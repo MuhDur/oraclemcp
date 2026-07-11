@@ -122,6 +122,13 @@ key_ref = "env:ORACLEMCP_AUDIT_KEY"
 # old records keep verifying. Default: "default".
 key_id = "2026-q2"
 
+# During an explicit rotation, keep every prior key as verification-only until
+# all records/anchors signed by it age out. IDs and resolved key material must
+# be unique; historical keys never sign new records.
+# [[audit.verification_keys]]
+# key_id = "2026-q1"
+# key_ref = "env:ORACLEMCP_AUDIT_KEY_2026_Q1"
+
 # [audit.shipping] — optional mirror of each signed record to an external
 # WORM store and/or SIEM. OFF by default (no [audit.shipping] table = nothing
 # forwarded). At least one of worm_path / siem_endpoint is required when present.

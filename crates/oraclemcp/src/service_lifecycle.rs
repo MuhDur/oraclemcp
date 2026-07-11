@@ -3910,6 +3910,118 @@ mod tests {
     }
 
     #[test]
+    fn backup_restore_verifies_mixed_key_audit_and_rejects_missing_history() {
+        let root = test_root("qa37-mixed-key-backup");
+        let state_dir = root.join("state");
+        let config_path = root.join("config/profiles.toml");
+        let audit_path = root.join("audit/audit.jsonl");
+        let backup_dir = root.join("backup");
+        fs::create_dir_all(&state_dir).expect("state dir");
+        fs::create_dir_all(config_path.parent().unwrap()).expect("config dir");
+        fs::create_dir_all(audit_path.parent().unwrap()).expect("audit dir");
+        fs::write(&config_path, "schema_version = 2\n").expect("config");
+
+        let old_key = SigningKey::new("old", vec![0x61; 32]).expect("old key");
+        let new_key = SigningKey::new("new", vec![0x62; 32]).expect("new key");
+        let draft = AuditEntryDraft {
+            subject: AuditSubject::new("operator", "qa37"),
+            db_evidence: None,
+            cancel: None,
+            tool: "oracle_execute".to_owned(),
+            sql: "delete from qa37 where id = :id".to_owned(),
+            danger_level: "READ_WRITE".to_owned(),
+            decision: AuditDecision::Allowed,
+            rows_affected: Some(1),
+            outcome: AuditOutcome::Succeeded,
+        };
+        let old_record =
+            AuditRecord::chained_signed(&draft, 1, GENESIS_HASH, "t1".to_owned(), &old_key);
+        let new_record = AuditRecord::chained_signed(
+            &draft,
+            2,
+            &old_record.entry_hash,
+            "t2".to_owned(),
+            &new_key,
+        );
+        fs::write(
+            &audit_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&old_record).unwrap(),
+                serde_json::to_string(&new_record).unwrap()
+            ),
+        )
+        .expect("mixed audit");
+        fs::write(
+            oraclemcp_audit::anchor_path_for(&audit_path),
+            format!(
+                "{}\n",
+                serde_json::to_string(&oraclemcp_audit::ChainAnchor::signed(
+                    new_record.seq,
+                    &new_record.entry_hash,
+                    &new_key,
+                ))
+                .unwrap()
+            ),
+        )
+        .expect("anchor");
+
+        run_service_command_with(
+            ServiceCommand::Backup(ServiceBackupOptions {
+                name: "oraclemcp".to_owned(),
+                state_dir: state_dir.clone(),
+                config_path: config_path.clone(),
+                audit_path: audit_path.clone(),
+                manifest_signing_key: new_key.clone(),
+                output: Some(backup_dir.clone()),
+                yes: true,
+                dry_run: false,
+            }),
+            ServiceManager::SystemdUser,
+            &exe(),
+        )
+        .expect("mixed-key backup");
+
+        let options = |keys| ServiceRestoreOptions {
+            name: "oraclemcp".to_owned(),
+            state_dir: root.join("restore/state"),
+            config_path: root.join("restore/config/profiles.toml"),
+            audit_path: root.join("restore/audit/audit.jsonl"),
+            backup: backup_dir.clone(),
+            audit_keys: keys,
+            yes: false,
+            dry_run: true,
+        };
+        let verified = run_service_command_with(
+            ServiceCommand::Restore(options(vec![new_key.clone(), old_key.clone()])),
+            ServiceManager::SystemdUser,
+            &exe(),
+        )
+        .expect("complete keyring restores");
+        assert_eq!(
+            verified.payload["audit_verification"]["records"],
+            serde_json::json!(2)
+        );
+
+        let missing = run_service_command_with(
+            ServiceCommand::Restore(options(vec![new_key.clone()])),
+            ServiceManager::SystemdUser,
+            &exe(),
+        )
+        .expect_err("missing historical key refuses restore");
+        assert_eq!(missing.code, "ORACLEMCP_SERVICE_RESTORE_AUDIT_BROKEN");
+
+        let wrong_old = SigningKey::new("old", vec![0x63; 32]).expect("wrong old key");
+        let wrong = run_service_command_with(
+            ServiceCommand::Restore(options(vec![new_key, wrong_old])),
+            ServiceManager::SystemdUser,
+            &exe(),
+        )
+        .expect_err("wrong historical bytes refuse restore");
+        assert_eq!(wrong.code, "ORACLEMCP_SERVICE_RESTORE_AUDIT_BROKEN");
+    }
+
+    #[test]
     fn restore_rejects_authenticated_absolute_parent_empty_and_prefixed_paths() {
         let fixture = restore_fixture("unsafe-manifest-paths");
         let baseline = fixture.manifest();

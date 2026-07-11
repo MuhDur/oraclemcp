@@ -657,6 +657,23 @@ mod tests {
         }
     }
 
+    struct TestTee {
+        first: Box<dyn ShippingForwarder>,
+        second: Box<dyn ShippingForwarder>,
+    }
+
+    impl ShippingForwarder for TestTee {
+        fn forward(&self, record: &AuditRecord) -> Result<(), ShippingError> {
+            self.first.forward(record)?;
+            self.second.forward(record)
+        }
+
+        fn flush(&self) -> Result<(), ShippingError> {
+            self.first.flush()?;
+            self.second.flush()
+        }
+    }
+
     /// A forwarder that always fails — models an unreachable SIEM.
     struct FailingForwarder {
         attempts: Arc<AtomicU64>,
@@ -897,6 +914,91 @@ mod tests {
         let body = std::fs::read_to_string(&worm_path).expect("read worm");
         let records = parse_jsonl(&body).expect("valid worm chain");
         assert_eq!(records, vec![first], "replay must not append a duplicate");
+    }
+
+    #[test]
+    fn mixed_key_worm_and_siem_streams_preserve_order_and_signatures() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary_path = dir.path().join("audit.jsonl");
+        let worm_path = dir.path().join("worm.jsonl");
+        let capture = Arc::new(CapturingForwarder::default());
+        let old_key = SigningKey::new("old", vec![0x41; 32]).expect("old key");
+        let new_key = SigningKey::new("new", vec![0x42; 32]).expect("new key");
+
+        {
+            let local = crate::FileAuditSink::open(&primary_path).expect("old primary");
+            let worm = WormFileForwarder::open_distinct(&worm_path, &local).expect("old worm");
+            let tee = TestTee {
+                first: Box::new(worm),
+                second: Box::new(SharedForwarder(Arc::clone(&capture))),
+            };
+            let auditor = Auditor::new(
+                Box::new(ShippingAuditSink::new(Box::new(local), Box::new(tee))),
+                old_key.clone(),
+            );
+            for seq in 1..=2 {
+                auditor
+                    .append(
+                        &draft(&format!("DELETE FROM t WHERE id={seq}"), "GUARDED"),
+                        format!("t{seq}"),
+                        true,
+                    )
+                    .expect("old append");
+            }
+        }
+
+        let rotation =
+            crate::AuditKeyring::new(new_key.clone(), [old_key.clone()]).expect("rotation keyring");
+        {
+            let local = crate::FileAuditSink::open(&primary_path).expect("new primary");
+            let worm = WormFileForwarder::open_distinct(&worm_path, &local).expect("new worm");
+            let tee = TestTee {
+                first: Box::new(worm),
+                second: Box::new(SharedForwarder(Arc::clone(&capture))),
+            };
+            let auditor = Auditor::new_with_keyring(
+                Box::new(ShippingAuditSink::new(Box::new(local), Box::new(tee))),
+                rotation.clone(),
+            )
+            .resume_from(&primary_path)
+            .expect("mixed-key resume");
+            for seq in 3..=4 {
+                auditor
+                    .append(
+                        &draft(&format!("DELETE FROM t WHERE id={seq}"), "GUARDED"),
+                        format!("t{seq}"),
+                        true,
+                    )
+                    .expect("new append");
+            }
+        }
+
+        let primary = std::fs::read_to_string(&primary_path).expect("primary body");
+        let worm = std::fs::read_to_string(&worm_path).expect("worm body");
+        assert_eq!(worm, primary, "WORM stream remains byte-identical");
+        let records = parse_jsonl(&primary).expect("mixed stream");
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.key_id.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["old", "old", "new", "new"]
+        );
+        assert_eq!(
+            verify_records(&records, rotation.verification_keys()),
+            VerifyOutcome::Ok { records: 4 }
+        );
+
+        let siem = capture.records();
+        assert_eq!(
+            siem.iter().map(|record| record.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(
+            verify_records(&siem, rotation.verification_keys()),
+            VerifyOutcome::Ok { records: 4 },
+            "SIEM records retain per-key signatures and chain order"
+        );
     }
 
     #[test]

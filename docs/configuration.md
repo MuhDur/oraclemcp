@@ -117,6 +117,30 @@ Parsing is **strict and fail-fast**:
 
 ---
 
+## Audit signing-key rotation
+
+`[audit].key_ref` and `key_id` define the single active signer. Retain old keys
+as verification-only entries during rotation:
+
+```toml
+[audit]
+key_id = "2026-q3"
+key_ref = "env:ORACLEMCP_AUDIT_KEY_2026_Q3"
+
+[[audit.verification_keys]]
+key_id = "2026-q2"
+key_ref = "env:ORACLEMCP_AUDIT_KEY_2026_Q2"
+```
+
+Key IDs use only ASCII letters, digits, `.`, `_`, and `-` (maximum 128 bytes);
+IDs and resolved key material must be unique. Startup authenticates the
+complete existing chain and old head anchor with this keyring. The anchor stays
+under the old key until the first new-key record is durably appended, so a
+crash on either side of the transition remains recoverable. Secret references
+are redacted from diagnostics and never enter audit or protocol output.
+
+---
+
 ## Connection-profile fields
 
 Each `[[profiles]]` entry is a named Oracle connection target. Inheritable scalar
@@ -317,7 +341,8 @@ is enumerated as a threat with its mitigation in
 
 ## Credentials and secret references
 
-`credential_ref`, `wallet_password_ref`, the audit `key_ref`, and the SIEM
+`credential_ref`, `wallet_password_ref`, the audit active/historical
+`key_ref` values, and the SIEM
 `siem_auth_header_ref` are resolved through the SecretResolver seam and are
 never surfaced in `list_profiles` metadata or diagnostics. Production profiles
 should use external references; the `literal:` form is a development escape

@@ -8,6 +8,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use oraclemcp_audit::{
+    AnchorFile, AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord, AuditSubject,
+    GENESIS_HASH, SigningKey, anchor_path_for,
+};
 use oraclemcp_config::{CONFIG_PATH_ENV, OperatingLevel, OracleMcpConfig};
 
 fn temp_config(contents: &str) -> PathBuf {
@@ -74,6 +78,85 @@ fn run_binary(args: &[&str]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     wait_with_timeout(cmd, Duration::from_secs(5))
+}
+
+#[test]
+fn audit_verify_cli_uses_active_and_historical_keyring() {
+    let dir = temp_dir("qa37-mixed-key-verify");
+    let audit_path = dir.join("audit.jsonl");
+    let config_path = dir.join("profiles.toml");
+    let old_material = "O".repeat(32);
+    let new_material = "N".repeat(32);
+    let old_key = SigningKey::new("old", old_material.as_bytes().to_vec()).expect("old key");
+    let new_key = SigningKey::new("new", new_material.as_bytes().to_vec()).expect("new key");
+    let draft = |id: u64| AuditEntryDraft {
+        subject: AuditSubject::new("cli-test", "qa37"),
+        db_evidence: None,
+        cancel: None,
+        tool: "oracle_execute".to_owned(),
+        sql: format!("DELETE FROM qa37 WHERE id={id}"),
+        danger_level: "GUARDED".to_owned(),
+        decision: AuditDecision::Allowed,
+        rows_affected: Some(1),
+        outcome: AuditOutcome::Succeeded,
+    };
+    let first = AuditRecord::chained_signed(&draft(1), 1, GENESIS_HASH, "t1".to_owned(), &old_key);
+    let second =
+        AuditRecord::chained_signed(&draft(2), 2, &first.entry_hash, "t2".to_owned(), &new_key);
+    fs::write(
+        &audit_path,
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        ),
+    )
+    .expect("write mixed audit");
+    AnchorFile::new(anchor_path_for(&audit_path), new_key)
+        .record_head(second.seq, &second.entry_hash)
+        .expect("write new anchor");
+    fs::write(
+        &config_path,
+        r#"
+        [audit]
+        key_id = "new"
+        key_ref = "env:QA37_ACTIVE_KEY"
+
+        [[audit.verification_keys]]
+        key_id = "old"
+        key_ref = "env:QA37_HISTORICAL_KEY"
+        "#,
+    )
+    .expect("write keyring config");
+
+    let mut ok = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    ok.args(["--json", "audit", "verify", audit_path.to_str().unwrap()])
+        .env(CONFIG_PATH_ENV, &config_path)
+        .env("QA37_ACTIVE_KEY", &new_material)
+        .env("QA37_HISTORICAL_KEY", &old_material)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(ok, Duration::from_secs(5));
+    assert_eq!(output.status.code(), Some(0), "{:?}", output);
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("verify JSON");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["records"], 2);
+    assert_eq!(payload["anchor"]["status"], "match");
+
+    let mut missing = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    missing
+        .args(["--json", "audit", "verify", audit_path.to_str().unwrap()])
+        .env(CONFIG_PATH_ENV, &config_path)
+        .env("QA37_ACTIVE_KEY", &new_material)
+        .env_remove("QA37_HISTORICAL_KEY")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(missing, Duration::from_secs(5));
+    assert_eq!(output.status.code(), Some(2));
+    let rendered = String::from_utf8_lossy(&output.stderr);
+    assert!(!rendered.contains(&old_material));
+    assert!(!rendered.contains("env:QA37_HISTORICAL_KEY"));
+    let _ = fs::remove_dir_all(dir);
 }
 
 fn spawn_healthz_stub() -> (u16, thread::JoinHandle<()>, Arc<AtomicBool>) {

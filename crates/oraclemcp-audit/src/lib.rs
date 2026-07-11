@@ -14,6 +14,7 @@
 
 mod anchor;
 mod hmac;
+mod keyring;
 mod record;
 mod shipping;
 mod shipping_spool;
@@ -29,9 +30,10 @@ pub use hmac::{
     HmacSha256Key, HmacSha256KeyError, MIN_HMAC_SHA256_KEY_BYTES, ct_eq, hmac_sha256,
     hmac_sha256_hex,
 };
+pub use keyring::{AuditKeyring, AuditKeyringError};
 pub use record::{
     AUDIT_SCHEMA_VERSION, AuditCancel, AuditCorrelation, AuditDecision, AuditEntryDraft,
-    AuditOutcome, AuditRecord, AuditSubject, DbEvidence, GENESIS_HASH, SigningKey,
+    AuditOutcome, AuditRecord, AuditSubject, DbEvidence, GENESIS_HASH, SigningKey, SigningKeyError,
     normalized_sql_sha256, sha256_hex,
 };
 pub use shipping::{

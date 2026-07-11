@@ -130,7 +130,7 @@ impl Default for OracleMcpConfig {
 /// `literal:`) for the keyed MAC; `key_id` labels the active key for rotation.
 /// When unset, the binary picks a safe default path and fails closed at startup
 /// if an operating level above ReadOnly is reachable without a configured key.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuditConfig {
     /// Append-only audit log file path. When `None`, the binary chooses a safe
@@ -143,6 +143,10 @@ pub struct AuditConfig {
     /// Identifier of the active signing key, recorded in each record so the key
     /// can be rotated while old records keep verifying. Defaults to `default`.
     pub key_id: Option<String>,
+    /// Historical verification-only keys retained for mixed-key chain and old
+    /// anchor authentication. Exactly one active signer remains `key_ref` /
+    /// `key_id`; these entries are never used to sign new records.
+    pub verification_keys: Vec<AuditVerificationKeyConfig>,
     /// Optional shipping of the signed audit chain to an external WORM/SIEM
     /// destination (bead D2). **Off by default** — when `None`, nothing is
     /// forwarded and the auditor uses the local file sink alone.
@@ -155,6 +159,90 @@ impl AuditConfig {
     pub fn key_id_or_default(&self) -> &str {
         self.key_id.as_deref().unwrap_or("default")
     }
+
+    /// Validate unambiguous active and historical key identifiers/references.
+    /// Secret resolution performs the additional same-material check.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !valid_audit_key_id(self.key_id_or_default()) {
+            return Err(ConfigError::InvalidAuditKeyring {
+                reason: "active audit key_id is empty or unsafe",
+            });
+        }
+        let active_id = self.key_id_or_default();
+        let mut ids = BTreeSet::new();
+        ids.insert(active_id);
+        let mut refs = BTreeSet::new();
+        if let Some(key_ref) = self.key_ref.as_deref() {
+            if key_ref.trim().is_empty() {
+                return Err(ConfigError::InvalidAuditKeyring {
+                    reason: "active audit key_ref is empty",
+                });
+            }
+            refs.insert(key_ref);
+        }
+        for historical in &self.verification_keys {
+            if !valid_audit_key_id(&historical.key_id) {
+                return Err(ConfigError::InvalidAuditKeyring {
+                    reason: "historical audit key_id is empty or unsafe",
+                });
+            }
+            if historical.key_ref.trim().is_empty() {
+                return Err(ConfigError::InvalidAuditKeyring {
+                    reason: "historical audit key_ref is empty",
+                });
+            }
+            if !ids.insert(&historical.key_id) {
+                return Err(ConfigError::InvalidAuditKeyring {
+                    reason: "audit key ids must be unique across active and historical keys",
+                });
+            }
+            if !refs.insert(&historical.key_ref) {
+                return Err(ConfigError::InvalidAuditKeyring {
+                    reason: "one audit secret reference cannot be assigned to multiple key ids",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for AuditConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuditConfig")
+            .field("path", &self.path)
+            .field("key_ref", &self.key_ref.as_ref().map(|_| "***redacted***"))
+            .field("key_id", &self.key_id)
+            .field("verification_keys", &self.verification_keys)
+            .field("shipping", &self.shipping)
+            .finish()
+    }
+}
+
+/// One historical audit verification key reference.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditVerificationKeyConfig {
+    /// Unique identifier carried by historical records/anchors.
+    pub key_id: String,
+    /// Secret reference resolving the historical HMAC key bytes.
+    pub key_ref: String,
+}
+
+impl std::fmt::Debug for AuditVerificationKeyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuditVerificationKeyConfig")
+            .field("key_id", &self.key_id)
+            .field("key_ref", &"***redacted***")
+            .finish()
+    }
+}
+
+fn valid_audit_key_id(key_id: &str) -> bool {
+    !key_id.is_empty()
+        && key_id.len() <= 128
+        && key_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 /// Audit-log shipping configuration (bead D2): mirror each signed, durable
@@ -860,6 +948,7 @@ impl OracleMcpConfig {
             });
         }
         self.http.validate()?;
+        self.audit.validate()?;
         if let Some(shipping) = self.audit.shipping.as_ref() {
             shipping.validate()?;
         }
@@ -1330,6 +1419,12 @@ pub enum ConfigError {
     #[error("invalid audit.shipping: {reason}")]
     InvalidAuditShipping {
         /// Validation failure.
+        reason: &'static str,
+    },
+    /// Active/historical audit keyring configuration is ambiguous or unsafe.
+    #[error("invalid audit keyring: {reason}")]
+    InvalidAuditKeyring {
+        /// Validation failure without any secret reference/value.
         reason: &'static str,
     },
 }
@@ -2137,6 +2232,93 @@ mod tests {
             Some("env:ORACLEMCP_AUDIT_KEY")
         );
         assert_eq!(cfg.audit.key_id_or_default(), "2026-q2");
+    }
+
+    #[test]
+    fn audit_historical_verification_keyring_loads_and_redacts_debug() {
+        let sentinel_ref = "env:QA37_OLD_KEY_REF_MUST_NOT_APPEAR";
+        let cfg = OracleMcpConfig::from_toml_str(&format!(
+            r#"
+            [audit]
+            key_ref = "env:QA37_ACTIVE_KEY_REF_MUST_NOT_APPEAR"
+            key_id = "2026-q3"
+
+            [[audit.verification_keys]]
+            key_id = "2026-q2"
+            key_ref = "{sentinel_ref}"
+
+            [[audit.verification_keys]]
+            key_id = "2026-q1"
+            key_ref = "file:/private/audit-q1.key"
+            "#
+        ))
+        .expect("mixed-key config loads");
+        assert_eq!(cfg.audit.verification_keys.len(), 2);
+        assert_eq!(cfg.audit.verification_keys[0].key_id, "2026-q2");
+        assert_eq!(cfg.audit.verification_keys[0].key_ref, sentinel_ref);
+
+        let debug = format!("{:?}", cfg.audit);
+        assert!(!debug.contains("QA37_ACTIVE_KEY_REF_MUST_NOT_APPEAR"));
+        assert!(!debug.contains("QA37_OLD_KEY_REF_MUST_NOT_APPEAR"));
+        assert!(!debug.contains("/private/audit-q1.key"));
+        assert!(debug.contains("***redacted***"));
+    }
+
+    #[test]
+    fn audit_keyring_rejects_duplicate_ids_references_and_unsafe_ids() {
+        for (name, historical) in [
+            (
+                "active-id collision",
+                r#"
+                [[audit.verification_keys]]
+                key_id = "active"
+                key_ref = "env:OLD"
+                "#,
+            ),
+            (
+                "historical-id collision",
+                r#"
+                [[audit.verification_keys]]
+                key_id = "old"
+                key_ref = "env:OLD1"
+                [[audit.verification_keys]]
+                key_id = "old"
+                key_ref = "env:OLD2"
+                "#,
+            ),
+            (
+                "reference reuse",
+                r#"
+                [[audit.verification_keys]]
+                key_id = "old"
+                key_ref = "env:ACTIVE"
+                "#,
+            ),
+            (
+                "empty id",
+                r#"
+                [[audit.verification_keys]]
+                key_id = ""
+                key_ref = "env:OLD"
+                "#,
+            ),
+        ] {
+            let toml = format!(
+                r#"
+                [audit]
+                key_ref = "env:ACTIVE"
+                key_id = "active"
+                {historical}
+                "#
+            );
+            let error = OracleMcpConfig::from_toml_str(&toml).expect_err(name);
+            assert!(
+                matches!(error, ConfigError::InvalidAuditKeyring { .. }),
+                "{name}: {error:?}"
+            );
+            assert!(!error.to_string().contains("env:ACTIVE"));
+            assert!(!error.to_string().contains("env:OLD"));
+        }
     }
 
     #[test]

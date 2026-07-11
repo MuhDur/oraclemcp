@@ -19,7 +19,10 @@ Sign the audit chain with a **keyed MAC (HMAC-SHA256)** and wire the auditor
 into the **served dispatch path** so every privileged action is recorded as it
 happens, out-of-band of the Oracle session, fsync-before-execute. The signing
 key comes from config/env (`[audit].key_ref` secret-ref) and carries a rotatable
-`key_id`. The `oraclemcp audit verify <file>` CLI re-walks the file, recomputes
+`key_id`. Exactly one active key signs; prior keys remain verification-only in
+`[[audit.verification_keys]]`. Startup authenticates the old chain and anchor
+before rotation and advances the anchor under the new key only after the first
+new durable record. The `oraclemcp audit verify <file>` CLI re-walks the file, recomputes
 every hash link, and re-checks the keyed MAC, exiting non-zero on a broken link
 or a recompute-without-key forgery. Treating A8 as a blocking release gate
 ensures dispatch cannot ship un-audited.
@@ -30,9 +33,9 @@ ensures dispatch cannot ship un-audited.
   the log but lacks the key cannot produce a chain that `audit verify` accepts.
 - "Audited / tamper-evident" became an honest, defensible claim for 0.4.0
   (before A8 it was not, and the honesty gate rejected any such over-claim).
-- Operators must manage an audit signing key: protect it, rotate it via
-  `key_id`, and keep prior `key_id`s available so historical records still
-  verify.
+- Operators must manage an audit keyring: protect it, use a unique `key_id` per
+  epoch, and keep prior key references available so historical records,
+  backups, and anchors still verify.
 - fsync-before-execute adds latency to privileged actions, accepted as the cost
   of durability before the side effect.
 

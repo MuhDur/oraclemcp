@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 use crate::hmac::{HmacSha256Key, HmacSha256KeyError};
 
@@ -404,15 +405,24 @@ impl SigningKey {
     ///
     /// # Errors
     ///
-    /// Returns [`HmacSha256KeyError`] when the secret is shorter than the
-    /// minimum accepted HMAC-SHA256 key size.
+    /// Returns [`SigningKeyError`] when the identifier is unsafe/empty or the
+    /// secret is shorter than the minimum accepted HMAC-SHA256 key size.
     pub fn new(
         key_id: impl Into<String>,
         key: impl Into<Vec<u8>>,
-    ) -> Result<Self, HmacSha256KeyError> {
+    ) -> Result<Self, SigningKeyError> {
+        let key_id = key_id.into();
+        if key_id.is_empty()
+            || key_id.len() > 128
+            || !key_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(SigningKeyError::InvalidKeyId);
+        }
         Ok(SigningKey {
-            key_id: key_id.into(),
-            key: HmacSha256Key::new(key)?,
+            key_id,
+            key: HmacSha256Key::new(key).map_err(SigningKeyError::InvalidMaterial)?,
         })
     }
 
@@ -427,6 +437,30 @@ impl SigningKey {
     pub fn sign(&self, entry_hash: &str) -> String {
         self.key.authenticate_hex(entry_hash.as_bytes())
     }
+
+    /// Compare secret material without exposing it. Used only to reject an
+    /// ambiguous keyring that assigns the same key to multiple identifiers.
+    #[must_use]
+    pub(crate) fn same_material(&self, other: &Self) -> bool {
+        const DOMAIN: &[u8] = b"oraclemcp:audit-key-identity:v1";
+        crate::ct_eq(
+            &self.key.authenticate(DOMAIN),
+            &other.key.authenticate(DOMAIN),
+        )
+    }
+}
+
+/// Invalid signing-key identity or material. Secret bytes are never retained.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SigningKeyError {
+    /// The identifier is empty, too long, or outside the safe ASCII
+    /// letters/digits/`.`/`_`/`-` alphabet.
+    #[error("audit signing key id is empty or unsafe")]
+    InvalidKeyId,
+    /// The HMAC key material does not meet the security floor.
+    #[error(transparent)]
+    InvalidMaterial(HmacSha256KeyError),
 }
 
 impl std::fmt::Debug for SigningKey {
@@ -1606,6 +1640,32 @@ mod tests {
         }
         SigningKey::new("k1", vec![0x5a; 32]).expect("32-byte audit signing key is valid");
         SigningKey::new("k1", vec![0x5a; 33]).expect("longer audit signing key is valid");
+    }
+
+    #[test]
+    fn signing_key_rejects_ambiguous_or_log_injecting_ids() {
+        for id in [
+            "",
+            " leading",
+            "trailing ",
+            "line\nbreak",
+            "control\0byte",
+            "../path",
+            "unicode-é",
+            "bidi-\u{202e}txt",
+        ] {
+            assert!(
+                matches!(
+                    SigningKey::new(id, vec![0x5a; 32]),
+                    Err(SigningKeyError::InvalidKeyId)
+                ),
+                "unsafe id {id:?} must fail"
+            );
+        }
+        assert!(matches!(
+            SigningKey::new("x".repeat(129), vec![0x5a; 32]),
+            Err(SigningKeyError::InvalidKeyId)
+        ));
     }
 
     #[test]

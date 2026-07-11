@@ -52,8 +52,8 @@ use oraclemcp::dispatch::{
 };
 use oraclemcp::registry;
 use oraclemcp_audit::{
-    AuditError, AuditSink, AuditSubject, Auditor, FileAuditSink, HmacSha256Key, ShippingAuditSink,
-    ShippingForwarder, SigningKey, WormFileForwarder,
+    AuditError, AuditKeyring, AuditSink, AuditSubject, Auditor, FileAuditSink, HmacSha256Key,
+    ShippingAuditSink, ShippingForwarder, SigningKey, WormFileForwarder,
 };
 use oraclemcp_auth::{
     Hs256Verifier, ResourceServerConfig, SecretError, SecretResolver, SystemSecretResolver,
@@ -280,8 +280,8 @@ enum AuditCommand {
     Verify {
         /// Path to the append-only JSONL audit log.
         file: PathBuf,
-        /// Override the signing key id to verify against (defaults to the
-        /// configured [audit].key_id or "default").
+        /// Override the active key id for a legacy env-only key. Mixed-key
+        /// rotation should use [[audit.verification_keys]] instead.
         #[arg(long)]
         key_id: Option<String>,
         /// Summarize signed database evidence and session-tag correlation.
@@ -436,7 +436,7 @@ struct ServiceRestoreCliArgs {
     /// Service name / label.
     #[arg(long, default_value = "oraclemcp")]
     name: String,
-    /// Override the audit signing key id to verify against.
+    /// Override the active id for a legacy env-only audit key.
     #[arg(long, visible_alias = "key_id")]
     key_id: Option<String>,
     /// Execute the stop, restore, and start sequence. Omit and use --dry-run first.
@@ -1253,44 +1253,90 @@ fn doctor_state_layout(audit_path_configured: bool) -> Option<DoctorStateLayout>
     })
 }
 
-/// Resolve the audit signing key: prefer the config `[audit].key_ref` secret,
-/// fall back to the `ORACLEMCP_AUDIT_KEY` env var. Returns `None` when neither
-/// is set (the caller fails closed if a write level is reachable).
-fn resolve_audit_signing_key(
+/// Resolve one active audit signer plus all configured historical verification
+/// keys. The legacy environment key is only the active-key fallback.
+fn resolve_audit_keyring(
     audit: &AuditConfig,
     protected: bool,
     secret_resolver: &dyn SecretResolver,
-) -> Result<Option<SigningKey>, (&'static str, String)> {
-    let key_id = audit.key_id_or_default().to_owned();
-    if let Some(key_ref) = audit.key_ref.as_deref() {
-        let secret = resolve_secret_with(key_ref, protected, secret_resolver).map_err(|e| {
-            (
-                "ORACLEMCP_AUDIT_KEY_INVALID",
+) -> Result<Option<AuditKeyring>, (&'static str, String)> {
+    let legacy_env_key = std::env::var(AUDIT_KEY_ENV).ok();
+    resolve_audit_keyring_from_sources(
+        audit,
+        None,
+        protected,
+        secret_resolver,
+        legacy_env_key.as_deref(),
+    )
+    .map_err(|message| ("ORACLEMCP_AUDIT_KEY_INVALID", message))
+}
+
+fn resolve_audit_keyring_from_sources(
+    audit: &AuditConfig,
+    active_key_id_override: Option<&str>,
+    protected: bool,
+    secret_resolver: &dyn SecretResolver,
+    legacy_env_key: Option<&str>,
+) -> Result<Option<AuditKeyring>, String> {
+    let active_key_id = if audit.key_ref.is_some() {
+        audit.key_id_or_default()
+    } else {
+        active_key_id_override.unwrap_or_else(|| audit.key_id_or_default())
+    };
+    let active = if let Some(key_ref) = audit.key_ref.as_deref() {
+        let secret = resolve_secret_with(key_ref, protected, secret_resolver).map_err(|error| {
+            format!(
+                "failed to resolve active [audit].key_ref: {}",
+                secret_error_summary(&error)
+            )
+        })?;
+        Some(
+            SigningKey::new(active_key_id, secret.expose().as_bytes().to_vec())
+                .map_err(|error| format!("resolved active audit key is invalid: {error}"))?,
+        )
+    } else {
+        legacy_env_key
+            .map(|raw| {
+                SigningKey::new(active_key_id, raw.as_bytes().to_vec())
+                    .map_err(|error| format!("{AUDIT_KEY_ENV} is invalid: {error}"))
+            })
+            .transpose()?
+    };
+    let Some(active) = active else {
+        if audit.verification_keys.is_empty() {
+            return Ok(None);
+        }
+        return Err(format!(
+            "historical audit verification keys are configured without an active signing key; \
+             set [audit].key_ref or {AUDIT_KEY_ENV}"
+        ));
+    };
+
+    let mut historical = Vec::with_capacity(audit.verification_keys.len());
+    for configured in &audit.verification_keys {
+        let secret = resolve_secret_with(&configured.key_ref, protected, secret_resolver).map_err(
+            |error| {
                 format!(
-                    "failed to resolve [audit].key_ref: {}",
-                    secret_error_summary(&e)
-                ),
-            )
-        })?;
-        let key =
-            SigningKey::new(key_id, secret.expose().as_bytes().to_vec()).map_err(|error| {
-                (
-                    "ORACLEMCP_AUDIT_KEY_INVALID",
-                    format!("resolved [audit].key_ref is invalid: {error}"),
+                    "failed to resolve historical audit key_id {:?}: {}",
+                    configured.key_id,
+                    secret_error_summary(&error)
                 )
-            })?;
-        return Ok(Some(key));
+            },
+        )?;
+        historical.push(
+            SigningKey::new(&configured.key_id, secret.expose().as_bytes().to_vec()).map_err(
+                |error| {
+                    format!(
+                        "resolved historical audit key_id {:?} is invalid: {error}",
+                        configured.key_id
+                    )
+                },
+            )?,
+        );
     }
-    if let Ok(raw) = std::env::var(AUDIT_KEY_ENV) {
-        let key = SigningKey::new(key_id, raw.into_bytes()).map_err(|error| {
-            (
-                "ORACLEMCP_AUDIT_KEY_INVALID",
-                format!("{AUDIT_KEY_ENV} is invalid: {error}"),
-            )
-        })?;
-        return Ok(Some(key));
-    }
-    Ok(None)
+    AuditKeyring::new(active, historical)
+        .map(Some)
+        .map_err(|error| format!("invalid active+historical audit keyring: {error}"))
 }
 
 /// The maximum operating level reachable across every profile this server can
@@ -1367,9 +1413,9 @@ fn build_auditor(
     secret_resolver: &dyn SecretResolver,
 ) -> Result<Option<Arc<Auditor>>, (&'static str, String)> {
     let write_reachable = reachable_ceiling > OperatingLevel::ReadOnly;
-    let key = resolve_audit_signing_key(audit, level.is_protected(), secret_resolver)?;
+    let keyring = resolve_audit_keyring(audit, level.is_protected(), secret_resolver)?;
 
-    let Some(key) = key else {
+    let Some(keyring) = keyring else {
         if write_reachable {
             return Err((
                 "ORACLEMCP_AUDIT_KEY_REQUIRED",
@@ -1438,7 +1484,12 @@ fn build_auditor(
             format!("failed to open audit log {}: {other}", path.display()),
         ),
     })?;
-    tracing::info!(path = %path.display(), key_id = %audit.key_id_or_default(), "audit log armed");
+    tracing::info!(
+        path = %path.display(),
+        key_id = %keyring.active().key_id(),
+        historical_keys = keyring.verification_keys().len().saturating_sub(1),
+        "audit log armed"
+    );
 
     // D2: optional WORM/SIEM shipping. Off by default — only when
     // `[audit.shipping]` configures a destination do we wrap the durable local
@@ -1459,7 +1510,7 @@ fn build_auditor(
     // (which `audit verify` would report BROKEN at the run boundary). Seed the
     // chain state from the log's last well-formed record; fail closed if that
     // tail is malformed or contradicts the head anchor.
-    let auditor = Auditor::new(local, key)
+    let auditor = Auditor::new_with_keyring(local, keyring)
         .with_head_anchor(anchor_path)
         .resume_from(&path)
         .map_err(|e| {
@@ -4726,16 +4777,15 @@ fn run_sign_tool(robot_json: bool, path: &Path, only_tool: Option<&str>) -> Exit
     }
 }
 
-/// Resolve the verification key set from config + env. The verify path resolves
-/// the same secret the server signs with; if `--key-id` is given it overrides
-/// the label so a rotated key (whose bytes are supplied via the same secret-ref
-/// or env) can be checked.
-fn audit_verification_keys(key_id_override: Option<&str>) -> Result<Vec<SigningKey>, String> {
+/// Resolve the same active+historical keyring used by startup. `--key-id`
+/// remains an env-only active-id override; configured historical keys are
+/// always included so a mixed chain verifies end to end.
+fn audit_verification_keyring(key_id_override: Option<&str>) -> Result<AuditKeyring, String> {
     let audit = OracleMcpConfig::load(None)
         .map(|cfg| cfg.audit)
         .map_err(|e| format!("failed to load audit config: {e}"))?;
     let legacy_env_key = std::env::var(AUDIT_KEY_ENV).ok();
-    audit_verification_keys_from_sources(
+    audit_verification_keyring_from_sources(
         &audit,
         key_id_override,
         &SystemSecretResolver,
@@ -4743,37 +4793,27 @@ fn audit_verification_keys(key_id_override: Option<&str>) -> Result<Vec<SigningK
     )
 }
 
-fn audit_verification_keys_from_sources(
+fn audit_verification_keyring_from_sources(
     audit: &AuditConfig,
     key_id_override: Option<&str>,
     secret_resolver: &dyn SecretResolver,
     legacy_env_key: Option<&str>,
-) -> Result<Vec<SigningKey>, String> {
-    let key_id = key_id_override
-        .map(str::to_owned)
-        .unwrap_or_else(|| audit.key_id_or_default().to_owned());
-
-    if let Some(key_ref) = audit.key_ref.as_deref() {
-        // `protected=false`: verification is an operator action that may run
-        // off-box against a copied log, where a dev `literal:` key is legitimate.
-        let secret = resolve_secret_with(key_ref, false, secret_resolver).map_err(|e| {
-            format!(
-                "failed to resolve [audit].key_ref: {}",
-                secret_error_summary(&e)
-            )
-        })?;
-        let key = SigningKey::new(key_id, secret.expose().as_bytes().to_vec())
-            .map_err(|error| format!("resolved [audit].key_ref is invalid: {error}"))?;
-        return Ok(vec![key]);
-    }
-    match legacy_env_key {
-        Some(raw) => SigningKey::new(key_id, raw.as_bytes().to_vec())
-            .map(|key| vec![key])
-            .map_err(|error| format!("{AUDIT_KEY_ENV} is invalid: {error}")),
-        None => Err(format!(
-            "no audit signing key configured; set [audit].key_ref or {AUDIT_KEY_ENV} to verify the chain"
-        )),
-    }
+) -> Result<AuditKeyring, String> {
+    // `protected=false`: verification is an operator action that may run
+    // off-box against a copied log, where a dev `literal:` key is legitimate.
+    resolve_audit_keyring_from_sources(
+        audit,
+        key_id_override,
+        false,
+        secret_resolver,
+        legacy_env_key,
+    )?
+    .ok_or_else(|| {
+        format!(
+            "no audit signing key configured; set [audit].key_ref or {AUDIT_KEY_ENV} to verify \
+             the chain"
+        )
+    })
 }
 
 fn run_audit_verify(
@@ -4787,8 +4827,8 @@ fn run_audit_verify(
         parse_jsonl, verify_records,
     };
 
-    let keys = match audit_verification_keys(key_id_override) {
-        Ok(keys) => keys,
+    let keyring = match audit_verification_keyring(key_id_override) {
+        Ok(keyring) => keyring,
         Err(message) => {
             emit_status_error(robot_json, "ORACLEMCP_AUDIT_KEY_REQUIRED", &message);
             return ExitCode::from(2);
@@ -4814,7 +4854,7 @@ fn run_audit_verify(
         }
     };
 
-    match verify_records(&records, &keys) {
+    match verify_records(&records, keyring.verification_keys()) {
         VerifyOutcome::Ok {
             records: record_count,
         } => {
@@ -4837,7 +4877,7 @@ fn run_audit_verify(
                     "note": "no head anchor sidecar; tail truncation is not locally detectable \
                              for this log (legacy log, or the anchor was removed)",
                 }),
-                Some(anchor) => match check_anchor(&records, anchor, &keys) {
+                Some(anchor) => match check_anchor(&records, anchor, keyring.verification_keys()) {
                     Ok(AnchorStatus::Match) => serde_json::json!({
                         "status": "match",
                         "seq": anchor.seq,
@@ -5022,8 +5062,8 @@ fn run_service_cmd(robot_json: bool, command: ServiceCliCommand) -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            let manifest_signing_key = match audit_verification_keys(None) {
-                Ok(mut keys) => keys.remove(0),
+            let manifest_signing_key = match audit_verification_keyring(None) {
+                Ok(keyring) => keyring.active().clone(),
                 Err(message) => {
                     emit_status_error(robot_json, "ORACLEMCP_AUDIT_KEY_REQUIRED", &message);
                     return ExitCode::from(2);
@@ -5045,8 +5085,8 @@ fn run_service_cmd(robot_json: bool, command: ServiceCliCommand) -> ExitCode {
                 Ok(path) => path,
                 Err(code) => return code,
             };
-            let audit_keys = match audit_verification_keys(args.key_id.as_deref()) {
-                Ok(keys) => keys,
+            let audit_keys = match audit_verification_keyring(args.key_id.as_deref()) {
+                Ok(keyring) => keyring.verification_keys().to_vec(),
                 Err(message) => {
                     emit_status_error(robot_json, "ORACLEMCP_AUDIT_KEY_REQUIRED", &message);
                     return ExitCode::from(2);

@@ -690,12 +690,11 @@ Privileged actions are written to a hash-chained, HMAC-SHA256-signed audit log
 ```sh
 oraclemcp audit verify /path/to/audit.jsonl
 oraclemcp audit verify /path/to/audit.jsonl --with-db-evidence
-# Override the key id to verify against a rotated key:
-oraclemcp audit verify /path/to/audit.jsonl --key_id 2026-q2
 ```
 
 `verify` re-walks the file, recomputes every hash link, and re-checks the keyed
-MAC with the configured key(s); it exits non-zero on a broken link or a
+MAC with the configured active plus `[[audit.verification_keys]]` keyring; it
+exits non-zero on a broken link or a
 recompute-without-key forgery. It also cross-checks the **head anchor sidecar**
 (`<audit path>.anchor`), which the server maintains automatically: a keyed-MAC
 attestation of the last durably-fsynced record (`seq` + `entry_hash`). Because
@@ -718,7 +717,9 @@ backup` does this for you).
 
 Configure the log under `[audit]` in your config
 (`path`, `key_ref` as a secret-ref like `env:ORACLEMCP_AUDIT_KEY`, and `key_id`
-to label the active key for rotation; the default key id is `default`). When
+to label the single active signing key; the default key id is `default`). Old
+keys are retained as `[[audit.verification_keys]]` entries and are
+verification-only. When
 resolved, the audit signing key must contain at least 32 bytes of randomly
 generated key material; empty, newline-only, and shorter keys fail closed. When
 `[audit].path` is unset, the binary writes to
@@ -728,7 +729,7 @@ Back up and rotate this log like any other security record, and verify it after
 incident review.
 
 Audit records are additive and format-versioned. Current records carry
-`schema_version = 6`, a structured server-derived `subject`, optional database
+`schema_version = 7`, a structured server-derived `subject`, optional database
 evidence, exact and normalized SQL hashes, injective canonical framing for
 optional values, and a fixed redaction marker instead of a SQL-text preview.
 `audit verify` still accepts signed v1-v5 records byte-for-byte, so existing logs
@@ -854,10 +855,22 @@ still the write-intent/audit path, not this HTTP-edge cache.
   once, and `oraclemcp --json clients revoke <client_id>` revokes that client.
   Close that client's active lanes or restart the service so in-memory grants
   are revoked.
-- **Audit signing key:** add a randomly generated key of at least 32 bytes under
-  `[audit].key_ref` with a new
-  `key_id`, restart, and keep the old `key_id` available to `audit verify` so
-  historical records still verify.
+- **Audit signing key:** move the current `key_id`/`key_ref` pair into
+  `[[audit.verification_keys]]`, configure a new randomly generated active key
+  of at least 32 bytes, then restart. Startup authenticates the old chain and
+  anchor before accepting the transition. Keep each historical entry until all
+  records, backups, and mirrors signed by it have expired. Never rotate bytes
+  behind an unchanged ID.
+
+```toml
+[audit]
+key_id = "2026-q3"
+key_ref = "env:ORACLEMCP_AUDIT_KEY_2026_Q3"
+
+[[audit.verification_keys]]
+key_id = "2026-q2"
+key_ref = "env:ORACLEMCP_AUDIT_KEY_2026_Q2"
+```
 
 ### 5.6 Ship the audit log to a WORM store / SIEM
 

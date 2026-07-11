@@ -18,8 +18,9 @@ use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::anchor::{AnchorFile, ChainAnchor, load_anchor};
+use crate::keyring::AuditKeyring;
 use crate::record::{AuditCorrelation, AuditEntryDraft, AuditRecord, GENESIS_HASH, SigningKey};
-use crate::verify::parse_jsonl;
+use crate::verify::{BrokenReason, VerifyOutcome, parse_jsonl, verify_records};
 
 /// Stable identity of an already-open filesystem object. Comparing identities
 /// from the open handles (rather than path strings) catches symlink, hard-link,
@@ -416,6 +417,10 @@ fn structural_break(records: &[AuditRecord]) -> Option<String> {
 struct ChainState {
     seq: u64,
     last_hash: String,
+    /// An authenticated historical head was resumed, but no record under the
+    /// active key exists yet. A plain flush must preserve the old anchor; only
+    /// fsyncing the first active-key record authorizes the anchor transition.
+    anchor_transition_pending: bool,
     /// Set once an append or flush failed/panicked after the seq=N line may have
     /// reached the byte stream. The in-memory state was NOT advanced, so
     /// re-issuing seq=N from the un-advanced state would fork the tamper-evident
@@ -432,7 +437,7 @@ pub struct Auditor {
     /// the auditor; construction is the place to fail closed if no key is
     /// configured (the binary does this before any operating level above
     /// ReadOnly is reachable).
-    key: SigningKey,
+    keyring: AuditKeyring,
     /// Optional sidecar head anchor (bead oraclemcp-xb51): after every durable
     /// fsync the anchor is atomically rewritten to name the durable chain head,
     /// so `audit verify` can detect tail truncation. Record fsync always comes
@@ -446,13 +451,21 @@ impl Auditor {
     /// A new signing auditor over the given sink and keyed MAC identity.
     #[must_use]
     pub fn new(sink: Box<dyn AuditSink>, key: SigningKey) -> Self {
+        Self::new_with_keyring(sink, AuditKeyring::single(key))
+    }
+
+    /// A new signing auditor with one active signer plus historical
+    /// verification keys for authenticated rotation and mixed-key resume.
+    #[must_use]
+    pub fn new_with_keyring(sink: Box<dyn AuditSink>, keyring: AuditKeyring) -> Self {
         Auditor {
             sink,
-            key,
+            keyring,
             anchor: None,
             state: Mutex::new(ChainState {
                 seq: 0,
                 last_hash: GENESIS_HASH.to_owned(),
+                anchor_transition_pending: false,
                 poisoned: false,
             }),
         }
@@ -466,7 +479,7 @@ impl Auditor {
     /// advances and the chain never forks).
     #[must_use]
     pub fn with_head_anchor(mut self, path: impl Into<PathBuf>) -> Self {
-        self.anchor = Some(AnchorFile::new(path.into(), self.key.clone()));
+        self.anchor = Some(AnchorFile::new(path.into(), self.keyring.active().clone()));
         self
     }
 
@@ -532,24 +545,30 @@ impl Auditor {
             )));
         }
 
-        // Keyed full-chain BODY check (bead oraclemcp-g4xi): the structural walk
-        // above proves the hash chain is internally consistent, but a tamperer
-        // who repairs the hashes (recompute `entry_hash`, relink `prev_hash`)
-        // makes a forged interior pass it. The keyed MAC is the only thing they
-        // cannot reproduce without the signing key. Since the active auditor holds
-        // exactly ONE key, we verify the MAC of every record signed *under that
-        // key* and fail closed on the first mismatch — not just the head anchor.
-        // Records under a *different* `key_id` (a genuine cross-run key rotation)
-        // cannot be verified with the single active key and are deliberately left
-        // to `oraclemcp audit verify` with the full key ring; skipping them keeps
-        // the keyless structural walk as the no-key floor without false-refusing a
-        // rotated interior.
-        if let Some(seq) = self.keyed_body_break(&records) {
+        // Authenticate every record under the configured active+historical
+        // keyring. A rotation is explicit only when the prior key is present;
+        // skipping an unknown key would let a forged mixed-key interior seed a
+        // continuing chain.
+        if let VerifyOutcome::Broken { seq, reason, .. } =
+            verify_records(&records, self.keyring.verification_keys())
+        {
+            let detail = match reason {
+                BrokenReason::UnknownKeyId(key_id) => format!(
+                    "record at seq {seq} names audit key_id {key_id:?}, which is absent from the \
+                     configured active+historical keyring"
+                ),
+                BrokenReason::SignatureMismatch => format!(
+                    "record at seq {seq} has a keyed MAC that does not verify under its configured \
+                     audit key"
+                ),
+                BrokenReason::Unsigned => {
+                    format!("record at seq {seq} is unsigned and cannot seed a signed chain")
+                }
+                other => format!("record at seq {seq} failed verification: {other}"),
+            };
             return Err(AuditError::ResumeRefused(format!(
-                "audit log {disp} has a record at seq {seq} whose keyed MAC does not verify under \
-                 the active signing key — a structurally-repaired forgery re-hashed without the key; \
-                 run `oraclemcp audit verify {disp}` (with the anchoring key available) and restore \
-                 the authentic records before restarting"
+                "audit log {disp} {detail}; run `oraclemcp audit verify {disp}` with the complete \
+                 keyring and restore the authentic records before restarting"
             )));
         }
         let Some(tail) = records.last() else {
@@ -599,11 +618,13 @@ impl Auditor {
             let mut state = self.state.lock();
             state.seq = tail.seq;
             state.last_hash = tail.entry_hash.clone();
+            state.anchor_transition_pending =
+                tail.key_id.as_deref() != Some(self.keyring.active().key_id());
         }
         Ok(self)
     }
 
-    /// Fail-closed MAC/key cross-check of a loaded head anchor at resume time,
+    /// Fail-closed MAC/keyring cross-check of a loaded head anchor at resume time,
     /// mirroring [`crate::anchor::check_anchor`]'s posture (the `oraclemcp audit
     /// verify` reference): an anchor under an unknown `key_id`, or whose keyed
     /// MAC does not verify under the active key, is refused BEFORE its plaintext
@@ -619,37 +640,21 @@ impl Auditor {
     /// itself a refusal, exactly as `check_anchor` treats `UnknownKeyId`; a
     /// genuine cross-run key rotation is reconciled by an operator via `audit
     /// verify`, never by silently resuming past an unverifiable anchor.
-    /// Keyed full-chain body walk for [`resume_from`](Self::resume_from) (bead
-    /// oraclemcp-g4xi): return the `seq` of the first record that names the
-    /// active `key_id` but whose keyed MAC does not verify under the active key —
-    /// a structurally-repaired forgery. Records under a different `key_id`
-    /// (rotation) are skipped: the single active key cannot verify them, and that
-    /// reconciliation is `oraclemcp audit verify`'s job with the full key ring.
-    fn keyed_body_break(&self, records: &[AuditRecord]) -> Option<u64> {
-        records
-            .iter()
-            .find(|r| {
-                r.key_id.as_deref() == Some(self.key.key_id()) && !r.signature_is_valid(&self.key)
-            })
-            .map(|r| r.seq)
-    }
-
     fn verify_anchor_authenticity(&self, anchor: &ChainAnchor) -> Result<(), AuditError> {
-        if anchor.key_id != self.key.key_id() {
+        let Some(key) = self.keyring.key(&anchor.key_id) else {
             return Err(AuditError::ResumeRefused(format!(
-                "head anchor names key_id {:?} but the active signing key is {:?} — the anchor \
-                 cannot be authenticated with this key; run `oraclemcp audit verify` (with the \
-                 anchoring key available) to reconcile, or reset the anchor only if the key \
-                 rotation is understood, before restarting",
-                anchor.key_id,
-                self.key.key_id()
+                "head anchor names audit key_id {:?}, which is absent from the configured \
+                 active+historical keyring; add the authentic historical verification key and \
+                 run `oraclemcp audit verify` before restarting",
+                anchor.key_id
             )));
-        }
-        if !anchor.mac_is_valid(&self.key) {
+        };
+        if !anchor.mac_is_valid(key) {
             return Err(AuditError::ResumeRefused(
-                "head anchor MAC does not verify under the active signing key — the sidecar was \
-                 rewritten or forged (a truncated-head rewrite without the signing key); inspect \
-                 with `oraclemcp audit verify` and restore the durable tail before restarting"
+                "head anchor MAC does not verify under its configured audit key — the sidecar \
+                 was rewritten, forged, or the key bytes changed behind an existing key_id; \
+                 inspect with `oraclemcp audit verify` and restore the authentic key/tail before \
+                 restarting"
                     .to_owned(),
             ));
         }
@@ -691,7 +696,7 @@ impl Auditor {
             seq,
             &state.last_hash,
             timestamp,
-            &self.key,
+            self.keyring.active(),
             correlation,
         );
         match catch_unwind(AssertUnwindSafe(|| self.sink.append(&record))) {
@@ -741,6 +746,10 @@ impl Auditor {
         }
         state.seq = seq;
         state.last_hash = record.entry_hash.clone();
+        // Every new record is signed under the active key. For a non-durable
+        // append, a later flush fsyncs it before writing the active anchor; for
+        // a durable append, fsync already preceded the anchor attempt above.
+        state.anchor_transition_pending = false;
         anchor_outcome?;
         Ok(record)
     }
@@ -759,6 +768,7 @@ impl Auditor {
         self.sink.flush()?;
         if let Some(anchor) = &self.anchor
             && state.seq > 0
+            && !state.anchor_transition_pending
         {
             anchor.record_head(state.seq, &state.last_hash)?;
         }
@@ -1685,7 +1695,7 @@ mod tests {
         match refused {
             Err(AuditError::ResumeRefused(msg)) => {
                 assert!(
-                    msg.contains("keyed MAC does not verify")
+                    msg.contains("keyed MAC that does not verify")
                         && msg.contains("seq 2")
                         && msg.contains("audit verify"),
                     "expected keyed-MAC refusal naming seq 2, got: {msg}"
@@ -1699,13 +1709,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_tolerates_a_rotated_interior_under_a_different_key_id() {
-        // Guard against over-tightening the keyed body check (bead
-        // oraclemcp-g4xi): a genuine cross-run key rotation leaves interior
-        // records under a PRIOR key_id that the single active key cannot verify.
-        // Those are `oraclemcp audit verify`'s job (full key ring), so resume
-        // must skip them rather than false-refuse — while still seeding from a
-        // tail signed under the active key.
+    fn resume_requires_the_historical_key_for_a_rotated_interior() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("audit.jsonl");
         let old_key = SigningKey::new("old-key", b"abcdef0123456789abcdef0123456789".to_vec())
@@ -1730,12 +1734,23 @@ mod tests {
             .collect();
         std::fs::write(&path, body).unwrap();
 
-        let auditor = Auditor::new(
+        let refused = Auditor::new(
             Box::new(FileAuditSink::open(&path).expect("open")),
             test_key(),
         )
+        .resume_from(&path);
+        assert!(
+            matches!(refused, Err(AuditError::ResumeRefused(ref message)) if message.contains("old-key") && message.contains("absent")),
+            "missing historical key must fail closed"
+        );
+
+        let keyring = AuditKeyring::new(test_key(), [old_key]).expect("valid rotation keyring");
+        let auditor = Auditor::new_with_keyring(
+            Box::new(FileAuditSink::open(&path).expect("reopen")),
+            keyring,
+        )
         .resume_from(&path)
-        .expect("rotated interior under a prior key_id must not false-refuse resume");
+        .expect("authenticated historical key permits mixed-key resume");
         // The chain seeded from the tail (seq 2): the next append is seq 3.
         let r3 = auditor
             .append(
@@ -1749,6 +1764,148 @@ mod tests {
             r3.prev_hash, r2.entry_hash,
             "resume chained onto the active-key tail"
         );
+    }
+
+    #[test]
+    fn authenticated_rotation_advances_anchor_only_after_first_new_durable_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let anchor_path = crate::anchor_path_for(&path);
+        let old_key = SigningKey::new("old", vec![0x11; 32]).expect("old key");
+        let new_key = SigningKey::new("new", vec![0x22; 32]).expect("new key");
+
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open old log")),
+                old_key.clone(),
+            )
+            .with_head_anchor(&anchor_path);
+            auditor
+                .append(
+                    &draft("DELETE FROM t WHERE id=1", "GUARDED"),
+                    "t1".into(),
+                    true,
+                )
+                .expect("old append");
+        }
+        let old_anchor = load_anchor(&anchor_path)
+            .expect("load old anchor")
+            .expect("old anchor");
+        assert_eq!(old_anchor.key_id, "old");
+
+        let rotation = AuditKeyring::new(new_key.clone(), [old_key.clone()])
+            .expect("authenticated rotation keyring");
+        {
+            // Crash/stop before the first new-key record: resume authenticates
+            // the old anchor but does not rewrite it merely by opening.
+            let auditor = Auditor::new_with_keyring(
+                Box::new(FileAuditSink::open(&path).expect("open rotation")),
+                rotation.clone(),
+            )
+            .with_head_anchor(&anchor_path)
+            .resume_from(&path)
+            .expect("old anchor authenticated by historical key");
+            auditor.flush().expect("flush old durable head");
+            assert_eq!(
+                load_anchor(&anchor_path).unwrap().unwrap(),
+                old_anchor,
+                "a flush without a new-key record must preserve the old anchor"
+            );
+        }
+        assert_eq!(
+            load_anchor(&anchor_path).unwrap().unwrap(),
+            old_anchor,
+            "rotation startup alone must not advance/re-sign the anchor"
+        );
+
+        {
+            let auditor = Auditor::new_with_keyring(
+                Box::new(FileAuditSink::open(&path).expect("open new signer")),
+                rotation.clone(),
+            )
+            .with_head_anchor(&anchor_path)
+            .resume_from(&path)
+            .expect("resume for first new record");
+            let record = auditor
+                .append(
+                    &draft("DELETE FROM t WHERE id=2", "GUARDED"),
+                    "t2".into(),
+                    true,
+                )
+                .expect("new-key durable append");
+            assert_eq!(record.key_id.as_deref(), Some("new"));
+        }
+        let new_anchor = load_anchor(&anchor_path).unwrap().unwrap();
+        assert_eq!(new_anchor.key_id, "new");
+        assert!(new_anchor.mac_is_valid(&new_key));
+
+        let records = parse_jsonl(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            verify_records(&records, rotation.verification_keys()),
+            VerifyOutcome::Ok { records: 2 }
+        );
+        assert_eq!(
+            crate::check_anchor(&records, &new_anchor, rotation.verification_keys()),
+            Ok(crate::AnchorStatus::Match)
+        );
+    }
+
+    #[test]
+    fn crash_after_new_record_before_anchor_update_accepts_old_anchor_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let anchor_path = crate::anchor_path_for(&path);
+        let old_key = SigningKey::new("old", vec![0x31; 32]).expect("old key");
+        let new_key = SigningKey::new("new", vec![0x32; 32]).expect("new key");
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("old sink")),
+                old_key.clone(),
+            )
+            .with_head_anchor(&anchor_path);
+            auditor
+                .append(
+                    &draft("DELETE FROM t WHERE id=1", "GUARDED"),
+                    "t1".into(),
+                    true,
+                )
+                .expect("old append");
+        }
+        // Model the precise crash window: the first new-key record reached the
+        // durable log, but the process died before replacing the old anchor.
+        let rotation = AuditKeyring::new(new_key.clone(), [old_key.clone()]).unwrap();
+        {
+            let auditor = Auditor::new_with_keyring(
+                Box::new(FileAuditSink::open(&path).expect("rotation sink")),
+                rotation.clone(),
+            )
+            .resume_from(&path)
+            .expect("resume without anchor writer");
+            auditor
+                .append(
+                    &draft("DELETE FROM t WHERE id=2", "GUARDED"),
+                    "t2".into(),
+                    true,
+                )
+                .expect("durable new record");
+        }
+        assert_eq!(load_anchor(&anchor_path).unwrap().unwrap().key_id, "old");
+        let auditor = Auditor::new_with_keyring(
+            Box::new(FileAuditSink::open(&path).expect("recovery sink")),
+            rotation,
+        )
+        .with_head_anchor(&anchor_path)
+        .resume_from(&path)
+        .expect("old authenticated anchor behind new-key tail is recoverable");
+        let next = auditor
+            .append(
+                &draft("DELETE FROM t WHERE id=3", "GUARDED"),
+                "t3".into(),
+                true,
+            )
+            .expect("recovery append");
+        assert_eq!(next.seq, 3);
+        assert_eq!(load_anchor(&anchor_path).unwrap().unwrap().key_id, "new");
     }
 
     #[test]

@@ -15,6 +15,8 @@
 //! Multiple keys may be supplied so a rotated chain (old records under an old
 //! `key_id`, new under a new one) verifies end to end.
 
+use std::collections::BTreeSet;
+
 use crate::record::{AuditRecord, GENESIS_HASH, SigningKey};
 
 /// The result of verifying a chain: OK, or the first broken link with a reason.
@@ -60,6 +62,8 @@ pub enum BrokenReason {
     /// The keyed MAC did not verify — a recompute-from-genesis forgery, or a
     /// wrong key.
     SignatureMismatch,
+    /// A retired key id reappeared after a different signing epoch began.
+    KeyIdReused(String),
 }
 
 impl std::fmt::Display for BrokenReason {
@@ -84,6 +88,9 @@ impl std::fmt::Display for BrokenReason {
             BrokenReason::SignatureMismatch => f.write_str(
                 "keyed MAC does not verify (recompute-from-genesis forgery or wrong key)",
             ),
+            BrokenReason::KeyIdReused(id) => {
+                write!(f, "retired audit key_id {id:?} reappears in a later epoch")
+            }
         }
     }
 }
@@ -100,6 +107,8 @@ fn key_for<'a>(keys: &'a [SigningKey], key_id: &str) -> Option<&'a SigningKey> {
 pub fn verify_records(records: &[AuditRecord], keys: &[SigningKey]) -> VerifyOutcome {
     let mut prev_hash = GENESIS_HASH.to_owned();
     let mut prev_seq: Option<u64> = None;
+    let mut current_key_id: Option<&str> = None;
+    let mut retired_key_ids = BTreeSet::new();
     for (index, record) in records.iter().enumerate() {
         // 1) hash recomputes from content (in-place edit).
         if !record.hash_is_valid() {
@@ -150,6 +159,19 @@ pub fn verify_records(records: &[AuditRecord], keys: &[SigningKey]) -> VerifyOut
                 index,
                 reason: BrokenReason::SignatureMismatch,
             };
+        }
+        if current_key_id != Some(key_id) {
+            if let Some(previous) = current_key_id {
+                retired_key_ids.insert(previous.to_owned());
+            }
+            if retired_key_ids.contains(key_id) {
+                return VerifyOutcome::Broken {
+                    seq: record.seq,
+                    index,
+                    reason: BrokenReason::KeyIdReused(key_id.to_owned()),
+                };
+            }
+            current_key_id = Some(key_id);
         }
 
         prev_hash = record.entry_hash.clone();
@@ -420,6 +442,41 @@ mod tests {
     }
 
     #[test]
+    fn retired_key_id_cannot_reappear_after_rotation() {
+        let k1 = key();
+        let k2 = SigningKey::new("k2", vec![0x72; 32]).expect("k2");
+        let first = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=1"),
+            1,
+            GENESIS_HASH,
+            "t1".to_owned(),
+            &k1,
+        );
+        let second = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=2"),
+            2,
+            &first.entry_hash,
+            "t2".to_owned(),
+            &k2,
+        );
+        let rollback = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=3"),
+            3,
+            &second.entry_hash,
+            "t3".to_owned(),
+            &k1,
+        );
+        assert_eq!(
+            verify_records(&[first, second, rollback], &[k1, k2]),
+            VerifyOutcome::Broken {
+                seq: 3,
+                index: 2,
+                reason: BrokenReason::KeyIdReused("k1".to_owned()),
+            }
+        );
+    }
+
+    #[test]
     fn broken_reason_display_names_each_integrity_failure() {
         let cases = [
             (BrokenReason::HashMismatch.to_string(), "entry_hash"),
@@ -440,6 +497,10 @@ mod tests {
             (
                 BrokenReason::SignatureMismatch.to_string(),
                 "keyed MAC does not verify",
+            ),
+            (
+                BrokenReason::KeyIdReused("k1".to_owned()).to_string(),
+                "reappears",
             ),
         ];
         for (msg, needle) in cases {

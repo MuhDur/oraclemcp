@@ -482,7 +482,7 @@ fn audit_startup_accepts_32_byte_and_longer_resolved_keys() {
             key_ref: Some("env:QA2_AUDIT_KEY".to_owned()),
             ..AuditConfig::default()
         };
-        let key = resolve_audit_signing_key(&audit, false, &resolver)
+        let key = resolve_audit_keyring(&audit, false, &resolver)
             .expect("minimum-size resolved audit key is valid");
         assert!(key.is_some());
     }
@@ -496,7 +496,7 @@ fn audit_startup_rejects_newline_only_key_file_without_leaking_its_path() {
         key_ref: Some(format!("file:{}", key_path.display())),
         ..AuditConfig::default()
     };
-    let error = resolve_audit_signing_key(&audit, false, &SystemSecretResolver)
+    let error = resolve_audit_keyring(&audit, false, &SystemSecretResolver)
         .expect_err("newline-only audit key resolves empty and must be rejected");
     assert_eq!(error.0, "ORACLEMCP_AUDIT_KEY_INVALID");
     assert!(error.1.contains("0 bytes"), "{}", error.1);
@@ -520,7 +520,7 @@ fn audit_verify_enforces_key_size_for_config_and_legacy_env_sources() {
             let secret = secret.clone();
             move |_: &str| Some(secret.clone())
         });
-        let error = audit_verification_keys_from_sources(&audit, None, &resolver, None)
+        let error = audit_verification_keyring_from_sources(&audit, None, &resolver, None)
             .expect_err("undersized resolved verification key must fail closed");
         assert!(error.contains(&format!("{len} bytes")), "{error}");
         assert!(!error.contains(locator), "{error}");
@@ -533,8 +533,9 @@ fn audit_verify_enforces_key_size_for_config_and_legacy_env_sources() {
         let resolver =
             oraclemcp_auth::EnvLookupSecretResolver::new(move |_: &str| Some(secret.clone()));
         assert_eq!(
-            audit_verification_keys_from_sources(&audit, None, &resolver, None)
+            audit_verification_keyring_from_sources(&audit, None, &resolver, None)
                 .expect("minimum-size resolved verification key is valid")
+                .verification_keys()
                 .len(),
             1
         );
@@ -543,7 +544,7 @@ fn audit_verify_enforces_key_size_for_config_and_legacy_env_sources() {
     let no_config = AuditConfig::default();
     for len in [0, 1, 31] {
         let secret = "E".repeat(len);
-        let error = audit_verification_keys_from_sources(
+        let error = audit_verification_keyring_from_sources(
             &no_config,
             None,
             &SystemSecretResolver,
@@ -558,17 +559,200 @@ fn audit_verify_enforces_key_size_for_config_and_legacy_env_sources() {
     for len in [32, 33] {
         let secret = "E".repeat(len);
         assert_eq!(
-            audit_verification_keys_from_sources(
+            audit_verification_keyring_from_sources(
                 &no_config,
                 None,
                 &SystemSecretResolver,
                 Some(&secret),
             )
             .expect("minimum-size legacy environment verification key is valid")
+            .verification_keys()
             .len(),
             1
         );
     }
+}
+
+#[test]
+fn audit_keyring_resolves_active_and_historical_keys_without_leaking_locators() {
+    let active_locator = "QA37_ACTIVE_LOCATOR_MUST_NOT_RENDER";
+    let old_locator = "QA37_OLD_LOCATOR_MUST_NOT_RENDER";
+    let audit = AuditConfig {
+        key_ref: Some(format!("env:{active_locator}")),
+        key_id: Some("new".to_owned()),
+        verification_keys: vec![oraclemcp_config::AuditVerificationKeyConfig {
+            key_id: "old".to_owned(),
+            key_ref: format!("env:{old_locator}"),
+        }],
+        ..AuditConfig::default()
+    };
+    let resolver = oraclemcp_auth::EnvLookupSecretResolver::new(move |name: &str| match name {
+        "QA37_ACTIVE_LOCATOR_MUST_NOT_RENDER" => Some("A".repeat(32)),
+        "QA37_OLD_LOCATOR_MUST_NOT_RENDER" => Some("B".repeat(32)),
+        _ => None,
+    });
+    let keyring = audit_verification_keyring_from_sources(&audit, None, &resolver, None)
+        .expect("complete keyring resolves");
+    assert_eq!(keyring.active().key_id(), "new");
+    assert_eq!(
+        keyring
+            .verification_keys()
+            .iter()
+            .map(SigningKey::key_id)
+            .collect::<Vec<_>>(),
+        vec!["new", "old"]
+    );
+
+    let missing = oraclemcp_auth::EnvLookupSecretResolver::new(|_: &str| None);
+    let error = audit_verification_keyring_from_sources(&audit, None, &missing, None)
+        .expect_err("unresolvable keyring fails closed");
+    assert!(!error.contains(active_locator), "{error}");
+    assert!(!error.contains(old_locator), "{error}");
+}
+
+#[test]
+fn audit_keyring_rejects_same_material_under_different_ids() {
+    let audit = AuditConfig {
+        key_ref: Some("env:ACTIVE".to_owned()),
+        key_id: Some("new".to_owned()),
+        verification_keys: vec![oraclemcp_config::AuditVerificationKeyConfig {
+            key_id: "old".to_owned(),
+            key_ref: "env:OLD".to_owned(),
+        }],
+        ..AuditConfig::default()
+    };
+    let resolver = oraclemcp_auth::EnvLookupSecretResolver::new(|_: &str| Some("K".repeat(32)));
+    let error = audit_verification_keyring_from_sources(&audit, None, &resolver, None)
+        .expect_err("key reuse across ids is ambiguous");
+    assert!(error.contains("reused under ids"), "{error}");
+    assert!(!error.contains(&"K".repeat(32)), "{error}");
+}
+
+#[test]
+fn audit_keyring_historical_secrets_follow_protected_policy_and_require_active_key() {
+    let sentinel = "QA37_HISTORICAL_LITERAL_MUST_NOT_RENDER_123456789";
+    let protected = AuditConfig {
+        key_ref: Some("env:ACTIVE".to_owned()),
+        key_id: Some("new".to_owned()),
+        verification_keys: vec![oraclemcp_config::AuditVerificationKeyConfig {
+            key_id: "old".to_owned(),
+            key_ref: format!("literal:{sentinel}"),
+        }],
+        ..AuditConfig::default()
+    };
+    let resolver = oraclemcp_auth::EnvLookupSecretResolver::new(|_: &str| Some("A".repeat(32)));
+    let error = resolve_audit_keyring_from_sources(&protected, None, true, &resolver, None)
+        .expect_err("protected historical literal must fail closed");
+    assert!(error.contains("forbidden"), "{error}");
+    assert!(!error.contains(sentinel), "{error}");
+
+    let historical_only = AuditConfig {
+        verification_keys: vec![oraclemcp_config::AuditVerificationKeyConfig {
+            key_id: "old".to_owned(),
+            key_ref: "env:OLD".to_owned(),
+        }],
+        ..AuditConfig::default()
+    };
+    let error = resolve_audit_keyring_from_sources(&historical_only, None, false, &resolver, None)
+        .expect_err("historical-only keyring has no signer");
+    assert!(error.contains("without an active signing key"), "{error}");
+}
+
+#[test]
+fn startup_performs_authenticated_mixed_key_rotation_end_to_end() {
+    let root = target_tmp_file("qa37-startup-rotation");
+    let path = root.join("audit.jsonl");
+    let resolver = oraclemcp_auth::EnvLookupSecretResolver::new(|name: &str| match name {
+        "QA37_OLD" => Some("O".repeat(32)),
+        "QA37_NEW" => Some("N".repeat(32)),
+        "QA37_CHANGED" => Some("C".repeat(32)),
+        _ => None,
+    });
+    let level = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+    let draft = oraclemcp_audit::AuditEntryDraft {
+        subject: AuditSubject::new("startup-test", "qa37"),
+        db_evidence: None,
+        cancel: None,
+        tool: "oracle_execute".to_owned(),
+        sql: "delete from qa37 where id = 1".to_owned(),
+        danger_level: "GUARDED".to_owned(),
+        decision: oraclemcp_audit::AuditDecision::Allowed,
+        rows_affected: Some(1),
+        outcome: oraclemcp_audit::AuditOutcome::Succeeded,
+    };
+    let old_config = AuditConfig {
+        path: Some(path.clone()),
+        key_ref: Some("env:QA37_OLD".to_owned()),
+        key_id: Some("old".to_owned()),
+        ..AuditConfig::default()
+    };
+    {
+        let auditor = build_auditor(&old_config, &level, OperatingLevel::Ddl, &resolver)
+            .expect("old startup")
+            .expect("auditor");
+        auditor
+            .append(&draft, "t1".to_owned(), true)
+            .expect("old record");
+    }
+
+    let rotated_config = AuditConfig {
+        path: Some(path.clone()),
+        key_ref: Some("env:QA37_NEW".to_owned()),
+        key_id: Some("new".to_owned()),
+        verification_keys: vec![oraclemcp_config::AuditVerificationKeyConfig {
+            key_id: "old".to_owned(),
+            key_ref: "env:QA37_OLD".to_owned(),
+        }],
+        ..AuditConfig::default()
+    };
+    {
+        let auditor = build_auditor(&rotated_config, &level, OperatingLevel::Ddl, &resolver)
+            .expect("authenticated rotation startup")
+            .expect("auditor");
+        let record = auditor
+            .append(&draft, "t2".to_owned(), true)
+            .expect("new record");
+        assert_eq!(record.seq, 2);
+        assert_eq!(record.key_id.as_deref(), Some("new"));
+    }
+    let keyring = audit_verification_keyring_from_sources(&rotated_config, None, &resolver, None)
+        .expect("verification keyring");
+    let records = oraclemcp_audit::parse_jsonl(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        oraclemcp_audit::verify_records(&records, keyring.verification_keys()),
+        oraclemcp_audit::VerifyOutcome::Ok { records: 2 }
+    );
+
+    let missing_history = AuditConfig {
+        path: Some(path.clone()),
+        key_ref: Some("env:QA37_NEW".to_owned()),
+        key_id: Some("new".to_owned()),
+        ..AuditConfig::default()
+    };
+    let error = match build_auditor(&missing_history, &level, OperatingLevel::Ddl, &resolver) {
+        Err(error) => error,
+        Ok(_) => panic!("missing old key must refuse startup"),
+    };
+    assert_eq!(error.0, "ORACLEMCP_AUDIT_CHAIN_RESUME_REFUSED");
+    assert!(error.1.contains("old"), "{}", error.1);
+
+    let same_id_changed_bytes = AuditConfig {
+        path: Some(path),
+        key_ref: Some("env:QA37_CHANGED".to_owned()),
+        key_id: Some("old".to_owned()),
+        ..AuditConfig::default()
+    };
+    let error = match build_auditor(
+        &same_id_changed_bytes,
+        &level,
+        OperatingLevel::Ddl,
+        &resolver,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("changed bytes behind old id must refuse startup"),
+    };
+    assert_eq!(error.0, "ORACLEMCP_AUDIT_CHAIN_RESUME_REFUSED");
+    assert!(!error.1.contains(&"C".repeat(32)));
 }
 
 #[test]

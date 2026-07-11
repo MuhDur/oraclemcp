@@ -96,6 +96,11 @@ vulnerability-reporting policy and supported versions are in the repo-root
 - [ ] Configure `[audit]` with a signing key (`key_ref` as a secret-ref) and a
       labeled `key_id` for rotation. Privileged actions write to a hash-chained,
       HMAC-SHA256-signed log.
+- [ ] Rotate audit keys by moving the old pair into
+      `[[audit.verification_keys]]` and configuring a unique new active ID/key.
+      Never change bytes behind an existing ID. Keep historical keys available
+      to startup, verify, backup, and restore until their signed evidence ages
+      out.
 - [ ] Protect and back up the audit log; treat it as a security record. Keep
       the `<audit path>.anchor` sidecar with it — the server-maintained head
       anchor is what lets `audit verify` detect tail truncation (deleting the
