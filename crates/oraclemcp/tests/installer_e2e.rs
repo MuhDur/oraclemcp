@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -863,24 +864,28 @@ fn binstall_brew_winget_metadata_valid() {
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("target"));
-    let test_root = target_dir.join("dist-metadata-test");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_nanos();
+    let test_root = target_dir.join(format!("dist-metadata-test-{}-{nonce}", std::process::id()));
     let artifacts = test_root.join("artifacts");
     let out = test_root.join("out");
     fs::create_dir_all(&artifacts).expect("create artifact fixture dir");
-    write_checksum_fixture(
+    let darwin_x64_sha = write_archive_checksum_fixture(
         &artifacts,
         "oraclemcp-x86_64-apple-darwin.tar.gz",
-        "1111111111111111111111111111111111111111111111111111111111111111",
+        b"deterministic darwin x86_64 release archive fixture",
     );
-    write_checksum_fixture(
+    let darwin_arm64_sha = write_archive_checksum_fixture(
         &artifacts,
         "oraclemcp-aarch64-apple-darwin.tar.gz",
-        "2222222222222222222222222222222222222222222222222222222222222222",
+        b"deterministic darwin aarch64 release archive fixture",
     );
-    write_checksum_fixture(
+    let windows_x64_sha = write_archive_checksum_fixture(
         &artifacts,
         "oraclemcp-x86_64-pc-windows-msvc.zip",
-        "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+        b"deterministic windows x86_64 release archive fixture",
     );
 
     let output = Command::new("bash")
@@ -902,16 +907,8 @@ fn binstall_brew_winget_metadata_valid() {
         .expect("read rendered Homebrew formula");
     assert!(!formula.contains("__"));
     assert!(formula.contains("version \"9.9.9-test.1\""));
-    assert!(
-        formula.contains(
-            "sha256 \"1111111111111111111111111111111111111111111111111111111111111111\""
-        )
-    );
-    assert!(
-        formula.contains(
-            "sha256 \"2222222222222222222222222222222222222222222222222222222222222222\""
-        )
-    );
+    assert!(formula.contains(&format!("sha256 \"{darwin_x64_sha}\"")));
+    assert!(formula.contains(&format!("sha256 \"{darwin_arm64_sha}\"")));
 
     let winget_dir = out.join("winget/manifests/m/MuhDur/oraclemcp/9.9.9-test.1");
     let winget_version = fs::read_to_string(winget_dir.join("MuhDur.oraclemcp.yaml"))
@@ -928,17 +925,29 @@ fn binstall_brew_winget_metadata_valid() {
     assert!(winget_version.contains("ManifestType: version"));
     assert!(winget_locale.contains("ManifestType: defaultLocale"));
     assert!(winget_installer.contains("ManifestType: installer"));
-    assert!(winget_installer.contains(
-        "InstallerSha256: ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD"
-    ));
+    assert!(winget_installer.contains(&format!(
+        "InstallerSha256: {}",
+        windows_x64_sha.to_ascii_uppercase()
+    )));
 }
 
-fn write_checksum_fixture(dir: &Path, asset: &str, digest: &str) {
+fn write_archive_checksum_fixture(dir: &Path, asset: &str, bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    use sha2::Digest as _;
+
+    fs::write(dir.join(asset), bytes).expect("write archive fixture");
+    let hash = sha2::Sha256::digest(bytes);
+    let mut digest = String::with_capacity(hash.len() * 2);
+    for byte in hash {
+        write!(&mut digest, "{byte:02x}").expect("writing to a String cannot fail");
+    }
     fs::write(
         dir.join(format!("{asset}.sha256")),
         format!("{digest}  {asset}\n"),
     )
     .expect("write checksum fixture");
+    digest
 }
 
 fn expand_binstall_template(
