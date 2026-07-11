@@ -51,15 +51,17 @@
 //! away: it is re-exported as [`error_envelope`] and its [`ErrorEnvelope`]
 //! type appears in return positions (e.g. [`DbError::into_envelope`]), so a
 //! breaking bump to it is a deliberate, snapshot-visible change. The
-//! `oraclemcp-guard` dependency is internal (the pool consumes its validators)
-//! and intentionally does **not** appear in this public surface. See
-//! `README.md` for the API-stability note and the baseline-refresh procedure.
+//! `oraclemcp-guard` normally remains an implementation dependency (the pool
+//! consumes its validators). The one deliberate public exception is the
+//! engine-free semantic resolver port implemented by [`OracleCatalogResolver`].
+//! See `README.md` for the API-stability note and baseline-refresh procedure.
 //!
 //! [`ErrorEnvelope`]: oraclemcp_error::ErrorEnvelope
 
 mod auth_adapter;
 mod awr;
 mod catalog_extract;
+mod catalog_resolver;
 mod connection;
 mod doctor;
 mod drcp;
@@ -88,6 +90,9 @@ pub use awr::{
 pub use catalog_extract::{
     CatalogExtractReport, CatalogExtractRequest, CatalogExtractWarning, CatalogRowBatch,
     CatalogRowSetName, CatalogSchemaFilter, catalog_extract_rowsets, extract_catalog_rowsets,
+};
+pub use catalog_resolver::{
+    MAX_CATALOG_NAMES, OracleCatalogResolver, read_catalog_resolve_context,
 };
 pub use connection::{
     DRIVER_VERSION, DbRequestQuota, DbmsOutput, ExecuteOutcome, OracleConnection, OracleRoutineArg,

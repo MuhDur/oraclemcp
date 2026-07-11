@@ -1135,6 +1135,704 @@ pub fn oraclemcp_guard::purity::SideEffectOracle::statement_purity(&self, &[orac
 impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::UnknownOracle
 pub fn oraclemcp_guard::purity::UnknownOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::purity::UnknownOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
+pub mod oraclemcp_guard::resolver
+#[non_exhaustive] pub enum oraclemcp_guard::resolver::CatalogObjectKind
+pub oraclemcp_guard::resolver::CatalogObjectKind::Function
+pub oraclemcp_guard::resolver::CatalogObjectKind::MaterializedView
+pub oraclemcp_guard::resolver::CatalogObjectKind::Other(alloc::string::String)
+pub oraclemcp_guard::resolver::CatalogObjectKind::Package
+pub oraclemcp_guard::resolver::CatalogObjectKind::Procedure
+pub oraclemcp_guard::resolver::CatalogObjectKind::Sequence
+pub oraclemcp_guard::resolver::CatalogObjectKind::Synonym
+pub oraclemcp_guard::resolver::CatalogObjectKind::Table
+pub oraclemcp_guard::resolver::CatalogObjectKind::Type
+pub oraclemcp_guard::resolver::CatalogObjectKind::View
+impl core::clone::Clone for oraclemcp_guard::resolver::CatalogObjectKind
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::clone(&self) -> oraclemcp_guard::resolver::CatalogObjectKind
+impl core::cmp::Eq for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::CatalogObjectKind
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::eq(&self, &oraclemcp_guard::resolver::CatalogObjectKind) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::CatalogObjectKind
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::CatalogObjectKind
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::marker::Freeze for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::marker::Send for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::marker::Sync for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::marker::Unpin for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::CatalogObjectKind
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::CatalogObjectKind where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::CatalogObjectKind where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::CatalogObjectKind::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::CatalogObjectKind where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::CatalogObjectKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::CatalogObjectKind where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::CatalogObjectKind::Owned = T
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::CatalogObjectKind where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::CatalogObjectKind where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::CatalogObjectKind where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::CatalogObjectKind where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::CatalogObjectKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::CatalogObjectKind
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::CatalogObjectKind
+pub type oraclemcp_guard::resolver::CatalogObjectKind::Output = T
+pub enum oraclemcp_guard::resolver::QuoteSemantics
+pub oraclemcp_guard::resolver::QuoteSemantics::Quoted
+pub oraclemcp_guard::resolver::QuoteSemantics::Unquoted
+impl core::clone::Clone for oraclemcp_guard::resolver::QuoteSemantics
+pub fn oraclemcp_guard::resolver::QuoteSemantics::clone(&self) -> oraclemcp_guard::resolver::QuoteSemantics
+impl core::cmp::Eq for oraclemcp_guard::resolver::QuoteSemantics
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::QuoteSemantics
+pub fn oraclemcp_guard::resolver::QuoteSemantics::eq(&self, &oraclemcp_guard::resolver::QuoteSemantics) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::QuoteSemantics
+pub fn oraclemcp_guard::resolver::QuoteSemantics::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::QuoteSemantics
+pub fn oraclemcp_guard::resolver::QuoteSemantics::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oraclemcp_guard::resolver::QuoteSemantics
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::QuoteSemantics
+impl core::marker::Freeze for oraclemcp_guard::resolver::QuoteSemantics
+impl core::marker::Send for oraclemcp_guard::resolver::QuoteSemantics
+impl core::marker::Sync for oraclemcp_guard::resolver::QuoteSemantics
+impl core::marker::Unpin for oraclemcp_guard::resolver::QuoteSemantics
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::QuoteSemantics
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::QuoteSemantics
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::QuoteSemantics
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::QuoteSemantics where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::QuoteSemantics::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::QuoteSemantics where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::QuoteSemantics::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::QuoteSemantics::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::QuoteSemantics where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::QuoteSemantics::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::QuoteSemantics::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::QuoteSemantics where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::QuoteSemantics::Owned = T
+pub fn oraclemcp_guard::resolver::QuoteSemantics::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::QuoteSemantics::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::QuoteSemantics where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::QuoteSemantics::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::QuoteSemantics where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::QuoteSemantics::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::QuoteSemantics where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::QuoteSemantics::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::QuoteSemantics where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::QuoteSemantics::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::QuoteSemantics
+pub fn oraclemcp_guard::resolver::QuoteSemantics::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::QuoteSemantics
+pub type oraclemcp_guard::resolver::QuoteSemantics::Output = T
+pub enum oraclemcp_guard::resolver::Resolution
+pub oraclemcp_guard::resolver::Resolution::Ambiguous
+pub oraclemcp_guard::resolver::Resolution::Ambiguous::candidates: alloc::vec::Vec<oraclemcp_guard::resolver::ResolvedIdentity>
+pub oraclemcp_guard::resolver::Resolution::Remote
+pub oraclemcp_guard::resolver::Resolution::Remote::db_link: oraclemcp_guard::resolver::RawNamePart
+pub oraclemcp_guard::resolver::Resolution::Resolved(alloc::boxed::Box<oraclemcp_guard::resolver::ResolvedObject>)
+pub oraclemcp_guard::resolver::Resolution::Unresolved
+impl core::clone::Clone for oraclemcp_guard::resolver::Resolution
+pub fn oraclemcp_guard::resolver::Resolution::clone(&self) -> oraclemcp_guard::resolver::Resolution
+impl core::cmp::Eq for oraclemcp_guard::resolver::Resolution
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::Resolution
+pub fn oraclemcp_guard::resolver::Resolution::eq(&self, &oraclemcp_guard::resolver::Resolution) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::Resolution
+pub fn oraclemcp_guard::resolver::Resolution::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::Resolution
+impl core::marker::Freeze for oraclemcp_guard::resolver::Resolution
+impl core::marker::Send for oraclemcp_guard::resolver::Resolution
+impl core::marker::Sync for oraclemcp_guard::resolver::Resolution
+impl core::marker::Unpin for oraclemcp_guard::resolver::Resolution
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::Resolution
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::Resolution
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::Resolution
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::Resolution where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::Resolution::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::Resolution where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::Resolution::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::Resolution::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::Resolution where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::Resolution::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::Resolution::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::Resolution where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::Resolution::Owned = T
+pub fn oraclemcp_guard::resolver::Resolution::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::Resolution::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::Resolution where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::Resolution::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::Resolution where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::Resolution::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::Resolution where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::Resolution::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::Resolution where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::Resolution::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::Resolution
+pub fn oraclemcp_guard::resolver::Resolution::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::Resolution
+pub type oraclemcp_guard::resolver::Resolution::Output = T
+pub enum oraclemcp_guard::resolver::SyntacticRole
+pub oraclemcp_guard::resolver::SyntacticRole::CallWithArgs
+pub oraclemcp_guard::resolver::SyntacticRole::FromFactor
+pub oraclemcp_guard::resolver::SyntacticRole::ValuePosition
+impl core::clone::Clone for oraclemcp_guard::resolver::SyntacticRole
+pub fn oraclemcp_guard::resolver::SyntacticRole::clone(&self) -> oraclemcp_guard::resolver::SyntacticRole
+impl core::cmp::Eq for oraclemcp_guard::resolver::SyntacticRole
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::SyntacticRole
+pub fn oraclemcp_guard::resolver::SyntacticRole::eq(&self, &oraclemcp_guard::resolver::SyntacticRole) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::SyntacticRole
+pub fn oraclemcp_guard::resolver::SyntacticRole::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::SyntacticRole
+pub fn oraclemcp_guard::resolver::SyntacticRole::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oraclemcp_guard::resolver::SyntacticRole
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::SyntacticRole
+impl core::marker::Freeze for oraclemcp_guard::resolver::SyntacticRole
+impl core::marker::Send for oraclemcp_guard::resolver::SyntacticRole
+impl core::marker::Sync for oraclemcp_guard::resolver::SyntacticRole
+impl core::marker::Unpin for oraclemcp_guard::resolver::SyntacticRole
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::SyntacticRole
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::SyntacticRole
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::SyntacticRole
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::SyntacticRole where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::SyntacticRole::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::SyntacticRole where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::SyntacticRole::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::SyntacticRole::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::SyntacticRole where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::SyntacticRole::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::SyntacticRole::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::SyntacticRole where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::SyntacticRole::Owned = T
+pub fn oraclemcp_guard::resolver::SyntacticRole::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::SyntacticRole::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::SyntacticRole where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::SyntacticRole::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::SyntacticRole where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::SyntacticRole::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::SyntacticRole where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::SyntacticRole::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::SyntacticRole where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::SyntacticRole::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::SyntacticRole
+pub fn oraclemcp_guard::resolver::SyntacticRole::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::SyntacticRole
+pub type oraclemcp_guard::resolver::SyntacticRole::Output = T
+pub struct oraclemcp_guard::resolver::CatalogGeneration(pub u64)
+impl core::clone::Clone for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::clone(&self) -> oraclemcp_guard::resolver::CatalogGeneration
+impl core::cmp::Eq for oraclemcp_guard::resolver::CatalogGeneration
+impl core::cmp::Ord for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::cmp(&self, &oraclemcp_guard::resolver::CatalogGeneration) -> core::cmp::Ordering
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::eq(&self, &oraclemcp_guard::resolver::CatalogGeneration) -> bool
+impl core::cmp::PartialOrd for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::partial_cmp(&self, &oraclemcp_guard::resolver::CatalogGeneration) -> core::option::Option<core::cmp::Ordering>
+impl core::default::Default for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::default() -> oraclemcp_guard::resolver::CatalogGeneration
+impl core::fmt::Debug for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oraclemcp_guard::resolver::CatalogGeneration
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::CatalogGeneration
+impl core::marker::Freeze for oraclemcp_guard::resolver::CatalogGeneration
+impl core::marker::Send for oraclemcp_guard::resolver::CatalogGeneration
+impl core::marker::Sync for oraclemcp_guard::resolver::CatalogGeneration
+impl core::marker::Unpin for oraclemcp_guard::resolver::CatalogGeneration
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::CatalogGeneration
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::CatalogGeneration
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::CatalogGeneration
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::CatalogGeneration where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::CatalogGeneration::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::CatalogGeneration where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::CatalogGeneration::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::CatalogGeneration::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::CatalogGeneration where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::CatalogGeneration::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::CatalogGeneration::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::CatalogGeneration where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::CatalogGeneration::Owned = T
+pub fn oraclemcp_guard::resolver::CatalogGeneration::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::CatalogGeneration::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::CatalogGeneration where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::CatalogGeneration::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::CatalogGeneration where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::CatalogGeneration::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::CatalogGeneration where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::CatalogGeneration::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::CatalogGeneration where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::CatalogGeneration::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::CatalogGeneration
+pub type oraclemcp_guard::resolver::CatalogGeneration::Output = T
+pub struct oraclemcp_guard::resolver::RawName
+pub oraclemcp_guard::resolver::RawName::db_link: core::option::Option<oraclemcp_guard::resolver::RawNamePart>
+pub oraclemcp_guard::resolver::RawName::parts: alloc::vec::Vec<oraclemcp_guard::resolver::RawNamePart>
+pub oraclemcp_guard::resolver::RawName::role: oraclemcp_guard::resolver::SyntacticRole
+impl oraclemcp_guard::resolver::RawName
+pub fn oraclemcp_guard::resolver::RawName::new(impl core::iter::traits::collect::IntoIterator<Item = oraclemcp_guard::resolver::RawNamePart>, oraclemcp_guard::resolver::SyntacticRole) -> Self
+pub fn oraclemcp_guard::resolver::RawName::with_db_link(self, oraclemcp_guard::resolver::RawNamePart) -> Self
+impl core::clone::Clone for oraclemcp_guard::resolver::RawName
+pub fn oraclemcp_guard::resolver::RawName::clone(&self) -> oraclemcp_guard::resolver::RawName
+impl core::cmp::Eq for oraclemcp_guard::resolver::RawName
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::RawName
+pub fn oraclemcp_guard::resolver::RawName::eq(&self, &oraclemcp_guard::resolver::RawName) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::RawName
+pub fn oraclemcp_guard::resolver::RawName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::RawName
+pub fn oraclemcp_guard::resolver::RawName::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::RawName
+impl core::marker::Freeze for oraclemcp_guard::resolver::RawName
+impl core::marker::Send for oraclemcp_guard::resolver::RawName
+impl core::marker::Sync for oraclemcp_guard::resolver::RawName
+impl core::marker::Unpin for oraclemcp_guard::resolver::RawName
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::RawName
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::RawName
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::RawName
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::RawName where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::RawName::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::RawName where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::RawName::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::RawName::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::RawName where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::RawName::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::RawName::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::RawName where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::RawName::Owned = T
+pub fn oraclemcp_guard::resolver::RawName::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::RawName::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::RawName where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::RawName::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::RawName where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::RawName::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::RawName where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::RawName::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::RawName where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::RawName::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::RawName
+pub fn oraclemcp_guard::resolver::RawName::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::RawName
+pub type oraclemcp_guard::resolver::RawName::Output = T
+pub struct oraclemcp_guard::resolver::RawNamePart
+pub oraclemcp_guard::resolver::RawNamePart::quoting: oraclemcp_guard::resolver::QuoteSemantics
+pub oraclemcp_guard::resolver::RawNamePart::text: alloc::string::String
+impl oraclemcp_guard::resolver::RawNamePart
+pub fn oraclemcp_guard::resolver::RawNamePart::quoted(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oraclemcp_guard::resolver::RawNamePart::unquoted(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::clone::Clone for oraclemcp_guard::resolver::RawNamePart
+pub fn oraclemcp_guard::resolver::RawNamePart::clone(&self) -> oraclemcp_guard::resolver::RawNamePart
+impl core::cmp::Eq for oraclemcp_guard::resolver::RawNamePart
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::RawNamePart
+pub fn oraclemcp_guard::resolver::RawNamePart::eq(&self, &oraclemcp_guard::resolver::RawNamePart) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::RawNamePart
+pub fn oraclemcp_guard::resolver::RawNamePart::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::RawNamePart
+pub fn oraclemcp_guard::resolver::RawNamePart::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::RawNamePart
+impl core::marker::Freeze for oraclemcp_guard::resolver::RawNamePart
+impl core::marker::Send for oraclemcp_guard::resolver::RawNamePart
+impl core::marker::Sync for oraclemcp_guard::resolver::RawNamePart
+impl core::marker::Unpin for oraclemcp_guard::resolver::RawNamePart
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::RawNamePart
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::RawNamePart
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::RawNamePart
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::RawNamePart where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::RawNamePart::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::RawNamePart where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::RawNamePart::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::RawNamePart::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::RawNamePart where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::RawNamePart::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::RawNamePart::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::RawNamePart where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::RawNamePart::Owned = T
+pub fn oraclemcp_guard::resolver::RawNamePart::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::RawNamePart::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::RawNamePart where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::RawNamePart::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::RawNamePart where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::RawNamePart::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::RawNamePart where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::RawNamePart::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::RawNamePart where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::RawNamePart::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::RawNamePart
+pub fn oraclemcp_guard::resolver::RawNamePart::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::RawNamePart
+pub type oraclemcp_guard::resolver::RawNamePart::Output = T
+pub struct oraclemcp_guard::resolver::ResolveCtx
+pub oraclemcp_guard::resolver::ResolveCtx::connected_schema: alloc::string::String
+pub oraclemcp_guard::resolver::ResolveCtx::current_schema: alloc::string::String
+pub oraclemcp_guard::resolver::ResolveCtx::edition: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::resolver::ResolveCtx::enabled_roles: alloc::collections::btree::set::BTreeSet<alloc::string::String>
+pub oraclemcp_guard::resolver::ResolveCtx::generation: oraclemcp_guard::resolver::CatalogGeneration
+pub oraclemcp_guard::resolver::ResolveCtx::statement_scope: oraclemcp_guard::resolver::StatementScope
+impl oraclemcp_guard::resolver::ResolveCtx
+pub fn oraclemcp_guard::resolver::ResolveCtx::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oraclemcp_guard::resolver::CatalogGeneration) -> Self
+impl core::clone::Clone for oraclemcp_guard::resolver::ResolveCtx
+pub fn oraclemcp_guard::resolver::ResolveCtx::clone(&self) -> oraclemcp_guard::resolver::ResolveCtx
+impl core::cmp::Eq for oraclemcp_guard::resolver::ResolveCtx
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::ResolveCtx
+pub fn oraclemcp_guard::resolver::ResolveCtx::eq(&self, &oraclemcp_guard::resolver::ResolveCtx) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::ResolveCtx
+pub fn oraclemcp_guard::resolver::ResolveCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::ResolveCtx
+impl core::marker::Freeze for oraclemcp_guard::resolver::ResolveCtx
+impl core::marker::Send for oraclemcp_guard::resolver::ResolveCtx
+impl core::marker::Sync for oraclemcp_guard::resolver::ResolveCtx
+impl core::marker::Unpin for oraclemcp_guard::resolver::ResolveCtx
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::ResolveCtx
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::ResolveCtx
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::ResolveCtx
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::ResolveCtx where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::ResolveCtx::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::ResolveCtx where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::ResolveCtx::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::ResolveCtx::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::ResolveCtx where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::ResolveCtx::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::ResolveCtx::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::ResolveCtx where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::ResolveCtx::Owned = T
+pub fn oraclemcp_guard::resolver::ResolveCtx::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::ResolveCtx::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::ResolveCtx where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolveCtx::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::ResolveCtx where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolveCtx::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::ResolveCtx where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolveCtx::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::ResolveCtx where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::ResolveCtx::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::ResolveCtx
+pub fn oraclemcp_guard::resolver::ResolveCtx::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::ResolveCtx
+pub type oraclemcp_guard::resolver::ResolveCtx::Output = T
+pub struct oraclemcp_guard::resolver::ResolvedContainer
+pub oraclemcp_guard::resolver::ResolvedContainer::kind: oraclemcp_guard::resolver::CatalogObjectKind
+pub oraclemcp_guard::resolver::ResolvedContainer::name: alloc::string::String
+impl core::clone::Clone for oraclemcp_guard::resolver::ResolvedContainer
+pub fn oraclemcp_guard::resolver::ResolvedContainer::clone(&self) -> oraclemcp_guard::resolver::ResolvedContainer
+impl core::cmp::Eq for oraclemcp_guard::resolver::ResolvedContainer
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::ResolvedContainer
+pub fn oraclemcp_guard::resolver::ResolvedContainer::eq(&self, &oraclemcp_guard::resolver::ResolvedContainer) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::ResolvedContainer
+pub fn oraclemcp_guard::resolver::ResolvedContainer::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::ResolvedContainer
+pub fn oraclemcp_guard::resolver::ResolvedContainer::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::ResolvedContainer
+impl core::marker::Freeze for oraclemcp_guard::resolver::ResolvedContainer
+impl core::marker::Send for oraclemcp_guard::resolver::ResolvedContainer
+impl core::marker::Sync for oraclemcp_guard::resolver::ResolvedContainer
+impl core::marker::Unpin for oraclemcp_guard::resolver::ResolvedContainer
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::ResolvedContainer
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::ResolvedContainer
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::ResolvedContainer
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::ResolvedContainer where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::ResolvedContainer::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::ResolvedContainer where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::ResolvedContainer::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::ResolvedContainer::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::ResolvedContainer where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::ResolvedContainer::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::ResolvedContainer::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::ResolvedContainer where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::ResolvedContainer::Owned = T
+pub fn oraclemcp_guard::resolver::ResolvedContainer::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::ResolvedContainer::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::ResolvedContainer where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedContainer::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::ResolvedContainer where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedContainer::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::ResolvedContainer where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedContainer::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::ResolvedContainer where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::ResolvedContainer::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::ResolvedContainer
+pub fn oraclemcp_guard::resolver::ResolvedContainer::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::ResolvedContainer
+pub type oraclemcp_guard::resolver::ResolvedContainer::Output = T
+pub struct oraclemcp_guard::resolver::ResolvedIdentity
+pub oraclemcp_guard::resolver::ResolvedIdentity::edition: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::resolver::ResolvedIdentity::object_id: u64
+impl core::clone::Clone for oraclemcp_guard::resolver::ResolvedIdentity
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::clone(&self) -> oraclemcp_guard::resolver::ResolvedIdentity
+impl core::cmp::Eq for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::ResolvedIdentity
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::eq(&self, &oraclemcp_guard::resolver::ResolvedIdentity) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::ResolvedIdentity
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::ResolvedIdentity
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::marker::Freeze for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::marker::Send for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::marker::Sync for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::marker::Unpin for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::ResolvedIdentity
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::ResolvedIdentity where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::ResolvedIdentity where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::ResolvedIdentity::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::ResolvedIdentity where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::ResolvedIdentity::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::ResolvedIdentity where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::ResolvedIdentity::Owned = T
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::ResolvedIdentity where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::ResolvedIdentity where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::ResolvedIdentity where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::ResolvedIdentity where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::ResolvedIdentity::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::ResolvedIdentity
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::ResolvedIdentity
+pub type oraclemcp_guard::resolver::ResolvedIdentity::Output = T
+pub struct oraclemcp_guard::resolver::ResolvedObject
+pub oraclemcp_guard::resolver::ResolvedObject::container: core::option::Option<oraclemcp_guard::resolver::ResolvedContainer>
+pub oraclemcp_guard::resolver::ResolvedObject::db_link: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::resolver::ResolvedObject::identity: oraclemcp_guard::resolver::ResolvedIdentity
+pub oraclemcp_guard::resolver::ResolvedObject::kind: oraclemcp_guard::resolver::CatalogObjectKind
+pub oraclemcp_guard::resolver::ResolvedObject::member: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::resolver::ResolvedObject::name: alloc::string::String
+pub oraclemcp_guard::resolver::ResolvedObject::overloads: alloc::vec::Vec<oraclemcp_guard::resolver::ResolvedOverload>
+pub oraclemcp_guard::resolver::ResolvedObject::owner: alloc::string::String
+pub oraclemcp_guard::resolver::ResolvedObject::quote_exact: bool
+pub oraclemcp_guard::resolver::ResolvedObject::synonym_chain: alloc::vec::Vec<oraclemcp_guard::resolver::SynonymHop>
+impl core::clone::Clone for oraclemcp_guard::resolver::ResolvedObject
+pub fn oraclemcp_guard::resolver::ResolvedObject::clone(&self) -> oraclemcp_guard::resolver::ResolvedObject
+impl core::cmp::Eq for oraclemcp_guard::resolver::ResolvedObject
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::ResolvedObject
+pub fn oraclemcp_guard::resolver::ResolvedObject::eq(&self, &oraclemcp_guard::resolver::ResolvedObject) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::ResolvedObject
+pub fn oraclemcp_guard::resolver::ResolvedObject::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::ResolvedObject
+impl core::marker::Freeze for oraclemcp_guard::resolver::ResolvedObject
+impl core::marker::Send for oraclemcp_guard::resolver::ResolvedObject
+impl core::marker::Sync for oraclemcp_guard::resolver::ResolvedObject
+impl core::marker::Unpin for oraclemcp_guard::resolver::ResolvedObject
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::ResolvedObject
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::ResolvedObject
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::ResolvedObject
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::ResolvedObject where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::ResolvedObject::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::ResolvedObject where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::ResolvedObject::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::ResolvedObject::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::ResolvedObject where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::ResolvedObject::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::ResolvedObject::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::ResolvedObject where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::ResolvedObject::Owned = T
+pub fn oraclemcp_guard::resolver::ResolvedObject::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::ResolvedObject::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::ResolvedObject where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedObject::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::ResolvedObject where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedObject::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::ResolvedObject where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedObject::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::ResolvedObject where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::ResolvedObject::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::ResolvedObject
+pub fn oraclemcp_guard::resolver::ResolvedObject::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::ResolvedObject
+pub type oraclemcp_guard::resolver::ResolvedObject::Output = T
+pub struct oraclemcp_guard::resolver::ResolvedOverload
+pub oraclemcp_guard::resolver::ResolvedOverload::overload: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::resolver::ResolvedOverload::subprogram_id: u32
+impl core::clone::Clone for oraclemcp_guard::resolver::ResolvedOverload
+pub fn oraclemcp_guard::resolver::ResolvedOverload::clone(&self) -> oraclemcp_guard::resolver::ResolvedOverload
+impl core::cmp::Eq for oraclemcp_guard::resolver::ResolvedOverload
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::ResolvedOverload
+pub fn oraclemcp_guard::resolver::ResolvedOverload::eq(&self, &oraclemcp_guard::resolver::ResolvedOverload) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::ResolvedOverload
+pub fn oraclemcp_guard::resolver::ResolvedOverload::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::ResolvedOverload
+pub fn oraclemcp_guard::resolver::ResolvedOverload::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::ResolvedOverload
+impl core::marker::Freeze for oraclemcp_guard::resolver::ResolvedOverload
+impl core::marker::Send for oraclemcp_guard::resolver::ResolvedOverload
+impl core::marker::Sync for oraclemcp_guard::resolver::ResolvedOverload
+impl core::marker::Unpin for oraclemcp_guard::resolver::ResolvedOverload
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::ResolvedOverload
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::ResolvedOverload
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::ResolvedOverload
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::ResolvedOverload where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::ResolvedOverload::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::ResolvedOverload where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::ResolvedOverload::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::ResolvedOverload::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::ResolvedOverload where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::ResolvedOverload::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::ResolvedOverload::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::ResolvedOverload where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::ResolvedOverload::Owned = T
+pub fn oraclemcp_guard::resolver::ResolvedOverload::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::ResolvedOverload::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::ResolvedOverload where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedOverload::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::ResolvedOverload where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedOverload::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::ResolvedOverload where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedOverload::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::ResolvedOverload where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::ResolvedOverload::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::ResolvedOverload
+pub fn oraclemcp_guard::resolver::ResolvedOverload::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::ResolvedOverload
+pub type oraclemcp_guard::resolver::ResolvedOverload::Output = T
+pub struct oraclemcp_guard::resolver::StatementScope
+pub oraclemcp_guard::resolver::StatementScope::aliases: alloc::vec::Vec<oraclemcp_guard::resolver::RawNamePart>
+pub oraclemcp_guard::resolver::StatementScope::common_table_expressions: alloc::vec::Vec<oraclemcp_guard::resolver::RawNamePart>
+impl core::clone::Clone for oraclemcp_guard::resolver::StatementScope
+pub fn oraclemcp_guard::resolver::StatementScope::clone(&self) -> oraclemcp_guard::resolver::StatementScope
+impl core::cmp::Eq for oraclemcp_guard::resolver::StatementScope
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::StatementScope
+pub fn oraclemcp_guard::resolver::StatementScope::eq(&self, &oraclemcp_guard::resolver::StatementScope) -> bool
+impl core::default::Default for oraclemcp_guard::resolver::StatementScope
+pub fn oraclemcp_guard::resolver::StatementScope::default() -> oraclemcp_guard::resolver::StatementScope
+impl core::fmt::Debug for oraclemcp_guard::resolver::StatementScope
+pub fn oraclemcp_guard::resolver::StatementScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::StatementScope
+impl core::marker::Freeze for oraclemcp_guard::resolver::StatementScope
+impl core::marker::Send for oraclemcp_guard::resolver::StatementScope
+impl core::marker::Sync for oraclemcp_guard::resolver::StatementScope
+impl core::marker::Unpin for oraclemcp_guard::resolver::StatementScope
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::StatementScope
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::StatementScope
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::StatementScope
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::StatementScope where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::StatementScope::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::StatementScope where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::StatementScope::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::StatementScope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::StatementScope where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::StatementScope::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::StatementScope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::StatementScope where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::StatementScope::Owned = T
+pub fn oraclemcp_guard::resolver::StatementScope::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::StatementScope::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::StatementScope where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::StatementScope::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::StatementScope where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::StatementScope::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::StatementScope where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::StatementScope::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::StatementScope where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::StatementScope::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::StatementScope
+pub fn oraclemcp_guard::resolver::StatementScope::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::StatementScope
+pub type oraclemcp_guard::resolver::StatementScope::Output = T
+pub struct oraclemcp_guard::resolver::SynonymHop
+pub oraclemcp_guard::resolver::SynonymHop::identity: oraclemcp_guard::resolver::ResolvedIdentity
+pub oraclemcp_guard::resolver::SynonymHop::name: alloc::string::String
+pub oraclemcp_guard::resolver::SynonymHop::owner: alloc::string::String
+impl core::clone::Clone for oraclemcp_guard::resolver::SynonymHop
+pub fn oraclemcp_guard::resolver::SynonymHop::clone(&self) -> oraclemcp_guard::resolver::SynonymHop
+impl core::cmp::Eq for oraclemcp_guard::resolver::SynonymHop
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::SynonymHop
+pub fn oraclemcp_guard::resolver::SynonymHop::eq(&self, &oraclemcp_guard::resolver::SynonymHop) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::SynonymHop
+pub fn oraclemcp_guard::resolver::SynonymHop::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::SynonymHop
+pub fn oraclemcp_guard::resolver::SynonymHop::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::SynonymHop
+impl core::marker::Freeze for oraclemcp_guard::resolver::SynonymHop
+impl core::marker::Send for oraclemcp_guard::resolver::SynonymHop
+impl core::marker::Sync for oraclemcp_guard::resolver::SynonymHop
+impl core::marker::Unpin for oraclemcp_guard::resolver::SynonymHop
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::SynonymHop
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::SynonymHop
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::SynonymHop
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::SynonymHop where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::SynonymHop::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::SynonymHop where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::SynonymHop::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::SynonymHop::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::SynonymHop where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::SynonymHop::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::SynonymHop::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::SynonymHop where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::SynonymHop::Owned = T
+pub fn oraclemcp_guard::resolver::SynonymHop::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::SynonymHop::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::SynonymHop where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::SynonymHop::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::SynonymHop where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::SynonymHop::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::SynonymHop where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::SynonymHop::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::SynonymHop where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::SynonymHop::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::SynonymHop
+pub fn oraclemcp_guard::resolver::SynonymHop::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::SynonymHop
+pub type oraclemcp_guard::resolver::SynonymHop::Output = T
+pub struct oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::clone::Clone for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::clone(&self) -> oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::default::Default for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::default() -> oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::fmt::Debug for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl oraclemcp_guard::resolver::CatalogResolver for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::resolve(&self, &oraclemcp_guard::resolver::RawName, &oraclemcp_guard::resolver::ResolveCtx) -> oraclemcp_guard::resolver::Resolution
+impl core::marker::Freeze for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::marker::Send for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::marker::Sync for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::marker::Unpin for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::UnresolvedCatalogResolver where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::UnresolvedCatalogResolver where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::UnresolvedCatalogResolver::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::UnresolvedCatalogResolver where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::UnresolvedCatalogResolver::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::UnresolvedCatalogResolver where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::UnresolvedCatalogResolver::Owned = T
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::UnresolvedCatalogResolver where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::UnresolvedCatalogResolver where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::UnresolvedCatalogResolver where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::UnresolvedCatalogResolver where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+pub type oraclemcp_guard::resolver::UnresolvedCatalogResolver::Output = T
+pub trait oraclemcp_guard::resolver::CatalogResolver: core::marker::Send + core::marker::Sync
+pub fn oraclemcp_guard::resolver::CatalogResolver::resolve(&self, &oraclemcp_guard::resolver::RawName, &oraclemcp_guard::resolver::ResolveCtx) -> oraclemcp_guard::resolver::Resolution
+impl oraclemcp_guard::resolver::CatalogResolver for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::resolve(&self, &oraclemcp_guard::resolver::RawName, &oraclemcp_guard::resolver::ResolveCtx) -> oraclemcp_guard::resolver::Resolution
 pub mod oraclemcp_guard::rewrite
 pub fn oraclemcp_guard::rewrite::suggest_parameterized_form(&str) -> core::option::Option<alloc::string::String>
 pub mod oraclemcp_guard::stepup
@@ -1633,6 +2331,58 @@ impl<T> core::convert::From<T> for oraclemcp_guard::levels::BlockReason
 pub fn oraclemcp_guard::levels::BlockReason::from(T) -> T
 impl<T> typenum::type_operators::Same for oraclemcp_guard::levels::BlockReason
 pub type oraclemcp_guard::levels::BlockReason::Output = T
+#[non_exhaustive] pub enum oraclemcp_guard::CatalogObjectKind
+pub oraclemcp_guard::CatalogObjectKind::Function
+pub oraclemcp_guard::CatalogObjectKind::MaterializedView
+pub oraclemcp_guard::CatalogObjectKind::Other(alloc::string::String)
+pub oraclemcp_guard::CatalogObjectKind::Package
+pub oraclemcp_guard::CatalogObjectKind::Procedure
+pub oraclemcp_guard::CatalogObjectKind::Sequence
+pub oraclemcp_guard::CatalogObjectKind::Synonym
+pub oraclemcp_guard::CatalogObjectKind::Table
+pub oraclemcp_guard::CatalogObjectKind::Type
+pub oraclemcp_guard::CatalogObjectKind::View
+impl core::clone::Clone for oraclemcp_guard::resolver::CatalogObjectKind
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::clone(&self) -> oraclemcp_guard::resolver::CatalogObjectKind
+impl core::cmp::Eq for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::CatalogObjectKind
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::eq(&self, &oraclemcp_guard::resolver::CatalogObjectKind) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::CatalogObjectKind
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::CatalogObjectKind
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::marker::Freeze for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::marker::Send for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::marker::Sync for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::marker::Unpin for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::CatalogObjectKind
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::CatalogObjectKind
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::CatalogObjectKind where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::CatalogObjectKind where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::CatalogObjectKind::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::CatalogObjectKind where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::CatalogObjectKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::CatalogObjectKind where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::CatalogObjectKind::Owned = T
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::CatalogObjectKind where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::CatalogObjectKind where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::CatalogObjectKind where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::CatalogObjectKind where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::CatalogObjectKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::CatalogObjectKind
+pub fn oraclemcp_guard::resolver::CatalogObjectKind::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::CatalogObjectKind
+pub type oraclemcp_guard::resolver::CatalogObjectKind::Output = T
 pub enum oraclemcp_guard::ChallengeStatus
 pub oraclemcp_guard::ChallengeStatus::ExpiredOrUnknown
 pub oraclemcp_guard::ChallengeStatus::Pending
@@ -2100,6 +2850,97 @@ pub fn oraclemcp_guard::purity::Purity::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::purity::Purity where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> typenum::type_operators::Same for oraclemcp_guard::purity::Purity
 pub type oraclemcp_guard::purity::Purity::Output = T
+pub enum oraclemcp_guard::QuoteSemantics
+pub oraclemcp_guard::QuoteSemantics::Quoted
+pub oraclemcp_guard::QuoteSemantics::Unquoted
+impl core::clone::Clone for oraclemcp_guard::resolver::QuoteSemantics
+pub fn oraclemcp_guard::resolver::QuoteSemantics::clone(&self) -> oraclemcp_guard::resolver::QuoteSemantics
+impl core::cmp::Eq for oraclemcp_guard::resolver::QuoteSemantics
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::QuoteSemantics
+pub fn oraclemcp_guard::resolver::QuoteSemantics::eq(&self, &oraclemcp_guard::resolver::QuoteSemantics) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::QuoteSemantics
+pub fn oraclemcp_guard::resolver::QuoteSemantics::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::QuoteSemantics
+pub fn oraclemcp_guard::resolver::QuoteSemantics::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oraclemcp_guard::resolver::QuoteSemantics
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::QuoteSemantics
+impl core::marker::Freeze for oraclemcp_guard::resolver::QuoteSemantics
+impl core::marker::Send for oraclemcp_guard::resolver::QuoteSemantics
+impl core::marker::Sync for oraclemcp_guard::resolver::QuoteSemantics
+impl core::marker::Unpin for oraclemcp_guard::resolver::QuoteSemantics
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::QuoteSemantics
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::QuoteSemantics
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::QuoteSemantics
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::QuoteSemantics where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::QuoteSemantics::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::QuoteSemantics where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::QuoteSemantics::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::QuoteSemantics::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::QuoteSemantics where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::QuoteSemantics::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::QuoteSemantics::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::QuoteSemantics where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::QuoteSemantics::Owned = T
+pub fn oraclemcp_guard::resolver::QuoteSemantics::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::QuoteSemantics::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::QuoteSemantics where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::QuoteSemantics::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::QuoteSemantics where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::QuoteSemantics::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::QuoteSemantics where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::QuoteSemantics::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::QuoteSemantics where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::QuoteSemantics::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::QuoteSemantics
+pub fn oraclemcp_guard::resolver::QuoteSemantics::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::QuoteSemantics
+pub type oraclemcp_guard::resolver::QuoteSemantics::Output = T
+pub enum oraclemcp_guard::Resolution
+pub oraclemcp_guard::Resolution::Ambiguous
+pub oraclemcp_guard::Resolution::Ambiguous::candidates: alloc::vec::Vec<oraclemcp_guard::resolver::ResolvedIdentity>
+pub oraclemcp_guard::Resolution::Remote
+pub oraclemcp_guard::Resolution::Remote::db_link: oraclemcp_guard::resolver::RawNamePart
+pub oraclemcp_guard::Resolution::Resolved(alloc::boxed::Box<oraclemcp_guard::resolver::ResolvedObject>)
+pub oraclemcp_guard::Resolution::Unresolved
+impl core::clone::Clone for oraclemcp_guard::resolver::Resolution
+pub fn oraclemcp_guard::resolver::Resolution::clone(&self) -> oraclemcp_guard::resolver::Resolution
+impl core::cmp::Eq for oraclemcp_guard::resolver::Resolution
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::Resolution
+pub fn oraclemcp_guard::resolver::Resolution::eq(&self, &oraclemcp_guard::resolver::Resolution) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::Resolution
+pub fn oraclemcp_guard::resolver::Resolution::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::Resolution
+impl core::marker::Freeze for oraclemcp_guard::resolver::Resolution
+impl core::marker::Send for oraclemcp_guard::resolver::Resolution
+impl core::marker::Sync for oraclemcp_guard::resolver::Resolution
+impl core::marker::Unpin for oraclemcp_guard::resolver::Resolution
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::Resolution
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::Resolution
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::Resolution
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::Resolution where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::Resolution::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::Resolution where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::Resolution::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::Resolution::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::Resolution where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::Resolution::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::Resolution::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::Resolution where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::Resolution::Owned = T
+pub fn oraclemcp_guard::resolver::Resolution::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::Resolution::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::Resolution where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::Resolution::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::Resolution where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::Resolution::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::Resolution where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::Resolution::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::Resolution where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::Resolution::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::Resolution
+pub fn oraclemcp_guard::resolver::Resolution::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::Resolution
+pub type oraclemcp_guard::resolver::Resolution::Output = T
 pub enum oraclemcp_guard::StageA
 pub oraclemcp_guard::StageA::AllowListed
 pub oraclemcp_guard::StageA::BlockListed(alloc::string::String)
@@ -2248,6 +3089,52 @@ pub fn oraclemcp_guard::stepup::StepUpResolution::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::stepup::StepUpResolution where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> typenum::type_operators::Same for oraclemcp_guard::stepup::StepUpResolution
 pub type oraclemcp_guard::stepup::StepUpResolution::Output = T
+pub enum oraclemcp_guard::SyntacticRole
+pub oraclemcp_guard::SyntacticRole::CallWithArgs
+pub oraclemcp_guard::SyntacticRole::FromFactor
+pub oraclemcp_guard::SyntacticRole::ValuePosition
+impl core::clone::Clone for oraclemcp_guard::resolver::SyntacticRole
+pub fn oraclemcp_guard::resolver::SyntacticRole::clone(&self) -> oraclemcp_guard::resolver::SyntacticRole
+impl core::cmp::Eq for oraclemcp_guard::resolver::SyntacticRole
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::SyntacticRole
+pub fn oraclemcp_guard::resolver::SyntacticRole::eq(&self, &oraclemcp_guard::resolver::SyntacticRole) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::SyntacticRole
+pub fn oraclemcp_guard::resolver::SyntacticRole::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::SyntacticRole
+pub fn oraclemcp_guard::resolver::SyntacticRole::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oraclemcp_guard::resolver::SyntacticRole
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::SyntacticRole
+impl core::marker::Freeze for oraclemcp_guard::resolver::SyntacticRole
+impl core::marker::Send for oraclemcp_guard::resolver::SyntacticRole
+impl core::marker::Sync for oraclemcp_guard::resolver::SyntacticRole
+impl core::marker::Unpin for oraclemcp_guard::resolver::SyntacticRole
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::SyntacticRole
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::SyntacticRole
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::SyntacticRole
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::SyntacticRole where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::SyntacticRole::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::SyntacticRole where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::SyntacticRole::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::SyntacticRole::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::SyntacticRole where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::SyntacticRole::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::SyntacticRole::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::SyntacticRole where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::SyntacticRole::Owned = T
+pub fn oraclemcp_guard::resolver::SyntacticRole::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::SyntacticRole::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::SyntacticRole where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::SyntacticRole::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::SyntacticRole where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::SyntacticRole::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::SyntacticRole where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::SyntacticRole::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::SyntacticRole where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::SyntacticRole::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::SyntacticRole
+pub fn oraclemcp_guard::resolver::SyntacticRole::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::SyntacticRole
+pub type oraclemcp_guard::resolver::SyntacticRole::Output = T
 pub struct oraclemcp_guard::AllowOnceStore
 impl oraclemcp_guard::token::AllowOnceStore
 pub fn oraclemcp_guard::token::AllowOnceStore::consume(&self, &str, &str) -> core::result::Result<(), oraclemcp_guard::token::AllowOnceError>
@@ -2326,6 +3213,55 @@ impl<T> core::convert::From<T> for oraclemcp_guard::classifier::BatchShape
 pub fn oraclemcp_guard::classifier::BatchShape::from(T) -> T
 impl<T> typenum::type_operators::Same for oraclemcp_guard::classifier::BatchShape
 pub type oraclemcp_guard::classifier::BatchShape::Output = T
+pub struct oraclemcp_guard::CatalogGeneration(pub u64)
+impl core::clone::Clone for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::clone(&self) -> oraclemcp_guard::resolver::CatalogGeneration
+impl core::cmp::Eq for oraclemcp_guard::resolver::CatalogGeneration
+impl core::cmp::Ord for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::cmp(&self, &oraclemcp_guard::resolver::CatalogGeneration) -> core::cmp::Ordering
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::eq(&self, &oraclemcp_guard::resolver::CatalogGeneration) -> bool
+impl core::cmp::PartialOrd for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::partial_cmp(&self, &oraclemcp_guard::resolver::CatalogGeneration) -> core::option::Option<core::cmp::Ordering>
+impl core::default::Default for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::default() -> oraclemcp_guard::resolver::CatalogGeneration
+impl core::fmt::Debug for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oraclemcp_guard::resolver::CatalogGeneration
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::CatalogGeneration
+impl core::marker::Freeze for oraclemcp_guard::resolver::CatalogGeneration
+impl core::marker::Send for oraclemcp_guard::resolver::CatalogGeneration
+impl core::marker::Sync for oraclemcp_guard::resolver::CatalogGeneration
+impl core::marker::Unpin for oraclemcp_guard::resolver::CatalogGeneration
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::CatalogGeneration
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::CatalogGeneration
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::CatalogGeneration
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::CatalogGeneration where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::CatalogGeneration::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::CatalogGeneration where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::CatalogGeneration::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::CatalogGeneration::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::CatalogGeneration where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::CatalogGeneration::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::CatalogGeneration::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::CatalogGeneration where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::CatalogGeneration::Owned = T
+pub fn oraclemcp_guard::resolver::CatalogGeneration::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::CatalogGeneration::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::CatalogGeneration where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::CatalogGeneration::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::CatalogGeneration where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::CatalogGeneration::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::CatalogGeneration where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::CatalogGeneration::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::CatalogGeneration where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::CatalogGeneration::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_guard::resolver::CatalogGeneration::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::CatalogGeneration
+pub type oraclemcp_guard::resolver::CatalogGeneration::Output = T
 pub struct oraclemcp_guard::CiToken
 impl oraclemcp_guard::stepup::CiToken
 pub fn oraclemcp_guard::stepup::CiToken::authorizes(&self, &str, oraclemcp_guard::levels::OperatingLevel) -> bool
@@ -2669,6 +3605,331 @@ pub fn oraclemcp_guard::purity::ObjectRef::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::purity::ObjectRef where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> typenum::type_operators::Same for oraclemcp_guard::purity::ObjectRef
 pub type oraclemcp_guard::purity::ObjectRef::Output = T
+pub struct oraclemcp_guard::RawName
+pub oraclemcp_guard::RawName::db_link: core::option::Option<oraclemcp_guard::resolver::RawNamePart>
+pub oraclemcp_guard::RawName::parts: alloc::vec::Vec<oraclemcp_guard::resolver::RawNamePart>
+pub oraclemcp_guard::RawName::role: oraclemcp_guard::resolver::SyntacticRole
+impl oraclemcp_guard::resolver::RawName
+pub fn oraclemcp_guard::resolver::RawName::new(impl core::iter::traits::collect::IntoIterator<Item = oraclemcp_guard::resolver::RawNamePart>, oraclemcp_guard::resolver::SyntacticRole) -> Self
+pub fn oraclemcp_guard::resolver::RawName::with_db_link(self, oraclemcp_guard::resolver::RawNamePart) -> Self
+impl core::clone::Clone for oraclemcp_guard::resolver::RawName
+pub fn oraclemcp_guard::resolver::RawName::clone(&self) -> oraclemcp_guard::resolver::RawName
+impl core::cmp::Eq for oraclemcp_guard::resolver::RawName
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::RawName
+pub fn oraclemcp_guard::resolver::RawName::eq(&self, &oraclemcp_guard::resolver::RawName) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::RawName
+pub fn oraclemcp_guard::resolver::RawName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::RawName
+pub fn oraclemcp_guard::resolver::RawName::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::RawName
+impl core::marker::Freeze for oraclemcp_guard::resolver::RawName
+impl core::marker::Send for oraclemcp_guard::resolver::RawName
+impl core::marker::Sync for oraclemcp_guard::resolver::RawName
+impl core::marker::Unpin for oraclemcp_guard::resolver::RawName
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::RawName
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::RawName
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::RawName
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::RawName where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::RawName::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::RawName where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::RawName::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::RawName::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::RawName where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::RawName::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::RawName::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::RawName where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::RawName::Owned = T
+pub fn oraclemcp_guard::resolver::RawName::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::RawName::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::RawName where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::RawName::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::RawName where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::RawName::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::RawName where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::RawName::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::RawName where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::RawName::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::RawName
+pub fn oraclemcp_guard::resolver::RawName::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::RawName
+pub type oraclemcp_guard::resolver::RawName::Output = T
+pub struct oraclemcp_guard::RawNamePart
+pub oraclemcp_guard::RawNamePart::quoting: oraclemcp_guard::resolver::QuoteSemantics
+pub oraclemcp_guard::RawNamePart::text: alloc::string::String
+impl oraclemcp_guard::resolver::RawNamePart
+pub fn oraclemcp_guard::resolver::RawNamePart::quoted(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oraclemcp_guard::resolver::RawNamePart::unquoted(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::clone::Clone for oraclemcp_guard::resolver::RawNamePart
+pub fn oraclemcp_guard::resolver::RawNamePart::clone(&self) -> oraclemcp_guard::resolver::RawNamePart
+impl core::cmp::Eq for oraclemcp_guard::resolver::RawNamePart
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::RawNamePart
+pub fn oraclemcp_guard::resolver::RawNamePart::eq(&self, &oraclemcp_guard::resolver::RawNamePart) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::RawNamePart
+pub fn oraclemcp_guard::resolver::RawNamePart::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::RawNamePart
+pub fn oraclemcp_guard::resolver::RawNamePart::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::RawNamePart
+impl core::marker::Freeze for oraclemcp_guard::resolver::RawNamePart
+impl core::marker::Send for oraclemcp_guard::resolver::RawNamePart
+impl core::marker::Sync for oraclemcp_guard::resolver::RawNamePart
+impl core::marker::Unpin for oraclemcp_guard::resolver::RawNamePart
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::RawNamePart
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::RawNamePart
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::RawNamePart
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::RawNamePart where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::RawNamePart::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::RawNamePart where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::RawNamePart::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::RawNamePart::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::RawNamePart where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::RawNamePart::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::RawNamePart::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::RawNamePart where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::RawNamePart::Owned = T
+pub fn oraclemcp_guard::resolver::RawNamePart::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::RawNamePart::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::RawNamePart where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::RawNamePart::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::RawNamePart where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::RawNamePart::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::RawNamePart where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::RawNamePart::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::RawNamePart where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::RawNamePart::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::RawNamePart
+pub fn oraclemcp_guard::resolver::RawNamePart::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::RawNamePart
+pub type oraclemcp_guard::resolver::RawNamePart::Output = T
+pub struct oraclemcp_guard::ResolveCtx
+pub oraclemcp_guard::ResolveCtx::connected_schema: alloc::string::String
+pub oraclemcp_guard::ResolveCtx::current_schema: alloc::string::String
+pub oraclemcp_guard::ResolveCtx::edition: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::ResolveCtx::enabled_roles: alloc::collections::btree::set::BTreeSet<alloc::string::String>
+pub oraclemcp_guard::ResolveCtx::generation: oraclemcp_guard::resolver::CatalogGeneration
+pub oraclemcp_guard::ResolveCtx::statement_scope: oraclemcp_guard::resolver::StatementScope
+impl oraclemcp_guard::resolver::ResolveCtx
+pub fn oraclemcp_guard::resolver::ResolveCtx::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oraclemcp_guard::resolver::CatalogGeneration) -> Self
+impl core::clone::Clone for oraclemcp_guard::resolver::ResolveCtx
+pub fn oraclemcp_guard::resolver::ResolveCtx::clone(&self) -> oraclemcp_guard::resolver::ResolveCtx
+impl core::cmp::Eq for oraclemcp_guard::resolver::ResolveCtx
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::ResolveCtx
+pub fn oraclemcp_guard::resolver::ResolveCtx::eq(&self, &oraclemcp_guard::resolver::ResolveCtx) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::ResolveCtx
+pub fn oraclemcp_guard::resolver::ResolveCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::ResolveCtx
+impl core::marker::Freeze for oraclemcp_guard::resolver::ResolveCtx
+impl core::marker::Send for oraclemcp_guard::resolver::ResolveCtx
+impl core::marker::Sync for oraclemcp_guard::resolver::ResolveCtx
+impl core::marker::Unpin for oraclemcp_guard::resolver::ResolveCtx
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::ResolveCtx
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::ResolveCtx
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::ResolveCtx
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::ResolveCtx where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::ResolveCtx::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::ResolveCtx where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::ResolveCtx::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::ResolveCtx::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::ResolveCtx where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::ResolveCtx::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::ResolveCtx::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::ResolveCtx where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::ResolveCtx::Owned = T
+pub fn oraclemcp_guard::resolver::ResolveCtx::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::ResolveCtx::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::ResolveCtx where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolveCtx::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::ResolveCtx where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolveCtx::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::ResolveCtx where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolveCtx::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::ResolveCtx where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::ResolveCtx::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::ResolveCtx
+pub fn oraclemcp_guard::resolver::ResolveCtx::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::ResolveCtx
+pub type oraclemcp_guard::resolver::ResolveCtx::Output = T
+pub struct oraclemcp_guard::ResolvedContainer
+pub oraclemcp_guard::ResolvedContainer::kind: oraclemcp_guard::resolver::CatalogObjectKind
+pub oraclemcp_guard::ResolvedContainer::name: alloc::string::String
+impl core::clone::Clone for oraclemcp_guard::resolver::ResolvedContainer
+pub fn oraclemcp_guard::resolver::ResolvedContainer::clone(&self) -> oraclemcp_guard::resolver::ResolvedContainer
+impl core::cmp::Eq for oraclemcp_guard::resolver::ResolvedContainer
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::ResolvedContainer
+pub fn oraclemcp_guard::resolver::ResolvedContainer::eq(&self, &oraclemcp_guard::resolver::ResolvedContainer) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::ResolvedContainer
+pub fn oraclemcp_guard::resolver::ResolvedContainer::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::ResolvedContainer
+pub fn oraclemcp_guard::resolver::ResolvedContainer::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::ResolvedContainer
+impl core::marker::Freeze for oraclemcp_guard::resolver::ResolvedContainer
+impl core::marker::Send for oraclemcp_guard::resolver::ResolvedContainer
+impl core::marker::Sync for oraclemcp_guard::resolver::ResolvedContainer
+impl core::marker::Unpin for oraclemcp_guard::resolver::ResolvedContainer
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::ResolvedContainer
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::ResolvedContainer
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::ResolvedContainer
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::ResolvedContainer where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::ResolvedContainer::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::ResolvedContainer where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::ResolvedContainer::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::ResolvedContainer::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::ResolvedContainer where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::ResolvedContainer::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::ResolvedContainer::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::ResolvedContainer where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::ResolvedContainer::Owned = T
+pub fn oraclemcp_guard::resolver::ResolvedContainer::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::ResolvedContainer::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::ResolvedContainer where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedContainer::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::ResolvedContainer where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedContainer::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::ResolvedContainer where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedContainer::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::ResolvedContainer where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::ResolvedContainer::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::ResolvedContainer
+pub fn oraclemcp_guard::resolver::ResolvedContainer::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::ResolvedContainer
+pub type oraclemcp_guard::resolver::ResolvedContainer::Output = T
+pub struct oraclemcp_guard::ResolvedIdentity
+pub oraclemcp_guard::ResolvedIdentity::edition: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::ResolvedIdentity::object_id: u64
+impl core::clone::Clone for oraclemcp_guard::resolver::ResolvedIdentity
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::clone(&self) -> oraclemcp_guard::resolver::ResolvedIdentity
+impl core::cmp::Eq for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::ResolvedIdentity
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::eq(&self, &oraclemcp_guard::resolver::ResolvedIdentity) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::ResolvedIdentity
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::ResolvedIdentity
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::marker::Freeze for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::marker::Send for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::marker::Sync for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::marker::Unpin for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::ResolvedIdentity
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::ResolvedIdentity
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::ResolvedIdentity where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::ResolvedIdentity where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::ResolvedIdentity::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::ResolvedIdentity where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::ResolvedIdentity::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::ResolvedIdentity where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::ResolvedIdentity::Owned = T
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::ResolvedIdentity where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::ResolvedIdentity where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::ResolvedIdentity where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::ResolvedIdentity where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::ResolvedIdentity::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::ResolvedIdentity
+pub fn oraclemcp_guard::resolver::ResolvedIdentity::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::ResolvedIdentity
+pub type oraclemcp_guard::resolver::ResolvedIdentity::Output = T
+pub struct oraclemcp_guard::ResolvedObject
+pub oraclemcp_guard::ResolvedObject::container: core::option::Option<oraclemcp_guard::resolver::ResolvedContainer>
+pub oraclemcp_guard::ResolvedObject::db_link: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::ResolvedObject::identity: oraclemcp_guard::resolver::ResolvedIdentity
+pub oraclemcp_guard::ResolvedObject::kind: oraclemcp_guard::resolver::CatalogObjectKind
+pub oraclemcp_guard::ResolvedObject::member: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::ResolvedObject::name: alloc::string::String
+pub oraclemcp_guard::ResolvedObject::overloads: alloc::vec::Vec<oraclemcp_guard::resolver::ResolvedOverload>
+pub oraclemcp_guard::ResolvedObject::owner: alloc::string::String
+pub oraclemcp_guard::ResolvedObject::quote_exact: bool
+pub oraclemcp_guard::ResolvedObject::synonym_chain: alloc::vec::Vec<oraclemcp_guard::resolver::SynonymHop>
+impl core::clone::Clone for oraclemcp_guard::resolver::ResolvedObject
+pub fn oraclemcp_guard::resolver::ResolvedObject::clone(&self) -> oraclemcp_guard::resolver::ResolvedObject
+impl core::cmp::Eq for oraclemcp_guard::resolver::ResolvedObject
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::ResolvedObject
+pub fn oraclemcp_guard::resolver::ResolvedObject::eq(&self, &oraclemcp_guard::resolver::ResolvedObject) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::ResolvedObject
+pub fn oraclemcp_guard::resolver::ResolvedObject::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::ResolvedObject
+impl core::marker::Freeze for oraclemcp_guard::resolver::ResolvedObject
+impl core::marker::Send for oraclemcp_guard::resolver::ResolvedObject
+impl core::marker::Sync for oraclemcp_guard::resolver::ResolvedObject
+impl core::marker::Unpin for oraclemcp_guard::resolver::ResolvedObject
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::ResolvedObject
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::ResolvedObject
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::ResolvedObject
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::ResolvedObject where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::ResolvedObject::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::ResolvedObject where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::ResolvedObject::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::ResolvedObject::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::ResolvedObject where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::ResolvedObject::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::ResolvedObject::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::ResolvedObject where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::ResolvedObject::Owned = T
+pub fn oraclemcp_guard::resolver::ResolvedObject::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::ResolvedObject::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::ResolvedObject where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedObject::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::ResolvedObject where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedObject::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::ResolvedObject where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedObject::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::ResolvedObject where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::ResolvedObject::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::ResolvedObject
+pub fn oraclemcp_guard::resolver::ResolvedObject::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::ResolvedObject
+pub type oraclemcp_guard::resolver::ResolvedObject::Output = T
+pub struct oraclemcp_guard::ResolvedOverload
+pub oraclemcp_guard::ResolvedOverload::overload: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::ResolvedOverload::subprogram_id: u32
+impl core::clone::Clone for oraclemcp_guard::resolver::ResolvedOverload
+pub fn oraclemcp_guard::resolver::ResolvedOverload::clone(&self) -> oraclemcp_guard::resolver::ResolvedOverload
+impl core::cmp::Eq for oraclemcp_guard::resolver::ResolvedOverload
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::ResolvedOverload
+pub fn oraclemcp_guard::resolver::ResolvedOverload::eq(&self, &oraclemcp_guard::resolver::ResolvedOverload) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::ResolvedOverload
+pub fn oraclemcp_guard::resolver::ResolvedOverload::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::ResolvedOverload
+pub fn oraclemcp_guard::resolver::ResolvedOverload::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::ResolvedOverload
+impl core::marker::Freeze for oraclemcp_guard::resolver::ResolvedOverload
+impl core::marker::Send for oraclemcp_guard::resolver::ResolvedOverload
+impl core::marker::Sync for oraclemcp_guard::resolver::ResolvedOverload
+impl core::marker::Unpin for oraclemcp_guard::resolver::ResolvedOverload
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::ResolvedOverload
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::ResolvedOverload
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::ResolvedOverload
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::ResolvedOverload where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::ResolvedOverload::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::ResolvedOverload where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::ResolvedOverload::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::ResolvedOverload::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::ResolvedOverload where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::ResolvedOverload::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::ResolvedOverload::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::ResolvedOverload where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::ResolvedOverload::Owned = T
+pub fn oraclemcp_guard::resolver::ResolvedOverload::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::ResolvedOverload::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::ResolvedOverload where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedOverload::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::ResolvedOverload where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedOverload::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::ResolvedOverload where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::ResolvedOverload::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::ResolvedOverload where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::ResolvedOverload::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::ResolvedOverload
+pub fn oraclemcp_guard::resolver::ResolvedOverload::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::ResolvedOverload
+pub type oraclemcp_guard::resolver::ResolvedOverload::Output = T
 pub struct oraclemcp_guard::SchemaPolicy
 impl oraclemcp_guard::policy::SchemaPolicy
 pub fn oraclemcp_guard::policy::SchemaPolicy::compile(&oraclemcp_guard::policy::SchemaPolicyRaw) -> Self
@@ -2845,6 +4106,50 @@ impl<T> core::convert::From<T> for oraclemcp_guard::levels::SessionLevelState
 pub fn oraclemcp_guard::levels::SessionLevelState::from(T) -> T
 impl<T> typenum::type_operators::Same for oraclemcp_guard::levels::SessionLevelState
 pub type oraclemcp_guard::levels::SessionLevelState::Output = T
+pub struct oraclemcp_guard::StatementScope
+pub oraclemcp_guard::StatementScope::aliases: alloc::vec::Vec<oraclemcp_guard::resolver::RawNamePart>
+pub oraclemcp_guard::StatementScope::common_table_expressions: alloc::vec::Vec<oraclemcp_guard::resolver::RawNamePart>
+impl core::clone::Clone for oraclemcp_guard::resolver::StatementScope
+pub fn oraclemcp_guard::resolver::StatementScope::clone(&self) -> oraclemcp_guard::resolver::StatementScope
+impl core::cmp::Eq for oraclemcp_guard::resolver::StatementScope
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::StatementScope
+pub fn oraclemcp_guard::resolver::StatementScope::eq(&self, &oraclemcp_guard::resolver::StatementScope) -> bool
+impl core::default::Default for oraclemcp_guard::resolver::StatementScope
+pub fn oraclemcp_guard::resolver::StatementScope::default() -> oraclemcp_guard::resolver::StatementScope
+impl core::fmt::Debug for oraclemcp_guard::resolver::StatementScope
+pub fn oraclemcp_guard::resolver::StatementScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::StatementScope
+impl core::marker::Freeze for oraclemcp_guard::resolver::StatementScope
+impl core::marker::Send for oraclemcp_guard::resolver::StatementScope
+impl core::marker::Sync for oraclemcp_guard::resolver::StatementScope
+impl core::marker::Unpin for oraclemcp_guard::resolver::StatementScope
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::StatementScope
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::StatementScope
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::StatementScope
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::StatementScope where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::StatementScope::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::StatementScope where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::StatementScope::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::StatementScope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::StatementScope where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::StatementScope::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::StatementScope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::StatementScope where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::StatementScope::Owned = T
+pub fn oraclemcp_guard::resolver::StatementScope::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::StatementScope::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::StatementScope where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::StatementScope::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::StatementScope where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::StatementScope::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::StatementScope where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::StatementScope::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::StatementScope where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::StatementScope::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::StatementScope
+pub fn oraclemcp_guard::resolver::StatementScope::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::StatementScope
+pub type oraclemcp_guard::resolver::StatementScope::Output = T
 pub struct oraclemcp_guard::StepUpChallenge
 pub oraclemcp_guard::StepUpChallenge::challenge_id: alloc::string::String
 pub oraclemcp_guard::StepUpChallenge::options: alloc::vec::Vec<oraclemcp_guard::stepup::StepUpOption>
@@ -2930,6 +4235,51 @@ impl<T> core::convert::From<T> for oraclemcp_guard::stepup::StepUpRegistry
 pub fn oraclemcp_guard::stepup::StepUpRegistry::from(T) -> T
 impl<T> typenum::type_operators::Same for oraclemcp_guard::stepup::StepUpRegistry
 pub type oraclemcp_guard::stepup::StepUpRegistry::Output = T
+pub struct oraclemcp_guard::SynonymHop
+pub oraclemcp_guard::SynonymHop::identity: oraclemcp_guard::resolver::ResolvedIdentity
+pub oraclemcp_guard::SynonymHop::name: alloc::string::String
+pub oraclemcp_guard::SynonymHop::owner: alloc::string::String
+impl core::clone::Clone for oraclemcp_guard::resolver::SynonymHop
+pub fn oraclemcp_guard::resolver::SynonymHop::clone(&self) -> oraclemcp_guard::resolver::SynonymHop
+impl core::cmp::Eq for oraclemcp_guard::resolver::SynonymHop
+impl core::cmp::PartialEq for oraclemcp_guard::resolver::SynonymHop
+pub fn oraclemcp_guard::resolver::SynonymHop::eq(&self, &oraclemcp_guard::resolver::SynonymHop) -> bool
+impl core::fmt::Debug for oraclemcp_guard::resolver::SynonymHop
+pub fn oraclemcp_guard::resolver::SynonymHop::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_guard::resolver::SynonymHop
+pub fn oraclemcp_guard::resolver::SynonymHop::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_guard::resolver::SynonymHop
+impl core::marker::Freeze for oraclemcp_guard::resolver::SynonymHop
+impl core::marker::Send for oraclemcp_guard::resolver::SynonymHop
+impl core::marker::Sync for oraclemcp_guard::resolver::SynonymHop
+impl core::marker::Unpin for oraclemcp_guard::resolver::SynonymHop
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::SynonymHop
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::SynonymHop
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::SynonymHop
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::SynonymHop where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::SynonymHop::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::SynonymHop where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::SynonymHop::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::SynonymHop::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::SynonymHop where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::SynonymHop::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::SynonymHop::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::SynonymHop where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::SynonymHop::Owned = T
+pub fn oraclemcp_guard::resolver::SynonymHop::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::SynonymHop::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::SynonymHop where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::SynonymHop::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::SynonymHop where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::SynonymHop::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::SynonymHop where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::SynonymHop::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::SynonymHop where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::SynonymHop::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::SynonymHop
+pub fn oraclemcp_guard::resolver::SynonymHop::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::SynonymHop
+pub type oraclemcp_guard::resolver::SynonymHop::Output = T
 pub struct oraclemcp_guard::UnknownOracle
 impl core::clone::Clone for oraclemcp_guard::purity::UnknownOracle
 pub fn oraclemcp_guard::purity::UnknownOracle::clone(&self) -> oraclemcp_guard::purity::UnknownOracle
@@ -2972,8 +4322,53 @@ impl<T> core::convert::From<T> for oraclemcp_guard::purity::UnknownOracle
 pub fn oraclemcp_guard::purity::UnknownOracle::from(T) -> T
 impl<T> typenum::type_operators::Same for oraclemcp_guard::purity::UnknownOracle
 pub type oraclemcp_guard::purity::UnknownOracle::Output = T
+pub struct oraclemcp_guard::UnresolvedCatalogResolver
+impl core::clone::Clone for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::clone(&self) -> oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::default::Default for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::default() -> oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::fmt::Debug for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl oraclemcp_guard::resolver::CatalogResolver for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::resolve(&self, &oraclemcp_guard::resolver::RawName, &oraclemcp_guard::resolver::ResolveCtx) -> oraclemcp_guard::resolver::Resolution
+impl core::marker::Freeze for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::marker::Send for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::marker::Sync for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::marker::Unpin for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::marker::UnsafeUnpin for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::resolver::UnresolvedCatalogResolver where U: core::convert::From<T>
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::resolver::UnresolvedCatalogResolver where U: core::convert::Into<T>
+pub type oraclemcp_guard::resolver::UnresolvedCatalogResolver::Error = core::convert::Infallible
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::resolver::UnresolvedCatalogResolver where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::resolver::UnresolvedCatalogResolver::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::resolver::UnresolvedCatalogResolver where T: core::clone::Clone
+pub type oraclemcp_guard::resolver::UnresolvedCatalogResolver::Owned = T
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::resolver::UnresolvedCatalogResolver where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::resolver::UnresolvedCatalogResolver where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::resolver::UnresolvedCatalogResolver where T: ?core::marker::Sized
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::resolver::UnresolvedCatalogResolver where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+pub type oraclemcp_guard::resolver::UnresolvedCatalogResolver::Output = T
 pub const oraclemcp_guard::ALLOW_ONCE_TTL: core::time::Duration
 pub const oraclemcp_guard::SET_TRANSACTION_READ_ONLY: &str
+pub trait oraclemcp_guard::CatalogResolver: core::marker::Send + core::marker::Sync
+pub fn oraclemcp_guard::CatalogResolver::resolve(&self, &oraclemcp_guard::resolver::RawName, &oraclemcp_guard::resolver::ResolveCtx) -> oraclemcp_guard::resolver::Resolution
+impl oraclemcp_guard::resolver::CatalogResolver for oraclemcp_guard::resolver::UnresolvedCatalogResolver
+pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::resolve(&self, &oraclemcp_guard::resolver::RawName, &oraclemcp_guard::resolver::ResolveCtx) -> oraclemcp_guard::resolver::Resolution
 pub trait oraclemcp_guard::SideEffectOracle: core::marker::Send + core::marker::Sync
 pub fn oraclemcp_guard::SideEffectOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::SideEffectOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
