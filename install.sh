@@ -836,17 +836,46 @@ download_file() {
 }
 
 verify_checksum() {
-  local checksum="$1"
-  local dir base
-  dir="$(dirname "$checksum")"
-  base="$(basename "$checksum")"
+  local archive="$1" checksum="$2"
+  local archive_base line expected_digest sidecar_name actual_digest digest_output record_count
+  local checksum_pattern
+  archive_base="$(basename "$archive")"
+  checksum_pattern='^([0-9A-Fa-f]{64}) ([ *])([^[:space:]]+)$'
+  record_count=0
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    record_count=$((record_count + 1))
+    [ "$record_count" -eq 1 ] \
+      || fail "ORACLEMCP_INSTALL_CHECKSUM_INVALID: checksum sidecar must contain exactly one record"
+    if [[ ! "$line" =~ $checksum_pattern ]]; then
+      fail "ORACLEMCP_INSTALL_CHECKSUM_INVALID: checksum sidecar record is malformed"
+    fi
+    expected_digest="${BASH_REMATCH[1]}"
+    sidecar_name="${BASH_REMATCH[3]}"
+  done <"$checksum"
+
+  [ "$record_count" -eq 1 ] \
+    || fail "ORACLEMCP_INSTALL_CHECKSUM_INVALID: checksum sidecar must contain exactly one record"
+  [ "$sidecar_name" = "$archive_base" ] \
+    || fail "ORACLEMCP_INSTALL_CHECKSUM_INVALID: checksum sidecar must name the selected archive $archive_base"
+
   if have sha256sum; then
-    (cd "$dir" && sha256sum -c "$base")
+    digest_output="$(sha256sum -- "$archive")" \
+      || fail "ORACLEMCP_INSTALL_CHECKSUM_FAILED: could not hash the selected archive"
   elif have shasum; then
-    (cd "$dir" && shasum -a 256 -c "$base")
+    digest_output="$(shasum -a 256 -- "$archive")" \
+      || fail "ORACLEMCP_INSTALL_CHECKSUM_FAILED: could not hash the selected archive"
   else
     fail "missing checksum command: sha256sum or shasum"
   fi
+
+  actual_digest="${digest_output%%[[:space:]]*}"
+  [[ "$actual_digest" =~ ^[0-9A-Fa-f]{64}$ ]] \
+    || fail "ORACLEMCP_INSTALL_CHECKSUM_FAILED: checksum command returned malformed output"
+  expected_digest="$(printf '%s' "$expected_digest" | tr '[:upper:]' '[:lower:]')"
+  actual_digest="$(printf '%s' "$actual_digest" | tr '[:upper:]' '[:lower:]')"
+  [ "$actual_digest" = "$expected_digest" ] \
+    || fail "ORACLEMCP_INSTALL_CHECKSUM_MISMATCH: selected archive SHA-256 does not match its sidecar"
 }
 
 cosign_required_message() {
@@ -1141,7 +1170,7 @@ install_prebuilt() {
     fi
   fi
 
-  verify_checksum "$checksum"
+  verify_checksum "$archive" "$checksum"
   verify_cosign "$archive" "$signature" "$certificate" "$attestation"
 
   tar -xzf "$archive" -C "$work_dir"

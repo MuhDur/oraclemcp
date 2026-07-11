@@ -43,6 +43,7 @@ fn installer_lint_and_offline_smoke_passes() {
         "verify-require without cosign fails closed",
         "bad cosign signature fails closed",
         "tampered checksum fails closed",
+        "checksum sidecars are bound to the selected archive",
         "service dry-run consent plan",
         "offline plan and missing metadata failure",
         "uninstall preview remove and idempotent rerun",

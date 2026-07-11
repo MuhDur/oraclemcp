@@ -721,8 +721,77 @@ tampered_checksum_output="$(
 tampered_checksum_status=$?
 set -e
 [ "$tampered_checksum_status" -ne 0 ] || fail "tampered checksum unexpectedly succeeded"
-contains "$tampered_checksum_output" "FAILED"
+contains "$tampered_checksum_output" "ORACLEMCP_INSTALL_CHECKSUM_MISMATCH"
 log_pass "tampered checksum fails closed"
+
+checksum_file "$NO_COSIGN_ARCHIVE"
+NO_COSIGN_DIGEST="$(awk 'NR == 1 { print $1 }' "$NO_COSIGN_ARCHIVE.sha256")"
+assert_checksum_sidecar_rejected() {
+  local case_name="$1" sidecar_contents="$2" prefix output status
+  prefix="$SMOKE_ROOT/checksum-reject-$case_name"
+  printf '%s' "$sidecar_contents" >"$NO_COSIGN_ARCHIVE.sha256"
+  set +e
+  output="$(
+    env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+      ORACLEMCP_COSIGN="$SMOKE_ROOT/missing-cosign" \
+      bash install.sh \
+        --offline "$NO_COSIGN_ARCHIVE" \
+        --version "$SMOKE_VERSION" \
+        --target x86_64-unknown-linux-musl \
+        --prefix "$prefix" \
+        --verify prefer \
+        --no-completions \
+        --no-service 2>&1
+  )"
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "invalid checksum sidecar case $case_name unexpectedly succeeded"
+  contains "$output" "ORACLEMCP_INSTALL_CHECKSUM_INVALID"
+  [ ! -e "$prefix/bin/oraclemcp" ] \
+    || fail "invalid checksum sidecar case $case_name reached archive installation"
+}
+
+assert_checksum_sidecar_rejected \
+  "device" \
+  "$NO_COSIGN_DIGEST  /dev/null"$'\n'
+assert_checksum_sidecar_rejected \
+  "other-file" \
+  "$NO_COSIGN_DIGEST  another.tar.gz"$'\n'
+assert_checksum_sidecar_rejected \
+  "absolute" \
+  "$NO_COSIGN_DIGEST  $NO_COSIGN_ARCHIVE"$'\n'
+assert_checksum_sidecar_rejected \
+  "parent" \
+  "$NO_COSIGN_DIGEST  ../$(basename "$NO_COSIGN_ARCHIVE")"$'\n'
+assert_checksum_sidecar_rejected \
+  "digest-only" \
+  "$NO_COSIGN_DIGEST"$'\n'
+assert_checksum_sidecar_rejected \
+  "extra-record" \
+  "$NO_COSIGN_DIGEST  $(basename "$NO_COSIGN_ARCHIVE")"$'\n'"$NO_COSIGN_DIGEST  another.tar.gz"$'\n'
+
+VERIFY_FUNCTION_SOURCE="$SMOKE_ROOT/install-checksum-functions.sh"
+awk '/^cosign_required_message\(\)/ { exit } { print }' install.sh >"$VERIFY_FUNCTION_SOURCE"
+UPPER_NO_COSIGN_DIGEST="$(printf '%s' "$NO_COSIGN_DIGEST" | tr '[:lower:]' '[:upper:]')"
+printf '%s  %s\n' "$UPPER_NO_COSIGN_DIGEST" "$(basename "$NO_COSIGN_ARCHIVE")" \
+  >"$NO_COSIGN_ARCHIVE.sha256"
+# shellcheck disable=SC2016 # Variables expand inside the deliberately single-quoted child shell.
+env EXPECTED_ARCHIVE="$NO_COSIGN_ARCHIVE" EXPECTED_DIGEST="$NO_COSIGN_DIGEST" \
+  bash -c '
+    set -euo pipefail
+    # shellcheck source=/dev/null
+    source "$1"
+    have() { [ "$1" = "shasum" ]; }
+    shasum() {
+      [ "$#" -eq 4 ] && [ "$1" = "-a" ] && [ "$2" = "256" ] \
+        && [ "$3" = "--" ] && [ "$4" = "$EXPECTED_ARCHIVE" ] \
+        || fail "shasum fallback did not hash the selected archive argument"
+      printf "%s  %s\n" "$EXPECTED_DIGEST" "$4"
+    }
+    verify_checksum "$EXPECTED_ARCHIVE" "$EXPECTED_ARCHIVE.sha256"
+  ' _ "$VERIFY_FUNCTION_SOURCE"
+checksum_file "$NO_COSIGN_ARCHIVE"
+log_pass "checksum sidecars are bound to the selected archive"
 
 service_output="$(
   env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
