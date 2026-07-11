@@ -27,8 +27,9 @@
 //! **NO shell**: shell metacharacters (`;`, `$(…)`, backticks, `|`) in any element
 //! are inert literal argv, never interpreted. Every fetch is bounded and
 //! fail-closed:
-//! - a **5-second wall-clock timeout** ([`EXEC_TIMEOUT`]) that always fires — a
-//!   hung child is killed and reaped (no zombie);
+//! - one **5-second end-to-end wall-clock timeout** ([`EXEC_TIMEOUT`]) over both
+//!   process execution and output collection — the whole helper process tree is
+//!   killed and the direct child reaped (no zombie or inherited-pipe hang);
 //! - stdout is read behind a **64 KiB cap** ([`EXEC_OUTPUT_CAP`]) — larger output
 //!   fails closed and is never buffered unbounded;
 //! - the trimmed token must match the **base64url/JWT charset** (`[A-Za-z0-9_.=-]`)
@@ -47,8 +48,11 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
+use command_group::{CommandGroup, GroupChild};
 use oraclemcp_config::{ConnectionProfile, OciConfig};
 use oraclemcp_db::OracleConnectOptions;
 use thiserror::Error;
@@ -109,8 +113,9 @@ pub enum IamTokenError {
     /// token.
     #[error("IAM token_exec program `{0}` could not be spawned")]
     ExecSpawnFailed(String),
-    /// The `token_exec` command did not exit within [`EXEC_TIMEOUT`]. It was killed
-    /// and reaped; the fetch fails closed. Carries the deadline (seconds) only.
+    /// The `token_exec` process tree or its output collection did not finish
+    /// within [`EXEC_TIMEOUT`]. The whole tree was killed and the direct child
+    /// reaped; the fetch fails closed. Carries the deadline (seconds) only.
     #[error("IAM token_exec command timed out after {0}s and was killed")]
     ExecTimedOut(u64),
     /// The `token_exec` command exited with a non-zero status (or was terminated by
@@ -296,6 +301,77 @@ fn read_capped(mut reader: impl Read) -> (Vec<u8>, bool) {
     (buffer, truncated)
 }
 
+/// A `token_exec` process tree held in an OS containment unit.
+///
+/// SAFETY: every spawned helper is a fresh POSIX process group on Unix and a
+/// Job Object on Windows. All exits from the credential path terminate that
+/// entire unit, not just the direct child. The `Drop` fallback preserves that
+/// invariant during unwinding as well.
+struct TokenExecProcessTree {
+    child: GroupChild,
+}
+
+impl TokenExecProcessTree {
+    fn spawn(program: &str, args: &[String]) -> std::io::Result<Self> {
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+            .group_spawn()
+            .map(|child| TokenExecProcessTree { child })
+    }
+
+    fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.child.inner().stdout.take()
+    }
+
+    fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.inner().stderr.take()
+    }
+
+    fn wait_direct(
+        &mut self,
+        timeout: Duration,
+    ) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.inner().wait_timeout(timeout)
+    }
+
+    fn terminate_and_reap(&mut self) {
+        // `kill` deliberately targets the containment unit even when the direct
+        // child has already exited. That is the successful-parent/lingering-
+        // descendant case that caused QA9.
+        let _ = self.child.kill();
+        let _ = self.child.inner().wait();
+    }
+}
+
+impl Drop for TokenExecProcessTree {
+    fn drop(&mut self) {
+        self.terminate_and_reap();
+    }
+}
+
+fn receive_before<T>(
+    receiver: &Receiver<T>,
+    started: Instant,
+    timeout: Duration,
+) -> Result<T, RecvTimeoutError> {
+    let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+        return Err(RecvTimeoutError::Timeout);
+    };
+    receiver.recv_timeout(remaining)
+}
+
+fn drop_reader<T>(reader: JoinHandle<T>) {
+    // A reader sends only after reaching EOF, so receipt proves its blocking
+    // work is over. Dropping instead of joining keeps the wall deadline strict:
+    // the thread has no more I/O and exits immediately after its one send.
+    drop(reader);
+}
+
 /// Run a `token_exec` arg-array and return the fetched token, fully hardened.
 ///
 /// The command is spawned **directly** — `Command::new(argv[0]).args(argv[1..])`,
@@ -303,27 +379,31 @@ fn read_capped(mut reader: impl Read) -> (Vec<u8>, bool) {
 /// ([`Stdio::null`]) so a fetcher never blocks reading input. stdout is drained on
 /// a dedicated thread behind [`EXEC_OUTPUT_CAP`]; stderr is drained+discarded on
 /// its own thread so a chatty child cannot deadlock on a full stderr pipe. A
-/// [`EXEC_TIMEOUT`] wall-clock deadline always fires: a child still alive at the
-/// deadline is killed and reaped (no zombie) and the fetch fails closed. Every
-/// fail-closed path logs its *reason* without the token or the stdout bytes.
+/// One [`EXEC_TIMEOUT`] wall-clock deadline covers execution and pipe collection.
+/// The helper runs in its own POSIX process group / Windows Job Object, which is
+/// terminated on every exit so descendants cannot retain pipes or survive a
+/// retry. The direct child is reaped, and every fail-closed path logs its *reason*
+/// without the token or the stdout bytes.
 ///
 /// This runs in the **synchronous** connect path (`inject_iam_token` →
 /// `resolve_profile_options_with`), so it uses `std::thread` + `wait_timeout` and
 /// introduces **no** `block_on`, `tokio::spawn`, or async-runtime dependency — the
-/// concurrency-audit contract stays green (same idiom as `plugin.rs`).
+/// concurrency-audit contract stays green.
 fn run_token_exec(argv: &[String]) -> Result<String, IamTokenError> {
+    run_token_exec_with_timeout(argv, EXEC_TIMEOUT)
+}
+
+fn run_token_exec_with_timeout(
+    argv: &[String],
+    timeout: Duration,
+) -> Result<String, IamTokenError> {
     let (program, args) = argv.split_first().ok_or(IamTokenError::ExecEmptyCommand)?;
+    let started = Instant::now();
 
     // Arg-array spawn: NO shell. `program` + `args` are passed as literal argv, so
     // `;`, `$(…)`, backticks, and `|` in any element are inert data, never
     // interpreted. stdin is closed so the fetcher cannot hang waiting for input.
-    let mut child = match Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+    let mut child = match TokenExecProcessTree::spawn(program, args) {
         Ok(child) => child,
         Err(_) => {
             tracing::warn!(reason = "spawn-failed", "IAM token_exec failed closed");
@@ -333,45 +413,41 @@ fn run_token_exec(argv: &[String]) -> Result<String, IamTokenError> {
 
     // Drain stdout on its own thread (capped) and stderr on its own thread
     // (discarded, capped) so neither pipe can fill and wedge us while we wait.
-    let stdout = child.stdout.take();
+    let stdout = child.take_stdout();
+    let (stdout_tx, stdout_rx) = mpsc::sync_channel(1);
     let stdout_reader = std::thread::spawn(move || {
-        stdout
+        let output = stdout
             .map(read_capped)
-            .unwrap_or_else(|| (Vec::new(), false))
+            .unwrap_or_else(|| (Vec::new(), false));
+        let _ = stdout_tx.send(output);
     });
-    let stderr = child.stderr.take();
+    let stderr = child.take_stderr();
+    let (stderr_tx, stderr_rx) = mpsc::sync_channel(1);
     let stderr_reader = std::thread::spawn(move || {
         if let Some(err) = stderr {
             // Bounded discard: keep draining until the child closes the pipe.
             let _ = read_capped(err);
         }
+        let _ = stderr_tx.send(());
     });
 
     // Bounded wall-clock wait: a child still alive at the deadline is killed and
     // reaped so it can neither wedge the connect path nor leak a zombie.
-    let status = match child.wait_timeout(EXEC_TIMEOUT) {
+    let status = match child.wait_direct(timeout) {
         Ok(Some(status)) => status,
         Ok(None) => {
-            let _ = child.kill();
-            // Reap the direct child so it does not become a zombie.
-            let _ = child.wait();
-            // Do NOT join the reader threads: a misbehaving fetcher can spawn a
-            // grandchild that inherits the pipe write ends, so a read may stay
-            // blocked long after we kill the direct child. Detaching is the point
-            // — the connect path must not block past the deadline; the threads
-            // finish on their own once those ends finally close.
+            child.terminate_and_reap();
             drop(stdout_reader);
             drop(stderr_reader);
             tracing::warn!(
                 reason = "timeout",
-                secs = EXEC_TIMEOUT.as_secs(),
+                secs = timeout.as_secs(),
                 "IAM token_exec failed closed"
             );
-            return Err(IamTokenError::ExecTimedOut(EXEC_TIMEOUT.as_secs()));
+            return Err(IamTokenError::ExecTimedOut(timeout.as_secs()));
         }
         Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            child.terminate_and_reap();
             drop(stdout_reader);
             drop(stderr_reader);
             tracing::warn!(reason = "wait-failed", "IAM token_exec failed closed");
@@ -379,14 +455,37 @@ fn run_token_exec(argv: &[String]) -> Result<String, IamTokenError> {
         }
     };
 
-    // The child exited within the deadline; the reader threads observe EOF as its
-    // pipe ends close, so the joins return promptly.
-    let _ = stderr_reader.join();
-    let (stdout_bytes, truncated) = stdout_reader
-        .join()
-        // A panicked reader thread is fail-closed (treated as oversized output),
-        // never a leak and never a host panic.
-        .unwrap_or((Vec::new(), true));
+    // A direct-child exit does not prove its pipes reached EOF: descendants may
+    // have inherited their write ends. Terminate the whole containment unit on
+    // success too, then collect both readers under the *same* end-to-end wall
+    // deadline. This is deliberately not two fresh per-phase timeouts.
+    child.terminate_and_reap();
+    let stdout_result = receive_before(&stdout_rx, started, timeout);
+    let stderr_result = receive_before(&stderr_rx, started, timeout);
+    let ((stdout_bytes, truncated), ()) = match (stdout_result, stderr_result) {
+        (Ok(stdout), Ok(stderr)) => (stdout, stderr),
+        (Err(RecvTimeoutError::Timeout), _) | (_, Err(RecvTimeoutError::Timeout)) => {
+            drop(stdout_reader);
+            drop(stderr_reader);
+            tracing::warn!(
+                reason = "output-timeout",
+                secs = timeout.as_secs(),
+                "IAM token_exec failed closed"
+            );
+            return Err(IamTokenError::ExecTimedOut(timeout.as_secs()));
+        }
+        (Err(RecvTimeoutError::Disconnected), _) | (_, Err(RecvTimeoutError::Disconnected)) => {
+            drop(stdout_reader);
+            drop(stderr_reader);
+            tracing::warn!(
+                reason = "output-collection-failed",
+                "IAM token_exec failed closed"
+            );
+            return Err(IamTokenError::ExecSpawnFailed(program.clone()));
+        }
+    };
+    drop_reader(stdout_reader);
+    drop_reader(stderr_reader);
 
     // A non-zero exit (or signal termination) fails closed BEFORE we look at
     // stdout — a token from a command that reported failure is never trusted.
@@ -976,6 +1075,119 @@ mod tests {
         assert!(
             elapsed >= Duration::from_secs(4) && elapsed < Duration::from_secs(15),
             "must return at the ~5s deadline, not block for the full sleep (elapsed {elapsed:?})"
+        );
+    }
+
+    #[cfg(unix)]
+    fn assert_process_gone(pid: &str) {
+        let kill = coreutil("kill");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if !Command::new(&kill)
+                .args(["-0", pid])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("probe descendant")
+                .success()
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("token_exec descendant {pid} survived process-tree cleanup");
+    }
+
+    #[cfg(unix)]
+    fn assert_inherited_pipe_is_bounded(script: &str) {
+        // The shell is an explicitly configured argv[0], not an implicit shell.
+        // It prints its descendant PID as part of a valid token, then exits 0;
+        // the descendant keeps exactly one inherited pipe open for 30 seconds.
+        let src = exec_src(&[&coreutil("sh"), "-c", script]);
+        let start = Instant::now();
+        let token = src.get_token().expect("valid token before descendant EOF");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "direct-child success must not leave output collection blocked on a descendant (elapsed {elapsed:?})"
+        );
+        let pid = token.split('.').next().expect("PID token segment");
+        assert!(pid.bytes().all(|byte| byte.is_ascii_digit()), "{token}");
+        assert_process_gone(pid);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exec_successful_parent_with_pipe_inheriting_descendants_is_deadline_bounded() {
+        // Five stdout and five stderr inheritances stress the original
+        // interleaving at 10x load. Before QA9, the first iteration blocked for
+        // the full 30-second sleep despite the advertised five-second deadline.
+        for _ in 0..5 {
+            assert_inherited_pipe_is_bounded("sleep 30 2>/dev/null & printf '%s.valid.jwt' \"$!\"");
+            assert_inherited_pipe_is_bounded("sleep 30 >/dev/null & printf '%s.valid.jwt' \"$!\"");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_with_marker_exists(marker: &str) -> bool {
+        std::fs::read_dir("/proc")
+            .expect("read /proc")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit())
+            })
+            .filter_map(|entry| std::fs::read(entry.path().join("cmdline")).ok())
+            .any(|cmdline| String::from_utf8_lossy(&cmdline).contains(marker))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_direct_timeouts_cleanup_descendant_trees_and_reader_workers() {
+        let threads_before = std::fs::read_dir("/proc/self/task")
+            .expect("read tasks")
+            .count();
+        for iteration in 0..10 {
+            let marker = format!("qa9-timeout-tree-{}-{iteration}", std::process::id());
+            let script = format!("sh -c 'sleep 30' {marker} & wait");
+            let argv = vec![coreutil("sh"), "-c".to_owned(), script];
+            let start = Instant::now();
+            let error = run_token_exec_with_timeout(&argv, Duration::from_millis(100))
+                .expect_err("waiting parent must time out");
+            assert_eq!(error, IamTokenError::ExecTimedOut(0));
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "short test deadline was not end-to-end bounded"
+            );
+            let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+            while process_with_marker_exists(&marker) && Instant::now() < cleanup_deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                !process_with_marker_exists(&marker),
+                "descendant process tree survived timeout: {marker}"
+            );
+        }
+
+        // Reader handles are detached only after the tree is killed; give those
+        // already-unblocked threads a scheduling turn, then prove retries did not
+        // accumulate one stdout/stderr worker pair per attempt.
+        let settle_deadline = Instant::now() + Duration::from_secs(2);
+        let threads_after = loop {
+            let count = std::fs::read_dir("/proc/self/task")
+                .expect("read tasks")
+                .count();
+            if count <= threads_before || Instant::now() >= settle_deadline {
+                break count;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            threads_after <= threads_before,
+            "reader workers leaked (before={threads_before}, after={threads_after})"
         );
     }
 
