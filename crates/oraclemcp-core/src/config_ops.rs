@@ -163,6 +163,13 @@ pub struct ConfigRollbackReport {
     pub restored_sha256: String,
 }
 
+struct AppliedConfigRollback {
+    report: ConfigRollbackReport,
+    reverse_plan: ConfigReloadPlan,
+    applied_config: OracleMcpConfig,
+    restored_config: OracleMcpConfig,
+}
+
 /// Redacted current-config status for the operator UI.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ConfigOpsStatus {
@@ -344,23 +351,49 @@ impl ConfigOpsBackend {
     ///
     /// When the original target did not exist, the backup is the empty config;
     /// rollback writes that empty config back rather than deleting the file.
+    /// The restore is compare-and-swap: the target must still contain the exact
+    /// generation named by `report.applied_sha256`.
     pub fn rollback_applied_config(
         &self,
         report: &ConfigApplyReport,
     ) -> Result<ConfigRollbackReport, ConfigOpsError> {
+        self.rollback_applied_config_with_reload(report)
+            .map(|applied| applied.report)
+    }
+
+    fn rollback_applied_config_with_reload(
+        &self,
+        report: &ConfigApplyReport,
+    ) -> Result<AppliedConfigRollback, ConfigOpsError> {
         let lock = self.store.acquire_service_lock("config-ops")?;
+        let applied_bytes = read_or_empty(&report.target_path)?;
+        let actual_sha256 = oraclemcp_audit::sha256_hex(&applied_bytes);
+        if actual_sha256 != report.applied_sha256 {
+            return Err(ConfigOpsError::CurrentChanged {
+                expected_sha256: report.applied_sha256.clone(),
+                actual_sha256,
+            });
+        }
         let backup =
             fs::read(&report.backup_path).map_err(|e| ConfigOpsError::Io(e.to_string()))?;
-        bytes_to_toml(&report.backup_path, &backup)
-            .and_then(|toml| OracleMcpConfig::from_toml_str(toml).map_err(ConfigOpsError::from))?;
+        let applied_toml = bytes_to_toml(&report.target_path, &applied_bytes)?;
+        let backup_toml = bytes_to_toml(&report.backup_path, &backup)?;
+        let applied_config = OracleMcpConfig::from_toml_str(applied_toml)?;
+        let restored_config = OracleMcpConfig::from_toml_str(backup_toml)?;
+        let reverse_plan = ConfigReloadPlan::between(&applied_config, &restored_config);
         write_atomic_path(&report.target_path, &backup)?;
         validate_target(&report.target_path)?;
         drop(lock);
 
-        Ok(ConfigRollbackReport {
-            target_path: report.target_path.clone(),
-            backup_path: report.backup_path.clone(),
-            restored_sha256: oraclemcp_audit::sha256_hex(&backup),
+        Ok(AppliedConfigRollback {
+            report: ConfigRollbackReport {
+                target_path: report.target_path.clone(),
+                backup_path: report.backup_path.clone(),
+                restored_sha256: oraclemcp_audit::sha256_hex(&backup),
+            },
+            reverse_plan,
+            applied_config,
+            restored_config,
         })
     }
 }
@@ -376,6 +409,10 @@ pub struct ConfigOpsService {
     reload_applier: Option<Arc<dyn ConfigReloadApplier>>,
     /// Serializes stage, file replacement, and live snapshot application so
     /// two dashboard requests cannot commit disk order A→B but live order B→A.
+    ///
+    /// SAFETY: every config mutation takes this lock before touching
+    /// `rollback_reports`; that total order makes a rollback id single-consumer
+    /// and keeps disk plus live-generation transitions indivisible in-process.
     apply_lock: Mutex<()>,
     rollback_reports: Mutex<BTreeMap<String, ConfigApplyReport>>,
 }
@@ -446,9 +483,13 @@ impl ConfigOpsService {
         let report = self.backend.apply_config_draft(&plan)?;
         let reload = self.reload_outcome(&report.reload_plan, &current_config, &next_config);
         let rollback_id = rollback_id_for(&report);
-        self.rollback_reports
-            .lock()
-            .insert(rollback_id.clone(), report.clone());
+        let mut rollback_reports = self.rollback_reports.lock();
+        // Only the newest apply can be the predecessor of the current
+        // generation. Retaining older ids is both misleading and unnecessary:
+        // the backend CAS would reject them, while this makes supersession
+        // explicit and bounds the map to one actionable rollback.
+        rollback_reports.clear();
+        rollback_reports.insert(rollback_id.clone(), report.clone());
         Ok(ConfigApplyOutcome {
             apply: report,
             reload,
@@ -457,19 +498,38 @@ impl ConfigOpsService {
     }
 
     /// Restore a previously applied config from its timestamped backup.
+    ///
+    /// The id is claimed before any I/O and consumed only after a successful
+    /// compare-and-swap restore. Failed attempts release the claim for a safe
+    /// retry; every retry repeats the generation check before writing. A live
+    /// reload refusal is reported as `restart_required`, not as a failed file
+    /// restore: the id remains consumed because the disk generation has already
+    /// changed, and restarting is the safe way to reconcile live state.
     pub fn rollback(&self, rollback_id: &str) -> Result<ConfigRollbackOutcome, ConfigOpsError> {
         let _apply_guard = self.apply_lock.lock();
         let report = self
             .rollback_reports
             .lock()
-            .get(rollback_id)
-            .cloned()
+            .remove(rollback_id)
             .ok_or(ConfigOpsError::UnknownRollbackId)?;
-        let (reverse_plan, applied_config, restored_config) = reverse_reload_plan(&report)?;
-        let rollback = self.backend.rollback_applied_config(&report)?;
-        let reload = self.reload_outcome(&reverse_plan, &applied_config, &restored_config);
-        self.rollback_reports.lock().remove(rollback_id);
-        Ok(ConfigRollbackOutcome { rollback, reload })
+        let applied = match self.backend.rollback_applied_config_with_reload(&report) {
+            Ok(applied) => applied,
+            Err(error) => {
+                self.rollback_reports
+                    .lock()
+                    .insert(rollback_id.to_owned(), report);
+                return Err(error);
+            }
+        };
+        let reload = self.reload_outcome(
+            &applied.reverse_plan,
+            &applied.applied_config,
+            &applied.restored_config,
+        );
+        Ok(ConfigRollbackOutcome {
+            rollback: applied.report,
+            reload,
+        })
     }
 
     fn reload_outcome(
@@ -486,22 +546,6 @@ impl ConfigOpsService {
             None => ConfigReloadApplyReport::not_configured(plan),
         }
     }
-}
-
-fn reverse_reload_plan(
-    report: &ConfigApplyReport,
-) -> Result<(ConfigReloadPlan, OracleMcpConfig, OracleMcpConfig), ConfigOpsError> {
-    let applied_bytes = read_or_empty(&report.target_path)?;
-    let backup = fs::read(&report.backup_path).map_err(|e| ConfigOpsError::Io(e.to_string()))?;
-    let applied_toml = bytes_to_toml(&report.target_path, &applied_bytes)?;
-    let backup_toml = bytes_to_toml(&report.backup_path, &backup)?;
-    let applied = OracleMcpConfig::from_toml_str(applied_toml)?;
-    let restored = OracleMcpConfig::from_toml_str(backup_toml)?;
-    Ok((
-        ConfigReloadPlan::between(&applied, &restored),
-        applied,
-        restored,
-    ))
 }
 
 fn rollback_id_for(report: &ConfigApplyReport) -> String {
@@ -787,6 +831,69 @@ mod tests {
         release_first: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     }
 
+    #[derive(Default)]
+    struct RecordingReloadApplier {
+        calls: Mutex<Vec<(String, String)>>,
+    }
+
+    #[derive(Default)]
+    struct RejectSecondReloadApplier {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ConfigReloadApplier for RecordingReloadApplier {
+        fn apply_config_reload_plan(
+            &self,
+            plan: &ConfigReloadPlan,
+            expected: &OracleMcpConfig,
+            next: &OracleMcpConfig,
+        ) -> ConfigReloadApplyReport {
+            let connect_string = |config: &OracleMcpConfig| {
+                config
+                    .profile("prod")
+                    .and_then(|profile| profile.connect_string.clone())
+                    .expect("prod connect string")
+            };
+            self.calls
+                .lock()
+                .push((connect_string(expected), connect_string(next)));
+            ConfigReloadApplyReport {
+                status: "applied".to_owned(),
+                hot_reloadable: true,
+                restart_required: Vec::new(),
+                draining_profiles: plan.draining_profiles(),
+                message: "test reload applied".to_owned(),
+            }
+        }
+    }
+
+    impl ConfigReloadApplier for RejectSecondReloadApplier {
+        fn apply_config_reload_plan(
+            &self,
+            plan: &ConfigReloadPlan,
+            _expected: &OracleMcpConfig,
+            _next: &OracleMcpConfig,
+        ) -> ConfigReloadApplyReport {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                return ConfigReloadApplyReport {
+                    status: "applied".to_owned(),
+                    hot_reloadable: true,
+                    restart_required: Vec::new(),
+                    draining_profiles: plan.draining_profiles(),
+                    message: "initial reload applied".to_owned(),
+                };
+            }
+            ConfigReloadApplyReport {
+                status: "restart_required".to_owned(),
+                hot_reloadable: false,
+                restart_required: vec!["simulated live-generation refusal".to_owned()],
+                draining_profiles: Vec::new(),
+                message: "disk restored; restart required".to_owned(),
+            }
+        }
+    }
+
     impl ConfigReloadApplier for BlockingReloadApplier {
         fn apply_config_reload_plan(
             &self,
@@ -832,6 +939,31 @@ mod tests {
         let root = test_root(name);
         let store = FileStore::open(root.join("state")).expect("store");
         (ConfigOpsBackend::new(store), root.join("profiles.toml"))
+    }
+
+    fn profile_config(connect_string: &str) -> String {
+        format!(
+            r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "{connect_string}"
+            "#
+        )
+    }
+
+    fn privileged_profile_config(connect_string: &str, max_level: &str) -> String {
+        format!(
+            r#"
+            [audit]
+            key_ref = "env:ORACLEMCP_AUDIT_KEY"
+
+            [[profiles]]
+            name = "prod"
+            connect_string = "{connect_string}"
+            max_level = "{max_level}"
+            default_level = "READ_ONLY"
+            "#
+        )
     }
 
     #[test]
@@ -1111,6 +1243,224 @@ mod tests {
                 ("b:1521/svc".to_owned(), "c:1521/svc".to_owned()),
             ],
             "the exact expected snapshot handed to the applier follows disk order"
+        );
+    }
+
+    #[test]
+    fn rollback_rejects_an_external_edit_without_replacing_it() {
+        let (backend, target) = backend("rollback-external-edit");
+        let before = profile_config("before:1521/svc");
+        let applied = profile_config("applied:1521/svc");
+        let external = profile_config("external:1521/svc");
+        write_atomic_path(&target, before.as_bytes()).expect("seed before config");
+        let service = ConfigOpsService::new(backend, target.clone(), None);
+        let outcome = service.apply(&applied, None).expect("apply config");
+        write_atomic_path(&target, external.as_bytes()).expect("external config edit");
+
+        let error = service
+            .rollback(&outcome.rollback_id)
+            .expect_err("stale rollback must be rejected");
+
+        assert!(matches!(error, ConfigOpsError::CurrentChanged { .. }));
+        assert_eq!(
+            fs::read_to_string(&target).expect("read preserved target"),
+            external,
+            "rollback must not replace a generation it did not create"
+        );
+    }
+
+    #[test]
+    fn newer_apply_invalidates_older_rollback_id() {
+        let (backend, target) = backend("rollback-superseded");
+        let a = profile_config("a:1521/svc");
+        let b = profile_config("b:1521/svc");
+        let c = profile_config("c:1521/svc");
+        write_atomic_path(&target, a.as_bytes()).expect("seed A");
+        let service = ConfigOpsService::new(backend, target.clone(), None);
+        let apply_b = service.apply(&b, None).expect("apply B");
+        let apply_c = service.apply(&c, None).expect("apply C");
+
+        let stale = service
+            .rollback(&apply_b.rollback_id)
+            .expect_err("apply C supersedes the rollback to A");
+        assert!(matches!(stale, ConfigOpsError::UnknownRollbackId));
+        assert_eq!(
+            fs::read_to_string(&target).expect("read C"),
+            c,
+            "a stale id must not overwrite the newer generation"
+        );
+
+        service
+            .rollback(&apply_c.rollback_id)
+            .expect("the newest rollback remains actionable");
+        assert_eq!(fs::read_to_string(&target).expect("read B"), b);
+    }
+
+    #[test]
+    fn concurrent_same_id_rollback_has_exactly_one_consumer() {
+        const CALLERS: usize = 32;
+
+        let (backend, target) = backend("rollback-single-consumer");
+        let before = profile_config("before:1521/svc");
+        let applied = profile_config("applied:1521/svc");
+        write_atomic_path(&target, before.as_bytes()).expect("seed before config");
+        let service = Arc::new(ConfigOpsService::new(backend, target.clone(), None));
+        let rollback_id = service
+            .apply(&applied, None)
+            .expect("apply config")
+            .rollback_id;
+        let barrier = Arc::new(std::sync::Barrier::new(CALLERS));
+
+        let callers: Vec<_> = (0..CALLERS)
+            .map(|_| {
+                let service = Arc::clone(&service);
+                let rollback_id = rollback_id.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    service.rollback(&rollback_id)
+                })
+            })
+            .collect();
+
+        let mut successes = 0;
+        let mut consumed = 0;
+        for caller in callers {
+            match caller.join().expect("rollback caller") {
+                Ok(_) => successes += 1,
+                Err(ConfigOpsError::UnknownRollbackId) => consumed += 1,
+                Err(other) => panic!("unexpected rollback error: {other}"),
+            }
+        }
+        assert_eq!(successes, 1, "exactly one caller may consume the id");
+        assert_eq!(consumed, CALLERS - 1);
+        assert_eq!(
+            fs::read_to_string(&target).expect("read restored target"),
+            before
+        );
+    }
+
+    #[test]
+    fn successful_rollback_reloads_the_exact_applied_and_restored_snapshots() {
+        let (backend, target) = backend("rollback-reload-snapshots");
+        let before = profile_config("before:1521/svc");
+        let applied = profile_config("applied:1521/svc");
+        write_atomic_path(&target, before.as_bytes()).expect("seed before config");
+        let applier = Arc::new(RecordingReloadApplier::default());
+        let service = ConfigOpsService::new(backend, target.clone(), Some(applier.clone()));
+        let outcome = service.apply(&applied, None).expect("apply config");
+
+        service
+            .rollback(&outcome.rollback_id)
+            .expect("rollback current generation");
+
+        assert_eq!(
+            applier.calls.lock().as_slice(),
+            &[
+                ("before:1521/svc".to_owned(), "applied:1521/svc".to_owned()),
+                ("applied:1521/svc".to_owned(), "before:1521/svc".to_owned()),
+            ],
+            "rollback reload must use the same locked bytes that the CAS replaced"
+        );
+        assert_eq!(fs::read_to_string(&target).expect("read restored"), before);
+    }
+
+    #[test]
+    fn rollback_io_failure_releases_claim_for_safe_retry() {
+        let (backend, target) = backend("rollback-io-retry");
+        let before = profile_config("before:1521/svc");
+        let applied = profile_config("applied:1521/svc");
+        write_atomic_path(&target, before.as_bytes()).expect("seed before config");
+        let service = ConfigOpsService::new(backend, target.clone(), None);
+        let outcome = service.apply(&applied, None).expect("apply config");
+        let original_report = service
+            .rollback_reports
+            .lock()
+            .get(&outcome.rollback_id)
+            .cloned()
+            .expect("retained report");
+        let mut broken_report = original_report.clone();
+        broken_report.backup_path = target.with_extension("missing-backup");
+        service
+            .rollback_reports
+            .lock()
+            .insert(outcome.rollback_id.clone(), broken_report);
+
+        let error = service
+            .rollback(&outcome.rollback_id)
+            .expect_err("missing backup fails before replacement");
+        assert!(matches!(error, ConfigOpsError::Io(_)));
+        assert!(
+            service
+                .rollback_reports
+                .lock()
+                .contains_key(&outcome.rollback_id),
+            "a failed execution releases its single-consumer claim"
+        );
+        assert_eq!(fs::read_to_string(&target).expect("read applied"), applied);
+
+        service
+            .rollback_reports
+            .lock()
+            .insert(outcome.rollback_id.clone(), original_report);
+        service
+            .rollback(&outcome.rollback_id)
+            .expect("retry succeeds while the applied generation still matches");
+        assert_eq!(fs::read_to_string(&target).expect("read restored"), before);
+    }
+
+    #[test]
+    fn reload_refusal_after_restore_consumes_id_and_requires_restart() {
+        let (backend, target) = backend("rollback-reload-refusal");
+        let before = profile_config("before:1521/svc");
+        let applied = profile_config("applied:1521/svc");
+        write_atomic_path(&target, before.as_bytes()).expect("seed before config");
+        let applier = Arc::new(RejectSecondReloadApplier::default());
+        let service = ConfigOpsService::new(backend, target.clone(), Some(applier));
+        let outcome = service.apply(&applied, None).expect("apply config");
+
+        let rollback = service
+            .rollback(&outcome.rollback_id)
+            .expect("file restore succeeds even when live state refuses it");
+
+        assert_eq!(rollback.reload.status, "restart_required");
+        assert_eq!(
+            fs::read_to_string(&target).expect("read restored config"),
+            before,
+            "the file restore completed before the live reload refusal"
+        );
+        assert!(matches!(
+            service.rollback(&outcome.rollback_id),
+            Err(ConfigOpsError::UnknownRollbackId)
+        ));
+    }
+
+    #[test]
+    fn stale_id_cannot_undo_a_newer_security_ceiling_reduction() {
+        let (backend, target) = backend("rollback-security-reduction");
+        let admin = privileged_profile_config("prod:1521/svc", "ADMIN");
+        let read_write = privileged_profile_config("prod:1521/svc", "READ_WRITE");
+        let read_only = privileged_profile_config("prod:1521/svc", "READ_ONLY");
+        write_atomic_path(&target, admin.as_bytes()).expect("seed ADMIN config");
+        let service = ConfigOpsService::new(backend, target.clone(), None);
+        let older = service
+            .apply(&read_write, None)
+            .expect("lower to READ_WRITE");
+        service.apply(&read_only, None).expect("lower to READ_ONLY");
+
+        let stale = service
+            .rollback(&older.rollback_id)
+            .expect_err("older rollback id was superseded");
+        assert!(matches!(stale, ConfigOpsError::UnknownRollbackId));
+        assert_eq!(
+            fs::read_to_string(&target).expect("read protected ceiling"),
+            read_only,
+            "the stale rollback must not restore the older, higher ceiling"
+        );
+        let parsed = OracleMcpConfig::load(Some(&target)).expect("parse reduced config");
+        assert_eq!(
+            parsed.profile("prod").expect("prod profile").max_level(),
+            oraclemcp_config::OperatingLevel::ReadOnly
         );
     }
 }
