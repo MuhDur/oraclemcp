@@ -113,7 +113,9 @@ vulnerability-reporting policy and supported versions are in the repo-root
 - [ ] For defense in depth, ship the signed log to an external WORM store / SIEM
       via `[audit.shipping]` (off by default). The mirror is tamper-evident end
       to end — `audit verify` accepts the forwarded JSONL — and a forwarding
-      failure never loses the local durable record. See
+      failure never loses the local durable record. Remote SIEM shipping
+      requires HTTPS and never follows redirects; plaintext is limited to an
+      unauthenticated literal-loopback development collector. See
       [`operations.md` §5.6](operations.md#56-ship-the-audit-log-to-a-worm-store--siem).
 
 ### Container / runtime

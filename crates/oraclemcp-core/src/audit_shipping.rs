@@ -4,10 +4,13 @@
 //! [`WormFileForwarder`](oraclemcp_audit::WormFileForwarder) (a local, no-network
 //! WORM mirror) plus the SIEM-native line formats ([`cef_line`] / [`syslog_line`]).
 //! This module adds the **network** forwarder: [`SiemHttpForwarder`] POSTs each
-//! signed [`AuditRecord`] to a configured SIEM/WORM HTTP endpoint over
+//! signed [`AuditRecord`] to a configured SIEM/WORM endpoint over
 //! asupersync's Tokio-free HTTP/1 client — the same egress path the OTLP
 //! exporter uses, so the engine-free boundary lint stays green (no
 //! reqwest/hyper/tokio).
+//! Remote destinations require HTTPS. An unauthenticated literal-loopback HTTP
+//! endpoint is the sole local-development exception, and redirects are never
+//! followed so neither headers nor bodies can be replayed after a downgrade.
 //!
 //! # Fail-safe by construction
 //!
@@ -31,6 +34,7 @@ use asupersync::http::h1::http_client::HttpClient;
 use asupersync::http::h1::types::Method;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_audit::{AuditRecord, ShippingError, ShippingForwarder, cef_line, syslog_line};
+use oraclemcp_config::SiemEndpoint;
 
 /// The wire format a [`SiemHttpForwarder`] POSTs to the SIEM endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,14 +85,15 @@ impl SiemFormat {
     }
 }
 
-/// Forwards each signed audit record to a SIEM/WORM HTTP endpoint over
+/// Forwards each signed audit record to a transport-policy-validated SIEM/WORM
+/// endpoint over
 /// asupersync's HTTP/1 client.
 ///
 /// One record per POST keeps tamper-evidence simple: the destination receives
 /// the records in `seq` order and (for [`SiemFormat::Json`]) can append them to
 /// a JSONL file that `oraclemcp audit verify` accepts unchanged.
 pub struct SiemHttpForwarder {
-    endpoint: String,
+    endpoint: SiemEndpoint,
     format: SiemFormat,
     timeout: Duration,
     /// Extra request headers (e.g. `Authorization: Splunk <token>`). Never
@@ -100,12 +105,12 @@ impl SiemHttpForwarder {
     /// Default per-request timeout for a SIEM POST.
     pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
-    /// Build a forwarder for `endpoint` using `format`. Add auth headers with
-    /// [`Self::with_header`].
+    /// Build a forwarder for a transport-policy-validated `endpoint` using
+    /// `format`. Add auth headers with [`Self::with_header`].
     #[must_use]
-    pub fn new(endpoint: impl Into<String>, format: SiemFormat) -> Self {
+    pub fn new(endpoint: SiemEndpoint, format: SiemFormat) -> Self {
         Self {
-            endpoint: endpoint.into(),
+            endpoint,
             format,
             timeout: Self::DEFAULT_TIMEOUT,
             headers: Vec::new(),
@@ -121,16 +126,30 @@ impl SiemHttpForwarder {
 
     /// Attach an outbound request header (e.g. a SIEM API token). Sent only on
     /// the wire; never emitted as telemetry or logs.
-    #[must_use]
-    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+    ///
+    /// # Errors
+    /// Refuses every authentication header on the narrow plaintext-loopback
+    /// development transport so a direct library caller cannot bypass config
+    /// validation.
+    pub fn with_header(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, ShippingError> {
+        if !self.endpoint.uses_confidential_transport() {
+            return Err(ShippingError::Transport(
+                "SIEM authentication headers require an HTTPS endpoint".to_owned(),
+            ));
+        }
         self.headers.push((name.into(), value.into()));
-        self
+        Ok(self)
     }
 
-    /// The configured endpoint (for diagnostics; no secrets).
+    /// The configured endpoint's safe origin for diagnostics. Path and query
+    /// material are omitted.
     #[must_use]
-    pub fn endpoint(&self) -> &str {
-        &self.endpoint
+    pub fn diagnostic_origin(&self) -> &str {
+        self.endpoint.diagnostic_origin()
     }
 
     /// POST one encoded record on a dedicated current-thread asupersync runtime.
@@ -157,10 +176,14 @@ impl SiemHttpForwarder {
         // block-on-boundary: dedicated audit-forwarder runtime after local fsync.
         runtime.block_on(async move {
             let cx = Cx::current().expect("asupersync block_on installs a current Cx");
-            let client = HttpClient::new();
+            // Audit records are confidential. Never replay their body or
+            // headers to a redirect target, even when an HTTPS endpoint tries
+            // to downgrade or move the request. Operators must configure the
+            // final ingest URL explicitly.
+            let client = HttpClient::builder().no_redirects().build();
             let response = asupersync::time::timeout(cx.now(), timeout, async {
                 client
-                    .request(&cx, Method::Post, &endpoint, headers, body)
+                    .request(&cx, Method::Post, endpoint.as_str(), headers, body)
                     .await
             })
             .await
@@ -195,6 +218,9 @@ mod tests {
     use oraclemcp_audit::{
         AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, GENESIS_HASH, SigningKey,
     };
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     const SQL_SENTINEL: &str = "QA31_HTTP_SIEM_SECRET";
 
@@ -265,12 +291,76 @@ mod tests {
     fn unreachable_endpoint_yields_transport_error_not_panic() {
         // Port 1 is unbound; the POST must fail with a Transport error (which
         // the ShippingAuditSink treats as non-fatal), never panic or block.
-        let fwd = SiemHttpForwarder::new("http://127.0.0.1:1/audit", SiemFormat::Json)
+        let endpoint = SiemEndpoint::parse("http://127.0.0.1:1/audit")
+            .expect("literal loopback plaintext is the explicit test-only exception");
+        let fwd = SiemHttpForwarder::new(endpoint, SiemFormat::Json)
             .with_timeout(Duration::from_millis(200));
         let result = fwd.forward(&rec());
         assert!(
             matches!(result, Err(ShippingError::Transport(_))),
             "an unreachable SIEM yields a transport error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn plaintext_loopback_forwarder_rejects_auth_headers_without_retaining_secret() {
+        let endpoint =
+            SiemEndpoint::parse("http://127.0.0.1:1/audit").expect("literal loopback endpoint");
+        let secret = "QA13_MUST_NOT_LEAK";
+        let error = match SiemHttpForwarder::new(endpoint, SiemFormat::Json)
+            .with_header("Authorization", secret)
+        {
+            Err(error) => error,
+            Ok(_) => panic!("auth headers require confidential transport"),
+        };
+        let error = error.to_string();
+        assert!(error.contains("require an HTTPS endpoint"));
+        assert!(!error.contains(secret));
+    }
+
+    #[test]
+    fn siem_forwarder_never_follows_redirects() {
+        let redirect_listener = TcpListener::bind("127.0.0.1:0").expect("bind redirect server");
+        let redirect_addr = redirect_listener.local_addr().expect("redirect address");
+        let target_listener = TcpListener::bind("127.0.0.1:0").expect("bind redirect target");
+        target_listener
+            .set_nonblocking(true)
+            .expect("nonblocking target listener");
+        let target_addr = target_listener.local_addr().expect("target address");
+
+        let redirect_server = thread::spawn(move || {
+            let (mut stream, _) = redirect_listener.accept().expect("accept SIEM POST");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            let mut request = [0_u8; 16 * 1024];
+            let bytes = stream.read(&mut request).expect("read SIEM POST");
+            assert!(
+                request[..bytes].starts_with(b"POST /initial HTTP/1.1\r\n"),
+                "unexpected request: {}",
+                String::from_utf8_lossy(&request[..bytes])
+            );
+            write!(
+                stream,
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_addr}/downgraded\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .expect("write redirect");
+        });
+
+        let endpoint = SiemEndpoint::parse(format!("http://{redirect_addr}/initial"))
+            .expect("literal loopback endpoint");
+        let result = SiemHttpForwarder::new(endpoint, SiemFormat::Json)
+            .with_timeout(Duration::from_secs(2))
+            .forward(&rec());
+        redirect_server.join().expect("redirect server joins");
+
+        assert!(
+            matches!(result, Err(ShippingError::Transport(ref message)) if message.contains("HTTP 307")),
+            "redirect must be surfaced as a failed shipment, got {result:?}"
+        );
+        assert!(
+            matches!(target_listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "redirect target must never receive the signed audit body"
         );
     }
 }

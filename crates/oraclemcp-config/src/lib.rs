@@ -13,6 +13,8 @@ pub mod discovery;
 mod profile;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::IpAddr;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use figment::Figment;
@@ -171,8 +173,10 @@ pub struct AuditShippingConfig {
     /// JSONL, so `oraclemcp audit verify <worm_path>` verifies it under the
     /// signing key.
     pub worm_path: Option<PathBuf>,
-    /// SIEM HTTP(S) endpoint that receives one signed record per POST.
-    pub siem_endpoint: Option<String>,
+    /// SIEM endpoint that receives one signed record per POST. Remote endpoints
+    /// must use HTTPS. Plain HTTP is restricted to literal loopback IPs and
+    /// cannot carry an authentication header.
+    pub siem_endpoint: Option<SiemEndpoint>,
     /// SIEM wire format: `json` (default), `cef`, or `syslog`.
     pub siem_format: Option<String>,
     /// Secret reference for an outbound SIEM auth header value
@@ -181,6 +185,200 @@ pub struct AuditShippingConfig {
     pub siem_auth_header_ref: Option<String>,
     /// Header name for the SIEM auth value. Defaults to `Authorization`.
     pub siem_auth_header_name: Option<String>,
+}
+
+/// A SIEM endpoint whose transport policy has been validated.
+///
+/// HTTPS is accepted for any syntactically valid authority. Plain HTTP is an
+/// intentionally narrow local-development exception: its host must be a
+/// literal loopback IP (`127.0.0.0/8` or `[::1]`). Hostnames such as
+/// `localhost` are not accepted because name resolution is mutable and cannot
+/// prove that the effective peer is local.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct SiemEndpoint(String);
+
+impl SiemEndpoint {
+    /// Parse and enforce the SIEM transport policy without making a network
+    /// request.
+    ///
+    /// # Errors
+    /// Returns a typed, secret-free error for malformed URLs, unsupported
+    /// schemes, or non-loopback plaintext destinations.
+    pub fn parse(endpoint: impl Into<String>) -> Result<Self, SiemEndpointError> {
+        let endpoint = endpoint.into();
+        if endpoint.is_empty() {
+            return Err(SiemEndpointError::Empty);
+        }
+        if endpoint.chars().any(char::is_whitespace) || endpoint.chars().any(char::is_control) {
+            return Err(SiemEndpointError::UnsafeCharacter);
+        }
+        if endpoint.contains('#') {
+            return Err(SiemEndpointError::Fragment);
+        }
+
+        let (confidential, rest) = if let Some(rest) = endpoint.strip_prefix("https://") {
+            (true, rest)
+        } else if let Some(rest) = endpoint.strip_prefix("http://") {
+            (false, rest)
+        } else {
+            return Err(SiemEndpointError::UnsupportedScheme);
+        };
+        let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
+        let authority = &rest[..authority_end];
+        let host = validate_siem_authority(authority)?;
+
+        if !confidential {
+            let ip = host
+                .parse::<IpAddr>()
+                .map_err(|_| SiemEndpointError::RemotePlaintext)?;
+            if !ip.is_loopback() {
+                return Err(SiemEndpointError::RemotePlaintext);
+            }
+        }
+        Ok(Self(endpoint))
+    }
+
+    /// The validated endpoint string used by the HTTP client.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether requests to this endpoint are protected by TLS.
+    #[must_use]
+    pub fn uses_confidential_transport(&self) -> bool {
+        self.0.starts_with("https://")
+    }
+
+    /// A safe origin-only label for logs. Paths and queries are deliberately
+    /// omitted because operators sometimes place ingest material there.
+    #[must_use]
+    pub fn diagnostic_origin(&self) -> &str {
+        let authority_start = self
+            .0
+            .find("://")
+            .map_or(0, |index| index.saturating_add(3));
+        let authority_end = self.0[authority_start..]
+            .find(['/', '?'])
+            .map_or(self.0.len(), |index| authority_start.saturating_add(index));
+        &self.0[..authority_end]
+    }
+}
+
+impl Deref for SiemEndpoint {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for SiemEndpoint {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Debug for SiemEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("SiemEndpoint")
+            .field(&self.diagnostic_origin())
+            .finish()
+    }
+}
+
+impl<'de> Deserialize<'de> for SiemEndpoint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let endpoint = String::deserialize(deserializer)?;
+        Self::parse(endpoint).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Why a SIEM endpoint was rejected. Messages never echo the endpoint, its
+/// query string, an authentication value, or an audit payload.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum SiemEndpointError {
+    /// No endpoint value was supplied.
+    #[error("SIEM endpoint must not be empty")]
+    Empty,
+    /// Only the network transports implemented by the forwarder are allowed.
+    #[error("SIEM endpoint scheme must be https (or http for a literal loopback IP)")]
+    UnsupportedScheme,
+    /// The URL contained whitespace or a control character.
+    #[error("SIEM endpoint must not contain whitespace or control characters")]
+    UnsafeCharacter,
+    /// URI fragments are client-side only and ambiguous for an ingest target.
+    #[error("SIEM endpoint must not contain a fragment")]
+    Fragment,
+    /// The authority was absent or malformed.
+    #[error("SIEM endpoint must contain a valid host and optional non-zero port")]
+    InvalidAuthority,
+    /// Credentials embedded in a URL are both ambiguous and leak-prone.
+    #[error("SIEM endpoint must not contain URL userinfo")]
+    UserInfo,
+    /// Plaintext was requested for a destination not proven to be loopback.
+    #[error("remote SIEM endpoints require https; http is limited to literal loopback IPs")]
+    RemotePlaintext,
+}
+
+fn validate_siem_authority(authority: &str) -> Result<&str, SiemEndpointError> {
+    if authority.is_empty() {
+        return Err(SiemEndpointError::InvalidAuthority);
+    }
+    if authority.contains('@') {
+        return Err(SiemEndpointError::UserInfo);
+    }
+
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let close = bracketed
+            .find(']')
+            .ok_or(SiemEndpointError::InvalidAuthority)?;
+        let host = &bracketed[..close];
+        if !matches!(host.parse::<IpAddr>(), Ok(IpAddr::V6(_))) {
+            return Err(SiemEndpointError::InvalidAuthority);
+        }
+        validate_siem_port(&bracketed[close + 1..])?;
+        return Ok(host);
+    }
+
+    if authority.contains(['[', ']']) || authority.matches(':').count() > 1 {
+        return Err(SiemEndpointError::InvalidAuthority);
+    }
+    let (host, port) = authority
+        .rsplit_once(':')
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
+    if host.is_empty() {
+        return Err(SiemEndpointError::InvalidAuthority);
+    }
+    if let Some(port) = port {
+        validate_siem_port_value(port)?;
+    }
+    Ok(host)
+}
+
+fn validate_siem_port(suffix: &str) -> Result<(), SiemEndpointError> {
+    if suffix.is_empty() {
+        return Ok(());
+    }
+    let port = suffix
+        .strip_prefix(':')
+        .ok_or(SiemEndpointError::InvalidAuthority)?;
+    validate_siem_port_value(port)
+}
+
+fn validate_siem_port_value(port: &str) -> Result<(), SiemEndpointError> {
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| SiemEndpointError::InvalidAuthority)?;
+    if port == 0 {
+        return Err(SiemEndpointError::InvalidAuthority);
+    }
+    Ok(())
 }
 
 impl AuditShippingConfig {
@@ -223,6 +421,16 @@ impl AuditShippingConfig {
             return Err(ConfigError::InvalidAuditShipping {
                 reason: "audit.shipping.siem_format / siem_auth_header_ref require \
                          audit.shipping.siem_endpoint",
+            });
+        }
+        if self.siem_auth_header_ref.is_some()
+            && self
+                .siem_endpoint
+                .as_ref()
+                .is_some_and(|endpoint| !endpoint.uses_confidential_transport())
+        {
+            return Err(ConfigError::InvalidAuditShipping {
+                reason: "audit.shipping.siem_auth_header_ref requires an https SIEM endpoint",
             });
         }
         Ok(())
@@ -1964,6 +2172,14 @@ mod tests {
             shipping.siem_endpoint.as_deref(),
             Some("https://siem.example.com/services/collector/raw")
         );
+        assert_eq!(
+            shipping
+                .siem_endpoint
+                .as_ref()
+                .expect("SIEM endpoint")
+                .diagnostic_origin(),
+            "https://siem.example.com"
+        );
         assert_eq!(shipping.siem_format_or_default(), "cef");
         assert_eq!(shipping.siem_auth_header_name_or_default(), "Authorization");
         assert!(shipping.has_destination());
@@ -2000,6 +2216,102 @@ mod tests {
             matches!(err, ConfigError::InvalidAuditShipping { .. }),
             "SIEM auth without a SIEM endpoint is rejected, got {err:?}"
         );
+    }
+
+    #[test]
+    fn audit_shipping_rejects_remote_plaintext_and_unsupported_urls() {
+        for endpoint in [
+            "http://siem.example.com/ingest",
+            "http://10.0.0.8:8080/ingest",
+            "http://localhost:8080/ingest",
+            "ftp://siem.example.com/ingest",
+            "https:///missing-host",
+            "https://user:secret@siem.example.com/ingest",
+            "https://siem.example.com:0/ingest",
+            "https://siem.example.com/ingest#fragment",
+            "https://siem.example.com/ingest\r\nx-forged: value",
+        ] {
+            let toml = format!(
+                r#"
+                [audit.shipping]
+                siem_endpoint = {endpoint:?}
+                "#
+            );
+            let err = OracleMcpConfig::from_toml_str(&toml)
+                .expect_err("unsafe or malformed SIEM endpoint must fail closed");
+            let error = err.to_string();
+            assert!(
+                !error.contains("user:secret") && !error.contains("x-forged"),
+                "validation error must not echo endpoint material: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn audit_shipping_accepts_https_and_explicit_literal_loopback_http() {
+        for endpoint in [
+            "https://siem.example.com/ingest?tenant=alpha",
+            "https://[2001:db8::1]:8443/ingest",
+            "http://127.0.0.1:8080/ingest",
+            "http://127.255.255.254/ingest",
+            "http://[::1]:8080/ingest",
+        ] {
+            let parsed = SiemEndpoint::parse(endpoint).expect("endpoint allowed by policy");
+            assert_eq!(parsed.as_str(), endpoint);
+        }
+    }
+
+    #[test]
+    fn loopback_plaintext_cannot_carry_a_siem_auth_secret() {
+        let err = OracleMcpConfig::from_toml_str(
+            r#"
+            [audit.shipping]
+            siem_endpoint = "http://127.0.0.1:8080/ingest"
+            siem_auth_header_ref = "env:SIEM_TOKEN"
+            "#,
+        )
+        .expect_err("auth material over plaintext must fail even on loopback");
+        assert!(
+            matches!(err, ConfigError::InvalidAuditShipping { .. }),
+            "got {err:?}"
+        );
+        let error = err.to_string();
+        assert!(error.contains("requires an https SIEM endpoint"));
+        assert!(!error.contains("SIEM_TOKEN"));
+    }
+
+    #[test]
+    fn protected_config_has_no_insecure_siem_override() {
+        let err = OracleMcpConfig::from_toml_str(
+            r#"
+            [audit.shipping]
+            siem_endpoint = "http://127.0.0.1:8080/ingest"
+            siem_auth_header_ref = "env:SIEM_TOKEN"
+            allow_insecure_transport = true
+
+            [[profiles]]
+            name = "protected"
+            connect_string = "127.0.0.1:1521/FREEPDB1"
+            protected = true
+            "#,
+        )
+        .expect_err("protected config must not gain an insecure SIEM override");
+        assert!(matches!(err, ConfigError::Figment(_)), "got {err:?}");
+        assert!(!err.to_string().contains("SIEM_TOKEN"));
+    }
+
+    #[test]
+    fn siem_diagnostic_origin_omits_path_and_query_material() {
+        let endpoint = SiemEndpoint::parse(
+            "https://siem.example.com:8443/private/token-path?access_token=secret",
+        )
+        .expect("valid HTTPS endpoint");
+        assert_eq!(
+            endpoint.diagnostic_origin(),
+            "https://siem.example.com:8443"
+        );
+        assert!(!endpoint.diagnostic_origin().contains("secret"));
+        assert!(!format!("{endpoint:?}").contains("secret"));
     }
 
     #[test]

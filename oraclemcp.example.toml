@@ -128,10 +128,12 @@ key_id = "2026-q2"
 # Full operational detail: docs/operations.md §5.6.
 # [audit.shipping]
 # worm_path = "/mnt/worm/oraclemcp-audit.jsonl"                 # Default: none
-# siem_endpoint = "https://siem.example.com/services/collector/raw"  # Default: none
+# siem_endpoint = "https://siem.example.com/services/collector/raw"  # Remote endpoints require HTTPS; no redirects
 # siem_format = "json"                                          # Default: "json" (also "cef" / "syslog")
 # siem_auth_header_ref = "env:SIEM_TOKEN"                       # Default: none
 # siem_auth_header_name = "Authorization"                       # Default: "Authorization"
+# Plain HTTP is accepted only for an unauthenticated literal-loopback endpoint
+# (127.0.0.0/8 or [::1]) used by a same-host development collector.
 
 # ===========================================================================
 # [[profiles]] — named Oracle connection profiles. Every field is shown below

@@ -1572,8 +1572,8 @@ fn finish_write_intent_log_build(
 }
 
 /// Wrap the durable local audit sink in the D2 shipping decorator from
-/// `[audit.shipping]`. Builds a WORM file forwarder and/or a SIEM HTTP forwarder
-/// (asupersync HTTP client, no tokio/reqwest), composing both into a single
+/// `[audit.shipping]`. Builds a WORM file forwarder and/or a validated SIEM
+/// HTTPS/loopback forwarder (asupersync HTTP client, no tokio/reqwest), composing both into a single
 /// forwarder when both are configured. Shipping never weakens the local chain.
 fn build_shipping_sink(
     local: FileAuditSink,
@@ -1616,7 +1616,7 @@ fn build_shipping_sink(
         forwarders.push(Box::new(worm));
     }
 
-    if let Some(endpoint) = shipping.siem_endpoint.as_deref() {
+    if let Some(endpoint) = shipping.siem_endpoint.as_ref() {
         let format = SiemFormat::parse(shipping.siem_format_or_default()).ok_or((
             "ORACLEMCP_AUDIT_SHIPPING_INVALID",
             format!(
@@ -1624,7 +1624,7 @@ fn build_shipping_sink(
                 shipping.siem_format_or_default()
             ),
         ))?;
-        let mut forwarder = SiemHttpForwarder::new(endpoint.to_owned(), format);
+        let mut forwarder = SiemHttpForwarder::new(endpoint.clone(), format);
         if let Some(auth_ref) = shipping.siem_auth_header_ref.as_deref() {
             let secret =
                 resolve_secret_with(auth_ref, protected, secret_resolver).map_err(|e| {
@@ -1636,12 +1636,23 @@ fn build_shipping_sink(
                         ),
                     )
                 })?;
-            forwarder = forwarder.with_header(
-                shipping.siem_auth_header_name_or_default().to_owned(),
-                secret.expose().to_owned(),
-            );
+            forwarder = forwarder
+                .with_header(
+                    shipping.siem_auth_header_name_or_default().to_owned(),
+                    secret.expose().to_owned(),
+                )
+                .map_err(|error| {
+                    (
+                        "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                        format!("refusing SIEM authentication header: {error}"),
+                    )
+                })?;
         }
-        tracing::info!(siem_endpoint = %endpoint, format = ?format, "audit SIEM forwarder armed");
+        tracing::info!(
+            siem_origin = %endpoint.diagnostic_origin(),
+            format = ?format,
+            "audit SIEM forwarder armed"
+        );
         forwarders.push(Box::new(forwarder));
     }
 

@@ -878,7 +878,7 @@ key_id  = "2026-q2"
 # WORM-mounted volume or an object-lock bucket's sync directory.
 worm_path = "/mnt/worm/oraclemcp-audit.jsonl"
 
-# And/or a SIEM HTTP(S) endpoint that receives one signed record per POST.
+# And/or an HTTPS SIEM endpoint that receives one signed record per POST.
 siem_endpoint        = "https://siem.example.com/services/collector/raw"
 siem_format          = "json"            # json (default) | cef | syslog
 siem_auth_header_ref = "env:SIEM_TOKEN"  # secret-ref for the auth header value
@@ -918,6 +918,15 @@ How it behaves — the load-bearing properties:
 - **No new network stack.** The SIEM forwarder POSTs over the same Tokio-free
   asupersync HTTP/1 client the OTLP exporter uses; there is no reqwest/hyper/tokio
   in the production graph.
+- **Confidential transport, without downgrade.** Remote SIEM endpoints must use
+  `https://`. The only plaintext exception is an unauthenticated endpoint whose
+  host is a literal loopback IP (`127.0.0.0/8` or `[::1]`), intended for a
+  same-host development collector. `localhost`, private-network addresses, and
+  every plaintext endpoint with `siem_auth_header_ref` are rejected. There is
+  no insecure override, including for protected profiles. The forwarder never
+  follows redirects: configure the final ingest URL directly so neither an
+  authentication header nor a signed audit body can be replayed to a downgraded
+  or different destination.
 
 Operator setup for the destination:
 
@@ -926,7 +935,7 @@ Operator setup for the destination:
   oraclemcp writes `O_APPEND` and never seeks or truncates; the write-once
   guarantee is enforced by the destination. Size retention to your compliance
   window and back the volume up like any security record.
-- **SIEM endpoint.** Use a raw/HEC-style ingest endpoint that accepts a POST body
+- **SIEM endpoint.** Use an HTTPS raw/HEC-style ingest endpoint that accepts a POST body
   per event. Provision the ingest token as the secret behind
   `siem_auth_header_ref` (for example `env:`, `file:`, or `keyring:`; `literal:`
   is rejected on `protected` profiles). Set a retention policy on the SIEM index to match the
