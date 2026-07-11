@@ -7575,12 +7575,31 @@ impl OracleDispatcher {
                 // rather than failing the whole call. Unknown subcheck names are
                 // reported, never fatal.
                 return with_call_timeout(cx, conn, request_budget, timeout_seconds, || async {
-                    let findings =
-                        oraclemcp_db::run_health(cx, &guarded_conn, &request.subchecks).await;
+                    let findings = match oraclemcp_db::run_health(
+                        cx,
+                        &guarded_conn,
+                        &request.subchecks,
+                    )
+                    .await
+                    {
+                        Ok(findings) => findings,
+                        Err(err) => {
+                            if err.is_uncertain_session_state() {
+                                mark_connection_quarantined(
+                                    &self.quarantine,
+                                    AuditOutcome::UnknownDiscarded,
+                                    format!(
+                                        "oracle_db_health aborted at an uncertain database boundary: {err}"
+                                    ),
+                                )?;
+                            }
+                            return Err(DbError::into_envelope(err));
+                        }
+                    };
                     let checks_run: Vec<&str> = findings
                         .iter()
                         .filter(|f| {
-                            f.detail.get("status").and_then(Value::as_str) != Some("skipped")
+                            f.detail.get("status").and_then(Value::as_str) == Some("ok")
                         })
                         .map(|f| f.subcheck.name())
                         .collect();
@@ -7591,10 +7610,18 @@ impl OracleDispatcher {
                         })
                         .map(|f| f.subcheck.name())
                         .collect();
+                    let checks_failed: Vec<&str> = findings
+                        .iter()
+                        .filter(|f| {
+                            f.detail.get("status").and_then(Value::as_str) == Some("failed")
+                        })
+                        .map(|f| f.subcheck.name())
+                        .collect();
                     Ok(json!({
                         "findings": serde_json::to_value(&findings).unwrap_or(Value::Null),
                         "checks_run": checks_run,
                         "checks_skipped": checks_skipped,
+                        "checks_failed": checks_failed,
                         "unknown_checks": request.unknown,
                     }))
                 })

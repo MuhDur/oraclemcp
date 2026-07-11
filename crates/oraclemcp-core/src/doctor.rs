@@ -2094,7 +2094,8 @@ fn check_virtual_tools() -> CheckResult {
 /// query or touches a paid-pack object unless the Diagnostics Pack license was
 /// confirmed first. It is informational: it reports `Pass` (full tier coverage),
 /// `Warn` (some subchecks would degrade/skip, or historical perf history is
-/// unavailable), or `Skip` (offline) — never `Fail`.
+/// unavailable), `Skip` (offline), or `Fail` when cancellation/session loss
+/// makes the preflight itself untrustworthy.
 async fn check_dba_suite_preflight(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     const ID: u8 = 10;
     const NAME: &str = "DBA suite preflight";
@@ -2116,9 +2117,24 @@ async fn check_dba_suite_preflight(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckRes
         );
     };
 
-    let report = preflight(cx, conn).await;
-    let (runnable, skipped) = report.runnable_skipped();
-    let total = runnable + skipped;
+    let report = match preflight(cx, conn).await {
+        Ok(report) => report,
+        Err(err) => {
+            let envelope = err.into_envelope();
+            let detail = sanitized_detail(
+                ctx,
+                format!(
+                    "DBA suite preflight aborted at an uncertain database boundary ({:?}): {}",
+                    envelope.error_class, envelope.message
+                ),
+            );
+            return CheckResult::new(ID, NAME, CheckStatus::Fail, detail).with_fix(
+                "repair connectivity or cancellation state and rerun doctor on a fresh connection",
+            );
+        }
+    };
+    let (runnable, skipped, failed) = report.runnable_skipped_failed();
+    let total = runnable + skipped + failed;
     let history = match report.top_queries_historical {
         DiagnosticsSource::AwrAsh => "AWR/ASH (Diagnostics Pack licensed)",
         DiagnosticsSource::Statspack => "Statspack (free fallback)",
@@ -2128,13 +2144,14 @@ async fn check_dba_suite_preflight(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckRes
         DiagnosticsSource::LiveCursor => "live cursor only",
     };
     let detail = format!(
-        "oracle_db_health: {runnable}/{total} subchecks runnable, {skipped} would skip; \
+        "oracle_db_health: {runnable}/{total} subchecks runnable, {skipped} would skip, \
+         {failed} ordinary probe(s) failed; \
          oracle_top_queries default=live cursor (free), historical={history}"
     );
 
     // Report-only: a degraded posture is a Warn (informational), never a Fail.
     let history_unavailable = report.top_queries_historical == DiagnosticsSource::Unavailable;
-    if skipped == 0 && !history_unavailable {
+    if skipped == 0 && failed == 0 && !history_unavailable {
         CheckResult::new(ID, NAME, CheckStatus::Pass, detail)
     } else {
         CheckResult::new(ID, NAME, CheckStatus::Warn, detail).with_fix(
@@ -2632,6 +2649,95 @@ mod tests {
         async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    struct CancelledPreflightMock;
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for CancelledPreflightMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            if sql.contains("WHERE 1 = 0") {
+                return Err(DbError::Cancelled(
+                    "injected preflight cancellation".to_owned(),
+                ));
+            }
+            Ok(Vec::new())
+        }
+
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    /// Succeeds through every dictionary-tier probe, then loses certainty on
+    /// the later Diagnostics Pack feature probe. This proves preflight does not
+    /// only protect its initial `WHERE 1 = 0` phase.
+    struct LateCancelledPreflightMock;
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for LateCancelledPreflightMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            if sql.contains("control_management_pack_access") {
+                return Err(DbError::Cancelled(
+                    "late feature-probe cancellation: token=never-render-this".to_owned(),
+                ));
+            }
+            Ok(Vec::new())
+        }
+
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
         async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
@@ -3515,11 +3621,12 @@ mod tests {
     /// reports the resolved tier/feature posture and never `Fail`s the suite,
     /// even when a subcheck would skip or historical perf history is missing.
     #[test]
-    fn dba_suite_preflight_is_report_only_and_never_fails() {
+    fn dba_suite_preflight_privilege_degradation_is_report_only() {
         // LiveMock answers every probe with one empty row: every tier probe
         // succeeds (Dba), detect_statspack succeeds, but detect_diagnostics_pack
         // is false (no DIAGNOSTIC value) -> historical resolves to Statspack, so
-        // the preflight passes and, regardless, never fails.
+        // privilege degradation remains report-only; structurally uncertain
+        // cancellation/session loss is covered separately as a hard failure.
         let conn = LiveMock;
         let ctx = DoctorContext {
             conn: Some(&conn),
@@ -3530,7 +3637,7 @@ mod tests {
         assert_ne!(
             preflight_check.status,
             CheckStatus::Fail,
-            "the preflight is report-only and must never fail the suite"
+            "recognized privilege degradation remains report-only"
         );
         assert!(
             preflight_check.detail.contains("oracle_db_health")
@@ -3539,6 +3646,36 @@ mod tests {
             preflight_check.detail
         );
         assert_eq!(report.exit_code(), 0, "report-only never exits non-zero");
+    }
+
+    #[test]
+    fn dba_suite_preflight_cancellation_is_a_hard_failure() {
+        let conn = CancelledPreflightMock;
+        let ctx = DoctorContext {
+            conn: Some(&conn),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let preflight = check_by_id(&report, 10);
+        assert_eq!(preflight.status, CheckStatus::Fail);
+        assert!(preflight.detail.contains("uncertain database boundary"));
+        assert_ne!(report.exit_code(), 0);
+    }
+
+    #[test]
+    fn dba_suite_preflight_late_feature_probe_cancellation_is_a_redacted_hard_failure() {
+        let conn = LateCancelledPreflightMock;
+        let ctx = DoctorContext {
+            conn: Some(&conn),
+            sensitive_values: vec!["never-render-this".to_owned()],
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let preflight = check_by_id(&report, 10);
+        assert_eq!(preflight.status, CheckStatus::Fail);
+        assert!(preflight.detail.contains("uncertain database boundary"));
+        assert!(!preflight.detail.contains("never-render-this"));
+        assert_ne!(report.exit_code(), 0);
     }
 
     /// When connectivity fails, the preflight (10) skips rather than running any

@@ -86,13 +86,32 @@ pub async fn detect_statspack(
     cx: &asupersync::Cx,
     conn: &dyn crate::connection::OracleConnection,
 ) -> bool {
-    conn.query_rows(
-        cx,
-        "SELECT 1 FROM perfstat.stats$snapshot WHERE rownum = 1",
-        &[],
-    )
-    .await
-    .is_ok()
+    detect_statspack_for_preflight(cx, conn)
+        .await
+        .unwrap_or(false)
+}
+
+/// Detect Statspack for the DBA-suite preflight while preserving structurally
+/// uncertain connection failures. Ordinary absence/privilege/query failures
+/// still degrade to `false`, matching [`detect_statspack`]'s best-effort public
+/// contract; cancellation or a lost/dirty session is returned so doctor can
+/// fail rather than describing an untrustworthy connection as merely limited.
+pub(crate) async fn detect_statspack_for_preflight(
+    cx: &asupersync::Cx,
+    conn: &dyn crate::connection::OracleConnection,
+) -> Result<bool, crate::error::DbError> {
+    match conn
+        .query_rows(
+            cx,
+            "SELECT 1 FROM perfstat.stats$snapshot WHERE rownum = 1",
+            &[],
+        )
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(error) if error.is_uncertain_session_state() => Err(error),
+        Err(_) => Ok(false),
+    }
 }
 
 /// Detect a licensed Diagnostics Pack: `control_management_pack_access` includes
@@ -103,18 +122,34 @@ pub async fn detect_diagnostics_pack(
     cx: &asupersync::Cx,
     conn: &dyn crate::connection::OracleConnection,
 ) -> bool {
-    conn.query_rows(
-        cx,
-        "SELECT value FROM v$parameter WHERE name = 'control_management_pack_access'",
-        &[],
-    )
-    .await
-    .ok()
-    .and_then(|rows| {
-        rows.first()
-            .and_then(|r| r.text("value").map(str::to_owned))
-    })
-    .is_some_and(|v| v.to_ascii_uppercase().contains("DIAGNOSTIC"))
+    detect_diagnostics_pack_for_preflight(cx, conn)
+        .await
+        .unwrap_or(false)
+}
+
+/// Detect Diagnostics Pack licensing for the DBA-suite preflight while
+/// preserving structurally uncertain connection failures. Ordinary failures
+/// remain fail-closed as "not licensed"; cancellation/session loss propagates
+/// because the preflight cannot truthfully report connection posture afterward.
+pub(crate) async fn detect_diagnostics_pack_for_preflight(
+    cx: &asupersync::Cx,
+    conn: &dyn crate::connection::OracleConnection,
+) -> Result<bool, crate::error::DbError> {
+    match conn
+        .query_rows(
+            cx,
+            "SELECT value FROM v$parameter WHERE name = 'control_management_pack_access'",
+            &[],
+        )
+        .await
+    {
+        Ok(rows) => Ok(rows
+            .first()
+            .and_then(|row| row.text("value").map(str::to_owned))
+            .is_some_and(|value| value.to_ascii_uppercase().contains("DIAGNOSTIC"))),
+        Err(error) if error.is_uncertain_session_state() => Err(error),
+        Err(_) => Ok(false),
+    }
 }
 
 /// Resolve the top-SQL source from the request. The free live cursor cache is

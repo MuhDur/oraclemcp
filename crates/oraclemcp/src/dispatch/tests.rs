@@ -7721,3 +7721,141 @@ mod dependents_preview {
         assert_eq!(block["at_risk_of_invalid"].as_array().unwrap().len(), 0);
     }
 }
+
+/// QA97: health-query failures remain truthful at the served dispatcher
+/// boundary. This module is intentionally isolated so concurrent QA85 timeout
+/// tests do not share fixtures or edit the same production paths.
+mod qa97_health_failure_boundaries {
+    use super::*;
+    use std::sync::Arc;
+
+    #[derive(Clone, Copy)]
+    enum FailureMode {
+        Ordinary,
+        Uncertain,
+    }
+
+    struct HealthFailureMock {
+        mode: FailureMode,
+        query_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for HealthFailureMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo {
+                current_schema: Some("APP".to_owned()),
+                ..Default::default()
+            })
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.query_count.fetch_add(1, Ordering::SeqCst);
+            match self.mode {
+                FailureMode::Ordinary => Err(DbError::Query(
+                    "ORA-00904: invalid identifier; password=never-render-this".to_owned(),
+                )),
+                FailureMode::Uncertain => Err(DbError::Cancelled(
+                    "health query cancelled at the database boundary".to_owned(),
+                )),
+            }
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    fn dispatcher(mode: FailureMode, query_count: Arc<AtomicUsize>) -> OracleDispatcher {
+        OracleDispatcher::new_switchable(
+            Box::new(HealthFailureMock { mode, query_count }),
+            Some("dev".to_owned()),
+            read_write_level(),
+            Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
+        )
+    }
+
+    #[test]
+    fn ordinary_health_failure_is_reported_failed_and_secret_safe() {
+        let query_count = Arc::new(AtomicUsize::new(0));
+        let out = dispatcher(FailureMode::Ordinary, Arc::clone(&query_count))
+            .dispatch(
+                "oracle_db_health",
+                json!({ "health_type": "invalid_objects" }),
+            )
+            .expect("ordinary diagnostic failure remains an in-band health report");
+
+        assert_eq!(out["checks_run"], json!([]));
+        assert_eq!(out["checks_skipped"], json!([]));
+        assert_eq!(out["checks_failed"], json!(["invalid_objects"]));
+        assert_eq!(out["findings"][0]["detail"]["status"], json!("failed"));
+        assert_eq!(
+            out["findings"][0]["detail"]["error_class"],
+            json!("SYNTAX_ERROR")
+        );
+        assert_eq!(out["findings"][0]["detail"]["ora_code"], json!(904));
+        let rendered = out.to_string();
+        assert!(!rendered.contains("never-render-this"), "{rendered}");
+        assert!(!rendered.contains("password="), "{rendered}");
+        assert_eq!(
+            query_count.load(Ordering::SeqCst),
+            1,
+            "an ordinary SQL regression must not trigger an ALL_* fallback"
+        );
+    }
+
+    #[test]
+    fn uncertain_health_failure_quarantines_and_refuses_subsequent_dispatch() {
+        let query_count = Arc::new(AtomicUsize::new(0));
+        let dispatcher = dispatcher(FailureMode::Uncertain, Arc::clone(&query_count));
+
+        let first = dispatcher
+            .dispatch(
+                "oracle_db_health",
+                json!({ "health_type": "invalid_objects" }),
+            )
+            .expect_err("uncertain health failure must propagate");
+        assert_eq!(first.error_class, ErrorClass::Timeout);
+        assert_eq!(query_count.load(Ordering::SeqCst), 1);
+
+        let second = dispatcher
+            .dispatch(
+                "oracle_db_health",
+                json!({ "health_type": "invalid_objects" }),
+            )
+            .expect_err("quarantined connection must refuse later work");
+        assert_eq!(second.error_class, ErrorClass::RuntimeStateRequired);
+        assert!(second.message.contains("quarantined"), "{}", second.message);
+        assert_eq!(
+            query_count.load(Ordering::SeqCst),
+            1,
+            "subsequent refusal must happen before another Oracle query"
+        );
+    }
+}

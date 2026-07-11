@@ -1364,7 +1364,9 @@ fn live_db_health_suite_runs_all_subchecks_without_hard_failure() {
         conn.ping(&cx).await.expect("health ping");
 
         let subchecks = oraclemcp_db::HealthSubcheck::all();
-        let findings = oraclemcp_db::run_health(&cx, &conn, subchecks).await;
+        let findings = oraclemcp_db::run_health(&cx, &conn, subchecks)
+            .await
+            .expect("live health suite must not lose or cancel its Oracle session");
         assert_eq!(
             findings.len(),
             subchecks.len(),
@@ -1424,7 +1426,7 @@ fn live_db_health_suite_runs_all_subchecks_without_hard_failure() {
 
 /// C9 live: the report-only preflight resolves a tier/feature posture for every
 /// subcheck and for top_queries (default + historical) against a real DB. It
-/// must never fail and must report a runnable-or-skip resolution per subcheck;
+/// must report a runnable/skip/ordinary-failure resolution per subcheck;
 /// the resolved tiers must be consistent with what `run_health` actually used.
 #[test]
 fn live_dba_suite_preflight_reports_runnable_posture() {
@@ -1440,16 +1442,18 @@ fn live_dba_suite_preflight_reports_runnable_posture() {
         };
         conn.ping(&cx).await.expect("preflight ping");
 
-        let report = oraclemcp_db::preflight(&cx, &conn).await;
+        let report = oraclemcp_db::preflight(&cx, &conn)
+            .await
+            .expect("live preflight must not lose/cancel its Oracle session");
         assert_eq!(
             report.subchecks.len(),
             oraclemcp_db::HealthSubcheck::all().len(),
             "one preflight row per subcheck"
         );
-        let (runnable, skipped) = report.runnable_skipped();
-        assert_eq!(runnable + skipped, report.subchecks.len());
+        let (runnable, skipped, failed) = report.runnable_skipped_failed();
+        assert_eq!(runnable + skipped + failed, report.subchecks.len());
         eprintln!(
-            "[live-xe] preflight: {runnable} runnable, {skipped} skip; default={:?} historical={:?} pack={} statspack={}",
+            "[live-xe] preflight: {runnable} runnable, {skipped} skip, {failed} failed; default={:?} historical={:?} pack={} statspack={}",
             report.top_queries_default,
             report.top_queries_historical,
             report.diagnostics_pack_licensed,
@@ -1463,8 +1467,9 @@ fn live_dba_suite_preflight_reports_runnable_posture() {
         );
         // The preflight's per-subcheck tier must match what run_health would use:
         // a subcheck the preflight marks runnable must NOT degrade to a skip.
-        let findings =
-            oraclemcp_db::run_health(&cx, &conn, oraclemcp_db::HealthSubcheck::all()).await;
+        let findings = oraclemcp_db::run_health(&cx, &conn, oraclemcp_db::HealthSubcheck::all())
+            .await
+            .expect("live health rerun must not lose or cancel its Oracle session");
         for row in &report.subchecks {
             let finding = findings
                 .iter()
