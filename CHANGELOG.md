@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- Audit hash-chain schema v5 now encodes optional values with explicit presence
+  tags and uses stable, length-framed canonical bytes. This prevents
+  `rows_affected = null` from authenticating as `u64::MAX`; historical v1-v4
+  records continue to verify byte-for-byte without rewriting the audit log.
+
 ## [0.8.0] — 2026-07-07
 
 - Adopted oracledb 0.8.0 (independent driver release train; server and driver now version separately).

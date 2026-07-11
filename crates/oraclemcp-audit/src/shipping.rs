@@ -312,6 +312,9 @@ pub fn syslog_line(record: &AuditRecord) -> String {
     push_sd_param(&mut sd, "sqlSha256", &record.sql_sha256);
     push_sd_param(&mut sd, "prevHash", &record.prev_hash);
     push_sd_param(&mut sd, "entryHash", &record.entry_hash);
+    if let Some(rows) = record.rows_affected {
+        push_sd_param(&mut sd, "rowsAffected", &rows.to_string());
+    }
     if let Some(key_id) = record.key_id.as_deref() {
         push_sd_param(&mut sd, "keyId", key_id);
     }
@@ -703,6 +706,46 @@ mod tests {
         );
         // The '=' inside the preview value is escaped in the extension.
         assert!(line.contains("\\="), "extension '=' is escaped");
+    }
+
+    #[test]
+    fn rows_affected_max_is_distinct_from_absent_in_json_cef_and_syslog() {
+        let mut absent_draft = draft("DELETE FROM t", "DESTRUCTIVE");
+        absent_draft.rows_affected = None;
+        let absent = AuditRecord::chained_signed(
+            &absent_draft,
+            1,
+            crate::record::GENESIS_HASH,
+            "t1".to_owned(),
+            &key(),
+        );
+        let mut max_draft = absent_draft;
+        max_draft.rows_affected = Some(u64::MAX);
+        let max = AuditRecord::chained_signed(
+            &max_draft,
+            1,
+            crate::record::GENESIS_HASH,
+            "t1".to_owned(),
+            &key(),
+        );
+
+        let absent_json = serde_json::to_value(&absent).expect("serialize absent rows");
+        let max_json = serde_json::to_value(&max).expect("serialize max rows");
+        assert!(absent_json.get("rows_affected").is_none());
+        assert_eq!(max_json["rows_affected"], serde_json::json!(u64::MAX));
+
+        let absent_cef = cef_line(&absent);
+        let max_cef = cef_line(&max);
+        assert!(!absent_cef.contains("cnt="), "{absent_cef}");
+        assert!(max_cef.contains("cnt=18446744073709551615"), "{max_cef}");
+
+        let absent_syslog = syslog_line(&absent);
+        let max_syslog = syslog_line(&max);
+        assert!(!absent_syslog.contains("rowsAffected="), "{absent_syslog}");
+        assert!(
+            max_syslog.contains("rowsAffected=\"18446744073709551615\""),
+            "{max_syslog}"
+        );
     }
 
     #[test]

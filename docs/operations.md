@@ -727,11 +727,12 @@ Back up and rotate this log like any other security record, and verify it after
 incident review.
 
 Audit records are additive and format-versioned. Current records carry
-`schema_version = 3`, a structured server-derived `subject`, and optional
-database-evidence fields. `audit verify` still accepts signed v1/v2 records, so
-existing logs do not need to be rewritten.
+`schema_version = 5`, a structured server-derived `subject`, optional database
+evidence, the normalized-SQL fingerprint, and injective canonical framing for
+optional values. `audit verify` still accepts signed v1-v4 records byte-for-byte,
+so existing logs do not need to be rewritten.
 
-Use `--with-db-evidence` when reviewing a v3 audit chain after incident
+Use `--with-db-evidence` when reviewing a v3-or-newer audit chain after incident
 response or a dashboard proof-bundle export. The verifier still runs offline:
 it first verifies the signed hash-chain, then summarizes the hash-covered
 database evidence already present in the records. A `correlated` report means

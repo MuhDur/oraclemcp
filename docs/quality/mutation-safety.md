@@ -51,8 +51,8 @@ classes:
   tests.
 - Audit platform-observability edges where success-only `fsync`/unlock paths do
   not expose a deterministic behavior difference without fault-injection hooks.
-- Audit v2 legacy hash helper coverage where v3/v4 production verification is
-  fully pinned and v2 compatibility still has direct valid-record tests.
+- Audit v2 legacy hash helper coverage where v3/v4/v5 production verification
+  is fully pinned and v2 compatibility still has direct valid-record tests.
 
 No survivor required weakening guard or audit production logic. The added tests
 pin the missing safety contracts directly: allow-list specificity, marker

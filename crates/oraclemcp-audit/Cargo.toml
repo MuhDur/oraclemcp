@@ -21,6 +21,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+proptest = "1"
 tempfile = "3"
 
 [lints]

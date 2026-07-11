@@ -10,8 +10,10 @@ use sha2::{Digest, Sha256};
 
 use crate::hmac::{HmacSha256Key, HmacSha256KeyError};
 
+const AUDIT_SCHEMA_V5: u16 = 5;
+
 /// Current on-disk audit record schema.
-pub const AUDIT_SCHEMA_VERSION: u16 = 4;
+pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V5;
 
 /// The guard decision being audited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,7 +414,7 @@ impl AuditRecord {
         let sql_normalized_sha256 = normalized_sql_sha256(&draft.sql);
         let sql_preview: String = draft.sql.chars().take(PREVIEW_LEN).collect();
         let agent_identity = draft.subject.legacy_agent_identity();
-        let entry_hash = compute_entry_hash_v4(
+        let entry_hash = compute_entry_hash_v5(
             seq,
             &timestamp,
             &agent_identity,
@@ -508,6 +510,24 @@ impl AuditRecord {
             )
         } else if self.schema_version == 4 {
             compute_entry_hash_v4(
+                self.seq,
+                &self.timestamp,
+                &self.agent_identity,
+                &self.subject,
+                self.db_evidence.as_ref(),
+                self.cancel.as_ref(),
+                &self.tool,
+                &self.sql_sha256,
+                &self.sql_normalized_sha256,
+                &self.sql_preview,
+                &self.danger_level,
+                self.decision,
+                self.rows_affected,
+                self.outcome,
+                &self.prev_hash,
+            )
+        } else if self.schema_version == AUDIT_SCHEMA_V5 {
+            compute_entry_hash_v5(
                 self.seq,
                 &self.timestamp,
                 &self.agent_identity,
@@ -804,6 +824,183 @@ fn compute_entry_hash_v4(
     out
 }
 
+fn canonical_push_str(out: &mut Vec<u8>, field: &str) {
+    let len = u64::try_from(field.len()).expect("audit string length fits u64");
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(field.as_bytes());
+}
+
+fn canonical_push_opt_str(out: &mut Vec<u8>, field: Option<&str>) {
+    match field {
+        Some(value) => {
+            out.push(1);
+            canonical_push_str(out, value);
+        }
+        None => out.push(0),
+    }
+}
+
+fn canonical_push_subject(out: &mut Vec<u8>, subject: &AuditSubject) {
+    canonical_push_str(out, &subject.kind);
+    canonical_push_str(out, &subject.stable_id);
+    canonical_push_opt_str(out, subject.authn_method.as_deref());
+    canonical_push_opt_str(out, subject.client_id.as_deref());
+    canonical_push_opt_str(out, subject.thumbprint.as_deref());
+}
+
+fn canonical_push_db_evidence(out: &mut Vec<u8>, evidence: Option<&DbEvidence>) {
+    let Some(evidence) = evidence else {
+        out.push(0);
+        return;
+    };
+    out.push(1);
+    for field in [
+        evidence.availability.as_deref(),
+        evidence.db_unique_name.as_deref(),
+        evidence.service_name.as_deref(),
+        evidence.instance_name.as_deref(),
+        evidence.session_user.as_deref(),
+        evidence.current_user.as_deref(),
+        evidence.proxy_user.as_deref(),
+        evidence.current_schema.as_deref(),
+        evidence.sid.as_deref(),
+        evidence.serial_number.as_deref(),
+        evidence.client_identifier.as_deref(),
+        evidence.module.as_deref(),
+        evidence.action.as_deref(),
+        evidence.database_role.as_deref(),
+        evidence.open_mode.as_deref(),
+    ] {
+        canonical_push_opt_str(out, field);
+    }
+}
+
+fn canonical_push_cancel(out: &mut Vec<u8>, cancel: Option<&AuditCancel>) {
+    let Some(cancel) = cancel else {
+        out.push(0);
+        return;
+    };
+    out.push(1);
+    canonical_push_str(out, &cancel.kind);
+    canonical_push_str(out, &cancel.reason);
+}
+
+fn canonical_push_rows_affected(out: &mut Vec<u8>, rows_affected: Option<u64>) {
+    match rows_affected {
+        Some(rows) => {
+            out.push(1);
+            out.extend_from_slice(&rows.to_be_bytes());
+        }
+        None => out.push(0),
+    }
+}
+
+const fn canonical_decision_tag(decision: AuditDecision) -> u8 {
+    match decision {
+        AuditDecision::Allowed => 0,
+        AuditDecision::StepUpRequired => 1,
+        AuditDecision::Blocked => 2,
+    }
+}
+
+const fn canonical_outcome_tag(outcome: AuditOutcome) -> u8 {
+    match outcome {
+        AuditOutcome::Pending => 0,
+        AuditOutcome::Succeeded => 1,
+        AuditOutcome::Failed => 2,
+        AuditOutcome::RolledBack => 3,
+        AuditOutcome::DiscardedUncommitted => 4,
+        AuditOutcome::CommitInDoubt => 5,
+        AuditOutcome::UnknownDiscarded => 6,
+    }
+}
+
+/// Canonical v5 preimage. Every variable-length field is length-framed, every
+/// optional field carries an explicit presence tag, and enums use stable numeric
+/// tags rather than Rust `Debug` output. Keeping this as bytes before hashing
+/// makes injectivity directly testable.
+#[allow(clippy::too_many_arguments)]
+fn canonical_entry_v5(
+    seq: u64,
+    timestamp: &str,
+    agent_identity: &str,
+    subject: &AuditSubject,
+    db_evidence: Option<&DbEvidence>,
+    cancel: Option<&AuditCancel>,
+    tool: &str,
+    sql_sha256: &str,
+    sql_normalized_sha256: &str,
+    sql_preview: &str,
+    danger_level: &str,
+    decision: AuditDecision,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+    prev_hash: &str,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&AUDIT_SCHEMA_V5.to_be_bytes());
+    out.extend_from_slice(&seq.to_be_bytes());
+    for field in [
+        timestamp,
+        agent_identity,
+        tool,
+        sql_sha256,
+        sql_normalized_sha256,
+        sql_preview,
+        danger_level,
+    ] {
+        canonical_push_str(&mut out, field);
+    }
+    canonical_push_subject(&mut out, subject);
+    canonical_push_db_evidence(&mut out, db_evidence);
+    canonical_push_cancel(&mut out, cancel);
+    out.push(canonical_decision_tag(decision));
+    canonical_push_rows_affected(&mut out, rows_affected);
+    out.push(canonical_outcome_tag(outcome));
+    canonical_push_str(&mut out, prev_hash);
+    out
+}
+
+/// Deterministically hash a v5 entry using injective canonical framing.
+/// Verification keeps the v1-v4 hash functions untouched so historical audit
+/// evidence continues to verify byte-for-byte.
+#[allow(clippy::too_many_arguments)]
+fn compute_entry_hash_v5(
+    seq: u64,
+    timestamp: &str,
+    agent_identity: &str,
+    subject: &AuditSubject,
+    db_evidence: Option<&DbEvidence>,
+    cancel: Option<&AuditCancel>,
+    tool: &str,
+    sql_sha256: &str,
+    sql_normalized_sha256: &str,
+    sql_preview: &str,
+    danger_level: &str,
+    decision: AuditDecision,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+    prev_hash: &str,
+) -> String {
+    sha256_hex(&canonical_entry_v5(
+        seq,
+        timestamp,
+        agent_identity,
+        subject,
+        db_evidence,
+        cancel,
+        tool,
+        sql_sha256,
+        sql_normalized_sha256,
+        sql_preview,
+        danger_level,
+        decision,
+        rows_affected,
+        outcome,
+        prev_hash,
+    ))
+}
+
 /// The genesis prev-hash for the first entry.
 pub const GENESIS_HASH: &str = "genesis";
 
@@ -871,6 +1068,7 @@ mod kani_proofs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn draft() -> AuditEntryDraft {
         AuditEntryDraft {
@@ -888,6 +1086,163 @@ mod tests {
 
     fn key() -> SigningKey {
         SigningKey::new("k1", b"0123456789abcdef0123456789abcdef".to_vec()).expect("valid test key")
+    }
+
+    fn v5_preimage_for(draft: &AuditEntryDraft, rows_affected: Option<u64>) -> Vec<u8> {
+        let sql_sha256 = sha256_hex(draft.sql.as_bytes());
+        let sql_normalized_sha256 = normalized_sql_sha256(&draft.sql);
+        let sql_preview = draft.sql.chars().take(PREVIEW_LEN).collect::<String>();
+        canonical_entry_v5(
+            1,
+            "t",
+            &draft.subject.legacy_agent_identity(),
+            &draft.subject,
+            draft.db_evidence.as_ref(),
+            draft.cancel.as_ref(),
+            &draft.tool,
+            &sql_sha256,
+            &sql_normalized_sha256,
+            &sql_preview,
+            &draft.danger_level,
+            draft.decision,
+            rows_affected,
+            draft.outcome,
+            GENESIS_HASH,
+        )
+    }
+
+    fn signed_record_for_schema(
+        schema_version: u16,
+        seq: u64,
+        prev_hash: &str,
+        key: &SigningKey,
+    ) -> AuditRecord {
+        let d = draft();
+        let timestamp = format!("t{seq}");
+        let agent_identity = d.subject.legacy_agent_identity();
+        let sql_sha256 = sha256_hex(d.sql.as_bytes());
+        let sql_normalized_sha256 = normalized_sql_sha256(&d.sql);
+        let sql_preview = d.sql.chars().take(PREVIEW_LEN).collect::<String>();
+        let entry_hash = match schema_version {
+            1 => compute_entry_hash_v1(
+                seq,
+                &timestamp,
+                &agent_identity,
+                &d.tool,
+                &sql_sha256,
+                &sql_preview,
+                &d.danger_level,
+                d.decision,
+                d.rows_affected,
+                d.outcome,
+                prev_hash,
+            ),
+            2 => compute_entry_hash_v2(
+                seq,
+                &timestamp,
+                &agent_identity,
+                &d.subject,
+                d.db_evidence.as_ref(),
+                d.cancel.as_ref(),
+                &d.tool,
+                &sql_sha256,
+                &sql_preview,
+                &d.danger_level,
+                d.decision,
+                d.rows_affected,
+                d.outcome,
+                prev_hash,
+            ),
+            3 => compute_entry_hash_v3(
+                seq,
+                &timestamp,
+                &agent_identity,
+                &d.subject,
+                d.db_evidence.as_ref(),
+                d.cancel.as_ref(),
+                &d.tool,
+                &sql_sha256,
+                &sql_preview,
+                &d.danger_level,
+                d.decision,
+                d.rows_affected,
+                d.outcome,
+                prev_hash,
+            ),
+            4 => compute_entry_hash_v4(
+                seq,
+                &timestamp,
+                &agent_identity,
+                &d.subject,
+                d.db_evidence.as_ref(),
+                d.cancel.as_ref(),
+                &d.tool,
+                &sql_sha256,
+                &sql_normalized_sha256,
+                &sql_preview,
+                &d.danger_level,
+                d.decision,
+                d.rows_affected,
+                d.outcome,
+                prev_hash,
+            ),
+            AUDIT_SCHEMA_V5 => compute_entry_hash_v5(
+                seq,
+                &timestamp,
+                &agent_identity,
+                &d.subject,
+                d.db_evidence.as_ref(),
+                d.cancel.as_ref(),
+                &d.tool,
+                &sql_sha256,
+                &sql_normalized_sha256,
+                &sql_preview,
+                &d.danger_level,
+                d.decision,
+                d.rows_affected,
+                d.outcome,
+                prev_hash,
+            ),
+            other => panic!("unsupported test schema {other}"),
+        };
+        AuditRecord {
+            schema_version,
+            seq,
+            timestamp,
+            agent_identity,
+            subject: d.subject,
+            db_evidence: d.db_evidence,
+            cancel: d.cancel,
+            tool: d.tool,
+            sql_sha256,
+            sql_normalized_sha256: if schema_version >= 4 {
+                sql_normalized_sha256
+            } else {
+                String::new()
+            },
+            sql_preview,
+            danger_level: d.danger_level,
+            decision: d.decision,
+            rows_affected: d.rows_affected,
+            outcome: d.outcome,
+            prev_hash: prev_hash.to_owned(),
+            signature: Some(key.sign(&entry_hash)),
+            key_id: Some(key.key_id().to_owned()),
+            entry_hash,
+        }
+    }
+
+    fn assert_v5_mutation_breaks(
+        base: &AuditRecord,
+        label: &str,
+        mutate: impl FnOnce(&mut AuditRecord),
+    ) {
+        let mut changed = base.clone();
+        mutate(&mut changed);
+        assert!(
+            !changed.hash_is_valid(),
+            "v5 mutation of {label} must invalidate the canonical hash"
+        );
     }
 
     #[test]
@@ -1080,7 +1435,7 @@ mod tests {
         assert_eq!(r.sql_preview.chars().count(), PREVIEW_LEN);
     }
 
-    // ---- K5: normalized-SQL fingerprint (schema v4) ----
+    // ---- K5: normalized-SQL fingerprint (introduced in schema v4) ----
 
     #[test]
     fn normalized_fingerprint_collapses_whitespace_and_case() {
@@ -1092,7 +1447,7 @@ mod tests {
         b.sql = "select * from orders where id = :id".to_owned();
         let ra = AuditRecord::chained_unsigned(&a, 1, GENESIS_HASH, "t".to_owned());
         let rb = AuditRecord::chained_unsigned(&b, 1, GENESIS_HASH, "t".to_owned());
-        assert_eq!(ra.schema_version, 4);
+        assert_eq!(ra.schema_version, AUDIT_SCHEMA_VERSION);
         assert!(ra.sql_normalized_sha256.starts_with("sha256:"));
         assert_eq!(
             ra.sql_normalized_sha256, rb.sql_normalized_sha256,
@@ -1106,7 +1461,7 @@ mod tests {
 
     #[test]
     fn normalized_fingerprint_is_hash_covered() {
-        // The v4 chain hash must cover the normalized fingerprint: forging it
+        // The current chain hash must cover the normalized fingerprint: forging it
         // (e.g. to hide that a blocked attempt matched a known-bad statement)
         // must break verification.
         let mut r = AuditRecord::chained_unsigned(
@@ -1346,13 +1701,51 @@ mod tests {
             d.outcome,
             GENESIS_HASH,
         );
-        for hash in [&v1, &v2, &v3, &v4] {
+        let v5 = compute_entry_hash_v5(
+            1,
+            "t",
+            &agent_identity,
+            &d.subject,
+            d.db_evidence.as_ref(),
+            d.cancel.as_ref(),
+            &d.tool,
+            &sql_sha256,
+            &sql_normalized_sha256,
+            &sql_preview,
+            &d.danger_level,
+            d.decision,
+            d.rows_affected,
+            d.outcome,
+            GENESIS_HASH,
+        );
+        assert_eq!(
+            v1,
+            "sha256:f558f5ec49672e00a35ba625e6a59f96b7a4de9ca62bcd76ced8268fcb7b97a4"
+        );
+        assert_eq!(
+            v2,
+            "sha256:9579160d2f4634da3f4271ee80e5448bb43f8a073c84c6d2d8150dfe11492577"
+        );
+        assert_eq!(
+            v3,
+            "sha256:0b211dddb35d19774d3cf4f4e7da2d5277492362d080b0b4b085615cf84fcff1"
+        );
+        assert_eq!(
+            v4,
+            "sha256:94a62a27d6d7885f100df103b7c5d9102d77e49b584d6b19e60da15eab54da96"
+        );
+        assert_eq!(
+            v5,
+            "sha256:9325c4557119ddb4978d4b826c83aa63191c03b6ab906419590c7ce21c2251d1"
+        );
+        for hash in [&v1, &v2, &v3, &v4, &v5] {
             assert!(hash.starts_with("sha256:"), "{hash}");
             assert_eq!(hash.len(), "sha256:".len() + 64, "{hash}");
         }
         assert_ne!(v1, v2, "schema v2 must add subject/evidence coverage");
         assert_ne!(v2, v3, "schema v3 must add expanded DB evidence coverage");
         assert_ne!(v3, v4, "schema v4 must add normalized-SQL coverage");
+        assert_ne!(v4, v5, "schema v5 must adopt canonical framing");
 
         let mut changed_subject = d.subject.clone();
         changed_subject.client_id = Some("client-b".to_owned());
@@ -1398,6 +1791,263 @@ mod tests {
             v4, changed_evidence_v4,
             "expanded DB evidence fields are hash-covered"
         );
+    }
+
+    #[test]
+    fn v5_rows_affected_presence_is_injective_and_roundtrips() {
+        let cases = [None, Some(0), Some(42), Some(u64::MAX)];
+        let mut hashes = Vec::new();
+        for rows_affected in cases {
+            let mut d = draft();
+            d.rows_affected = rows_affected;
+            let record = AuditRecord::chained_signed(&d, 1, GENESIS_HASH, "t".to_owned(), &key());
+            let json = serde_json::to_string(&record).expect("serialize v5 record");
+            let roundtrip: AuditRecord =
+                serde_json::from_str(&json).expect("deserialize v5 record");
+            assert_eq!(roundtrip.rows_affected, rows_affected);
+            assert!(roundtrip.hash_is_valid());
+            assert!(roundtrip.signature_is_valid(&key()));
+            hashes.push(record.entry_hash);
+        }
+        for left in 0..hashes.len() {
+            for right in (left + 1)..hashes.len() {
+                assert_ne!(
+                    hashes[left], hashes[right],
+                    "distinct rows_affected values must have distinct v5 hashes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn v5_rows_affected_tamper_fails_hash_then_mac_after_recompute() {
+        use crate::{BrokenReason, VerifyOutcome, verify_records};
+
+        let signing_key = key();
+        let record =
+            AuditRecord::chained_signed(&draft(), 1, GENESIS_HASH, "t".to_owned(), &signing_key);
+        let mut edited = record.clone();
+        edited.rows_affected = Some(u64::MAX);
+        assert!(!edited.hash_is_valid());
+        assert!(
+            edited.signature_is_valid(&signing_key),
+            "the old MAC still covers the stored old hash until the attacker recomputes it"
+        );
+        assert!(matches!(
+            verify_records(&[edited.clone()], std::slice::from_ref(&signing_key)),
+            VerifyOutcome::Broken {
+                reason: BrokenReason::HashMismatch,
+                ..
+            }
+        ));
+
+        edited.entry_hash = compute_entry_hash_v5(
+            edited.seq,
+            &edited.timestamp,
+            &edited.agent_identity,
+            &edited.subject,
+            edited.db_evidence.as_ref(),
+            edited.cancel.as_ref(),
+            &edited.tool,
+            &edited.sql_sha256,
+            &edited.sql_normalized_sha256,
+            &edited.sql_preview,
+            &edited.danger_level,
+            edited.decision,
+            edited.rows_affected,
+            edited.outcome,
+            &edited.prev_hash,
+        );
+        assert!(edited.hash_is_valid());
+        assert!(!edited.signature_is_valid(&signing_key));
+        assert!(matches!(
+            verify_records(&[edited], std::slice::from_ref(&signing_key)),
+            VerifyOutcome::Broken {
+                reason: BrokenReason::SignatureMismatch,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn v5_canonical_hash_covers_every_serialized_semantic_field() {
+        let mut d = draft();
+        d.subject = AuditSubject::new("oauth", "subject")
+            .with_authn_method("mtls")
+            .with_client_id("client")
+            .with_thumbprint("sha256:thumb");
+        d.db_evidence = Some(DbEvidence {
+            availability: Some("captured".to_owned()),
+            db_unique_name: Some("ORCL".to_owned()),
+            service_name: Some("svc".to_owned()),
+            instance_name: Some("inst".to_owned()),
+            session_user: Some("APP".to_owned()),
+            current_user: Some("APP".to_owned()),
+            proxy_user: Some("PROXY".to_owned()),
+            current_schema: Some("APP".to_owned()),
+            sid: Some("1".to_owned()),
+            serial_number: Some("2".to_owned()),
+            client_identifier: Some("cid".to_owned()),
+            module: Some("oraclemcp".to_owned()),
+            action: Some("execute".to_owned()),
+            database_role: Some("PRIMARY".to_owned()),
+            open_mode: Some("READ WRITE".to_owned()),
+        });
+        d.cancel = Some(AuditCancel::new("User", "session_delete"));
+        d.rows_affected = Some(7);
+        let base = AuditRecord::chained_signed(&d, 1, GENESIS_HASH, "t".to_owned(), &key());
+
+        for index in 0..3 {
+            assert_v5_mutation_breaks(&base, "subject optional", |record| match index {
+                0 => record.subject.authn_method = None,
+                1 => record.subject.client_id = None,
+                2 => record.subject.thumbprint = None,
+                _ => unreachable!(),
+            });
+        }
+        assert_v5_mutation_breaks(&base, "schema_version", |record| record.schema_version = 4);
+        assert_v5_mutation_breaks(&base, "seq", |record| record.seq += 1);
+        assert_v5_mutation_breaks(&base, "timestamp", |record| record.timestamp.push('x'));
+        assert_v5_mutation_breaks(&base, "agent_identity", |record| {
+            record.agent_identity.push('x');
+        });
+        assert_v5_mutation_breaks(&base, "subject kind", |record| {
+            record.subject.kind.push('x')
+        });
+        assert_v5_mutation_breaks(&base, "subject stable_id", |record| {
+            record.subject.stable_id.push('x');
+        });
+        assert_v5_mutation_breaks(&base, "db_evidence", |record| record.db_evidence = None);
+        for index in 0..15 {
+            assert_v5_mutation_breaks(&base, "database evidence optional", |record| {
+                let evidence = record.db_evidence.as_mut().expect("fixture evidence");
+                match index {
+                    0 => evidence.availability = None,
+                    1 => evidence.db_unique_name = None,
+                    2 => evidence.service_name = None,
+                    3 => evidence.instance_name = None,
+                    4 => evidence.session_user = None,
+                    5 => evidence.current_user = None,
+                    6 => evidence.proxy_user = None,
+                    7 => evidence.current_schema = None,
+                    8 => evidence.sid = None,
+                    9 => evidence.serial_number = None,
+                    10 => evidence.client_identifier = None,
+                    11 => evidence.module = None,
+                    12 => evidence.action = None,
+                    13 => evidence.database_role = None,
+                    14 => evidence.open_mode = None,
+                    _ => unreachable!(),
+                }
+            });
+        }
+        assert_v5_mutation_breaks(&base, "cancel", |record| record.cancel = None);
+        assert_v5_mutation_breaks(&base, "tool", |record| record.tool.push('x'));
+        assert_v5_mutation_breaks(&base, "sql_sha256", |record| record.sql_sha256.push('x'));
+        assert_v5_mutation_breaks(&base, "sql_normalized_sha256", |record| {
+            record.sql_normalized_sha256.push('x');
+        });
+        assert_v5_mutation_breaks(&base, "sql_preview", |record| record.sql_preview.push('x'));
+        assert_v5_mutation_breaks(&base, "danger_level", |record| {
+            record.danger_level.push('x')
+        });
+        assert_v5_mutation_breaks(&base, "decision", |record| {
+            record.decision = AuditDecision::Blocked;
+        });
+        assert_v5_mutation_breaks(&base, "rows_affected presence", |record| {
+            record.rows_affected = None;
+        });
+        assert_v5_mutation_breaks(&base, "rows_affected value", |record| {
+            record.rows_affected = Some(u64::MAX);
+        });
+        assert_v5_mutation_breaks(&base, "outcome", |record| {
+            record.outcome = AuditOutcome::Failed;
+        });
+        assert_v5_mutation_breaks(&base, "prev_hash", |record| record.prev_hash.push('x'));
+
+        // key_id and signature are the unchanged MAC envelope rather than
+        // entry-hash content. The verifier still fails closed when either is
+        // removed.
+        let mut missing_key_id = base.clone();
+        missing_key_id.key_id = None;
+        assert!(matches!(
+            crate::verify_records(&[missing_key_id], &[key()]),
+            crate::VerifyOutcome::Broken {
+                reason: crate::BrokenReason::Unsigned,
+                ..
+            }
+        ));
+        let mut missing_signature = base;
+        missing_signature.signature = None;
+        assert!(matches!(
+            crate::verify_records(&[missing_signature], &[key()]),
+            crate::VerifyOutcome::Broken {
+                reason: crate::BrokenReason::SignatureMismatch,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn v5_enum_tags_are_stable_and_unique() {
+        assert_eq!(
+            [
+                canonical_decision_tag(AuditDecision::Allowed),
+                canonical_decision_tag(AuditDecision::StepUpRequired),
+                canonical_decision_tag(AuditDecision::Blocked),
+            ],
+            [0, 1, 2]
+        );
+        assert_eq!(
+            [
+                canonical_outcome_tag(AuditOutcome::Pending),
+                canonical_outcome_tag(AuditOutcome::Succeeded),
+                canonical_outcome_tag(AuditOutcome::Failed),
+                canonical_outcome_tag(AuditOutcome::RolledBack),
+                canonical_outcome_tag(AuditOutcome::DiscardedUncommitted),
+                canonical_outcome_tag(AuditOutcome::CommitInDoubt),
+                canonical_outcome_tag(AuditOutcome::UnknownDiscarded),
+            ],
+            [0, 1, 2, 3, 4, 5, 6]
+        );
+    }
+
+    #[test]
+    fn mixed_v1_through_v5_rotated_chain_verifies() {
+        use crate::{VerifyOutcome, verify_records};
+
+        let k1 = key();
+        let k2 = SigningKey::new("k2", b"fedcba9876543210fedcba9876543210".to_vec())
+            .expect("valid rotated key");
+        let mut records = Vec::new();
+        let mut prev_hash = GENESIS_HASH.to_owned();
+        for schema_version in 1..=AUDIT_SCHEMA_V5 {
+            let signing_key = if schema_version <= 2 { &k1 } else { &k2 };
+            let record = signed_record_for_schema(
+                schema_version,
+                u64::from(schema_version),
+                &prev_hash,
+                signing_key,
+            );
+            prev_hash.clone_from(&record.entry_hash);
+            records.push(record);
+        }
+        assert_eq!(
+            verify_records(&records, &[k1, k2]),
+            VerifyOutcome::Ok { records: 5 }
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn v5_rows_affected_encoding_is_injective_before_hashing(
+            left in any::<Option<u64>>(),
+            right in any::<Option<u64>>(),
+        ) {
+            prop_assume!(left != right);
+            let d = draft();
+            prop_assert_ne!(v5_preimage_for(&d, left), v5_preimage_for(&d, right));
+        }
     }
 
     #[test]
@@ -1451,7 +2101,7 @@ mod tests {
         // Forge the operator-legible field and recompute the (unkeyed) hash so
         // the bare-hash check would pass — but leave the old MAC in place.
         forged.sql_preview = "SELECT 1".to_owned();
-        forged.entry_hash = compute_entry_hash_v4(
+        forged.entry_hash = compute_entry_hash_v5(
             forged.seq,
             &forged.timestamp,
             &forged.agent_identity,
