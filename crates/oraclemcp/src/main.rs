@@ -304,7 +304,7 @@ enum ServiceCliCommand {
     Restart(ServiceMutationCliArgs),
     /// Snapshot the service state directory plus the active config file.
     Backup(ServiceBackupCliArgs),
-    /// Restore a service backup after verifying its audit hash-chain.
+    /// Restore an authenticated service backup after verifying every payload and its audit chain.
     Restore(ServiceRestoreCliArgs),
 }
 
@@ -4881,11 +4881,19 @@ fn run_service_cmd(robot_json: bool, command: ServiceCliCommand) -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            let manifest_signing_key = match audit_verification_keys(None) {
+                Ok(mut keys) => keys.remove(0),
+                Err(message) => {
+                    emit_status_error(robot_json, "ORACLEMCP_AUDIT_KEY_REQUIRED", &message);
+                    return ExitCode::from(2);
+                }
+            };
             ServiceLifecycleCommand::Backup(ServiceBackupOptions {
                 name: args.name,
                 state_dir,
                 config_path,
                 audit_path,
+                manifest_signing_key,
                 output: args.output,
                 yes: args.yes,
                 dry_run: args.dry_run,
@@ -4903,10 +4911,19 @@ fn run_service_cmd(robot_json: bool, command: ServiceCliCommand) -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            let config_path = operator_config_target_path();
+            let audit_path = match service_audit_path_for_backup(&config_path) {
+                Ok(path) => path,
+                Err(message) => {
+                    emit_status_error(robot_json, "ORACLEMCP_CONFIG_INVALID", &message);
+                    return ExitCode::from(2);
+                }
+            };
             ServiceLifecycleCommand::Restore(ServiceRestoreOptions {
                 name: args.name,
                 state_dir,
-                config_path: operator_config_target_path(),
+                config_path,
+                audit_path,
                 backup: args.backup,
                 audit_keys,
                 yes: args.yes,

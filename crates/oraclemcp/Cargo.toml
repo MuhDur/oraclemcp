@@ -71,6 +71,10 @@ clap_complete = "4"
 serde.workspace = true
 serde_json.workspace = true
 getrandom = "0.2"
+cap-std = "4.0.2"
+cap-fs-ext = "4.0.2"
+sha2.workspace = true
+tempfile = "3"
 tracing.workspace = true
 tracing-subscriber = "0.3"
 chrono = { version = "0.4.44", features = ["serde"], optional = true }
