@@ -459,6 +459,10 @@ Server-only TLS is transport encryption, not application authentication —
 `/mcp` still needs per-client credentials, OAuth, mTLS, or `--allow-no-auth`.
 The built-in HS256 verifier requires the resolved
 `[http.oauth].hs256_secret_ref` to contain at least 32 bytes.
+It accepts RFC 9068 JWT access tokens only: `typ` must be `at+jwt` or
+`application/at+jwt` (case-insensitive), and the required `iss`, `sub`, `aud`,
+`exp`, `client_id`, `iat`, and `jti` claims must have valid shapes. A generic
+`typ=JWT`, a missing token type, or an ID token fails as `invalid_token`.
 Adding `[http.tls.client_ca_path]` requires mTLS client certs, but only leaf DER
 SHA-256 fingerprints listed in `[http.mtls].client_fingerprints` become
 `mtls:sha256:<hex>` principals.

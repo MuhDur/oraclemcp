@@ -206,11 +206,15 @@ fn b64url(bytes: &[u8]) -> String {
 }
 
 fn jwt_with_scope(scope: &str) -> String {
-    let header = b64url(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let header = b64url(br#"{"alg":"HS256","typ":"at+jwt"}"#);
     let claims = json!({
         "iss": "https://idp.example",
         "aud": "https://oraclemcp.example/mcp",
         "exp": 9_999_999_999i64,
+        "sub": "golden-subject",
+        "client_id": "golden-client",
+        "iat": 1_000_000_000i64,
+        "jti": "golden-token",
         "scope": scope,
     });
     let payload = b64url(serde_json::to_string(&claims).unwrap().as_bytes());

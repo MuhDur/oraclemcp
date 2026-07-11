@@ -4842,6 +4842,49 @@ fn oauth_enabled_rejects_bad_token_but_keeps_metadata_open() {
         );
     }
 
+    for token in [
+        jwt_with_type_and_claims(Some("JWT"), oauth_claims("oracle:read")),
+        {
+            let mut claims = oauth_claims("oracle:read");
+            claims.as_object_mut().unwrap().remove("sub");
+            jwt_with_type_and_claims(Some("at+jwt"), claims)
+        },
+    ] {
+        let rejected = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "POST",
+                MCP_PATH,
+                [
+                    ("host", "127.0.0.1"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json, text/event-stream"),
+                    ("authorization", &format!("Bearer {token}")),
+                ],
+                init_body().to_string().into_bytes(),
+            ),
+        );
+        assert_eq!(rejected.status, 401);
+        assert_eq!(String::from_utf8_lossy(&rejected.body), "unauthorized");
+        assert!(
+            rejected
+                .header("www-authenticate")
+                .is_some_and(|value| value.ends_with("error=\"invalid_token\"")),
+            "token-class and claim-shape failures must share the opaque invalid_token surface"
+        );
+        assert!(
+            !String::from_utf8_lossy(&rejected.body).contains(&token),
+            "rejected bearer must not be echoed"
+        );
+        for (name, value) in &rejected.headers {
+            assert!(
+                !value.contains(&token),
+                "rejected bearer leaked in response header {name}: {value}"
+            );
+        }
+    }
+
     let metadata = handle_http_request(
         &test_server(),
         &cfg,
@@ -5402,22 +5445,37 @@ impl oraclemcp_auth::SignatureVerifier for AcceptHs256 {
     }
 }
 
-fn jwt_with_scope(scope: &str) -> String {
-    let header = b64url(br#"{"alg":"HS256","typ":"JWT"}"#);
-    let claims = serde_json::json!({
+fn oauth_claims(scope: &str) -> Value {
+    serde_json::json!({
         "iss": "https://idp.example",
         "aud": "https://oraclemcp.example/mcp",
         "exp": 9_999_999_999i64,
+        "sub": "test-subject",
+        "client_id": "test-client",
+        "iat": 1_000_000_000i64,
+        "jti": "test-token",
         "scope": scope,
-    });
+    })
+}
+
+fn jwt_with_type_and_claims(typ: Option<&str>, claims: Value) -> String {
+    let mut header = serde_json::json!({ "alg": "HS256" });
+    if let Some(typ) = typ {
+        header["typ"] = serde_json::json!(typ);
+    }
+    let header = b64url(serde_json::to_string(&header).unwrap().as_bytes());
     let payload = b64url(serde_json::to_string(&claims).unwrap().as_bytes());
     format!("{header}.{payload}.{}", b64url(b"sig"))
+}
+
+fn jwt_with_scope(scope: &str) -> String {
+    jwt_with_type_and_claims(Some("at+jwt"), oauth_claims(scope))
 }
 
 #[test]
 fn oauth_principal_is_stable_across_refresh_only_with_a_canonical_subject() {
     let token = |subject: Option<&str>, generation: u64| {
-        let header = b64url(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let header = b64url(br#"{"alg":"HS256","typ":"at+jwt"}"#);
         let mut claims = serde_json::json!({
             "iss": "https://idp.example",
             "aud": "https://oraclemcp.example/mcp",

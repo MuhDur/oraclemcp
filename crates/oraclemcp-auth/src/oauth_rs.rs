@@ -5,7 +5,8 @@
 //! crypto-edge-agnostic so it is fully unit-testable and the highest-CVE surface
 //! is small:
 //!
-//! - **JWT parse**: `header.payload.signature`, base64url, alg check.
+//! - **JWT parse**: `header.payload.signature`, base64url, alg check, and RFC 9068
+//!   access-token type/claim validation.
 //! - **Signature**: real HS256 (HMAC-SHA256) verification built on `sha2`. This
 //!   is the only algorithm wired in production. Asymmetric algs (RS256/ES256 via
 //!   JWKS) are routed through the [`SignatureVerifier`] boundary so this crate
@@ -22,6 +23,11 @@
 //! Downstream, [`crate::scope`] maps the validated scopes to the operating-level
 //! ceiling (scope can only LOWER it; bead P1-9e).
 
+use std::collections::HashSet;
+use std::fmt;
+
+use serde::de::{IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 #[cfg(test)]
 use sha2::{Digest, Sha256};
@@ -38,6 +44,9 @@ pub enum TokenError {
     /// The token is not a well-formed JWT.
     #[error("malformed token")]
     Malformed,
+    /// The JWT does not explicitly identify itself as an RFC 9068 access token.
+    #[error("unexpected JWT token type")]
+    UnexpectedTokenType,
     /// The token's `alg` is not supported by the configured verifier.
     #[error("unsupported token alg: {0}")]
     UnsupportedAlg(String),
@@ -121,7 +130,11 @@ impl ResourceServerConfig {
         verifier: &dyn SignatureVerifier,
         now_unix: i64,
     ) -> Result<Vec<String>, TokenError> {
-        let (alg, claims, signing_input, signature) = parse_jwt(token)?;
+        let (header, claims, signing_input, signature) = parse_jwt(token)?;
+        if !is_access_token_type(&header.typ) {
+            return Err(TokenError::UnexpectedTokenType);
+        }
+        let alg = header.alg;
         if alg == "none" || alg.is_empty() {
             return Err(TokenError::UnsupportedAlg(alg));
         }
@@ -137,8 +150,21 @@ impl ResourceServerConfig {
         claims: &Value,
         now_unix: i64,
     ) -> Result<Vec<String>, TokenError> {
+        // RFC 9068 required access-token claims. Validate their shapes even
+        // when a caller supplies an already signature-verified claim set.
+        for claim in ["iss", "sub", "client_id", "jti"] {
+            if !claims[claim]
+                .as_str()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                return Err(TokenError::Malformed);
+            }
+        }
+        if !claims["iat"].is_number() {
+            return Err(TokenError::Malformed);
+        }
         // Issuer allowlist (fail-closed: empty allowlist rejects everything).
-        let iss = claims["iss"].as_str().unwrap_or_default();
+        let iss = claims["iss"].as_str().ok_or(TokenError::Malformed)?;
         if !self.allowed_issuers.iter().any(|i| i == iss) {
             return Err(TokenError::UntrustedIssuer(iss.to_owned()));
         }
@@ -202,21 +228,78 @@ pub fn extract_bearer(header: Option<&str>) -> Result<&str, TokenError> {
     }
 }
 
-/// Parse a JWT into (`alg`, claims JSON, signing input bytes, signature bytes).
-fn parse_jwt(token: &str) -> Result<(String, Value, Vec<u8>, Vec<u8>), TokenError> {
+#[derive(Debug)]
+struct JwtHeader {
+    alg: String,
+    typ: String,
+}
+
+impl<'de> Deserialize<'de> for JwtHeader {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct HeaderVisitor;
+
+        impl<'de> Visitor<'de> for HeaderVisitor {
+            type Value = JwtHeader;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JWT protected-header object")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut seen = HashSet::new();
+                let mut alg = None;
+                let mut typ = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    if !seen.insert(key.clone()) {
+                        return Err(serde::de::Error::custom(
+                            "duplicate JWT protected-header parameter",
+                        ));
+                    }
+                    match key.as_str() {
+                        "alg" => alg = Some(map.next_value::<String>()?),
+                        "typ" => typ = Some(map.next_value::<String>()?),
+                        _ => {
+                            let _: IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                Ok(JwtHeader {
+                    alg: alg.unwrap_or_default(),
+                    typ: typ.unwrap_or_default(),
+                })
+            }
+        }
+
+        deserializer.deserialize_map(HeaderVisitor)
+    }
+}
+
+fn is_access_token_type(value: &str) -> bool {
+    value.eq_ignore_ascii_case("at+jwt") || value.eq_ignore_ascii_case("application/at+jwt")
+}
+
+/// Parse a JWT into (header, claims JSON, signing input bytes, signature bytes).
+fn parse_jwt(token: &str) -> Result<(JwtHeader, Value, Vec<u8>, Vec<u8>), TokenError> {
     let mut parts = token.trim().split('.');
     let (h, p, s) = match (parts.next(), parts.next(), parts.next(), parts.next()) {
         (Some(h), Some(p), Some(s), None) => (h, p, s),
         _ => return Err(TokenError::Malformed),
     };
-    let header: Value = serde_json::from_slice(&b64url_decode(h).ok_or(TokenError::Malformed)?)
+    let header: JwtHeader = serde_json::from_slice(&b64url_decode(h).ok_or(TokenError::Malformed)?)
         .map_err(|_| TokenError::Malformed)?;
     let claims: Value = serde_json::from_slice(&b64url_decode(p).ok_or(TokenError::Malformed)?)
         .map_err(|_| TokenError::Malformed)?;
     let signature = b64url_decode(s).ok_or(TokenError::Malformed)?;
-    let alg = header["alg"].as_str().unwrap_or_default().to_owned();
     let signing_input = format!("{h}.{p}").into_bytes();
-    Ok((alg, claims, signing_input, signature))
+    Ok((header, claims, signing_input, signature))
 }
 
 fn audiences(claims: &Value) -> Vec<String> {
@@ -343,8 +426,15 @@ mod tests {
     const SECRET: &[u8] = b"0123456789abcdef0123456789abcdef";
 
     fn mint(claims: Value) -> String {
-        let header = json!({ "alg": "HS256", "typ": "JWT" });
-        let h = b64url_encode(serde_json::to_string(&header).unwrap().as_bytes());
+        mint_with_header(json!({ "alg": "HS256", "typ": "at+jwt" }), claims)
+    }
+
+    fn mint_with_header(header: Value, claims: Value) -> String {
+        mint_with_raw_header(&serde_json::to_string(&header).unwrap(), claims)
+    }
+
+    fn mint_with_raw_header(header: &str, claims: Value) -> String {
+        let h = b64url_encode(header.as_bytes());
         let p = b64url_encode(serde_json::to_string(&claims).unwrap().as_bytes());
         let signing_input = format!("{h}.{p}");
         let sig = b64url_encode(&hmac_sha256(SECRET, signing_input.as_bytes()));
@@ -379,6 +469,10 @@ mod tests {
             "aud": ["https://oraclemcp.example/mcp"],
             "exp": 2_000_000_000i64,
             "nbf": 1_000_000_000i64,
+            "sub": "subject-123",
+            "client_id": "client-123",
+            "iat": 1_000_000_000i64,
+            "jti": "token-123",
             "scope": "openid oracle:read oracle:execute",
         })
     }
@@ -402,6 +496,115 @@ mod tests {
             .expect("valid");
         assert!(scopes.contains(&"oracle:read".to_owned()));
         assert!(scopes.contains(&"oracle:execute".to_owned()));
+    }
+
+    #[test]
+    fn rfc9068_access_token_types_are_case_insensitive() {
+        for typ in [
+            "at+jwt",
+            "AT+JWT",
+            "application/at+jwt",
+            "Application/AT+Jwt",
+        ] {
+            let token = mint_with_header(json!({ "alg": "HS256", "typ": typ }), good_claims());
+            cfg()
+                .validate(&token, &verifier(), 1_500_000_000)
+                .expect("RFC 9068 access-token type must pass");
+        }
+    }
+
+    #[test]
+    fn generic_missing_and_id_token_types_are_rejected() {
+        for header in [
+            json!({ "alg": "HS256", "typ": "JWT" }),
+            json!({ "alg": "HS256" }),
+            json!({ "alg": "HS256", "typ": "id+jwt" }),
+            json!({ "alg": "HS256", "typ": "application/id+jwt" }),
+            json!({ "alg": "HS256", "typ": " at+jwt" }),
+        ] {
+            let token = mint_with_header(header, good_claims());
+            assert_eq!(
+                cfg().validate(&token, &verifier(), 1_500_000_000),
+                Err(TokenError::UnexpectedTokenType)
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_and_duplicate_protected_headers_fail_closed() {
+        let non_string_type =
+            mint_with_header(json!({ "alg": "HS256", "typ": ["at+jwt"] }), good_claims());
+        assert_eq!(
+            cfg().validate(&non_string_type, &verifier(), 1_500_000_000),
+            Err(TokenError::Malformed)
+        );
+
+        for header in [
+            r#"{"alg":"HS256","typ":"at+jwt","typ":"JWT"}"#,
+            r#"{"alg":"HS256","typ":"JWT","typ":"at+jwt"}"#,
+            r#"{"alg":"HS256","alg":"HS256","typ":"at+jwt"}"#,
+        ] {
+            let token = mint_with_raw_header(header, good_claims());
+            assert_eq!(
+                cfg().validate(&token, &verifier(), 1_500_000_000),
+                Err(TokenError::Malformed)
+            );
+        }
+    }
+
+    #[test]
+    fn required_rfc9068_claims_must_have_valid_shapes() {
+        for claim in ["iss", "sub", "client_id", "iat", "jti"] {
+            let mut missing = good_claims();
+            missing.as_object_mut().unwrap().remove(claim);
+            assert_eq!(
+                cfg().validate(&mint(missing), &verifier(), 1_500_000_000),
+                Err(TokenError::Malformed),
+                "missing {claim}"
+            );
+        }
+
+        for (claim, invalid) in [
+            ("iss", json!("")),
+            ("sub", json!("  ")),
+            ("client_id", json!(null)),
+            ("iat", json!("1000000000")),
+            ("jti", json!([])),
+        ] {
+            let mut malformed = good_claims();
+            malformed[claim] = invalid;
+            assert_eq!(
+                cfg().validate(&mint(malformed), &verifier(), 1_500_000_000),
+                Err(TokenError::Malformed),
+                "malformed {claim}"
+            );
+        }
+
+        let mut missing_exp = good_claims();
+        missing_exp.as_object_mut().unwrap().remove("exp");
+        assert_eq!(
+            cfg().validate(&mint(missing_exp), &verifier(), 1_500_000_000),
+            Err(TokenError::Malformed)
+        );
+
+        let mut missing_aud = good_claims();
+        missing_aud.as_object_mut().unwrap().remove("aud");
+        assert_eq!(
+            cfg().validate(&mint(missing_aud), &verifier(), 1_500_000_000),
+            Err(TokenError::AudienceMismatch)
+        );
+    }
+
+    #[test]
+    fn token_type_is_rejected_before_claim_validation() {
+        let token = mint_with_header(
+            json!({ "alg": "HS256", "typ": "JWT" }),
+            json!({ "iss": "https://idp.example" }),
+        );
+        assert_eq!(
+            cfg().validate(&token, &verifier(), 1_500_000_000),
+            Err(TokenError::UnexpectedTokenType)
+        );
     }
 
     #[test]
@@ -471,7 +674,7 @@ mod tests {
     #[test]
     fn alg_none_is_rejected() {
         // Forge an alg=none token (no signature).
-        let header = json!({ "alg": "none", "typ": "JWT" });
+        let header = json!({ "alg": "none", "typ": "at+jwt" });
         let h = b64url_encode(serde_json::to_string(&header).unwrap().as_bytes());
         let p = b64url_encode(serde_json::to_string(&good_claims()).unwrap().as_bytes());
         let token = format!("{h}.{p}.");

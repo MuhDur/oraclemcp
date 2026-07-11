@@ -203,16 +203,18 @@ fn jwt_with_scope(scope: &str) -> String {
 }
 
 fn jwt_with_scope_and_subject(scope: &str, subject: Option<&str>) -> String {
-    let header = b64url(br#"{"alg":"HS256","typ":"JWT"}"#);
-    let mut claims = json!({
+    let subject = subject.unwrap_or("default-test-subject");
+    let header = b64url(br#"{"alg":"HS256","typ":"at+jwt"}"#);
+    let claims = json!({
         "iss": "https://idp.example",
         "aud": "https://oraclemcp.example/mcp",
         "exp": 9_999_999_999i64,
+        "sub": subject,
+        "client_id": "oraclemcp-e2e-client",
+        "iat": 1_000_000_000i64,
+        "jti": format!("{subject}:{scope}"),
         "scope": scope,
     });
-    if let Some(subject) = subject {
-        claims["sub"] = json!(subject);
-    }
     let payload = b64url(serde_json::to_string(&claims).unwrap().as_bytes());
     format!("{header}.{payload}.{}", b64url(b"sig"))
 }

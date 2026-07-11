@@ -76,7 +76,9 @@ dashboard_workbench = false
 # plaintext requests never receive privileged browser cookies. Dashboard POSTs
 # require CSRF + action tickets.
 
-# [http.oauth] — OAuth 2.1 resource-server protection for /mcp. Optional;
+# [http.oauth] — OAuth 2.1 resource-server protection for /mcp. JWT bearers must
+# follow RFC 9068: typ=at+jwt (or application/at+jwt) plus the required access-
+# token claims. Generic JWTs and ID tokens are rejected. Optional;
 # omit for an unauthenticated dev listener (which then requires --allow-no-auth).
 [http.oauth]
 # Canonical resource/audience expected in the JWT `aud`. Required when [http.oauth] is present.

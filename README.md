@@ -461,6 +461,11 @@ request's effective operating ceiling monotonically. `oracle:read` caps the
 request at `READ_ONLY`, `oracle:write`/`oracle:execute` at `READ_WRITE`,
 `oracle:ddl` at `DDL`, and `oracle:admin` at `ADMIN`; none of them can raise a
 profile above its `max_level`, and protected profiles remain `READ_ONLY`.
+JWT bearer tokens must use the RFC 9068 access-token profile: the protected
+`typ` header is `at+jwt` (or `application/at+jwt`), and `iss`, `sub`, `aud`,
+`exp`, `client_id`, `iat`, and `jti` have their required access-token shapes.
+Generic JWTs and OpenID Connect ID tokens are rejected; there is no implicit
+generic-JWT compatibility mode.
 
 Native TLS uses rustls when `[http.tls]` or `--tls-cert` / `--tls-key` are
 configured. Adding `[http.tls.client_ca_path]` or `--mtls-client-ca` requires
