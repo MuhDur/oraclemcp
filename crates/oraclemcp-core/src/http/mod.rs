@@ -634,7 +634,7 @@ impl OperatorEventStore {
         stream.push(HttpBufferedEvent {
             id: event_id,
             event: Some("operator.snapshot"),
-            data: event,
+            data: Arc::new(event),
         });
         if stream.len() > MAX_OPERATOR_EVENTS_PER_STREAM {
             let overflow = stream.len() - MAX_OPERATOR_EVENTS_PER_STREAM;
@@ -1014,6 +1014,9 @@ impl HttpSessionStore {
 }
 
 const MAX_BUFFERED_MCP_EVENTS_PER_SESSION: usize = 128;
+const MAX_BUFFERED_MCP_EVENT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_BUFFERED_MCP_BYTES_PER_SESSION: usize = 16 * 1024 * 1024;
+const MAX_BUFFERED_MCP_BYTES_GLOBAL: usize = 64 * 1024 * 1024;
 
 /// Stateful Streamable HTTP result buffer.
 ///
@@ -1025,18 +1028,76 @@ const MAX_BUFFERED_MCP_EVENTS_PER_SESSION: usize = 128;
 pub struct HttpResultStore {
     state: Mutex<HttpResultStoreState>,
     changed: Condvar,
+    limits: HttpResultStoreLimits,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HttpResultStoreLimits {
+    max_events_per_session: usize,
+    max_event_bytes: usize,
+    max_session_bytes: usize,
+    max_global_bytes: usize,
+}
+
+impl Default for HttpResultStoreLimits {
+    fn default() -> Self {
+        Self {
+            max_events_per_session: MAX_BUFFERED_MCP_EVENTS_PER_SESSION,
+            max_event_bytes: MAX_BUFFERED_MCP_EVENT_BYTES,
+            max_session_bytes: MAX_BUFFERED_MCP_BYTES_PER_SESSION,
+            max_global_bytes: MAX_BUFFERED_MCP_BYTES_GLOBAL,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 struct HttpResultStoreState {
-    sessions: HashMap<String, Vec<HttpBufferedEvent>>,
+    sessions: HashMap<String, HttpResultSession>,
+    retained_bytes: usize,
+    next_completion_ordinal: u64,
+}
+
+#[derive(Debug, Default)]
+struct HttpResultSession {
+    events: Vec<HttpRetainedEvent>,
+    retained_bytes: usize,
+    next_sequence: u64,
+    dropped_through_sequence: u64,
+}
+
+#[derive(Debug)]
+struct HttpRetainedEvent {
+    event: HttpBufferedEvent,
+    retained_bytes: usize,
+    completion_ordinal: u64,
+}
+
+impl HttpResultSession {
+    fn evict_oldest(&mut self) -> Option<usize> {
+        if self.events.is_empty() {
+            return None;
+        }
+        let evicted = self.events.remove(0);
+        if let Some(sequence) = stream_event_sequence(&evicted.event.id) {
+            self.dropped_through_sequence = self.dropped_through_sequence.max(sequence);
+        }
+        self.retained_bytes = self.retained_bytes.saturating_sub(evicted.retained_bytes);
+        Some(evicted.retained_bytes)
+    }
+
+    fn buffered_events(&self) -> Vec<HttpBufferedEvent> {
+        self.events
+            .iter()
+            .map(|event| event.event.clone())
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HttpBufferedEvent {
     id: String,
     event: Option<&'static str>,
-    data: Value,
+    data: Arc<Value>,
 }
 
 impl HttpBufferedEvent {
@@ -1044,7 +1105,7 @@ impl HttpBufferedEvent {
         Self {
             id,
             event: None,
-            data,
+            data: Arc::new(data),
         }
     }
 
@@ -1052,14 +1113,40 @@ impl HttpBufferedEvent {
         Self {
             id,
             event: Some("stream-gap"),
-            data: json!({
+            data: Arc::new(json!({
                 "type": "stream_gap",
                 "message": "one or more Streamable HTTP events were dropped before this resume point",
                 "requested_last_event_id": requested_cursor.unwrap_or(""),
                 "oldest_event_id": oldest_event_id,
                 "next_step": "continue from the retained events in this stream; restart the MCP session if the missing range is required",
-            }),
+            })),
         }
+    }
+
+    fn oversized(id: String, response_bytes: usize, max_replay_event_bytes: usize) -> Self {
+        Self {
+            id,
+            event: Some("stream-gap"),
+            data: Arc::new(json!({
+                "type": "stream_gap",
+                "reason": "response_too_large_for_replay",
+                "message": "the MCP response was delivered to the original POST caller but exceeded the replay entry byte budget and was not retained",
+                "response_bytes": response_bytes,
+                "max_replay_event_bytes": max_replay_event_bytes,
+                "next_step": "repeat the request if the response is still required; use a bounded export for large durable result delivery",
+            })),
+        }
+    }
+
+    fn retained_bytes(&self) -> usize {
+        let data_bytes = serde_json::to_vec(self.data.as_ref())
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX);
+        self.id
+            .len()
+            .saturating_add(self.event.map(str::len).unwrap_or_default())
+            .saturating_add(data_bytes)
+            .saturating_add(32)
     }
 }
 
@@ -1067,6 +1154,15 @@ impl HttpResultStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(test)]
+    fn with_limits_for_test(limits: HttpResultStoreLimits) -> Self {
+        Self {
+            state: Mutex::new(HttpResultStoreState::default()),
+            changed: Condvar::new(),
+            limits,
+        }
     }
 
     fn ensure_session(&self, session_id: &str) {
@@ -1079,17 +1175,72 @@ impl HttpResultStore {
 
     fn append_response(&self, session_id: &str, data: Value) -> String {
         let mut state = self.state.lock();
-        let events = state.sessions.entry(session_id.to_owned()).or_default();
-        let next_seq = events
-            .last()
-            .and_then(|event| stream_event_sequence(&event.id))
-            .unwrap_or(0)
-            .saturating_add(1);
+        let completion_ordinal = state.next_completion_ordinal;
+        state.next_completion_ordinal = state.next_completion_ordinal.saturating_add(1);
+        let next_seq = {
+            let session = state.sessions.entry(session_id.to_owned()).or_default();
+            session.next_sequence = session.next_sequence.saturating_add(1);
+            session.next_sequence
+        };
         let id = format!("{next_seq}/0");
-        events.push(HttpBufferedEvent::data(id.clone(), data));
-        if events.len() > MAX_BUFFERED_MCP_EVENTS_PER_SESSION {
-            let overflow = events.len() - MAX_BUFFERED_MCP_EVENTS_PER_SESSION;
-            events.drain(..overflow);
+        let event = HttpBufferedEvent::data(id.clone(), data);
+        let response_bytes = event.retained_bytes();
+        let event = if response_bytes > self.limits.max_event_bytes {
+            HttpBufferedEvent::oversized(id.clone(), response_bytes, self.limits.max_event_bytes)
+        } else {
+            event
+        };
+        let retained_bytes = event.retained_bytes();
+        let session_evicted_bytes = {
+            let session = state
+                .sessions
+                .get_mut(session_id)
+                .expect("replay session was inserted under the same store lock");
+            session.retained_bytes = session.retained_bytes.saturating_add(retained_bytes);
+            session.events.push(HttpRetainedEvent {
+                event,
+                retained_bytes,
+                completion_ordinal,
+            });
+
+            let mut evicted_bytes = 0usize;
+            while session.events.len() > self.limits.max_events_per_session
+                || session.retained_bytes > self.limits.max_session_bytes
+            {
+                let Some(evicted) = session.evict_oldest() else {
+                    break;
+                };
+                evicted_bytes = evicted_bytes.saturating_add(evicted);
+            }
+            evicted_bytes
+        };
+        state.retained_bytes = state
+            .retained_bytes
+            .saturating_add(retained_bytes)
+            .saturating_sub(session_evicted_bytes);
+        while state.retained_bytes > self.limits.max_global_bytes {
+            let oldest_session = state
+                .sessions
+                .iter()
+                .filter_map(|(session_id, session)| {
+                    session
+                        .events
+                        .first()
+                        .map(|event| (session_id.clone(), event.completion_ordinal))
+                })
+                .min_by_key(|(_, ordinal)| *ordinal)
+                .map(|(session_id, _)| session_id);
+            let Some(oldest_session) = oldest_session else {
+                break;
+            };
+            let session = state
+                .sessions
+                .get_mut(&oldest_session)
+                .expect("selected replay session remains present under the store lock");
+            let evicted_bytes = session
+                .evict_oldest()
+                .expect("selected replay session has an oldest event");
+            state.retained_bytes = state.retained_bytes.saturating_sub(evicted_bytes);
         }
         drop(state);
         self.changed.notify_all();
@@ -1104,10 +1255,17 @@ impl HttpResultStore {
     ) -> Result<Vec<HttpBufferedEvent>, HttpResponse> {
         let after_seq = parse_stream_cursor(cursor)?;
         let state = self.state.lock();
-        let Some(events) = state.sessions.get(session_id) else {
+        let Some(session) = state.sessions.get(session_id) else {
             return Ok(Vec::new());
         };
-        events_after_sequence(events, after_seq, cursor, gap_on_expired_cursor)
+        let events = session.buffered_events();
+        events_after_sequence(
+            &events,
+            session.dropped_through_sequence,
+            after_seq,
+            cursor,
+            gap_on_expired_cursor,
+        )
     }
 
     fn wait_events_after(
@@ -1118,11 +1276,18 @@ impl HttpResultStore {
     ) -> HttpResultWait {
         let mut state = self.state.lock();
         loop {
-            let Some(events) = state.sessions.get(session_id) else {
+            let Some(session) = state.sessions.get(session_id) else {
                 return HttpResultWait::Closed;
             };
+            let events = session.buffered_events();
             let cursor = format!("{after_seq}/0");
-            match events_after_sequence(events, after_seq, Some(&cursor), true) {
+            match events_after_sequence(
+                &events,
+                session.dropped_through_sequence,
+                after_seq,
+                Some(&cursor),
+                true,
+            ) {
                 Ok(events) if !events.is_empty() => return HttpResultWait::Events(events),
                 Ok(_) => {}
                 Err(_) => return HttpResultWait::Closed,
@@ -1136,9 +1301,12 @@ impl HttpResultStore {
 
     fn remove_session(&self, session_id: &str) {
         let mut state = self.state.lock();
-        let removed = state.sessions.remove(session_id).is_some();
+        let removed = state.sessions.remove(session_id);
+        if let Some(session) = &removed {
+            state.retained_bytes = state.retained_bytes.saturating_sub(session.retained_bytes);
+        }
         drop(state);
-        if removed {
+        if removed.is_some() {
             self.changed.notify_all();
         }
     }
@@ -1147,9 +1315,22 @@ impl HttpResultStore {
         let mut state = self.state.lock();
         if !state.sessions.is_empty() {
             state.sessions.clear();
+            state.retained_bytes = 0;
             drop(state);
             self.changed.notify_all();
         }
+    }
+
+    #[cfg(test)]
+    fn retained_bytes_for_test(&self) -> (usize, Vec<(String, usize)>) {
+        let state = self.state.lock();
+        let mut sessions = state
+            .sessions
+            .iter()
+            .map(|(session_id, session)| (session_id.clone(), session.retained_bytes))
+            .collect::<Vec<_>>();
+        sessions.sort_by(|a, b| a.0.cmp(&b.0));
+        (state.retained_bytes, sessions)
     }
 }
 
@@ -4654,7 +4835,7 @@ fn operator_events_after_sequence(
                 .unwrap_or("operator/0")
                 .to_owned(),
             event: Some("operator.stream_gap"),
-            data: gap_event,
+            data: Arc::new(gap_event),
         });
         resumed.extend(events.iter().cloned());
         return Ok(resumed);
@@ -5759,14 +5940,21 @@ fn parse_stream_cursor(cursor: Option<&str>) -> Result<u64, HttpResponse> {
 
 fn events_after_sequence(
     events: &[HttpBufferedEvent],
+    dropped_through_sequence: u64,
     after_seq: u64,
     cursor: Option<&str>,
     gap_on_expired_cursor: bool,
 ) -> Result<Vec<HttpBufferedEvent>, HttpResponse> {
-    if let Some(oldest_event) = events.first()
-        && let Some(oldest_seq) = stream_event_sequence(&oldest_event.id)
-        && after_seq < oldest_seq.saturating_sub(1)
-    {
+    let oldest_retained_sequence = events
+        .first()
+        .and_then(|event| stream_event_sequence(&event.id));
+    let cursor_expired = after_seq < dropped_through_sequence
+        || oldest_retained_sequence.is_some_and(|oldest| after_seq < oldest.saturating_sub(1));
+    if cursor_expired {
+        let oldest_event_id = events.first().map_or_else(
+            || format!("{}/0", dropped_through_sequence.saturating_add(1)),
+            |event| event.id.clone(),
+        );
         if !gap_on_expired_cursor {
             return Err(json_response(
                 410,
@@ -5774,16 +5962,17 @@ fn events_after_sequence(
                     "error": "stream_cursor_expired",
                     "message": "requested Streamable HTTP cursor is older than the retained event buffer",
                     "cursor": cursor.unwrap_or(""),
-                    "oldest_event_id": oldest_event.id,
+                    "oldest_event_id": oldest_event_id,
+                    "dropped_through_event_id": format!("{dropped_through_sequence}/0"),
                     "next_step": "restart the MCP session; the missing event range is no longer available for replay",
                 }),
             ));
         }
         let mut resumed = Vec::with_capacity(events.len().saturating_add(1));
         resumed.push(HttpBufferedEvent::gap(
-            format!("{}/gap", oldest_seq.saturating_sub(1)),
+            format!("{dropped_through_sequence}/gap"),
             cursor,
-            &oldest_event.id,
+            &oldest_event_id,
         ));
         resumed.extend(events.iter().cloned());
         return Ok(resumed);

@@ -3737,6 +3737,122 @@ fn stateful_get_replays_buffered_lane_results_by_cursor() {
 }
 
 #[test]
+fn replay_store_replaces_oversized_responses_with_a_bounded_honest_gap() {
+    let limits = HttpResultStoreLimits {
+        max_events_per_session: 8,
+        max_event_bytes: 256,
+        max_session_bytes: 2_048,
+        max_global_bytes: 4_096,
+    };
+    let result_store = HttpResultStore::with_limits_for_test(limits);
+    let session_id = "oversized-replay-session";
+    result_store.ensure_session(session_id);
+
+    let secret_payload = "not-retained-".repeat(128);
+    let id =
+        result_store.append_response(session_id, serde_json::json!({ "payload": secret_payload }));
+    assert_eq!(id, "1/0");
+    let (total_bytes, sessions) = result_store.retained_bytes_for_test();
+    assert!(total_bytes <= limits.max_global_bytes, "{total_bytes}");
+    assert_eq!(sessions.len(), 1);
+    assert!(sessions[0].1 <= limits.max_session_bytes);
+
+    let events = result_store
+        .events_after(session_id, Some("0"), true)
+        .expect("bounded replay marker");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, "1/0");
+    assert_eq!(events[0].event, Some("stream-gap"));
+    assert_eq!(
+        events[0].data["reason"],
+        serde_json::json!("response_too_large_for_replay")
+    );
+    assert_eq!(events[0].data["max_replay_event_bytes"], 256);
+    assert!(
+        !events[0].data.to_string().contains("not-retained-"),
+        "the replay marker must not retain the oversized response body"
+    );
+}
+
+#[test]
+fn replay_store_enforces_session_and_global_byte_caps_with_oldest_eviction() {
+    let limits = HttpResultStoreLimits {
+        max_events_per_session: 128,
+        max_event_bytes: 512,
+        max_session_bytes: 500,
+        max_global_bytes: 700,
+    };
+    let result_store = Arc::new(HttpResultStore::with_limits_for_test(limits));
+    for sequence in 0..4 {
+        result_store.append_response(
+            "session-a",
+            serde_json::json!({ "sequence": sequence, "payload": "a".repeat(180) }),
+        );
+    }
+    for sequence in 0..3 {
+        result_store.append_response(
+            "session-b",
+            serde_json::json!({ "sequence": sequence, "payload": "b".repeat(180) }),
+        );
+    }
+
+    let (total_bytes, sessions) = result_store.retained_bytes_for_test();
+    assert!(total_bytes <= limits.max_global_bytes, "{total_bytes}");
+    assert_eq!(
+        total_bytes,
+        sessions.iter().map(|(_, bytes)| *bytes).sum::<usize>(),
+        "global accounting equals the exact sum of resident sessions"
+    );
+    assert!(
+        sessions
+            .iter()
+            .all(|(_, bytes)| *bytes <= limits.max_session_bytes),
+        "per-session byte ceiling violated: {sessions:?}"
+    );
+    let expired = result_store
+        .events_after("session-a", Some("0"), false)
+        .expect_err("the oldest globally evicted cursor must be explicit");
+    assert_eq!(expired.status, 410);
+    let gap = result_store
+        .events_after("session-a", Some("0"), true)
+        .expect("last-event-id resume gets a typed gap");
+    assert_eq!(gap[0].event, Some("stream-gap"));
+
+    let concurrent = Arc::clone(&result_store);
+    let workers = (0..8)
+        .map(|worker| {
+            let store = Arc::clone(&concurrent);
+            std::thread::spawn(move || {
+                let session = format!("concurrent-{worker}");
+                for sequence in 0..20 {
+                    store.append_response(
+                        &session,
+                        serde_json::json!({ "sequence": sequence, "payload": "c".repeat(80) }),
+                    );
+                }
+                if worker % 2 == 0 {
+                    store.remove_session(&session);
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().expect("concurrent replay worker");
+    }
+    let (total_bytes, sessions) = result_store.retained_bytes_for_test();
+    assert!(total_bytes <= limits.max_global_bytes, "{total_bytes}");
+    assert_eq!(
+        total_bytes,
+        sessions.iter().map(|(_, bytes)| *bytes).sum::<usize>()
+    );
+    assert!(
+        sessions
+            .iter()
+            .all(|(_, bytes)| *bytes <= limits.max_session_bytes)
+    );
+}
+
+#[test]
 fn stateful_get_reports_typed_expiry_when_cursor_falls_out_of_ring() {
     let session_store = Arc::new(HttpSessionStore::default());
     let result_store = Arc::new(HttpResultStore::new());
