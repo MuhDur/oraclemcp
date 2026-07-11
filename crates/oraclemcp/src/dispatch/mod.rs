@@ -5636,15 +5636,9 @@ async fn compile_object_inner(
         owner_and_name_arg(cx, conn, args.owner, object_name, "name").await?;
     let object_type = normalize_compile_type_for_wire(&args.object_type);
     let warnings = args.warnings || tool_name == "compile_with_warnings";
-    let mut statements =
-        compile_object_statements(&object_type, &owner, &object_name, args.plscope)
+    let statements =
+        compile_object_statements(&object_type, &owner, &object_name, args.plscope, warnings)
             .map_err(DbError::into_envelope)?;
-    if warnings {
-        statements.insert(
-            0,
-            "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'".to_owned(),
-        );
-    }
     let compile_danger = classify_compile_statements(&statements)?;
     let gate = session.evaluate(Some(OperatingLevel::Ddl));
     let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);

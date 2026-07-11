@@ -491,7 +491,7 @@ expression: rendered
             "type": "string"
           },
           "plscope": {
-            "description": "Enable PL/Scope identifier and statement collection before compiling. Default false.",
+            "description": "Apply PL/Scope identifier and statement collection to this PL/SQL unit only. Invalid for VIEW. Default false.",
             "type": "boolean"
           },
           "timeout_seconds": {
@@ -505,7 +505,7 @@ expression: rendered
             "type": "string"
           },
           "warnings": {
-            "description": "Enable PLSQL_WARNINGS='ENABLE:ALL' before compiling. Default false.",
+            "description": "Apply PLSQL_WARNINGS='ENABLE:ALL' to this PL/SQL unit only. Invalid for VIEW. Default false.",
             "type": "boolean"
           }
         },
@@ -1998,7 +1998,7 @@ expression: rendered
             "type": "string"
           },
           "plscope": {
-            "description": "Enable PL/Scope identifier and statement collection before compiling. Default false.",
+            "description": "Apply PL/Scope identifier and statement collection to this PL/SQL unit only. Invalid for VIEW. Default false.",
             "type": "boolean"
           },
           "timeout_seconds": {
@@ -2012,7 +2012,7 @@ expression: rendered
             "type": "string"
           },
           "warnings": {
-            "description": "Enable PLSQL_WARNINGS='ENABLE:ALL' before compiling. Default false.",
+            "description": "Apply PLSQL_WARNINGS='ENABLE:ALL' to this PL/SQL unit only. Invalid for VIEW. Default false.",
             "type": "boolean"
           }
         },
@@ -2033,7 +2033,7 @@ expression: rendered
       "name": "compile_with_warnings",
       "title": "Compile With Warnings",
       "tier": "foundation_live_db",
-      "summary": "Compatibility alias for oracle_compile_object with warnings=true.",
+      "summary": "Compatibility alias for oracle_compile_object with warnings=true. PL/SQL units only; VIEW is invalid.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -2066,7 +2066,7 @@ expression: rendered
             "type": "string"
           },
           "plscope": {
-            "description": "Enable PL/Scope identifier and statement collection before compiling. Default false.",
+            "description": "Apply PL/Scope identifier and statement collection to this PL/SQL unit only. Invalid for VIEW. Default false.",
             "type": "boolean"
           },
           "timeout_seconds": {

@@ -432,8 +432,8 @@ pub fn tool_registry() -> ToolRegistry {
                     "owner": { "type": "string", "description": "Optional schema owner. Defaults to the current schema when available." },
                     "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
                     "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." },
-                    "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
-                    "warnings": { "type": "boolean", "description": "Enable PLSQL_WARNINGS='ENABLE:ALL' before compiling. Default false." },
+                    "plscope": { "type": "boolean", "description": "Apply PL/Scope identifier and statement collection to this PL/SQL unit only. Invalid for VIEW. Default false." },
+                    "warnings": { "type": "boolean", "description": "Apply PLSQL_WARNINGS='ENABLE:ALL' to this PL/SQL unit only. Invalid for VIEW. Default false." },
                     "enable_warnings": { "type": "boolean", "description": "Alias for warnings." },
                     "execute": { "type": "boolean", "description": "Default false returns a preview and confirmation token. Set true only with confirm to run the compile statements." }
                 }),
@@ -952,8 +952,8 @@ pub fn tool_registry() -> ToolRegistry {
                     "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
                     "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
                     "object_name": { "type": "string", "description": "Alias for name." },
-                    "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
-                    "warnings": { "type": "boolean", "description": "Enable PLSQL_WARNINGS='ENABLE:ALL' before compiling. Default false." },
+                    "plscope": { "type": "boolean", "description": "Apply PL/Scope identifier and statement collection to this PL/SQL unit only. Invalid for VIEW. Default false." },
+                    "warnings": { "type": "boolean", "description": "Apply PLSQL_WARNINGS='ENABLE:ALL' to this PL/SQL unit only. Invalid for VIEW. Default false." },
                     "enable_warnings": { "type": "boolean", "description": "Alias for warnings." },
                     "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to compile." }
                 }),
@@ -971,7 +971,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "compile_with_warnings",
             ToolTier::FoundationLiveDb,
-            "Compatibility alias for oracle_compile_object with warnings=true.",
+            "Compatibility alias for oracle_compile_object with warnings=true. PL/SQL units only; VIEW is invalid.",
         )
         .with_input_schema(object_schema(
             props_with(
@@ -980,7 +980,7 @@ pub fn tool_registry() -> ToolRegistry {
                     "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
                     "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
                     "object_name": { "type": "string", "description": "Alias for name." },
-                    "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
+                    "plscope": { "type": "boolean", "description": "Apply PL/Scope identifier and statement collection to this PL/SQL unit only. Invalid for VIEW. Default false." },
                     "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to compile." }
                 }),
                 &[

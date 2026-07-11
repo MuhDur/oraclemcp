@@ -57,18 +57,20 @@ fn normalize_compile_object_type(object_type: &str) -> String {
     object_type.trim().replace('_', " ").to_ascii_uppercase()
 }
 
-/// The DDL statements to compile `owner.name`. `object_type` is
+/// The DDL statement to compile `owner.name`. `object_type` is
 /// `PACKAGE`/`PACKAGE BODY`/`PROCEDURE`/`FUNCTION`/`TRIGGER`/`TYPE`/`TYPE BODY`/
 /// `VIEW`; underscores are accepted for MCP-friendly spellings such as
-/// `PACKAGE_BODY`. When `plscope` is true, the returned statements first enable
-/// PL/Scope identifier + statement collection for the current session. DDL-level
-/// (step-up-gated). Returns an error if any name is not a simple identifier
-/// (injection defense — object names are not bindable).
+/// `PACKAGE_BODY`. PL/Scope and warning options are applied as compiler
+/// parameters to this unit only; they never mutate the surrounding Oracle
+/// session. Both options are invalid for views, which are not PL/SQL units.
+/// DDL-level (step-up-gated). Returns an error if any name is not a simple
+/// identifier (injection defense — object names are not bindable).
 pub fn compile_object_statements(
     object_type: &str,
     owner: &str,
     name: &str,
     plscope: bool,
+    warnings: bool,
 ) -> Result<Vec<String>, DbError> {
     if !is_simple_ident(owner) || !is_simple_ident(name) {
         return Err(DbError::Execute(format!(
@@ -76,7 +78,13 @@ pub fn compile_object_statements(
         )));
     }
     let ty = normalize_compile_object_type(object_type);
-    let compile = match ty.as_str() {
+    if ty == "VIEW" && (plscope || warnings) {
+        return Err(DbError::UnsupportedFeature(
+            "PL/Scope and PL/SQL warning compiler options apply only to PL/SQL units, not VIEW"
+                .to_owned(),
+        ));
+    }
+    let mut compile = match ty.as_str() {
         "PACKAGE BODY" => format!("ALTER PACKAGE {owner}.{name} COMPILE BODY"),
         "TYPE BODY" => format!("ALTER TYPE {owner}.{name} COMPILE BODY"),
         "PACKAGE" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "TYPE" | "VIEW" => {
@@ -84,18 +92,22 @@ pub fn compile_object_statements(
         }
         other => {
             return Err(DbError::Execute(format!(
-                "unsupported object type for PL/Scope recompile: {other}"
+                "unsupported object type for compile: {other}"
             )));
         }
     };
-    let mut statements = Vec::new();
-    if plscope {
-        statements.push(
-            "ALTER SESSION SET PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL, STATEMENTS:ALL'".to_owned(),
-        );
+    if warnings {
+        compile.push_str(" PLSQL_WARNINGS = 'ENABLE:ALL'");
     }
-    statements.push(compile);
-    Ok(statements)
+    if plscope {
+        compile.push_str(" PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL, STATEMENTS:ALL'");
+    }
+    if warnings || plscope {
+        // Preserve every stored compiler setting the caller did not explicitly
+        // request instead of reacquiring unrelated values from the session.
+        compile.push_str(" REUSE SETTINGS");
+    }
+    Ok(vec![compile])
 }
 
 /// The DDL to recompile `owner.name` with PL/Scope identifier + statement
@@ -105,7 +117,7 @@ pub fn recompile_with_plscope_statements(
     owner: &str,
     name: &str,
 ) -> Result<Vec<String>, DbError> {
-    compile_object_statements(object_type, owner, name, true)
+    compile_object_statements(object_type, owner, name, true, false)
 }
 
 fn row_i64(row: &crate::types::OracleRow, col: &str) -> i64 {
@@ -206,29 +218,59 @@ mod tests {
     use crate::types::{OracleBackend, OracleCell, OracleConnectionInfo, OracleRow};
 
     #[test]
-    fn recompile_emits_plscope_settings_and_compile() {
+    fn recompile_embeds_plscope_in_one_unit_local_compile() {
         let s = recompile_with_plscope_statements("PACKAGE", "HR", "EMP_API").unwrap();
-        assert_eq!(s.len(), 2);
-        assert!(s[0].contains("PLSCOPE_SETTINGS") && s[0].contains("IDENTIFIERS:ALL"));
-        assert_eq!(s[1], "ALTER PACKAGE HR.EMP_API COMPILE");
+        assert_eq!(
+            s,
+            vec![
+                "ALTER PACKAGE HR.EMP_API COMPILE PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL, STATEMENTS:ALL' REUSE SETTINGS"
+            ]
+        );
+        assert!(!s[0].contains("ALTER SESSION"));
     }
 
     #[test]
     fn compile_object_can_emit_plain_compile_only() {
-        let s = compile_object_statements("PACKAGE", "HR", "EMP_API", false).unwrap();
+        let s = compile_object_statements("PACKAGE", "HR", "EMP_API", false, false).unwrap();
         assert_eq!(s, vec!["ALTER PACKAGE HR.EMP_API COMPILE"]);
     }
 
     #[test]
-    fn recompile_handles_package_body_and_validates_idents() {
+    fn compile_options_are_unit_local_across_supported_shapes() {
         assert_eq!(
-            recompile_with_plscope_statements("PACKAGE BODY", "HR", "EMP_API").unwrap()[1],
-            "ALTER PACKAGE HR.EMP_API COMPILE BODY"
+            compile_object_statements("PACKAGE BODY", "HR", "EMP_API", true, true).unwrap(),
+            vec![
+                "ALTER PACKAGE HR.EMP_API COMPILE BODY PLSQL_WARNINGS = 'ENABLE:ALL' PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL, STATEMENTS:ALL' REUSE SETTINGS"
+            ]
         );
         assert_eq!(
-            compile_object_statements("PACKAGE_BODY", "HR", "EMP_API", false).unwrap()[0],
-            "ALTER PACKAGE HR.EMP_API COMPILE BODY"
+            compile_object_statements("TYPE_BODY", "HR", "EMP_T", false, true).unwrap(),
+            vec!["ALTER TYPE HR.EMP_T COMPILE BODY PLSQL_WARNINGS = 'ENABLE:ALL' REUSE SETTINGS"]
         );
+        assert_eq!(
+            compile_object_statements("TRIGGER", "HR", "EMP_BIU", true, false).unwrap(),
+            vec![
+                "ALTER TRIGGER HR.EMP_BIU COMPILE PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL, STATEMENTS:ALL' REUSE SETTINGS"
+            ]
+        );
+    }
+
+    #[test]
+    fn view_rejects_plsql_only_options_but_plain_compile_remains_valid() {
+        assert_eq!(
+            compile_object_statements("VIEW", "HR", "EMP_V", false, false).unwrap(),
+            vec!["ALTER VIEW HR.EMP_V COMPILE"]
+        );
+        for (plscope, warnings) in [(true, false), (false, true), (true, true)] {
+            assert!(matches!(
+                compile_object_statements("VIEW", "HR", "EMP_V", plscope, warnings),
+                Err(DbError::UnsupportedFeature(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn compile_builder_validates_non_bindable_identifiers() {
         // Injection attempt in the (non-bindable) object name is rejected.
         assert!(recompile_with_plscope_statements("PACKAGE", "HR", "X; DROP TABLE T").is_err());
         assert!(recompile_with_plscope_statements("PACKAGE", "HR", "").is_err());

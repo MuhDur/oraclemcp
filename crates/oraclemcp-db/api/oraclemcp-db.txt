@@ -6350,7 +6350,7 @@ pub fn oraclemcp_db::classify_type(&str) -> oraclemcp_db::TypeRepr
 pub fn oraclemcp_db::classify_wallet(&std::path::Path, &[alloc::string::String], core::option::Option<&str>) -> core::result::Result<oraclemcp_db::WalletContents, oraclemcp_db::OciError>
 pub fn oraclemcp_db::compare_schemas(&oraclemcp_db::SchemaSnapshot, &oraclemcp_db::SchemaSnapshot) -> oraclemcp_db::SchemaDiff
 pub async fn oraclemcp_db::compile_errors(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, core::option::Option<&str>) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
-pub fn oraclemcp_db::compile_object_statements(&str, &str, &str, bool) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
+pub fn oraclemcp_db::compile_object_statements(&str, &str, &str, bool, bool) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::cursor_to_offset(core::option::Option<&str>) -> usize
 pub fn oraclemcp_db::dependent_from_row(&oraclemcp_db::OracleRow) -> core::option::Option<oraclemcp_db::DependentObject>
 pub fn oraclemcp_db::derive_version_capabilities(u8) -> oraclemcp_db::DerivedVersionCapabilities

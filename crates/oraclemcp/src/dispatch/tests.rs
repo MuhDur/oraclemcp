@@ -547,6 +547,7 @@ impl OracleConnection for DescribeFailingMock {
 #[derive(Default)]
 struct ExecState {
     executed: Mutex<Vec<(String, Vec<OracleBind>)>>,
+    execute_error: Mutex<Option<DbError>>,
     diagnostics: Mutex<Vec<OracleRow>>,
     dbms_output: Mutex<DbmsOutput>,
     describe_calls: AtomicUsize,
@@ -846,6 +847,15 @@ impl OracleConnection for ExecRecordingMock {
             .lock()
             .expect("exec mutex")
             .push((sql.to_owned(), b.to_vec()));
+        if let Some(error) = self
+            .state
+            .execute_error
+            .lock()
+            .expect("execute error mutex")
+            .clone()
+        {
+            return Err(error);
+        }
         Ok(self.rows_affected)
     }
 
@@ -5707,17 +5717,18 @@ fn compile_object_preview_is_default_and_does_not_execute() {
     assert_eq!(preview["warnings"], json!(true));
     assert_eq!(preview["required_level"], json!("DDL"));
     assert_eq!(preview["gate_decision"], json!("allow"));
+    assert_eq!(preview["statements"].as_array().map(Vec::len), Some(1));
     assert_eq!(
         preview["statements"][0],
-        json!("ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'")
+        json!(
+            "ALTER PACKAGE APP.EMP_API COMPILE BODY PLSQL_WARNINGS = 'ENABLE:ALL' PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL, STATEMENTS:ALL' REUSE SETTINGS"
+        )
     );
-    assert_eq!(
-        preview["statements"][1],
-        json!("ALTER SESSION SET PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL, STATEMENTS:ALL'")
-    );
-    assert_eq!(
-        preview["statements"][2],
-        json!("ALTER PACKAGE APP.EMP_API COMPILE BODY")
+    assert!(
+        !preview["statements"][0]
+            .as_str()
+            .expect("compile statement")
+            .contains("ALTER SESSION")
     );
     assert_eq!(
         preview["confirmation"]["tool"],
@@ -5749,6 +5760,32 @@ fn compile_object_requires_ddl_level_without_executing() {
         .expect_err("read/write is not enough for compile");
     assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow);
     assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
+}
+
+#[test]
+fn compile_view_rejects_plsql_only_options_before_execute() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        Some("dev".to_owned()),
+        ddl_level(),
+    );
+
+    let err = dispatcher
+        .dispatch(
+            "oracle_compile_object",
+            json!({
+                "object_type": "VIEW",
+                "owner": "APP",
+                "name": "EMP_V",
+                "warnings": true
+            }),
+        )
+        .expect_err("PL/SQL compiler options do not apply to views");
+
+    assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+    assert!(err.message.contains("not VIEW"));
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
 }
 
 #[test]
@@ -5839,13 +5876,10 @@ fn compile_with_warnings_enables_warnings_and_counts_diagnostics() {
         )
         .expect("compile-with-warnings preview");
     assert_eq!(preview["warnings"], json!(true));
+    assert_eq!(preview["statements"].as_array().map(Vec::len), Some(1));
     assert_eq!(
         preview["statements"][0],
-        json!("ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'")
-    );
-    assert_eq!(
-        preview["statements"][1],
-        json!("ALTER PACKAGE APP.EMP_API COMPILE")
+        json!("ALTER PACKAGE APP.EMP_API COMPILE PLSQL_WARNINGS = 'ENABLE:ALL' REUSE SETTINGS")
     );
     assert_eq!(
         preview["confirmation"]["tool"],
@@ -5873,12 +5907,11 @@ fn compile_with_warnings_enables_warnings_and_counts_diagnostics() {
     assert_eq!(out["warning_count"], json!(1));
 
     let executed = state.executed.lock().expect("exec mutex");
-    assert_eq!(executed.len(), 2);
+    assert_eq!(executed.len(), 1);
     assert_eq!(
         executed[0].0,
-        "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'"
+        "ALTER PACKAGE APP.EMP_API COMPILE PLSQL_WARNINGS = 'ENABLE:ALL' REUSE SETTINGS"
     );
-    assert_eq!(executed[1].0, "ALTER PACKAGE APP.EMP_API COMPILE");
 }
 
 #[test]
@@ -7159,6 +7192,83 @@ mod audit_wiring {
                 .contains("ALTER PACKAGE APP.EMP_API COMPILE")
         );
         assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+    }
+
+    #[test]
+    fn definite_compile_failure_has_no_prior_session_effect_and_resolves_intent() {
+        let (auditor, sink) = auditor_with_sink();
+        let state = Arc::new(ExecState::default());
+        *state.execute_error.lock().expect("execute error mutex") = Some(DbError::Execute(
+            "ORA-04043: object APP.EMP_API does not exist".to_owned(),
+        ));
+        let intents = write_intent_log("qa110-definite-compile-failure");
+        let dispatcher = dispatcher_with_conn(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            ddl_level(),
+            auditor,
+        )
+        .with_write_intent_log(intents.clone());
+        let preview = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({
+                    "object_type": "PACKAGE",
+                    "name": "EMP_API",
+                    "plscope": true,
+                    "warnings": true
+                }),
+            )
+            .expect("compile preview");
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("confirm grant");
+
+        let error = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({
+                    "object_type": "PACKAGE",
+                    "name": "EMP_API",
+                    "plscope": true,
+                    "warnings": true,
+                    "execute": true,
+                    "confirm": confirm,
+                }),
+            )
+            .expect_err("definite compile failure surfaces");
+        assert_eq!(error.error_class, ErrorClass::ObjectNotFound);
+
+        let executed = state.executed.lock().expect("exec mutex");
+        assert_eq!(executed.len(), 1, "compile performs one database effect");
+        assert_eq!(
+            executed[0].0,
+            "ALTER PACKAGE APP.EMP_API COMPILE PLSQL_WARNINGS = 'ENABLE:ALL' PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL, STATEMENTS:ALL' REUSE SETTINGS"
+        );
+        assert!(!executed[0].0.contains("ALTER SESSION"));
+        drop(executed);
+
+        let recs = sink.records();
+        assert_eq!(recs.len(), 2, "compile logs Pending then Failed");
+        assert_eq!(recs[0].outcome, AuditOutcome::Pending);
+        assert_eq!(recs[1].outcome, AuditOutcome::Failed);
+        assert_eq!(recs[1].prev_hash, recs[0].entry_hash);
+        assert!(
+            intents.unresolved().expect("intent snapshot").is_empty(),
+            "a definite one-statement failure is safe to resolve"
+        );
+        let ledger = std::fs::read_to_string(intents.path().expect("intent path"))
+            .expect("intent ledger is readable");
+        assert!(ledger.contains("\"outcome\":\"FAILED\""), "{ledger}");
+        assert!(
+            dispatcher
+                .connection_quarantine()
+                .expect("quarantine lock")
+                .is_none(),
+            "a definite failure with no earlier session effect remains reusable"
+        );
+        dispatcher
+            .dispatch("oracle_connection_info", json!({}))
+            .expect("connection remains usable after the definite failure");
     }
 
     #[test]
