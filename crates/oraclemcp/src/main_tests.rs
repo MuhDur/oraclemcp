@@ -470,6 +470,258 @@ fn http_oauth_literal_secret_is_rejected_for_protected_profiles() {
 }
 
 #[test]
+fn metrics_dispatch_forwards_stream_frames_and_records_one_terminal_outcome() {
+    struct StreamAwareDispatch {
+        ordinary_calls: Arc<std::sync::atomic::AtomicUsize>,
+        stream_calls: Arc<std::sync::atomic::AtomicUsize>,
+        first_row_sent: std::sync::mpsc::Sender<()>,
+        release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+        completed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl ToolDispatch for StreamAwareDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: serde_json::Value,
+        ) -> DispatchFuture<'a> {
+            self.ordinary_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { DispatchOutcome::Ok(serde_json::json!({ "buffered": true })) })
+        }
+
+        fn dispatch_stream<'a>(
+            &'a self,
+            cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: serde_json::Value,
+            frames: ToolStreamSender,
+        ) -> DispatchFuture<'a> {
+            self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                frames
+                    .send(
+                        cx,
+                        oraclemcp_core::ToolStreamFrame::Row {
+                            seq: 0,
+                            row: serde_json::json!({ "id": 1 }),
+                        },
+                    )
+                    .await
+                    .expect("first row reaches the transport channel");
+                self.first_row_sent
+                    .send(())
+                    .expect("first-row observer is alive");
+                let (lock, cvar) = &*self.release;
+                {
+                    let mut released = lock.lock().expect("release mutex not poisoned");
+                    while !*released {
+                        released = cvar.wait(released).expect("release mutex not poisoned");
+                    }
+                }
+                frames
+                    .send(
+                        cx,
+                        oraclemcp_core::ToolStreamFrame::Row {
+                            seq: 1,
+                            row: serde_json::json!({ "id": 2 }),
+                        },
+                    )
+                    .await
+                    .expect("second row reaches the transport channel");
+                self.completed.store(true, Ordering::SeqCst);
+                DispatchOutcome::Ok(serde_json::json!({
+                    "streaming": true,
+                    "rows_returned": 2
+                }))
+            })
+        }
+    }
+
+    let ordinary_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stream_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (first_row_tx, first_row_rx) = std::sync::mpsc::channel();
+    let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let metrics = Arc::new(Metrics::new());
+    let dispatch: Arc<dyn ToolDispatch> = Arc::new(MetricsDispatch::new(
+        Arc::new(StreamAwareDispatch {
+            ordinary_calls: Arc::clone(&ordinary_calls),
+            stream_calls: Arc::clone(&stream_calls),
+            first_row_sent: first_row_tx,
+            release: Arc::clone(&release),
+            completed: Arc::clone(&completed),
+        }),
+        Arc::clone(&metrics),
+    ));
+    let lane = LaneRuntime::spawn("metrics-stream-lane", dispatch, 4);
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("test runtime builds");
+    let (outcome, frames) = runtime.block_on(async {
+        let cx = Cx::current().expect("test runtime installs Cx");
+        let (frames_tx, mut frames_rx) = asupersync::channel::mpsc::channel(2);
+        let mut reply = lane
+            .dispatch_stream_start(
+                &cx,
+                DispatchContext::default().with_principal_key("oauth:streamer"),
+                "oracle_query",
+                serde_json::json!({ "sql": "SELECT id FROM demo", "streaming": true }),
+                frames_tx,
+            )
+            .await
+            .expect("streaming lane accepts the call");
+        let first = frames_rx.recv(&cx).await.expect("first forwarded frame");
+        first_row_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("inner dispatcher emitted the first row");
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "the first row is observable before terminal completion"
+        );
+        let (lock, cvar) = &*release;
+        *lock.lock().expect("release mutex not poisoned") = true;
+        cvar.notify_all();
+        let second = frames_rx.recv(&cx).await.expect("second forwarded frame");
+        let outcome = reply
+            .recv(&cx)
+            .await
+            .expect("streaming lane returns a terminal outcome");
+        (outcome, vec![first, second])
+    });
+
+    assert_eq!(
+        frames,
+        vec![
+            oraclemcp_core::ToolStreamFrame::Row {
+                seq: 0,
+                row: serde_json::json!({ "id": 1 }),
+            },
+            oraclemcp_core::ToolStreamFrame::Row {
+                seq: 1,
+                row: serde_json::json!({ "id": 2 }),
+            },
+        ]
+    );
+    assert_eq!(
+        outcome,
+        DispatchOutcome::Ok(serde_json::json!({
+            "streaming": true,
+            "rows_returned": 2
+        }))
+    );
+    assert_eq!(ordinary_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
+
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.requests.len(), 1);
+    assert_eq!(snapshot.requests[0].tool, "oracle_query");
+    assert_eq!(snapshot.requests[0].status, "ok");
+    assert_eq!(snapshot.requests[0].count, 1);
+    assert_eq!(snapshot.lane_requests.len(), 1);
+    assert_eq!(snapshot.lane_requests[0].lane_id, "metrics-stream-lane");
+    assert_eq!(snapshot.lane_requests[0].status, "ok");
+    assert_eq!(snapshot.lane_requests[0].count, 1);
+    assert_eq!(snapshot.lane_request_duration_ms.len(), 1);
+    assert_eq!(
+        snapshot.lane_request_duration_ms[0].histogram.count, 1,
+        "streaming completion records exactly one duration"
+    );
+}
+
+#[test]
+fn metrics_dispatch_forwards_stream_cancellation_and_records_it_once() {
+    struct CancellationAwareStream {
+        stream_calls: Arc<std::sync::atomic::AtomicUsize>,
+        entered: std::sync::mpsc::Sender<()>,
+    }
+
+    impl ToolDispatch for CancellationAwareStream {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: serde_json::Value,
+        ) -> DispatchFuture<'a> {
+            Box::pin(async { DispatchOutcome::Ok(serde_json::Value::Null) })
+        }
+
+        fn dispatch_stream<'a>(
+            &'a self,
+            cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: serde_json::Value,
+            _frames: ToolStreamSender,
+        ) -> DispatchFuture<'a> {
+            self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                self.entered
+                    .send(())
+                    .expect("stream-entry observer is alive");
+                while cx.checkpoint().is_ok() {
+                    asupersync::runtime::yield_now().await;
+                }
+                DispatchOutcome::Cancelled(
+                    cx.cancel_reason().unwrap_or_else(|| {
+                        asupersync::CancelReason::user("stream cancelled in test")
+                    }),
+                )
+            })
+        }
+    }
+
+    let stream_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let metrics = Arc::new(Metrics::new());
+    let dispatch: Arc<dyn ToolDispatch> = Arc::new(MetricsDispatch::new(
+        Arc::new(CancellationAwareStream {
+            stream_calls: Arc::clone(&stream_calls),
+            entered: entered_tx,
+        }),
+        Arc::clone(&metrics),
+    ));
+    let lane = LaneRuntime::spawn("metrics-cancel-lane", dispatch, 4);
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("test runtime builds");
+    let outcome = runtime.block_on(async {
+        let cx = Cx::current().expect("test runtime installs Cx");
+        let (frames_tx, _frames_rx) = asupersync::channel::mpsc::channel(1);
+        let mut reply = lane
+            .dispatch_stream_start(
+                &cx,
+                DispatchContext::default(),
+                "oracle_query",
+                serde_json::json!({ "streaming": true }),
+                frames_tx,
+            )
+            .await
+            .expect("streaming lane accepts the call");
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("inner streaming dispatch starts");
+        cx.set_cancel_requested(true);
+        reply
+            .recv(&cx)
+            .await
+            .expect("cancelled stream returns its terminal classification")
+    });
+
+    assert!(matches!(outcome, DispatchOutcome::Cancelled(_)));
+    assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.requests.len(), 1);
+    assert_eq!(snapshot.requests[0].status, "cancelled");
+    assert_eq!(snapshot.requests[0].count, 1);
+    assert_eq!(snapshot.lane_request_duration_ms.len(), 1);
+    assert_eq!(snapshot.lane_request_duration_ms[0].histogram.count, 1);
+}
+
+#[test]
 fn stateless_http_read_workers_do_not_head_of_line_block() {
     struct ControlDispatch;
 

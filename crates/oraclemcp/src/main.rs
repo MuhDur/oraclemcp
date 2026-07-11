@@ -77,7 +77,7 @@ use oraclemcp_core::{
     MtlsClientRegistry, OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy,
     OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, PreparedLaneDispatch, ServiceTransport,
     ShutdownCoordinator, SiemFormat, SiemHttpForwarder, SourceHistoryStore, StatefulLaneDispatch,
-    StdioAuthPolicy, TlsMaterial, TlsServerConfig, ToolDispatch, WriteIntentLog,
+    StdioAuthPolicy, TlsMaterial, TlsServerConfig, ToolDispatch, ToolStreamSender, WriteIntentLog,
     apply_legacy_state_migration, build_server_config, default_dashboard_ticket_dir, load_tools,
     load_tools_for_profile, mint_dashboard_pairing_ticket, operator_subject_id_hash,
     parse_tools_file, probe_dashboard_http_service, requires_mtls, run_doctor,
@@ -1770,6 +1770,42 @@ impl MetricsDispatch {
     fn new(inner: Arc<dyn ToolDispatch>, metrics: Arc<Metrics>) -> Self {
         Self { inner, metrics }
     }
+
+    fn labels(context: oraclemcp_core::DispatchContext<'_>) -> (String, String) {
+        let lane_id = context.lane_id().unwrap_or("process").to_owned();
+        let subject_id_hash = context
+            .principal_key()
+            .map(operator_subject_id_hash)
+            .unwrap_or_else(|| operator_subject_id_hash("process"));
+        (lane_id, subject_id_hash)
+    }
+
+    fn record_outcome(
+        &self,
+        started: Instant,
+        lane_id: &str,
+        subject_id_hash: &str,
+        name: &str,
+        result: &DispatchOutcome,
+    ) {
+        let status = metrics_status(result);
+        self.metrics
+            .record_lane_request(lane_id, subject_id_hash, name, status);
+        self.metrics.record_lane_request_duration_ms(
+            lane_id,
+            subject_id_hash,
+            name,
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        );
+        if let Some((reason_class, operating_level)) = blocked_labels(result) {
+            self.metrics.record_lane_blocked(
+                lane_id,
+                subject_id_hash,
+                reason_class,
+                operating_level,
+            );
+        }
+    }
 }
 
 impl ToolDispatch for MetricsDispatch {
@@ -1786,29 +1822,29 @@ impl ToolDispatch for MetricsDispatch {
     ) -> DispatchFuture<'a> {
         Box::pin(async move {
             let started = Instant::now();
-            let lane_id = context.lane_id().unwrap_or("process").to_owned();
-            let subject_id_hash = context
-                .principal_key()
-                .map(operator_subject_id_hash)
-                .unwrap_or_else(|| operator_subject_id_hash("process"));
+            let (lane_id, subject_id_hash) = Self::labels(context);
             let result = self.inner.dispatch(cx, context, name, args).await;
-            let status = metrics_status(&result);
-            self.metrics
-                .record_lane_request(&lane_id, &subject_id_hash, name, status);
-            self.metrics.record_lane_request_duration_ms(
-                &lane_id,
-                &subject_id_hash,
-                name,
-                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            );
-            if let Some((reason_class, operating_level)) = blocked_labels(&result) {
-                self.metrics.record_lane_blocked(
-                    &lane_id,
-                    &subject_id_hash,
-                    reason_class,
-                    operating_level,
-                );
-            }
+            self.record_outcome(started, &lane_id, &subject_id_hash, name, &result);
+            result
+        })
+    }
+
+    fn dispatch_stream<'a>(
+        &'a self,
+        cx: &'a Cx,
+        context: oraclemcp_core::DispatchContext<'a>,
+        name: &'a str,
+        args: serde_json::Value,
+        frames: ToolStreamSender,
+    ) -> DispatchFuture<'a> {
+        Box::pin(async move {
+            let started = Instant::now();
+            let (lane_id, subject_id_hash) = Self::labels(context);
+            let result = self
+                .inner
+                .dispatch_stream(cx, context, name, args, frames)
+                .await;
+            self.record_outcome(started, &lane_id, &subject_id_hash, name, &result);
             result
         })
     }
