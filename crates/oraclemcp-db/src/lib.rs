@@ -92,7 +92,8 @@ pub use catalog_extract::{
     CatalogRowSetName, CatalogSchemaFilter, catalog_extract_rowsets, extract_catalog_rowsets,
 };
 pub use catalog_resolver::{
-    MAX_CATALOG_NAMES, OracleCatalogResolver, read_catalog_resolve_context,
+    CatalogInvalidation, MAX_CATALOG_NAMES, OracleCatalogResolver, OracleCatalogResolverCache,
+    read_catalog_resolve_context,
 };
 pub use connection::{
     DRIVER_VERSION, DbRequestQuota, DbmsOutput, ExecuteOutcome, OracleConnection, OracleRoutineArg,

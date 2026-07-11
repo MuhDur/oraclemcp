@@ -7,6 +7,7 @@
 //! deliberately unresolved.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::RwLock;
 
 use asupersync::Cx;
 use oraclemcp_guard::{
@@ -20,6 +21,7 @@ use crate::{DbError, OracleBind, OracleConnection, OracleRow};
 /// Maximum number of syntactic names loaded into one immutable resolver.
 pub const MAX_CATALOG_NAMES: usize = 64;
 
+const MAX_CATALOG_CACHE_ENTRIES: usize = 4_096;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_CANDIDATES: usize = 32;
 const MAX_SYNONYM_HOPS: usize = 16;
@@ -62,6 +64,250 @@ const COLUMN_CONFLICT_SQL: &str = "SELECT owner, table_name, column_name, column
 pub struct OracleCatalogResolver {
     context: ResolveCtx,
     entries: HashMap<RawName, Resolution>,
+}
+
+/// A catalog event that invalidates every resolution proof in one lane/profile.
+///
+/// Reasons are retained as a closed vocabulary so mutation call sites must
+/// state why they are advancing the generation. All variants have the same
+/// fail-closed effect: advance the monotonic generation and clear positive and
+/// negative entries atomically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CatalogInvalidation {
+    /// A general DDL statement may have changed object identity or visibility.
+    Ddl,
+    /// A synonym was created, replaced, altered, or dropped.
+    Synonym,
+    /// A package or type specification/body was compiled or replaced.
+    Package,
+    /// Callable overload or argument metadata may have changed.
+    Overload,
+    /// `CURRENT_SCHEMA` changed for the Oracle session.
+    CurrentSchema,
+    /// The active Oracle edition changed.
+    Edition,
+    /// Enabled roles or grants affecting `ALL_*` visibility changed.
+    Roles,
+    /// A physical connection or active profile was replaced.
+    Reconnect,
+    /// Live session state changed while a dictionary snapshot was loading.
+    SessionContextChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ResolverCacheKey {
+    generation: u64,
+    connected_schema: String,
+    resolving_schema: String,
+    edition: Option<String>,
+    enabled_roles: Vec<String>,
+    aliases: Vec<RawNamePart>,
+    common_table_expressions: Vec<RawNamePart>,
+    raw_name: RawName,
+}
+
+impl ResolverCacheKey {
+    fn new(name: &RawName, context: &ResolveCtx) -> Self {
+        Self {
+            generation: context.generation.0,
+            connected_schema: context.connected_schema.clone(),
+            resolving_schema: context.current_schema.clone(),
+            edition: context.edition.clone(),
+            enabled_roles: context.enabled_roles.iter().cloned().collect(),
+            aliases: context.statement_scope.aliases.clone(),
+            common_table_expressions: context.statement_scope.common_table_expressions.clone(),
+            raw_name: name.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ResolverCacheState {
+    generation: u64,
+    exhausted: bool,
+    entries: HashMap<ResolverCacheKey, Resolution>,
+}
+
+/// Bounded generation-scoped resolution cache for one lane/profile.
+///
+/// The single lock makes generation checks, invalidation, and publication
+/// linearizable. No method holds it across an Oracle await: [`Self::preload`]
+/// captures a generation, performs dictionary I/O without the lock, then
+/// publishes only if that exact generation is still current. A racing
+/// invalidation therefore turns the caller's old context stale and cannot
+/// repopulate the new generation with old evidence.
+#[derive(Debug)]
+pub struct OracleCatalogResolverCache {
+    // SAFETY: this is the cache's only lock. Never hold it across Oracle I/O or
+    // while acquiring dispatcher/lane state; consumers acquire lane state
+    // first and call these short non-awaiting critical sections second.
+    state: RwLock<ResolverCacheState>,
+}
+
+impl Default for OracleCatalogResolverCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OracleCatalogResolverCache {
+    /// Build an empty cache at generation one.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            state: RwLock::new(ResolverCacheState {
+                generation: 1,
+                exhausted: false,
+                entries: HashMap::new(),
+            }),
+        }
+    }
+
+    /// Current monotonic generation.
+    ///
+    /// A poisoned cache reports the terminal generation. Resolution still
+    /// fails closed because [`CatalogResolver::resolve`] refuses a poisoned
+    /// lock.
+    #[must_use]
+    pub fn generation(&self) -> oraclemcp_guard::CatalogGeneration {
+        self.state
+            .read()
+            .map(|state| oraclemcp_guard::CatalogGeneration(state.generation))
+            .unwrap_or(oraclemcp_guard::CatalogGeneration(u64::MAX))
+    }
+
+    /// Number of positive and negative entries in the current generation.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.state
+            .read()
+            .map(|state| state.entries.len())
+            .unwrap_or(0)
+    }
+
+    /// Whether the current generation contains no cached answers.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Atomically advance the generation and discard all prior evidence.
+    ///
+    /// Generation exhaustion permanently disables publication and resolution
+    /// rather than wrapping to a value that could make ancient evidence appear
+    /// current again.
+    pub fn invalidate(&self, _reason: CatalogInvalidation) -> oraclemcp_guard::CatalogGeneration {
+        let Ok(mut state) = self.state.write() else {
+            return oraclemcp_guard::CatalogGeneration(u64::MAX);
+        };
+        state.entries.clear();
+        match state.generation.checked_add(1) {
+            Some(next) if !state.exhausted => state.generation = next,
+            _ => {
+                state.generation = u64::MAX;
+                state.exhausted = true;
+            }
+        }
+        oraclemcp_guard::CatalogGeneration(state.generation)
+    }
+
+    /// Load missing names from the live session into the current generation.
+    ///
+    /// The returned context is the exact context used for cache keys. If an
+    /// invalidation races the load, that context is intentionally stale and
+    /// subsequent [`CatalogResolver::resolve`] calls return `Unresolved`.
+    pub async fn preload(
+        &self,
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+        names: &[RawName],
+        statement_scope: StatementScope,
+    ) -> Result<ResolveCtx, DbError> {
+        if names.len() > MAX_CATALOG_NAMES {
+            return Err(DbError::Query(format!(
+                "catalog resolver name cap exceeded: {} > {MAX_CATALOG_NAMES}",
+                names.len()
+            )));
+        }
+        let generation = {
+            let state = self.state.read().map_err(cache_lock_error)?;
+            if state.exhausted {
+                return Err(DbError::Query(
+                    "catalog resolver generation is exhausted".to_owned(),
+                ));
+            }
+            oraclemcp_guard::CatalogGeneration(state.generation)
+        };
+        let context = read_catalog_resolve_context(cx, conn, generation, statement_scope).await?;
+        let missing = {
+            let state = self.state.read().map_err(cache_lock_error)?;
+            if state.exhausted || state.generation != generation.0 {
+                return Ok(context);
+            }
+            let mut seen = HashSet::new();
+            names
+                .iter()
+                .filter(|name| seen.insert((*name).clone()))
+                .filter(|name| {
+                    !state
+                        .entries
+                        .contains_key(&ResolverCacheKey::new(name, &context))
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if missing.is_empty() {
+            return Ok(context);
+        }
+
+        let loaded = OracleCatalogResolver::load(cx, conn, &missing, &context).await?;
+        if loaded.entries.len() != missing.len() {
+            self.invalidate(CatalogInvalidation::SessionContextChanged);
+            return Ok(context);
+        }
+        self.publish(generation, &context, loaded.entries);
+        Ok(context)
+    }
+
+    fn publish(
+        &self,
+        generation: oraclemcp_guard::CatalogGeneration,
+        context: &ResolveCtx,
+        entries: HashMap<RawName, Resolution>,
+    ) -> bool {
+        let Ok(mut state) = self.state.write() else {
+            return false;
+        };
+        if state.exhausted || state.generation != generation.0 || context.generation != generation {
+            return false;
+        }
+        if state.entries.len().saturating_add(entries.len()) > MAX_CATALOG_CACHE_ENTRIES {
+            state.entries.clear();
+        }
+        for (name, resolution) in entries {
+            state
+                .entries
+                .insert(ResolverCacheKey::new(&name, context), resolution);
+        }
+        true
+    }
+}
+
+impl CatalogResolver for OracleCatalogResolverCache {
+    fn resolve(&self, name: &RawName, context: &ResolveCtx) -> Resolution {
+        let Ok(state) = self.state.read() else {
+            return Resolution::Unresolved;
+        };
+        if state.exhausted || state.generation != context.generation.0 {
+            return Resolution::Unresolved;
+        }
+        state
+            .entries
+            .get(&ResolverCacheKey::new(name, context))
+            .cloned()
+            .unwrap_or(Resolution::Unresolved)
+    }
 }
 
 impl OracleCatalogResolver {
@@ -905,10 +1151,16 @@ fn optional_text(row: &OracleRow, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn cache_lock_error<T>(_error: std::sync::PoisonError<T>) -> DbError {
+    DbError::Query("catalog resolver cache lock poisoned".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::OracleCell;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     fn row(columns: &[(&str, Option<&str>)]) -> OracleRow {
         OracleRow {
@@ -1141,5 +1393,189 @@ mod tests {
             Resolution::Unresolved
         );
         assert_eq!(merge_alternatives(remote, local), Resolution::Unresolved);
+    }
+
+    fn resolved_table(object_id: u64) -> Resolution {
+        Resolution::Resolved(Box::new(ResolvedObject {
+            owner: "APP".to_owned(),
+            name: "ORDERS".to_owned(),
+            kind: CatalogObjectKind::Table,
+            container: None,
+            member: None,
+            overloads: Vec::new(),
+            quote_exact: false,
+            synonym_chain: Vec::new(),
+            db_link: None,
+            identity: ResolvedIdentity {
+                object_id,
+                edition: None,
+            },
+        }))
+    }
+
+    fn cache_context(cache: &OracleCatalogResolverCache) -> ResolveCtx {
+        let mut context = ResolveCtx::new("APP", "APP", cache.generation());
+        context.edition = Some("ORA$BASE".to_owned());
+        context
+    }
+
+    fn publish_one(
+        cache: &OracleCatalogResolverCache,
+        name: &RawName,
+        context: &ResolveCtx,
+        resolution: Resolution,
+    ) -> bool {
+        cache.publish(
+            context.generation,
+            context,
+            HashMap::from([(name.clone(), resolution)]),
+        )
+    }
+
+    #[test]
+    fn every_catalog_mutation_reason_advances_monotonically_and_clears_entries() {
+        let cache = OracleCatalogResolverCache::new();
+        let name = RawName::new([RawNamePart::unquoted("orders")], SyntacticRole::FromFactor);
+        let reasons = [
+            CatalogInvalidation::Ddl,
+            CatalogInvalidation::Synonym,
+            CatalogInvalidation::Package,
+            CatalogInvalidation::Overload,
+            CatalogInvalidation::CurrentSchema,
+            CatalogInvalidation::Edition,
+            CatalogInvalidation::Roles,
+            CatalogInvalidation::Reconnect,
+            CatalogInvalidation::SessionContextChanged,
+        ];
+        let mut prior = cache.generation().0;
+        for reason in reasons {
+            let context = cache_context(&cache);
+            assert!(publish_one(&cache, &name, &context, resolved_table(prior)));
+            assert_eq!(cache.len(), 1);
+            let next = cache.invalidate(reason).0;
+            assert_eq!(next, prior + 1);
+            assert!(cache.is_empty());
+            assert_eq!(cache.resolve(&name, &context), Resolution::Unresolved);
+            prior = next;
+        }
+    }
+
+    #[test]
+    fn cache_key_is_exact_for_schema_edition_roles_scope_and_quote_identity() {
+        let cache = OracleCatalogResolverCache::new();
+        let unquoted = RawName::new([RawNamePart::unquoted("orders")], SyntacticRole::FromFactor);
+        let quoted = RawName::new([RawNamePart::quoted("ORDERS")], SyntacticRole::FromFactor);
+        let context = cache_context(&cache);
+        assert!(publish_one(&cache, &unquoted, &context, resolved_table(71)));
+        assert!(matches!(
+            cache.resolve(&unquoted, &context),
+            Resolution::Resolved(_)
+        ));
+        assert_eq!(cache.resolve(&quoted, &context), Resolution::Unresolved);
+
+        let mut changed = context.clone();
+        changed.current_schema = "OTHER".to_owned();
+        assert_eq!(cache.resolve(&unquoted, &changed), Resolution::Unresolved);
+        changed = context.clone();
+        changed.edition = Some("BLUE".to_owned());
+        assert_eq!(cache.resolve(&unquoted, &changed), Resolution::Unresolved);
+        changed = context.clone();
+        changed.enabled_roles.insert("REPORTER".to_owned());
+        assert_eq!(cache.resolve(&unquoted, &changed), Resolution::Unresolved);
+        changed = context.clone();
+        changed
+            .statement_scope
+            .aliases
+            .push(RawNamePart::unquoted("o"));
+        assert_eq!(cache.resolve(&unquoted, &changed), Resolution::Unresolved);
+    }
+
+    #[test]
+    fn stale_publication_cannot_cross_an_invalidation_race() {
+        let cache = Arc::new(OracleCatalogResolverCache::new());
+        let context = cache_context(&cache);
+        let name = RawName::new([RawNamePart::unquoted("orders")], SyntacticRole::FromFactor);
+        let barrier = Arc::new(Barrier::new(2));
+        let invalidator_cache = Arc::clone(&cache);
+        let invalidator_barrier = Arc::clone(&barrier);
+        let invalidator = thread::spawn(move || {
+            invalidator_barrier.wait();
+            invalidator_cache.invalidate(CatalogInvalidation::Ddl)
+        });
+        barrier.wait();
+        let new_generation = invalidator.join().expect("invalidation thread");
+        assert!(new_generation > context.generation);
+        assert!(!publish_one(&cache, &name, &context, resolved_table(72)));
+        assert!(cache.is_empty());
+        assert_eq!(cache.resolve(&name, &context), Resolution::Unresolved);
+    }
+
+    #[test]
+    fn concurrent_readers_never_accept_old_context_after_invalidation_completes() {
+        let cache = Arc::new(OracleCatalogResolverCache::new());
+        let context = cache_context(&cache);
+        let name = RawName::new([RawNamePart::unquoted("orders")], SyntacticRole::FromFactor);
+        assert!(publish_one(&cache, &name, &context, resolved_table(73)));
+        let start = Arc::new(Barrier::new(17));
+        let mut readers = Vec::new();
+        for _ in 0..16 {
+            let cache = Arc::clone(&cache);
+            let context = context.clone();
+            let name = name.clone();
+            let start = Arc::clone(&start);
+            readers.push(thread::spawn(move || {
+                start.wait();
+                while cache.generation() == context.generation {
+                    let _ = cache.resolve(&name, &context);
+                }
+                for _ in 0..1_000 {
+                    assert_eq!(cache.resolve(&name, &context), Resolution::Unresolved);
+                }
+            }));
+        }
+        start.wait();
+        cache.invalidate(CatalogInvalidation::Reconnect);
+        for reader in readers {
+            reader.join().expect("reader thread");
+        }
+    }
+
+    #[test]
+    fn negative_entries_are_cached_only_in_their_generation() {
+        let cache = OracleCatalogResolverCache::new();
+        let name = RawName::new(
+            [RawNamePart::unquoted("missing")],
+            SyntacticRole::FromFactor,
+        );
+        let old = cache_context(&cache);
+        assert!(publish_one(&cache, &name, &old, Resolution::Unresolved));
+        assert_eq!(cache.len(), 1);
+        cache.invalidate(CatalogInvalidation::Ddl);
+        assert!(cache.is_empty());
+        let current = cache_context(&cache);
+        assert_ne!(old.generation, current.generation);
+        assert_eq!(cache.resolve(&name, &old), Resolution::Unresolved);
+        assert_eq!(cache.resolve(&name, &current), Resolution::Unresolved);
+    }
+
+    #[test]
+    fn generation_exhaustion_is_terminal_and_never_wraps_to_old_evidence() {
+        let cache = OracleCatalogResolverCache::new();
+        {
+            let mut state = cache.state.write().expect("cache state");
+            state.generation = u64::MAX - 1;
+        }
+        assert_eq!(
+            cache.invalidate(CatalogInvalidation::Ddl),
+            oraclemcp_guard::CatalogGeneration(u64::MAX)
+        );
+        assert_eq!(
+            cache.invalidate(CatalogInvalidation::Ddl),
+            oraclemcp_guard::CatalogGeneration(u64::MAX)
+        );
+        let context = ResolveCtx::new("APP", "APP", oraclemcp_guard::CatalogGeneration(u64::MAX));
+        let name = RawName::new([RawNamePart::unquoted("orders")], SyntacticRole::FromFactor);
+        assert!(!publish_one(&cache, &name, &context, resolved_table(74)));
+        assert_eq!(cache.resolve(&name, &context), Resolution::Unresolved);
     }
 }

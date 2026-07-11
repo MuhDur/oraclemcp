@@ -187,6 +187,71 @@ pub type oraclemcp_db::AuthAdapterError::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::AuthAdapterError where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::AuthAdapterError where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::AuthAdapterError::vzip(self) -> V
+#[non_exhaustive] pub enum oraclemcp_db::CatalogInvalidation
+pub oraclemcp_db::CatalogInvalidation::CurrentSchema
+pub oraclemcp_db::CatalogInvalidation::Ddl
+pub oraclemcp_db::CatalogInvalidation::Edition
+pub oraclemcp_db::CatalogInvalidation::Overload
+pub oraclemcp_db::CatalogInvalidation::Package
+pub oraclemcp_db::CatalogInvalidation::Reconnect
+pub oraclemcp_db::CatalogInvalidation::Roles
+pub oraclemcp_db::CatalogInvalidation::SessionContextChanged
+pub oraclemcp_db::CatalogInvalidation::Synonym
+impl core::clone::Clone for oraclemcp_db::CatalogInvalidation
+pub fn oraclemcp_db::CatalogInvalidation::clone(&self) -> oraclemcp_db::CatalogInvalidation
+impl core::cmp::Eq for oraclemcp_db::CatalogInvalidation
+impl core::cmp::PartialEq for oraclemcp_db::CatalogInvalidation
+pub fn oraclemcp_db::CatalogInvalidation::eq(&self, &oraclemcp_db::CatalogInvalidation) -> bool
+impl core::fmt::Debug for oraclemcp_db::CatalogInvalidation
+pub fn oraclemcp_db::CatalogInvalidation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_db::CatalogInvalidation
+pub fn oraclemcp_db::CatalogInvalidation::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oraclemcp_db::CatalogInvalidation
+impl core::marker::StructuralPartialEq for oraclemcp_db::CatalogInvalidation
+impl core::marker::Freeze for oraclemcp_db::CatalogInvalidation
+impl core::marker::Send for oraclemcp_db::CatalogInvalidation
+impl core::marker::Sync for oraclemcp_db::CatalogInvalidation
+impl core::marker::Unpin for oraclemcp_db::CatalogInvalidation
+impl core::marker::UnsafeUnpin for oraclemcp_db::CatalogInvalidation
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::CatalogInvalidation
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::CatalogInvalidation
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::CatalogInvalidation where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::CatalogInvalidation where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::CatalogInvalidation where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CatalogInvalidation::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::CatalogInvalidation where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::CatalogInvalidation where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::CatalogInvalidation where U: core::convert::From<T>
+pub fn oraclemcp_db::CatalogInvalidation::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::CatalogInvalidation where U: core::convert::Into<T>
+pub type oraclemcp_db::CatalogInvalidation::Error = core::convert::Infallible
+pub fn oraclemcp_db::CatalogInvalidation::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::CatalogInvalidation where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::CatalogInvalidation::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::CatalogInvalidation::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::CatalogInvalidation where T: core::clone::Clone
+pub type oraclemcp_db::CatalogInvalidation::Owned = T
+pub fn oraclemcp_db::CatalogInvalidation::clone_into(&self, &mut T)
+pub fn oraclemcp_db::CatalogInvalidation::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::CatalogInvalidation
+impl<T> core::any::Any for oraclemcp_db::CatalogInvalidation where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::CatalogInvalidation::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::CatalogInvalidation where T: ?core::marker::Sized
+pub fn oraclemcp_db::CatalogInvalidation::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::CatalogInvalidation where T: ?core::marker::Sized
+pub fn oraclemcp_db::CatalogInvalidation::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::CatalogInvalidation where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::CatalogInvalidation::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::CatalogInvalidation
+pub fn oraclemcp_db::CatalogInvalidation::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CatalogInvalidation
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CatalogInvalidation
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CatalogInvalidation
+impl<T> typenum::type_operators::Same for oraclemcp_db::CatalogInvalidation
+pub type oraclemcp_db::CatalogInvalidation::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CatalogInvalidation where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CatalogInvalidation where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::CatalogInvalidation::vzip(self) -> V
 pub enum oraclemcp_db::CatalogRowSetName
 pub oraclemcp_db::CatalogRowSetName::ColumnComments
 pub oraclemcp_db::CatalogRowSetName::Columns
@@ -3051,6 +3116,56 @@ pub type oraclemcp_db::OracleCatalogResolver::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleCatalogResolver where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleCatalogResolver where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::OracleCatalogResolver::vzip(self) -> V
+pub struct oraclemcp_db::OracleCatalogResolverCache
+impl oraclemcp_db::OracleCatalogResolverCache
+pub fn oraclemcp_db::OracleCatalogResolverCache::generation(&self) -> oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_db::OracleCatalogResolverCache::invalidate(&self, oraclemcp_db::CatalogInvalidation) -> oraclemcp_guard::resolver::CatalogGeneration
+pub fn oraclemcp_db::OracleCatalogResolverCache::is_empty(&self) -> bool
+pub fn oraclemcp_db::OracleCatalogResolverCache::len(&self) -> usize
+pub fn oraclemcp_db::OracleCatalogResolverCache::new() -> Self
+pub async fn oraclemcp_db::OracleCatalogResolverCache::preload(&self, &asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_guard::resolver::RawName], oraclemcp_guard::resolver::StatementScope) -> core::result::Result<oraclemcp_guard::resolver::ResolveCtx, oraclemcp_db::DbError>
+impl core::default::Default for oraclemcp_db::OracleCatalogResolverCache
+pub fn oraclemcp_db::OracleCatalogResolverCache::default() -> Self
+impl core::fmt::Debug for oraclemcp_db::OracleCatalogResolverCache
+pub fn oraclemcp_db::OracleCatalogResolverCache::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl oraclemcp_guard::resolver::CatalogResolver for oraclemcp_db::OracleCatalogResolverCache
+pub fn oraclemcp_db::OracleCatalogResolverCache::resolve(&self, &oraclemcp_guard::resolver::RawName, &oraclemcp_guard::resolver::ResolveCtx) -> oraclemcp_guard::resolver::Resolution
+impl !core::marker::Freeze for oraclemcp_db::OracleCatalogResolverCache
+impl core::marker::Send for oraclemcp_db::OracleCatalogResolverCache
+impl core::marker::Sync for oraclemcp_db::OracleCatalogResolverCache
+impl core::marker::Unpin for oraclemcp_db::OracleCatalogResolverCache
+impl core::marker::UnsafeUnpin for oraclemcp_db::OracleCatalogResolverCache
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OracleCatalogResolverCache
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OracleCatalogResolverCache
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OracleCatalogResolverCache where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OracleCatalogResolverCache where T: 'a
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OracleCatalogResolverCache where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OracleCatalogResolverCache where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OracleCatalogResolverCache where U: core::convert::From<T>
+pub fn oraclemcp_db::OracleCatalogResolverCache::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OracleCatalogResolverCache where U: core::convert::Into<T>
+pub type oraclemcp_db::OracleCatalogResolverCache::Error = core::convert::Infallible
+pub fn oraclemcp_db::OracleCatalogResolverCache::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OracleCatalogResolverCache where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OracleCatalogResolverCache::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OracleCatalogResolverCache::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OracleCatalogResolverCache
+impl<T> core::any::Any for oraclemcp_db::OracleCatalogResolverCache where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OracleCatalogResolverCache::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OracleCatalogResolverCache where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleCatalogResolverCache::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OracleCatalogResolverCache where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleCatalogResolverCache::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for oraclemcp_db::OracleCatalogResolverCache
+pub fn oraclemcp_db::OracleCatalogResolverCache::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleCatalogResolverCache
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleCatalogResolverCache
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleCatalogResolverCache
+impl<T> typenum::type_operators::Same for oraclemcp_db::OracleCatalogResolverCache
+pub type oraclemcp_db::OracleCatalogResolverCache::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleCatalogResolverCache where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleCatalogResolverCache where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OracleCatalogResolverCache::vzip(self) -> V
 pub struct oraclemcp_db::OracleCell
 pub oraclemcp_db::OracleCell::bytes: core::option::Option<alloc::vec::Vec<u8>>
 pub oraclemcp_db::OracleCell::nested_result: core::option::Option<alloc::boxed::Box<oraclemcp_db::types::OracleNestedResult>>

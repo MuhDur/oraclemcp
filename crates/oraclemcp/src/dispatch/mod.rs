@@ -36,9 +36,10 @@ use oraclemcp_core::{
 };
 use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
-    AsOf, DbError, DbRequestQuota, DbmsOutput, DependentObject, DependentsProbe, OracleBackend,
-    OracleBind, OracleConnection, OracleConnectionInfo, OracleRow, QuarantineOutcome, QueryCaps,
-    QueryRowStream, QueryRowStreamStart, SerializeOptions, StructuredDecodeCaps, compile_errors,
+    AsOf, CatalogInvalidation, DbError, DbRequestQuota, DbmsOutput, DependentObject,
+    DependentsProbe, OracleBackend, OracleBind, OracleCatalogResolverCache, OracleConnection,
+    OracleConnectionInfo, OracleRow, QuarantineOutcome, QueryCaps, QueryRowStream,
+    QueryRowStreamStart, SerializeOptions, StructuredDecodeCaps, compile_errors,
     compile_object_statements, describe_columns, describe_constraints, describe_index,
     describe_trigger, describe_view, execute_immediate_audit, explain_plan,
     find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects, list_schemas,
@@ -298,6 +299,10 @@ struct DispatcherState {
     grant_generation: u64,
     execute_approved_tokens: HashMap<String, ExecuteApprovedGrant>,
     patch_previews: HashMap<String, PatchPreviewEntry>,
+    /// Generation-scoped dictionary evidence for this lane/profile sequence.
+    /// Profile switches advance rather than replace it, so an old context can
+    /// never become current again after reconnecting to another session.
+    catalog_cache: OracleCatalogResolverCache,
     /// A1: lazy read-only transaction backstop for the pinned/primary session.
     /// Scoped to `conn` only (the stateless metadata pool relies on the
     /// least-privilege DB user, A2). Re-asserted at the start of every read
@@ -409,6 +414,7 @@ impl OracleDispatcher {
                 grant_generation: 1,
                 execute_approved_tokens: HashMap::new(),
                 patch_previews: HashMap::new(),
+                catalog_cache: OracleCatalogResolverCache::new(),
                 read_only_backstop: ReadOnlyBackstop::new(),
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
@@ -489,6 +495,7 @@ impl OracleDispatcher {
                 grant_generation: 1,
                 execute_approved_tokens: HashMap::new(),
                 patch_previews: HashMap::new(),
+                catalog_cache: OracleCatalogResolverCache::new(),
                 read_only_backstop: ReadOnlyBackstop::new(),
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
@@ -4171,6 +4178,7 @@ struct DbToolCtx<'a> {
     execute_grants: &'a ExecGrantStore,
     grant_binding: &'a ExecGrantBinding,
     write_intents: Option<&'a WriteIntentLog>,
+    catalog_cache: &'a OracleCatalogResolverCache,
     audit: AuditCtx<'a>,
     quarantine: &'a SyncMutex<Option<ConnectionQuarantine>>,
 }
@@ -5063,6 +5071,39 @@ fn quarantined_db_error(outcome: QuarantineOutcome, message: impl Into<String>) 
     }
 }
 
+/// Classify why a statement invalidates dictionary resolution evidence.
+///
+/// Every DDL/Admin call advances the generation regardless of this label. The
+/// narrower reasons also identify lower-level session-context mutations (for
+/// example `CURRENT_SCHEMA`) that must invalidate without a DDL floor.
+fn catalog_invalidation_for_sql(sql: &str) -> CatalogInvalidation {
+    let sql = sql.trim_start().to_ascii_uppercase();
+    if sql.starts_with("ALTER SESSION") && sql.contains("CURRENT_SCHEMA") {
+        CatalogInvalidation::CurrentSchema
+    } else if sql.starts_with("ALTER SESSION") && sql.contains("EDITION") {
+        CatalogInvalidation::Edition
+    } else if sql.contains("SYNONYM") {
+        CatalogInvalidation::Synonym
+    } else if sql.starts_with("SET ROLE") || sql.starts_with("GRANT ") || sql.starts_with("REVOKE ")
+    {
+        CatalogInvalidation::Roles
+    } else if sql.contains("PACKAGE") || sql.contains(" TYPE ") {
+        CatalogInvalidation::Package
+    } else if sql.contains("PROCEDURE") || sql.contains("FUNCTION") {
+        CatalogInvalidation::Overload
+    } else {
+        CatalogInvalidation::Ddl
+    }
+}
+
+fn catalog_invalidation_for_object_type(object_type: &str) -> CatalogInvalidation {
+    match object_type {
+        "PACKAGE" | "PACKAGE BODY" | "TYPE" | "TYPE BODY" => CatalogInvalidation::Package,
+        "PROCEDURE" | "FUNCTION" => CatalogInvalidation::Overload,
+        _ => CatalogInvalidation::Ddl,
+    }
+}
+
 fn quarantine_uncertain_optional_diagnostic(
     quarantine: &SyncMutex<Option<ConnectionQuarantine>>,
     label: &str,
@@ -5305,6 +5346,14 @@ async fn execute_sql_inner(
     // like explicit non-transactional effects for outcome accounting.
     let effect_may_survive_rollback =
         decision.non_transactional_effect || required_level >= OperatingLevel::Ddl;
+    let invalidation = catalog_invalidation_for_sql(&args.sql);
+    if required_level >= OperatingLevel::Ddl || invalidation != CatalogInvalidation::Ddl {
+        // Invalidate before the wire call. Oracle DDL can commit implicitly and
+        // session-context changes take effect on the live connection; an
+        // adapter error may leave either effect uncertain. Waiting for success
+        // could therefore preserve stale proof after a real mutation.
+        ctx.catalog_cache.invalidate(invalidation);
+    }
     let rows_affected = match execute_conn(cx, conn, &executed_sql, &binds).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -5773,6 +5822,8 @@ async fn compile_object_inner(
         )?;
         return Err(err);
     }
+    ctx.catalog_cache
+        .invalidate(catalog_invalidation_for_object_type(&object_type));
     let mut rows_affected = Vec::with_capacity(statements.len());
     for stmt in &statements {
         match execute_conn(cx, conn, stmt, &[]).await {
@@ -6675,6 +6726,8 @@ async fn patch_source_inner(
         )?;
         return Err(err);
     }
+    ctx.catalog_cache
+        .invalidate(catalog_invalidation_for_sql(&patched_ddl));
     let rows_affected = match execute_conn(cx, conn, &patched_ddl, &[]).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -7615,6 +7668,9 @@ impl OracleDispatcher {
         state.execute_grants.clear();
         state.execute_approved_tokens.clear();
         state.patch_previews.clear();
+        state
+            .catalog_cache
+            .invalidate(CatalogInvalidation::Reconnect);
         state.read_only_backstop.reset();
 
         if reason == DispatchCloseReason::RequestFinalizationTimeout {
@@ -7936,6 +7992,9 @@ impl OracleDispatcher {
                     state.execute_grants.clear();
                     state.execute_approved_tokens.clear();
                     state.patch_previews.clear();
+                    state
+                        .catalog_cache
+                        .invalidate(CatalogInvalidation::Reconnect);
                     // A1: the pinned session was replaced; the new session's
                     // transaction is fresh, so re-assert the read-only backstop
                     // on its first read.
@@ -8134,6 +8193,7 @@ impl OracleDispatcher {
                 execute_grants: &state.execute_grants,
                 grant_binding: &grant_binding,
                 write_intents: self.write_intents.as_deref(),
+                catalog_cache: &state.catalog_cache,
                 audit,
                 quarantine: &self.quarantine,
             };
@@ -8159,6 +8219,7 @@ impl OracleDispatcher {
                 execute_grants: &state.execute_grants,
                 grant_binding: &grant_binding,
                 write_intents: self.write_intents.as_deref(),
+                catalog_cache: &state.catalog_cache,
                 audit,
                 quarantine: &self.quarantine,
             };
@@ -8386,6 +8447,7 @@ impl OracleDispatcher {
                     execute_grants: &state.execute_grants,
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
+                    catalog_cache: &state.catalog_cache,
                     audit,
                     quarantine: &self.quarantine,
                 };
@@ -8409,6 +8471,7 @@ impl OracleDispatcher {
                     execute_grants: &state.execute_grants,
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
+                    catalog_cache: &state.catalog_cache,
                     audit,
                     quarantine: &self.quarantine,
                 };
@@ -8432,6 +8495,7 @@ impl OracleDispatcher {
                     execute_grants: &state.execute_grants,
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
+                    catalog_cache: &state.catalog_cache,
                     audit,
                     quarantine: &self.quarantine,
                 };
@@ -8455,6 +8519,7 @@ impl OracleDispatcher {
                     execute_grants: &state.execute_grants,
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
+                    catalog_cache: &state.catalog_cache,
                     audit,
                     quarantine: &self.quarantine,
                 };

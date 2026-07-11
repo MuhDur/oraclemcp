@@ -5,8 +5,8 @@
 
 use asupersync::{Cx, runtime::RuntimeBuilder};
 use oraclemcp_db::{
-    AuthAdapter, OracleCatalogResolver, OracleConnectOptions, OracleConnection,
-    RustOracleConnection, read_catalog_resolve_context,
+    AuthAdapter, CatalogInvalidation, OracleCatalogResolver, OracleCatalogResolverCache,
+    OracleConnectOptions, OracleConnection, RustOracleConnection, read_catalog_resolve_context,
 };
 use oraclemcp_guard::{
     CatalogGeneration, CatalogObjectKind, CatalogResolver, RawName, RawNamePart, Resolution,
@@ -173,5 +173,55 @@ fn live_statement_scope_shadows_dictionary_objects() {
                 .await
                 .expect("scoped dictionary snapshot");
         assert_eq!(resolver.resolve(&dual, &context), Resolution::Unresolved);
+    });
+}
+
+#[test]
+fn live_cache_invalidation_rejects_stale_positive_and_negative_evidence() {
+    run_with_cx(|cx| async move {
+        let Some(conn) = connect_or_skip(&cx).await else {
+            return;
+        };
+        let cache = OracleCatalogResolverCache::new();
+        let dual = name(&["dual"], SyntacticRole::FromFactor);
+        let missing = name(
+            &["oraclemcp_generation_scoped_missing_object"],
+            SyntacticRole::FromFactor,
+        );
+        let old = cache
+            .preload(
+                &cx,
+                &conn,
+                &[dual.clone(), missing.clone()],
+                StatementScope::default(),
+            )
+            .await
+            .expect("live generation-one cache load");
+        assert!(matches!(
+            cache.resolve(&dual, &old),
+            Resolution::Resolved(_)
+        ));
+        assert_eq!(cache.resolve(&missing, &old), Resolution::Unresolved);
+        assert_eq!(cache.len(), 2, "negative answers are cached too");
+
+        let next = cache.invalidate(CatalogInvalidation::Reconnect);
+        assert_eq!(next.0, old.generation.0 + 1);
+        assert!(cache.is_empty());
+        assert_eq!(cache.resolve(&dual, &old), Resolution::Unresolved);
+
+        let current = cache
+            .preload(
+                &cx,
+                &conn,
+                std::slice::from_ref(&dual),
+                StatementScope::default(),
+            )
+            .await
+            .expect("live cache reload after invalidation");
+        assert_eq!(current.generation, next);
+        assert!(matches!(
+            cache.resolve(&dual, &current),
+            Resolution::Resolved(_)
+        ));
     });
 }

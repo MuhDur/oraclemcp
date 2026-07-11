@@ -94,6 +94,53 @@ fn preview_confirm(dispatcher: &OracleDispatcher, sql: &str) -> String {
         .to_owned()
 }
 
+fn catalog_generation(dispatcher: &OracleDispatcher) -> u64 {
+    RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds")
+        .block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            let state = dispatcher
+                .state
+                .lock(&cx)
+                .await
+                .unwrap_or_else(|_| panic!("dispatcher state lock failed"));
+            state.catalog_cache.generation().0
+        })
+}
+
+#[test]
+fn catalog_invalidation_labels_cover_every_session_and_dictionary_mutation_class() {
+    assert_eq!(
+        catalog_invalidation_for_sql("DROP TABLE app.orders"),
+        CatalogInvalidation::Ddl
+    );
+    assert_eq!(
+        catalog_invalidation_for_sql("CREATE OR REPLACE SYNONYM orders FOR app.orders"),
+        CatalogInvalidation::Synonym
+    );
+    assert_eq!(
+        catalog_invalidation_for_sql("ALTER PACKAGE app.api COMPILE"),
+        CatalogInvalidation::Package
+    );
+    assert_eq!(
+        catalog_invalidation_for_sql("ALTER PROCEDURE app.run COMPILE"),
+        CatalogInvalidation::Overload
+    );
+    assert_eq!(
+        catalog_invalidation_for_sql("ALTER SESSION SET CURRENT_SCHEMA = APP"),
+        CatalogInvalidation::CurrentSchema
+    );
+    assert_eq!(
+        catalog_invalidation_for_sql("ALTER SESSION SET EDITION = blue"),
+        CatalogInvalidation::Edition
+    );
+    assert_eq!(
+        catalog_invalidation_for_sql("SET ROLE reporter"),
+        CatalogInvalidation::Roles
+    );
+}
+
 fn write_intent_root(name: &str) -> PathBuf {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1298,9 +1345,11 @@ fn profile_switch_opens_one_connection_bundle() {
     )
     .with_profile_drain_state(state);
 
+    let before_generation = catalog_generation(&dispatcher);
     dispatcher
         .dispatch("oracle_switch_profile", json!({ "profile": "other" }))
         .expect("bundle switch succeeds");
+    assert_eq!(catalog_generation(&dispatcher), before_generation + 1);
     assert_eq!(bundle_calls.load(Ordering::SeqCst), 1);
     let query = dispatcher
         .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
@@ -4782,12 +4831,14 @@ fn create_or_replace_execute_applies_and_reports_compile_errors() {
         .as_str()
         .expect("confirm grant");
 
+    let before_generation = catalog_generation(&dispatcher);
     let out = dispatcher
         .dispatch(
             "create_or_replace",
             json!({ "source_code": source, "execute": true, "token": confirm }),
         )
         .expect("confirmed apply");
+    assert_eq!(catalog_generation(&dispatcher), before_generation + 1);
     assert_eq!(out["applied"], json!(true));
     assert_eq!(out["committed"], json!(true));
     assert_eq!(out["detected_object"]["owner"], json!("APP"));
@@ -5533,9 +5584,11 @@ fn allowlisted_alter_session_requires_confirmation_even_with_rollback_default() 
     assert!(state.executed.lock().expect("exec mutex").is_empty());
 
     let confirm = preview_confirm(&dispatcher, sql);
+    let before_generation = catalog_generation(&dispatcher);
     let out = dispatcher
         .dispatch("oracle_execute", json!({ "sql": sql, "confirm": confirm }))
         .expect("reviewed allowlisted setting executes");
+    assert_eq!(catalog_generation(&dispatcher), before_generation + 1);
     assert_eq!(out["committed"], json!(false));
     assert_eq!(out["rolled_back"], json!(true));
     assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
@@ -6374,6 +6427,7 @@ fn compile_object_execute_runs_statements_and_returns_compile_errors() {
         .as_str()
         .expect("confirm");
 
+    let before_generation = catalog_generation(&dispatcher);
     let out = dispatcher
         .dispatch(
             "oracle_compile_object",
@@ -6385,6 +6439,7 @@ fn compile_object_execute_runs_statements_and_returns_compile_errors() {
             }),
         )
         .expect("compile executes");
+    assert_eq!(catalog_generation(&dispatcher), before_generation + 1);
     assert_eq!(out["compiled"], json!(true));
     assert_eq!(out["object_type"], json!("PACKAGE"));
     assert_eq!(
