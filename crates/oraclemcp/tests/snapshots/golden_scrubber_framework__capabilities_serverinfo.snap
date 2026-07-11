@@ -260,7 +260,7 @@ expression: rendered
           },
           "export": {
             "additionalProperties": true,
-            "description": "Present when export=true: metadata for the materialized oracle-export://{id} resource.",
+            "description": "Present when export=true: metadata for the materialized oracle-export://{id} resource, readable only by the originating principal under the exact scope grant.",
             "type": "object"
           },
           "inlined": {
@@ -1663,7 +1663,7 @@ expression: rendered
             "type": "boolean"
           },
           "export": {
-            "description": "When true, materialize the bounded full result as an oracle-export://{id} resource and return a resource_link instead of inlining rows.",
+            "description": "When true, materialize the bounded full result as an oracle-export://{id} resource and return a resource_link instead of inlining rows. The resource is bound to the originating principal and exact scope grant.",
             "type": "boolean"
           },
           "export_format": {
@@ -1770,7 +1770,7 @@ expression: rendered
           },
           "export": {
             "additionalProperties": true,
-            "description": "Present when export=true: metadata for the materialized oracle-export://{id} resource.",
+            "description": "Present when export=true: metadata for the materialized oracle-export://{id} resource, readable only by the originating principal under the exact scope grant.",
             "type": "object"
           },
           "inlined": {
