@@ -337,4 +337,41 @@ mod tests {
         assert!(!keys.contains(&"bind_0"), "bind value dropped");
         assert!(keys.contains(&"tool"), "safe attribute kept");
     }
+
+    #[test]
+    fn sensitive_db_attributes_never_reach_log_protobuf() {
+        const SENTINEL: &str = "QA34_DB_SECRET_SENTINEL";
+        let config = cfg();
+        let records = vec![
+            LogRecordInput::new(LogLevel::Warn, "database event", 1)
+                .with_attribute("db.password", SENTINEL)
+                .with_attribute("db.bind_count", "2")
+                .with_attribute("db.vendor.extension", format!("Bearer {SENTINEL}")),
+        ];
+        let snapshot = build_snapshot(&config, &Redactor::new(), &records);
+        let record = &snapshot.records[0];
+        assert!(
+            !record
+                .attributes
+                .iter()
+                .any(|(key, _)| key == "db.password")
+        );
+        assert!(
+            record
+                .attributes
+                .iter()
+                .any(|(key, value)| { key == "db.bind_count" && value == "2" })
+        );
+        assert!(record.attributes.iter().any(|(key, value)| {
+            key == "db.vendor.extension" && value == super::super::redact::REDACTED
+        }));
+
+        let bytes = snapshot.to_otlp_protobuf();
+        assert!(
+            !bytes
+                .windows(SENTINEL.len())
+                .any(|window| window == SENTINEL.as_bytes()),
+            "sensitive db.* sentinel must not reach OTLP log bytes"
+        );
+    }
 }

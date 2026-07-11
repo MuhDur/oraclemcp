@@ -511,6 +511,25 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_db_labels_use_the_finite_redaction_policy() {
+        const SENTINEL: &str = "QA34_DB_SECRET_SENTINEL";
+        let attrs = redact_labels(
+            &Redactor::new(),
+            &[
+                ("db.password", SENTINEL),
+                ("db.bind_count", "2"),
+                ("db.vendor.extension", "Bearer QA34_DB_SECRET_SENTINEL"),
+            ],
+        );
+        assert!(!attrs.iter().any(|attribute| attribute.key == "db.password"));
+        assert_eq!(attr_value(&attrs, "db.bind_count"), Some("2"));
+        assert_eq!(
+            attr_value(&attrs, "db.vendor.extension"),
+            Some(super::super::redact::REDACTED)
+        );
+    }
+
+    #[test]
     fn batch_sampling_respects_ratio() {
         assert!(should_export_batch(1.0, 12345));
         assert!(!should_export_batch(0.0, 12345));

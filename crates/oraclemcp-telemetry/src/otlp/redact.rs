@@ -9,16 +9,16 @@
 //!
 //! 1. **Key denylist** — an attribute whose key matches a sensitive name
 //!    (`password`, `secret`, `token`, `bind`, `wallet`, `authorization`, …) is
-//!    DROPPED entirely (key and value), so neither the name nor the value leaks.
+//!    DROPPED entirely. The only sensitive-name exceptions are finite, exact,
+//!    typed driver counters such as numeric `db.bind_count`.
 //! 2. **Value redaction** — for attributes that survive the key check, values
 //!    that *look* like a secret (a bearer token, a `key=value` credential, a
 //!    long opaque blob) are replaced with `[REDACTED]`. This is a backstop for
 //!    free-form fields (e.g. an error message that quoted a connect string).
 //!
-//! The allowlist of *known-safe* keys (`tool`, `profile`, `operating_level`,
-//! `row_count`, `cache_hit`, `ora_code`, `db.*` semantic-convention keys, …) is
-//! passed through verbatim — these are the structured fields the spans/metrics
-//! are designed to carry and never hold secrets by construction.
+//! The finite allowlist of benign `db.*` keys contains only the exact semantic
+//! fields emitted by this product/driver. An arbitrary `db.*` extension is not
+//! implicitly safe, and value-shape redaction still applies after key admission.
 
 /// Sentinel substituted for a redacted value.
 pub const REDACTED: &str = "[REDACTED]";
@@ -39,7 +39,8 @@ impl Redactor {
     /// Returns `true` if an attribute with this key must be dropped wholesale.
     ///
     /// Case-insensitive substring match against the sensitive-name denylist.
-    /// Known-safe structured keys are never dropped.
+    /// Exact typed database-counter exceptions remain observable; an arbitrary
+    /// extension never inherits trust from the `db.` namespace.
     #[must_use]
     pub fn should_drop_key(&self, key: &str) -> bool {
         let key_lc = key.to_ascii_lowercase();
@@ -50,22 +51,31 @@ impl Redactor {
         if DB_TEXT_DENY.iter().any(|d| key_lc == *d) || key_lc.starts_with("db.query.parameter") {
             return true;
         }
-        if is_known_safe_key(&key_lc) {
-            return false;
-        }
-        SENSITIVE_KEY_FRAGMENTS
+        let sensitive = SENSITIVE_KEY_FRAGMENTS
             .iter()
-            .any(|fragment| key_lc.contains(fragment))
+            .any(|fragment| key_lc.contains(fragment));
+        // `db.bind_count` and `db.bind_rows` are typed numeric metadata emitted
+        // by the active oracledb driver, not bind values. They are deliberately
+        // exact-listed; arbitrary db.bind*/db.token*/etc. extensions still lose.
+        sensitive && !is_known_safe_db_key(&key_lc)
     }
 
     /// Redact a value that survived the key check, returning the safe value.
     ///
-    /// Known-safe keys pass through unchanged (they are structured, non-secret
-    /// by construction). For any other key, a value that pattern-matches a
-    /// secret is replaced with [`REDACTED`].
+    /// Secret-shape scanning applies to every admitted key. The only opaque
+    /// value exempted from the heuristic is a `subject_id_hash` that matches its
+    /// exact `subject-sha256:<64 lowercase hex>` domain. Invalid typed database
+    /// counters are redacted here and dropped by [`Self::filter`].
     #[must_use]
     pub fn redact_value(&self, key: &str, value: &str) -> String {
-        if is_known_safe_key(&key.to_ascii_lowercase()) {
+        let key_lc = key.to_ascii_lowercase();
+        if is_safe_bind_count_key(&key_lc) && value.parse::<u64>().is_err() {
+            return REDACTED.to_owned();
+        }
+        // The subject hash is intentionally a 64-character opaque token, which
+        // the generic entropy backstop would otherwise redact. Only bypass that
+        // backstop when it has the exact SHA-256 hex domain promised by the key.
+        if key.eq_ignore_ascii_case("subject_id_hash") && is_subject_sha256(value) {
             return value.to_owned();
         }
         if value_looks_secret(value) {
@@ -75,12 +85,19 @@ impl Redactor {
         }
     }
 
-    /// Filter a `(key, value)` pair: `None` if the key is dropped, otherwise the
-    /// key with its (possibly redacted) value. The single funnel every
-    /// attribute should pass through before export.
+    /// Filter a `(key, value)` pair: `None` if the key is denied or an exact
+    /// typed counter has an invalid value, otherwise the key with its (possibly
+    /// redacted) value. This is the single funnel every attribute should pass
+    /// through before export.
     #[must_use]
     pub fn filter<'a>(&self, key: &'a str, value: &str) -> Option<(&'a str, String)> {
         if self.should_drop_key(key) {
+            return None;
+        }
+        let key_lc = key.to_ascii_lowercase();
+        if is_safe_bind_count_key(&key_lc) && value.parse::<u64>().is_err() {
+            // The exact key exception is for typed driver counts only. A string
+            // placed under the same name does not inherit that trust.
             return None;
         }
         Some((key, self.redact_value(key, value)))
@@ -113,41 +130,62 @@ const SENSITIVE_KEY_FRAGMENTS: &[&str] = &[
     "connection_string",
 ];
 
-/// `db.*` keys that carry raw SQL / bind text and must be dropped even though
-/// they share the otherwise-safe `db.` prefix. We only ever emit the SQL SHA +
-/// bind-free subset, so these never appear — this is a backstop.
+/// `db.*` keys that carry raw SQL / bind text and must be dropped regardless of
+/// namespace or value. We only ever emit the SQL SHA + bind-free subset, so
+/// these never appear — this is a backstop.
 const DB_TEXT_DENY: &[&str] = &["db.statement", "db.query.text"];
 
-/// Structured keys the telemetry layer is designed to carry. Exact match
-/// (case-insensitive) OR `db.`-prefixed OTel semantic-convention keys. These are
-/// never dropped or value-redacted.
-fn is_known_safe_key(key_lc: &str) -> bool {
-    if key_lc.starts_with("db.") {
-        // OTel db.* semantic conventions: db.system, db.operation, db.namespace,
-        // db.response.status_code, etc. NEVER db.statement with binds — we map
-        // only the SHA/preview-free subset (see metrics.rs / traces.rs).
-        return true;
-    }
+/// Exact benign database attributes currently emitted by oraclemcp metrics or
+/// the pinned oracledb tracing integration. Raw statement/query/parameter text
+/// is intentionally absent. Keep this finite when either emitter grows.
+fn is_known_safe_db_key(key_lc: &str) -> bool {
     matches!(
         key_lc,
-        "tool"
-            | "tool_name"
-            | "profile"
-            | "operating_level"
-            | "status"
-            | "row_count"
-            | "rowcount"
-            | "cache_hit"
-            | "ora_code"
-            | "lane_id"
-            | "subject_id_hash"
-            | "request_id"
-            | "target"
-            | "service.name"
-            | "telemetry.sdk.name"
-            | "telemetry.sdk.version"
-            | "code"
+        // Current OTel database semantic-convention fields.
+        "db.system.name"
+            | "db.namespace"
+            | "db.operation.name"
+            | "db.response.status_code"
+            // Pinned oracledb tracing fields (bounded names/counts/booleans).
+            | "db.system"
+            | "db.name"
+            | "db.operation"
+            | "db.arraysize"
+            | "db.batch_row_count"
+            | "db.batch_row_error_count"
+            | "db.batch_rows_affected"
+            | "db.bind_count"
+            | "db.bind_rows"
+            | "db.cache_event"
+            | "db.cache_existed"
+            | "db.cache_generation"
+            | "db.cursor_id"
+            | "db.lob_amount"
+            | "db.lob_bytes"
+            | "db.lob_chunk_bytes"
+            | "db.lob_chunk_chars"
+            | "db.lob_chunk_units"
+            | "db.lob_offset"
+            | "db.lob_utf16_boundary_split"
+            | "db.pages_fetched"
+            | "db.prefetch_inflight_max"
+            | "db.rows_fetched"
+            | "db.rows_streamed"
     )
+}
+
+fn is_safe_bind_count_key(key_lc: &str) -> bool {
+    matches!(key_lc, "db.bind_count" | "db.bind_rows")
+}
+
+fn is_subject_sha256(value: &str) -> bool {
+    let Some(hash) = value.strip_prefix("subject-sha256:") else {
+        return false;
+    };
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Heuristic: does a free-form value look like a secret?
@@ -248,13 +286,64 @@ mod tests {
                     .is_none()
             );
         }
-        // The safe db.* subset still passes.
+        // Exact benign database keys still pass key admission.
         assert!(!r.should_drop_key("db.operation"));
         assert!(!r.should_drop_key("db.system.name"));
     }
 
     #[test]
-    fn keeps_known_safe_keys_verbatim() {
+    fn sensitive_db_extensions_never_bypass_the_key_denylist() {
+        let r = Redactor::new();
+        for key in [
+            "db.password",
+            "DB.PASSWD",
+            "db.wallet_secret",
+            "db.token",
+            "db.authorization",
+            "db.credential",
+            "db.bind_value",
+            "db.dsn",
+            "db.connect_string",
+            "db.connection_string",
+        ] {
+            assert!(r.should_drop_key(key), "{key} must be dropped");
+            assert!(r.filter(key, "QA34_DB_SECRET_SENTINEL").is_none());
+        }
+    }
+
+    #[test]
+    fn finite_db_allowlist_preserves_benign_driver_metadata_only() {
+        let r = Redactor::new();
+        for (key, value) in [
+            ("db.system.name", "oracle"),
+            ("db.namespace", "service"),
+            ("db.operation.name", "SELECT"),
+            ("db.response.status_code", "942"),
+            ("db.bind_count", "2"),
+            ("db.bind_rows", "8"),
+            ("db.rows_fetched", "40"),
+        ] {
+            assert_eq!(r.filter(key, value), Some((key, value.to_owned())));
+        }
+
+        let (_, value) = r
+            .filter("db.vendor.extension", "Bearer QA34_DB_SECRET_SENTINEL")
+            .expect("non-sensitive extension key remains observable");
+        assert_eq!(value, REDACTED, "unknown db.* values use the backstop");
+        assert!(
+            r.filter("db.bind_count", "Bearer QA34_DB_SECRET_SENTINEL")
+                .is_none(),
+            "bind-count exception applies only to typed numeric values"
+        );
+        assert_eq!(
+            r.redact_value("db.bind_count", "QA34_DB_SECRET_SENTINEL"),
+            REDACTED,
+            "direct value redaction also rejects a non-numeric count"
+        );
+    }
+
+    #[test]
+    fn keeps_ordinary_structured_values_verbatim() {
         let r = Redactor::new();
         for (key, value) in [
             ("tool", "oracle_query"),
@@ -305,16 +394,35 @@ mod tests {
     }
 
     #[test]
-    fn known_safe_value_not_redacted_even_if_secret_shaped() {
-        // A db.* attribute whose value happens to be long is still kept (these
-        // are structured, never secrets).
+    fn secret_shaped_values_are_redacted_even_under_known_keys() {
         let r = Redactor::new();
-        let (_k, v) = r
-            .filter(
+        for (key, value) in [
+            (
                 "db.operation",
                 "SELECTSELECTSELECTSELECTSELECTSELECTSELECT1",
+            ),
+            ("db.operation.name", "Bearer QA34_DB_SECRET_SENTINEL"),
+            ("db.namespace", "password=QA34_DB_SECRET_SENTINEL"),
+        ] {
+            let (_, filtered) = r.filter(key, value).expect("key remains observable");
+            assert_eq!(filtered, REDACTED, "{key} value must be redacted");
+        }
+    }
+
+    #[test]
+    fn validated_subject_hash_bypasses_only_the_opaque_value_heuristic() {
+        let r = Redactor::new();
+        let hash = format!("subject-sha256:{}", "0123456789abcdef".repeat(4));
+        assert_eq!(
+            r.filter("subject_id_hash", &hash),
+            Some(("subject_id_hash", hash))
+        );
+        let (_, invalid) = r
+            .filter(
+                "subject_id_hash",
+                "Bearer QA34_DB_SECRET_SENTINEL_that_is_not_a_sha256_hash",
             )
-            .expect("kept");
-        assert_eq!(v, "SELECTSELECTSELECTSELECTSELECTSELECTSELECT1");
+            .expect("key remains observable");
+        assert_eq!(invalid, REDACTED);
     }
 }

@@ -73,7 +73,7 @@ pub struct FinishedSpan {
 }
 
 impl FinishedSpan {
-    fn to_proto(&self) -> Span {
+    fn to_proto(&self, redactor: &Redactor) -> Span {
         let parent = if self.parent_span_id == [0u8; 8] {
             Vec::new()
         } else {
@@ -91,7 +91,11 @@ impl FinishedSpan {
             attributes: self
                 .attributes
                 .iter()
-                .map(|(k, v)| key_value(k.clone(), v.clone()))
+                .filter_map(|(key, value)| {
+                    redactor
+                        .filter(key, value)
+                        .map(|(safe_key, safe_value)| key_value(safe_key, safe_value))
+                })
                 .collect(),
             dropped_attributes_count: 0,
             status: Some(Status {
@@ -104,7 +108,11 @@ impl FinishedSpan {
 
 /// Build an `ExportTraceServiceRequest` from a batch of finished spans.
 #[must_use]
-pub fn build_request(config: &OtlpConfig, spans: &[FinishedSpan]) -> ExportTraceServiceRequest {
+pub fn build_request(
+    config: &OtlpConfig,
+    redactor: &Redactor,
+    spans: &[FinishedSpan],
+) -> ExportTraceServiceRequest {
     ExportTraceServiceRequest {
         resource_spans: vec![ResourceSpans {
             resource: Some(Resource {
@@ -119,7 +127,7 @@ pub fn build_request(config: &OtlpConfig, spans: &[FinishedSpan]) -> ExportTrace
                     name: SCOPE_NAME.to_owned(),
                     version: SCOPE_VERSION.to_owned(),
                 }),
-                spans: spans.iter().map(FinishedSpan::to_proto).collect(),
+                spans: spans.iter().map(|span| span.to_proto(redactor)).collect(),
                 schema_url: OTEL_SCHEMA_URL.to_owned(),
             }],
             schema_url: OTEL_SCHEMA_URL.to_owned(),
@@ -648,7 +656,7 @@ mod tests {
             let _g = s.enter();
         });
         let spans = sink.spans.lock().unwrap().clone();
-        let req = build_request(&cfg(), &spans);
+        let req = build_request(&cfg(), &Redactor::new(), &spans);
         let bytes = req.to_bytes();
         let decoded = ExportTraceServiceRequest::decode(bytes.as_slice()).expect("decodes");
         assert_eq!(decoded, req, "trace request roundtrips");
@@ -656,5 +664,86 @@ mod tests {
         assert_eq!(span.trace_id.len(), 16);
         assert_eq!(span.span_id.len(), 8);
         assert_eq!(span.status.as_ref().unwrap().code, STATUS_CODE_OK);
+    }
+
+    #[test]
+    fn dependency_db_fields_pass_the_same_redaction_policy() {
+        let sink = Arc::new(CollectingSink::default());
+        let layer = OtlpTraceLayer::new(sink.clone(), Redactor::new(), 1.0);
+        let subscriber = Registry::default().with(layer);
+
+        with_default(subscriber, || {
+            let span = tracing::info_span!(
+                target: "third_party_oracle",
+                "dependency.db",
+                db.password = "QA34_DB_SECRET_SENTINEL",
+                db.bind_count = 2_u64,
+                db.vendor_extension = "Bearer QA34_DB_SECRET_SENTINEL"
+            );
+            let _guard = span.enter();
+        });
+
+        let spans = sink.spans.lock().unwrap().clone();
+        let attrs = &spans[0].attributes;
+        assert!(!attrs.iter().any(|(key, _)| key == "db.password"));
+        assert!(
+            attrs
+                .iter()
+                .any(|(key, value)| { key == "db.bind_count" && value == "2" })
+        );
+        assert!(attrs.iter().any(|(key, value)| {
+            key == "db.vendor_extension" && value == super::super::redact::REDACTED
+        }));
+    }
+
+    #[test]
+    fn raw_finished_span_is_redacted_again_at_the_protobuf_boundary() {
+        const SENTINEL: &str = "QA34_DB_SECRET_SENTINEL";
+        let span = FinishedSpan {
+            trace_id: [1; 16],
+            span_id: [2; 8],
+            parent_span_id: [0; 8],
+            name: "raw.submission".to_owned(),
+            kind: SPAN_KIND_INTERNAL,
+            start_time_unix_nano: 1,
+            end_time_unix_nano: 2,
+            attributes: vec![
+                ("db.password".to_owned(), SENTINEL.to_owned()),
+                ("db.bind_count".to_owned(), "2".to_owned()),
+                (
+                    "db.vendor.extension".to_owned(),
+                    format!("Bearer {SENTINEL}"),
+                ),
+            ],
+            status_code: STATUS_CODE_UNSET,
+            trace_state: String::new(),
+        };
+
+        let request = build_request(&cfg(), &Redactor::new(), &[span]);
+        let bytes = request.to_bytes();
+        assert!(
+            !bytes
+                .windows(SENTINEL.len())
+                .any(|window| window == SENTINEL.as_bytes()),
+            "raw FinishedSpan secret must not reach OTLP bytes"
+        );
+        let decoded = ExportTraceServiceRequest::decode(bytes.as_slice()).expect("decodes");
+        let attrs = &decoded.resource_spans[0].scope_spans[0].spans[0].attributes;
+        assert!(!attrs.iter().any(|attribute| attribute.key == "db.password"));
+        assert!(
+            attrs
+                .iter()
+                .any(|attribute| attribute.key == "db.bind_count")
+        );
+        assert!(attrs.iter().any(|attribute| {
+            attribute.key == "db.vendor.extension"
+                && attribute
+                    .value
+                    .as_ref()
+                    .and_then(|value| value.value.as_ref())
+                    == Some(&super::super::proto::any_value::Value::StringValue(
+                        super::super::redact::REDACTED.to_owned(),
+                    ))
+        }));
     }
 }

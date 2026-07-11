@@ -283,7 +283,7 @@ async fn drain_once(cx: &asupersync::Cx, shared: &Arc<Shared>) -> usize {
     let spans = shared.spans.drain(SPANS_QUEUE_CAP);
     if !spans.is_empty() {
         exported += spans.len();
-        let request = traces::build_request(&shared.config, &spans);
+        let request = traces::build_request(&shared.config, &shared.redactor, &spans);
         if let Err(e) = traces::export_request(cx, &shared.config, &request).await {
             tracing::debug!(error = %e, "oraclemcp-otlp: trace export dropped");
         }
