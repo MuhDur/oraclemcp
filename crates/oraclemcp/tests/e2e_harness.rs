@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -26,6 +27,102 @@ fn run_script(script: &str, args: &[&str]) -> Output {
         )
         .output()
         .unwrap_or_else(|e| panic!("run {script}: {e}"))
+}
+
+const DISTRIBUTION_ASSETS: [&str; 3] = [
+    "oraclemcp-x86_64-apple-darwin.tar.gz",
+    "oraclemcp-aarch64-apple-darwin.tar.gz",
+    "oraclemcp-x86_64-pc-windows-msvc.zip",
+];
+
+fn distribution_fixture(label: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_nanos();
+    let artifact_dir = repo_root().join("target/e2e-contract").join(format!(
+        "distribution-manifests-{label}-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&artifact_dir).expect("create distribution artifact fixture");
+    artifact_dir
+}
+
+fn sha256_file(path: &Path) -> String {
+    let output = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Command::new("shasum")
+                    .args(["-a", "256"])
+                    .arg(path)
+                    .output()
+            } else {
+                Err(error)
+            }
+        })
+        .expect("sha256sum or shasum is available");
+    assert!(
+        output.status.success(),
+        "hash command failed for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("hash output is utf8")
+        .split_whitespace()
+        .next()
+        .expect("hash output contains a digest")
+        .to_ascii_lowercase()
+}
+
+fn write_distribution_archives(artifact_dir: &Path) -> [String; 3] {
+    for (asset, bytes) in
+        DISTRIBUTION_ASSETS
+            .iter()
+            .zip([b"darwin-x64".as_slice(), b"darwin-arm64", b"windows-x64"])
+    {
+        std::fs::write(artifact_dir.join(asset), bytes).expect("write release archive fixture");
+    }
+    DISTRIBUTION_ASSETS.map(|asset| sha256_file(&artifact_dir.join(asset)))
+}
+
+fn write_valid_distribution_sidecars(artifact_dir: &Path, hashes: &[String; 3]) {
+    std::fs::write(
+        artifact_dir.join(format!("{}.sha256", DISTRIBUTION_ASSETS[0])),
+        format!("{}  {}\n", hashes[0], DISTRIBUTION_ASSETS[0]),
+    )
+    .expect("write GNU checksum fixture");
+    std::fs::write(
+        artifact_dir.join(format!("{}.sha256", DISTRIBUTION_ASSETS[1])),
+        format!(
+            "SHA256 ({}) = {}\n",
+            DISTRIBUTION_ASSETS[1],
+            hashes[1].to_ascii_uppercase()
+        ),
+    )
+    .expect("write BSD checksum fixture");
+    std::fs::write(
+        artifact_dir.join(format!("{}.sha256", DISTRIBUTION_ASSETS[2])),
+        format!(
+            "SHA256 hash of {}:\r\n{}\r\nCertUtil: -hashfile command completed successfully.\r\n",
+            DISTRIBUTION_ASSETS[2],
+            hashes[2].to_ascii_uppercase()
+        ),
+    )
+    .expect("write certutil checksum fixture");
+}
+
+fn run_distribution_renderer(artifact_dir: &Path, output_dir: &Path) -> Output {
+    Command::new("bash")
+        .arg(repo_root().join("scripts/render_distribution_manifests.sh"))
+        .arg(artifact_dir)
+        .current_dir(repo_root())
+        .env("VERSION", "9.9.9")
+        .env("OUT_DIR", output_dir)
+        .output()
+        .expect("run distribution manifest renderer")
 }
 
 fn json_lines(stderr: &[u8]) -> Vec<Value> {
@@ -184,6 +281,144 @@ fn clean_machine_e2e_refuses_production_markers() {
                 .as_str()
                 .is_some_and(|message| message.contains("production-looking"))),
         "missing production-marker refusal event: {events:?}"
+    );
+}
+
+#[test]
+fn distribution_renderer_accepts_bound_platform_checksums_and_hashes_exact_archives() {
+    let artifact_dir = distribution_fixture("formats-pass");
+    let hashes = write_distribution_archives(&artifact_dir);
+    write_valid_distribution_sidecars(&artifact_dir, &hashes);
+    let output_dir = artifact_dir.join("rendered");
+
+    let output = run_distribution_renderer(&artifact_dir, &output_dir);
+    assert!(
+        output.status.success(),
+        "GNU, BSD, and certutil checksum records must pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let formula = std::fs::read_to_string(output_dir.join("homebrew/Formula/oraclemcp.rb"))
+        .expect("read rendered Homebrew formula");
+    assert!(
+        formula.contains(&format!("sha256 \"{}\"", hashes[0]))
+            && formula.contains(&format!("sha256 \"{}\"", hashes[1])),
+        "Homebrew digests must equal fresh hashes of the referenced archives: {formula}"
+    );
+
+    let winget = std::fs::read_to_string(
+        output_dir
+            .join("winget/manifests/m/MuhDur/oraclemcp/9.9.9/MuhDur.oraclemcp.installer.yaml"),
+    )
+    .expect("read rendered winget manifest");
+    assert!(
+        winget.contains(&format!(
+            "InstallerSha256: {}",
+            hashes[2].to_ascii_uppercase()
+        )),
+        "winget digest must equal a fresh hash of the referenced archive: {winget}"
+    );
+}
+
+#[test]
+fn distribution_renderer_rejects_unbound_or_tampered_checksum_inputs_before_rendering() {
+    for scenario in [
+        "wrong-filename",
+        "other-archive-digest",
+        "extra-record",
+        "prefix-suffix-junk",
+        "missing-archive",
+        "mutated-archive",
+    ] {
+        let artifact_dir = distribution_fixture(scenario);
+        let hashes = write_distribution_archives(&artifact_dir);
+        write_valid_distribution_sidecars(&artifact_dir, &hashes);
+        let target = DISTRIBUTION_ASSETS[0];
+        let target_sidecar = artifact_dir.join(format!("{target}.sha256"));
+
+        match scenario {
+            "wrong-filename" => std::fs::write(
+                &target_sidecar,
+                format!("{}  another-archive.tar.gz\n", hashes[0]),
+            )
+            .expect("write wrong-filename checksum"),
+            "other-archive-digest" => {
+                std::fs::write(&target_sidecar, format!("{}  {target}\n", hashes[1]))
+                    .expect("write another archive's digest")
+            }
+            "extra-record" => std::fs::write(
+                &target_sidecar,
+                format!(
+                    "{}  {target}\n{}  extra-archive.tar.gz\n",
+                    hashes[0], hashes[0]
+                ),
+            )
+            .expect("write extra checksum record"),
+            "prefix-suffix-junk" => {
+                std::fs::write(&target_sidecar, format!("prefix={} suffix\n", hashes[0]))
+                    .expect("write checksum junk")
+            }
+            "missing-archive" => {
+                std::fs::rename(
+                    artifact_dir.join(target),
+                    artifact_dir.join(format!("{target}.withheld")),
+                )
+                .expect("withhold release archive fixture");
+            }
+            "mutated-archive" => {
+                use std::io::Write as _;
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(artifact_dir.join(target))
+                    .expect("open release archive fixture")
+                    .write_all(b"mutated-byte")
+                    .expect("mutate release archive fixture");
+            }
+            _ => unreachable!("scenario list is exhaustive"),
+        }
+
+        let output_dir = artifact_dir.join("rendered");
+        let output = run_distribution_renderer(&artifact_dir, &output_dir);
+        assert!(
+            !output.status.success(),
+            "{scenario} must fail closed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output_dir.exists(),
+            "{scenario} must fail before writing any distribution manifest"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("render_distribution_manifests:"),
+            "{scenario} failure must identify the release gate: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn release_upload_is_sequentially_blocked_by_distribution_verification() {
+    let workflow = std::fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+        .expect("read release workflow");
+    let verify = workflow
+        .find("- name: Generate Homebrew and winget manifests")
+        .expect("release workflow has distribution verification step");
+    let upload = workflow
+        .find("- name: Publish release with checksums, SBOM, and signatures")
+        .expect("release workflow has package upload step");
+    assert!(
+        verify < upload,
+        "verification must run before package upload"
+    );
+    assert!(
+        workflow[verify..upload]
+            .contains("run: bash scripts/render_distribution_manifests.sh artifacts"),
+        "release verification must execute the fail-closed renderer directly"
+    );
+    assert!(
+        !workflow[verify..upload].contains("continue-on-error"),
+        "release verification failure must prevent the upload step"
     );
 }
 

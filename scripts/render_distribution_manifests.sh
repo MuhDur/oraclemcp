@@ -20,20 +20,63 @@ fail() {
   exit 1
 }
 
+sha256_of_archive() {
+  local archive="$1" output digest
+  [ -f "$archive" ] || fail "missing release archive: $archive"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    output="$(sha256sum -- "$archive")"
+  elif command -v shasum >/dev/null 2>&1; then
+    output="$(shasum -a 256 -- "$archive")"
+  else
+    fail "sha256sum or shasum is required to verify release archives"
+  fi
+
+  digest="${output%% *}"
+  [[ "$digest" =~ ^[A-Fa-f0-9]{64}$ ]] ||
+    fail "checksum tool returned an invalid SHA-256 digest for: $archive"
+  printf '%s\n' "$digest" | tr '[:upper:]' '[:lower:]'
+}
+
 sha256_from_file() {
-  local asset="$1" checksum_file digest
+  local asset="$1" archive checksum_file line parsed_digest actual_digest
+  local gnu_pattern bsd_pattern
+  local -a lines=()
+
+  archive="$ARTIFACT_DIR/$asset"
   checksum_file="$ARTIFACT_DIR/$asset.sha256"
   [ -f "$checksum_file" ] || fail "missing checksum file: $checksum_file"
-  digest="$(
-    awk '
-      match($0, /[A-Fa-f0-9]{64}/) {
-        print substr($0, RSTART, RLENGTH)
-        exit
-      }
-    ' "$checksum_file"
-  )"
-  [ -n "$digest" ] || fail "checksum file does not contain a SHA-256 digest: $checksum_file"
-  printf '%s\n' "$digest" | tr '[:upper:]' '[:lower:]'
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    lines+=("${line%$'\r'}")
+  done < "$checksum_file"
+
+  gnu_pattern='^([A-Fa-f0-9]{64}) ([ *])(.+)$'
+  bsd_pattern='^SHA256 \((.+)\) = ([A-Fa-f0-9]{64})$'
+  parsed_digest=""
+  if [ "${#lines[@]}" -eq 1 ] && [[ "${lines[0]}" =~ $gnu_pattern ]]; then
+    [ "${BASH_REMATCH[3]}" = "$asset" ] ||
+      fail "checksum record names '${BASH_REMATCH[3]}', expected '$asset': $checksum_file"
+    parsed_digest="${BASH_REMATCH[1]}"
+  elif [ "${#lines[@]}" -eq 1 ] && [[ "${lines[0]}" =~ $bsd_pattern ]]; then
+    [ "${BASH_REMATCH[1]}" = "$asset" ] ||
+      fail "checksum record names '${BASH_REMATCH[1]}', expected '$asset': $checksum_file"
+    parsed_digest="${BASH_REMATCH[2]}"
+  elif [ "${#lines[@]}" -eq 3 ] &&
+    [ "${lines[0]}" = "SHA256 hash of $asset:" ] &&
+    [[ "${lines[1]}" =~ ^[A-Fa-f0-9]{64}$ ]] &&
+    [ "${lines[2]}" = "CertUtil: -hashfile command completed successfully." ]; then
+    parsed_digest="${lines[1]}"
+  else
+    fail "checksum file must contain exactly one basename-bound GNU, BSD, or certutil SHA-256 record: $checksum_file"
+  fi
+
+  parsed_digest="$(printf '%s\n' "$parsed_digest" | tr '[:upper:]' '[:lower:]')"
+  actual_digest="$(sha256_of_archive "$archive")"
+  [ "$parsed_digest" = "$actual_digest" ] ||
+    fail "checksum mismatch for release archive: $archive"
+
+  printf '%s\n' "$actual_digest"
 }
 
 render_template() {
