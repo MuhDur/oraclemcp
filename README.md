@@ -869,6 +869,16 @@ oraclemcp sign-tool ~/.config/oraclemcp/tools.d/customer.toml --tool app_custome
 The command prints the signature values to place into matching `[[tool]]`
 blocks; it does not print the HMAC key.
 
+Custom-tool signatures use the self-identifying
+`oraclemcp-custom-tool:v2:hmac-sha256:…` format. Version 2 authenticates every
+semantic and agent-visible definition field, including nested parameter
+descriptions, parameter order, and `output_mode`; only the `signature` envelope
+itself is excluded. Bare 64-hex signatures emitted by older releases are not
+accepted when present, and protected-profile startup fails with re-sign
+guidance instead of silently falling back to the incomplete legacy format.
+During upgrade, run `oraclemcp sign-tool` for each tools file and replace every
+legacy `signature` value before restarting a protected profile.
+
 ## Building and testing
 
 `oraclemcp` builds on a single **pinned Rust nightly** (`nightly-2026-05-11`,

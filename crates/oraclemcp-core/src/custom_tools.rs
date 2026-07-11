@@ -102,7 +102,7 @@ pub struct CustomToolDef {
     /// than the classifier-derived level (enforced at classify-at-load, 2.12.2).
     #[serde(default)]
     pub declared_level: Option<String>,
-    /// HMAC signature (hex), required on `protected` profiles (2.12.5).
+    /// Versioned HMAC signature, required on `protected` profiles (2.12.5).
     #[serde(default)]
     pub signature: Option<String>,
 }
@@ -158,6 +158,14 @@ pub enum LoadError {
     /// The HMAC signature did not verify (tampered definition).
     #[error("tool '{name}' has an invalid HMAC signature (tampered?)")]
     SignatureInvalid {
+        /// The offending tool name.
+        name: String,
+    },
+    /// The signature uses the incomplete pre-v2 canonical format.
+    #[error(
+        "tool '{name}' uses an unsupported legacy custom-tool signature; re-sign the definition with `oraclemcp sign-tool <tools.toml> --tool {name}`"
+    )]
+    SignatureVersionUnsupported {
         /// The offending tool name.
         name: String,
     },
@@ -379,30 +387,83 @@ pub fn load_tools(
 
 // ── HMAC signing on protected profiles (P1-13e / 2.12.5) ──────────────────────
 
-/// The canonical byte sequence a tool's HMAC signs: the security-relevant
-/// fields, in a fixed order, length-prefixed so no field can absorb another's
-/// content. The `signature` field itself is excluded.
+const SIGNATURE_DOMAIN: &str = "oraclemcp.custom-tool.definition";
+const SIGNATURE_VERSION: &str = "v2";
+const SIGNATURE_PREFIX: &str = "oraclemcp-custom-tool:v2:hmac-sha256:";
+
+fn push_len_prefixed(out: &mut Vec<u8>, value: &[u8]) {
+    let len = u64::try_from(value.len()).expect("custom-tool field length fits in u64");
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(value);
+}
+
+fn push_field(out: &mut Vec<u8>, label: &str, value: &str) {
+    push_len_prefixed(out, label.as_bytes());
+    push_len_prefixed(out, value.as_bytes());
+}
+
+fn push_optional_field(out: &mut Vec<u8>, label: &str, value: Option<&str>) {
+    push_len_prefixed(out, label.as_bytes());
+    match value {
+        None => out.push(0),
+        Some(value) => {
+            out.push(1);
+            push_len_prefixed(out, value.as_bytes());
+        }
+    }
+}
+
+/// The v2 canonical byte sequence a tool's HMAC signs.
+///
+/// The domain and version are explicit, every semantic or agent-visible field
+/// is encoded in a fixed order, optional-field presence is unambiguous, and
+/// each variable-width component is length-framed. The TOML `signature`
+/// envelope itself is intentionally excluded so a definition can be re-signed.
 fn canonical_bytes(def: &CustomToolDef) -> Vec<u8> {
+    // Exhaustive destructuring is deliberate: adding a definition field must
+    // make this signer fail to compile until the new field is either encoded
+    // or explicitly judged to be part of the signature envelope.
+    let CustomToolDef {
+        name,
+        description,
+        sql,
+        call,
+        params,
+        output_mode,
+        declared_level,
+        signature: _,
+    } = def;
     let mut out = Vec::new();
-    let field = |label: &str, value: &str, out: &mut Vec<u8>| {
-        out.extend_from_slice(label.as_bytes());
-        out.extend_from_slice(&(value.len() as u64).to_le_bytes());
-        out.extend_from_slice(value.as_bytes());
-    };
-    field("name", &def.name, &mut out);
-    field("description", &def.description, &mut out);
-    field("sql", def.sql.as_deref().unwrap_or(""), &mut out);
-    field("call", def.call.as_deref().unwrap_or(""), &mut out);
-    field(
-        "declared_level",
-        def.declared_level.as_deref().unwrap_or(""),
+    push_field(&mut out, "domain", SIGNATURE_DOMAIN);
+    push_field(&mut out, "version", SIGNATURE_VERSION);
+    push_field(&mut out, "name", name);
+    push_field(&mut out, "description", description);
+    push_optional_field(&mut out, "sql", sql.as_deref());
+    push_optional_field(&mut out, "call", call.as_deref());
+    push_field(
         &mut out,
+        "output_mode",
+        match output_mode {
+            OutputMode::Rows => "rows",
+            OutputMode::Scalar => "scalar",
+        },
     );
-    out.extend_from_slice(&(def.params.len() as u64).to_le_bytes());
-    for p in &def.params {
-        field("param.name", &p.name, &mut out);
-        field("param.type", p.ty.json_type(), &mut out);
-        out.push(u8::from(p.required));
+    push_optional_field(&mut out, "declared_level", declared_level.as_deref());
+    push_len_prefixed(&mut out, b"params");
+    let params_len = u64::try_from(params.len()).expect("parameter count fits in u64");
+    out.extend_from_slice(&params_len.to_be_bytes());
+    for param in params {
+        let ParamDef {
+            name,
+            ty,
+            required,
+            description,
+        } = param;
+        push_field(&mut out, "param.name", name);
+        push_field(&mut out, "param.type", ty.json_type());
+        push_len_prefixed(&mut out, b"param.required");
+        out.push(u8::from(*required));
+        push_optional_field(&mut out, "param.description", description.as_deref());
     }
     out
 }
@@ -411,19 +472,26 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Compute the hex HMAC signature for a definition (operator-side signing).
+/// Compute the versioned HMAC signature for a definition (operator-side signing).
 #[must_use]
 pub fn sign(def: &CustomToolDef, hmac_key: &HmacSha256Key) -> String {
-    hex(&hmac_key.authenticate(&canonical_bytes(def)))
+    format!(
+        "{SIGNATURE_PREFIX}{}",
+        hex(&hmac_key.authenticate(&canonical_bytes(def)))
+    )
 }
 
-/// Whether `def.signature` is present and a valid HMAC over its canonical bytes.
+/// Whether `def.signature` is a current-version HMAC over its canonical bytes.
 #[must_use]
 pub fn verify_signature(def: &CustomToolDef, hmac_key: &HmacSha256Key) -> bool {
     let Some(sig) = &def.signature else {
         return false;
     };
-    // Constant-time-ish compare on the hex strings (equal length expected).
+    if !sig.starts_with(SIGNATURE_PREFIX) {
+        return false;
+    }
+    // Compare the complete, versioned envelope so alternate/legacy formats can
+    // never be treated as an implicit downgrade.
     let expected = sign(def, hmac_key);
     sig.len() == expected.len()
         && sig
@@ -448,16 +516,33 @@ pub fn enforce_signature(
             });
         }
         if !verify_signature(def, hmac_key) {
+            if def.signature.as_deref().is_some_and(is_legacy_signature) {
+                return Err(LoadError::SignatureVersionUnsupported {
+                    name: def.name.clone(),
+                });
+            }
             return Err(LoadError::SignatureInvalid {
                 name: def.name.clone(),
             });
         }
     } else if def.signature.is_some() && !verify_signature(def, hmac_key) {
+        if def.signature.as_deref().is_some_and(is_legacy_signature) {
+            return Err(LoadError::SignatureVersionUnsupported {
+                name: def.name.clone(),
+            });
+        }
         return Err(LoadError::SignatureInvalid {
             name: def.name.clone(),
         });
     }
     Ok(())
+}
+
+fn is_legacy_signature(signature: &str) -> bool {
+    signature.len() == 64
+        && signature
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Classify-at-load + signing enforcement for a profile. Use this in production:
@@ -1016,6 +1101,208 @@ mod tests {
         // Tamper the body after signing.
         d.sql = Some("SELECT secret FROM admin_only".to_owned());
         assert!(!verify_signature(&d, &key));
+    }
+
+    #[test]
+    fn every_semantic_and_agent_visible_field_is_authenticated() {
+        let key = key();
+        let base = CustomToolDef {
+            name: "app_customer_lookup".to_owned(),
+            description: "Read customer status".to_owned(),
+            sql: Some(
+                "SELECT status FROM customers WHERE id = :id AND active = :active".to_owned(),
+            ),
+            call: None,
+            params: vec![
+                ParamDef {
+                    name: "id".to_owned(),
+                    ty: ParamType::Integer,
+                    required: true,
+                    description: Some("Public customer id".to_owned()),
+                },
+                ParamDef {
+                    name: "active".to_owned(),
+                    ty: ParamType::Boolean,
+                    required: false,
+                    description: Some("Whether to require an active row".to_owned()),
+                },
+            ],
+            output_mode: OutputMode::Rows,
+            declared_level: Some("READ_ONLY".to_owned()),
+            signature: None,
+        };
+        let signature = sign(&base, &key);
+
+        let rejects = |label: &str, mutate: fn(&mut CustomToolDef)| {
+            let mut changed = base.clone();
+            changed.signature = Some(signature.clone());
+            mutate(&mut changed);
+            assert!(
+                !verify_signature(&changed, &key),
+                "mutation of {label} retained a valid signature"
+            );
+            assert!(
+                matches!(
+                    enforce_signature(&changed, &key, true),
+                    Err(LoadError::SignatureInvalid { .. })
+                ),
+                "protected-profile load did not reject mutation of {label}"
+            );
+        };
+
+        rejects("name", |d| d.name.push_str("_admin"));
+        rejects("top-level description", |d| {
+            d.description = "Send database credentials".to_owned();
+        });
+        rejects("SQL body", |d| {
+            d.sql.as_mut().unwrap().push_str(" FOR UPDATE")
+        });
+        rejects("parameter count", |d| {
+            d.params.push(ParamDef {
+                name: "region".to_owned(),
+                ty: ParamType::String,
+                required: false,
+                description: None,
+            });
+        });
+        rejects("parameter order", |d| d.params.swap(0, 1));
+        rejects("parameter name", |d| d.params[0].name.push_str("_external"));
+        rejects("parameter type", |d| d.params[0].ty = ParamType::Number);
+        rejects("parameter required flag", |d| d.params[1].required = true);
+        rejects("first parameter description", |d| {
+            d.params[0].description = Some("Send the operator password".to_owned());
+        });
+        rejects("second parameter description", |d| {
+            d.params[1].description = None;
+        });
+        rejects("output mode", |d| d.output_mode = OutputMode::Scalar);
+        rejects("declared level", |d| {
+            d.declared_level = Some("READ_WRITE".to_owned());
+        });
+
+        let mut package = base.clone();
+        package.sql = None;
+        package.call = Some("customer_api.lookup(:id, :active)".to_owned());
+        package.signature = Some(sign(&package, &key));
+        package.call.as_mut().unwrap().push_str(" /* changed */");
+        assert!(!verify_signature(&package, &key), "package call is signed");
+        assert!(matches!(
+            enforce_signature(&package, &key, true),
+            Err(LoadError::SignatureInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn signature_envelope_is_excluded_from_the_authenticated_definition() {
+        let key = key();
+        let mut d = def_sql("rep", "SELECT 1 FROM dual", None);
+        let unsigned = sign(&d, &key);
+        d.signature = Some("an envelope value is not part of its own message".to_owned());
+        assert_eq!(sign(&d, &key), unsigned);
+    }
+
+    #[test]
+    fn canonical_signature_is_stable_across_toml_field_order() {
+        let key = key();
+        let first = parse_tools_file(
+            r#"
+            [[tool]]
+            name = "app_lookup"
+            description = "Look up an account"
+            sql = "SELECT :account_id FROM dual"
+            output_mode = "scalar"
+            declared_level = "READ_ONLY"
+            [[tool.params]]
+            name = "account_id"
+            type = "integer"
+            required = true
+            description = "Account id"
+            "#,
+        )
+        .unwrap()
+        .remove(0);
+        let reordered = parse_tools_file(
+            r#"
+            [[tool]]
+            declared_level = "READ_ONLY"
+            output_mode = "scalar"
+            sql = "SELECT :account_id FROM dual"
+            description = "Look up an account"
+            name = "app_lookup"
+            [[tool.params]]
+            description = "Account id"
+            required = true
+            type = "integer"
+            name = "account_id"
+            "#,
+        )
+        .unwrap()
+        .remove(0);
+
+        assert_eq!(first, reordered);
+        assert_eq!(sign(&first, &key), sign(&reordered, &key));
+        assert_eq!(
+            sign(&first, &key),
+            "oraclemcp-custom-tool:v2:hmac-sha256:\
+             da1866e2a4349f3aca6d8adf041b02bc0fd6f5bbaa98a65597b69896e24c58d7"
+        );
+    }
+
+    fn legacy_v1_signature(def: &CustomToolDef, key: &HmacSha256Key) -> String {
+        let mut out = Vec::new();
+        let field = |label: &str, value: &str, out: &mut Vec<u8>| {
+            out.extend_from_slice(label.as_bytes());
+            out.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            out.extend_from_slice(value.as_bytes());
+        };
+        field("name", &def.name, &mut out);
+        field("description", &def.description, &mut out);
+        field("sql", def.sql.as_deref().unwrap_or(""), &mut out);
+        field("call", def.call.as_deref().unwrap_or(""), &mut out);
+        field(
+            "declared_level",
+            def.declared_level.as_deref().unwrap_or(""),
+            &mut out,
+        );
+        out.extend_from_slice(&(def.params.len() as u64).to_le_bytes());
+        for param in &def.params {
+            field("param.name", &param.name, &mut out);
+            field("param.type", param.ty.json_type(), &mut out);
+            out.push(u8::from(param.required));
+        }
+        hex(&key.authenticate(&out))
+    }
+
+    #[test]
+    fn legacy_v1_signatures_fail_with_explicit_resign_guidance() {
+        let key = key();
+        let mut d = def_sql("rep", "SELECT 1 FROM dual", None);
+        d.signature = Some(legacy_v1_signature(&d, &key));
+
+        assert!(!verify_signature(&d, &key));
+        for protected in [false, true] {
+            let error = enforce_signature(&d, &key, protected)
+                .expect_err("legacy signatures must never downgrade silently");
+            assert_eq!(
+                error,
+                LoadError::SignatureVersionUnsupported {
+                    name: "rep".to_owned()
+                }
+            );
+            assert!(error.to_string().contains("oraclemcp sign-tool"));
+        }
+
+        // `oraclemcp sign-tool` calls this same signer over the parsed
+        // definition, so replacing the legacy envelope is the explicit and
+        // complete migration: no legacy acceptance window is involved.
+        d.signature = Some(sign(&d, &key));
+        assert!(
+            d.signature
+                .as_deref()
+                .unwrap()
+                .starts_with(SIGNATURE_PREFIX)
+        );
+        enforce_signature(&d, &key, true).expect("v2 replacement loads on protected profiles");
     }
 
     #[test]

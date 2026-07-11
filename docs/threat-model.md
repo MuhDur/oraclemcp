@@ -106,6 +106,11 @@ statement's meaning.
 (`is_simple_identifier`) on the audit/unified path; the classifier runs on the
 *exact* SQL bytes. Custom tools are classified at load and only loaded if proven
 `READ_ONLY`, and (on `protected` profiles) must carry a valid HMAC signature.
+The versioned custom-tool signature authenticates every semantic and
+agent-visible definition field, including nested parameter descriptions and
+output shaping. Legacy signatures with incomplete field coverage are rejected
+with explicit `oraclemcp sign-tool` re-sign guidance; protected startup never
+silently downgrades signature verification.
 
 *Evidence (green; CI):*
 - `crates/oraclemcp-audit/src/unified.rs` tests
