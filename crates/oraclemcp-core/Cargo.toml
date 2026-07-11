@@ -31,9 +31,10 @@ oraclemcp-telemetry = { path = "../oraclemcp-telemetry", version = "0.8.0" }
 oracledb-protocol = { workspace = true }
 asupersync.workspace = true
 async-trait.workspace = true
-# `token_exec` subprocesses run in an OS containment unit: a POSIX process group
-# on Unix and a Job Object on Windows. Killing the unit closes descendant-held
-# pipes as well as reaping the direct child, so the credential deadline is real.
+# `token_exec` and plugin subprocesses run in OS containment units: POSIX process
+# groups on Unix and Job Objects on Windows. Killing a unit closes
+# descendant-held pipes as well as reaping the direct child, so deadlines are
+# real across the complete helper tree.
 command-group = "5.0.1"
 getrandom = "0.2"
 parking_lot.workspace = true
