@@ -196,13 +196,15 @@ mod tests {
         AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, GENESIS_HASH, SigningKey,
     };
 
+    const SQL_SENTINEL: &str = "QA31_HTTP_SIEM_SECRET";
+
     fn rec() -> AuditRecord {
         let draft = AuditEntryDraft {
             subject: AuditSubject::new("agent", "agent-1"),
             db_evidence: None,
             cancel: None,
             tool: "oracle_execute".to_owned(),
-            sql: "DELETE FROM orders WHERE id = 1".to_owned(),
+            sql: format!("UPDATE users SET password='{SQL_SENTINEL}'"),
             danger_level: "DESTRUCTIVE".to_owned(),
             decision: AuditDecision::Allowed,
             rows_affected: Some(1),
@@ -230,6 +232,12 @@ mod tests {
     fn json_encoding_roundtrips_to_the_same_record() {
         let r = rec();
         let body = SiemFormat::Json.encode(&r);
+        assert!(
+            !body
+                .windows(SQL_SENTINEL.len())
+                .any(|bytes| bytes == SQL_SENTINEL.as_bytes()),
+            "current JSON SIEM body must not contain SQL literals"
+        );
         let back: AuditRecord = serde_json::from_slice(&body).expect("json record");
         assert_eq!(back, r, "JSON wire body is the exact signed record");
     }
@@ -240,9 +248,11 @@ mod tests {
         let cef = String::from_utf8(SiemFormat::Cef.encode(&r)).unwrap();
         assert!(cef.starts_with("CEF:0|oraclemcp|"));
         assert!(cef.contains("entryHash="));
+        assert!(!cef.contains(SQL_SENTINEL));
         let sys = String::from_utf8(SiemFormat::Syslog.encode(&r)).unwrap();
         assert!(sys.contains("[oraclemcp@0"));
         assert!(sys.contains("seq=\"1\""));
+        assert!(!sys.contains(SQL_SENTINEL));
     }
 
     #[test]

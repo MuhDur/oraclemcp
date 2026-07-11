@@ -8,8 +8,9 @@
 //! that runs the audited statement). For `Guarded`/`Destructive`/escalation
 //! calls the record is **fsynced before the statement executes** (at-least-once
 //! log, at-most-once execute); the monotonic sequence number, not the wall
-//! timestamp, is the chain's order key (§5.10). Records carry the SQL SHA-256 +
-//! a truncated preview, never bind values or secrets.
+//! timestamp, is the chain's order key (§5.10). Current records carry exact and
+//! normalized SQL hashes plus a fixed redaction marker, never SQL text, bind
+//! values, or secrets. Historical schemas remain verifiable byte-for-byte.
 
 mod anchor;
 mod hmac;

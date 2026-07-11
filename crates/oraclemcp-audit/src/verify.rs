@@ -274,11 +274,10 @@ mod tests {
 
     #[test]
     fn recompute_from_genesis_without_key_is_detected() {
-        // Forge record 2: edit the operator-legible preview AND recompute its
-        // entry_hash so the bare hash chain would pass, exactly as an attacker
-        // with the file but not the key would. (We rebuild a draft with the
-        // forged preview as the SQL so sql_sha256/sql_preview both reflect it,
-        // then copy the recomputed hash over the real record.)
+        // Forge record 2: replace the exact/normalized SQL hashes and recompute
+        // its entry_hash so the bare hash chain would pass, exactly as an
+        // attacker with the file but not the key would. The v6 preview remains
+        // the fixed redaction marker.
         let mut records = signed_chain(3);
         let forged = AuditRecord::chained_unsigned(
             &draft("SELECT 1"),

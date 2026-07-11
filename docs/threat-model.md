@@ -183,10 +183,15 @@ at an independent destination
 *Threat.* A bind value, password, wallet secret, or token ends up in a log line,
 an OTLP export, or an agent-facing error.
 
-*Mitigation.* The audit record stores only the SQL **SHA-256 + a truncated
-preview**, never bind values; operator timeline/proof-bundle surfaces export
-`sql_sha256` instead of that preview because inlined literals can enter SQL
-text. `OracleBind` and `OracleConnectionInfo` have redacting `Debug`
+*Mitigation.* Current schema-v6 audit records store exact and normalized SQL
+hashes plus a fixed redaction marker, never SQL text or bind values; malformed
+Oracle quoting/comments therefore fail closed without relying on a best-effort
+scrubber. Operator timeline/proof-bundle surfaces likewise export hashes only.
+Historical v1-v5 records may contain a signed truncated preview and cannot be
+rewritten without invalidating evidence; operations guidance requires access
+review, retention/destination review, and no wider backfill before review.
+`AuditRecord`, `AuditEntryDraft`, `OracleBind`, and `OracleConnectionInfo` have
+redacting `Debug`
 implementations plus explicit redacted serializers for audit/proof/log/protocol
 surfaces. Telemetry redaction drops sensitive keys and redacts secret-shaped
 values before export. Secrets are resolved from
@@ -202,7 +207,7 @@ values before export. Secrets are resolved from
 - `crates/oraclemcp-db/src/types.rs` — redaction newtypes and sentinel tests for
   bind values plus connection identity/topology fields.
 - `crates/oraclemcp-audit/src/record.rs` —
-  `record_hashes_and_previews_without_storing_sql_verbatim`.
+  `v6_redacts_oracle_literal_comment_identifier_and_malformed_sql_sentinels`.
 
 ### T7 — Prompt injection via row data (T; asset A4)
 

@@ -3562,7 +3562,11 @@ mod tests {
         assert_eq!(records[0].agent_identity, "lane:finalization-audit-order");
         assert_eq!(
             records[0].sql_preview,
-            "LANE_FINALIZATION_TIMEOUT_UNKNOWN_DISCARDED",
+            "<sql text redacted; see sql_sha256>",
+        );
+        assert_eq!(
+            records[0].sql_sha256,
+            oraclemcp_audit::sha256_hex(b"LANE_FINALIZATION_TIMEOUT_UNKNOWN_DISCARDED")
         );
         assert_eq!(records[0].outcome, AuditOutcome::UnknownDiscarded);
     }
@@ -4959,7 +4963,14 @@ mod tests {
         assert_eq!(records[0].agent_identity, "lane:panic-test");
         assert_eq!(records[0].subject, AuditSubject::new("lane", "panic-test"));
         assert_eq!(records[0].tool, "lane_runtime");
-        assert_eq!(records[0].sql_preview, "LANE_PANIC_UNKNOWN_DISCARDED");
+        assert_eq!(
+            records[0].sql_preview,
+            "<sql text redacted; see sql_sha256>"
+        );
+        assert_eq!(
+            records[0].sql_sha256,
+            oraclemcp_audit::sha256_hex(b"LANE_PANIC_UNKNOWN_DISCARDED")
+        );
         assert_eq!(records[0].outcome, AuditOutcome::UnknownDiscarded);
 
         let sibling_result = block_on_lane_bridge(async {

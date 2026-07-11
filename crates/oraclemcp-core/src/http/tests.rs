@@ -667,7 +667,14 @@ fn operator_api_routes_are_typed_json_404_and_parse_query() {
     let records = sink.records();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].tool, "operator_api");
-    assert_eq!(records[0].sql_preview, "GET /operator/v1/sessions");
+    assert_eq!(
+        records[0].sql_preview,
+        "<sql text redacted; see sql_sha256>"
+    );
+    assert_eq!(
+        records[0].sql_sha256,
+        oraclemcp_audit::sha256_hex(b"GET /operator/v1/sessions")
+    );
     assert_eq!(
         records[0].subject,
         AuditSubject::new("local-owner", "process-owner").with_authn_method("loopback")
@@ -1009,7 +1016,14 @@ fn operator_lane_cancel_is_operator_gated_and_audited() {
     let records = sink.records();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].tool, "operator_api");
-    assert_eq!(records[0].sql_preview, "POST /operator/v1/lanes/cancel");
+    assert_eq!(
+        records[0].sql_preview,
+        "<sql text redacted; see sql_sha256>"
+    );
+    assert_eq!(
+        records[0].sql_sha256,
+        oraclemcp_audit::sha256_hex(b"POST /operator/v1/lanes/cancel")
+    );
 
     // Unknown lane id: 404, no termination.
     let unknown = handle_http_request(&test_server(), &cfg, cancel_request(true, "lane-z"));
@@ -1366,11 +1380,21 @@ fn operator_v1_serves_schema_health_events_and_action_mapping() {
         records.len() >= 5,
         "schema, health, metrics, events, and action routes are audited"
     );
-    assert_eq!(records[0].sql_preview, "GET /operator/v1/schema");
-    assert_eq!(records[1].sql_preview, "GET /operator/v1/health");
-    assert_eq!(records[2].sql_preview, "GET /operator/v1/metrics");
-    assert_eq!(records[3].sql_preview, "GET /operator/v1/events");
-    assert_eq!(records[4].sql_preview, "POST /operator/v1/actions/preview");
+    for record in records.iter().take(5) {
+        assert_eq!(record.sql_preview, "<sql text redacted; see sql_sha256>");
+    }
+    for (record, action) in records.iter().zip([
+        "GET /operator/v1/schema",
+        "GET /operator/v1/health",
+        "GET /operator/v1/metrics",
+        "GET /operator/v1/events",
+        "POST /operator/v1/actions/preview",
+    ]) {
+        assert_eq!(
+            record.sql_sha256,
+            oraclemcp_audit::sha256_hex(action.as_bytes())
+        );
+    }
 }
 
 #[test]
@@ -6149,8 +6173,14 @@ fn scoped_principal_cannot_act_as_operator_without_allowlist_and_operator_action
         AuditSubject::new("oauth", stable_id).with_authn_method("oauth")
     );
     assert_eq!(records[0].tool, "operator_api");
-    assert_eq!(records[0].sql_preview, "GET /operator/v1/sessions");
-    assert!(!records[0].sql_preview.contains("force=true"));
+    assert_eq!(
+        records[0].sql_preview,
+        "<sql text redacted; see sql_sha256>"
+    );
+    assert_eq!(
+        records[0].sql_sha256,
+        oraclemcp_audit::sha256_hex(b"GET /operator/v1/sessions")
+    );
 }
 
 // ===================================================================

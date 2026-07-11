@@ -3206,7 +3206,11 @@ fn lifecycle_close_rolls_back_and_revokes_execution_grants() {
     assert_eq!(records.len(), 1);
     let record = &records[0];
     assert_eq!(record.tool, "lane_lifecycle");
-    assert_eq!(record.sql_preview, "LANE_CLOSE");
+    assert_eq!(record.sql_preview, "<sql text redacted; see sql_sha256>");
+    assert_eq!(
+        record.sql_sha256,
+        oraclemcp_audit::sha256_hex(b"LANE_CLOSE")
+    );
     assert_eq!(
         record.cancel.as_ref().map(|c| c.kind.as_str()),
         Some("User")
@@ -3382,7 +3386,11 @@ fn lifecycle_timeout_close_audits_timeout_reason() {
     assert_eq!(records.len(), 1);
     let record = &records[0];
     assert_eq!(record.tool, "lane_lifecycle");
-    assert_eq!(record.sql_preview, "LANE_CLOSE");
+    assert_eq!(record.sql_preview, "<sql text redacted; see sql_sha256>");
+    assert_eq!(
+        record.sql_sha256,
+        oraclemcp_audit::sha256_hex(b"LANE_CLOSE")
+    );
     assert_eq!(
         record.cancel.as_ref().map(|c| c.kind.as_str()),
         Some("Timeout")
@@ -7506,11 +7514,8 @@ mod audit_wiring {
         assert_eq!(recs[1].outcome, AuditOutcome::Succeeded);
         assert_eq!(recs[1].prev_hash, recs[0].entry_hash);
         assert!(recs[0].signature.is_some());
-        assert!(
-            recs[0]
-                .sql_preview
-                .contains("ALTER PACKAGE APP.EMP_API COMPILE")
-        );
+        assert_eq!(recs[0].sql_preview, "<sql text redacted; see sql_sha256>");
+        assert!(recs[0].sql_sha256.starts_with("sha256:"));
         assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
     }
 
@@ -7630,11 +7635,8 @@ mod audit_wiring {
         assert_eq!(recs[1].outcome, AuditOutcome::Succeeded);
         assert_eq!(recs[1].prev_hash, recs[0].entry_hash);
         assert!(recs[0].signature.is_some());
-        assert!(
-            recs[0]
-                .sql_preview
-                .contains("CREATE OR REPLACE PACKAGE BODY")
-        );
+        assert_eq!(recs[0].sql_preview, "<sql text redacted; see sql_sha256>");
+        assert!(recs[0].sql_sha256.starts_with("sha256:"));
         assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
     }
 
@@ -8184,10 +8186,11 @@ mod read_only_backstop_wiring {
         assert_eq!(records[1].danger_level, "SAFE");
         assert_eq!(records[0].outcome, AuditOutcome::Pending);
         assert_eq!(records[1].outcome, AuditOutcome::Succeeded);
-        assert!(
-            records[0].sql_preview.starts_with("SELECT * FROM ("),
-            "audit preview identifies the generated dictionary SQL"
+        assert_eq!(
+            records[0].sql_preview,
+            "<sql text redacted; see sql_sha256>"
         );
+        assert!(records[0].sql_sha256.starts_with("sha256:"));
         assert!(records[0].hash_is_valid());
         assert!(records[1].hash_is_valid());
     }

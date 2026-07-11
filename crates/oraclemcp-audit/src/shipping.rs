@@ -250,9 +250,10 @@ impl AuditSink for ShippingAuditSink {
 ///
 /// The extension carries the chain-integrity fields (`seq`, `prev`/`entry`
 /// hash, `key_id`, `signature`) so a SIEM can detect a gap or a re-signed
-/// record, plus the operator-legible decision/outcome/sql-preview. No bind
-/// values or secrets appear (the record never carried them). Extension values
-/// are escaped per the CEF spec (`\`, `=`, and newlines).
+/// record, plus the decision/outcome and schema-versioned `sql_preview` field.
+/// Current v6 records carry only a fixed redaction marker in that field;
+/// historical v1-v5 records retain their signed bytes. Extension values are
+/// escaped per the CEF spec (`\`, `=`, and newlines).
 #[must_use]
 pub fn cef_line(record: &AuditRecord) -> String {
     let severity = cef_severity(record);
@@ -663,7 +664,10 @@ mod tests {
             for i in 0..4 {
                 auditor
                     .append(
-                        &draft(&format!("DELETE FROM t WHERE id={i}"), "DESTRUCTIVE"),
+                        &draft(
+                            &format!("DELETE FROM t WHERE secret='QA31_WORM_SECRET_{i}'"),
+                            "DESTRUCTIVE",
+                        ),
                         format!("t{i}"),
                         true,
                     )
@@ -676,6 +680,10 @@ mod tests {
             primary_body, worm_body,
             "the WORM mirror is byte-identical to the primary JSONL"
         );
+        assert!(
+            !primary_body.contains("QA31_WORM_SECRET"),
+            "new v6 local/WORM JSONL must not persist source SQL literals"
+        );
         let parsed = parse_jsonl(&worm_body).expect("parse worm");
         assert_eq!(
             verify_records(&parsed, &[key()]),
@@ -686,13 +694,17 @@ mod tests {
 
     #[test]
     fn cef_line_carries_chain_fields_and_escapes() {
-        let rec = AuditRecord::chained_signed(
+        let mut rec = AuditRecord::chained_signed(
             &draft("DELETE FROM orders WHERE note = 'a|b=c'", "DESTRUCTIVE"),
             7,
             crate::record::GENESIS_HASH,
             "2026-06-20T00:00:00Z".to_owned(),
             &key(),
         );
+        // A legacy-shaped record may contain a raw preview. QA31 preserves the
+        // formatter's treatment of that field; QA35 owns legacy re-shipping
+        // policy. Keep the escaping proof independent of new-v6 construction.
+        rec.sql_preview = "DELETE FROM orders WHERE note = 'a|b=c'".to_owned();
         let line = cef_line(&rec);
         assert!(
             line.starts_with("CEF:0|oraclemcp|oraclemcp|"),
@@ -706,6 +718,30 @@ mod tests {
         );
         // The '=' inside the preview value is escaped in the extension.
         assert!(line.contains("\\="), "extension '=' is escaped");
+    }
+
+    #[test]
+    fn new_v6_json_cef_and_syslog_never_carry_sql_sentinel() {
+        let sentinel = "QA31_SIEM_SECRET_SENTINEL";
+        let rec = AuditRecord::chained_signed(
+            &draft(
+                &format!("UPDATE users SET password='{sentinel}'"),
+                "DESTRUCTIVE",
+            ),
+            1,
+            crate::record::GENESIS_HASH,
+            "2026-07-11T00:00:00Z".to_owned(),
+            &key(),
+        );
+        let json = serde_json::to_string(&rec).expect("serialize current record");
+        let cef = cef_line(&rec);
+        let syslog = syslog_line(&rec);
+        for (surface, rendered) in [("json", json), ("cef", cef), ("syslog", syslog)] {
+            assert!(
+                !rendered.contains(sentinel),
+                "new v6 {surface} output leaked SQL source: {rendered}"
+            );
+        }
     }
 
     #[test]

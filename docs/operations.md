@@ -493,8 +493,9 @@ the intent unresolved, so restart refuses writable service with
 `ORACLEMCP_WRITE_INTENT_IN_DOUBT` until the database outcome is verified. Safe
 terminal outcomes are recovered as a durable idempotency index and reject exact
 confirmation-grant plus SQL replay after restart.
-Stateful lane close records use tool `lane_lifecycle`, SQL preview `LANE_CLOSE`,
-and hash-covered `cancel.kind` / `cancel.reason` fields such as
+Stateful lane close records use tool `lane_lifecycle`, hash the internal
+`LANE_CLOSE` marker without persisting it, and carry hash-covered `cancel.kind`
+/ `cancel.reason` fields such as
 `User/session_delete` for HTTP `DELETE /mcp` or `Shutdown/server_shutdown` for
 listener drain.
 
@@ -727,10 +728,21 @@ Back up and rotate this log like any other security record, and verify it after
 incident review.
 
 Audit records are additive and format-versioned. Current records carry
-`schema_version = 5`, a structured server-derived `subject`, optional database
-evidence, the normalized-SQL fingerprint, and injective canonical framing for
-optional values. `audit verify` still accepts signed v1-v4 records byte-for-byte,
-so existing logs do not need to be rewritten.
+`schema_version = 6`, a structured server-derived `subject`, optional database
+evidence, exact and normalized SQL hashes, injective canonical framing for
+optional values, and a fixed redaction marker instead of a SQL-text preview.
+`audit verify` still accepts signed v1-v5 records byte-for-byte, so existing logs
+do not need to be rewritten.
+
+Schema v1-v5 records may already contain the first 120 SQL characters in their
+signed `sql_preview` field. Those bytes cannot be redacted in place without
+invalidating the hash chain and keyed MAC, and a WORM copy cannot be rewritten
+at all. Treat an upgrade as an incident-review boundary: restrict access to
+historical files, review their retention and destination permissions, rotate to
+a fresh log when policy requires physical separation, and do not newly backfill
+historical JSON/WORM/CEF/syslog records to a broader destination before that
+review. New v6 records retain exact statement identity as `sql_sha256` while
+persisting no SQL text.
 
 Use `--with-db-evidence` when reviewing a v3-or-newer audit chain after incident
 response or a dashboard proof-bundle export. The verifier still runs offline:
@@ -889,9 +901,10 @@ How it behaves — the load-bearing properties:
 - **SIEM-native formats.** `cef` emits ArcSight CEF v0 and `syslog` emits
   RFC-5424, each carrying the chain-integrity fields (`seq`, `prevHash`,
   `entryHash`, `keyId`, `signature`) in the extension / structured-data element
-  so a SIEM rule can alert on a gap or a re-signed record. Records never carry
-  bind values or secrets (only the SQL SHA-256 + a truncated preview), so
-  nothing sensitive crosses the wire.
+  so a SIEM rule can alert on a gap or a re-signed record. New v6 records carry
+  SQL hashes plus a fixed redaction marker, never SQL text or bind values. Do
+  not newly re-ship historical v1-v5 records until their legacy preview fields
+  have been reviewed as described in §5.4.
 - **No new network stack.** The SIEM forwarder POSTs over the same Tokio-free
   asupersync HTTP/1 client the OTLP exporter uses; there is no reqwest/hyper/tokio
   in the production graph.

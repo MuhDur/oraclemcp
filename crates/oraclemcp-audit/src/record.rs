@@ -2,8 +2,10 @@
 //!
 //! The **monotonic sequence number is the authoritative order key** for the
 //! hash chain — never the wall-clock timestamp (a clock jump must not reorder
-//! or collide entries, §5.10). Records store the SQL **SHA-256 + a truncated
-//! preview**, never bind values or secrets.
+//! or collide entries, §5.10). Current records store SQL hashes plus a fixed
+//! redaction marker, never SQL text, bind values, or secrets. Historical
+//! schemas may contain a truncated SQL preview and remain verifiable
+//! byte-for-byte.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,9 +13,19 @@ use sha2::{Digest, Sha256};
 use crate::hmac::{HmacSha256Key, HmacSha256KeyError};
 
 const AUDIT_SCHEMA_V5: u16 = 5;
+const AUDIT_SCHEMA_V6: u16 = 6;
+
+/// Stable, non-secret replacement for the historical raw-SQL preview field.
+///
+/// The serialized field remains present so old readers and mixed-version audit
+/// chains keep working, but every newly constructed v6 record stores only this
+/// constant. A constant is deliberately used instead of a best-effort SQL
+/// scrubber: malformed Oracle quoting, comments, or PL/SQL can never make source
+/// text escape into the signed record.
+pub(crate) const REDACTED_SQL_PREVIEW: &str = "<sql text redacted; see sql_sha256>";
 
 /// Current on-disk audit record schema.
-pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V5;
+pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V6;
 
 /// The guard decision being audited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,8 +262,9 @@ impl AuditCancel {
 
 /// One audit entry. `seq` + `prev_hash` + `entry_hash` form the tamper-evident
 /// chain; `entry_hash` covers the seq and all content fields — including the
-/// operator-legible `sql_preview` — so any edit or reorder breaks verification.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// schema-versioned `sql_preview` field — so any edit or reorder breaks
+/// verification.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditRecord {
     /// On-disk record schema version. Missing means v1 for pre-FN2 records.
     #[serde(default = "legacy_schema_version")]
@@ -283,7 +296,8 @@ pub struct AuditRecord {
     /// v1–v3 records that predate the field; covered by the v4 chain hash.
     #[serde(default)]
     pub sql_normalized_sha256: String,
-    /// A short, truncated preview of the SQL (no bind values / secrets).
+    /// Historical SQL-preview field. New v6 records always contain a fixed
+    /// redaction marker; v1-v5 records may contain a truncated raw preview.
     pub sql_preview: String,
     /// The classifier danger tier (as a string, to avoid a guard dep).
     pub danger_level: String,
@@ -308,6 +322,32 @@ pub struct AuditRecord {
     /// no forger holds. `None` only for legacy unsigned records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+}
+
+impl std::fmt::Debug for AuditRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuditRecord")
+            .field("schema_version", &self.schema_version)
+            .field("seq", &self.seq)
+            .field("timestamp", &self.timestamp)
+            .field("agent_identity", &self.agent_identity)
+            .field("subject", &self.subject)
+            .field("db_evidence", &self.db_evidence)
+            .field("cancel", &self.cancel)
+            .field("tool", &self.tool)
+            .field("sql_sha256", &self.sql_sha256)
+            .field("sql_normalized_sha256", &self.sql_normalized_sha256)
+            .field("sql_preview", &"***redacted***")
+            .field("danger_level", &self.danger_level)
+            .field("decision", &self.decision)
+            .field("rows_affected", &self.rows_affected)
+            .field("outcome", &self.outcome)
+            .field("prev_hash", &self.prev_hash)
+            .field("entry_hash", &self.entry_hash)
+            .field("key_id", &self.key_id)
+            .field("signature", &self.signature)
+            .finish()
+    }
 }
 
 /// A keyed signing identity for the audit chain: an opaque `key_id` (stored in
@@ -358,7 +398,7 @@ impl std::fmt::Debug for SigningKey {
 }
 
 /// The fields of an audit entry before the chain hashes are attached.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AuditEntryDraft {
     /// Server-derived subject identity.
     pub subject: AuditSubject,
@@ -368,7 +408,7 @@ pub struct AuditEntryDraft {
     pub cancel: Option<AuditCancel>,
     /// Tool name.
     pub tool: String,
-    /// The exact SQL (hashed + previewed here; never stored verbatim).
+    /// The exact SQL, retained only long enough to compute audit hashes.
     pub sql: String,
     /// Danger tier string.
     pub danger_level: String,
@@ -380,7 +420,26 @@ pub struct AuditEntryDraft {
     pub outcome: AuditOutcome,
 }
 
-/// Max preview characters retained from the SQL text.
+impl std::fmt::Debug for AuditEntryDraft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuditEntryDraft")
+            .field("subject", &self.subject)
+            .field("db_evidence", &self.db_evidence)
+            .field("cancel", &self.cancel)
+            .field("tool", &self.tool)
+            .field("sql_sha256", &sha256_hex(self.sql.as_bytes()))
+            .field("sql_normalized_sha256", &normalized_sql_sha256(&self.sql))
+            .field("sql", &"***redacted***")
+            .field("danger_level", &self.danger_level)
+            .field("decision", &self.decision)
+            .field("rows_affected", &self.rows_affected)
+            .field("outcome", &self.outcome)
+            .finish()
+    }
+}
+
+/// Max preview characters retained by historical v1-v5 records.
+#[cfg(test)]
 const PREVIEW_LEN: usize = 120;
 
 impl AuditRecord {
@@ -412,9 +471,9 @@ impl AuditRecord {
     ) -> Self {
         let sql_sha256 = sha256_hex(draft.sql.as_bytes());
         let sql_normalized_sha256 = normalized_sql_sha256(&draft.sql);
-        let sql_preview: String = draft.sql.chars().take(PREVIEW_LEN).collect();
+        let sql_preview = REDACTED_SQL_PREVIEW.to_owned();
         let agent_identity = draft.subject.legacy_agent_identity();
-        let entry_hash = compute_entry_hash_v5(
+        let entry_hash = compute_entry_hash_v6(
             seq,
             &timestamp,
             &agent_identity,
@@ -528,6 +587,24 @@ impl AuditRecord {
             )
         } else if self.schema_version == AUDIT_SCHEMA_V5 {
             compute_entry_hash_v5(
+                self.seq,
+                &self.timestamp,
+                &self.agent_identity,
+                &self.subject,
+                self.db_evidence.as_ref(),
+                self.cancel.as_ref(),
+                &self.tool,
+                &self.sql_sha256,
+                &self.sql_normalized_sha256,
+                &self.sql_preview,
+                &self.danger_level,
+                self.decision,
+                self.rows_affected,
+                self.outcome,
+                &self.prev_hash,
+            )
+        } else if self.schema_version == AUDIT_SCHEMA_V6 {
+            compute_entry_hash_v6(
                 self.seq,
                 &self.timestamp,
                 &self.agent_identity,
@@ -915,12 +992,13 @@ const fn canonical_outcome_tag(outcome: AuditOutcome) -> u8 {
     }
 }
 
-/// Canonical v5 preimage. Every variable-length field is length-framed, every
+/// Canonical v5+ preimage. Every variable-length field is length-framed, every
 /// optional field carries an explicit presence tag, and enums use stable numeric
 /// tags rather than Rust `Debug` output. Keeping this as bytes before hashing
 /// makes injectivity directly testable.
 #[allow(clippy::too_many_arguments)]
-fn canonical_entry_v5(
+fn canonical_entry(
+    schema_version: u16,
     seq: u64,
     timestamp: &str,
     agent_identity: &str,
@@ -938,7 +1016,7 @@ fn canonical_entry_v5(
     prev_hash: &str,
 ) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(&AUDIT_SCHEMA_V5.to_be_bytes());
+    out.extend_from_slice(&schema_version.to_be_bytes());
     out.extend_from_slice(&seq.to_be_bytes());
     for field in [
         timestamp,
@@ -959,6 +1037,44 @@ fn canonical_entry_v5(
     out.push(canonical_outcome_tag(outcome));
     canonical_push_str(&mut out, prev_hash);
     out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn canonical_entry_v5(
+    seq: u64,
+    timestamp: &str,
+    agent_identity: &str,
+    subject: &AuditSubject,
+    db_evidence: Option<&DbEvidence>,
+    cancel: Option<&AuditCancel>,
+    tool: &str,
+    sql_sha256: &str,
+    sql_normalized_sha256: &str,
+    sql_preview: &str,
+    danger_level: &str,
+    decision: AuditDecision,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+    prev_hash: &str,
+) -> Vec<u8> {
+    canonical_entry(
+        AUDIT_SCHEMA_V5,
+        seq,
+        timestamp,
+        agent_identity,
+        subject,
+        db_evidence,
+        cancel,
+        tool,
+        sql_sha256,
+        sql_normalized_sha256,
+        sql_preview,
+        danger_level,
+        decision,
+        rows_affected,
+        outcome,
+        prev_hash,
+    )
 }
 
 /// Deterministically hash a v5 entry using injective canonical framing.
@@ -1001,6 +1117,46 @@ fn compute_entry_hash_v5(
     ))
 }
 
+/// Deterministically hash a v6 entry using the same injective canonical framing
+/// as v5, with the v6 schema tag and fail-closed redacted SQL field.
+#[allow(clippy::too_many_arguments)]
+fn compute_entry_hash_v6(
+    seq: u64,
+    timestamp: &str,
+    agent_identity: &str,
+    subject: &AuditSubject,
+    db_evidence: Option<&DbEvidence>,
+    cancel: Option<&AuditCancel>,
+    tool: &str,
+    sql_sha256: &str,
+    sql_normalized_sha256: &str,
+    sql_preview: &str,
+    danger_level: &str,
+    decision: AuditDecision,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+    prev_hash: &str,
+) -> String {
+    sha256_hex(&canonical_entry(
+        AUDIT_SCHEMA_V6,
+        seq,
+        timestamp,
+        agent_identity,
+        subject,
+        db_evidence,
+        cancel,
+        tool,
+        sql_sha256,
+        sql_normalized_sha256,
+        sql_preview,
+        danger_level,
+        decision,
+        rows_affected,
+        outcome,
+        prev_hash,
+    ))
+}
+
 /// The genesis prev-hash for the first entry.
 pub const GENESIS_HASH: &str = "genesis";
 
@@ -1020,7 +1176,7 @@ mod kani_proofs {
             tool: "oracle_execute".to_owned(),
             sql_sha256: "sha256:sql".to_owned(),
             sql_normalized_sha256: "sha256:sql".to_owned(),
-            sql_preview: "UPDATE t SET c = 1 WHERE id = 1".to_owned(),
+            sql_preview: REDACTED_SQL_PREVIEW.to_owned(),
             danger_level: "GUARDED".to_owned(),
             decision: AuditDecision::Allowed,
             rows_affected: None,
@@ -1117,12 +1273,25 @@ mod tests {
         prev_hash: &str,
         key: &SigningKey,
     ) -> AuditRecord {
-        let d = draft();
+        signed_record_for_schema_with_draft(&draft(), schema_version, seq, prev_hash, key)
+    }
+
+    fn signed_record_for_schema_with_draft(
+        d: &AuditEntryDraft,
+        schema_version: u16,
+        seq: u64,
+        prev_hash: &str,
+        key: &SigningKey,
+    ) -> AuditRecord {
         let timestamp = format!("t{seq}");
         let agent_identity = d.subject.legacy_agent_identity();
         let sql_sha256 = sha256_hex(d.sql.as_bytes());
         let sql_normalized_sha256 = normalized_sql_sha256(&d.sql);
-        let sql_preview = d.sql.chars().take(PREVIEW_LEN).collect::<String>();
+        let sql_preview = if schema_version <= AUDIT_SCHEMA_V5 {
+            d.sql.chars().take(PREVIEW_LEN).collect::<String>()
+        } else {
+            REDACTED_SQL_PREVIEW.to_owned()
+        };
         let entry_hash = match schema_version {
             1 => compute_entry_hash_v1(
                 seq,
@@ -1203,6 +1372,23 @@ mod tests {
                 d.outcome,
                 prev_hash,
             ),
+            AUDIT_SCHEMA_V6 => compute_entry_hash_v6(
+                seq,
+                &timestamp,
+                &agent_identity,
+                &d.subject,
+                d.db_evidence.as_ref(),
+                d.cancel.as_ref(),
+                &d.tool,
+                &sql_sha256,
+                &sql_normalized_sha256,
+                &sql_preview,
+                &d.danger_level,
+                d.decision,
+                d.rows_affected,
+                d.outcome,
+                prev_hash,
+            ),
             other => panic!("unsupported test schema {other}"),
         };
         AuditRecord {
@@ -1210,10 +1396,10 @@ mod tests {
             seq,
             timestamp,
             agent_identity,
-            subject: d.subject,
-            db_evidence: d.db_evidence,
-            cancel: d.cancel,
-            tool: d.tool,
+            subject: d.subject.clone(),
+            db_evidence: d.db_evidence.clone(),
+            cancel: d.cancel.clone(),
+            tool: d.tool.clone(),
             sql_sha256,
             sql_normalized_sha256: if schema_version >= 4 {
                 sql_normalized_sha256
@@ -1221,7 +1407,7 @@ mod tests {
                 String::new()
             },
             sql_preview,
-            danger_level: d.danger_level,
+            danger_level: d.danger_level.clone(),
             decision: d.decision,
             rows_affected: d.rows_affected,
             outcome: d.outcome,
@@ -1256,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn record_hashes_and_previews_without_storing_sql_verbatim() {
+    fn v6_hashes_exact_sql_without_storing_sql_text() {
         let r = AuditRecord::chained_unsigned(
             &draft(),
             1,
@@ -1266,8 +1452,9 @@ mod tests {
         assert_eq!(r.schema_version, AUDIT_SCHEMA_VERSION);
         assert_eq!(r.subject, AuditSubject::new("agent", "agent-1"));
         assert_eq!(r.agent_identity, "agent:agent-1");
-        assert!(r.sql_sha256.starts_with("sha256:"));
-        assert_eq!(r.sql_preview, "DELETE FROM orders WHERE id = 1");
+        assert_eq!(r.sql_sha256, sha256_hex(draft().sql.as_bytes()));
+        assert_eq!(r.sql_preview, REDACTED_SQL_PREVIEW);
+        assert!(!serde_json::to_string(&r).unwrap().contains("orders"));
         assert!(r.hash_is_valid());
         assert_eq!(r.prev_hash, GENESIS_HASH);
     }
@@ -1408,10 +1595,8 @@ mod tests {
 
     #[test]
     fn tampering_with_sql_preview_breaks_the_hash() {
-        // The only human-legible record of the statement must be hash-covered:
-        // an actor with write access to the append-only log must not be able to
-        // rewrite "DELETE FROM orders ..." -> "SELECT 1" without breaking
-        // verification, even while leaving sql_sha256 / danger_level intact.
+        // The fixed redaction marker is still hash-covered: an actor with write
+        // access cannot replace it with a forged statement summary.
         let mut r = AuditRecord::chained_unsigned(
             &draft(),
             1,
@@ -1419,8 +1604,8 @@ mod tests {
             "2026-06-01T00:00:00Z".to_owned(),
         );
         assert!(r.hash_is_valid());
-        assert_eq!(r.sql_preview, "DELETE FROM orders WHERE id = 1");
-        r.sql_preview = "SELECT 1".to_owned(); // forge the only operator-legible field
+        assert_eq!(r.sql_preview, REDACTED_SQL_PREVIEW);
+        r.sql_preview = "SELECT 1".to_owned();
         assert!(
             !r.hash_is_valid(),
             "tampered sql_preview must fail verification"
@@ -1428,11 +1613,89 @@ mod tests {
     }
 
     #[test]
-    fn long_sql_preview_truncates() {
+    fn long_sql_is_replaced_by_fixed_redaction_marker() {
         let mut d = draft();
         d.sql = "X".repeat(500);
         let r = AuditRecord::chained_unsigned(&d, 2, "sha256:prev", "t".to_owned());
-        assert_eq!(r.sql_preview.chars().count(), PREVIEW_LEN);
+        assert_eq!(r.sql_preview, REDACTED_SQL_PREVIEW);
+        assert!(!serde_json::to_string(&r).unwrap().contains(&d.sql));
+    }
+
+    #[test]
+    fn v6_redacts_oracle_literal_comment_identifier_and_malformed_sql_sentinels() {
+        let cases = [
+            (
+                "UPDATE users SET password = 'QA31_ORDINARY_SECRET'",
+                "QA31_ORDINARY_SECRET",
+            ),
+            (
+                "UPDATE users SET password = N'QA31_NCHAR_SECRET'",
+                "QA31_NCHAR_SECRET",
+            ),
+            (
+                "UPDATE users SET password = q'[QA31_QQUOTE_SECRET]'",
+                "QA31_QQUOTE_SECRET",
+            ),
+            (
+                "SELECT \"QA31_QUOTED_IDENTIFIER\" FROM dual",
+                "QA31_QUOTED_IDENTIFIER",
+            ),
+            (
+                "DELETE FROM users WHERE customer_id = 3141592653589793",
+                "3141592653589793",
+            ),
+            (
+                "SELECT hextoraw('514133315F4845585F534543524554') FROM dual",
+                "514133315F4845585F534543524554",
+            ),
+            (
+                "UPDATE users SET active=0 -- QA31_LINE_COMMENT_SECRET",
+                "QA31_LINE_COMMENT_SECRET",
+            ),
+            (
+                "/* QA31_BLOCK_COMMENT_SECRET */ DELETE FROM users",
+                "QA31_BLOCK_COMMENT_SECRET",
+            ),
+            (
+                "BEGIN\n  SYS.DBMS_OUTPUT.PUT_LINE('QA31_PLSQL_SECRET');\nEND;",
+                "QA31_PLSQL_SECRET",
+            ),
+            (
+                "SELECT 'QA31_UNCLOSED_SECRET FROM dual",
+                "QA31_UNCLOSED_SECRET",
+            ),
+            (
+                "SELECT 1 /* QA31_UNCLOSED_COMMENT_SECRET",
+                "QA31_UNCLOSED_COMMENT_SECRET",
+            ),
+        ];
+
+        for (sql, sentinel) in cases {
+            let mut d = draft();
+            d.sql = sql.to_owned();
+            let record = AuditRecord::chained_signed(&d, 1, GENESIS_HASH, "t".to_owned(), &key());
+            assert_eq!(record.schema_version, AUDIT_SCHEMA_V6);
+            assert_eq!(record.sql_preview, REDACTED_SQL_PREVIEW);
+            assert_eq!(record.sql_sha256, sha256_hex(sql.as_bytes()));
+            assert_eq!(record.sql_normalized_sha256, normalized_sql_sha256(sql));
+            assert!(!serde_json::to_string(&record).unwrap().contains(sentinel));
+            assert!(!format!("{record:?}").contains(sentinel));
+            assert!(!format!("{d:?}").contains(sentinel));
+            assert!(record.hash_is_valid());
+            assert!(record.signature_is_valid(&key()));
+        }
+    }
+
+    #[test]
+    fn debug_redacts_historical_raw_preview_and_current_draft_sql() {
+        let sentinel = "QA31_HISTORICAL_DEBUG_SECRET";
+        let mut d = draft();
+        d.sql = format!("UPDATE users SET password='{sentinel}'");
+        let historical =
+            signed_record_for_schema_with_draft(&d, AUDIT_SCHEMA_V5, 1, GENESIS_HASH, &key());
+        assert!(historical.sql_preview.contains(sentinel));
+        assert!(!format!("{historical:?}").contains(sentinel));
+        assert!(!format!("{d:?}").contains(sentinel));
     }
 
     // ---- K5: normalized-SQL fingerprint (introduced in schema v4) ----
@@ -1718,6 +1981,23 @@ mod tests {
             d.outcome,
             GENESIS_HASH,
         );
+        let v6 = compute_entry_hash_v6(
+            1,
+            "t",
+            &agent_identity,
+            &d.subject,
+            d.db_evidence.as_ref(),
+            d.cancel.as_ref(),
+            &d.tool,
+            &sql_sha256,
+            &sql_normalized_sha256,
+            REDACTED_SQL_PREVIEW,
+            &d.danger_level,
+            d.decision,
+            d.rows_affected,
+            d.outcome,
+            GENESIS_HASH,
+        );
         assert_eq!(
             v1,
             "sha256:f558f5ec49672e00a35ba625e6a59f96b7a4de9ca62bcd76ced8268fcb7b97a4"
@@ -1738,7 +2018,7 @@ mod tests {
             v5,
             "sha256:9325c4557119ddb4978d4b826c83aa63191c03b6ab906419590c7ce21c2251d1"
         );
-        for hash in [&v1, &v2, &v3, &v4, &v5] {
+        for hash in [&v1, &v2, &v3, &v4, &v5, &v6] {
             assert!(hash.starts_with("sha256:"), "{hash}");
             assert_eq!(hash.len(), "sha256:".len() + 64, "{hash}");
         }
@@ -1746,6 +2026,7 @@ mod tests {
         assert_ne!(v2, v3, "schema v3 must add expanded DB evidence coverage");
         assert_ne!(v3, v4, "schema v4 must add normalized-SQL coverage");
         assert_ne!(v4, v5, "schema v5 must adopt canonical framing");
+        assert_ne!(v5, v6, "schema v6 must bind the redacted representation");
 
         let mut changed_subject = d.subject.clone();
         changed_subject.client_id = Some("client-b".to_owned());
@@ -1800,7 +2081,8 @@ mod tests {
         for rows_affected in cases {
             let mut d = draft();
             d.rows_affected = rows_affected;
-            let record = AuditRecord::chained_signed(&d, 1, GENESIS_HASH, "t".to_owned(), &key());
+            let record =
+                signed_record_for_schema_with_draft(&d, AUDIT_SCHEMA_V5, 1, GENESIS_HASH, &key());
             let json = serde_json::to_string(&record).expect("serialize v5 record");
             let roundtrip: AuditRecord =
                 serde_json::from_str(&json).expect("deserialize v5 record");
@@ -1824,8 +2106,13 @@ mod tests {
         use crate::{BrokenReason, VerifyOutcome, verify_records};
 
         let signing_key = key();
-        let record =
-            AuditRecord::chained_signed(&draft(), 1, GENESIS_HASH, "t".to_owned(), &signing_key);
+        let record = signed_record_for_schema_with_draft(
+            &draft(),
+            AUDIT_SCHEMA_V5,
+            1,
+            GENESIS_HASH,
+            &signing_key,
+        );
         let mut edited = record.clone();
         edited.rows_affected = Some(u64::MAX);
         assert!(!edited.hash_is_valid());
@@ -1895,7 +2182,8 @@ mod tests {
         });
         d.cancel = Some(AuditCancel::new("User", "session_delete"));
         d.rows_affected = Some(7);
-        let base = AuditRecord::chained_signed(&d, 1, GENESIS_HASH, "t".to_owned(), &key());
+        let base =
+            signed_record_for_schema_with_draft(&d, AUDIT_SCHEMA_V5, 1, GENESIS_HASH, &key());
 
         for index in 0..3 {
             assert_v5_mutation_breaks(&base, "subject optional", |record| match index {
@@ -2013,7 +2301,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_v1_through_v5_rotated_chain_verifies() {
+    fn mixed_v1_through_v6_rotated_chain_verifies() {
         use crate::{VerifyOutcome, verify_records};
 
         let k1 = key();
@@ -2021,7 +2309,7 @@ mod tests {
             .expect("valid rotated key");
         let mut records = Vec::new();
         let mut prev_hash = GENESIS_HASH.to_owned();
-        for schema_version in 1..=AUDIT_SCHEMA_V5 {
+        for schema_version in 1..=AUDIT_SCHEMA_V6 {
             let signing_key = if schema_version <= 2 { &k1 } else { &k2 };
             let record = signed_record_for_schema(
                 schema_version,
@@ -2034,7 +2322,7 @@ mod tests {
         }
         assert_eq!(
             verify_records(&records, &[k1, k2]),
-            VerifyOutcome::Ok { records: 5 }
+            VerifyOutcome::Ok { records: 6 }
         );
     }
 
@@ -2047,6 +2335,21 @@ mod tests {
             prop_assume!(left != right);
             let d = draft();
             prop_assert_ne!(v5_preimage_for(&d, left), v5_preimage_for(&d, right));
+        }
+
+        #[test]
+        fn arbitrary_sql_is_replaced_by_fixed_v6_marker(sql in any::<String>()) {
+            let mut d = draft();
+            d.sql = sql.clone();
+            let record = AuditRecord::chained_unsigned(&d, 1, GENESIS_HASH, "t".to_owned());
+            prop_assert_eq!(record.schema_version, AUDIT_SCHEMA_V6);
+            prop_assert_eq!(record.sql_preview.as_str(), REDACTED_SQL_PREVIEW);
+            prop_assert_eq!(record.sql_sha256.as_str(), sha256_hex(sql.as_bytes()));
+            prop_assert_eq!(
+                record.sql_normalized_sha256.as_str(),
+                normalized_sql_sha256(&sql)
+            );
+            prop_assert!(record.hash_is_valid());
         }
     }
 
@@ -2098,10 +2401,10 @@ mod tests {
             "2026-06-01T00:00:00Z".to_owned(),
             &key(),
         );
-        // Forge the operator-legible field and recompute the (unkeyed) hash so
-        // the bare-hash check would pass — but leave the old MAC in place.
+        // Forge the redacted field and recompute the (unkeyed) hash so the
+        // bare-hash check would pass — but leave the old MAC in place.
         forged.sql_preview = "SELECT 1".to_owned();
-        forged.entry_hash = compute_entry_hash_v5(
+        forged.entry_hash = compute_entry_hash_v6(
             forged.seq,
             &forged.timestamp,
             &forged.agent_identity,

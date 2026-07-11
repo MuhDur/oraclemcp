@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- New audit records use schema v6 and replace the historical raw SQL preview
+  with a fixed redaction marker before hashing, signing, local JSONL storage,
+  WORM mirroring, or SIEM encoding. Exact and normalized SQL hashes remain for
+  correlation, while custom `Debug` implementations keep current draft SQL and
+  historical previews out of logs. Signed v1-v5 records remain verifiable
+  byte-for-byte and are not silently rewritten.
 - Audit hash-chain schema v5 now encodes optional values with explicit presence
   tags and uses stable, length-framed canonical bytes. This prevents
   `rows_affected = null` from authenticating as `u64::MAX`; historical v1-v4
