@@ -1,7 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { OperatorOutcomeNotice } from "./App";
+import {
+  OperatorOutcomeNotice,
+  currentSchemaDiffPreview,
+  schemaDiffInputIdentity
+} from "./App";
 import {
   OperatorOutcomeError,
   applyChangeProposal,
@@ -97,6 +101,33 @@ const explorerScope: ExplorerMetadataCacheKey = {
   visible_schema: "APP",
   serialization_contract_version: 1
 };
+
+describe("schema diff preview input binding", () => {
+  it("invalidates a preview on title or either snapshot edit", () => {
+    const identity = schemaDiffInputIdentity("migration", "before", "after");
+    const binding = { inputIdentity: identity, data: { artifact: "reviewed" } };
+
+    expect(currentSchemaDiffPreview(binding, identity)).toEqual({ artifact: "reviewed" });
+    expect(
+      currentSchemaDiffPreview(
+        binding,
+        schemaDiffInputIdentity("renamed migration", "before", "after")
+      )
+    ).toBeNull();
+    expect(
+      currentSchemaDiffPreview(
+        binding,
+        schemaDiffInputIdentity("migration", "changed before", "after")
+      )
+    ).toBeNull();
+    expect(
+      currentSchemaDiffPreview(
+        binding,
+        schemaDiffInputIdentity("migration", "before", "changed after")
+      )
+    ).toBeNull();
+  });
+});
 
 function deferred<T>(): {
   promise: Promise<T>;

@@ -180,10 +180,7 @@ pub fn migration_plan(diff: &SchemaDiff) -> Vec<MigrationStep> {
     let mut order = 0;
     for (_, kind, o) in creates {
         let ddl = match kind {
-            StepKind::ManualReview => format!(
-                "-- REVIEW REQUIRED: {} {} changed; generate a reasoned ALTER (not auto-derived).\n-- target DDL:\n{}",
-                o.object_type, o.name, o.ddl
-            ),
+            StepKind::ManualReview => inert_manual_review_ddl(o),
             _ => o.ddl.clone(),
         };
         steps.push(MigrationStep {
@@ -206,6 +203,19 @@ pub fn migration_plan(diff: &SchemaDiff) -> Vec<MigrationStep> {
         order += 1;
     }
     steps
+}
+
+fn inert_manual_review_ddl(object: &SchemaObject) -> String {
+    let mut ddl = format!(
+        "-- REVIEW REQUIRED: {} {} changed; generate a reasoned ALTER (not auto-derived).\n-- target DDL (inert):\n",
+        object.object_type, object.name
+    );
+    for line in object.ddl.trim().split(['\r', '\n']) {
+        ddl.push_str("-- ");
+        ddl.push_str(line);
+        ddl.push('\n');
+    }
+    ddl
 }
 
 #[cfg(test)]
@@ -286,10 +296,35 @@ mod tests {
         let t_ch = plan.iter().find(|s| s.name == "T_CH").unwrap();
         assert_eq!(t_ch.kind, StepKind::ManualReview);
         assert!(t_ch.ddl.contains("REVIEW REQUIRED"));
+        assert!(t_ch.ddl.lines().all(|line| line.starts_with("--")));
         // The DROP comes after all creates/replaces.
         let drop_step = plan.iter().find(|s| s.kind == StepKind::Drop).unwrap();
         assert_eq!(drop_step.ddl, "DROP TABLE T_OLD");
         assert!(drop_step.order > t_pos && drop_step.order > p_pos);
+    }
+
+    #[test]
+    fn manual_review_step_never_contains_active_target_lines() {
+        let diff = SchemaDiff {
+            added: Vec::new(),
+            changed: vec![obj(
+                "TABLE",
+                "T_CH",
+                "CREATE TABLE t_ch (note varchar2(40) default q'[\nDROP USER victim CASCADE;\n]');\r/",
+            )],
+            dropped: Vec::new(),
+        };
+
+        let plan = migration_plan(&diff);
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].kind, StepKind::ManualReview);
+        assert!(
+            plan[0].ddl.lines().all(|line| line.starts_with("--")),
+            "manual review DDL must be inert at its source: {}",
+            plan[0].ddl
+        );
+        assert!(plan[0].ddl.contains("-- DROP USER victim CASCADE;"));
+        assert!(plan[0].ddl.contains("-- /"));
     }
 
     #[test]

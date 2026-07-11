@@ -5609,6 +5609,26 @@ function SourceHistoryPanel({
   );
 }
 
+export interface SchemaDiffPreviewBinding<T> {
+  inputIdentity: string;
+  data: T;
+}
+
+export function schemaDiffInputIdentity(
+  title: string,
+  beforeJson: string,
+  afterJson: string
+): string {
+  return JSON.stringify([title, beforeJson, afterJson]);
+}
+
+export function currentSchemaDiffPreview<T>(
+  binding: SchemaDiffPreviewBinding<T> | null,
+  inputIdentity: string
+): T | null {
+  return binding?.inputIdentity === inputIdentity ? binding.data : null;
+}
+
 function SchemaDiffPanel({
   session,
   profile,
@@ -5621,20 +5641,29 @@ function SchemaDiffPanel({
   const [title, setTitle] = React.useState("Schema diff migration");
   const [beforeJson, setBeforeJson] = React.useState(schemaDiffBeforeFixture);
   const [afterJson, setAfterJson] = React.useState(schemaDiffAfterFixture);
-  const [preview, setPreview] = React.useState<SchemaDiffExportData | null>(null);
+  const [previewBinding, setPreviewBinding] = React.useState<
+    SchemaDiffPreviewBinding<SchemaDiffExportData> | null
+  >(null);
   const [lastError, setLastError] = React.useState<string | null>(null);
+  const inputIdentity = schemaDiffInputIdentity(title, beforeJson, afterJson);
+  const preview = currentSchemaDiffPreview(previewBinding, inputIdentity);
 
   const previewMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (input: {
+      title: string;
+      beforeJson: string;
+      afterJson: string;
+      inputIdentity: string;
+    }) => {
       if (!session) {
         throw new Error("dashboard session is not ready");
       }
-      const before = parseSchemaSnapshotInput(beforeJson);
-      const after = parseSchemaSnapshotInput(afterJson);
-      return previewSchemaDiff(session, before, after, title);
+      const before = parseSchemaSnapshotInput(input.beforeJson);
+      const after = parseSchemaSnapshotInput(input.afterJson);
+      return previewSchemaDiff(session, before, after, input.title);
     },
-    onSuccess: (response) => {
-      setPreview(response.data);
+    onSuccess: (response, input) => {
+      setPreviewBinding({ inputIdentity: input.inputIdentity, data: response.data });
       setLastError(null);
     },
     onError: (error) => {
@@ -5721,7 +5750,14 @@ function SchemaDiffPanel({
           </label>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button type="button" variant="secondary" disabled={!canPreview} onClick={() => previewMutation.mutate()}>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={!canPreview}
+            onClick={() =>
+              previewMutation.mutate({ title, beforeJson, afterJson, inputIdentity })
+            }
+          >
             <RefreshCcw className="size-4" aria-hidden="true" />
             Preview
           </Button>

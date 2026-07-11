@@ -270,23 +270,59 @@ fn render_migration_script(title: &str, steps: &[MigrationStep]) -> String {
             prefixed_sha256_hex(step.ddl.as_bytes())
         ));
         if step.kind == StepKind::ManualReview {
-            out.push_str(step.ddl.trim());
-            out.push_str("\n\n");
+            out.push_str("-- manual-review payload follows; every line is intentionally inert\n");
+            out.push_str(&commented_lines(&step.ddl));
+            out.push('\n');
             continue;
         }
-        out.push_str(&terminated_statement(&step.ddl));
+        out.push_str(&terminated_statement(step));
         out.push_str("\n\n");
     }
     out
 }
 
-fn terminated_statement(ddl: &str) -> String {
-    let trimmed = ddl.trim();
-    if trimmed.ends_with(';') || trimmed.ends_with('/') {
+fn commented_lines(value: &str) -> String {
+    let mut out = String::new();
+    for line in value.trim().split(['\r', '\n']) {
+        if line.trim_start().starts_with("--") {
+            out.push_str(line);
+        } else {
+            out.push_str("-- ");
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn terminated_statement(step: &MigrationStep) -> String {
+    let trimmed = step.ddl.trim();
+    if is_sqlplus_block_step(step) {
+        let statement = trimmed.strip_suffix('/').map_or(trimmed, str::trim_end);
+        if statement.ends_with(';') {
+            format!("{statement}\n/")
+        } else {
+            format!("{statement};\n/")
+        }
+    } else if trimmed.ends_with(';') || trimmed.ends_with('/') {
         trimmed.to_owned()
     } else {
         format!("{trimmed};")
     }
+}
+
+fn is_sqlplus_block_step(step: &MigrationStep) -> bool {
+    matches!(step.kind, StepKind::Create | StepKind::Replace)
+        && matches!(
+            step.object_type.to_ascii_uppercase().as_str(),
+            "FUNCTION"
+                | "PROCEDURE"
+                | "PACKAGE"
+                | "PACKAGE BODY"
+                | "TRIGGER"
+                | "TYPE"
+                | "TYPE BODY"
+        )
 }
 
 fn sanitize_comment(value: &str) -> String {
@@ -406,6 +442,86 @@ mod tests {
         assert!(script.contains("create or replace view v_changed"));
         assert!(script.contains("DROP TABLE T_OLD"));
         assert!(script.contains("REVIEW REQUIRED"));
+    }
+
+    #[test]
+    fn manual_review_payload_is_line_commented_even_when_multiline_or_q_quoted() {
+        let steps = [MigrationStep {
+            order: 0,
+            kind: StepKind::ManualReview,
+            object_type: "TABLE".to_owned(),
+            name: "T_CHANGED".to_owned(),
+            ddl: "-- REVIEW REQUIRED\nCREATE TABLE t_changed (note varchar2(40) default q'[\nDROP TABLE victims;\n]');\rDROP USER bare_cr CASCADE;\n/\nPROMPT still-not-a-command"
+                .to_owned(),
+        }];
+
+        let script = render_migration_script("inert review", &steps);
+        for forbidden in [
+            "CREATE TABLE t_changed (note varchar2(40) default q'[",
+            "DROP TABLE victims;",
+            "DROP USER bare_cr CASCADE;",
+            "/",
+            "PROMPT still-not-a-command",
+        ] {
+            assert!(
+                !script.lines().any(|line| line.trim() == forbidden),
+                "manual payload line became active: {forbidden}\n{script}"
+            );
+        }
+        assert!(script.contains("-- CREATE TABLE t_changed"));
+        assert!(script.contains("-- DROP TABLE victims;"));
+        assert!(script.contains("-- DROP USER bare_cr CASCADE;"));
+        assert!(script.contains("-- /"));
+        assert!(script.contains("-- PROMPT still-not-a-command"));
+        assert!(proposal_statements_from_steps(&steps).is_empty());
+    }
+
+    #[test]
+    fn sqlplus_block_steps_get_one_slash_and_plain_ddl_one_semicolon() {
+        let steps = [
+            MigrationStep {
+                order: 0,
+                kind: StepKind::Replace,
+                object_type: "PACKAGE".to_owned(),
+                name: "P".to_owned(),
+                ddl: "CREATE OR REPLACE PACKAGE p AS\n  PROCEDURE run;\nEND p;".to_owned(),
+            },
+            MigrationStep {
+                order: 1,
+                kind: StepKind::Replace,
+                object_type: "PROCEDURE".to_owned(),
+                name: "RUN".to_owned(),
+                ddl: "CREATE OR REPLACE PROCEDURE run AS BEGIN NULL; END;\n/".to_owned(),
+            },
+            MigrationStep {
+                order: 2,
+                kind: StepKind::Replace,
+                object_type: "VIEW".to_owned(),
+                name: "V".to_owned(),
+                ddl: "CREATE OR REPLACE VIEW v AS SELECT 1 x FROM dual;".to_owned(),
+            },
+            MigrationStep {
+                order: 3,
+                kind: StepKind::Drop,
+                object_type: "PACKAGE".to_owned(),
+                name: "OLD_P".to_owned(),
+                ddl: "DROP PACKAGE old_p".to_owned(),
+            },
+        ];
+
+        let script = render_migration_script("runner boundaries", &steps);
+        assert!(script.contains("END p;\n/\n\n-- step 2"), "{script}");
+        assert!(
+            script.contains("BEGIN NULL; END;\n/\n\n-- step 3"),
+            "{script}"
+        );
+        assert!(
+            script.contains("CREATE OR REPLACE VIEW v AS SELECT 1 x FROM dual;\n\n-- step 4"),
+            "{script}"
+        );
+        assert!(script.ends_with("DROP PACKAGE old_p;\n\n"), "{script}");
+        assert!(!script.contains(";;"), "{script}");
+        assert!(!script.contains("\n/\n/"), "{script}");
     }
 
     #[test]
