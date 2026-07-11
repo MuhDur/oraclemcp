@@ -616,6 +616,35 @@ fn build_write_intent_log_fails_closed_on_unresolved_restart_intent() {
 }
 
 #[test]
+fn writable_http_state_and_client_credentials_share_startup_owner() {
+    let root = target_tmp_file("qa1-writable-http-state");
+    let owner = build_service_owner_at(&root, true)
+        .expect("service state owner")
+        .expect("owner required");
+    let write_intents = build_write_intent_log(OperatingLevel::ReadWrite, Some(&owner))
+        .expect("write-intent startup")
+        .expect("writable log required");
+    let clients =
+        ClientCredentialStore::open_with_owner(owner.clone()).expect("client credential startup");
+    let config = ConfigOpsBackend::open_with_owner(owner.clone()).expect("config ops startup");
+    let proposals =
+        ChangeProposalStore::open_with_owner(owner.clone()).expect("change proposal startup");
+    let history = SourceHistoryStore::open_with_owner(owner).expect("source history startup");
+
+    assert!(write_intents.unresolved().expect("intent state").is_empty());
+    assert!(clients.list().is_empty());
+    let target = root.join("profiles.toml");
+    assert!(config.stage_config_draft(target, "").is_ok());
+    assert!(proposals.list().expect("proposal list").is_empty());
+    assert!(
+        history
+            .list(oraclemcp_core::SourceHistoryFilter::default())
+            .expect("history list")
+            .is_empty()
+    );
+}
+
+#[test]
 fn http_listen_loopback_allowed_with_allow_no_auth() {
     assert!(http_listen_guard(true, false, false, "127.0.0.1:7070", false).is_ok());
     assert!(http_listen_guard(true, false, true, "[::1]:7070", false).is_ok());

@@ -19,7 +19,6 @@ use oraclemcp_config::discovery::synth::{
     DiscoveredNetService, DiscoverySynthesis, SynthOptions, synthesize_profiles,
 };
 use oraclemcp_core::config_ops::{ConfigOpsBackend, ConfigOpsService};
-use oraclemcp_core::file_store::FileStore;
 
 fn unique_temp_dir(label: &str) -> PathBuf {
     let stamp = SystemTime::now()
@@ -85,7 +84,7 @@ fn generated_config_round_trips_through_config_ops_without_leaking_secrets() {
     let rendered = render_annotated_config(&synth);
 
     let store_root = unique_temp_dir("store");
-    let backend = ConfigOpsBackend::new(FileStore::open(&store_root).expect("open file store"));
+    let backend = ConfigOpsBackend::open(&store_root).expect("open config ops");
     let target_dir = unique_temp_dir("target");
     let target = target_dir.join("profiles.toml");
 

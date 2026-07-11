@@ -72,13 +72,13 @@ use oraclemcp_core::{
     CustomToolDef, DEFAULT_REQUEST_TIMEOUT, DashboardAuth, DashboardAuthError, DispatchCloseReason,
     DispatchContext, DispatchFuture, DispatchOutcome, DoctorAuthCapabilities, DoctorAuthModeKind,
     DoctorContext, DoctorLevelCaps, DoctorProfileCaps, DoctorStateLayout, EffectiveHttpScheme,
-    ExportRegistry, FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext,
-    LaneDispatchFactory, LaneDispatchFactoryBuilder, LaneRuntime, MCP_PATH, McpSurfaceDetail,
-    McpSurfaceFuture, MtlsClientRegistry, OAuthEnforcement, ObservabilityState,
+    ExportRegistry, FeatureTiers, FileStore, HttpSessionLifecycle, HttpTransportConfig,
+    LaneContext, LaneDispatchFactory, LaneDispatchFactoryBuilder, LaneRuntime, MCP_PATH,
+    McpSurfaceDetail, McpSurfaceFuture, MtlsClientRegistry, OAuthEnforcement, ObservabilityState,
     OperatorAuthorityPolicy, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH,
-    PreparedLaneDispatch, ServiceTransport, ShutdownCoordinator, SiemFormat, SiemHttpForwarder,
-    SourceHistoryStore, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig,
-    ToolDispatch, ToolStreamSender, WriteIntentLog, apply_legacy_state_migration,
+    PreparedLaneDispatch, ServiceOwner, ServiceTransport, ShutdownCoordinator, SiemFormat,
+    SiemHttpForwarder, SourceHistoryStore, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial,
+    TlsServerConfig, ToolDispatch, ToolStreamSender, WriteIntentLog, apply_legacy_state_migration,
     build_server_config, default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
     mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file,
     probe_dashboard_http_service, requires_mtls, run_doctor, service_app_doctor_snapshot, sign,
@@ -1506,13 +1506,62 @@ fn normalized_destination_path(path: &Path) -> std::io::Result<PathBuf> {
     Ok(normalized)
 }
 
+fn build_service_owner(required: bool) -> Result<Option<ServiceOwner>, (&'static str, String)> {
+    if !required {
+        return Ok(None);
+    }
+    let store = FileStore::open_default().map_err(|e| {
+        (
+            "ORACLEMCP_SERVICE_STATE_UNAVAILABLE",
+            format!("failed to open service state root: {e}"),
+        )
+    })?;
+    let owner = store.acquire_service_owner("serve").map_err(|e| {
+        (
+            "ORACLEMCP_SERVICE_STATE_UNAVAILABLE",
+            format!("failed to acquire exclusive service state ownership: {e}"),
+        )
+    })?;
+    Ok(Some(owner))
+}
+
+#[cfg(test)]
+fn build_service_owner_at(
+    root: &Path,
+    required: bool,
+) -> Result<Option<ServiceOwner>, (&'static str, String)> {
+    if !required {
+        return Ok(None);
+    }
+    let store = FileStore::open(root).map_err(|e| {
+        (
+            "ORACLEMCP_SERVICE_STATE_UNAVAILABLE",
+            format!("failed to open service state root: {e}"),
+        )
+    })?;
+    let owner = store.acquire_service_owner("serve-test").map_err(|e| {
+        (
+            "ORACLEMCP_SERVICE_STATE_UNAVAILABLE",
+            format!("failed to acquire exclusive service state ownership: {e}"),
+        )
+    })?;
+    Ok(Some(owner))
+}
+
 fn build_write_intent_log(
     reachable_ceiling: OperatingLevel,
+    owner: Option<&ServiceOwner>,
 ) -> Result<Option<Arc<WriteIntentLog>>, (&'static str, String)> {
     if reachable_ceiling <= OperatingLevel::ReadOnly {
         return Ok(None);
     }
-    let log = WriteIntentLog::open_default().map_err(|e| {
+    let owner = owner.ok_or_else(|| {
+        (
+            "ORACLEMCP_WRITE_INTENT_LOG_INVALID",
+            "writable service state owner was not initialized".to_owned(),
+        )
+    })?;
+    let log = WriteIntentLog::open_with_owner(owner.clone()).map_err(|e| {
         (
             "ORACLEMCP_WRITE_INTENT_LOG_INVALID",
             format!("failed to open durable write-intent log: {e}"),
@@ -1529,7 +1578,19 @@ fn build_write_intent_log_at(
     if reachable_ceiling <= OperatingLevel::ReadOnly {
         return Ok(None);
     }
-    let log = WriteIntentLog::open(root).map_err(|e| {
+    let store = FileStore::open(root).map_err(|e| {
+        (
+            "ORACLEMCP_WRITE_INTENT_LOG_INVALID",
+            format!("failed to open durable write-intent state: {e}"),
+        )
+    })?;
+    let owner = store.acquire_service_owner("serve-test").map_err(|e| {
+        (
+            "ORACLEMCP_WRITE_INTENT_LOG_INVALID",
+            format!("failed to own durable write-intent state: {e}"),
+        )
+    })?;
+    let log = WriteIntentLog::open_with_owner(owner).map_err(|e| {
         (
             "ORACLEMCP_WRITE_INTENT_LOG_INVALID",
             format!("failed to open durable write-intent log: {e}"),
@@ -3120,7 +3181,16 @@ fn run_serve(
             return ExitCode::from(2);
         }
     };
-    let write_intents = match build_write_intent_log(reachable_ceiling) {
+    let service_owner =
+        match build_service_owner(listen.is_some() || reachable_ceiling > OperatingLevel::ReadOnly)
+        {
+            Ok(owner) => owner,
+            Err((code, message)) => {
+                emit_status_error(robot_json, code, &message);
+                return ExitCode::from(2);
+            }
+        };
+    let write_intents = match build_write_intent_log(reachable_ceiling, service_owner.as_ref()) {
         Ok(write_intents) => write_intents,
         Err((code, message)) => {
             emit_status_error(robot_json, code, &message);
@@ -3174,6 +3244,14 @@ fn run_serve(
         }
         // ── Streamable HTTP transport (--listen) ───────────────────────────
         Some(addr) => {
+            let Some(http_service_owner) = service_owner.as_ref() else {
+                emit_status_error(
+                    robot_json,
+                    "ORACLEMCP_SERVICE_STATE_UNAVAILABLE",
+                    "HTTP service state owner was not initialized",
+                );
+                return ExitCode::from(2);
+            };
             let mut resolved_http = match resolve_http_transport_config(
                 &full_config,
                 &http,
@@ -3187,7 +3265,8 @@ fn run_serve(
                 }
             };
             if http.client_credentials {
-                let store = match ClientCredentialStore::open_default() {
+                let store = match ClientCredentialStore::open_with_owner(http_service_owner.clone())
+                {
                     Ok(store) => store,
                     Err(error) => {
                         emit_status_error(
@@ -3319,17 +3398,18 @@ fn run_serve(
                     .unwrap_or_else(default_audit_path)
             });
             transport.operator_auditor = auditor;
-            let config_ops_backend = match ConfigOpsBackend::open_default() {
-                Ok(backend) => backend,
-                Err(e) => {
-                    emit_status_error(
-                        robot_json,
-                        "ORACLEMCP_CONFIG_OPS_UNAVAILABLE",
-                        &format!("failed to initialize config workflow backend: {e}"),
-                    );
-                    return ExitCode::from(2);
-                }
-            };
+            let config_ops_backend =
+                match ConfigOpsBackend::open_with_owner(http_service_owner.clone()) {
+                    Ok(backend) => backend,
+                    Err(e) => {
+                        emit_status_error(
+                            robot_json,
+                            "ORACLEMCP_CONFIG_OPS_UNAVAILABLE",
+                            &format!("failed to initialize config workflow backend: {e}"),
+                        );
+                        return ExitCode::from(2);
+                    }
+                };
             transport.config_ops = Some(Arc::new(ConfigOpsService::new(
                 config_ops_backend,
                 operator_config_target_path(),
@@ -3337,29 +3417,31 @@ fn run_serve(
                     profile_drain: profile_drain.clone(),
                 })),
             )));
-            let change_proposals = match ChangeProposalStore::open_default() {
-                Ok(store) => store,
-                Err(e) => {
-                    emit_status_error(
-                        robot_json,
-                        "ORACLEMCP_CHANGE_PROPOSALS_UNAVAILABLE",
-                        &format!("failed to initialize change proposal store: {e}"),
-                    );
-                    return ExitCode::from(2);
-                }
-            };
+            let change_proposals =
+                match ChangeProposalStore::open_with_owner(http_service_owner.clone()) {
+                    Ok(store) => store,
+                    Err(e) => {
+                        emit_status_error(
+                            robot_json,
+                            "ORACLEMCP_CHANGE_PROPOSALS_UNAVAILABLE",
+                            &format!("failed to initialize change proposal store: {e}"),
+                        );
+                        return ExitCode::from(2);
+                    }
+                };
             transport.change_proposals = Some(Arc::new(change_proposals));
-            let source_history = match SourceHistoryStore::open_default() {
-                Ok(store) => store,
-                Err(e) => {
-                    emit_status_error(
-                        robot_json,
-                        "ORACLEMCP_SOURCE_HISTORY_UNAVAILABLE",
-                        &format!("failed to initialize source history store: {e}"),
-                    );
-                    return ExitCode::from(2);
-                }
-            };
+            let source_history =
+                match SourceHistoryStore::open_with_owner(http_service_owner.clone()) {
+                    Ok(store) => store,
+                    Err(e) => {
+                        emit_status_error(
+                            robot_json,
+                            "ORACLEMCP_SOURCE_HISTORY_UNAVAILABLE",
+                            &format!("failed to initialize source history store: {e}"),
+                        );
+                        return ExitCode::from(2);
+                    }
+                };
             transport.source_history = Some(Arc::new(source_history));
 
             // ── D1 observability wiring (health + metrics + graceful drain) ──

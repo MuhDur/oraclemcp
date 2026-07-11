@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::file_store::{FileStore, FileStoreError, StoreId};
+use crate::file_store::{FileStore, FileStoreError, ServiceOwner, StoreId};
 
 const SOURCE_SNAPSHOT_COLLECTION: &str = "source-snapshots";
 const SOURCE_HISTORY_COLLECTION: &str = "source-history";
@@ -23,18 +23,26 @@ const LEGACY_SOURCE_HISTORY_SCHEMA_VERSION: u8 = 1;
 /// Persistent source-history store.
 pub struct SourceHistoryStore {
     store: FileStore,
+    owner: ServiceOwner,
 }
 
 impl SourceHistoryStore {
     /// Open the default service-owned source-history store.
     pub fn open_default() -> Result<Self, SourceHistoryError> {
-        Ok(Self::new(FileStore::open_default()?))
+        Self::open(FileStore::default_state_dir()?)
     }
 
-    /// Build a source-history store from an existing file-store root.
-    #[must_use]
-    pub fn new(store: FileStore) -> Self {
-        Self { store }
+    /// Open a standalone source-history store rooted at `root`.
+    pub fn open(root: impl AsRef<Path>) -> Result<Self, SourceHistoryError> {
+        let store = FileStore::open(root)?;
+        let owner = store.acquire_service_owner("source-history")?;
+        Ok(Self { store, owner })
+    }
+
+    /// Open the source-history store under an existing process-wide service owner.
+    pub fn open_with_owner(owner: ServiceOwner) -> Result<Self, SourceHistoryError> {
+        let store = FileStore::open(owner.root())?;
+        Ok(Self { store, owner })
     }
 
     /// Record one complete prior-source snapshot and append its object history.
@@ -121,16 +129,20 @@ impl SourceHistoryStore {
             &snapshot.object_type,
         )?;
         let snapshot_id = StoreId::from_safe_segment(id)?;
-        let lock = self.store.acquire_service_lock("source-history")?;
+        let _mutation = self.owner.mutation_guard();
         self.store.write_atomic(
-            &lock,
+            &self.owner,
             SOURCE_SNAPSHOT_COLLECTION,
             &snapshot_id,
             SOURCE_HISTORY_EXTENSION,
             &snapshot_bytes,
         )?;
-        self.store
-            .append_jsonl(&lock, SOURCE_HISTORY_COLLECTION, &history_id, &entry_bytes)?;
+        self.store.append_jsonl(
+            &self.owner,
+            SOURCE_HISTORY_COLLECTION,
+            &history_id,
+            &entry_bytes,
+        )?;
         Ok(view)
     }
 
@@ -878,7 +890,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/source-history-tests")
             .join(format!("{}-{stamp}", std::process::id()));
-        let store = SourceHistoryStore::new(FileStore::open(root).expect("file store"));
+        let store = SourceHistoryStore::open(root).expect("source history");
         let source = "CREATE OR REPLACE PROCEDURE p IS BEGIN NULL; END;".to_owned();
         let view = store
             .record_snapshot(SourceSnapshotDraft {
@@ -923,7 +935,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/source-history-tests")
             .join(format!("{}-{stamp}-quoted", std::process::id()));
-        let store = SourceHistoryStore::new(FileStore::open(root).expect("file store"));
+        let store = SourceHistoryStore::open(root).expect("source history");
         let target_identity_sha256 = source_identity_sha256("MiXeD Owner", "foo", "PROCEDURE");
         let draft = SourceSnapshotDraft {
             profile: "prod".to_owned(),

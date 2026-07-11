@@ -1,17 +1,18 @@
 //! Shared file-store primitives for service-owned state.
 //!
 //! This is deliberately files-first and SQLite-free. Mutations require a
-//! process-wide service lock token, then use write-temp/fsync/rename/fsync-dir so
+//! process-wide service ownership capability, then use write-temp/fsync/rename/fsync-dir so
 //! callers can build durable config, metrics, proposal, and idempotency stores
 //! without inventing their own path handling.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
-use parking_lot::Mutex;
+use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -38,8 +39,8 @@ pub enum FileStoreError {
     /// Another service owner already holds the single-writer lock.
     #[error("file-store service lock is already held")]
     Locked,
-    /// A mutation was attempted without the lock token for this store root.
-    #[error("file-store mutation requires the matching service lock")]
+    /// A mutation was attempted without the owner capability for this store root.
+    #[error("file-store mutation requires the matching service owner")]
     LockRequired,
     /// Audit data is never pruned by retention.
     #[error("audit data is not prunable")]
@@ -85,27 +86,47 @@ impl StoreId {
     }
 }
 
-/// Token proving this process holds the single-writer service lock.
+/// Cloneable capability proving this process owns the service state root.
 ///
 /// Ownership is an advisory OS lock tied to the open descriptor. The
 /// `.service.lock` sidecar persists as an operator hint and must not be
-/// manually removed; process exit releases ownership automatically.
-pub struct ServiceLock {
-    root: PathBuf,
-    file: File,
+/// manually removed; process exit releases ownership automatically. Clones
+/// share one in-process mutation gate and temporary-name sequence, so every
+/// file-store domain composes under one process owner without weakening
+/// cross-process exclusion.
+#[derive(Clone)]
+pub struct ServiceOwner {
+    inner: Arc<ServiceOwnerInner>,
 }
 
-impl ServiceLock {
+struct ServiceOwnerInner {
+    root: PathBuf,
+    file: File,
+    mutation_gate: ReentrantMutex<()>,
+    tmp_counter: AtomicU64,
+}
+
+impl ServiceOwner {
     fn assert_for(&self, store: &FileStore) -> Result<()> {
-        if self.root == store.root {
+        if self.inner.root == store.root {
             Ok(())
         } else {
             Err(FileStoreError::LockRequired)
         }
     }
+
+    /// The canonical state root owned by this process.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.inner.root
+    }
+
+    pub(crate) fn mutation_guard(&self) -> ReentrantMutexGuard<'_, ()> {
+        self.inner.mutation_gate.lock()
+    }
 }
 
-impl Drop for ServiceLock {
+impl Drop for ServiceOwnerInner {
     fn drop(&mut self) {
         // SAFETY: ownership is the advisory OS lock on this exact open file,
         // never the mutable pathname. Closing the descriptor also releases it
@@ -162,8 +183,6 @@ pub struct PruneReport {
 /// Service-owned file store rooted under XDG state.
 pub struct FileStore {
     root: PathBuf,
-    mutation_gate: Mutex<()>,
-    tmp_counter: AtomicU64,
 }
 
 impl FileStore {
@@ -193,11 +212,7 @@ impl FileStore {
         let root = root
             .canonicalize()
             .map_err(|e| FileStoreError::Io(e.to_string()))?;
-        Ok(Self {
-            root,
-            mutation_gate: Mutex::new(()),
-            tmp_counter: AtomicU64::new(0),
-        })
+        Ok(Self { root })
     }
 
     /// The canonical store root.
@@ -206,16 +221,16 @@ impl FileStore {
         &self.root
     }
 
-    /// Acquire the mandatory single-writer service lock for this store.
-    pub fn acquire_service_lock(&self, owner: &str) -> Result<ServiceLock> {
-        self.acquire_service_lock_with_metadata(owner, write_service_lock_metadata)
+    /// Acquire the mandatory process-wide ownership capability for this store.
+    pub fn acquire_service_owner(&self, owner: &str) -> Result<ServiceOwner> {
+        self.acquire_service_owner_with_metadata(owner, write_service_lock_metadata)
     }
 
-    fn acquire_service_lock_with_metadata(
+    fn acquire_service_owner_with_metadata(
         &self,
         owner: &str,
         write_metadata: impl FnOnce(&mut File, &str) -> std::io::Result<()>,
-    ) -> Result<ServiceLock> {
+    ) -> Result<ServiceOwner> {
         let path = self.root.join(SERVICE_LOCK_FILE);
         let mut file = open_private_lock_file(&path)
             .map_err(|e| FileStoreError::Io(format!("cannot open {}: {e}", path.display())))?;
@@ -241,9 +256,13 @@ impl FileStore {
         file.sync_all()
             .map_err(|e| FileStoreError::Io(e.to_string()))?;
         fsync_dir(&self.root)?;
-        Ok(ServiceLock {
-            root: self.root.clone(),
-            file,
+        Ok(ServiceOwner {
+            inner: Arc::new(ServiceOwnerInner {
+                root: self.root.clone(),
+                file,
+                mutation_gate: ReentrantMutex::new(()),
+                tmp_counter: AtomicU64::new(0),
+            }),
         })
     }
 
@@ -270,17 +289,17 @@ impl FileStore {
     /// Atomically replace a file with `bytes`.
     pub fn write_atomic(
         &self,
-        lock: &ServiceLock,
+        owner: &ServiceOwner,
         collection: &str,
         id: &StoreId,
         extension: &str,
         bytes: &[u8],
     ) -> Result<PathBuf> {
-        lock.assert_for(self)?;
-        let _guard = self.mutation_gate.lock();
+        owner.assert_for(self)?;
+        let _guard = owner.inner.mutation_gate.lock();
         let dir = self.collection_dir(collection)?;
         let final_path = self.path_for(collection, id, extension)?;
-        let tmp_path = self.tmp_path(&dir, id, extension);
+        let tmp_path = self.tmp_path(owner, &dir, id, extension);
 
         let mut tmp =
             create_new_private_file(&tmp_path).map_err(|e| FileStoreError::Io(e.to_string()))?;
@@ -297,15 +316,15 @@ impl FileStore {
     /// Atomically replace a fixed root-level service file with `bytes`.
     pub fn write_root_atomic(
         &self,
-        lock: &ServiceLock,
+        owner: &ServiceOwner,
         id: &StoreId,
         extension: &str,
         bytes: &[u8],
     ) -> Result<PathBuf> {
-        lock.assert_for(self)?;
-        let _guard = self.mutation_gate.lock();
+        owner.assert_for(self)?;
+        let _guard = owner.inner.mutation_gate.lock();
         let final_path = self.root_path_for(id, extension)?;
-        let tmp_path = self.tmp_path(&self.root, id, extension);
+        let tmp_path = self.tmp_path(owner, &self.root, id, extension);
 
         let mut tmp =
             create_new_private_file(&tmp_path).map_err(|e| FileStoreError::Io(e.to_string()))?;
@@ -323,12 +342,12 @@ impl FileStore {
     /// rebuilding the byte-offset index from complete lines.
     pub fn recover_jsonl(
         &self,
-        lock: &ServiceLock,
+        owner: &ServiceOwner,
         collection: &str,
         id: &StoreId,
     ) -> Result<RecoveryReport> {
-        lock.assert_for(self)?;
-        let _guard = self.mutation_gate.lock();
+        owner.assert_for(self)?;
+        let _guard = owner.inner.mutation_gate.lock();
         let dir = self.collection_dir(collection)?;
         let path = self.path_for(collection, id, "jsonl")?;
         if !path.exists() {
@@ -370,16 +389,16 @@ impl FileStore {
     /// exactly one line terminator.
     pub fn append_jsonl(
         &self,
-        lock: &ServiceLock,
+        owner: &ServiceOwner,
         collection: &str,
         id: &StoreId,
         record: &[u8],
     ) -> Result<PathBuf> {
-        lock.assert_for(self)?;
+        owner.assert_for(self)?;
         if record.iter().any(|b| *b == b'\n' || *b == b'\r') {
             return Err(FileStoreError::InvalidJsonlRecord);
         }
-        let _guard = self.mutation_gate.lock();
+        let _guard = owner.inner.mutation_gate.lock();
         let dir = self.collection_dir(collection)?;
         let path = self.path_for(collection, id, "jsonl")?;
         let created = !path.exists();
@@ -399,16 +418,16 @@ impl FileStore {
     /// by modified time. Audit-class data is refused.
     pub fn prune_collection(
         &self,
-        lock: &ServiceLock,
+        owner: &ServiceOwner,
         collection: &str,
         keep_latest: usize,
         class: RetentionClass,
     ) -> Result<PruneReport> {
-        lock.assert_for(self)?;
+        owner.assert_for(self)?;
         if class == RetentionClass::Audit {
             return Err(FileStoreError::AuditNotPrunable);
         }
-        let _guard = self.mutation_gate.lock();
+        let _guard = owner.inner.mutation_gate.lock();
         let dir = self.collection_dir(collection)?;
         let mut entries = Vec::new();
         for entry in fs::read_dir(&dir).map_err(|e| FileStoreError::Io(e.to_string()))? {
@@ -448,8 +467,8 @@ impl FileStore {
         Ok(dir)
     }
 
-    fn tmp_path(&self, dir: &Path, id: &StoreId, extension: &str) -> PathBuf {
-        let counter = self.tmp_counter.fetch_add(1, Ordering::Relaxed);
+    fn tmp_path(&self, owner: &ServiceOwner, dir: &Path, id: &StoreId, extension: &str) -> PathBuf {
+        let counter = owner.inner.tmp_counter.fetch_add(1, Ordering::Relaxed);
         dir.join(format!(
             ".{}.{}.tmp.{}.{}",
             id.as_str(),
@@ -619,9 +638,9 @@ mod tests {
     #[test]
     fn file_store_atomic_fsync_lock_path_safe() {
         let store = FileStore::open(test_root("atomic")).expect("store");
-        let lock = store.acquire_service_lock("test").expect("lock");
+        let lock = store.acquire_service_owner("test").expect("lock");
         assert!(
-            store.acquire_service_lock("other").is_err(),
+            store.acquire_service_owner("other").is_err(),
             "second writer must not acquire the service lock"
         );
 
@@ -691,6 +710,159 @@ mod tests {
     }
 
     #[test]
+    fn all_file_store_domains_compose_under_one_process_owner() {
+        use crate::change_proposal::{
+            ChangeProposalAuthorKind, ChangeProposalDraftRequest, ChangeProposalStatementDraft,
+        };
+        use crate::client_credentials::ClientCredentialIssueRequest;
+        use crate::source_history::{SourceHistoryStore, SourceSnapshotDraft};
+        use crate::write_intent::{WriteIntent, WriteIntentDetails, WriteIntentOutcome};
+        use oraclemcp_guard::{ExecGrantBinding, OperatingLevel};
+
+        let root = test_root("process-composition");
+        let store = FileStore::open(&root).expect("service store");
+        let owner = store.acquire_service_owner("serve").expect("service owner");
+        assert!(
+            matches!(
+                FileStore::open(&root)
+                    .expect("competing store")
+                    .acquire_service_owner("second-process"),
+                Err(FileStoreError::Locked)
+            ),
+            "an independent owner must remain excluded"
+        );
+
+        let write_intents = crate::write_intent::WriteIntentLog::open_with_owner(owner.clone())
+            .expect("write intents share owner");
+        let clients =
+            crate::client_credentials::ClientCredentialStore::open_with_owner(owner.clone())
+                .expect("client credentials share owner");
+        let config = crate::config_ops::ConfigOpsBackend::open_with_owner(owner.clone())
+            .expect("config ops share owner");
+        let proposals = crate::change_proposal::ChangeProposalStore::open_with_owner(owner.clone())
+            .expect("change proposals share owner");
+        let history = SourceHistoryStore::open_with_owner(owner.clone())
+            .expect("source history shares owner");
+
+        clients
+            .issue(ClientCredentialIssueRequest::new(
+                "operator",
+                vec!["oracle:read".to_owned()],
+            ))
+            .expect("credential mutation");
+
+        let binding = ExecGrantBinding::new("session", "lane", "principal", 1);
+        let intent = WriteIntent::new(WriteIntentDetails {
+            idempotency_key_material: "grant",
+            subject: "profile:dev",
+            active_profile: Some("dev"),
+            tool: "oracle_execute",
+            sql: "UPDATE employees SET name = name WHERE employee_id = 1",
+            required_level: OperatingLevel::ReadWrite,
+            binding: &binding,
+        });
+        let intent_id = write_intents
+            .append_pending(intent)
+            .expect("write-intent mutation");
+        write_intents
+            .resolve(&intent_id, WriteIntentOutcome::RolledBack)
+            .expect("write-intent resolution");
+
+        let config_path = store.root().join("profiles.toml");
+        let plan = config
+            .stage_config_draft(&config_path, "")
+            .expect("config draft");
+        config.apply_config_draft(&plan).expect("config mutation");
+
+        proposals
+            .draft(
+                ChangeProposalDraftRequest {
+                    profile: "dev".to_owned(),
+                    author: ChangeProposalAuthorKind::Agent,
+                    title: Some("No-op update".to_owned()),
+                    statements: vec![ChangeProposalStatementDraft {
+                        sql_template: "UPDATE employees SET name = name WHERE employee_id = 1"
+                            .to_owned(),
+                        binds: Vec::new(),
+                        unit: None,
+                        commit: Some(false),
+                        capture_dbms_output: None,
+                        stored_verdict: None,
+                    }],
+                    stored_verdict: None,
+                },
+                "subject-sha256:test".to_owned(),
+            )
+            .expect("proposal mutation");
+
+        history
+            .record_snapshot(SourceSnapshotDraft {
+                profile: "dev".to_owned(),
+                owner: "app".to_owned(),
+                owner_quoted: false,
+                name: "p".to_owned(),
+                name_quoted: false,
+                object_type: "procedure".to_owned(),
+                target_identity_sha256: crate::source_history::source_identity_sha256(
+                    "APP",
+                    "P",
+                    "PROCEDURE",
+                ),
+                source_kind: "all_source".to_owned(),
+                source: "CREATE OR REPLACE PROCEDURE p IS BEGIN NULL; END;".to_owned(),
+                proposal_id: "cp-1".to_owned(),
+                statement_id: "stmt-1".to_owned(),
+                statement_sql_sha256: "sha256:stmt".to_owned(),
+                lane_id: Some("operator".to_owned()),
+                subject_id_hash: "subject-sha256:test".to_owned(),
+            })
+            .expect("source-history mutation");
+    }
+
+    #[test]
+    fn owner_serializes_concurrent_file_store_instances_without_temp_collisions() {
+        let root = test_root("shared-owner-concurrency");
+        let store = FileStore::open(&root).expect("service store");
+        let owner = store.acquire_service_owner("serve").expect("service owner");
+        let id = StoreId::from_safe_segment("shared").expect("safe id");
+
+        let threads: Vec<_> = (0..16)
+            .map(|index| {
+                let root = root.clone();
+                let owner = owner.clone();
+                let id = id.clone();
+                thread::spawn(move || {
+                    let store = FileStore::open(root).expect("thread store");
+                    store
+                        .write_atomic(
+                            &owner,
+                            "concurrent",
+                            &id,
+                            "json",
+                            format!("{{\"writer\":{index}}}").as_bytes(),
+                        )
+                        .expect("serialized write")
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("writer thread");
+        }
+
+        let final_path = store
+            .path_for("concurrent", &id, "json")
+            .expect("final path");
+        let final_bytes = fs::read(&final_path).expect("final bytes");
+        serde_json::from_slice::<serde_json::Value>(&final_bytes).expect("whole JSON write");
+        let leftovers = fs::read_dir(final_path.parent().expect("collection dir"))
+            .expect("read collection")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .count();
+        assert_eq!(leftovers, 0, "atomic writes must not strand temp files");
+    }
+
+    #[test]
     fn service_lock_subprocess_holder() {
         let Some(root) = std::env::var_os(LOCK_HELPER_ROOT_ENV) else {
             return;
@@ -698,7 +870,7 @@ mod tests {
         let ready = std::env::var_os(LOCK_HELPER_READY_ENV).expect("helper ready path");
         let store = FileStore::open(root).expect("helper store");
         let _lock = store
-            .acquire_service_lock("subprocess-holder")
+            .acquire_service_owner("subprocess-holder")
             .expect("helper service lock");
         let ready = PathBuf::from(ready);
         fs::write(&ready, b"ready\n").expect("publish helper readiness");
@@ -745,7 +917,7 @@ mod tests {
             }
 
             let live_contender_was_excluded = matches!(
-                contender.acquire_service_lock("live-contender"),
+                contender.acquire_service_owner("live-contender"),
                 Err(FileStoreError::Locked)
             );
 
@@ -758,7 +930,7 @@ mod tests {
                 "a second process must not acquire while the holder is live"
             );
             let recovered = contender
-                .acquire_service_lock("post-crash-owner")
+                .acquire_service_owner("post-crash-owner")
                 .expect("process death must release the service lock immediately");
             drop(recovered);
         }
@@ -768,7 +940,7 @@ mod tests {
     fn service_lock_initialization_failure_releases_os_lock() {
         let store = FileStore::open(test_root("partial-lock-init")).expect("store");
         let error = match store
-            .acquire_service_lock_with_metadata("failing-owner", |_file, _owner| {
+            .acquire_service_owner_with_metadata("failing-owner", |_file, _owner| {
                 Err(std::io::Error::other("injected metadata failure"))
             }) {
             Ok(_) => panic!("metadata initialization must fail"),
@@ -777,7 +949,7 @@ mod tests {
         assert!(matches!(error, FileStoreError::Io(_)));
 
         let recovered = store
-            .acquire_service_lock("recovered-owner")
+            .acquire_service_owner("recovered-owner")
             .expect("partial initialization must not leave a permanent lock");
         drop(recovered);
     }
@@ -785,13 +957,13 @@ mod tests {
     #[test]
     fn old_lock_drop_does_not_unlink_replacement_lock() {
         let store = FileStore::open(test_root("replacement-identity")).expect("store");
-        let old_lock = store.acquire_service_lock("old-owner").expect("old lock");
+        let old_lock = store.acquire_service_owner("old-owner").expect("old lock");
         let lock_path = store.root().join(SERVICE_LOCK_FILE);
         let displaced_path = store.root().join(".service.lock.displaced");
         fs::rename(&lock_path, &displaced_path).expect("displace old lock pathname");
 
         let replacement = store
-            .acquire_service_lock("replacement-owner")
+            .acquire_service_owner("replacement-owner")
             .expect("replacement lock");
         drop(old_lock);
 
@@ -801,7 +973,7 @@ mod tests {
         );
         assert!(
             matches!(
-                store.acquire_service_lock("third-owner"),
+                store.acquire_service_owner("third-owner"),
                 Err(FileStoreError::Locked)
             ),
             "the replacement must continue excluding a third writer"
@@ -812,7 +984,7 @@ mod tests {
     #[test]
     fn jsonl_recovery_repairs_torn_tail_and_rebuilds_index() {
         let store = FileStore::open(test_root("jsonl")).expect("store");
-        let lock = store.acquire_service_lock("test").expect("lock");
+        let lock = store.acquire_service_owner("test").expect("lock");
         let id = StoreId::from_safe_segment("metrics").expect("id");
         let path = store.path_for("metrics", &id, "jsonl").expect("path");
         ensure_private_dir(path.parent().expect("parent")).expect("metrics dir");
@@ -836,7 +1008,7 @@ mod tests {
     #[test]
     fn jsonl_append_fsyncs_complete_single_line_records() {
         let store = FileStore::open(test_root("append-jsonl")).expect("store");
-        let lock = store.acquire_service_lock("test").expect("lock");
+        let lock = store.acquire_service_owner("test").expect("lock");
         let id = StoreId::from_safe_segment("intents").expect("id");
 
         let path = store
@@ -858,7 +1030,7 @@ mod tests {
     #[test]
     fn retention_prunes_metrics_but_never_audit() {
         let store = FileStore::open(test_root("retention")).expect("store");
-        let lock = store.acquire_service_lock("test").expect("lock");
+        let lock = store.acquire_service_owner("test").expect("lock");
         for i in 0..3 {
             let id = StoreId::from_safe_segment(format!("snap-{i}")).expect("id");
             store

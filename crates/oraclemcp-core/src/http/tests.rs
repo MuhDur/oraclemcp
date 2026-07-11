@@ -2548,9 +2548,10 @@ fn workbench_no_bypass_guard_is_the_feature() {
 fn operator_http_200_preserves_mcp_failure_and_partial_apply_contract() {
     let (auditor, sink) = operator_auditor();
     let dir = dashboard_test_dir("operator-semantic-outcome");
-    let proposals = Arc::new(crate::change_proposal::ChangeProposalStore::new(
-        crate::file_store::FileStore::open(dir.join("state")).expect("proposal store"),
-    ));
+    let proposals = Arc::new(
+        crate::change_proposal::ChangeProposalStore::open(dir.join("state"))
+            .expect("proposal store"),
+    );
     let cfg = HttpTransportConfig {
         operator_auditor: Some(auditor),
         change_proposals: Some(proposals),
@@ -3121,9 +3122,10 @@ fn cp_apply_reclassifies_never_trusts_stored_verdict() {
         calls: Arc::clone(&calls),
     }));
     let dir = dashboard_test_dir("cp-reclassify");
-    let store = Arc::new(crate::change_proposal::ChangeProposalStore::new(
-        crate::file_store::FileStore::open(dir.join("state")).expect("file store"),
-    ));
+    let store = Arc::new(
+        crate::change_proposal::ChangeProposalStore::open(dir.join("state"))
+            .expect("proposal store"),
+    );
     let cfg = HttpTransportConfig {
         operator_auditor: Some(auditor),
         change_proposals: Some(store),
@@ -3327,12 +3329,18 @@ fn source_history_snapshots_prior_source_and_revert_drafts_review_proposal() {
     }));
     let dir = dashboard_test_dir("source-history");
     let state = dir.join("state");
-    let change_proposals = Arc::new(crate::change_proposal::ChangeProposalStore::new(
-        crate::file_store::FileStore::open(&state).expect("proposal store"),
-    ));
-    let source_history = Arc::new(crate::source_history::SourceHistoryStore::new(
-        crate::file_store::FileStore::open(&state).expect("source-history store"),
-    ));
+    let service_store = crate::file_store::FileStore::open(&state).expect("service store");
+    let owner = service_store
+        .acquire_service_owner("http-test")
+        .expect("service owner");
+    let change_proposals = Arc::new(
+        crate::change_proposal::ChangeProposalStore::open_with_owner(owner.clone())
+            .expect("proposal store"),
+    );
+    let source_history = Arc::new(
+        crate::source_history::SourceHistoryStore::open_with_owner(owner)
+            .expect("source-history store"),
+    );
     let cfg = HttpTransportConfig {
         operator_auditor: Some(auditor),
         change_proposals: Some(change_proposals),
@@ -3462,14 +3470,20 @@ fn apply_quoted_source_change(return_wrong_unquoted_object: bool) -> QuotedSourc
         "source-history-quoted-exact"
     });
     let state = dir.join("state");
+    let service_store = crate::file_store::FileStore::open(&state).expect("service store");
+    let owner = service_store
+        .acquire_service_owner("http-test")
+        .expect("service owner");
     let cfg = HttpTransportConfig {
         operator_auditor: Some(auditor),
-        change_proposals: Some(Arc::new(crate::change_proposal::ChangeProposalStore::new(
-            crate::file_store::FileStore::open(&state).expect("proposal store"),
-        ))),
-        source_history: Some(Arc::new(crate::source_history::SourceHistoryStore::new(
-            crate::file_store::FileStore::open(&state).expect("source-history store"),
-        ))),
+        change_proposals: Some(Arc::new(
+            crate::change_proposal::ChangeProposalStore::open_with_owner(owner.clone())
+                .expect("proposal store"),
+        )),
+        source_history: Some(Arc::new(
+            crate::source_history::SourceHistoryStore::open_with_owner(owner)
+                .expect("source-history store"),
+        )),
         ..Default::default()
     };
     let ddl = "CREATE /* identity */ OR\n-- quote guard\nREPLACE EDITIONABLE PROCEDURE \"App\".\"foo\" IS BEGIN NULL; END;";
@@ -3623,14 +3637,20 @@ fn unsupported_quoted_source_header_skips_snapshot_without_fetching() {
         calls: Arc::clone(&calls),
     }));
     let state = dashboard_test_dir("source-history-unsupported-quote").join("state");
+    let service_store = crate::file_store::FileStore::open(&state).expect("service store");
+    let owner = service_store
+        .acquire_service_owner("http-test")
+        .expect("service owner");
     let cfg = HttpTransportConfig {
         operator_auditor: Some(auditor),
-        change_proposals: Some(Arc::new(crate::change_proposal::ChangeProposalStore::new(
-            crate::file_store::FileStore::open(&state).expect("proposal store"),
-        ))),
-        source_history: Some(Arc::new(crate::source_history::SourceHistoryStore::new(
-            crate::file_store::FileStore::open(&state).expect("source-history store"),
-        ))),
+        change_proposals: Some(Arc::new(
+            crate::change_proposal::ChangeProposalStore::open_with_owner(owner.clone())
+                .expect("proposal store"),
+        )),
+        source_history: Some(Arc::new(
+            crate::source_history::SourceHistoryStore::open_with_owner(owner)
+                .expect("source-history store"),
+        )),
         ..Default::default()
     };
     let draft = handle_http_request(
@@ -3733,10 +3753,9 @@ fn config_ops_for_test(name: &str, current_toml: &str) -> TestConfigOps {
     let dir = dashboard_test_dir(name);
     let target = dir.join("profiles.toml");
     std::fs::write(&target, current_toml).expect("write current config");
-    let store = crate::file_store::FileStore::open(dir.join("state")).expect("file store");
     let applied = Arc::new(Mutex::new(Vec::new()));
     let service = crate::config_ops::ConfigOpsService::new(
-        crate::config_ops::ConfigOpsBackend::new(store),
+        crate::config_ops::ConfigOpsBackend::open(dir.join("state")).expect("config ops backend"),
         target.clone(),
         Some(Arc::new(TestConfigReloadApplier {
             applied: Arc::clone(&applied),

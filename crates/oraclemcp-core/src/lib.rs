@@ -134,7 +134,7 @@ pub use export::{
 };
 pub use file_store::{
     FileStore, FileStoreError, JsonlIndex, JsonlRecord, PruneReport, RecoveryReport,
-    RetentionClass, ServiceLock, StoreId,
+    RetentionClass, ServiceOwner, StoreId,
 };
 pub use http::{
     EffectiveHttpScheme, HEALTHZ_PATH, HttpRequest, HttpResponse, HttpResultStore,

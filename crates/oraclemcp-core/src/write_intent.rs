@@ -16,7 +16,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::file_store::{FileStore, FileStoreError, ServiceLock, StoreId};
+use crate::file_store::{FileStore, FileStoreError, ServiceOwner, StoreId};
 
 const WRITE_INTENT_COLLECTION: &str = "write-intents";
 const WRITE_INTENT_ID: &str = "intents";
@@ -272,7 +272,7 @@ impl WriteIntentRecord {
 /// Append-only durable write-intent ledger.
 pub struct WriteIntentLog {
     store: FileStore,
-    lock: ServiceLock,
+    owner: ServiceOwner,
     id: StoreId,
     state: Mutex<WriteIntentState>,
 }
@@ -286,14 +286,27 @@ impl WriteIntentLog {
     /// Open a write-intent log rooted at `root`.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, WriteIntentError> {
         let store = FileStore::open(root)?;
-        let lock = store.acquire_service_lock("write-intents")?;
+        let owner = store.acquire_service_owner("write-intents")?;
+        Self::open_with_store_owner(store, owner)
+    }
+
+    /// Open the write-intent log under an existing process-wide service owner.
+    pub fn open_with_owner(owner: ServiceOwner) -> Result<Self, WriteIntentError> {
+        let store = FileStore::open(owner.root())?;
+        Self::open_with_store_owner(store, owner)
+    }
+
+    fn open_with_store_owner(
+        store: FileStore,
+        owner: ServiceOwner,
+    ) -> Result<Self, WriteIntentError> {
         let id = StoreId::from_safe_segment(WRITE_INTENT_ID)?;
-        store.recover_jsonl(&lock, WRITE_INTENT_COLLECTION, &id)?;
+        store.recover_jsonl(&owner, WRITE_INTENT_COLLECTION, &id)?;
         let path = store.path_for(WRITE_INTENT_COLLECTION, &id, "jsonl")?;
         let state = rebuild_state(&path)?;
         Ok(Self {
             store,
-            lock,
+            owner,
             id,
             state: Mutex::new(state),
         })
@@ -350,7 +363,7 @@ impl WriteIntentLog {
         let bytes = serde_json::to_vec(record)
             .map_err(|e| WriteIntentError::Serialization(e.to_string()))?;
         self.store
-            .append_jsonl(&self.lock, WRITE_INTENT_COLLECTION, &self.id, &bytes)?;
+            .append_jsonl(&self.owner, WRITE_INTENT_COLLECTION, &self.id, &bytes)?;
         Ok(())
     }
 }

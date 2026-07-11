@@ -14,7 +14,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use oraclemcp_config::discovery::render_annotated_config;
 use oraclemcp_config::discovery::synth::{DiscoveredNetService, SynthOptions, synthesize_profiles};
 use oraclemcp_core::config_ops::ConfigOpsBackend;
-use oraclemcp_core::file_store::FileStore;
 
 fn unique_temp_dir(label: &str) -> PathBuf {
     let stamp = SystemTime::now()
@@ -45,7 +44,7 @@ fn annotated_writer_output_stages_through_config_ops() {
     let rendered = render_annotated_config(&synth);
 
     let store_root = unique_temp_dir("store");
-    let backend = ConfigOpsBackend::new(FileStore::open(&store_root).expect("open file store"));
+    let backend = ConfigOpsBackend::open(&store_root).expect("open config ops");
     let target = unique_temp_dir("target").join("profiles.toml");
 
     // stage_config_draft re-parses the draft with the strict loader

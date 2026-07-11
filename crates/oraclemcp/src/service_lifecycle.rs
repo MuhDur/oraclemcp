@@ -781,9 +781,12 @@ fn run_backup(
         build_backup_manifest(&options, &output, false, false)?
     } else {
         let store = FileStore::open(&options.state_dir).map_err(service_store_error)?;
-        let lock = store
-            .acquire_service_lock("service-backup")
-            .map_err(service_store_error)?;
+        // Backup is deliberately offline-only. A live service owns this lock
+        // for its full lifetime, so refusing here prevents a state snapshot
+        // from racing client/config/proposal/source/audit mutations.
+        let owner = store
+            .acquire_service_owner("service-backup")
+            .map_err(service_backup_store_error)?;
         create_new_private_dir(&output)?;
         let state_target = output.join("state");
         let mut state = copy_dir_snapshot(store.root(), &state_target)?;
@@ -812,7 +815,7 @@ fn run_backup(
         };
         sign_backup_manifest(&mut manifest, &options.manifest_signing_key)?;
         write_manifest(&output, &manifest)?;
-        drop(lock);
+        drop(owner);
         manifest
     };
 
@@ -1037,6 +1040,17 @@ fn service_store_error(error: oraclemcp_core::FileStoreError) -> ServiceError {
         format!("service file-store operation failed: {error}"),
         3,
     )
+}
+
+fn service_backup_store_error(error: oraclemcp_core::FileStoreError) -> ServiceError {
+    if matches!(error, oraclemcp_core::FileStoreError::Locked) {
+        return ServiceError::new(
+            "ORACLEMCP_SERVICE_BACKUP_ACTIVE_OWNER",
+            "refusing an incoherent online backup while the service owns the state root; stop the service and retry the backup",
+            3,
+        );
+    }
+    service_store_error(error)
 }
 
 fn copy_audit_for_backup(
@@ -4075,6 +4089,39 @@ mod tests {
         let err = prepare_restore(&empty_anchored_fixture.options())
             .expect_err("even an anchored empty log is not authenticated evidence");
         assert_eq!(err.code, "ORACLEMCP_SERVICE_RESTORE_AUDIT_UNVERIFIABLE");
+    }
+
+    #[test]
+    fn backup_refuses_live_service_owner_without_creating_partial_output() {
+        let root = test_root("backup-live-owner");
+        let state = root.join("state");
+        let output = root.join("backup");
+        let store = FileStore::open(&state).expect("state store");
+        let _owner = store
+            .acquire_service_owner("serve")
+            .expect("live service owner");
+        let key = SigningKey::new("default", b"qa1-offline-backup-key-0123456789".to_vec())
+            .expect("valid key");
+
+        let error = run_service_command_with(
+            ServiceCommand::Backup(ServiceBackupOptions {
+                name: "oraclemcp".to_owned(),
+                state_dir: state,
+                config_path: root.join("config/profiles.toml"),
+                audit_path: root.join("audit/audit.jsonl"),
+                manifest_signing_key: key,
+                output: Some(output.clone()),
+                yes: true,
+                dry_run: false,
+            }),
+            ServiceManager::SystemdUser,
+            &exe(),
+        )
+        .expect_err("online backup must fail closed");
+
+        assert_eq!(error.code, "ORACLEMCP_SERVICE_BACKUP_ACTIVE_OWNER");
+        assert!(error.message.contains("stop the service"));
+        assert!(!output.exists(), "refusal must precede output creation");
     }
 
     #[test]

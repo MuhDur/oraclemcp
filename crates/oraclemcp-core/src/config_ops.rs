@@ -19,7 +19,7 @@ use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::file_store::{FileStore, FileStoreError};
+use crate::file_store::{FileStore, FileStoreError, ServiceOwner};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -266,19 +266,25 @@ pub struct ConfigRollbackOutcome {
 
 /// Shared config-ops backend.
 pub struct ConfigOpsBackend {
-    store: FileStore,
+    owner: ServiceOwner,
 }
 
 impl ConfigOpsBackend {
     /// Open the backend using the default service file-store root.
     pub fn open_default() -> Result<Self, ConfigOpsError> {
-        Ok(Self::new(FileStore::open_default()?))
+        Self::open(FileStore::default_state_dir()?)
     }
 
-    /// Build the backend from an existing service file-store.
-    #[must_use]
-    pub fn new(store: FileStore) -> Self {
-        Self { store }
+    /// Open a standalone backend rooted at `root`.
+    pub fn open(root: impl AsRef<Path>) -> Result<Self, ConfigOpsError> {
+        let store = FileStore::open(root)?;
+        let owner = store.acquire_service_owner("config-ops")?;
+        Ok(Self { owner })
+    }
+
+    /// Open the backend under an existing process-wide service owner.
+    pub fn open_with_owner(owner: ServiceOwner) -> Result<Self, ConfigOpsError> {
+        Ok(Self { owner })
     }
 
     /// Stage and validate a draft for `target_path`.
@@ -323,7 +329,7 @@ impl ConfigOpsBackend {
         &self,
         plan: &ConfigDraftPlan,
     ) -> Result<ConfigApplyReport, ConfigOpsError> {
-        let lock = self.store.acquire_service_lock("config-ops")?;
+        let _mutation = self.owner.mutation_guard();
         let current_bytes = read_or_empty(&plan.preview.target_path)?;
         let actual_sha256 = oraclemcp_audit::sha256_hex(&current_bytes);
         if actual_sha256 != plan.preview.current_sha256 {
@@ -335,7 +341,6 @@ impl ConfigOpsBackend {
         write_backup(&plan.preview.backup_path, &current_bytes)?;
         write_atomic_path(&plan.preview.target_path, &plan.draft_bytes)?;
         validate_target(&plan.preview.target_path)?;
-        drop(lock);
 
         Ok(ConfigApplyReport {
             target_path: plan.preview.target_path.clone(),
@@ -365,7 +370,7 @@ impl ConfigOpsBackend {
         &self,
         report: &ConfigApplyReport,
     ) -> Result<AppliedConfigRollback, ConfigOpsError> {
-        let lock = self.store.acquire_service_lock("config-ops")?;
+        let _mutation = self.owner.mutation_guard();
         let applied_bytes = read_or_empty(&report.target_path)?;
         let actual_sha256 = oraclemcp_audit::sha256_hex(&applied_bytes);
         if actual_sha256 != report.applied_sha256 {
@@ -383,7 +388,6 @@ impl ConfigOpsBackend {
         let reverse_plan = ConfigReloadPlan::between(&applied_config, &restored_config);
         write_atomic_path(&report.target_path, &backup)?;
         validate_target(&report.target_path)?;
-        drop(lock);
 
         Ok(AppliedConfigRollback {
             report: ConfigRollbackReport {
@@ -937,8 +941,8 @@ mod tests {
 
     fn backend(name: &str) -> (ConfigOpsBackend, PathBuf) {
         let root = test_root(name);
-        let store = FileStore::open(root.join("state")).expect("store");
-        (ConfigOpsBackend::new(store), root.join("profiles.toml"))
+        let backend = ConfigOpsBackend::open(root.join("state")).expect("config ops");
+        (backend, root.join("profiles.toml"))
     }
 
     fn profile_config(connect_string: &str) -> String {

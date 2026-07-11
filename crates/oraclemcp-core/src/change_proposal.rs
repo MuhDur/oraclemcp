@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::file_store::{FileStore, FileStoreError, StoreId};
+use crate::file_store::{FileStore, FileStoreError, ServiceOwner, StoreId};
 
 const CHANGE_PROPOSAL_COLLECTION: &str = "change-proposals";
 const CHANGE_PROPOSAL_EXTENSION: &str = "json";
@@ -23,18 +23,26 @@ const MAX_PROPOSAL_STATEMENTS: usize = 32;
 /// Persistent change-proposal store.
 pub struct ChangeProposalStore {
     store: FileStore,
+    owner: ServiceOwner,
 }
 
 impl ChangeProposalStore {
     /// Open the default service-owned proposal store.
     pub fn open_default() -> Result<Self, ChangeProposalError> {
-        Ok(Self::new(FileStore::open_default()?))
+        Self::open(FileStore::default_state_dir()?)
     }
 
-    /// Build a store from an existing file-store root.
-    #[must_use]
-    pub fn new(store: FileStore) -> Self {
-        Self { store }
+    /// Open a standalone proposal store rooted at `root`.
+    pub fn open(root: impl AsRef<Path>) -> Result<Self, ChangeProposalError> {
+        let store = FileStore::open(root)?;
+        let owner = store.acquire_service_owner("change-proposals")?;
+        Ok(Self { store, owner })
+    }
+
+    /// Open the proposal store under an existing process-wide service owner.
+    pub fn open_with_owner(owner: ServiceOwner) -> Result<Self, ChangeProposalError> {
+        let store = FileStore::open(owner.root())?;
+        Ok(Self { store, owner })
     }
 
     /// List proposal board entries. Bind values are never included in the view.
@@ -74,9 +82,9 @@ impl ChangeProposalStore {
         let mut bytes = serde_json::to_vec_pretty(&proposal)
             .map_err(|e| ChangeProposalError::Json(e.to_string()))?;
         bytes.push(b'\n');
-        let lock = self.store.acquire_service_lock("change-proposals")?;
+        let _mutation = self.owner.mutation_guard();
         let path = self.store.write_atomic(
-            &lock,
+            &self.owner,
             CHANGE_PROPOSAL_COLLECTION,
             &id,
             CHANGE_PROPOSAL_EXTENSION,

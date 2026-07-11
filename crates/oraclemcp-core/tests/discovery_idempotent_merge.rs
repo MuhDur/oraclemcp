@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use oraclemcp_core::config_ops::{ConfigOpsBackend, ConfigOpsError, ConfigOpsService};
-use oraclemcp_core::file_store::FileStore;
 
 fn unique_temp_dir(label: &str) -> PathBuf {
     let stamp = SystemTime::now()
@@ -37,7 +36,7 @@ fn profile_block(name: &str) -> String {
 #[test]
 fn concurrent_edit_between_base_read_and_apply_is_rejected() {
     let store_root = unique_temp_dir("store");
-    let backend = ConfigOpsBackend::new(FileStore::open(&store_root).expect("open file store"));
+    let backend = ConfigOpsBackend::open(&store_root).expect("open config ops");
     let target_dir = unique_temp_dir("target");
     let target = target_dir.join("profiles.toml");
 
@@ -79,7 +78,7 @@ fn matching_base_hash_applies_cleanly() {
     // The companion happy path: when no concurrent edit occurred, the same
     // apply with the matching base hash succeeds and leaves a backup.
     let store_root = unique_temp_dir("store-ok");
-    let backend = ConfigOpsBackend::new(FileStore::open(&store_root).expect("open file store"));
+    let backend = ConfigOpsBackend::open(&store_root).expect("open config ops");
     let target_dir = unique_temp_dir("target-ok");
     let target = target_dir.join("profiles.toml");
 

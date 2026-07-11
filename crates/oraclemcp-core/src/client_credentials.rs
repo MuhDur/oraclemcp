@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::file_store::{FileStore, FileStoreError, ServiceLock, StoreId};
+use crate::file_store::{FileStore, FileStoreError, ServiceOwner, StoreId};
 use crate::operator_protocol::operator_subject_id_hash;
 
 const CLIENTS_ID: &str = "clients";
@@ -247,7 +247,7 @@ impl ClientCredentialRecord {
 /// Service-owned per-client credential store.
 pub struct ClientCredentialStore {
     store: FileStore,
-    lock: ServiceLock,
+    owner: ServiceOwner,
     id: StoreId,
     path: PathBuf,
     file: Mutex<ClientCredentialFile>,
@@ -262,16 +262,29 @@ impl ClientCredentialStore {
     /// Open a store rooted at `root`, creating `clients.json` when absent.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, ClientCredentialError> {
         let store = FileStore::open(root)?;
-        let lock = store.acquire_service_lock("client-credentials")?;
+        let owner = store.acquire_service_owner("client-credentials")?;
+        Self::open_with_store_owner(store, owner)
+    }
+
+    /// Open the credential store under an existing process-wide service owner.
+    pub fn open_with_owner(owner: ServiceOwner) -> Result<Self, ClientCredentialError> {
+        let store = FileStore::open(owner.root())?;
+        Self::open_with_store_owner(store, owner)
+    }
+
+    fn open_with_store_owner(
+        store: FileStore,
+        owner: ServiceOwner,
+    ) -> Result<Self, ClientCredentialError> {
         let id = StoreId::from_safe_segment(CLIENTS_ID)?;
         let path = store.root_path_for(&id, CLIENTS_EXTENSION)?;
         if !path.exists() {
-            persist_file(&store, &lock, &id, &ClientCredentialFile::default())?;
+            persist_file(&store, &owner, &id, &ClientCredentialFile::default())?;
         }
         let file = load_file(&path)?;
         Ok(Self {
             store,
-            lock,
+            owner,
             id,
             path,
             file: Mutex::new(file),
@@ -443,7 +456,7 @@ impl ClientCredentialStore {
     }
 
     fn persist_locked(&self, file: &ClientCredentialFile) -> Result<(), ClientCredentialError> {
-        persist_file(&self.store, &self.lock, &self.id, file)
+        persist_file(&self.store, &self.owner, &self.id, file)
     }
 }
 
@@ -494,14 +507,14 @@ fn validate_file(
 
 fn persist_file(
     store: &FileStore,
-    lock: &ServiceLock,
+    owner: &ServiceOwner,
     id: &StoreId,
     file: &ClientCredentialFile,
 ) -> Result<(), ClientCredentialError> {
     let mut bytes = serde_json::to_vec_pretty(file)
         .map_err(|e| ClientCredentialError::Serialization(e.to_string()))?;
     bytes.push(b'\n');
-    store.write_root_atomic(lock, id, CLIENTS_EXTENSION, &bytes)?;
+    store.write_root_atomic(owner, id, CLIENTS_EXTENSION, &bytes)?;
     Ok(())
 }
 
