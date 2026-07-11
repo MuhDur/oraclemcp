@@ -904,7 +904,11 @@ How it behaves — the load-bearing properties:
   so a SIEM rule can alert on a gap or a re-signed record. New v6 records carry
   SQL hashes plus a fixed redaction marker, never SQL text or bind values. Do
   not newly re-ship historical v1-v5 records until their legacy preview fields
-  have been reviewed as described in §5.4.
+  have been reviewed as described in §5.4. The RFC-5424 MSG is always a
+  literal-free tool/hash summary, including when formatting a historical
+  record; control characters are encoded so a raw line-oriented collector sees
+  exactly one event per POST. Historical CEF/JSON/WORM copies still retain their
+  signed legacy preview and remain subject to the §5.4 review boundary.
 - **No new network stack.** The SIEM forwarder POSTs over the same Tokio-free
   asupersync HTTP/1 client the OTLP exporter uses; there is no reqwest/hyper/tokio
   in the production graph.

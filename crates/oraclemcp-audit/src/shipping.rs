@@ -297,7 +297,10 @@ pub fn cef_line(record: &AuditRecord) -> String {
 /// facility (local0 = 16) and a severity mapped from the decision/outcome.
 ///
 /// The same chain fields ride in the structured-data element so a syslog-native
-/// SIEM can detect tampering without parsing the message body.
+/// SIEM can detect tampering without parsing the message body. The MSG is a
+/// literal-free tool/hash summary: it never re-emits the signed `sql_preview`
+/// bytes retained by historical v1-v5 records. Control characters in the
+/// summary are encoded so one record always remains one physical syslog line.
 #[must_use]
 pub fn syslog_line(record: &AuditRecord) -> String {
     const FACILITY_LOCAL0: u8 = 16;
@@ -323,13 +326,33 @@ pub fn syslog_line(record: &AuditRecord) -> String {
         push_sd_param(&mut sd, "signature", sig);
     }
     sd.push(']');
-    // VERSION=1, APP-NAME=oraclemcp, PROCID=-, MSGID=audit. Timestamp + msg are
-    // taken from the record. The agent identity rides as the HOSTNAME-adjacent
-    // field is reserved; we keep it in the message for legibility.
+    let mut message = String::from("audit tool=\"");
+    push_syslog_msg_text(&mut message, &record.tool);
+    message.push_str("\" sql_sha256=\"");
+    push_syslog_msg_text(&mut message, &record.sql_sha256);
+    message.push('"');
+    // VERSION=1, HOSTNAME=-, APP-NAME=oraclemcp, PROCID=-, MSGID=audit.
+    // The HTTP request body supplies octet-counted framing; the standalone text
+    // is also line-safe for collectors that split raw payloads on CR/LF.
     format!(
         "<{pri}>1 {} - oraclemcp - audit {} {}",
-        record.timestamp, sd, record.sql_preview
+        record.timestamp, sd, message
     )
+}
+
+/// Append text to the RFC-5424 MSG without admitting a physical line/control
+/// boundary. Backslash and quote are escaped to keep the summary unambiguous;
+/// C0/C1 controls and DEL use Rust's ASCII escape spelling. Other Unicode is
+/// preserved verbatim.
+fn push_syslog_msg_text(message: &mut String, value: &str) {
+    for c in value.chars() {
+        match c {
+            '\\' => message.push_str("\\\\"),
+            '"' => message.push_str("\\\""),
+            _ if c.is_control() => message.extend(c.escape_default()),
+            _ => message.push(c),
+        }
+    }
 }
 
 /// Map a record to a CEF severity 0..=10 (10 = most severe). Blocked/destructive
@@ -414,6 +437,7 @@ fn push_sd_param(sd: &mut String, key: &str, value: &str) {
             '"' => sd.push_str("\\\""),
             ']' => sd.push_str("\\]"),
             '\n' | '\r' => sd.push(' '),
+            _ if c.is_control() => sd.extend(c.escape_default()),
             _ => sd.push(c),
         }
     }
@@ -423,7 +447,10 @@ fn push_sd_param(sd: &mut String, key: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, SigningKey};
+    use crate::record::{
+        AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, SigningKey,
+        compute_entry_hash_v1,
+    };
     use crate::sink::{Auditor, MemoryAuditSink};
     use crate::verify::{VerifyOutcome, parse_jsonl, verify_records};
     use std::sync::Arc;
@@ -443,6 +470,51 @@ mod tests {
             decision: AuditDecision::Allowed,
             rows_affected: Some(3),
             outcome: AuditOutcome::Succeeded,
+        }
+    }
+
+    fn signed_legacy_v1_record(tool: &str, sql_preview: &str) -> AuditRecord {
+        let timestamp = "2026-06-20T00:00:00Z";
+        let agent_identity = "legacy-agent";
+        let sql_sha256 = crate::sha256_hex(sql_preview.as_bytes());
+        let danger_level = "GUARDED";
+        let decision = AuditDecision::Allowed;
+        let rows_affected = Some(1);
+        let outcome = AuditOutcome::Succeeded;
+        let entry_hash = compute_entry_hash_v1(
+            1,
+            timestamp,
+            agent_identity,
+            tool,
+            &sql_sha256,
+            sql_preview,
+            danger_level,
+            decision,
+            rows_affected,
+            outcome,
+            crate::record::GENESIS_HASH,
+        );
+        let signing_key = key();
+        AuditRecord {
+            schema_version: 1,
+            seq: 1,
+            timestamp: timestamp.to_owned(),
+            agent_identity: agent_identity.to_owned(),
+            subject: AuditSubject::default(),
+            db_evidence: None,
+            cancel: None,
+            tool: tool.to_owned(),
+            sql_sha256,
+            sql_normalized_sha256: String::new(),
+            sql_preview: sql_preview.to_owned(),
+            danger_level: danger_level.to_owned(),
+            decision,
+            rows_affected,
+            outcome,
+            prev_hash: crate::record::GENESIS_HASH.to_owned(),
+            entry_hash: entry_hash.clone(),
+            key_id: Some(signing_key.key_id().to_owned()),
+            signature: Some(signing_key.sign(&entry_hash)),
         }
     }
 
@@ -701,9 +773,9 @@ mod tests {
             "2026-06-20T00:00:00Z".to_owned(),
             &key(),
         );
-        // A legacy-shaped record may contain a raw preview. QA31 preserves the
-        // formatter's treatment of that field; QA35 owns legacy re-shipping
-        // policy. Keep the escaping proof independent of new-v6 construction.
+        // A legacy-shaped record may contain a raw preview. QA35 removes that
+        // field from syslog MSG only; historical CEF still carries its signed
+        // bytes, so keep this escaping proof independent of v6 construction.
         rec.sql_preview = "DELETE FROM orders WHERE note = 'a|b=c'".to_owned();
         let line = cef_line(&rec);
         assert!(
@@ -799,6 +871,90 @@ mod tests {
         assert!(line.contains("[oraclemcp@0"), "structured-data element");
         assert!(line.contains("seq=\"2\""), "seq in structured data");
         assert!(line.contains("entryHash="), "entry hash in structured data");
+    }
+
+    #[test]
+    fn signed_legacy_syslog_record_cannot_inject_a_second_event() {
+        let sentinel = "QA35_LEGACY_SQL_LITERAL";
+        let sql = format!(
+            "UPDATE t SET note='{sentinel}' /* first\r\n<165>1 forged-host forged-app - forged [x] forged */\0\t\u{1b}\u{7f}"
+        );
+        let tool = "oracle_éxecute_工具\r\n<165>1 forged-tool\0\t\u{1b}\u{7f}";
+        let record = signed_legacy_v1_record(tool, &sql);
+        assert_eq!(
+            verify_records(std::slice::from_ref(&record), &[key()]),
+            VerifyOutcome::Ok { records: 1 },
+            "fixture is a genuinely signed and verifiable historical record"
+        );
+
+        let line = syslog_line(&record);
+        assert_eq!(
+            line.lines().count(),
+            1,
+            "one signed record must remain one line-oriented collector event: {line:?}"
+        );
+        assert!(
+            !line
+                .chars()
+                .any(|c| matches!(c, '\0'..='\u{1f}' | '\u{7f}')),
+            "RFC-5424 output must not carry C0 controls or DEL: {line:?}"
+        );
+        assert!(
+            !line.contains(sentinel),
+            "legacy SQL preview literals must not be re-emitted: {line}"
+        );
+        assert!(
+            line.contains("oracle_éxecute_工具"),
+            "valid Unicode in the literal-free event summary must survive: {line}"
+        );
+        assert!(
+            line.contains("entryHash="),
+            "chain hash remains in SD: {line}"
+        );
+        assert!(
+            line.contains("sqlSha256=\"sha256:"),
+            "SQL hash remains in SD: {line}"
+        );
+        assert!(
+            line.contains("keyId=\"k1\""),
+            "signing key id remains in SD: {line}"
+        );
+        assert!(
+            line.contains("signature="),
+            "signature remains in SD: {line}"
+        );
+        assert!(
+            line.starts_with("<134>1 "),
+            "allowed/succeeded event keeps local0 informational severity: {line}"
+        );
+
+        let collector_input = format!("{line}\n");
+        assert_eq!(
+            collector_input.lines().collect::<Vec<_>>().len(),
+            1,
+            "newline-delimited collector fixture must parse exactly one event"
+        );
+    }
+
+    #[test]
+    fn legacy_sql_dialects_and_comments_never_enter_syslog_msg() {
+        for sql in [
+            "UPDATE t SET value='ordinary'\n<165>1 forged ordinary",
+            "UPDATE t SET value=N'national'\r<165>1 forged national",
+            "UPDATE t SET value=q'[quoted\r\n<165>1 forged q quote]'",
+            "UPDATE t SET value=1 /* multiline\n<165>1 forged comment */",
+        ] {
+            let record = signed_legacy_v1_record("oracle_execute", sql);
+            assert_eq!(
+                verify_records(std::slice::from_ref(&record), &[key()]),
+                VerifyOutcome::Ok { records: 1 },
+                "fixture must remain a valid signed v1 record: {sql:?}"
+            );
+            let line = syslog_line(&record);
+            assert_eq!(line.lines().count(), 1, "{line:?}");
+            assert!(!line.contains(sql), "legacy preview leaked: {line}");
+            assert!(!line.contains("forged"), "legacy literal leaked: {line}");
+        }
     }
 
     #[test]
@@ -902,8 +1058,15 @@ y"#
         assert_eq!(ext, r#"msg=a\\b\=c\nr\rd "#);
 
         let mut sd = String::from("[oraclemcp@0");
-        push_sd_param(&mut sd, "msg", "a\\b\"c]d\nx\ry");
+        push_sd_param(&mut sd, "msg", "a\\b\"c]d\nx\ry\t\0\u{1b}\u{7f}");
         sd.push(']');
-        assert_eq!(sd, r#"[oraclemcp@0 msg="a\\b\"c\]d x y"]"#);
+        assert_eq!(
+            sd,
+            r#"[oraclemcp@0 msg="a\\b\"c\]d x y\t\u{0}\u{1b}\u{7f}"]"#
+        );
+
+        let mut msg = String::new();
+        push_syslog_msg_text(&mut msg, "a\\b\"c\r\nx\t\0\u{1b}\u{7f}é工具");
+        assert_eq!(msg, r#"a\\b\"c\r\nx\t\u{0}\u{1b}\u{7f}é工具"#);
     }
 }
