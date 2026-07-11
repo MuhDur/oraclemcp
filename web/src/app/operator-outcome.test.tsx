@@ -10,6 +10,7 @@ import {
   OperatorOutcomeError,
   applyChangeProposal,
   cachedExplorerMetadata,
+  cancelLane,
   clearExplorerMetadataCache,
   coalesceAuditTimelineRecords,
   decodeOperatorOutcome,
@@ -56,6 +57,11 @@ const session: DashboardSession = {
       method: "POST",
       path: "/operator/v1/change-proposals/apply",
       ticket: "apply-ticket"
+    },
+    {
+      method: "POST",
+      path: "/operator/v1/lanes/cancel",
+      ticket: "cancel-ticket"
     }
   ]
 };
@@ -396,6 +402,34 @@ describe("audit timeline action correlation", () => {
 });
 
 describe("success-only side effects", () => {
+  it("sends the lane kill switch with its scoped ticket and CSRF header", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(
+        response("/operator/v1/lanes/cancel", {
+          status: "terminated",
+          terminated: true,
+          lane_id: "lane-a"
+        })
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await cancelLane(session, "lane-a");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/operator/v1/lanes/cancel",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "same-origin",
+        headers: expect.objectContaining({
+          "x-oraclemcp-csrf": "csrf",
+          "x-oraclemcp-action-ticket": "cancel-ticket"
+        }),
+        body: JSON.stringify({ lane_id: "lane-a" })
+      })
+    );
+  });
+
   it("rejects HTTP-200 MCP errors before a Workbench success effect can run", async () => {
     vi.stubGlobal(
       "fetch",

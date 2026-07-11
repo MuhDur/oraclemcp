@@ -35,6 +35,8 @@ pub struct OperatorRouteSpec {
     pub sse: bool,
     /// MCP tool this route maps to, for gated action routes.
     pub mcp_tool: Option<&'static str>,
+    /// Whether a paired dashboard may receive a route-scoped POST ticket.
+    pub browser_post: bool,
 }
 
 /// The `/operator/v1` route table.
@@ -45,6 +47,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "routeIndexResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: false,
     },
     OperatorRouteSpec {
         method: "GET",
@@ -52,6 +55,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "operatorSchemaBundle",
         sse: false,
         mcp_tool: None,
+        browser_post: false,
     },
     OperatorRouteSpec {
         method: "GET",
@@ -59,6 +63,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "healthResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: false,
     },
     OperatorRouteSpec {
         method: "GET",
@@ -66,6 +71,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "metricsResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: false,
     },
     OperatorRouteSpec {
         method: "GET",
@@ -73,6 +79,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "auditTailResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: false,
     },
     OperatorRouteSpec {
         method: "GET",
@@ -80,6 +87,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "activeLanesResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: false,
     },
     OperatorRouteSpec {
         method: "POST",
@@ -87,6 +95,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "laneCancelResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: true,
     },
     OperatorRouteSpec {
         method: "GET",
@@ -94,6 +103,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "vsessionResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: false,
     },
     OperatorRouteSpec {
         method: "GET",
@@ -101,6 +111,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "operatorEvent",
         sse: true,
         mcp_tool: None,
+        browser_post: false,
     },
     OperatorRouteSpec {
         method: "GET",
@@ -108,6 +119,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "configStatusResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: false,
     },
     OperatorRouteSpec {
         method: "POST",
@@ -115,6 +127,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "configDraftResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: true,
     },
     OperatorRouteSpec {
         method: "POST",
@@ -122,6 +135,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "configApplyResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: true,
     },
     OperatorRouteSpec {
         method: "POST",
@@ -129,6 +143,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "configRollbackResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: true,
     },
     OperatorRouteSpec {
         method: "GET",
@@ -136,6 +151,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "changeProposalListResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: false,
     },
     OperatorRouteSpec {
         method: "POST",
@@ -143,6 +159,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "changeProposalDraftResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: true,
     },
     OperatorRouteSpec {
         method: "POST",
@@ -150,6 +167,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "changeProposalApplyResponse",
         sse: false,
         mcp_tool: Some("proposal-selected apply tool"),
+        browser_post: true,
     },
     OperatorRouteSpec {
         method: "POST",
@@ -157,6 +175,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "schemaDiffResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: true,
     },
     OperatorRouteSpec {
         method: "GET",
@@ -164,6 +183,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "sourceHistoryListResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: false,
     },
     OperatorRouteSpec {
         method: "POST",
@@ -171,6 +191,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "sourceHistoryRevertResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: true,
     },
     OperatorRouteSpec {
         method: "GET",
@@ -178,6 +199,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "clientCredentialsResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: false,
     },
     OperatorRouteSpec {
         method: "POST",
@@ -185,6 +207,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "clientCredentialRotateResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: true,
     },
     OperatorRouteSpec {
         method: "POST",
@@ -192,6 +215,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "clientCredentialRevokeResponse",
         sse: false,
         mcp_tool: None,
+        browser_post: true,
     },
     OperatorRouteSpec {
         method: "POST",
@@ -199,6 +223,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "gatedActionResponse",
         sse: false,
         mcp_tool: Some("operator-selected preview tool"),
+        browser_post: true,
     },
     OperatorRouteSpec {
         method: "POST",
@@ -206,6 +231,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "gatedActionResponse",
         sse: false,
         mcp_tool: Some("operator-selected confirmation tool"),
+        browser_post: true,
     },
     OperatorRouteSpec {
         method: "POST",
@@ -213,6 +239,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "gatedActionResponse",
         sse: false,
         mcp_tool: Some("operator-selected execute tool"),
+        browser_post: true,
     },
     OperatorRouteSpec {
         method: "POST",
@@ -220,6 +247,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "gatedActionResponse",
         sse: false,
         mcp_tool: Some("oracle_set_session_level"),
+        browser_post: true,
     },
     OperatorRouteSpec {
         method: "POST",
@@ -227,6 +255,7 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         schema: "gatedActionResponse",
         sse: false,
         mcp_tool: Some("oracle_switch_profile"),
+        browser_post: true,
     },
 ];
 
@@ -798,6 +827,7 @@ fn expect_u64(obj: &Map<String, Value>, name: &str, expected: u64) -> Result<(),
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::PathBuf;
 
@@ -839,6 +869,46 @@ mod tests {
                 .iter()
                 .any(|field| field == "subject_id_hash")
         );
+    }
+
+    #[test]
+    fn dashboard_post_clients_and_ticket_policy_are_one_contract() {
+        let browser_routes = OPERATOR_ROUTE_SPECS
+            .iter()
+            .filter(|spec| spec.browser_post)
+            .map(|spec| {
+                assert_eq!(spec.method, "POST", "browser tickets are POST-only");
+                spec.path
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            browser_routes.len(),
+            OPERATOR_ROUTE_SPECS
+                .iter()
+                .filter(|spec| spec.browser_post)
+                .count(),
+            "browser-ticket paths must be unique"
+        );
+
+        let client_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../web/src/app/operator-client.ts");
+        let client = fs::read_to_string(&client_path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", client_path.display()));
+        let client_routes = client
+            .split("operatorPost(\"")
+            .skip(1)
+            .filter_map(|tail| tail.split_once('"').map(|(path, _)| path))
+            .collect::<BTreeSet<_>>();
+
+        let missing = client_routes
+            .difference(&browser_routes)
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "shipped dashboard operatorPost paths lack server-issued tickets: {missing:?}"
+        );
+        assert!(browser_routes.contains("/operator/v1/lanes/cancel"));
     }
 
     #[test]

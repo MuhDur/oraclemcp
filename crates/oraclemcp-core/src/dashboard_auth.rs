@@ -25,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::operator_protocol::OPERATOR_ROUTE_SPECS;
+
 /// One-time local bootstrap route used by `oraclemcp dashboard`.
 pub const DASHBOARD_PAIR_PATH: &str = "/dashboard/pair";
 /// Same-origin session-info route used by the SPA to get CSRF/action tickets.
@@ -43,24 +45,6 @@ pub const DASHBOARD_ACTION_TICKET_HEADER: &str = "x-oraclemcp-action-ticket";
 const DASHBOARD_PAIRING_TTL_SECONDS: u64 = 60;
 const DASHBOARD_SESSION_TTL_SECONDS: u64 = 12 * 60 * 60;
 const TOKEN_BYTES: usize = 32;
-
-/// Operator routes that accept dashboard-originated POSTs.
-pub const DASHBOARD_ACTION_ROUTES: &[(&str, &str)] = &[
-    ("POST", "/operator/v1/actions/preview"),
-    ("POST", "/operator/v1/actions/confirm"),
-    ("POST", "/operator/v1/actions/execute"),
-    ("POST", "/operator/v1/config/draft"),
-    ("POST", "/operator/v1/config/apply"),
-    ("POST", "/operator/v1/config/rollback"),
-    ("POST", "/operator/v1/change-proposals/draft"),
-    ("POST", "/operator/v1/change-proposals/apply"),
-    ("POST", "/operator/v1/schema-diff"),
-    ("POST", "/operator/v1/source-history/revert"),
-    ("POST", "/operator/v1/client-credentials/rotate"),
-    ("POST", "/operator/v1/client-credentials/revoke"),
-    ("POST", "/operator/v1/session/set-level"),
-    ("POST", "/operator/v1/session/switch-profile"),
-];
 
 /// A freshly minted local pairing ticket.
 pub struct DashboardPairingTicket {
@@ -259,6 +243,9 @@ impl DashboardAuth {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or(DashboardAuthError::MissingActionTicket)?;
+        if !is_dashboard_action_route(method, path) {
+            return Err(DashboardAuthError::InvalidActionTicket);
+        }
         let expected = action_ticket_for(&session, method, path);
         if !constant_time_eq(action_ticket.as_bytes(), expected.as_bytes()) {
             return Err(DashboardAuthError::InvalidActionTicket);
@@ -425,15 +412,22 @@ fn session_view(session: &DashboardSession) -> DashboardSessionView {
         csrf_header: DASHBOARD_CSRF_HEADER,
         action_ticket_header: DASHBOARD_ACTION_TICKET_HEADER,
         expires_unix: session.expires_unix,
-        action_tickets: DASHBOARD_ACTION_ROUTES
+        action_tickets: OPERATOR_ROUTE_SPECS
             .iter()
-            .map(|(method, path)| DashboardActionTicket {
-                method: (*method).to_owned(),
-                path: (*path).to_owned(),
-                ticket: action_ticket_for(session, method, path),
+            .filter(|spec| spec.browser_post)
+            .map(|spec| DashboardActionTicket {
+                method: spec.method.to_owned(),
+                path: spec.path.to_owned(),
+                ticket: action_ticket_for(session, spec.method, spec.path),
             })
             .collect(),
     }
+}
+
+fn is_dashboard_action_route(method: &str, path: &str) -> bool {
+    OPERATOR_ROUTE_SPECS
+        .iter()
+        .any(|spec| spec.browser_post && spec.method == method && spec.path == path)
 }
 
 fn dashboard_session_cookie_header(session_id: &str, max_age_seconds: u64, secure: bool) -> String {
@@ -570,6 +564,13 @@ mod tests {
             .iter()
             .find(|ticket| ticket.path == "/operator/v1/actions/preview")
             .expect("preview ticket");
+        let lane_cancel = view
+            .action_tickets
+            .iter()
+            .filter(|ticket| ticket.path == "/operator/v1/lanes/cancel")
+            .collect::<Vec<_>>();
+        assert_eq!(lane_cancel.len(), 1, "lane cancel has exactly one ticket");
+        assert_eq!(lane_cancel[0].method, "POST");
 
         auth.validate_action(
             Some(cookie_pair),
@@ -579,6 +580,14 @@ mod tests {
             "/operator/v1/actions/preview",
         )
         .expect("matching route validates");
+        auth.validate_action(
+            Some(cookie_pair),
+            Some(&view.csrf_token),
+            Some(&lane_cancel[0].ticket),
+            "POST",
+            "/operator/v1/lanes/cancel",
+        )
+        .expect("lane-cancel ticket validates for its route");
         assert!(matches!(
             auth.validate_action(
                 Some(cookie_pair),
@@ -598,6 +607,23 @@ mod tests {
                 "/operator/v1/actions/preview",
             ),
             Err(DashboardAuthError::InvalidCsrf)
+        ));
+        let unissued_get_ticket = action_ticket_for(
+            &auth
+                .valid_session(Some(cookie_pair))
+                .expect("session remains valid"),
+            "GET",
+            "/operator/v1/health",
+        );
+        assert!(matches!(
+            auth.validate_action(
+                Some(cookie_pair),
+                Some(&view.csrf_token),
+                Some(&unissued_get_ticket),
+                "GET",
+                "/operator/v1/health",
+            ),
+            Err(DashboardAuthError::InvalidActionTicket)
         ));
     }
 
