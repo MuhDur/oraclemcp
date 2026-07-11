@@ -5,9 +5,13 @@ import { OperatorOutcomeNotice } from "./App";
 import {
   OperatorOutcomeError,
   applyChangeProposal,
+  cachedExplorerMetadata,
+  clearExplorerMetadataCache,
   decodeOperatorOutcome,
   executeWorkbenchSql,
+  explorerMetadataCacheSummary,
   type DashboardSession,
+  type ExplorerMetadataCacheKey,
   type OperatorResponse,
   type WorkbenchActionData
 } from "./operator-client";
@@ -60,7 +64,102 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 afterEach(() => {
+  clearExplorerMetadataCache();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+const explorerScope: ExplorerMetadataCacheKey = {
+  db_fingerprint: "db-fingerprint",
+  profile: "db_ro",
+  user: "APP_USER",
+  visible_schema: "APP",
+  serialization_contract_version: 1
+};
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function jsonBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+describe("Explorer metadata cache concurrency", () => {
+  it("coalesces same-key misses, keeps byte accounting exact, and does not evict unrelated data", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-11T00:00:00Z"));
+    const unrelated = { payload: "u".repeat(300_000) };
+    await cachedExplorerMetadata(explorerScope, "unrelated", async () => unrelated);
+
+    vi.advanceTimersByTime(1);
+    const next = deferred<{ payload: string }>();
+    const load = vi.fn(() => next.promise);
+    const first = cachedExplorerMetadata(explorerScope, "same-key", load);
+    const second = cachedExplorerMetadata(explorerScope, "same-key", load);
+    expect(load).toHaveBeenCalledTimes(1);
+
+    const value = { payload: "n".repeat(110_000) };
+    next.resolve(value);
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(firstResult.value).toEqual(value);
+    expect(secondResult.value).toEqual(value);
+    expect(explorerMetadataCacheSummary()).toEqual({
+      entries: 2,
+      bytes: jsonBytes(unrelated) + jsonBytes(value)
+    });
+
+    const unexpectedReload = vi.fn(async () => ({ payload: "wrong" }));
+    const unrelatedHit = await cachedExplorerMetadata(
+      explorerScope,
+      "unrelated",
+      unexpectedReload
+    );
+    expect(unrelatedHit.status).toBe("hit");
+    expect(unexpectedReload).not.toHaveBeenCalled();
+  });
+
+  it("does not let a pre-invalidation load overwrite a newer generation", async () => {
+    const oldLoad = deferred<{ generation: string }>();
+    const oldResult = cachedExplorerMetadata(explorerScope, "same-key", () => oldLoad.promise);
+    clearExplorerMetadataCache();
+
+    const newLoad = deferred<{ generation: string }>();
+    const newResult = cachedExplorerMetadata(explorerScope, "same-key", () => newLoad.promise);
+    newLoad.resolve({ generation: "new" });
+    expect((await newResult).status).toBe("miss");
+
+    oldLoad.resolve({ generation: "old" });
+    expect((await oldResult).status).toBe("bypass");
+    const fallback = vi.fn(async () => ({ generation: "fallback" }));
+    const current = await cachedExplorerMetadata(explorerScope, "same-key", fallback);
+    expect(current).toMatchObject({ status: "hit", value: { generation: "new" } });
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it("removes a rejected in-flight load so the next call can retry", async () => {
+    const failure = deferred<{ ok: boolean }>();
+    const first = cachedExplorerMetadata(explorerScope, "retry", () => failure.promise);
+    failure.reject(new Error("temporary metadata failure"));
+    await expect(first).rejects.toThrow("temporary metadata failure");
+
+    const retry = vi.fn(async () => ({ ok: true }));
+    await expect(cachedExplorerMetadata(explorerScope, "retry", retry)).resolves.toMatchObject({
+      status: "miss",
+      value: { ok: true }
+    });
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("operator outcome decoder", () => {

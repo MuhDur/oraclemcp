@@ -1451,24 +1451,47 @@ export async function cachedExplorerMetadata<T>(
     }
     removeExplorerCacheEntry(cacheKey);
   }
-  const value = await load();
-  const bytes = approxJsonBytes(value);
-  if (bytes > EXPLORER_METADATA_CACHE_MAX_BYTES) {
-    return { value, status: "bypass", bytes, cacheKey };
+
+  const pending = explorerMetadataCacheLoads.get(cacheKey);
+  if (pending && pending.generation === explorerMetadataCacheGeneration) {
+    return pending.promise as Promise<ExplorerCachedResult<T>>;
   }
-  explorerMetadataCache.set(cacheKey, {
-    value,
-    bytes,
-    expiresAt: now + EXPLORER_METADATA_CACHE_TTL_MS,
-    lastAccessed: now
-  });
-  explorerMetadataCacheBytes += bytes;
-  trimExplorerMetadataCache();
-  return { value, status: existing ? "stale" : "miss", bytes, cacheKey };
+
+  const generation = explorerMetadataCacheGeneration;
+  const promise = (async (): Promise<ExplorerCachedResult<T>> => {
+    const value = await load();
+    const bytes = approxJsonBytes(value);
+    if (bytes > EXPLORER_METADATA_CACHE_MAX_BYTES || generation !== explorerMetadataCacheGeneration) {
+      return { value, status: "bypass", bytes, cacheKey };
+    }
+
+    const loadedAt = Date.now();
+    removeExplorerCacheEntry(cacheKey);
+    explorerMetadataCache.set(cacheKey, {
+      value,
+      bytes,
+      expiresAt: loadedAt + EXPLORER_METADATA_CACHE_TTL_MS,
+      lastAccessed: loadedAt
+    });
+    explorerMetadataCacheBytes += bytes;
+    trimExplorerMetadataCache();
+    return { value, status: existing ? "stale" : "miss", bytes, cacheKey };
+  })();
+  explorerMetadataCacheLoads.set(cacheKey, { generation, promise });
+
+  try {
+    return await promise;
+  } finally {
+    if (explorerMetadataCacheLoads.get(cacheKey)?.promise === promise) {
+      explorerMetadataCacheLoads.delete(cacheKey);
+    }
+  }
 }
 
 export function clearExplorerMetadataCache(): void {
+  explorerMetadataCacheGeneration += 1;
   explorerMetadataCache.clear();
+  explorerMetadataCacheLoads.clear();
   explorerMetadataCacheBytes = 0;
 }
 
@@ -1662,11 +1685,18 @@ type ExplorerMetadataCacheEntry = {
   lastAccessed: number;
 };
 
+type ExplorerMetadataCacheLoad = {
+  generation: number;
+  promise: Promise<ExplorerCachedResult<unknown>>;
+};
+
 const EXPLORER_METADATA_CACHE_TTL_MS = 60_000;
 const EXPLORER_METADATA_CACHE_MAX_BYTES = 512_000;
 const EXPLORER_METADATA_CACHE_MAX_ENTRIES = 64;
 const explorerMetadataCache = new Map<string, ExplorerMetadataCacheEntry>();
+const explorerMetadataCacheLoads = new Map<string, ExplorerMetadataCacheLoad>();
 let explorerMetadataCacheBytes = 0;
+let explorerMetadataCacheGeneration = 0;
 
 function explorerCacheKey(scope: ExplorerMetadataCacheKey, slot: string): string {
   return JSON.stringify({
