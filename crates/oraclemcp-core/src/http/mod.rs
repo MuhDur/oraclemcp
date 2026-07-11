@@ -6517,8 +6517,9 @@ fn reason_phrase(status: u16) -> &'static str {
         413 => "Payload Too Large",
         415 => "Unsupported Media Type",
         429 => "Too Many Requests",
+        499 => "Client Closed Request",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
-        _ => "OK",
+        _ => "Unknown Status",
     }
 }

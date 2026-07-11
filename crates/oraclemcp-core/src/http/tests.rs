@@ -4156,10 +4156,44 @@ fn cancelled_dispatch_outcome_is_http_499() {
     let response = handle_http_request(&cancelled_server(), &cfg, post(&body));
 
     assert_eq!(response.status, 499);
+    let mut wire = Vec::new();
+    write_http_response(&mut wire, &response).expect("serialize cancellation response");
+    let wire = String::from_utf8(wire).expect("HTTP response is UTF-8");
+    assert!(
+        wire.starts_with("HTTP/1.1 499 Client Closed Request\r\n"),
+        "unexpected cancellation status line: {wire}"
+    );
     let body = response_json(&response);
     assert_eq!(body["outcome"], serde_json::json!("cancelled"));
     assert_eq!(body["cancel_kind"], serde_json::json!("Timeout"));
     assert!(body.get("result").is_none());
+}
+
+#[test]
+fn every_emitted_http_status_has_an_explicit_non_success_reason_phrase() {
+    for status in [
+        200, 202, 303, 400, 401, 403, 404, 405, 406, 409, 410, 413, 415, 429, 499, 500, 503,
+    ] {
+        assert_ne!(
+            reason_phrase(status),
+            "Unknown Status",
+            "emitted status {status} must have an explicit reason phrase"
+        );
+    }
+
+    let response = HttpResponse {
+        status: 599,
+        headers: Vec::new(),
+        body: Vec::new(),
+    };
+    let mut wire = Vec::new();
+    write_http_response(&mut wire, &response).expect("serialize unknown status");
+    let wire = String::from_utf8(wire).expect("HTTP response is UTF-8");
+    assert!(
+        wire.starts_with("HTTP/1.1 599 Unknown Status\r\n"),
+        "{wire}"
+    );
+    assert!(!wire.starts_with("HTTP/1.1 599 OK"), "{wire}");
 }
 
 #[test]
