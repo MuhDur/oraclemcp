@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use oraclemcp_config::{ConfigError, ConfigReloadPlan, OracleMcpConfig, ProfileMetadata};
+use oraclemcp_config::{
+    ConfigError, ConfigReloadPlan, ConnectionProfile, OracleMcpConfig, ProfileMetadata,
+};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::Value;
@@ -267,6 +269,7 @@ pub struct ConfigRollbackOutcome {
 /// Shared config-ops backend.
 pub struct ConfigOpsBackend {
     owner: ServiceOwner,
+    redaction_key: OpaqueRevisionKey,
 }
 
 impl ConfigOpsBackend {
@@ -279,12 +282,15 @@ impl ConfigOpsBackend {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, ConfigOpsError> {
         let store = FileStore::open(root)?;
         let owner = store.acquire_service_owner("config-ops")?;
-        Ok(Self { owner })
+        Self::open_with_owner(owner)
     }
 
     /// Open the backend under an existing process-wide service owner.
     pub fn open_with_owner(owner: ServiceOwner) -> Result<Self, ConfigOpsError> {
-        Ok(Self { owner })
+        Ok(Self {
+            owner,
+            redaction_key: OpaqueRevisionKey::generate()?,
+        })
     }
 
     /// Stage and validate a draft for `target_path`.
@@ -301,8 +307,8 @@ impl ConfigOpsBackend {
         let current_toml = bytes_to_toml(&target_path, &current_bytes)?;
         let current = OracleMcpConfig::from_toml_str(current_toml)?;
         let draft = OracleMcpConfig::from_toml_str(draft_toml)?;
-        let before = redacted_snapshot(&current);
-        let after = redacted_snapshot(&draft);
+        let before = redacted_snapshot(&current, &self.redaction_key);
+        let after = redacted_snapshot(&draft, &self.redaction_key);
         let reload_plan = ConfigReloadPlan::between(&current, &draft);
         let draft_bytes = draft_toml.as_bytes().to_vec();
         let preview = ConfigDraftPreview {
@@ -569,43 +575,193 @@ struct RedactedConfigSnapshot {
     schema_version: u32,
     default_profile: Option<String>,
     monitor_profile: Option<String>,
+    /// Catch-all for newly added config fields until a more specific safe
+    /// descriptor is added. The process-local HMAC makes this complete without
+    /// turning low-entropy values into offline-guessable public hashes.
+    semantic_revision: String,
     http: RedactedHttpSnapshot,
     audit: RedactedAuditSnapshot,
-    profiles: Vec<ProfileMetadata>,
+    profiles: BTreeMap<String, RedactedProfileSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct RedactedHttpSnapshot {
-    allowed_hosts_count: usize,
-    allowed_origins_count: usize,
+    semantic_revision: String,
+    allowed_hosts: RedactedSetSnapshot,
+    allowed_origins: RedactedSetSnapshot,
     json_response: bool,
     stateful: bool,
     stateful_idle_ttl_seconds: u64,
-    oauth_enabled: bool,
-    oauth_issuer_count: usize,
-    oauth_scope_count: usize,
-    oauth_secret_ref_configured: bool,
-    tls_enabled: bool,
-    mtls_required: bool,
+    oauth: RedactedOptionalRevision,
+    oauth_resource: RedactedOptionalRevision,
+    oauth_allowed_issuers: RedactedSetSnapshot,
+    oauth_authorization_servers: RedactedSetSnapshot,
+    oauth_required_scopes: RedactedSetSnapshot,
+    oauth_secret_ref: RedactedOptionalRevision,
+    oauth_metadata_url: RedactedOptionalRevision,
+    mtls_client_fingerprints: RedactedSetSnapshot,
+    tls: RedactedOptionalRevision,
+    tls_cert_chain_path: RedactedOptionalRevision,
+    tls_private_key_path: RedactedOptionalRevision,
+    tls_client_ca_path: RedactedOptionalRevision,
     operator_loopback_owner: bool,
-    operator_allowed_subject_count: usize,
+    operator_allowed_subjects: RedactedSetSnapshot,
     dashboard_workbench: bool,
+    trusted_https_termination: bool,
     allow_remote: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct RedactedAuditSnapshot {
-    path_configured: bool,
-    key_ref_configured: bool,
-    shipping_configured: bool,
-    worm_configured: bool,
-    siem_configured: bool,
-    siem_auth_ref_configured: bool,
+    semantic_revision: String,
+    path: RedactedOptionalRevision,
+    key_ref: RedactedOptionalRevision,
+    key_id: RedactedOptionalRevision,
+    verification_keys: RedactedSetSnapshot,
+    shipping: RedactedOptionalRevision,
+    worm_path: RedactedOptionalRevision,
+    siem_endpoint: RedactedOptionalRevision,
+    siem_format: RedactedOptionalRevision,
+    siem_auth_header_ref: RedactedOptionalRevision,
+    siem_auth_header_name: RedactedOptionalRevision,
 }
 
-fn redacted_snapshot(config: &OracleMcpConfig) -> RedactedConfigSnapshot {
-    let mut profiles = config.list_profiles();
-    profiles.sort_by(|a, b| a.name.cmp(&b.name));
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct RedactedProfileSnapshot {
+    metadata: ProfileMetadata,
+    semantic_revision: String,
+    connection_identity_revision: String,
+    session_setup_revision: String,
+    thin_routing_revision: String,
+    session_identity_revision: String,
+    app_context_revision: String,
+    inheritance_revision: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct RedactedSetSnapshot {
+    count: usize,
+    /// Stable only for this backend lifetime. Members are sorted so order-only
+    /// changes to set-like config fields do not create noise.
+    member_revisions: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct RedactedOptionalRevision {
+    configured: bool,
+    revision: Option<String>,
+}
+
+struct OpaqueRevisionKey([u8; 32]);
+
+impl OpaqueRevisionKey {
+    fn generate() -> Result<Self, ConfigOpsError> {
+        let mut key = [0_u8; 32];
+        getrandom::getrandom(&mut key).map_err(|error| {
+            ConfigOpsError::Io(format!("redaction-key generation failed: {error}"))
+        })?;
+        Ok(Self(key))
+    }
+
+    fn revision<T: Serialize + ?Sized>(&self, domain: &str, value: &T) -> String {
+        let encoded = serde_json::to_vec(value)
+            .expect("validated config values must serialize to finite JSON");
+        let mut message = Vec::with_capacity(32 + domain.len() + encoded.len());
+        message.extend_from_slice(b"oraclemcp-config-preview:v1\0");
+        message.extend_from_slice(&(domain.len() as u64).to_be_bytes());
+        message.extend_from_slice(domain.as_bytes());
+        message.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+        message.extend_from_slice(&encoded);
+        let digest = oraclemcp_audit::hmac_sha256_hex(&self.0, &message);
+        format!("opaque-v1:{}", digest.trim_start_matches("hmac-sha256:"))
+    }
+
+    fn optional<T: Serialize>(&self, domain: &str, value: Option<&T>) -> RedactedOptionalRevision {
+        RedactedOptionalRevision {
+            configured: value.is_some(),
+            revision: value.map(|value| self.revision(domain, value)),
+        }
+    }
+
+    fn set<T: Serialize>(&self, domain: &str, values: &[T]) -> RedactedSetSnapshot {
+        let mut member_revisions = values
+            .iter()
+            .map(|value| self.revision(domain, value))
+            .collect::<Vec<_>>();
+        member_revisions.sort();
+        RedactedSetSnapshot {
+            count: values.len(),
+            member_revisions,
+        }
+    }
+}
+
+fn redacted_profile_snapshot(
+    profile: &ConnectionProfile,
+    metadata: ProfileMetadata,
+    key: &OpaqueRevisionKey,
+) -> RedactedProfileSnapshot {
+    RedactedProfileSnapshot {
+        metadata,
+        semantic_revision: key.revision("profile.semantic", profile),
+        connection_identity_revision: key.revision(
+            "profile.connection_identity",
+            &(
+                &profile.connect_string,
+                &profile.username,
+                &profile.credential_ref,
+            ),
+        ),
+        session_setup_revision: key.revision(
+            "profile.session_setup",
+            &(
+                &profile.login_script,
+                &profile.login_statements,
+                &profile.trusted_session_statements,
+            ),
+        ),
+        thin_routing_revision: key.revision(
+            "profile.thin_routing",
+            &(
+                profile.connect_timeout_seconds,
+                profile.inactivity_timeout_seconds,
+                profile.keepalive_minutes,
+                profile.sdu,
+                &profile.oci,
+                &profile.drcp,
+                &profile.proxy_auth,
+            ),
+        ),
+        session_identity_revision: key
+            .revision("profile.session_identity", &profile.session_identity),
+        app_context_revision: key.revision("profile.app_context", &profile.app_context),
+        inheritance_revision: key.revision("profile.inheritance", &profile.base),
+    }
+}
+
+fn redacted_snapshot(config: &OracleMcpConfig, key: &OpaqueRevisionKey) -> RedactedConfigSnapshot {
+    let metadata = config
+        .list_profiles()
+        .into_iter()
+        .map(|profile| (profile.name.clone(), profile))
+        .collect::<BTreeMap<_, _>>();
+    let profiles = config
+        .profiles
+        .iter()
+        .map(|profile| {
+            (
+                profile.name.clone(),
+                redacted_profile_snapshot(
+                    profile,
+                    metadata
+                        .get(&profile.name)
+                        .cloned()
+                        .unwrap_or_else(|| profile.metadata()),
+                    key,
+                ),
+            )
+        })
+        .collect();
     let oauth = config.http.oauth.as_ref();
     let tls = config.http.tls.as_ref();
     let shipping = config.audit.shipping.as_ref();
@@ -613,32 +769,95 @@ fn redacted_snapshot(config: &OracleMcpConfig) -> RedactedConfigSnapshot {
         schema_version: config.schema_version,
         default_profile: config.default_profile.clone(),
         monitor_profile: config.monitor_profile.clone(),
+        semantic_revision: key.revision("config.semantic", config),
         http: RedactedHttpSnapshot {
-            allowed_hosts_count: config.http.allowed_hosts.len(),
-            allowed_origins_count: config.http.allowed_origins.len(),
+            semantic_revision: key.revision("http.semantic", &config.http),
+            allowed_hosts: key.set("http.allowed_hosts.member", &config.http.allowed_hosts),
+            allowed_origins: key.set("http.allowed_origins.member", &config.http.allowed_origins),
             json_response: config.http.json_response,
             stateful: config.http.stateful,
             stateful_idle_ttl_seconds: config.http.stateful_idle_ttl_seconds,
-            oauth_enabled: oauth.is_some(),
-            oauth_issuer_count: oauth.map_or(0, |value| value.allowed_issuers.len()),
-            oauth_scope_count: oauth.map_or(0, |value| value.required_scopes.len()),
-            oauth_secret_ref_configured: oauth
-                .is_some_and(|value| value.hs256_secret_ref.is_some()),
-            tls_enabled: tls.is_some_and(|value| value.cert_chain_path.is_some()),
-            mtls_required: tls.is_some_and(|value| value.client_ca_path.is_some()),
+            oauth: key.optional("http.oauth", oauth),
+            oauth_resource: key.optional(
+                "http.oauth.resource",
+                oauth.and_then(|value| value.resource.as_ref()),
+            ),
+            oauth_allowed_issuers: key.set(
+                "http.oauth.allowed_issuers.member",
+                oauth.map_or(&[], |value| value.allowed_issuers.as_slice()),
+            ),
+            oauth_authorization_servers: key.set(
+                "http.oauth.authorization_servers.member",
+                oauth.map_or(&[], |value| value.authorization_servers.as_slice()),
+            ),
+            oauth_required_scopes: key.set(
+                "http.oauth.required_scopes.member",
+                oauth.map_or(&[], |value| value.required_scopes.as_slice()),
+            ),
+            oauth_secret_ref: key.optional(
+                "http.oauth.hs256_secret_ref",
+                oauth.and_then(|value| value.hs256_secret_ref.as_ref()),
+            ),
+            oauth_metadata_url: key.optional(
+                "http.oauth.metadata_url",
+                oauth.and_then(|value| value.metadata_url.as_ref()),
+            ),
+            mtls_client_fingerprints: key.set(
+                "http.mtls.client_fingerprints.member",
+                &config.http.mtls.client_fingerprints,
+            ),
+            tls: key.optional("http.tls", tls),
+            tls_cert_chain_path: key.optional(
+                "http.tls.cert_chain_path",
+                tls.and_then(|value| value.cert_chain_path.as_ref()),
+            ),
+            tls_private_key_path: key.optional(
+                "http.tls.private_key_path",
+                tls.and_then(|value| value.private_key_path.as_ref()),
+            ),
+            tls_client_ca_path: key.optional(
+                "http.tls.client_ca_path",
+                tls.and_then(|value| value.client_ca_path.as_ref()),
+            ),
             operator_loopback_owner: config.http.operator.allow_loopback_owner,
-            operator_allowed_subject_count: config.http.operator.allowed_subjects.len(),
+            operator_allowed_subjects: key.set(
+                "http.operator.allowed_subjects.member",
+                &config.http.operator.allowed_subjects,
+            ),
             dashboard_workbench: config.http.dashboard_workbench,
+            trusted_https_termination: config.http.trusted_https_termination,
             allow_remote: config.http.allow_remote,
         },
         audit: RedactedAuditSnapshot {
-            path_configured: config.audit.path.is_some(),
-            key_ref_configured: config.audit.key_ref.is_some(),
-            shipping_configured: shipping.is_some(),
-            worm_configured: shipping.is_some_and(|value| value.worm_path.is_some()),
-            siem_configured: shipping.is_some_and(|value| value.siem_endpoint.is_some()),
-            siem_auth_ref_configured: shipping
-                .is_some_and(|value| value.siem_auth_header_ref.is_some()),
+            semantic_revision: key.revision("audit.semantic", &config.audit),
+            path: key.optional("audit.path", config.audit.path.as_ref()),
+            key_ref: key.optional("audit.key_ref", config.audit.key_ref.as_ref()),
+            key_id: key.optional("audit.key_id", config.audit.key_id.as_ref()),
+            verification_keys: key.set(
+                "audit.verification_keys.member",
+                &config.audit.verification_keys,
+            ),
+            shipping: key.optional("audit.shipping", shipping),
+            worm_path: key.optional(
+                "audit.shipping.worm_path",
+                shipping.and_then(|value| value.worm_path.as_ref()),
+            ),
+            siem_endpoint: key.optional(
+                "audit.shipping.siem_endpoint",
+                shipping.and_then(|value| value.siem_endpoint.as_ref()),
+            ),
+            siem_format: key.optional(
+                "audit.shipping.siem_format",
+                shipping.and_then(|value| value.siem_format.as_ref()),
+            ),
+            siem_auth_header_ref: key.optional(
+                "audit.shipping.siem_auth_header_ref",
+                shipping.and_then(|value| value.siem_auth_header_ref.as_ref()),
+            ),
+            siem_auth_header_name: key.optional(
+                "audit.shipping.siem_auth_header_name",
+                shipping.and_then(|value| value.siem_auth_header_name.as_ref()),
+            ),
         },
         profiles,
     }
@@ -1051,17 +1270,235 @@ mod tests {
                 .redacted_diff
                 .changes
                 .iter()
-                .any(|change| change.path == "profiles"),
-            "{:?}",
-            plan.preview().redacted_diff
+                .any(|change| change.path == "http.oauth_allowed_issuers.count")
         );
-        assert!(
-            plan.preview()
-                .redacted_diff
-                .changes
-                .iter()
-                .any(|change| change.path == "http.oauth_issuer_count")
+        for path in [
+            "profiles.prod.connection_identity_revision",
+            "profiles.prod.thin_routing_revision",
+        ] {
+            assert!(
+                plan.preview()
+                    .redacted_diff
+                    .changes
+                    .iter()
+                    .any(|change| change.path == path),
+                "missing {path}: {:?}",
+                plan.preview().redacted_diff
+            );
+        }
+        assert!(rendered.contains("opaque-v1:"));
+    }
+
+    #[test]
+    fn same_cardinality_sensitive_substitutions_are_visible_but_opaque() {
+        let (backend, target) = backend("same-cardinality-redacted-diff");
+        let current = r#"
+            [http]
+            allowed_hosts = ["old.internal.example:443"]
+            allowed_origins = ["https://old.example"]
+
+            [http.oauth]
+            resource = "https://old.example/mcp"
+            allowed_issuers = ["https://issuer-old.example"]
+            authorization_servers = ["https://auth-old.example"]
+            required_scopes = ["oracle:read"]
+            hs256_secret_ref = "env:OLD_OAUTH_SECRET"
+            metadata_url = "https://old.example/oauth-metadata"
+
+            [http.mtls]
+            client_fingerprints = ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+
+            [http.tls]
+            cert_chain_path = "/old/tls/cert.pem"
+            private_key_path = "/old/tls/key.pem"
+            client_ca_path = "/old/tls/ca.pem"
+
+            [http.operator]
+            allowed_subjects = ["oauth:old-subject"]
+
+            [audit]
+            path = "/old/audit.jsonl"
+            key_ref = "env:OLD_AUDIT_KEY"
+            key_id = "old-active"
+
+            [[audit.verification_keys]]
+            key_id = "old-history"
+            key_ref = "env:OLD_HISTORY_KEY"
+
+            [audit.shipping]
+            worm_path = "/old/worm.jsonl"
+            siem_endpoint = "https://siem-old.example/ingest"
+            siem_format = "cef"
+            siem_auth_header_ref = "env:OLD_SIEM_TOKEN"
+            siem_auth_header_name = "Authorization"
+            "#;
+        let draft = r#"
+            [http]
+            allowed_hosts = ["new.internal.example:8443"]
+            allowed_origins = ["https://new.example"]
+
+            [http.oauth]
+            resource = "https://new.example/mcp"
+            allowed_issuers = ["https://issuer-new.example"]
+            authorization_servers = ["https://auth-new.example"]
+            required_scopes = ["oracle:admin"]
+            hs256_secret_ref = "env:NEW_OAUTH_SECRET"
+            metadata_url = "https://new.example/oauth-metadata"
+
+            [http.mtls]
+            client_fingerprints = ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+
+            [http.tls]
+            cert_chain_path = "/new/tls/cert.pem"
+            private_key_path = "/new/tls/key.pem"
+            client_ca_path = "/new/tls/ca.pem"
+
+            [http.operator]
+            allowed_subjects = ["mtls:new-subject"]
+
+            [audit]
+            path = "/new/audit.jsonl"
+            key_ref = "env:NEW_AUDIT_KEY"
+            key_id = "new-active"
+
+            [[audit.verification_keys]]
+            key_id = "new-history"
+            key_ref = "env:NEW_HISTORY_KEY"
+
+            [audit.shipping]
+            worm_path = "/new/worm.jsonl"
+            siem_endpoint = "https://siem-new.example/collect"
+            siem_format = "syslog"
+            siem_auth_header_ref = "env:NEW_SIEM_TOKEN"
+            siem_auth_header_name = "X-Collector-Token"
+            "#;
+        write_atomic_path(&target, current.as_bytes()).expect("seed current config");
+
+        let preview = backend
+            .stage_config_draft(&target, draft)
+            .expect("stage same-cardinality substitutions")
+            .preview()
+            .clone();
+        let paths = preview
+            .redacted_diff
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<BTreeSet<_>>();
+        for path in [
+            "http.allowed_hosts.member_revisions",
+            "http.allowed_origins.member_revisions",
+            "http.oauth_resource.revision",
+            "http.oauth_allowed_issuers.member_revisions",
+            "http.oauth_authorization_servers.member_revisions",
+            "http.oauth_required_scopes.member_revisions",
+            "http.oauth_secret_ref.revision",
+            "http.oauth_metadata_url.revision",
+            "http.mtls_client_fingerprints.member_revisions",
+            "http.tls_cert_chain_path.revision",
+            "http.tls_private_key_path.revision",
+            "http.tls_client_ca_path.revision",
+            "http.operator_allowed_subjects.member_revisions",
+            "audit.path.revision",
+            "audit.key_ref.revision",
+            "audit.key_id.revision",
+            "audit.verification_keys.member_revisions",
+            "audit.worm_path.revision",
+            "audit.siem_endpoint.revision",
+            "audit.siem_format.revision",
+            "audit.siem_auth_header_ref.revision",
+            "audit.siem_auth_header_name.revision",
+        ] {
+            assert!(paths.contains(path), "missing {path}: {paths:?}");
+        }
+
+        let rendered = serde_json::to_string(&preview).expect("serialize preview");
+        for forbidden in [
+            "old.internal.example",
+            "new.internal.example",
+            "issuer-old",
+            "issuer-new",
+            "old-subject",
+            "new-subject",
+            "/old/",
+            "/new/",
+            "OLD_",
+            "NEW_",
+            "siem-old",
+            "siem-new",
+            "X-Collector-Token",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "redacted preview leaked {forbidden}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn catch_all_revision_covers_new_semantics_and_is_deterministic_per_backend() {
+        let (backend, target) = backend("complete-redacted-revision");
+        let current = profile_config("old.internal:1521/svc");
+        let draft = r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "new.internal:1521/svc"
+            username = "PRIVATE_USER"
+            credential_ref = "env:PRIVATE_PASSWORD"
+            trusted_session_statements = ["BEGIN NULL; END;"]
+
+            [profiles.session_identity]
+            module = "PRIVATE_MODULE"
+
+            [[profiles.app_context]]
+            namespace = "PRIVATE_NAMESPACE"
+            key = "PRIVATE_KEY"
+            value = "PRIVATE_VALUE"
+            "#;
+        write_atomic_path(&target, current.as_bytes()).expect("seed current config");
+
+        let first = backend
+            .stage_config_draft(&target, draft)
+            .expect("first stage");
+        let second = backend
+            .stage_config_draft(&target, draft)
+            .expect("repeat stage");
+        assert_eq!(
+            first.preview().redacted_diff,
+            second.preview().redacted_diff,
+            "the same backend and exact draft must render a stable preview"
         );
+        let paths = first
+            .preview()
+            .redacted_diff
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<BTreeSet<_>>();
+        for path in [
+            "semantic_revision",
+            "profiles.prod.semantic_revision",
+            "profiles.prod.connection_identity_revision",
+            "profiles.prod.session_setup_revision",
+            "profiles.prod.session_identity_revision",
+            "profiles.prod.app_context_revision",
+        ] {
+            assert!(paths.contains(path), "missing {path}: {paths:?}");
+        }
+        let rendered = serde_json::to_string(first.preview()).expect("serialize preview");
+        for forbidden in [
+            "old.internal",
+            "new.internal",
+            "PRIVATE_USER",
+            "PRIVATE_PASSWORD",
+            "PRIVATE_MODULE",
+            "PRIVATE_NAMESPACE",
+            "PRIVATE_KEY",
+            "PRIVATE_VALUE",
+            "BEGIN NULL",
+        ] {
+            assert!(!rendered.contains(forbidden), "leaked {forbidden}");
+        }
     }
 
     #[test]
