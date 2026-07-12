@@ -102,7 +102,7 @@ jobs:
       - run: bash scripts/oraclemcp_agent_surface_lint.sh
       - run: bash scripts/oraclemcp_concurrency_lint.sh
       - run: bash scripts/secret_scan.sh
-      - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
           tool: cargo-deny
       - run: cargo deny check
@@ -173,7 +173,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
           tool: cargo-hack
       - run: bash scripts/release_acceptance_ci_suite.sh
@@ -239,7 +239,7 @@ jobs:
 
       - name: Install cargo-zigbuild (aarch64 musl)
         if: matrix.build_tool == 'cargo-zigbuild'
-        uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
           tool: cargo-zigbuild
 
@@ -380,7 +380,7 @@ jobs:
       # dashboard SPA so operators (and a third party) can enumerate exactly
       # what each release artifact was built from.
       - name: Install CycloneDX SBOM generator
-        uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
           tool: cargo-cyclonedx@0.5.9
       - name: Generate Rust CycloneDX SBOM
