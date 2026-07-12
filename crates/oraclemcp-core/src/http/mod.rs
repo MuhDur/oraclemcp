@@ -558,11 +558,11 @@ fn default_transport_admission() -> Arc<AdmissionController> {
 }
 
 fn default_sse_admission() -> Arc<AdmissionController> {
-    Arc::new(AdmissionController::with_reserved(
+    // Operator and readiness control work never opens an MCP SSE subscriber;
+    // reserving subscriber slots would only create unreachable dead capacity.
+    Arc::new(AdmissionController::new(
         DEFAULT_GLOBAL_HOST_CAP,
         DEFAULT_STATEFUL_PER_PROFILE_CAP,
-        DEFAULT_OPERATOR_RESERVED_LANES,
-        DEFAULT_DOCTOR_RESERVED_LANES,
     ))
 }
 
@@ -2200,7 +2200,7 @@ pub fn handle_http_request(
     config: &HttpTransportConfig,
     request: HttpRequest,
 ) -> HttpResponse {
-    handle_http_exchange(server, config, request, false).into_buffered_response()
+    handle_http_exchange(server, config, request, false, None).into_buffered_response()
 }
 
 fn handle_http_exchange(
@@ -2208,8 +2208,33 @@ fn handle_http_exchange(
     config: &HttpTransportConfig,
     request: HttpRequest,
     allow_streaming_get: bool,
+    mut transport_permit: Option<&mut AdmissionPermit>,
 ) -> HttpExchange {
-    match route_for(&request.path) {
+    let route = route_for(&request.path);
+    if transport_permit
+        .as_deref()
+        .is_some_and(AdmissionPermit::is_control_probe)
+    {
+        let is_doctor_request = route == HttpRoute::Observability
+            && request.method == "GET"
+            && matches!(request.path.as_str(), HEALTHZ_PATH | READYZ_PATH);
+        if is_doctor_request {
+            let permit = transport_permit
+                .as_deref_mut()
+                .expect("control probe was present above");
+            if permit.promote_to_doctor().is_err() {
+                return HttpExchange::Buffered(control_reserve_rejection(config));
+            }
+        } else if route != HttpRoute::OperatorApi {
+            // A fallback permit may parse only enough request data for trusted
+            // route/auth classification. Ordinary callers cannot retain it by
+            // naming an admission class, spoofing a header, or choosing a
+            // non-control route.
+            return HttpExchange::Buffered(control_reserve_rejection(config));
+        }
+    }
+
+    match route {
         HttpRoute::ProtectedResourceMetadata => {
             if request.method != "GET" {
                 return HttpExchange::Buffered(empty_response(405).with_header("allow", "GET"));
@@ -2270,6 +2295,13 @@ fn handle_http_exchange(
             else {
                 return HttpExchange::Buffered(operator_authority_required_response());
             };
+            if let Some(permit) = transport_permit
+                .as_mut()
+                .filter(|permit| permit.is_control_probe())
+                && permit.promote_to_operator().is_err()
+            {
+                return HttpExchange::Buffered(control_reserve_rejection(config));
+            }
             let operator_audit = match begin_operator_audit(config, &operator_subject, &request) {
                 Ok(attempt) => attempt,
                 Err(response) => return HttpExchange::Buffered(response),
@@ -3201,11 +3233,9 @@ fn operator_capacity_data(
             0,
             DEFAULT_RETRY_AFTER_MS,
             json!({
-                "operator": DEFAULT_OPERATOR_RESERVED_LANES,
-                "doctor": DEFAULT_DOCTOR_RESERVED_LANES,
-                "regular_global_cap": DEFAULT_GLOBAL_HOST_CAP
-                    .saturating_sub(DEFAULT_OPERATOR_RESERVED_LANES)
-                    .saturating_sub(DEFAULT_DOCTOR_RESERVED_LANES),
+                "operator": 0,
+                "doctor": 0,
+                "regular_global_cap": DEFAULT_GLOBAL_HOST_CAP,
             }),
         ),
     };
@@ -3259,8 +3289,8 @@ fn operator_capacity_data(
             "configured": {
                 "global": DEFAULT_GLOBAL_HOST_CAP,
                 "per_subject": DEFAULT_STATEFUL_PER_PROFILE_CAP,
-                "operator_reserved": DEFAULT_OPERATOR_RESERVED_LANES,
-                "doctor_reserved": DEFAULT_DOCTOR_RESERVED_LANES,
+                "operator_reserved": 0,
+                "doctor_reserved": 0,
             },
             "effective": stateful_snapshot,
             "active": active_lanes,
@@ -3275,7 +3305,8 @@ fn operator_capacity_data(
                 },
                 {
                     "name": "operator_doctor_reserve",
-                    "status": "applied",
+                    "status": "not_applicable",
+                    "reason": "control-plane work is admitted out of band and does not allocate Oracle lanes",
                 },
                 {
                     "name": "db_session_limit",
@@ -3305,7 +3336,7 @@ fn operator_capacity_data(
                     "status": "applied",
                 },
                 {
-                    "name": "operator_doctor_reserve",
+                    "name": "operator_doctor_worker_reserve",
                     "status": "applied",
                 },
             ],
@@ -6478,6 +6509,42 @@ fn try_admit_http_capacity(
     })
 }
 
+fn try_admit_http_transport(
+    controller: &AdmissionController,
+    peer_is_loopback: bool,
+) -> Result<AdmissionPermit, HttpResponse> {
+    let cx = detached_admission_cx();
+    if let Ok(permit) = controller.try_admit(&cx, HTTP_TRANSPORT_CAPACITY_SUBJECT) {
+        return Ok(permit);
+    }
+    // The default operator authority is the local process owner and readiness
+    // is normally scraped locally. Do not expose the pre-auth reserve to remote
+    // peers: a remote caller has not yet presented server-verifiable authority
+    // and could otherwise occupy the incident-response slots with slow ingress.
+    if peer_is_loopback && let Ok(permit) = controller.try_admit_control_probe(&cx) {
+        return Ok(permit);
+    }
+    Err(control_reserve_rejection_for(controller))
+}
+
+fn control_reserve_rejection(config: &HttpTransportConfig) -> HttpResponse {
+    control_reserve_rejection_for(&config.transport_admission)
+}
+
+fn control_reserve_rejection_for(controller: &AdmissionController) -> HttpResponse {
+    let envelope = controller
+        .at_capacity_envelope(
+            HTTP_TRANSPORT_CAPACITY_SCOPE,
+            HTTP_TRANSPORT_CAPACITY_SUBJECT,
+        )
+        .with_next_step(
+            "retry after retry_after_ms; control reserve requires an exact local readiness route or server-authorized operator request",
+        );
+    let retry_after =
+        retry_after_header_seconds(envelope.retry_after_ms.unwrap_or(DEFAULT_RETRY_AFTER_MS));
+    json_response(429, &envelope.to_json()).with_header("retry-after", &retry_after)
+}
+
 fn try_admit_http_request_rate(
     limiters: &HttpRequestRateLimiters,
     scope: &str,
@@ -7216,12 +7283,10 @@ pub fn serve_http_until(
             last_idle_reap = Instant::now();
         }
         match listener.accept() {
-            Ok((mut stream, _addr)) => {
-                let transport_permit = match try_admit_http_capacity(
+            Ok((mut stream, addr)) => {
+                let transport_permit = match try_admit_http_transport(
                     &config.transport_admission,
-                    HTTP_TRANSPORT_CAPACITY_SUBJECT,
-                    HTTP_TRANSPORT_CAPACITY_SCOPE,
-                    "retry after retry_after_ms; accepted connection workers are bounded to preserve operator and doctor reserve",
+                    addr.ip().is_loopback(),
                 ) {
                     Ok(permit) => permit,
                     Err(response) => {
@@ -7238,8 +7303,7 @@ pub fn serve_http_until(
                 let server = server.clone();
                 let config = Arc::clone(&config);
                 workers.push(std::thread::spawn(move || {
-                    let _transport_permit = transport_permit;
-                    if let Err(e) = handle_connection(stream, &server, &config) {
+                    if let Err(e) = handle_connection(stream, &server, &config, transport_permit) {
                         tracing::debug!(error = %e, "native HTTP connection failed");
                     }
                 }));
@@ -7297,12 +7361,10 @@ pub fn serve_https_until(
             last_idle_reap = Instant::now();
         }
         match listener.accept() {
-            Ok((stream, _addr)) => {
-                let transport_permit = match try_admit_http_capacity(
+            Ok((stream, addr)) => {
+                let transport_permit = match try_admit_http_transport(
                     &config.transport_admission,
-                    HTTP_TRANSPORT_CAPACITY_SUBJECT,
-                    HTTP_TRANSPORT_CAPACITY_SCOPE,
-                    "retry after retry_after_ms; accepted TLS connection workers are bounded to preserve operator and doctor reserve",
+                    addr.ip().is_loopback(),
                 ) {
                     Ok(permit) => permit,
                     Err(_) => {
@@ -7314,8 +7376,9 @@ pub fn serve_https_until(
                 let config = Arc::clone(&config);
                 let tls = Arc::clone(&tls);
                 workers.push(std::thread::spawn(move || {
-                    let _transport_permit = transport_permit;
-                    if let Err(e) = handle_tls_connection(stream, &server, &config, tls) {
+                    if let Err(e) =
+                        handle_tls_connection(stream, &server, &config, tls, transport_permit)
+                    {
                         tracing::debug!(error = %e, "native HTTPS connection failed");
                     }
                 }));
@@ -7431,6 +7494,7 @@ fn handle_connection(
     mut stream: TcpStream,
     server: &OracleMcpServer,
     config: &HttpTransportConfig,
+    mut transport_permit: AdmissionPermit,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT))?;
     stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT))?;
@@ -7443,6 +7507,7 @@ fn handle_connection(
         peer_is_loopback,
         peer_addr.map(|addr| addr.to_string()),
         None,
+        &mut transport_permit,
     )
 }
 
@@ -7463,6 +7528,7 @@ fn handle_tls_connection(
     server: &OracleMcpServer,
     config: &HttpTransportConfig,
     tls: Arc<TlsServerConfig>,
+    mut transport_permit: AdmissionPermit,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT))?;
     stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT))?;
@@ -7471,7 +7537,12 @@ fn handle_tls_connection(
     })?;
     let peer_addr = stream.peer_addr().ok();
     let peer_is_loopback = peer_addr.is_some_and(|addr| addr.ip().is_loopback());
-    complete_tls_handshake(&mut stream, &mut connection, TLS_HANDSHAKE_TIMEOUT)?;
+    let handshake_timeout = if transport_permit.is_control_probe() {
+        CONTROL_PROBE_INGRESS_TIMEOUT
+    } else {
+        TLS_HANDSHAKE_TIMEOUT
+    };
+    complete_tls_handshake(&mut stream, &mut connection, handshake_timeout)?;
     stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT))?;
     stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT))?;
     let peer_cert_fingerprint_sha256 = connection
@@ -7486,6 +7557,7 @@ fn handle_tls_connection(
         peer_is_loopback,
         peer_addr.map(|addr| addr.to_string()),
         peer_cert_fingerprint_sha256,
+        &mut transport_permit,
     );
     stream.conn.send_close_notify();
     let _ = stream.flush();
@@ -7585,8 +7657,14 @@ fn handle_stream(
     peer_is_loopback: bool,
     peer_addr: Option<String>,
     peer_cert_fingerprint_sha256: Option<String>,
+    transport_permit: &mut AdmissionPermit,
 ) -> std::io::Result<()> {
-    let exchange = match read_http_request(stream, REQUEST_HEADER_TIMEOUT, REQUEST_BODY_TIMEOUT) {
+    let (header_timeout, body_timeout) = if transport_permit.is_control_probe() {
+        (CONTROL_PROBE_INGRESS_TIMEOUT, CONTROL_PROBE_INGRESS_TIMEOUT)
+    } else {
+        (REQUEST_HEADER_TIMEOUT, REQUEST_BODY_TIMEOUT)
+    };
+    let exchange = match read_http_request(stream, header_timeout, body_timeout) {
         Ok(Some(request)) => handle_http_exchange(
             server,
             config,
@@ -7595,6 +7673,7 @@ fn handle_stream(
                 .with_peer_addr(peer_addr)
                 .with_peer_cert_fingerprint_sha256(peer_cert_fingerprint_sha256),
             true,
+            Some(transport_permit),
         ),
         Ok(None) => return Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
@@ -7619,6 +7698,8 @@ const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Short exposure window for the single loopback-only pre-auth control probe.
+const CONTROL_PROBE_INGRESS_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn reason_phrase(status: u16) -> &'static str {
     match status {

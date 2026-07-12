@@ -1825,11 +1825,11 @@ fn operator_v1_serves_schema_health_events_and_action_mapping() {
     );
     assert_eq!(
         metrics_body["data"]["capacity"]["stateful_lanes"]["effective"]["regular_global_cap"],
-        serde_json::json!(62)
+        serde_json::json!(64)
     );
     assert_eq!(
         metrics_body["data"]["capacity"]["stateful_lanes"]["reserve"]["operator"],
-        serde_json::json!(1)
+        serde_json::json!(0)
     );
     assert_eq!(
         metrics_body["data"]["capacity"]["stateful_lanes"]["retry_after_ms"],
@@ -6460,6 +6460,208 @@ fn serve_http_until_bounds_connection_workers_before_request_parse() {
     drop(stalled);
     shutdown.store(true, Ordering::SeqCst);
     handle.join().expect("bounded server thread joins");
+}
+
+#[test]
+fn local_doctor_and_authorized_operator_use_transport_reserve_under_saturation() {
+    fn request(addr: std::net::SocketAddr, raw: &str) -> String {
+        let mut stream = TcpStream::connect(addr).expect("connect control request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set control response timeout");
+        stream
+            .write_all(raw.as_bytes())
+            .expect("write control request");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("read control response");
+        response
+    }
+
+    let cx = detached_admission_cx();
+    let lane_admission = AdmissionController::n4_stateful_defaults();
+    let mut lane_permits = Vec::new();
+    for index in 0..DEFAULT_GLOBAL_HOST_CAP {
+        lane_permits.push(
+            lane_admission
+                .try_admit(&cx, &format!("lane-subject-{}", index / 8))
+                .expect("all measured Oracle lane capacity remains usable"),
+        );
+    }
+    assert!(
+        lane_admission.try_admit(&cx, "lane-overflow").is_err(),
+        "data-plane lane capacity is genuinely saturated"
+    );
+
+    let transport_admission = Arc::new(AdmissionController::with_reserved(3, 3, 1, 1));
+    let lifecycle = Arc::new(CancelRecordingLifecycle::default());
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback reserve listener");
+    let addr = listener.local_addr().expect("reserve listener address");
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = Arc::clone(&shutdown);
+    let (auditor, _audit_sink) = operator_auditor();
+    let config = HttpTransportConfig {
+        json_response: true,
+        transport_admission: Arc::clone(&transport_admission),
+        operator_auditor: Some(auditor),
+        session_lifecycle: Some(Arc::clone(&lifecycle) as Arc<dyn HttpSessionLifecycle>),
+        observability: ObservabilityState {
+            health: Some(HealthState::new("0.1.0")),
+            metrics: None,
+            readiness_probe: None,
+        },
+        ..Default::default()
+    };
+    let handle = std::thread::spawn(move || {
+        serve_http_until(listener, test_server(), &config, server_shutdown)
+            .expect("reserved native HTTP server exits cleanly")
+    });
+
+    let stalled_regular = TcpStream::connect(addr).expect("connect regular capacity holder");
+    for _ in 0..100 {
+        if transport_admission
+            .snapshot(
+                HTTP_TRANSPORT_CAPACITY_SCOPE,
+                HTTP_TRANSPORT_CAPACITY_SUBJECT,
+            )
+            .regular_global_available
+            == 0
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        transport_admission
+            .snapshot(
+                HTTP_TRANSPORT_CAPACITY_SCOPE,
+                HTTP_TRANSPORT_CAPACITY_SUBJECT
+            )
+            .regular_global_available,
+        0,
+        "regular transport capacity saturates"
+    );
+
+    let stalled_probe = TcpStream::connect(addr).expect("connect stalled reserve probe");
+    for _ in 0..100 {
+        if transport_admission
+            .snapshot(
+                HTTP_TRANSPORT_CAPACITY_SCOPE,
+                HTTP_TRANSPORT_CAPACITY_SUBJECT,
+            )
+            .control_probes_in_use
+            == 1
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let probe_deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < probe_deadline
+        && transport_admission
+            .snapshot(
+                HTTP_TRANSPORT_CAPACITY_SCOPE,
+                HTTP_TRANSPORT_CAPACITY_SUBJECT,
+            )
+            .control_probes_in_use
+            != 0
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        transport_admission
+            .snapshot(
+                HTTP_TRANSPORT_CAPACITY_SCOPE,
+                HTTP_TRANSPORT_CAPACITY_SUBJECT,
+            )
+            .control_probes_in_use,
+        0,
+        "an unclassified reserve worker must be released by its one-second ingress deadline"
+    );
+    drop(stalled_probe);
+
+    let spoofed = request(
+        addr,
+        "GET /ordinary HTTP/1.1\r\nhost: 127.0.0.1\r\nx-admission-class: operator\r\ncontent-length: 0\r\n\r\n",
+    );
+    assert!(spoofed.starts_with("HTTP/1.1 429 Too Many Requests"));
+    assert!(spoofed.contains("AT_CAPACITY"));
+
+    let health = request(
+        addr,
+        "GET /healthz HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 0\r\n\r\n",
+    );
+    assert!(health.starts_with("HTTP/1.1 200 OK"), "{health}");
+
+    let operator = request(
+        addr,
+        "GET /operator/v1/health HTTP/1.1\r\nhost: 127.0.0.1\r\naccept: application/json\r\ncontent-length: 0\r\n\r\n",
+    );
+    assert!(operator.starts_with("HTTP/1.1 200 OK"), "{operator}");
+
+    let cancel_body = serde_json::json!({ "lane_id": "lane-a" }).to_string();
+    let cancel_request = format!(
+        "POST /operator/v1/lanes/cancel HTTP/1.1\r\nhost: 127.0.0.1\r\naccept: application/json\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+        cancel_body.len(),
+        cancel_body
+    );
+    let cancel = request(addr, &cancel_request);
+    assert!(cancel.starts_with("HTTP/1.1 200 OK"), "{cancel}");
+    assert_eq!(
+        lifecycle.closed.lock().expect("cancel lock").as_slice(),
+        &[(
+            "mcp-session:lane-a".to_owned(),
+            "principal:subject-sha256:abc".to_owned(),
+            DispatchCloseReason::OperatorCancel,
+        )],
+        "operator cancellation remains reachable while both lane and regular transport caps are saturated"
+    );
+
+    let snapshot = transport_admission.snapshot(
+        HTTP_TRANSPORT_CAPACITY_SCOPE,
+        HTTP_TRANSPORT_CAPACITY_SUBJECT,
+    );
+    assert_eq!(
+        snapshot.global_in_use, 1,
+        "only the stalled regular remains"
+    );
+    assert_eq!(snapshot.control_probes_in_use, 0);
+    assert_eq!(snapshot.operator_in_use, 0);
+    assert_eq!(snapshot.doctor_in_use, 0);
+    assert!(snapshot.global_in_use <= snapshot.global_cap);
+
+    drop(stalled_regular);
+    drop(lane_permits);
+    shutdown.store(true, Ordering::SeqCst);
+    handle.join().expect("reserved server thread joins");
+}
+
+#[test]
+fn remote_or_unclassified_callers_cannot_enter_transport_reserve() {
+    let cx = detached_admission_cx();
+    let controller = AdmissionController::with_reserved(3, 3, 1, 1);
+    let _regular = controller
+        .try_admit(&cx, HTTP_TRANSPORT_CAPACITY_SUBJECT)
+        .expect("regular slot");
+
+    let remote = try_admit_http_transport(&controller, false)
+        .expect_err("remote pre-auth caller cannot consume local control reserve");
+    assert_eq!(remote.status, 429);
+    let snapshot = controller.snapshot(
+        HTTP_TRANSPORT_CAPACITY_SCOPE,
+        HTTP_TRANSPORT_CAPACITY_SUBJECT,
+    );
+    assert_eq!(snapshot.global_in_use, 1);
+    assert_eq!(snapshot.control_probes_in_use, 0);
+
+    let probe = try_admit_http_transport(&controller, true)
+        .expect("one local unclassified probe is bounded");
+    assert!(probe.is_control_probe());
+    assert!(
+        try_admit_http_transport(&controller, true).is_err(),
+        "only one unclassified control worker may exist at a time"
+    );
 }
 
 #[test]

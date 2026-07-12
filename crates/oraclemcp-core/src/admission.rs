@@ -35,9 +35,9 @@ pub const DEFAULT_READ_PER_PROFILE_CAP: usize = 16;
 pub const DEFAULT_STATEFUL_PER_PROFILE_CAP: usize = 8;
 /// N4b finalized upper-bound default for all lane slots on one host.
 pub const DEFAULT_GLOBAL_HOST_CAP: usize = 64;
-/// N4 operator reserve: kept out of regular agent admission.
+/// N4 transport-worker reserve for authenticated operator control requests.
 pub const DEFAULT_OPERATOR_RESERVED_LANES: usize = 1;
-/// N4 doctor/readiness reserve: kept out of regular agent admission.
+/// N4 transport-worker reserve for doctor/readiness probes.
 pub const DEFAULT_DOCTOR_RESERVED_LANES: usize = 1;
 
 /// A held admission permit. Dropping it returns capacity to both the global and
@@ -45,22 +45,98 @@ pub const DEFAULT_DOCTOR_RESERVED_LANES: usize = 1;
 #[derive(Debug)]
 pub struct AdmissionPermit {
     inner: Arc<AdmissionInner>,
-    agent: String,
+    agent: Option<String>,
+    class: AdmissionClass,
 }
 
 impl Drop for AdmissionPermit {
     fn drop(&mut self) {
         let mut state = self.inner.state.lock();
         state.global_in_use = state.global_in_use.saturating_sub(1);
-        match state.agents.get_mut(&self.agent) {
-            Some(count) if *count > 1 => *count -= 1,
-            Some(_) => {
-                state.agents.remove(&self.agent);
+        match self.class {
+            AdmissionClass::Regular => {
+                state.regular_in_use = state.regular_in_use.saturating_sub(1);
+                if let Some(agent) = self.agent.as_ref() {
+                    match state.agents.get_mut(agent) {
+                        Some(count) if *count > 1 => *count -= 1,
+                        Some(_) => {
+                            state.agents.remove(agent);
+                        }
+                        None => {}
+                    }
+                } else {
+                    debug_assert!(false, "regular admission permit must retain its subject");
+                }
             }
-            None => {}
+            AdmissionClass::Operator => {
+                state.operator_in_use = state.operator_in_use.saturating_sub(1);
+            }
+            AdmissionClass::Doctor => {
+                state.doctor_in_use = state.doctor_in_use.saturating_sub(1);
+            }
+            AdmissionClass::ControlProbe => {
+                state.control_probes_in_use = state.control_probes_in_use.saturating_sub(1);
+            }
         }
         drop(state);
         self.inner.changed.notify_all();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdmissionClass {
+    Regular,
+    Operator,
+    Doctor,
+    /// A bounded pre-auth transport worker. It may perform only ingress parsing
+    /// until trusted server code promotes it to an exact reserved class.
+    ControlProbe,
+}
+
+impl AdmissionPermit {
+    pub(crate) fn is_control_probe(&self) -> bool {
+        self.class == AdmissionClass::ControlProbe
+    }
+
+    /// Promote a pre-auth transport probe after operator authority has been
+    /// established by server-side authentication. Network request data cannot
+    /// call this crate-private boundary directly.
+    pub(crate) fn promote_to_operator(&mut self) -> Result<(), OracleMcpError> {
+        self.promote_control_probe(AdmissionClass::Operator)
+    }
+
+    /// Promote a pre-auth transport probe after the server has classified an
+    /// exact doctor/readiness route. The route may be public, but the permit can
+    /// then execute only that already-classified request.
+    pub(crate) fn promote_to_doctor(&mut self) -> Result<(), OracleMcpError> {
+        self.promote_control_probe(AdmissionClass::Doctor)
+    }
+
+    fn promote_control_probe(&mut self, target: AdmissionClass) -> Result<(), OracleMcpError> {
+        if self.class != AdmissionClass::ControlProbe {
+            return Err(OracleMcpError::Busy {
+                retry_after_ms: self.inner.retry_after_ms,
+            });
+        }
+        let mut state = self.inner.state.lock();
+        let available = match target {
+            AdmissionClass::Operator => state.operator_in_use < self.inner.operator_reserved,
+            AdmissionClass::Doctor => state.doctor_in_use < self.inner.doctor_reserved,
+            AdmissionClass::Regular | AdmissionClass::ControlProbe => false,
+        };
+        if !available {
+            return Err(OracleMcpError::Busy {
+                retry_after_ms: self.inner.retry_after_ms,
+            });
+        }
+        state.control_probes_in_use = state.control_probes_in_use.saturating_sub(1);
+        match target {
+            AdmissionClass::Operator => state.operator_in_use += 1,
+            AdmissionClass::Doctor => state.doctor_in_use += 1,
+            AdmissionClass::Regular | AdmissionClass::ControlProbe => unreachable!(),
+        }
+        self.class = target;
+        Ok(())
     }
 }
 
@@ -88,6 +164,10 @@ struct AdmissionInner {
 #[derive(Debug, Default)]
 struct AdmissionState {
     global_in_use: usize,
+    regular_in_use: usize,
+    operator_in_use: usize,
+    doctor_in_use: usize,
+    control_probes_in_use: usize,
     agents: HashMap<String, usize>,
     queued_total: usize,
     queued_subjects: HashMap<String, usize>,
@@ -103,14 +183,30 @@ pub struct CapacitySnapshot {
     pub subject: String,
     /// Configured global ceiling, including reserved slots.
     pub global_cap: usize,
+    /// Total permits currently held across every admission class.
+    pub global_in_use: usize,
+    /// Total capacity remaining across every admission class.
+    pub global_available: usize,
     /// Regular-agent slots after operator/doctor reserve is removed.
     pub regular_global_cap: usize,
     /// Currently available regular-agent global slots.
     pub regular_global_available: usize,
     /// Slots reserved for operator access.
     pub operator_reserved: usize,
+    /// Operator-reserved permits currently held.
+    pub operator_in_use: usize,
+    /// Operator-reserved permits currently available.
+    pub operator_available: usize,
     /// Slots reserved for doctor/readiness access.
     pub doctor_reserved: usize,
+    /// Doctor/readiness-reserved permits currently held.
+    pub doctor_in_use: usize,
+    /// Doctor/readiness-reserved permits currently available.
+    pub doctor_available: usize,
+    /// Bounded pre-auth workers awaiting trusted route/auth classification.
+    pub control_probes_in_use: usize,
+    /// Maximum simultaneous pre-auth control workers.
+    pub control_probe_cap: usize,
     /// Per-subject ceiling.
     pub per_subject_cap: usize,
     /// Currently available slots for this subject bucket.
@@ -163,7 +259,9 @@ impl AdmissionController {
     ) -> Self {
         let global_cap = global_cap.max(1);
         let per_agent_cap = per_agent_cap.max(1);
-        let reserved = operator_reserved.saturating_add(doctor_reserved);
+        let operator_reserved = operator_reserved.min(global_cap);
+        let doctor_reserved = doctor_reserved.min(global_cap.saturating_sub(operator_reserved));
+        let reserved = operator_reserved + doctor_reserved;
         let regular_global_cap = global_cap.saturating_sub(reserved);
         let queued_global_cap = regular_global_cap.saturating_mul(2).max(1);
         AdmissionController {
@@ -184,9 +282,13 @@ impl AdmissionController {
         }
     }
 
-    /// N4b finalized defaults for stateful/write lanes: 8 per subject/profile,
-    /// 64 global upper bound, with one operator and one doctor slot reserved
-    /// outside regular agent admission.
+    /// N4b finalized defaults for stateful/write lanes: 8 per subject/profile
+    /// and a 64 global upper bound.
+    ///
+    /// Operator and doctor work is out-of-band control-plane work and does not
+    /// allocate a new Oracle lane. Its reserve therefore belongs to HTTP
+    /// transport admission, not this data-plane lane controller; subtracting it
+    /// here would leave two unreachable lane slots.
     ///
     /// These upper bounds are pinned to the CX-I6 measurement recorded as
     /// `20260630-cx-i6-phase0-capacity`: 16 real lane-owned Oracle sessions,
@@ -194,12 +296,7 @@ impl AdmissionController {
     /// limits supporting the 64-lane candidate on the measured dev host.
     #[must_use]
     pub fn n4_stateful_defaults() -> Self {
-        Self::with_reserved(
-            DEFAULT_GLOBAL_HOST_CAP,
-            DEFAULT_STATEFUL_PER_PROFILE_CAP,
-            DEFAULT_OPERATOR_RESERVED_LANES,
-            DEFAULT_DOCTOR_RESERVED_LANES,
-        )
+        Self::new(DEFAULT_GLOBAL_HOST_CAP, DEFAULT_STATEFUL_PER_PROFILE_CAP)
     }
 
     /// Try to admit a call for `agent` in `cx` without waiting. Returns a
@@ -253,7 +350,43 @@ impl AdmissionController {
                 retry_after_ms: self.inner.retry_after_ms,
             });
         }
-        Ok(self.admit_locked(&mut state, agent))
+        Ok(self.admit_regular_locked(&mut state, agent))
+    }
+
+    /// Admit one bounded pre-auth transport worker from the combined control
+    /// reserve. The permit cannot run privileged work until trusted server code
+    /// promotes it to an exact operator or doctor class.
+    ///
+    /// This method is crate-private on purpose: request fields and public API
+    /// callers must never be able to select a privileged admission class.
+    pub(crate) fn try_admit_control_probe<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+    ) -> Result<AdmissionPermit, OracleMcpError>
+    where
+        Caps: CapSetRuntimeMask,
+    {
+        if cx.checkpoint().is_err() || self.is_draining() {
+            return Err(self.busy_error());
+        }
+        let mut state = self.inner.state.lock();
+        let reserved_cap = self
+            .inner
+            .operator_reserved
+            .saturating_add(self.inner.doctor_reserved);
+        let reserved_in_use = state
+            .operator_in_use
+            .saturating_add(state.doctor_in_use)
+            .saturating_add(state.control_probes_in_use);
+        if self.is_draining()
+            || cx.checkpoint().is_err()
+            || state.global_in_use >= self.inner.global_cap
+            || reserved_in_use >= reserved_cap
+            || state.control_probes_in_use >= usize::from(reserved_cap > 0)
+        {
+            return Err(self.busy_error());
+        }
+        Ok(self.admit_reserved_locked(&mut state, AdmissionClass::ControlProbe))
     }
 
     /// Admit or return an agent-facing `AT_CAPACITY` envelope with a redacted
@@ -320,7 +453,7 @@ impl AdmissionController {
             return Err(self.busy_error());
         }
         if state.queued_total == 0 && self.subject_can_admit_locked(&state, agent) {
-            return Ok(self.admit_locked(&mut state, agent));
+            return Ok(self.admit_regular_locked(&mut state, agent));
         }
         if !self.enqueue_locked(&mut state, agent) {
             return Err(self.busy_error());
@@ -335,7 +468,7 @@ impl AdmissionController {
             }
             if self.subject_has_fair_turn_locked(&state, agent) {
                 Self::dequeue_locked(&mut state, agent);
-                let permit = self.admit_locked(&mut state, agent);
+                let permit = self.admit_regular_locked(&mut state, agent);
                 drop(state);
                 self.inner.changed.notify_all();
                 return Ok(permit);
@@ -400,13 +533,32 @@ impl AdmissionController {
             scope: scope.to_owned(),
             subject: redact_subject_for_capacity(subject),
             global_cap: self.inner.global_cap,
+            global_in_use: state.global_in_use,
+            global_available: self.inner.global_cap.saturating_sub(state.global_in_use),
             regular_global_cap: self.inner.regular_global_cap,
             regular_global_available: self
                 .inner
                 .regular_global_cap
-                .saturating_sub(state.global_in_use),
+                .saturating_sub(state.regular_in_use),
             operator_reserved: self.inner.operator_reserved,
+            operator_in_use: state.operator_in_use,
+            operator_available: self
+                .inner
+                .operator_reserved
+                .saturating_sub(state.operator_in_use),
             doctor_reserved: self.inner.doctor_reserved,
+            doctor_in_use: state.doctor_in_use,
+            doctor_available: self
+                .inner
+                .doctor_reserved
+                .saturating_sub(state.doctor_in_use),
+            control_probes_in_use: state.control_probes_in_use,
+            control_probe_cap: usize::from(
+                self.inner
+                    .operator_reserved
+                    .saturating_add(self.inner.doctor_reserved)
+                    > 0,
+            ),
             per_subject_cap: self.inner.per_agent_cap,
             per_subject_available: self.inner.per_agent_cap.saturating_sub(subject_in_use),
             retry_after_ms: self.inner.retry_after_ms,
@@ -470,12 +622,33 @@ impl AdmissionController {
         false
     }
 
-    fn admit_locked(&self, state: &mut AdmissionState, agent: &str) -> AdmissionPermit {
+    fn admit_regular_locked(&self, state: &mut AdmissionState, agent: &str) -> AdmissionPermit {
         state.global_in_use += 1;
+        state.regular_in_use += 1;
         *state.agents.entry(agent.to_owned()).or_insert(0) += 1;
         AdmissionPermit {
             inner: Arc::clone(&self.inner),
-            agent: agent.to_owned(),
+            agent: Some(agent.to_owned()),
+            class: AdmissionClass::Regular,
+        }
+    }
+
+    fn admit_reserved_locked(
+        &self,
+        state: &mut AdmissionState,
+        class: AdmissionClass,
+    ) -> AdmissionPermit {
+        state.global_in_use += 1;
+        match class {
+            AdmissionClass::Operator => state.operator_in_use += 1,
+            AdmissionClass::Doctor => state.doctor_in_use += 1,
+            AdmissionClass::ControlProbe => state.control_probes_in_use += 1,
+            AdmissionClass::Regular => unreachable!(),
+        }
+        AdmissionPermit {
+            inner: Arc::clone(&self.inner),
+            agent: None,
+            class,
         }
     }
 
@@ -646,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn n4_defaults_keep_operator_and_doctor_reserve_out_of_regular_capacity() {
+    fn n4_lane_defaults_use_full_capacity_because_controls_are_out_of_band() {
         let cx = test_cx();
         let ctrl = AdmissionController::n4_stateful_defaults();
         assert_eq!(
@@ -658,12 +831,7 @@ mod tests {
         assert_eq!(DEFAULT_GLOBAL_HOST_CAP, 64);
         assert_eq!(DEFAULT_OPERATOR_RESERVED_LANES, 1);
         assert_eq!(DEFAULT_DOCTOR_RESERVED_LANES, 1);
-        assert_eq!(
-            ctrl.regular_global_cap(),
-            DEFAULT_GLOBAL_HOST_CAP
-                - DEFAULT_OPERATOR_RESERVED_LANES
-                - DEFAULT_DOCTOR_RESERVED_LANES
-        );
+        assert_eq!(ctrl.regular_global_cap(), DEFAULT_GLOBAL_HOST_CAP);
         let mut permits = Vec::new();
         for i in 0..ctrl.regular_global_cap() {
             permits.push(
@@ -674,11 +842,11 @@ mod tests {
 
         let err = ctrl
             .try_admit_capacity(&cx, "overflow-subject", "stateful_lane")
-            .expect_err("operator/doctor reserve is not consumed by regular lanes");
+            .expect_err("the complete measured lane ceiling is consumed");
         assert_eq!(err.error_class, ErrorClass::AtCapacity);
         assert_eq!(err.retry_after_ms, Some(DEFAULT_RETRY_AFTER_MS));
-        assert!(err.message.contains("\"operator_reserved\":1"));
-        assert!(err.message.contains("\"doctor_reserved\":1"));
+        assert!(err.message.contains("\"operator_reserved\":0"));
+        assert!(err.message.contains("\"doctor_reserved\":0"));
         assert!(err.message.contains("\"subject\":\"subject-len16\""));
         assert!(
             !err.message.contains("overflow-subject"),
@@ -686,6 +854,125 @@ mod tests {
         );
         drop(permits);
         assert_eq!(ctrl.available_global(), ctrl.regular_global_cap());
+    }
+
+    #[test]
+    fn authorized_control_classes_consume_exact_reserves_under_regular_saturation() {
+        let cx = test_cx();
+        let ctrl = AdmissionController::with_reserved(4, 4, 1, 1);
+        let regular_a = ctrl.try_admit(&cx, "regular-a").expect("regular a");
+        let regular_b = ctrl.try_admit(&cx, "regular-b").expect("regular b");
+
+        assert!(
+            ctrl.try_admit(&cx, "operator").is_err(),
+            "a caller-selected subject label must not claim operator reserve"
+        );
+        assert!(
+            ctrl.try_admit(&cx, "doctor").is_err(),
+            "a caller-selected subject label must not claim doctor reserve"
+        );
+
+        let mut operator = ctrl
+            .try_admit_control_probe(&cx)
+            .expect("bounded operator probe");
+        operator
+            .promote_to_operator()
+            .expect("trusted operator boundary consumes its reserve");
+        let mut doctor = ctrl
+            .try_admit_control_probe(&cx)
+            .expect("bounded doctor probe");
+        doctor
+            .promote_to_doctor()
+            .expect("trusted doctor boundary consumes its reserve");
+
+        let snapshot = ctrl.snapshot("stateful_lane", "regular-a");
+        assert_eq!(snapshot.global_cap, 4);
+        assert_eq!(snapshot.global_in_use, 4);
+        assert_eq!(snapshot.global_available, 0);
+        assert_eq!(snapshot.regular_global_available, 0);
+        assert_eq!(snapshot.operator_in_use, 1);
+        assert_eq!(snapshot.operator_available, 0);
+        assert_eq!(snapshot.doctor_in_use, 1);
+        assert_eq!(snapshot.doctor_available, 0);
+        assert_eq!(snapshot.control_probes_in_use, 0);
+
+        drop(operator);
+        drop(doctor);
+        drop(regular_a);
+        drop(regular_b);
+        let released = ctrl.snapshot("stateful_lane", "regular-a");
+        assert_eq!(released.global_in_use, 0);
+        assert_eq!(released.global_available, 4);
+        assert_eq!(released.regular_global_available, 2);
+        assert_eq!(released.operator_available, 1);
+        assert_eq!(released.doctor_available, 1);
+    }
+
+    #[test]
+    fn pre_auth_control_probes_require_server_side_class_promotion() {
+        let cx = test_cx();
+        let ctrl = AdmissionController::with_reserved(4, 4, 1, 1);
+        let _regular_a = ctrl.try_admit(&cx, "regular-a").expect("regular a");
+        let _regular_b = ctrl.try_admit(&cx, "regular-b").expect("regular b");
+
+        let mut first = ctrl
+            .try_admit_control_probe(&cx)
+            .expect("first bounded control probe");
+        assert!(
+            ctrl.try_admit_control_probe(&cx).is_err(),
+            "only one unclassified pre-auth probe may exist at once"
+        );
+        assert!(ctrl.try_admit(&cx, "operator").is_err());
+
+        first
+            .promote_to_operator()
+            .expect("authenticated operator promotion");
+        let mut second = ctrl
+            .try_admit_control_probe(&cx)
+            .expect("promotion frees the single probe slot");
+        assert!(
+            second.promote_to_operator().is_err(),
+            "one operator cannot borrow the doctor's class reserve"
+        );
+        second
+            .promote_to_doctor()
+            .expect("server-classified readiness promotion");
+        assert!(first.promote_to_doctor().is_err());
+
+        let snapshot = ctrl.snapshot("http_transport", "server");
+        assert_eq!(snapshot.global_in_use, 4);
+        assert_eq!(snapshot.operator_in_use, 1);
+        assert_eq!(snapshot.doctor_in_use, 1);
+        assert_eq!(snapshot.control_probes_in_use, 0);
+    }
+
+    #[test]
+    fn reserve_configuration_is_clamped_to_the_total_host_ceiling() {
+        let cx = test_cx();
+        let ctrl = AdmissionController::with_reserved(2, 1, usize::MAX, usize::MAX);
+        let snapshot = ctrl.snapshot("test", "subject");
+        assert_eq!(snapshot.global_cap, 2);
+        assert_eq!(snapshot.regular_global_cap, 0);
+        assert_eq!(snapshot.operator_reserved, 2);
+        assert_eq!(snapshot.doctor_reserved, 0);
+        assert!(ctrl.try_admit(&cx, "subject").is_err());
+        let mut first = ctrl.try_admit_control_probe(&cx).expect("probe 1");
+        first.promote_to_operator().expect("operator 1");
+        let mut second = ctrl.try_admit_control_probe(&cx).expect("probe 2");
+        second.promote_to_operator().expect("operator 2");
+        assert!(ctrl.try_admit_control_probe(&cx).is_err());
+    }
+
+    #[test]
+    fn drain_refuses_new_regular_reserved_and_probe_admission() {
+        let cx = test_cx();
+        let ctrl = AdmissionController::with_reserved(3, 1, 1, 1);
+        let held = ctrl.try_admit(&cx, "regular").expect("regular admitted");
+        ctrl.begin_drain();
+        assert!(ctrl.try_admit(&cx, "new-regular").is_err());
+        assert!(ctrl.try_admit_control_probe(&cx).is_err());
+        drop(held);
+        assert_eq!(ctrl.snapshot("test", "regular").global_in_use, 0);
     }
 
     #[test]
