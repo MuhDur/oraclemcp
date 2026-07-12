@@ -30,7 +30,7 @@ pub use enforcement::{
 
 pub use classifier::{
     BatchShape, Classifier, ClassifierConfig, GuardDecision, StageA, analyze_batch,
-    semantic_read_plan, stage_a,
+    named_bind_placeholders, semantic_read_plan, stage_a,
 };
 pub use clock::MonotonicDeadline;
 pub use exec_grant::{ExecGrantBinding, ExecGrantError, ExecGrantStore};

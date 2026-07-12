@@ -19,7 +19,7 @@
 use oraclemcp_audit::HmacSha256Key;
 use oraclemcp_db::OracleBind;
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
-use oraclemcp_guard::{Classifier, OperatingLevel};
+use oraclemcp_guard::{Classifier, OperatingLevel, named_bind_placeholders};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -229,9 +229,14 @@ impl CustomToolDef {
         if self.description.trim().is_empty() {
             return Err(invalid("description is required"));
         }
-        self.body()?; // exactly one body form
-        // Parameter names: unique, valid bind identifiers.
+        let body = self.body()?; // exactly one body form
+        // Parameter names: valid bind identifiers, unique both exactly AND
+        // (because Oracle bind names are case-insensitive — `:Id` and `:ID` are
+        // the same bind) case-insensitively. `seen_ci` maps the uppercased name
+        // to the operator's original spelling for a legible error.
         let mut seen = std::collections::HashSet::new();
+        let mut seen_ci: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for p in &self.params {
             if !is_bind_ident(&p.name) {
                 return Err(invalid(&format!(
@@ -241,6 +246,45 @@ impl CustomToolDef {
             }
             if !seen.insert(p.name.as_str()) {
                 return Err(invalid(&format!("duplicate parameter '{}'", p.name)));
+            }
+            if let Some(prev) = seen_ci.insert(p.name.to_ascii_uppercase(), p.name.clone()) {
+                return Err(invalid(&format!(
+                    "parameter '{}' duplicates parameter '{prev}' case-insensitively \
+                     (Oracle bind names are case-insensitive)",
+                    p.name
+                )));
+            }
+        }
+        // Declared parameters MUST match the named bind placeholders the body
+        // actually references, case-insensitively. A `:bind` with no parameter
+        // reaches ORA-01008 (not all variables bound) on every call; a parameter
+        // with no matching `:bind` is bound-but-unreferenced and reaches ORA-01036
+        // (illegal variable name) or is a silent no-op. Rejecting either at load
+        // time turns a permanently-advertised-but-unusable tool into a clear
+        // config error. Binds are extracted with the guard's SQL-aware tokenizer
+        // (`named_bind_placeholders`), so colons inside string/`q'`/`n'` literals,
+        // quoted identifiers, `--`/`/* */` comments, PL/SQL `:=`, and `::` casts
+        // never count. This is a TIGHTENING (refuse a broken definition); it never
+        // relaxes any query-path guard verdict.
+        let body_sql = match body {
+            ToolBody::InlineSql(s) => s,
+            ToolBody::PackageCall(c) => c,
+        };
+        let binds = named_bind_placeholders(body_sql); // uppercased, distinct
+        for b in &binds {
+            if !seen_ci.contains_key(b) {
+                return Err(invalid(&format!(
+                    "body references bind ':{}' but no matching parameter is declared",
+                    b.to_ascii_lowercase()
+                )));
+            }
+        }
+        for p in &self.params {
+            if !binds.contains(&p.name.to_ascii_uppercase()) {
+                return Err(invalid(&format!(
+                    "parameter '{}' is declared but the body references no ':{}' bind",
+                    p.name, p.name
+                )));
             }
         }
         // An operator-pinned `declared_level` must be a recognized operating
@@ -925,6 +969,169 @@ mod tests {
         ));
     }
 
+    // ── bind ⇄ parameter set validation at load (audit-5u1n.46) ───────────────
+
+    #[test]
+    fn missing_declared_param_for_bind_fails_load() {
+        // A `:bind` with no declared parameter would reach ORA-01008 on every
+        // call — rejected at load with tool + bind context (never silently loaded).
+        let src = r#"
+            [[tool]]
+            name = "myco_lookup"
+            description = "typo'd bind"
+            sql = "SELECT * FROM t WHERE id = :customer_id"
+            [[tool.params]]
+            name = "id"
+            type = "integer"
+        "#;
+        assert!(matches!(
+            parse_tools_file(src),
+            Err(LoadError::Invalid { name, reason })
+                if name == "myco_lookup" && reason.contains(":customer_id")
+        ));
+    }
+
+    #[test]
+    fn extra_declared_param_without_bind_fails_load() {
+        // A parameter the body never binds is dead config (ORA-01036 / silent
+        // no-op) — rejected at load with the offending parameter name.
+        let src = r#"
+            [[tool]]
+            name = "myco_count"
+            description = "unused param"
+            sql = "SELECT count(*) FROM t"
+            [[tool.params]]
+            name = "id"
+            type = "integer"
+        "#;
+        assert!(matches!(
+            parse_tools_file(src),
+            Err(LoadError::Invalid { reason, .. }) if reason.contains("id")
+        ));
+    }
+
+    #[test]
+    fn case_duplicate_params_fail_load() {
+        // `id` and `ID` are the SAME Oracle bind (case-insensitive) — a duplicate
+        // the exact-string check misses. It must fail load.
+        let src = r#"
+            [[tool]]
+            name = "myco_dup"
+            description = "case-dup params"
+            sql = "SELECT * FROM t WHERE id = :id"
+            [[tool.params]]
+            name = "id"
+            type = "integer"
+            [[tool.params]]
+            name = "ID"
+            type = "integer"
+        "#;
+        assert!(matches!(
+            parse_tools_file(src),
+            Err(LoadError::Invalid { reason, .. }) if reason.contains("case-insensitive")
+        ));
+    }
+
+    #[test]
+    fn repeated_and_case_insensitive_binds_pass() {
+        // A bind referenced many times is ONE bind; the declared case may differ
+        // from the body's — both load cleanly.
+        let repeated = def_with_params(
+            "SELECT :id, x FROM t WHERE a = :id AND b = :id",
+            vec![p("id", ParamType::Integer, true)],
+        );
+        assert!(
+            repeated.validate().is_ok(),
+            "repeated placeholder is one bind"
+        );
+
+        let ci_down = def_with_params(
+            "SELECT * FROM t WHERE id = :ID",
+            vec![p("id", ParamType::Integer, true)],
+        );
+        assert!(ci_down.validate().is_ok(), "param id matches bind :ID");
+
+        let ci_up = def_with_params(
+            "SELECT * FROM t WHERE id = :id",
+            vec![p("ID", ParamType::Integer, true)],
+        );
+        assert!(ci_up.validate().is_ok(), "param ID matches bind :id");
+    }
+
+    #[test]
+    fn colons_in_literals_comments_and_assignment_are_not_binds() {
+        // Ordinary / q'/ n' strings, quoted identifiers, line + block comments and
+        // PL/SQL `:=` each carry a colon that must NOT read as a bind. Only the
+        // single real `:real` bind counts, so declaring exactly `real` validates.
+        let sql = concat!(
+            "BEGIN ",
+            "-- comment :nope1\n",
+            "/* block :nope2 */ ",
+            "x := 'plain :nope3'; ",
+            "y := q'{q :nope4}'; ",
+            "z := n'nat :nope5'; ",
+            "UPDATE \"weird:col\" SET c = 1 WHERE k = :real; ",
+            "END;",
+        );
+        assert_eq!(named_bind_placeholders(sql), vec!["REAL".to_owned()]);
+        let good = def_with_params(sql, vec![p("real", ParamType::String, false)]);
+        assert!(good.validate().is_ok(), "only :real is a bind");
+        // Declaring one of the decoys would be an EXTRA param with no bind.
+        let bad = def_with_params(
+            sql,
+            vec![
+                p("real", ParamType::String, false),
+                p("nope1", ParamType::String, false),
+            ],
+        );
+        assert!(matches!(bad.validate(), Err(LoadError::Invalid { .. })));
+    }
+
+    #[test]
+    fn form_b_call_binds_are_validated() {
+        // Form B (package call) binds are validated identically to Form A.
+        let ok = CustomToolDef {
+            name: "myco_wrap".to_owned(),
+            description: "wrap a package".to_owned(),
+            sql: None,
+            call: Some("billing_api.get(:acct, :region)".to_owned()),
+            params: vec![
+                p("acct", ParamType::String, true),
+                p("region", ParamType::String, false),
+            ],
+            output_mode: OutputMode::Rows,
+            declared_level: None,
+            signature: None,
+        };
+        assert!(ok.validate().is_ok());
+        // Drop the `region` param -> its bind is now unmatched -> load fails.
+        let mut missing = ok.clone();
+        missing.params.pop();
+        assert!(matches!(
+            missing.validate(),
+            Err(LoadError::Invalid { reason, .. }) if reason.contains(":region")
+        ));
+    }
+
+    #[test]
+    fn invalid_bind_mismatch_never_reaches_discovery() {
+        // A mismatched definition is rejected by the loader, so it can never be
+        // registered / advertised via tools/list.
+        let src = r#"
+            [[tool]]
+            name = "myco_broken"
+            description = "bind typo"
+            sql = "SELECT * FROM t WHERE id = :i"
+            [[tool.params]]
+            name = "id"
+            type = "integer"
+        "#;
+        assert!(parse_tools_file(src).is_err());
+        // Nothing to register: the load never produced a def, so discovery is empty.
+        let reg = ToolRegistry::new();
+        assert!(!reg.tools.iter().any(|t| t.name == "myco_broken"));
+    }
+
     #[test]
     fn malformed_toml_is_a_parse_error() {
         assert!(matches!(
@@ -980,7 +1187,9 @@ mod tests {
     #[test]
     fn read_only_tool_loads_at_read_only() {
         let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
-        let d = def_sql("cust", "SELECT * FROM t WHERE id = :id", None);
+        // No binds here: `def_sql` declares no params, and (post-audit-5u1n.46)
+        // a `:bind` with no matching parameter is a load-time error.
+        let d = def_sql("cust", "SELECT * FROM t WHERE active = 1", None);
         let loaded = classify_at_load(&d, &c, OperatingLevel::ReadOnly).expect("loads");
         assert_eq!(loaded.required_level, OperatingLevel::ReadOnly);
     }
@@ -989,8 +1198,8 @@ mod tests {
     fn write_statement_refuses_on_a_read_only_profile() {
         let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
         // Static DML is Guarded (ReadWrite); on a READ_ONLY ceiling it refuses
-        // to load fail-fast. Caller PL/SQL is intentionally not needed here.
-        let d = def_sql("bump", "UPDATE t SET x = 1 WHERE id = :id", None);
+        // to load fail-fast. The literal avoids an undeclared :bind (post-5u1n.46).
+        let d = def_sql("bump", "UPDATE t SET x = 1 WHERE id = 7", None);
         let err = classify_at_load(&d, &c, OperatingLevel::ReadOnly).unwrap_err();
         assert!(
             matches!(err, LoadError::OverCeiling { required, .. } if required >= OperatingLevel::ReadWrite)

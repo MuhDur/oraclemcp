@@ -314,6 +314,57 @@ fn canonical_marker_scan(upper_source: &str) -> String {
     format!(" {} ", parts.join(" "))
 }
 
+/// Extract the distinct **named bind placeholders** (`:name`) referenced by
+/// `sql`, in first-appearance order, using the *same* fail-closed Oracle
+/// tokenizer the classifier itself uses. This is a read-only projection of the
+/// token stream — it NEVER participates in, and can never loosen, a
+/// classification/enforcement decision; it only reports which bind identifiers a
+/// body mentions so callers (e.g. custom-tool loading) can reject a definition
+/// whose declared parameters do not match its binds *at load time* instead of on
+/// every Oracle round trip.
+///
+/// Because the tokenizer treats string/`q'[…]'`/`n'…'` literals, `"quoted
+/// identifiers"`, and `--` / `/* … */` comments as single opaque tokens, a colon
+/// buried inside any of them can never register as a bind. PL/SQL assignment
+/// (`:=`, `Token::Assignment`) and PostgreSQL-style casts (`::`,
+/// `Token::DoubleColon`) are distinct tokens from a bare `Token::Colon`, so they
+/// never register either. Only a `Token::Colon` *immediately* followed (no
+/// intervening whitespace) by a bare, unquoted word is a named bind; positional
+/// binds (`:1`) and quoted bind names (`:"X"`) are ignored because they cannot be
+/// declared as simple identifier parameters.
+///
+/// Names are returned **uppercased** because Oracle bind names are
+/// case-insensitive (`:Id` and `:ID` denote the same bind), so callers can do a
+/// case-insensitive set comparison. Tokenization failure is fail-closed for the
+/// caller: an empty set makes every declared parameter read as unmatched, so a
+/// body the tokenizer cannot lex is rejected rather than silently accepted.
+#[must_use]
+pub fn named_bind_placeholders(sql: &str) -> Vec<String> {
+    let dialect = OracleDialect {};
+    let Ok(tokens) = Tokenizer::new(&dialect, sql).tokenize() else {
+        return Vec::new();
+    };
+    let mut binds: Vec<String> = Vec::new();
+    let mut after_colon = false;
+    for token in &tokens {
+        // A bind is a bare `:` glued to the very next token being an unquoted
+        // word. `after_colon` is the previous token; recompute it for the next
+        // iteration *before* the check so a word only counts when it directly
+        // follows the colon (any intervening whitespace token clears the flag).
+        if let Token::Word(w) = token
+            && after_colon
+            && w.quote_style.is_none()
+        {
+            let name = w.value.to_ascii_uppercase();
+            if !binds.contains(&name) {
+                binds.push(name);
+            }
+        }
+        after_colon = matches!(token, Token::Colon);
+    }
+    binds
+}
+
 /// Statement-leading admin/DCL verb sequences that require `OperatingLevel::Admin`
 /// (levels.rs:37 — "GRANT / REVOKE, ALTER USER/SYSTEM, cross-schema DCL"). These
 /// are matched against the *canonicalized* token stream produced by
@@ -5531,6 +5582,34 @@ mod tests {
             "q-quoted literal must not affect BEGIN/END depth"
         );
         assert_eq!(shape.statement_count, 1);
+    }
+
+    #[test]
+    fn named_bind_placeholders_extracts_only_real_named_binds() {
+        // Named binds: uppercased, de-duplicated, first-appearance order.
+        assert_eq!(
+            named_bind_placeholders("SELECT * FROM t WHERE a = :a AND b = :B AND a2 = :a"),
+            vec!["A".to_owned(), "B".to_owned()]
+        );
+        // `::` casts and PL/SQL `:=` assignment are distinct tokens — never binds.
+        assert!(named_bind_placeholders("SELECT col::text FROM t").is_empty());
+        assert!(named_bind_placeholders("BEGIN x := 1; END;").is_empty());
+        // Positional (`:1`) and quoted (`:\"x\"`) binds are not simple named binds.
+        assert!(named_bind_placeholders("SELECT :1 FROM dual").is_empty());
+        assert!(named_bind_placeholders("SELECT :\"x\" FROM dual").is_empty());
+        // Colons inside string / q-quote / national literals, quoted identifiers,
+        // and line/block comments never register as binds.
+        assert!(
+            named_bind_placeholders(
+                "SELECT 'a:b', q'{c:d}', n'e:f', \"g:h\" FROM t -- :i\n/* :j */"
+            )
+            .is_empty()
+        );
+        // A colon separated from its name by whitespace is not a bind (Oracle
+        // requires the name glued to the colon).
+        assert!(named_bind_placeholders("SELECT : x FROM dual").is_empty());
+        // A tokenizer failure (unterminated literal) is fail-closed: no binds.
+        assert!(named_bind_placeholders("SELECT 'unterminated :x").is_empty());
     }
 
     #[test]
