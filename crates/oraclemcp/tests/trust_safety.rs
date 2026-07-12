@@ -324,6 +324,26 @@ mod live {
         }
     }
 
+    async fn drop_qa82_objects(cx: &Cx, conn: &RustOracleConnection) {
+        let _ = conn
+            .execute(
+                cx,
+                "BEGIN DBMS_RLS.DROP_POLICY('SYSTEM', 'ORACLEMCP_QA82_T', 'ORACLEMCP_QA82_P'); \
+                 EXCEPTION WHEN OTHERS THEN NULL; END;",
+                &[] as &[OracleBind],
+            )
+            .await;
+        for ddl in [
+            "DROP VIEW ORACLEMCP_QA82_VIEW",
+            "DROP FUNCTION ORACLEMCP_QA82_VIEW_FN",
+            "DROP FUNCTION ORACLEMCP_QA82_POLICY_FN",
+            "DROP TABLE ORACLEMCP_QA82_T PURGE",
+            "DROP TABLE ORACLEMCP_QA82_LOG PURGE",
+        ] {
+            let _ = conn.execute(cx, ddl, &[] as &[OracleBind]).await;
+        }
+    }
+
     /// QA102 (live): Oracle accepts a zero-argument function without `()`.
     /// The served semantic gate must resolve that bare value as executable code
     /// and refuse both delivery modes before its autonomous write can occur.
@@ -409,6 +429,113 @@ mod live {
                 count,
                 Some(0),
                 "refused reads must leave no autonomous write"
+            );
+        });
+    }
+
+    /// QA82 (live): view bodies and VPD policies can hide autonomous writes
+    /// that no token in the submitted SELECT reveals. Exact relation proof must
+    /// refuse both before Oracle evaluates either function.
+    #[test]
+    fn qa82_live_view_and_vpd_side_effects_never_execute() {
+        run_with_cx(|cx| async move {
+            let Some(setup) = connect_or_skip(
+                &cx,
+                "qa82_live_view_and_vpd_side_effects_never_execute/setup",
+            )
+            .await
+            else {
+                return;
+            };
+            drop_qa82_objects(&cx, &setup).await;
+            for ddl in [
+                "CREATE TABLE ORACLEMCP_QA82_LOG (SOURCE VARCHAR2(16) NOT NULL)",
+                "CREATE TABLE ORACLEMCP_QA82_T (N NUMBER NOT NULL)",
+                "CREATE OR REPLACE FUNCTION ORACLEMCP_QA82_VIEW_FN RETURN NUMBER AUTHID DEFINER IS \
+                 PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ORACLEMCP_QA82_LOG VALUES ('VIEW'); \
+                 COMMIT; RETURN 1; END;",
+                "CREATE OR REPLACE FUNCTION ORACLEMCP_QA82_POLICY_FN(OWNER_NAME VARCHAR2, OBJECT_NAME VARCHAR2) \
+                 RETURN VARCHAR2 AUTHID DEFINER IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN \
+                 INSERT INTO ORACLEMCP_QA82_LOG VALUES ('VPD'); COMMIT; RETURN '1=1'; END;",
+                "CREATE VIEW ORACLEMCP_QA82_VIEW AS SELECT ORACLEMCP_QA82_VIEW_FN AS N FROM DUAL",
+            ] {
+                setup
+                    .execute(&cx, ddl, &[] as &[OracleBind])
+                    .await
+                    .expect("create hidden-side-effect fixture");
+            }
+            setup
+                .execute(
+                    &cx,
+                    "INSERT INTO ORACLEMCP_QA82_T VALUES (1)",
+                    &[] as &[OracleBind],
+                )
+                .await
+                .expect("seed VPD table");
+            setup.commit(&cx).await.expect("commit VPD seed");
+            setup
+                .execute(
+                    &cx,
+                    "BEGIN DBMS_RLS.ADD_POLICY(OBJECT_SCHEMA => 'SYSTEM', \
+                     OBJECT_NAME => 'ORACLEMCP_QA82_T', POLICY_NAME => 'ORACLEMCP_QA82_P', \
+                     FUNCTION_SCHEMA => 'SYSTEM', POLICY_FUNCTION => 'ORACLEMCP_QA82_POLICY_FN', \
+                     STATEMENT_TYPES => 'SELECT', ENABLE => TRUE); END;",
+                    &[] as &[OracleBind],
+                )
+                .await
+                .expect("attach SELECT VPD policy");
+            drop(setup);
+
+            let Some(served) = connect_or_skip(
+                &cx,
+                "qa82_live_view_and_vpd_side_effects_never_execute/served",
+            )
+            .await
+            else {
+                return;
+            };
+            let dispatcher = OracleDispatcher::new(Box::new(served));
+            for sql in [
+                "SELECT * FROM ORACLEMCP_QA82_VIEW",
+                "SELECT N FROM ORACLEMCP_QA82_T",
+            ] {
+                let outcome = ToolDispatch::dispatch(
+                    &dispatcher,
+                    &cx,
+                    DispatchContext::default(),
+                    "oracle_query",
+                    serde_json::json!({"sql": sql}),
+                )
+                .await;
+                assert!(
+                    matches!(outcome, Outcome::Err(ref error) if error.error_class == oraclemcp_core::error::ErrorClass::ForbiddenStatement),
+                    "hidden-side-effect read must fail closed: {sql}: {outcome:?}"
+                );
+            }
+            drop(dispatcher);
+
+            let Some(probe) = connect_or_skip(
+                &cx,
+                "qa82_live_view_and_vpd_side_effects_never_execute/probe",
+            )
+            .await
+            else {
+                return;
+            };
+            let rows = probe
+                .query_rows(
+                    &cx,
+                    "SELECT COUNT(*) AS N FROM ORACLEMCP_QA82_LOG",
+                    &[] as &[OracleBind],
+                )
+                .await
+                .expect("read hidden-side-effect witness");
+            let count = rows.first().and_then(|row| row.parse_i64("N"));
+            drop_qa82_objects(&cx, &probe).await;
+            assert_eq!(
+                count,
+                Some(0),
+                "refused view and VPD reads must leave no autonomous write"
             );
         });
     }
