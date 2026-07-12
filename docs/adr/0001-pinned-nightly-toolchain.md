@@ -7,7 +7,7 @@ Accepted (0.4.0).
 ## Context
 
 `oraclemcp` is engine-free pure Rust with the thin `oracledb` driver compiled
-in. The workspace has no stable MSRV because **asupersync 0.3.4** — the async
+in. The workspace has no stable MSRV because **asupersync 0.3.5** — the async
 runtime the transport and DB seam run on — uses nightly-only language features
 (`#![feature(try_trait_v2)]` and `try_trait_v2_residual`). The pinned `oracledb`
 0.5.1 driver itself is **stable-clean**: it is *not* the reason for the nightly

@@ -1,19 +1,24 @@
 # Release version surfaces (D3.1 audit)
 
-Every file below must carry the **same** workspace release version before a tag is cut.
+Every file below must carry its expected release version before a tag is cut —
+the shared workspace version for the `oraclemcp-*` surfaces, and the pinned
+driver version for the driver-pin surfaces (server and driver version
+independently since 0.8.0).
 `scripts/release_surface_sync_check.sh` enforces this inventory mechanically;
 `scripts/release_preflight.sh` and `scripts/release_acceptance_ci_suite.sh` call it on every release gate run. For drift drills only, `ORACLEMCP_RELEASE_SURFACE_SYNC_HEALTH_PATH` overrides the operator health fixture path (see `release_surface_drift_fails_fast` in `crates/oraclemcp/tests/e2e_harness.rs`).
 
-The expected version is always read from `cargo metadata` (all nine `oraclemcp-*`
-workspace packages share one version). The driver exact pins (`oracledb`,
-`oracledb-protocol`) must match that version as `=X.Y.Z`.
+The expected workspace version is always read from `cargo metadata` (all nine
+`oraclemcp-*` workspace packages share one version). The `oracledb` /
+`oracledb-protocol` driver pins are exact `=X.Y.Z` pins on the **separately
+versioned** driver release train (currently `=0.8.2`); the sync check verifies
+each driver pin against the driver's own version, not the workspace version.
 
 | Surface | Path / check |
 | --- | --- |
 | Workspace driver pins | `Cargo.toml` (`oracledb`, `oracledb-protocol` `=version`) |
 | Crate manifests | `crates/oraclemcp-*/Cargo.toml` (`version =`) |
 | Lockfile | `Cargo.lock` (workspace crates + `oracledb` + `oracledb-protocol`) |
-| Driver seam pin test | `crates/oraclemcp-db/src/connection.rs` (`pin_is_0_7_*` asserts `=version`) |
+| Driver seam pin test | `crates/oraclemcp-db/src/connection.rs` (`pin_is_0_8_2_and_seam_intact` asserts the `=version`) |
 | MCP registry | `server.json` (`version`, OCI `ghcr.io/muhdur/oraclemcp:version`) |
 | Dashboard npm | `web/package.json`, `web/package-lock.json` (root + `packages[""]`) |
 | npm wrapper | `npm/oraclemcp/package.json` |

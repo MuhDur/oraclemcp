@@ -19,7 +19,7 @@ repository = "https://github.com/MuhDur/oraclemcp"
 homepage = "https://github.com/MuhDur/oraclemcp"
 # No `rust-version`: the thin-native line is pinned to nightly because
 # asupersync uses nightly-only language features (try_trait_v2 + its residual).
-# The oracledb 0.7.2 driver is stable-clean and is NOT the reason for the pin.
+# The oracledb 0.8.2 driver is stable-clean and is NOT the reason for the pin.
 keywords = ["oracle", "mcp", "database", "sql"]
 categories = ["database", "development-tools"]
 
@@ -49,7 +49,7 @@ oracledb = { version = "=0.8.2", default-features = false }
 # `TnsnamesReader` DIRECTLY via the `oracledb_protocol::` path — which does NOT
 # match the driver-seam pattern (`oracledb` + `::`) that
 # scripts/oraclemcp_driver_seam_lint.sh confines to connection.rs, because the
-# `_` breaks the adjacency. Pinned EXACTLY to the version `oracledb 0.7.2`
+# `_` breaks the adjacency. Pinned EXACTLY to the version `oracledb 0.8.2`
 # already resolves, so this direct edge never floats the graph; pure
 # encode/decode (no async runtime), so the engine-free boundary holds.
 oracledb-protocol = { version = "=0.8.2", default-features = false }

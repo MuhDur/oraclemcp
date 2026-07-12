@@ -19,10 +19,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rows_affected = null` from authenticating as `u64::MAX`; historical v1-v4
   records continue to verify byte-for-byte without rewriting the audit log.
 
-## [0.8.0] — 2026-07-07
+## [0.8.0] — 2026-07-09
 
-- Adopted oracledb 0.8.0 (independent driver release train; server and driver now version separately).
-- Breaking: ErrorEnvelope and GuardDecision gained structured-reason fields (structured_reason / reason_category / offending_construct) — additive diagnostics that require a minor bump under 0.x SemVer.
+### Changed
+
+- Adopted the independent `oracledb` driver **0.8.2** (via 0.8.1) and
+  `asupersync` 0.3.5; the server and driver now version separately. Wired the
+  driver's new accessors (K1 certificate-expiry and wallet cross-check, K2).
+
+### Added
+
+- **K10 streaming query results over MCP.** `oracle_query` can stream rows
+  incrementally as cursor-chunked Server-Sent Events, with the fail-closed guard
+  still classifying the statement before any row is fetched.
+- **K9 flashback AS-OF read mode.** A structured `as_of` parameter selects a
+  read-consistent point in time; the classifier is untouched.
+- **K2 live server-capability probe.** `oracle_capabilities` reports the
+  connected server's actual feature set (`ServerFeatures`).
+
+### Security
+
+- **`oracle_query_execute` re-classifies and re-gates at apply time (SEC-1).** A
+  previewed statement is never trusted on its stored verdict; the classifier and
+  operating-level check run again before execution.
+
+### Breaking
+
+- `ErrorEnvelope` and `GuardDecision` gained structured-reason fields
+  (`structured_reason` / `reason_category` / `offending_construct`) — additive
+  diagnostics that require a minor bump under 0.x SemVer.
 
 ## [0.7.2] — 2026-07-06
 

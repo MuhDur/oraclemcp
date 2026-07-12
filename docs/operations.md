@@ -24,7 +24,7 @@ incapable of writing.
 
 `oraclemcp` builds on a pinned Rust toolchain (`nightly-2026-05-11`, recorded in
 `rust-toolchain.toml`). The thin-native line has no stable MSRV because
-**asupersync 0.3.4** uses nightly-only language features (`try_trait_v2` +
+**asupersync 0.3.5** uses nightly-only language features (`try_trait_v2` +
 `try_trait_v2_residual`); the pinned `oracledb` 0.5.1 driver is stable-clean.
 
 **This is invisible at runtime.** Once compiled, `oraclemcp` is an ordinary
@@ -104,7 +104,7 @@ docker buildx build \
 docker run -i --rm oraclemcp:plsql-intelligence --json info
 ```
 
-Pin to an immutable tag (`:0.7.2`), not `:latest`, in any non-interactive
+Pin to an immutable tag (`:0.8.0`), not `:latest`, in any non-interactive
 deployment, and verify the image digest against the release. The exact
 verification commands — SBOM, provenance, and signatures for both the binaries
 and the image — are in [§6](#6-verifying-release-artifacts-sbom-provenance-signatures).
