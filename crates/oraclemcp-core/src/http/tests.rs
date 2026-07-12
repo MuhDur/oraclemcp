@@ -3642,6 +3642,45 @@ fn non_browser_operator_keeps_structured_ddl_dispatch_path() {
 }
 
 #[test]
+fn streaming_dispatch_requires_a_valid_jsonrpc_request() {
+    // QA100 .61: the streaming path is selected only from a well-formed JSON-RPC
+    // 2.0 tools/call request. An invalid envelope must fall through to the main
+    // dispatcher (which returns a proper JSON-RPC error) rather than being
+    // streamed unvalidated.
+    assert!(
+        streaming_oracle_query_call(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "oracle_query", "arguments": { "sql": "SELECT 1 FROM dual", "streaming": true } },
+        }))
+        .is_some(),
+        "a well-formed JSON-RPC 2.0 streaming request selects streaming"
+    );
+
+    let rejected = [
+        // missing jsonrpc
+        serde_json::json!({ "id": 1, "method": "tools/call", "params": { "name": "oracle_query", "arguments": { "streaming": true } } }),
+        // wrong jsonrpc version
+        serde_json::json!({ "jsonrpc": "1.0", "id": 1, "method": "tools/call", "params": { "name": "oracle_query", "arguments": { "streaming": true } } }),
+        // structured id (not a valid request id)
+        serde_json::json!({ "jsonrpc": "2.0", "id": { "x": 1 }, "method": "tools/call", "params": { "name": "oracle_query", "arguments": { "streaming": true } } }),
+        // null id
+        serde_json::json!({ "jsonrpc": "2.0", "id": null, "method": "tools/call", "params": { "name": "oracle_query", "arguments": { "streaming": true } } }),
+        // notification (no id)
+        serde_json::json!({ "jsonrpc": "2.0", "method": "tools/call", "params": { "name": "oracle_query", "arguments": { "streaming": true } } }),
+        // streaming not requested (existing behavior preserved)
+        serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "oracle_query", "arguments": { "streaming": false } } }),
+    ];
+    for req in &rejected {
+        assert!(
+            streaming_oracle_query_call(req).is_none(),
+            "invalid/non-streaming request must not select streaming: {req}"
+        );
+    }
+}
+
+#[test]
 fn restored_dashboard_read_only_actions_are_allowed_on_execute() {
     // QA100 .22: the dashboard's capabilities view and global source search were
     // dropped from the operator allowlist, so those read-only actions failed

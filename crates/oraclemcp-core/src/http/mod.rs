@@ -6351,10 +6351,24 @@ fn handle_mcp_delete(
 
 fn streaming_oracle_query_call(parsed: &Value) -> Option<(Value, String, Value)> {
     let object = parsed.as_object()?;
+    // Only select the streaming path for a well-formed JSON-RPC 2.0 request. An
+    // invalid envelope (wrong/missing `jsonrpc`, or an id that is not a JSON-RPC
+    // request id) must fall through to the main dispatcher, which validates it
+    // and returns a proper JSON-RPC error instead of being silently streamed.
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return None;
+    }
     if object.get("method").and_then(Value::as_str) != Some("tools/call") {
         return None;
     }
-    let id = object.get("id")?.clone();
+    // A request that expects a response must carry an id that is a string or a
+    // number; a missing id (a notification), a null id, or a structured id is
+    // not a streamable request.
+    let id = object.get("id")?;
+    if !id.is_string() && !id.is_number() {
+        return None;
+    }
+    let id = id.clone();
     let params = object.get("params")?.as_object()?;
     let name = params.get("name")?.as_str()?;
     if name != "oracle_query" {
