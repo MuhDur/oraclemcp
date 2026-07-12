@@ -3278,6 +3278,129 @@ fn qa45_profile_switch_refreshes_every_discovery_surface_and_execution() {
 }
 
 #[test]
+fn qa99_level_changes_and_ttl_expiry_emit_list_changed_only_when_visibility_changes() {
+    let dispatcher = Arc::new(OracleDispatcher::new_with_profile_level(
+        Box::new(NoExecMock),
+        Some("dev".to_owned()),
+        SessionLevelState::new(OperatingLevel::ReadWrite, false),
+    ));
+    let registry = crate::registry::tool_registry();
+    let capabilities = oraclemcp_core::CapabilitiesReport::new(
+        "test",
+        registry.tools.clone(),
+        OperatingLevel::ReadOnly,
+        oraclemcp_core::FeatureTiers {
+            live_db: true,
+            engine: false,
+            http_transport: false,
+        },
+    );
+    let server = oraclemcp_core::OracleMcpServer::new("test", registry, capabilities, dispatcher);
+    let owner = oraclemcp_core::notifications::STDIO_NOTIFICATION_OWNER;
+    let call = |id: u64, name: &str, arguments: Value| {
+        server
+            .handle_jsonrpc_request(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "tools/call",
+                    "params": { "name": name, "arguments": arguments }
+                }),
+                None,
+            )
+            .expect("tool response")
+    };
+    let listed_names = |id: u64| {
+        server
+            .handle_jsonrpc_request(
+                json!({"jsonrpc":"2.0", "id":id, "method":"tools/list"}),
+                None,
+            )
+            .expect("tools/list response")["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+
+    let read_only = listed_names(1);
+    assert!(!read_only.iter().any(|name| name == "oracle_execute"));
+    assert!(server.drain_server_notifications(owner).is_empty());
+
+    let preview = call(
+        2,
+        "oracle_set_session_level",
+        json!({"level":"READ_WRITE", "ttl_seconds":60}),
+    );
+    let confirm = preview["result"]["structuredContent"]["confirmation"]["confirm"]
+        .as_str()
+        .expect("preview confirmation")
+        .to_owned();
+    assert!(
+        server.drain_server_notifications(owner).is_empty(),
+        "preview does not change the served catalog"
+    );
+    call(
+        3,
+        "oracle_set_session_level",
+        json!({
+            "level":"READ_WRITE",
+            "ttl_seconds":60,
+            "execute":true,
+            "confirm":confirm
+        }),
+    );
+    let elevated = server.drain_server_notifications(owner);
+    assert_eq!(elevated.len(), 1);
+    assert_eq!(
+        elevated[0]["method"],
+        json!("notifications/tools/list_changed")
+    );
+    assert!(listed_names(4).iter().any(|name| name == "oracle_execute"));
+
+    call(5, "oracle_set_session_level", json!({"action":"status"}));
+    assert!(
+        server.drain_server_notifications(owner).is_empty(),
+        "status at an unchanged level is silent"
+    );
+    call(6, "oracle_set_session_level", json!({"action":"drop"}));
+    assert_eq!(server.drain_server_notifications(owner).len(), 1);
+    assert!(!listed_names(7).iter().any(|name| name == "oracle_execute"));
+
+    let preview = call(
+        8,
+        "oracle_set_session_level",
+        json!({"level":"READ_WRITE", "ttl_seconds":1}),
+    );
+    let confirm = preview["result"]["structuredContent"]["confirmation"]["confirm"]
+        .as_str()
+        .expect("second preview confirmation")
+        .to_owned();
+    call(
+        9,
+        "oracle_set_session_level",
+        json!({
+            "level":"READ_WRITE",
+            "ttl_seconds":1,
+            "execute":true,
+            "confirm":confirm
+        }),
+    );
+    assert_eq!(server.drain_server_notifications(owner).len(), 1);
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    server
+        .handle_jsonrpc_request(json!({"jsonrpc":"2.0", "id":10, "method":"ping"}), None)
+        .expect("ping response after expiry");
+    assert_eq!(
+        server.drain_server_notifications(owner).len(),
+        1,
+        "the first request after monotonic TTL expiry reports catalog shrinkage"
+    );
+    assert!(!listed_names(11).iter().any(|name| name == "oracle_execute"));
+}
+
+#[test]
 fn malformed_args_are_invalid_arguments_not_a_panic() {
     let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
     // Missing required `table`.
