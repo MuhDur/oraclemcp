@@ -3347,6 +3347,62 @@ fn operator_execute_allows_read_only_metadata_tools_for_explorer() {
 }
 
 #[test]
+fn dashboard_operator_auth_enforces_origin_even_for_authenticated_principals() {
+    // QA100 .87: an authenticated principal (e.g. an ambient mTLS client cert the
+    // browser attaches automatically) must NOT bypass the browser origin /
+    // Sec-Fetch CSRF check — otherwise a hostile page could drive the dashboard
+    // with the victim's ambient credential.
+    let dir = dashboard_test_dir("origin-csrf-87");
+    let auth = Arc::new(
+        DashboardAuth::new(dir.clone(), "http://127.0.0.1").expect("dashboard auth builds"),
+    );
+    let cfg = HttpTransportConfig {
+        dashboard_auth: Some(Arc::clone(&auth)),
+        ..Default::default()
+    };
+    let request = |origin: Option<&'static str>, sec_fetch: Option<&'static str>| {
+        let mut headers = vec![
+            ("host".to_owned(), "127.0.0.1".to_owned()),
+            ("content-type".to_owned(), "application/json".to_owned()),
+        ];
+        if let Some(origin) = origin {
+            headers.push(("origin".to_owned(), origin.to_owned()));
+        }
+        if let Some(sec_fetch) = sec_fetch {
+            headers.push(("sec-fetch-site".to_owned(), sec_fetch.to_owned()));
+        }
+        HttpRequest::new("POST", "/dashboard/api/action", headers, Vec::new())
+    };
+
+    // Authenticated + cross-origin => refused (the fix).
+    let refused = enforce_dashboard_operator_auth(
+        &cfg,
+        &request(Some("http://evil.example"), Some("cross-site")),
+        true,
+    )
+    .expect("a cross-origin authenticated request must be refused");
+    assert_eq!(refused.status, 403);
+
+    // Authenticated + same-origin => allowed.
+    assert!(
+        enforce_dashboard_operator_auth(
+            &cfg,
+            &request(Some("http://127.0.0.1"), Some("same-origin")),
+            true,
+        )
+        .is_none(),
+        "a same-origin authenticated request passes"
+    );
+
+    // Authenticated non-browser (no Origin / Sec-Fetch headers) => allowed, so
+    // bearer/mTLS API clients are unaffected.
+    assert!(
+        enforce_dashboard_operator_auth(&cfg, &request(None, None), true).is_none(),
+        "a non-browser authenticated request (no browser headers) passes"
+    );
+}
+
+#[test]
 fn dashboard_workbench_ddl_apply_is_release_gated() {
     let (auditor, sink) = operator_auditor();
     let calls = Arc::new(AtomicUsize::new(0));

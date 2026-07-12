@@ -2554,10 +2554,23 @@ fn enforce_dashboard_operator_auth(
     has_authenticated_principal: bool,
 ) -> Option<HttpResponse> {
     let auth = config.dashboard_auth.as_ref()?;
+    // Browser CSRF defense applied to EVERY request, even an already
+    // authenticated one: if a browser Origin / Sec-Fetch-Site header is present
+    // it MUST be same-origin, regardless of the authentication mechanism. An
+    // ambient credential — a pairing cookie OR an ambient mTLS client
+    // certificate the browser attaches automatically — is CSRF-able, so a valid
+    // principal does not exempt the origin check. Non-browser clients (CLI,
+    // bearer/mTLS API callers) send neither header and pass this check, so they
+    // are unaffected.
+    if let Some(response) = enforce_dashboard_get_headers(request) {
+        return Some(response);
+    }
     if has_authenticated_principal {
         return None;
     }
     if request.method == "POST" {
+        // Unauthenticated browser POST (the pairing flow): additionally require a
+        // matching Origin (fail closed on absent) and a valid CSRF ticket.
         if let Some(response) = enforce_dashboard_post_headers(request) {
             return Some(response);
         }
@@ -2571,9 +2584,6 @@ fn enforce_dashboard_operator_auth(
             Ok(()) => None,
             Err(_) => Some(dashboard_auth_required_response()),
         };
-    }
-    if let Some(response) = enforce_dashboard_get_headers(request) {
-        return Some(response);
     }
     match auth.session_view(request.header("cookie")) {
         Ok(_) => None,
