@@ -335,6 +335,33 @@ impl LeaseManager {
         Ok(())
     }
 
+    /// Revoke a lease after a DB call crossed an uncertain boundary. Removal
+    /// happens while the operation still owns the per-lease lock, so no later
+    /// handle can reuse the session. Any possibly-open transaction is rolled
+    /// back best-effort before the physical connection is dropped.
+    async fn quarantine_uncertain_locked(
+        &self,
+        cx: &Cx,
+        id: &str,
+        arc: &Arc<AsyncMutex<Lease>>,
+        lease: &mut Lease,
+        operation: &str,
+        error: DbError,
+    ) -> DbError {
+        debug_assert!(error.is_uncertain_session_state());
+        lease.lifecycle = LeaseLifecycle::Revoking;
+        self.remove_if_same(id, arc);
+        let outcome = match lease.force_rollback(cx).await {
+            Ok(()) => QuarantineOutcome::RolledBack,
+            Err(_) => QuarantineOutcome::UnknownDiscarded,
+        };
+        lease.lifecycle = LeaseLifecycle::Revoked;
+        quarantine_error(
+            outcome,
+            format!("{operation} crossed an uncertain DB boundary; lease discarded: {error}"),
+        )
+    }
+
     /// Renew a lease's TTL (clients renew at ~75% of the TTL). Errors if the
     /// lease is gone/expired.
     pub async fn renew(&self, cx: &Cx, id: &LeaseId) -> Result<LeaseInfo, DbError> {
@@ -422,12 +449,25 @@ impl LeaseManager {
         let arc = self.lease_arc(&id.0)?;
         let mut lease = arc.lock(cx).await.map_err(lock_err)?;
         self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
-        lease
+        let was_in_transaction = lease.in_transaction;
+        // SAVEPOINT may have succeeded even when the response is cancelled or
+        // lost. Mark transaction state before crossing that boundary so
+        // quarantine cleanup never skips the rollback.
+        lease.in_transaction = true;
+        match lease
             .conn
             .execute(cx, &format!("SAVEPOINT {name}"), &[])
-            .await?;
-        lease.in_transaction = true;
-        Ok(())
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) if error.is_uncertain_session_state() => Err(self
+                .quarantine_uncertain_locked(cx, &id.0, &arc, &mut lease, "savepoint", error)
+                .await),
+            Err(error) => {
+                lease.in_transaction = was_in_transaction;
+                Err(error)
+            }
+        }
     }
 
     /// Execute-in-savepoint **preview** (plan §5.4, bead P2-3): inside an
@@ -457,8 +497,27 @@ impl LeaseManager {
             let savepoint_sql = format!("SAVEPOINT {SP}");
             let rollback_sql = format!("ROLLBACK TO SAVEPOINT {SP}");
             db_checkpoint(cx, "oracle_lease.preview.savepoint.before")?;
-            lease.conn.execute(cx, &savepoint_sql, &[]).await?;
+            let was_in_transaction = lease.in_transaction;
             lease.in_transaction = true;
+            match lease.conn.execute(cx, &savepoint_sql, &[]).await {
+                Ok(_) => {}
+                Err(error) if error.is_uncertain_session_state() => {
+                    return Err(self
+                        .quarantine_uncertain_locked(
+                            cx,
+                            &id.0,
+                            &arc,
+                            &mut lease,
+                            "preview savepoint",
+                            error,
+                        )
+                        .await);
+                }
+                Err(error) => {
+                    lease.in_transaction = was_in_transaction;
+                    return Err(error);
+                }
+            }
             let preview_result = match db_checkpoint(cx, "oracle_lease.preview.execute.before") {
                 Ok(()) => lease.conn.execute(cx, sql, binds).await,
                 Err(err) => Err(err),
@@ -472,15 +531,16 @@ impl LeaseManager {
                         rolled_back: true,
                     })
                 }
-                (Err(err), Ok(_)) if err.is_uncertain_session_state() => {
-                    discard_lease = Some(QuarantineOutcome::RolledBack);
-                    Err(quarantine_error(
-                        QuarantineOutcome::RolledBack,
-                        format!(
-                            "preview failed after an uncertain DB boundary; rollback-to-savepoint succeeded and lease was discarded: {err}"
-                        ),
-                    ))
-                }
+                (Err(err), Ok(_)) if err.is_uncertain_session_state() => Err(self
+                    .quarantine_uncertain_locked(
+                        cx,
+                        &id.0,
+                        &arc,
+                        &mut lease,
+                        "preview execute",
+                        err,
+                    )
+                    .await),
                 (Err(err), Ok(_)) => Err(err),
                 (Ok(_), Err(cleanup_err)) | (Err(_), Err(cleanup_err)) => {
                     let outcome = match lease.force_rollback(cx).await {
@@ -509,11 +569,24 @@ impl LeaseManager {
         let arc = self.lease_arc(&id.0)?;
         let mut lease = arc.lock(cx).await.map_err(lock_err)?;
         self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
-        lease
+        match lease
             .conn
             .execute(cx, "BEGIN DBMS_OUTPUT.ENABLE(NULL); END;", &[])
-            .await?;
-        Ok(())
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) if error.is_uncertain_session_state() => Err(self
+                .quarantine_uncertain_locked(
+                    cx,
+                    &id.0,
+                    &arc,
+                    &mut lease,
+                    "DBMS_OUTPUT enablement",
+                    error,
+                )
+                .await),
+            Err(error) => Err(error),
+        }
     }
 
     /// Apply an `ALTER SESSION` statement on the leased session (the
@@ -534,8 +607,13 @@ impl LeaseManager {
         let arc = self.lease_arc(&id.0)?;
         let mut lease = arc.lock(cx).await.map_err(lock_err)?;
         self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
-        lease.conn.execute(cx, statement, &[]).await?;
-        Ok(())
+        match lease.conn.execute(cx, statement, &[]).await {
+            Ok(_) => Ok(()),
+            Err(error) if error.is_uncertain_session_state() => Err(self
+                .quarantine_uncertain_locked(cx, &id.0, &arc, &mut lease, "ALTER SESSION", error)
+                .await),
+            Err(error) => Err(error),
+        }
     }
 
     /// A snapshot of a lease's state.
@@ -659,6 +737,12 @@ mod tests {
         log: Arc<Mutex<MockLog>>,
     }
 
+    struct FailAfterEffectConn {
+        log: Arc<Mutex<MockLog>>,
+        fail_sql: &'static str,
+        error: DbError,
+    }
+
     #[async_trait::async_trait(?Send)]
     impl OracleConnection for MockConn {
         fn backend(&self) -> crate::types::OracleBackend {
@@ -684,6 +768,46 @@ mod tests {
             log.executed.push(sql.to_owned());
             log.executed_binds.push((sql.to_owned(), binds.to_vec()));
             Ok(0)
+        }
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            self.log.lock().unwrap().commits += 1;
+            Ok(())
+        }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            self.log.lock().unwrap().rollbacks += 1;
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for FailAfterEffectConn {
+        fn backend(&self) -> crate::types::OracleBackend {
+            crate::types::OracleBackend::RustOracle
+        }
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.log.lock().unwrap().executed.push(sql.to_owned());
+            Ok(vec![])
+        }
+        async fn execute(&self, _cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+            let mut log = self.log.lock().unwrap();
+            log.executed.push(sql.to_owned());
+            log.executed_binds.push((sql.to_owned(), binds.to_vec()));
+            if sql == self.fail_sql {
+                Err(self.error.clone())
+            } else {
+                Ok(0)
+            }
         }
         async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             self.log.lock().unwrap().commits += 1;
@@ -857,6 +981,44 @@ mod tests {
     fn mock() -> (Box<dyn OracleConnection>, Arc<Mutex<MockLog>>) {
         let log = Arc::new(Mutex::new(MockLog::default()));
         (Box::new(MockConn { log: log.clone() }), log)
+    }
+
+    async fn acquire_fail_after_effect(
+        mgr: &LeaseManager,
+        cx: &Cx,
+        fail_sql: &'static str,
+        error: DbError,
+    ) -> (LeaseId, Arc<Mutex<MockLog>>) {
+        let log = Arc::new(Mutex::new(MockLog::default()));
+        let id = mgr
+            .acquire(
+                cx,
+                "dev",
+                "a",
+                Duration::from_secs(900),
+                &[],
+                Box::new(FailAfterEffectConn {
+                    log: log.clone(),
+                    fail_sql,
+                    error,
+                }),
+            )
+            .await
+            .expect("acquire");
+        (id, log)
+    }
+
+    fn assert_quarantined_rolled_back(error: &DbError) {
+        assert!(
+            matches!(
+                error,
+                DbError::Quarantined {
+                    outcome: QuarantineOutcome::RolledBack,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
     }
 
     /// Run an async test body on a fresh current-thread runtime, handing it the
@@ -1290,6 +1452,137 @@ mod tests {
                     .any(|sql| sql.contains("CURRENT_SCHEMA = HR")),
                 "allowlisted statement reaches the pinned session"
             );
+        });
+    }
+
+    #[test]
+    fn uncertain_savepoint_response_revokes_and_rolls_back_lease() {
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (id, log) = acquire_fail_after_effect(
+                &mgr,
+                &cx,
+                "SAVEPOINT SP_CANCEL",
+                DbError::Cancelled("response lost after savepoint effect".to_owned()),
+            )
+            .await;
+
+            let error = mgr
+                .savepoint(&cx, &id, "SP_CANCEL")
+                .await
+                .expect_err("uncertain savepoint is quarantined");
+            assert_quarantined_rolled_back(&error);
+            assert_eq!(mgr.active_count(), 0);
+            assert_eq!(log.lock().unwrap().rollbacks, 1);
+            let calls = log.lock().unwrap().executed.len();
+            assert!(mgr.savepoint(&cx, &id, "LATE").await.is_err());
+            assert_eq!(log.lock().unwrap().executed.len(), calls);
+        });
+    }
+
+    #[test]
+    fn uncertain_dbms_output_response_revokes_open_transaction() {
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (id, log) = acquire_fail_after_effect(
+                &mgr,
+                &cx,
+                "BEGIN DBMS_OUTPUT.ENABLE(NULL); END;",
+                DbError::Cancelled("response lost after DBMS_OUTPUT effect".to_owned()),
+            )
+            .await;
+            mgr.begin_transaction(&cx, &id).await.expect("begin");
+
+            let error = mgr
+                .enable_dbms_output(&cx, &id)
+                .await
+                .expect_err("uncertain enablement is quarantined");
+            assert_quarantined_rolled_back(&error);
+            assert_eq!(mgr.active_count(), 0);
+            assert_eq!(log.lock().unwrap().rollbacks, 1);
+            assert!(mgr.info(&cx, &id).await.is_err());
+        });
+    }
+
+    #[test]
+    fn uncertain_alter_session_response_revokes_open_transaction() {
+        const ALTER: &str = "ALTER SESSION SET CURRENT_SCHEMA = HR";
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (id, log) = acquire_fail_after_effect(
+                &mgr,
+                &cx,
+                ALTER,
+                DbError::Cancelled("response lost after ALTER SESSION effect".to_owned()),
+            )
+            .await;
+            mgr.begin_transaction(&cx, &id).await.expect("begin");
+
+            let error = mgr
+                .apply_session_statement(&cx, &id, ALTER)
+                .await
+                .expect_err("uncertain ALTER SESSION is quarantined");
+            assert_quarantined_rolled_back(&error);
+            assert_eq!(mgr.active_count(), 0);
+            assert_eq!(log.lock().unwrap().rollbacks, 1);
+            assert!(mgr.info(&cx, &id).await.is_err());
+        });
+    }
+
+    #[test]
+    fn uncertain_preview_savepoint_response_revokes_and_rolls_back() {
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (id, log) = acquire_fail_after_effect(
+                &mgr,
+                &cx,
+                "SAVEPOINT oraclemcp_preview",
+                DbError::Cancelled("response lost after preview savepoint".to_owned()),
+            )
+            .await;
+
+            let error = mgr
+                .preview_dml(&cx, &id, "UPDATE employees SET name = name", &[])
+                .await
+                .expect_err("uncertain preview savepoint is quarantined");
+            assert_quarantined_rolled_back(&error);
+            assert_eq!(mgr.active_count(), 0);
+            assert_eq!(log.lock().unwrap().rollbacks, 1);
+            assert!(
+                !log.lock()
+                    .unwrap()
+                    .executed
+                    .iter()
+                    .any(|sql| sql.starts_with("UPDATE")),
+                "preview DML never runs after an uncertain savepoint"
+            );
+        });
+    }
+
+    #[test]
+    fn deterministic_session_error_keeps_lease_reusable() {
+        const ALTER: &str = "ALTER SESSION SET CURRENT_SCHEMA = HR";
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (id, log) = acquire_fail_after_effect(
+                &mgr,
+                &cx,
+                ALTER,
+                DbError::Execute("ORA-00922: missing or invalid option".to_owned()),
+            )
+            .await;
+
+            let error = mgr
+                .apply_session_statement(&cx, &id, ALTER)
+                .await
+                .expect_err("deterministic Oracle error is returned");
+            assert!(matches!(error, DbError::Execute(_)));
+            assert!(!error.is_uncertain_session_state());
+            assert_eq!(mgr.active_count(), 1);
+            mgr.savepoint(&cx, &id, "AFTER_ERROR")
+                .await
+                .expect("known-safe failure leaves lease reusable");
+            assert_eq!(log.lock().unwrap().rollbacks, 0);
         });
     }
 
