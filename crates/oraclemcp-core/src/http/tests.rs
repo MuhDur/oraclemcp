@@ -1251,7 +1251,7 @@ fn stateful_session_caps_are_atomic_per_principal_and_global_and_release_on_dele
         Vec::new(),
     );
     assert_eq!(
-        handle_mcp_delete(&cfg, &delete, "oauth:alice@example.invalid").status,
+        handle_mcp_delete(&test_server(), &cfg, &delete, "oauth:alice@example.invalid",).status,
         202
     );
     assert_eq!(sessions.len(), 1);
@@ -5619,7 +5619,8 @@ fn stateful_idle_reaper_closes_by_timeout_and_clears_buffers() {
         ..Default::default()
     };
 
-    assert_eq!(reap_idle_stateful_sessions(&cfg), 1);
+    let server = test_server();
+    assert_eq!(reap_idle_stateful_sessions(&server, &cfg), 1);
     assert!(session_store.principal_for(session_id).is_none());
     assert!(
         result_store
@@ -5640,7 +5641,7 @@ fn stateful_idle_reaper_closes_by_timeout_and_clears_buffers() {
         )]
     );
     assert_eq!(
-        reap_idle_stateful_sessions(&cfg),
+        reap_idle_stateful_sessions(&server, &cfg),
         0,
         "reaping the same idle session is idempotent"
     );
@@ -5714,6 +5715,7 @@ fn principal_session_close_clears_sessions_buffers_and_lanes() {
 
     assert_eq!(
         close_http_principal_sessions(
+            &test_server(),
             &cfg,
             "client:sha256:aaa",
             DispatchCloseReason::SessionDelete,
@@ -5790,6 +5792,7 @@ fn principal_session_close_forwards_the_revocation_generation_floor() {
     };
 
     close_http_principal_sessions(
+        &test_server(),
         &cfg,
         "client:sha256:aaa",
         DispatchCloseReason::SessionDelete,
@@ -6449,6 +6452,11 @@ fn initialize_over_streamable_http_returns_json() {
     let body = response_json(&response);
     assert!(body.get("result").is_some(), "JSON-RPC initialize result");
     assert_eq!(body["result"]["serverInfo"]["name"], "oraclemcp");
+    assert_eq!(
+        body["result"]["capabilities"]["tools"]["listChanged"],
+        serde_json::json!(false),
+        "stateless JSON has no compliant server-notification channel"
+    );
 }
 
 #[test]
@@ -6467,6 +6475,114 @@ fn stateful_initialize_uses_sse_and_session_header() {
     assert!(body.contains("id: 0\nretry: 3000\ndata:\n\n"));
     assert!(!body.contains("\"method\""));
     assert!(body.contains("\"result\""));
+    let initialize = sse_json_events(&HttpResponse {
+        status: 200,
+        headers: Vec::new(),
+        body: body.into_bytes(),
+    });
+    assert_eq!(
+        initialize[0]["result"]["capabilities"]["tools"]["listChanged"],
+        serde_json::json!(true),
+        "stateful SSE advertises the notification channel it implements"
+    );
+}
+
+#[test]
+fn stateful_progress_notifications_stay_on_the_originating_session_stream() {
+    let sessions = Arc::new(HttpSessionStore::default());
+    let results = Arc::new(HttpResultStore::new());
+    let cfg = HttpTransportConfig {
+        json_response: true,
+        stateful: true,
+        session_store: Some(Arc::clone(&sessions)),
+        result_store: Some(Arc::clone(&results)),
+        ..Default::default()
+    };
+    let server = test_server();
+    let initialize = || {
+        handle_http_request(&server, &cfg, post(&init_body()))
+            .header("mcp-session-id")
+            .expect("initialize returns session id")
+            .to_owned()
+    };
+    let session_a = initialize();
+    let session_b = initialize();
+
+    let call = |session_id: &str, id: u64, token: &str| {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": "test_tool",
+                "arguments": {},
+                "_meta": { "progressToken": token }
+            }
+        });
+        handle_http_request(
+            &server,
+            &cfg,
+            HttpRequest::new(
+                "POST",
+                MCP_PATH,
+                [
+                    ("host", "127.0.0.1"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json, text/event-stream"),
+                    ("mcp-session-id", session_id),
+                    ("mcp-protocol-version", "2025-11-25"),
+                ],
+                body.to_string().into_bytes(),
+            ),
+        )
+    };
+
+    let response_a = call(&session_a, 10, "token-a");
+    let response_b = call(&session_b, 20, "token-b");
+    for (response, expected, forbidden) in [
+        (&response_a, "token-a", "token-b"),
+        (&response_b, "token-b", "token-a"),
+    ] {
+        let progress = sse_json_events(response)
+            .into_iter()
+            .filter(|event| event["method"] == "notifications/progress")
+            .collect::<Vec<_>>();
+        assert_eq!(progress.len(), 2, "start and finish are delivered");
+        assert!(
+            progress
+                .iter()
+                .all(|event| event["params"]["progressToken"] == expected)
+        );
+        assert!(
+            progress
+                .iter()
+                .all(|event| event["params"]["progressToken"] != forbidden)
+        );
+    }
+
+    for (session_id, expected, forbidden) in [
+        (&session_a, "token-a", "token-b"),
+        (&session_b, "token-b", "token-a"),
+    ] {
+        let replay = results
+            .events_after(session_id, None, false)
+            .expect("session replay remains available");
+        let progress = replay
+            .iter()
+            .filter(|event| event.data["method"] == "notifications/progress")
+            .collect::<Vec<_>>();
+        assert_eq!(progress.len(), 2);
+        assert!(
+            progress
+                .iter()
+                .all(|event| event.data["params"]["progressToken"] == expected)
+        );
+        assert!(
+            progress
+                .iter()
+                .all(|event| event.data["params"]["progressToken"] != forbidden)
+        );
+    }
 }
 
 #[test]
@@ -7254,7 +7370,7 @@ fn stateful_shutdown_clears_both_registries_and_releases_capacity() {
         ..Default::default()
     };
 
-    close_stateful_sessions_for_shutdown(&cfg);
+    close_stateful_sessions_for_shutdown(&test_server(), &cfg);
 
     assert_eq!(sessions.len(), 0);
     assert_eq!(results.session_count(), 0);
@@ -9085,11 +9201,18 @@ fn tool_stream_response_frames_each_row_before_final_result() {
     let response = HttpToolStream::new(
         test_server(),
         Some(Arc::clone(&result_store)),
-        "session-test".to_owned(),
-        "principal-test".to_owned(),
+        HttpToolStreamBinding {
+            session_id: "session-test".to_owned(),
+            principal_key: "principal-test".to_owned(),
+        },
         json!(7),
         frames_rx,
         reply_rx.into(),
+        HttpToolStreamNotifications {
+            initial: Vec::new(),
+            request_owner: None,
+            progress_token: None,
+        },
     )
     .into_buffered_response();
     assert_eq!(response.status, 200);
@@ -9160,7 +9283,10 @@ fn sse_response_emits_chunk_frames_before_the_authoritative_result() {
         streaming_query_response(),
         Some("chunk-session".to_owned()),
         "principal-test",
-        None,
+        SseResponseEvents {
+            response_event_id: None,
+            notifications: &[],
+        },
     );
     assert_eq!(response.status, 200);
     let text = String::from_utf8(response.body).expect("utf8 SSE body");
@@ -9199,7 +9325,10 @@ fn sse_response_emits_chunk_frames_before_the_authoritative_result() {
         inline,
         None,
         "principal-test",
-        Some("1/0"),
+        SseResponseEvents {
+            response_event_id: Some("1/0"),
+            notifications: &[],
+        },
     );
     let plain_text = String::from_utf8(plain.body).expect("utf8");
     assert!(

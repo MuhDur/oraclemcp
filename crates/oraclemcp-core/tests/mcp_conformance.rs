@@ -1765,12 +1765,13 @@ fn tools_list_changed_is_advertised_and_emitted_when_the_tool_set_changes() {
     );
 
     // Nothing queued yet.
-    assert!(server.drain_server_notifications().is_empty());
+    let owner = oraclemcp_core::notifications::STDIO_NOTIFICATION_OWNER;
+    assert!(server.drain_server_notifications(owner).is_empty());
 
     // A change to the served tool set (what oracle_switch_profile enqueues).
-    hub.enqueue_tools_list_changed();
+    hub.enqueue_tools_list_changed(owner);
 
-    let notes = server.drain_server_notifications();
+    let notes = server.drain_server_notifications(owner);
     assert_eq!(notes.len(), 1);
     assert_eq!(
         notes[0]["method"],

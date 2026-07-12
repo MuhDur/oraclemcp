@@ -1194,6 +1194,10 @@ impl HttpSessionStore {
         session_ids
     }
 
+    fn session_ids(&self) -> Vec<String> {
+        self.state.lock().owners.keys().cloned().collect()
+    }
+
     fn reap_idle(&self, idle_ttl: Duration) -> Vec<(String, String)> {
         if idle_ttl.is_zero() {
             return Vec::new();
@@ -2269,7 +2273,7 @@ fn guard_http_request(config: &HttpTransportConfig, request: &HttpRequest) -> Op
 enum HttpExchange {
     Buffered(HttpResponse),
     SseStream(HttpSseStream),
-    ToolStream(HttpToolStream),
+    ToolStream(Box<HttpToolStream>),
 }
 
 impl HttpExchange {
@@ -2277,7 +2281,7 @@ impl HttpExchange {
         match self {
             Self::Buffered(response) => response,
             Self::SseStream(stream) => stream.into_buffered_response(),
-            Self::ToolStream(stream) => stream.into_buffered_response(),
+            Self::ToolStream(stream) => (*stream).into_buffered_response(),
         }
     }
 }
@@ -2478,6 +2482,7 @@ fn handle_http_exchange(
     match request.method.as_str() {
         "GET" => handle_mcp_get(config, &request, principal_key, allow_streaming_get),
         "DELETE" => HttpExchange::Buffered(handle_mcp_delete(
+            server,
             config,
             &request,
             stateful_principal_key(principal_key),
@@ -3221,7 +3226,7 @@ fn handle_operator_api_route(
         OperatorRouteKind::ClientCredentials
         | OperatorRouteKind::ClientCredentialRotate
         | OperatorRouteKind::ClientCredentialRevoke => {
-            handle_operator_client_credentials_route(config, request, route)
+            handle_operator_client_credentials_route(server, config, request, route)
         }
         OperatorRouteKind::ActionPreview
         | OperatorRouteKind::ActionConfirm
@@ -4731,6 +4736,7 @@ fn operator_source_history_error_response(route: &str, error: SourceHistoryError
 }
 
 fn handle_operator_client_credentials_route(
+    server: &OracleMcpServer,
     config: &HttpTransportConfig,
     request: &HttpRequest,
     route: OperatorRouteKind,
@@ -4765,6 +4771,7 @@ fn handle_operator_client_credentials_route(
             match store.rotate(&client_id) {
                 Ok((issued, lifecycle)) => {
                     let closed_sessions = close_http_principal_sessions(
+                        server,
                         config,
                         &lifecycle.principal_key,
                         DispatchCloseReason::SessionDelete,
@@ -4798,6 +4805,7 @@ fn handle_operator_client_credentials_route(
             match store.revoke(&client_id) {
                 Ok(lifecycle) => {
                     let closed_sessions = close_http_principal_sessions(
+                        server,
                         config,
                         &lifecycle.principal_key,
                         DispatchCloseReason::SessionDelete,
@@ -6403,6 +6411,7 @@ fn handle_mcp_get(
 }
 
 fn handle_mcp_delete(
+    server: &OracleMcpServer,
     config: &HttpTransportConfig,
     request: &HttpRequest,
     principal_key: &str,
@@ -6425,6 +6434,7 @@ fn handle_mcp_delete(
                 if let Some(store) = &config.result_store {
                     store.remove_session(session_id);
                 }
+                server.notifications().forget_session(session_id);
                 if let Some(lifecycle) = &config.session_lifecycle {
                     lifecycle.close_session(session_id, &session.principal_key);
                 }
@@ -6543,10 +6553,11 @@ fn handle_mcp_post_exchange(
                     }),
                 ));
             }
-            // The transport does not allocate or expose a session id until
-            // dispatch has returned a successful initialize result and the
+            // Pre-generate the opaque id so discovery observation and queued
+            // notifications are scoped to the same future MCP session. It is
+            // not inserted or exposed until initialize succeeds and both
             // bounded registries admit it atomically.
-            None
+            Some(new_session_id())
         } else {
             match validate_stateful_session(config, request, Some(session_principal_key), false) {
                 Ok(session) => {
@@ -6586,6 +6597,15 @@ fn handle_mcp_post_exchange(
     // stateless unauthenticated HTTP must carry `anonymous-http` explicitly so
     // a missing principal remains unambiguous for the stdio transport.
     context = context.with_principal_key(session_principal_key);
+    let notification_request_owner = config.stateful.then(new_session_id);
+    if let (Some(session_id), Some(request_owner)) = (
+        http_session_id.as_deref(),
+        notification_request_owner.as_deref(),
+    ) {
+        context = context.with_notification_owners(session_id, request_owner);
+    } else {
+        context = context.without_server_notifications();
+    }
     // QA100 .92: carry the credential generation observed at admission so lane
     // resolution can refuse a stale (pre-revoke/rotate) context fail-closed.
     if let Some(generation) = credential_generation {
@@ -6595,20 +6615,74 @@ fn handle_mcp_post_exchange(
         && let Some((request_id, name, args)) = streaming_oracle_query_call(&parsed)
         && let Some(session_id) = http_session_id.clone()
     {
+        server.observe_tool_catalog(context);
+        let progress_token = parsed
+            .get("params")
+            .and_then(|params| crate::notifications::progress_token_from_params(Some(params)));
+        if let (Some(request_owner), Some(progress_token)) = (
+            notification_request_owner.as_deref(),
+            progress_token.as_ref(),
+        ) {
+            server.notifications().enqueue_progress(
+                request_owner,
+                progress_token,
+                0.0,
+                Some(1.0),
+                Some(&format!("{name} started")),
+            );
+        }
+        let initial_notifications = notification_request_owner
+            .as_deref()
+            .map(|request_owner| server.drain_server_notifications(request_owner))
+            .map(|notifications| {
+                retain_server_notifications(
+                    config.result_store.as_deref(),
+                    Some(&session_id),
+                    notifications,
+                )
+            })
+            .unwrap_or_default();
         let (frames_tx, frames_rx) = mpsc::channel(QUERY_ROW_STREAM_CHANNEL_CAPACITY);
         match server.start_tool_stream_blocking_with_context(context, name, args, frames_tx) {
             Outcome::Ok(reply_rx) => {
-                return HttpExchange::ToolStream(HttpToolStream::new(
+                return HttpExchange::ToolStream(Box::new(HttpToolStream::new(
                     server.clone(),
                     config.result_store.clone(),
-                    session_id,
-                    session_principal_key.to_owned(),
+                    HttpToolStreamBinding {
+                        session_id,
+                        principal_key: session_principal_key.to_owned(),
+                    },
                     request_id,
                     frames_rx,
                     reply_rx,
-                ));
+                    HttpToolStreamNotifications {
+                        initial: initial_notifications,
+                        request_owner: notification_request_owner,
+                        progress_token,
+                    },
+                )));
             }
             Outcome::Err(envelope) => {
+                if let (Some(request_owner), Some(progress_token)) = (
+                    notification_request_owner.as_deref(),
+                    progress_token.as_ref(),
+                ) {
+                    server.notifications().enqueue_progress(
+                        request_owner,
+                        progress_token,
+                        1.0,
+                        Some(1.0),
+                        Some("oracle_query completed"),
+                    );
+                }
+                let mut notifications = initial_notifications;
+                if let Some(request_owner) = notification_request_owner.as_deref() {
+                    notifications.extend(retain_server_notifications(
+                        config.result_store.as_deref(),
+                        Some(&session_id),
+                        server.drain_server_notifications(request_owner),
+                    ));
+                }
                 let response =
                     server.jsonrpc_tool_response_from_outcome(request_id, Outcome::Err(envelope));
                 let response_event_id = config.result_store.as_ref().and_then(|store| {
@@ -6621,7 +6695,10 @@ fn handle_mcp_post_exchange(
                     response,
                     http_session_id,
                     session_principal_key,
-                    response_event_id.as_deref(),
+                    SseResponseEvents {
+                        response_event_id: response_event_id.as_deref(),
+                        notifications: &notifications,
+                    },
                 ));
             }
             Outcome::Cancelled(reason) => {
@@ -6633,6 +6710,17 @@ fn handle_mcp_post_exchange(
         }
     }
     let outcome = server.handle_jsonrpc_request_with_context_outcome(parsed, None, context);
+    let notification_events = notification_request_owner
+        .as_deref()
+        .map(|request_owner| server.drain_server_notifications(request_owner))
+        .map(|notifications| {
+            retain_server_notifications(
+                config.result_store.as_deref(),
+                http_session_id.as_deref(),
+                notifications,
+            )
+        })
+        .unwrap_or_default();
     // QA100 `.116`: the stateful/stateless buffered HTTP paths build their
     // response here from the `_outcome` variant (bypassing the stdio wrapper),
     // so enforce the whole-response byte budget before the value is framed for
@@ -6671,7 +6759,10 @@ fn handle_mcp_post_exchange(
             response,
             http_session_id,
             session_principal_key,
-            response_event_id.as_deref(),
+            SseResponseEvents {
+                response_event_id: response_event_id.as_deref(),
+                notifications: &notification_events,
+            },
         ));
     }
     HttpExchange::Buffered(json_response(200, &response))
@@ -7132,32 +7223,52 @@ struct HttpToolStream {
     request_id: Value,
     frames_rx: mpsc::Receiver<ToolStreamFrame>,
     reply_rx: DispatchReplyReceiver,
+    initial_notifications: Vec<HttpBufferedEvent>,
+    notification_request_owner: Option<String>,
+    progress_token: Option<Value>,
+}
+
+struct HttpToolStreamBinding {
+    session_id: String,
+    principal_key: String,
+}
+
+struct HttpToolStreamNotifications {
+    initial: Vec<HttpBufferedEvent>,
+    request_owner: Option<String>,
+    progress_token: Option<Value>,
 }
 
 impl HttpToolStream {
     fn new(
         server: OracleMcpServer,
         result_store: Option<Arc<HttpResultStore>>,
-        session_id: String,
-        principal_key: String,
+        binding: HttpToolStreamBinding,
         request_id: Value,
         frames_rx: mpsc::Receiver<ToolStreamFrame>,
         reply_rx: DispatchReplyReceiver,
+        notifications: HttpToolStreamNotifications,
     ) -> Self {
         Self {
             server,
             result_store,
-            session_id,
-            _principal_key: principal_key,
+            session_id: binding.session_id,
+            _principal_key: binding.principal_key,
             request_id,
             frames_rx,
             reply_rx,
+            initial_notifications: notifications.initial,
+            notification_request_owner: notifications.request_owner,
+            progress_token: notifications.progress_token,
         }
     }
 
     fn into_buffered_response(mut self) -> HttpResponse {
         let mut body = Vec::new();
         write_sse_event(&mut body, None, Some("0/0"), Some(3000), Some(&Value::Null));
+        for notification in &self.initial_notifications {
+            write_tool_stream_event_buffered(&mut body, notification);
+        }
         let response = crate::lane::block_on_lane_bridge(async {
             let cx = Cx::current().expect("block_on installs a request Cx");
             while let Ok(frame) = self.frames_rx.recv(&cx).await {
@@ -7166,6 +7277,9 @@ impl HttpToolStream {
             }
             self.final_response(&cx).await
         });
+        for notification in self.finish_notifications() {
+            write_tool_stream_event_buffered(&mut body, &notification);
+        }
         let response_event_id = self.append_final_response(&response);
         write_sse_event(
             &mut body,
@@ -7187,6 +7301,9 @@ impl HttpToolStream {
     fn write_to(mut self, stream: &mut impl Write) -> std::io::Result<()> {
         write_streaming_sse_headers(stream)?;
         write_chunked_sse_event(stream, None, Some("0/0"), Some(3000), Some(&Value::Null))?;
+        for notification in &self.initial_notifications {
+            write_tool_stream_event_chunked(stream, notification)?;
+        }
         let response = crate::lane::block_on_lane_bridge(async {
             let cx = Cx::current().expect("block_on installs a request Cx");
             loop {
@@ -7207,6 +7324,9 @@ impl HttpToolStream {
             }
             Ok::<Value, std::io::Error>(self.final_response(&cx).await)
         })?;
+        for notification in self.finish_notifications() {
+            write_tool_stream_event_chunked(stream, &notification)?;
+        }
         let response_event_id = self.append_final_response(&response);
         write_chunked_sse_event(
             stream,
@@ -7237,6 +7357,27 @@ impl HttpToolStream {
         self.result_store
             .as_ref()
             .and_then(|store| store.append_response_if_session(&self.session_id, response.clone()))
+    }
+
+    fn finish_notifications(&self) -> Vec<HttpBufferedEvent> {
+        let (Some(request_owner), Some(progress_token)) = (
+            self.notification_request_owner.as_deref(),
+            self.progress_token.as_ref(),
+        ) else {
+            return Vec::new();
+        };
+        self.server.notifications().enqueue_progress(
+            request_owner,
+            progress_token,
+            1.0,
+            Some(1.0),
+            Some("oracle_query completed"),
+        );
+        retain_server_notifications(
+            self.result_store.as_deref(),
+            Some(&self.session_id),
+            self.server.drain_server_notifications(request_owner),
+        )
     }
 
     fn retain_frame(&self, frame: ToolStreamFrame) -> HttpBufferedEvent {
@@ -7326,6 +7467,30 @@ fn append_nonstreaming_response_if_session(
         .flatten()
 }
 
+fn retain_server_notifications(
+    store: Option<&HttpResultStore>,
+    session_id: Option<&str>,
+    notifications: Vec<Value>,
+) -> Vec<HttpBufferedEvent> {
+    notifications
+        .into_iter()
+        .map(|notification| {
+            let id = session_id
+                .zip(store)
+                .and_then(|(session_id, store)| {
+                    store.append_response_if_session(session_id, notification.clone())
+                })
+                .unwrap_or_default();
+            HttpBufferedEvent::data(id, notification)
+        })
+        .collect()
+}
+
+struct SseResponseEvents<'a> {
+    response_event_id: Option<&'a str>,
+    notifications: &'a [HttpBufferedEvent],
+}
+
 fn sse_response(
     config: &HttpTransportConfig,
     request: &HttpRequest,
@@ -7333,7 +7498,7 @@ fn sse_response(
     response: Value,
     initialized_session_id: Option<String>,
     principal_key: &str,
-    response_event_id: Option<&str>,
+    events: SseResponseEvents<'_>,
 ) -> HttpResponse {
     let mut body = Vec::new();
     // A method string alone does not establish an MCP session. The negotiated
@@ -7356,6 +7521,15 @@ fn sse_response(
             .map(|_| initialized_session_id.unwrap_or_else(new_session_id))
     } else {
         write_sse_event(&mut body, None, Some("0/0"), Some(3000), Some(&Value::Null));
+        for notification in events.notifications {
+            write_sse_event(
+                &mut body,
+                None,
+                (!notification.id.is_empty()).then_some(notification.id.as_str()),
+                None,
+                Some(&notification.data),
+            );
+        }
         // K10: a streaming `oracle_query` result carries an ordered page
         // `chunks` array. Emit each chunk as its own `event: chunk` SSE frame
         // BEFORE the authoritative response frame, so a streaming-aware client
@@ -7396,7 +7570,9 @@ fn sse_response(
         write_sse_event(
             &mut body,
             None,
-            retained_response_event_id.as_deref().or(response_event_id),
+            retained_response_event_id
+                .as_deref()
+                .or(events.response_event_id),
             None,
             Some(&response),
         );
@@ -7538,7 +7714,7 @@ pub fn serve_http_until(
     while !shutdown.load(Ordering::SeqCst) {
         reap_finished_workers(&mut workers);
         if last_idle_reap.elapsed() >= STATEFUL_IDLE_REAP_INTERVAL {
-            reap_idle_stateful_sessions(&config);
+            reap_idle_stateful_sessions(&server, &config);
             last_idle_reap = Instant::now();
         }
         match listener.accept() {
@@ -7573,7 +7749,7 @@ pub fn serve_http_until(
             Err(e) => return Err(e),
         }
     }
-    close_stateful_sessions_for_shutdown(&config);
+    close_stateful_sessions_for_shutdown(&server, &config);
     for worker in workers {
         let _ = worker.join();
     }
@@ -7616,7 +7792,7 @@ pub fn serve_https_until(
     while !shutdown.load(Ordering::SeqCst) {
         reap_finished_workers(&mut workers);
         if last_idle_reap.elapsed() >= STATEFUL_IDLE_REAP_INTERVAL {
-            reap_idle_stateful_sessions(&config);
+            reap_idle_stateful_sessions(&server, &config);
             last_idle_reap = Instant::now();
         }
         match listener.accept() {
@@ -7648,7 +7824,7 @@ pub fn serve_https_until(
             Err(e) => return Err(e),
         }
     }
-    close_stateful_sessions_for_shutdown(&config);
+    close_stateful_sessions_for_shutdown(&server, &config);
     for worker in workers {
         let _ = worker.join();
     }
@@ -7684,11 +7860,14 @@ fn listener_config(
     config
 }
 
-fn close_stateful_sessions_for_shutdown(config: &HttpTransportConfig) {
+fn close_stateful_sessions_for_shutdown(server: &OracleMcpServer, config: &HttpTransportConfig) {
     if let Some(lifecycle) = &config.session_lifecycle {
         lifecycle.close_all_sessions();
     }
     if let Some(session_store) = &config.session_store {
+        for session_id in session_store.session_ids() {
+            server.notifications().forget_session(&session_id);
+        }
         session_store.close_all();
     }
     if let Some(result_store) = &config.result_store {
@@ -7703,6 +7882,7 @@ fn close_stateful_sessions_for_shutdown(config: &HttpTransportConfig) {
 /// results are closed, and the lane dispatch cleanup path revokes any in-memory
 /// grants.
 pub fn close_http_principal_sessions(
+    server: &OracleMcpServer,
     config: &HttpTransportConfig,
     principal_key: &str,
     reason: DispatchCloseReason,
@@ -7718,6 +7898,9 @@ pub fn close_http_principal_sessions(
             result_store.remove_session(session_id);
         }
     }
+    for session_id in &session_ids {
+        server.notifications().forget_session(session_id);
+    }
     let closed_lanes = config
         .session_lifecycle
         .as_ref()
@@ -7726,7 +7909,7 @@ pub fn close_http_principal_sessions(
     closed_lanes.max(session_ids.len())
 }
 
-fn reap_idle_stateful_sessions(config: &HttpTransportConfig) -> usize {
+fn reap_idle_stateful_sessions(server: &OracleMcpServer, config: &HttpTransportConfig) -> usize {
     if !config.stateful || config.stateful_idle_ttl.is_zero() {
         return 0;
     }
@@ -7736,6 +7919,7 @@ fn reap_idle_stateful_sessions(config: &HttpTransportConfig) -> usize {
     let expired = session_store.reap_idle(config.stateful_idle_ttl);
     let count = expired.len();
     for (session_id, principal_key) in expired {
+        server.notifications().forget_session(&session_id);
         if let Some(result_store) = &config.result_store {
             result_store.remove_session(&session_id);
         }
@@ -7955,7 +8139,7 @@ fn handle_stream(
     match exchange {
         HttpExchange::Buffered(response) => write_http_response(stream, &response),
         HttpExchange::SseStream(response) => response.write_to(stream),
-        HttpExchange::ToolStream(response) => response.write_to(stream),
+        HttpExchange::ToolStream(response) => (*response).write_to(stream),
     }
 }
 

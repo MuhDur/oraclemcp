@@ -369,11 +369,6 @@ pub struct OracleDispatcher {
     /// runtime discovery, cannot be switched into, and cannot keep accepting
     /// non-diagnostic work on already-active lanes.
     profile_drain: ProfileDrainState,
-    /// E6 server-initiated notifications hub, shared with the server. When set,
-    /// a successful `oracle_switch_profile` enqueues `notifications/tools/list_changed`
-    /// because the switch may change the profile-scoped custom-tool catalog (and
-    /// thus the served tool set). `None` disables that signal (focused tests).
-    notifications: Option<Arc<oraclemcp_core::NotificationHub>>,
     /// Durable write-ahead idempotency ledger for committing tools (CX-C1).
     write_intents: Option<Arc<WriteIntentLog>>,
 }
@@ -426,7 +421,6 @@ impl OracleDispatcher {
             exports: None,
             mcp_exposure: McpExposurePolicy::default(),
             profile_drain,
-            notifications: None,
             write_intents: None,
         }
     }
@@ -507,22 +501,8 @@ impl OracleDispatcher {
             exports: None,
             mcp_exposure: McpExposurePolicy::default(),
             profile_drain,
-            notifications: None,
             write_intents: None,
         }
-    }
-
-    /// Attach the shared E6 notification hub (builder). The server wiring shares
-    /// the same hub it gave `OracleMcpServer::with_notifications`, so a profile
-    /// switch here enqueues `notifications/tools/list_changed` that the transport
-    /// flushes.
-    #[must_use]
-    pub fn with_notifications(
-        mut self,
-        notifications: Arc<oraclemcp_core::NotificationHub>,
-    ) -> Self {
-        self.notifications = Some(notifications);
-        self
     }
 
     /// Install the E5 connection-scope isolation policy (builder). The served
@@ -8096,13 +8076,6 @@ impl OracleDispatcher {
                 .map_err(|()| profile_draining_error(&profile))??;
             drop(retired_generation);
             drop(state);
-            // E6: the switch may have changed the profile-scoped custom-tool
-            // catalog (and thus the served tool set), so signal the client to
-            // re-fetch `tools/list`. Enqueued on the shared hub; flushed by the
-            // transport after this response.
-            if let Some(notifications) = &self.notifications {
-                notifications.enqueue_tools_list_changed();
-            }
             if let Err(error) = request_budget.enforce(cx) {
                 response.annotate_deadline_after_effect();
                 tracing::warn!(

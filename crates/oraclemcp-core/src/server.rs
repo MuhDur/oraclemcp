@@ -373,7 +373,7 @@ impl DispatchCloseReason {
 }
 
 /// Per-request transport context supplied to dispatch.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct DispatchContext<'a> {
     scope_grant: Option<&'a crate::http::ScopeGrant>,
     http_session_id: Option<&'a str>,
@@ -385,6 +385,27 @@ pub struct DispatchContext<'a> {
     admitted_at: Option<Time>,
     caller_budget: Option<Budget>,
     request_budget: Option<&'a RequestBudget>,
+    notification_session_owner: Option<&'a str>,
+    notification_request_owner: Option<&'a str>,
+}
+
+impl Default for DispatchContext<'_> {
+    fn default() -> Self {
+        Self {
+            scope_grant: None,
+            http_session_id: None,
+            principal_key: None,
+            credential_generation: None,
+            lane_id: None,
+            lane_generation: None,
+            request_started_at: None,
+            admitted_at: None,
+            caller_budget: None,
+            request_budget: None,
+            notification_session_owner: Some(crate::notifications::STDIO_NOTIFICATION_OWNER),
+            notification_request_owner: Some(crate::notifications::STDIO_NOTIFICATION_OWNER),
+        }
+    }
 }
 
 impl<'a> DispatchContext<'a> {
@@ -401,6 +422,29 @@ impl<'a> DispatchContext<'a> {
     #[must_use]
     pub fn with_http_session_id(mut self, session_id: &'a str) -> Self {
         self.http_session_id = Some(session_id);
+        self
+    }
+
+    /// Route server-initiated notifications to one MCP session and one exact
+    /// outbound request stream. HTTP uses a fresh request owner for every POST;
+    /// stdio uses its one stable owner for both dimensions.
+    #[must_use]
+    pub fn with_notification_owners(
+        mut self,
+        session_owner: &'a str,
+        request_owner: &'a str,
+    ) -> Self {
+        self.notification_session_owner = Some(session_owner);
+        self.notification_request_owner = Some(request_owner);
+        self
+    }
+
+    /// Disable server-initiated notifications for a transport without a
+    /// compliant delivery channel (stateless JSON Streamable HTTP).
+    #[must_use]
+    pub fn without_server_notifications(mut self) -> Self {
+        self.notification_session_owner = None;
+        self.notification_request_owner = None;
         self
     }
 
@@ -538,6 +582,18 @@ impl<'a> DispatchContext<'a> {
         self.request_budget
     }
 
+    /// Persistent MCP session owner used to detect catalog transitions.
+    #[must_use]
+    pub fn notification_session_owner(self) -> Option<&'a str> {
+        self.notification_session_owner
+    }
+
+    /// Exact outbound request stream that may receive queued notifications.
+    #[must_use]
+    pub fn notification_request_owner(self) -> Option<&'a str> {
+        self.notification_request_owner
+    }
+
     /// Clone request-local borrowed authorization into a mailbox-safe context.
     #[must_use]
     pub fn to_owned_context(self) -> OwnedDispatchContext {
@@ -552,6 +608,8 @@ impl<'a> DispatchContext<'a> {
             admitted_at: self.admitted_at,
             caller_budget: self.caller_budget,
             request_budget: self.request_budget.cloned(),
+            notification_session_owner: self.notification_session_owner.map(str::to_owned),
+            notification_request_owner: self.notification_request_owner.map(str::to_owned),
         }
     }
 }
@@ -559,7 +617,7 @@ impl<'a> DispatchContext<'a> {
 /// Owned transport authorization context used when a dispatch crosses a lane
 /// mailbox. The stored values are already validated and redacted where needed;
 /// no raw bearer token or unverified identity material is carried here.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct OwnedDispatchContext {
     scope_grant: Option<crate::http::ScopeGrant>,
     http_session_id: Option<String>,
@@ -571,6 +629,14 @@ pub struct OwnedDispatchContext {
     admitted_at: Option<Time>,
     caller_budget: Option<Budget>,
     request_budget: Option<RequestBudget>,
+    notification_session_owner: Option<String>,
+    notification_request_owner: Option<String>,
+}
+
+impl Default for OwnedDispatchContext {
+    fn default() -> Self {
+        DispatchContext::default().to_owned_context()
+    }
 }
 
 impl OwnedDispatchContext {
@@ -588,6 +654,8 @@ impl OwnedDispatchContext {
             admitted_at: self.admitted_at,
             caller_budget: self.caller_budget,
             request_budget: self.request_budget.as_ref(),
+            notification_session_owner: self.notification_session_owner.as_deref(),
+            notification_request_owner: self.notification_request_owner.as_deref(),
         }
     }
 }
@@ -845,8 +913,8 @@ impl OracleMcpServer {
     /// and `notifications/tools/list_changed` — as JSON-RPC notification objects,
     /// to be written to the transport after a request.
     #[must_use]
-    pub fn drain_server_notifications(&self) -> Vec<Value> {
-        self.notifications.drain()
+    pub fn drain_server_notifications(&self, request_owner: &str) -> Vec<Value> {
+        self.notifications.drain(request_owner)
     }
 
     /// Map the registry descriptors to native MCP JSON tool descriptors.
@@ -923,6 +991,11 @@ impl OracleMcpServer {
         // per server object; production runs one per process) may initialize,
         // while a second initialize WITHIN this session stays rejected.
         *self.stdio_negotiated.lock() = None;
+        self.notifications
+            .forget_session(crate::notifications::STDIO_NOTIFICATION_OWNER);
+        let _ = self
+            .notifications
+            .drain(crate::notifications::STDIO_NOTIFICATION_OWNER);
         let mut reader = BufReader::new(reader);
         let mut frame = Vec::new();
         loop {
@@ -963,7 +1036,9 @@ impl OracleMcpServer {
             // `notifications/progress` enqueued by a long tool call and
             // `notifications/tools/list_changed` enqueued when a profile switch
             // changed the served tool set — on the same stdout.
-            for notification in self.drain_server_notifications() {
+            for notification in
+                self.drain_server_notifications(crate::notifications::STDIO_NOTIFICATION_OWNER)
+            {
                 write_jsonrpc_response(&mut writer, &notification)?;
             }
         }
@@ -982,11 +1057,20 @@ impl OracleMcpServer {
     /// downgrading the protocol version can never bypass the guard.
     #[must_use]
     pub fn initialize_result_json(&self, client_protocol_version: Option<&str>) -> Value {
+        self.initialize_result_json_for_notifications(client_protocol_version, true)
+    }
+
+    fn initialize_result_json_for_notifications(
+        &self,
+        client_protocol_version: Option<&str>,
+        server_notifications_supported: bool,
+    ) -> Value {
         let negotiated = crate::capabilities::negotiate_protocol_version(client_protocol_version);
         json!({
             "protocolVersion": negotiated,
             "capabilities": served_capabilities_json(
                 self.subscriptions.supports_subscriptions(),
+                server_notifications_supported,
                 negotiated,
             ),
             "serverInfo": {
@@ -1316,6 +1400,44 @@ impl OracleMcpServer {
         auth: Option<&StdioAuthPolicy>,
         context: DispatchContext<'_>,
     ) -> JsonRpcDispatchOutcome {
+        let observe_catalog = request.as_object().is_some_and(|object| {
+            object.get("jsonrpc") == Some(&Value::String("2.0".to_owned()))
+                && object.get("method").and_then(Value::as_str) != Some("initialize")
+        }) && context.notification_session_owner().is_some()
+            && context.notification_request_owner().is_some();
+        if observe_catalog {
+            self.observe_tool_catalog(context);
+        }
+        let outcome =
+            self.handle_jsonrpc_request_with_context_outcome_inner(request, auth, context);
+        if observe_catalog {
+            self.observe_tool_catalog(context);
+        }
+        outcome
+    }
+
+    pub(crate) fn observe_tool_catalog(&self, context: DispatchContext<'_>) {
+        let (Some(session_owner), Some(request_owner)) = (
+            context.notification_session_owner(),
+            context.notification_request_owner(),
+        ) else {
+            return;
+        };
+        if let Ok(tools) = self.tools_json_for_context(context) {
+            self.notifications.observe_tool_catalog(
+                session_owner,
+                request_owner,
+                Value::Array(tools),
+            );
+        }
+    }
+
+    fn handle_jsonrpc_request_with_context_outcome_inner(
+        &self,
+        request: Value,
+        auth: Option<&StdioAuthPolicy>,
+        context: DispatchContext<'_>,
+    ) -> JsonRpcDispatchOutcome {
         let Value::Object(object) = request else {
             return Outcome::Ok(Some(jsonrpc_error(
                 Value::Null,
@@ -1356,9 +1478,12 @@ impl OracleMcpServer {
             return Outcome::Ok(None);
         };
         match method {
-            "initialize" => {
-                Outcome::Ok(Some(self.handle_initialize(id, object.get("params"), auth)))
-            }
+            "initialize" => Outcome::Ok(Some(self.handle_initialize(
+                id,
+                object.get("params"),
+                auth,
+                context,
+            ))),
             "ping" => Outcome::Ok(Some(jsonrpc_result(id, json!({})))),
             "notifications/initialized" => Outcome::Ok(None),
             "resources/list" => {
@@ -1410,6 +1535,7 @@ impl OracleMcpServer {
         id: Value,
         params: Option<&Value>,
         auth: Option<&StdioAuthPolicy>,
+        context: DispatchContext<'_>,
     ) -> Value {
         if let Some(auth) = auth {
             let presented = params
@@ -1463,7 +1589,10 @@ impl OracleMcpServer {
         }
         jsonrpc_result(
             id,
-            self.initialize_result_json(Some(client_protocol_version)),
+            self.initialize_result_json_for_notifications(
+                Some(client_protocol_version),
+                context.notification_request_owner().is_some(),
+            ),
         )
     }
 
@@ -1865,8 +1994,11 @@ impl OracleMcpServer {
         // start/finish bracket; the notifications flush after this response.
         let progress_token =
             crate::notifications::progress_token_from_params(Some(&Value::Object(params.clone())));
-        if let Some(token) = &progress_token {
+        if let Some(token) = &progress_token
+            && let Some(owner) = context.notification_request_owner()
+        {
             self.notifications.enqueue_progress(
+                owner,
                 token,
                 0.0,
                 Some(1.0),
@@ -1875,8 +2007,11 @@ impl OracleMcpServer {
         }
         match self.run_tool_blocking_outcome_with_context(context, name.to_owned(), args) {
             Outcome::Ok(result) => {
-                if let Some(token) = &progress_token {
+                if let Some(token) = &progress_token
+                    && let Some(owner) = context.notification_request_owner()
+                {
                     self.notifications.enqueue_progress(
+                        owner,
                         token,
                         1.0,
                         Some(1.0),
@@ -1886,8 +2021,11 @@ impl OracleMcpServer {
                 Outcome::Ok(jsonrpc_result(id, result))
             }
             Outcome::Err(envelope) => {
-                if let Some(token) = &progress_token {
+                if let Some(token) = &progress_token
+                    && let Some(owner) = context.notification_request_owner()
+                {
                     self.notifications.enqueue_progress(
+                        owner,
                         token,
                         1.0,
                         Some(1.0),
@@ -2249,7 +2387,11 @@ fn cursor_from_params(params: Option<&Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn served_capabilities_json(subscribe_supported: bool, negotiated_version: &str) -> Value {
+fn served_capabilities_json(
+    subscribe_supported: bool,
+    server_notifications_supported: bool,
+    negotiated_version: &str,
+) -> Value {
     // Keep this in lockstep with `handle_jsonrpc_request_with_context`.
     // Resource/prompt listChanged stays false (those catalogs are static), but
     // the served arms below ARE all wired now.
@@ -2270,7 +2412,7 @@ fn served_capabilities_json(subscribe_supported: bool, negotiated_version: &str)
     // `content[0].text`) are valid in every revision and never depend on this.
     let mut capabilities = json!({
         "tools": {
-            "listChanged": true,
+            "listChanged": server_notifications_supported,
         },
         "resources": {
             "subscribe": subscribe_supported,

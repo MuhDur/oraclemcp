@@ -21,7 +21,7 @@
 //! transport flush loop is a thin drain — identical in spirit to
 //! [`crate::subscriptions::SubscriptionHub::drain_pending`].
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -36,9 +36,24 @@ use serde_json::{Value, json};
 /// is acceptable, and `tools/list_changed` is idempotent so a coalesced drop is
 /// harmless).
 pub struct NotificationHub {
-    pending: Mutex<VecDeque<Value>>,
+    state: Mutex<NotificationState>,
     capacity: usize,
 }
+
+#[derive(Default)]
+struct NotificationState {
+    pending: VecDeque<OwnedNotification>,
+    tool_catalogs: HashMap<String, Value>,
+    dropped: u64,
+}
+
+struct OwnedNotification {
+    request_owner: String,
+    value: Value,
+}
+
+/// Stable notification/session owner for the single stdio client.
+pub const STDIO_NOTIFICATION_OWNER: &str = "stdio";
 
 /// Default cap on queued, undrained notifications.
 const DEFAULT_NOTIFICATION_CAPACITY: usize = 1024;
@@ -60,19 +75,23 @@ impl NotificationHub {
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         NotificationHub {
-            pending: Mutex::new(VecDeque::new()),
+            state: Mutex::new(NotificationState::default()),
             capacity: capacity.max(1),
         }
     }
 
     /// Push a fully-formed JSON-RPC notification object, dropping the oldest
     /// when the queue is full (advisory delivery; see the type docs).
-    fn push(&self, notification: Value) {
-        let mut pending = self.pending.lock();
-        while pending.len() >= self.capacity {
-            pending.pop_front();
+    fn push(&self, request_owner: &str, notification: Value) {
+        let mut state = self.state.lock();
+        while state.pending.len() >= self.capacity {
+            state.pending.pop_front();
+            state.dropped = state.dropped.saturating_add(1);
         }
-        pending.push_back(notification);
+        state.pending.push_back(OwnedNotification {
+            request_owner: request_owner.to_owned(),
+            value: notification,
+        });
     }
 
     /// Enqueue a `notifications/progress` for `progress_token` (E6). MCP carries
@@ -81,6 +100,7 @@ impl NotificationHub {
     /// supplied; this method does not itself decide whether progress is enabled.
     pub fn enqueue_progress(
         &self,
+        request_owner: &str,
         progress_token: &Value,
         progress: f64,
         total: Option<f64>,
@@ -96,35 +116,87 @@ impl NotificationHub {
         if let (Value::Object(map), Some(message)) = (&mut params, message) {
             map.insert("message".to_owned(), Value::String(message.to_owned()));
         }
-        self.push(json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/progress",
-            "params": params,
-        }));
+        self.push(
+            request_owner,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": params,
+            }),
+        );
     }
 
     /// Enqueue a `notifications/tools/list_changed` (E6). Idempotent for the
     /// client (it re-fetches `tools/list`), so duplicates are harmless; callers
     /// typically enqueue exactly one after a change to the served tool set.
-    pub fn enqueue_tools_list_changed(&self) {
-        self.push(json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/tools/list_changed",
-        }));
+    pub fn enqueue_tools_list_changed(&self, request_owner: &str) {
+        self.push(
+            request_owner,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/tools/list_changed",
+            }),
+        );
     }
 
     /// Drain queued notification objects (the transport writes each one). A
     /// one-shot drain like the subscription hub's.
     #[must_use]
-    pub fn drain(&self) -> Vec<Value> {
-        let mut pending = self.pending.lock();
-        pending.drain(..).collect()
+    pub fn drain(&self, request_owner: &str) -> Vec<Value> {
+        let mut state = self.state.lock();
+        let mut drained = Vec::new();
+        let mut retained = VecDeque::with_capacity(state.pending.len());
+        while let Some(notification) = state.pending.pop_front() {
+            if notification.request_owner == request_owner {
+                drained.push(notification.value);
+            } else {
+                retained.push_back(notification);
+            }
+        }
+        state.pending = retained;
+        drained
     }
 
-    /// Whether anything is queued (introspection/tests).
+    /// Whether `request_owner` has anything queued (introspection/tests).
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.pending.lock().is_empty()
+    pub fn is_empty(&self, request_owner: &str) -> bool {
+        !self
+            .state
+            .lock()
+            .pending
+            .iter()
+            .any(|notification| notification.request_owner == request_owner)
+    }
+
+    /// Observe the exact served tool catalog for one MCP session. The first
+    /// observation seeds the session snapshot. A later difference queues one
+    /// `tools/list_changed` on the request stream that observed the change.
+    pub fn observe_tool_catalog(&self, session_owner: &str, request_owner: &str, catalog: Value) {
+        let changed = {
+            let mut state = self.state.lock();
+            match state
+                .tool_catalogs
+                .insert(session_owner.to_owned(), catalog.clone())
+            {
+                Some(previous) => previous != catalog,
+                None => false,
+            }
+        };
+        if changed {
+            self.enqueue_tools_list_changed(request_owner);
+        }
+    }
+
+    /// Forget catalog state for a closed MCP session.
+    pub fn forget_session(&self, session_owner: &str) {
+        self.state.lock().tool_catalogs.remove(session_owner);
+    }
+
+    /// Number of globally evicted notifications. Saturation is observable
+    /// without exposing owners, principals, or progress tokens.
+    #[must_use]
+    pub fn dropped_count(&self) -> u64 {
+        self.state.lock().dropped
     }
 }
 
@@ -149,8 +221,8 @@ mod tests {
     fn progress_notification_carries_token_progress_total_and_message() {
         let hub = NotificationHub::new();
         let token = json!("op-1");
-        hub.enqueue_progress(&token, 0.5, Some(1.0), Some("halfway"));
-        let drained = hub.drain();
+        hub.enqueue_progress("a", &token, 0.5, Some(1.0), Some("halfway"));
+        let drained = hub.drain("a");
         assert_eq!(drained.len(), 1);
         let n = &drained[0];
         assert_eq!(n["jsonrpc"], json!("2.0"));
@@ -161,14 +233,14 @@ mod tests {
         assert_eq!(n["params"]["total"], json!(1.0));
         assert_eq!(n["params"]["message"], json!("halfway"));
         // Drain is one-shot.
-        assert!(hub.drain().is_empty());
+        assert!(hub.drain("a").is_empty());
     }
 
     #[test]
     fn progress_omits_absent_total_and_message() {
         let hub = NotificationHub::new();
-        hub.enqueue_progress(&json!(7), 3.0, None, None);
-        let drained = hub.drain();
+        hub.enqueue_progress("a", &json!(7), 3.0, None, None);
+        let drained = hub.drain("a");
         assert_eq!(drained[0]["params"]["progressToken"], json!(7));
         assert_eq!(drained[0]["params"]["progress"], json!(3.0));
         assert!(drained[0]["params"].get("total").is_none());
@@ -178,8 +250,8 @@ mod tests {
     #[test]
     fn tools_list_changed_is_a_paramless_notification() {
         let hub = NotificationHub::new();
-        hub.enqueue_tools_list_changed();
-        let drained = hub.drain();
+        hub.enqueue_tools_list_changed("a");
+        let drained = hub.drain("a");
         assert_eq!(drained.len(), 1);
         assert_eq!(
             drained[0]["method"],
@@ -192,14 +264,47 @@ mod tests {
     #[test]
     fn the_queue_is_bounded_and_drops_oldest_when_full() {
         let hub = NotificationHub::with_capacity(2);
-        hub.enqueue_progress(&json!("t"), 1.0, None, None);
-        hub.enqueue_progress(&json!("t"), 2.0, None, None);
-        hub.enqueue_progress(&json!("t"), 3.0, None, None);
-        let drained = hub.drain();
+        hub.enqueue_progress("a", &json!("t"), 1.0, None, None);
+        hub.enqueue_progress("a", &json!("t"), 2.0, None, None);
+        hub.enqueue_progress("a", &json!("t"), 3.0, None, None);
+        let drained = hub.drain("a");
         assert_eq!(drained.len(), 2, "capacity is enforced");
         // The oldest (progress 1.0) was dropped; 2.0 and 3.0 remain in order.
         assert_eq!(drained[0]["params"]["progress"], json!(2.0));
         assert_eq!(drained[1]["params"]["progress"], json!(3.0));
+        assert_eq!(hub.dropped_count(), 1);
+    }
+
+    #[test]
+    fn request_owners_cannot_cross_drain() {
+        let hub = NotificationHub::new();
+        hub.enqueue_progress("a", &json!("token-a"), 0.0, None, None);
+        hub.enqueue_progress("b", &json!("token-b"), 0.0, None, None);
+        let a = hub.drain("a");
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0]["params"]["progressToken"], json!("token-a"));
+        assert!(!hub.is_empty("b"));
+        let b = hub.drain("b");
+        assert_eq!(b[0]["params"]["progressToken"], json!("token-b"));
+    }
+
+    #[test]
+    fn catalog_observation_is_session_scoped_and_change_only() {
+        let hub = NotificationHub::new();
+        hub.observe_tool_catalog("session-a", "request-a1", json!(["read"]));
+        hub.observe_tool_catalog("session-b", "request-b1", json!(["read"]));
+        assert!(hub.drain("request-a1").is_empty());
+        assert!(hub.drain("request-b1").is_empty());
+
+        hub.observe_tool_catalog("session-a", "request-a2", json!(["read", "write"]));
+        assert_eq!(hub.drain("request-a2").len(), 1);
+        assert!(hub.drain("request-b1").is_empty());
+
+        hub.observe_tool_catalog("session-a", "request-a3", json!(["read", "write"]));
+        assert!(hub.drain("request-a3").is_empty());
+        hub.forget_session("session-a");
+        hub.observe_tool_catalog("session-a", "request-a4", json!(["read"]));
+        assert!(hub.drain("request-a4").is_empty());
     }
 
     #[test]

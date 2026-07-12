@@ -3099,17 +3099,14 @@ fn qa45_profile_switch_refreshes_every_discovery_surface_and_execution() {
         other => panic!("unexpected profile {other}"),
     });
     let notifications = Arc::new(oraclemcp_core::NotificationHub::new());
-    let dispatcher = Arc::new(
-        OracleDispatcher::new_switchable_with_custom_tools(
-            Box::new(OneRowMock),
-            Some("profile_a".to_owned()),
-            default_read_only_level(),
-            Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
-            catalog_a.clone(),
-            Some(loader),
-        )
-        .with_notifications(Arc::clone(&notifications)),
-    );
+    let dispatcher = Arc::new(OracleDispatcher::new_switchable_with_custom_tools(
+        Box::new(OneRowMock),
+        Some("profile_a".to_owned()),
+        default_read_only_level(),
+        Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
+        catalog_a.clone(),
+        Some(loader),
+    ));
     let registry = crate::registry::tool_registry();
     let capabilities = oraclemcp_core::CapabilitiesReport::new(
         "test",
@@ -3141,11 +3138,26 @@ fn qa45_profile_switch_refreshes_every_discovery_surface_and_execution() {
         assert!(before_names.contains(&"custom_a"));
         assert!(!before_names.contains(&"custom_b"));
 
-        let switch = dispatcher
-            .dispatch("oracle_switch_profile", json!({"profile":"profile_b"}))
-            .expect("profile switch");
-        assert_eq!(switch["custom_catalog_generation"], json!(2));
-        let changed = server.drain_server_notifications();
+        let switch = server
+            .handle_jsonrpc_request(
+                json!({
+                    "jsonrpc":"2.0",
+                    "id":10,
+                    "method":"tools/call",
+                    "params":{
+                        "name":"oracle_switch_profile",
+                        "arguments":{"profile":"profile_b"}
+                    }
+                }),
+                None,
+            )
+            .expect("profile switch response");
+        assert_eq!(
+            switch["result"]["structuredContent"]["custom_catalog_generation"],
+            json!(2)
+        );
+        let changed = server
+            .drain_server_notifications(oraclemcp_core::notifications::STDIO_NOTIFICATION_OWNER);
         assert_eq!(changed.len(), 1);
         assert_eq!(
             changed[0]["method"],
@@ -3221,11 +3233,31 @@ fn qa45_profile_switch_refreshes_every_discovery_surface_and_execution() {
             .expect_err("removed custom tool refuses");
         assert_eq!(stale.error_class, ErrorClass::InvalidArguments);
 
-        let failed = dispatcher
-            .dispatch("oracle_switch_profile", json!({"profile":"broken"}))
-            .expect_err("catalog refusal aborts switch");
-        assert_eq!(failed.error_class, ErrorClass::AtCapacity);
-        assert!(server.drain_server_notifications().is_empty());
+        let failed = server
+            .handle_jsonrpc_request(
+                json!({
+                    "jsonrpc":"2.0",
+                    "id":11,
+                    "method":"tools/call",
+                    "params":{
+                        "name":"oracle_switch_profile",
+                        "arguments":{"profile":"broken"}
+                    }
+                }),
+                None,
+            )
+            .expect("catalog refusal response");
+        assert_eq!(
+            failed["result"]["structuredContent"]["error_class"],
+            json!("AT_CAPACITY")
+        );
+        assert!(
+            server
+                .drain_server_notifications(
+                    oraclemcp_core::notifications::STDIO_NOTIFICATION_OWNER,
+                )
+                .is_empty()
+        );
         let after_failed = server
             .handle_jsonrpc_request(
                 json!({"jsonrpc":"2.0", "id":5, "method":"tools/list"}),

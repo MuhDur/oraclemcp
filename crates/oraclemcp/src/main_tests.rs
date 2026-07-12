@@ -340,7 +340,6 @@ fn fresh_stateful_lane_uses_reloaded_profile_ceiling_and_timeout() {
         auditor: None,
         write_intents: None,
         exports: Arc::new(ExportRegistry::new()),
-        notifications: Arc::new(oraclemcp_core::NotificationHub::new()),
     };
 
     apply_selected_profile_to_wiring(&mut wiring, selected);

@@ -1991,7 +1991,6 @@ struct DispatcherWiring {
     auditor: Option<Arc<Auditor>>,
     write_intents: Option<Arc<WriteIntentLog>>,
     exports: Arc<ExportRegistry>,
-    notifications: Arc<oraclemcp_core::NotificationHub>,
 }
 
 fn whole_request_timeout(call_timeout_seconds: Option<u64>) -> std::time::Duration {
@@ -2027,8 +2026,7 @@ fn build_oracle_dispatcher(
     .with_request_timeout(wiring.request_timeout)
     .with_mcp_exposure(wiring.exposure.clone())
     .with_profile_drain_state(wiring.profile_drain.clone())
-    .with_exports(Arc::clone(&wiring.exports))
-    .with_notifications(Arc::clone(&wiring.notifications));
+    .with_exports(Arc::clone(&wiring.exports));
     if let Some(auditor) = &wiring.auditor {
         dispatcher = dispatcher.with_auditor(Arc::clone(auditor));
     }
@@ -2818,10 +2816,6 @@ fn build_server_with_lifecycle(
     // results) and the server (which serves them over resources/read) share the
     // SAME export registry.
     let exports = Arc::new(ExportRegistry::new());
-    // E6: the dispatcher (which enqueues tools/list_changed on a profile switch)
-    // and the server (which brackets long tool calls with progress and flushes
-    // the queue) share the SAME notification hub.
-    let notifications = Arc::new(oraclemcp_core::NotificationHub::new());
     let wiring = DispatcherWiring {
         active_profile,
         level,
@@ -2833,7 +2827,6 @@ fn build_server_with_lifecycle(
         auditor: options.auditor,
         write_intents: options.write_intents,
         exports: Arc::clone(&exports),
-        notifications: Arc::clone(&notifications),
     };
     let mut session_lifecycle: Option<Arc<dyn HttpSessionLifecycle>> = None;
     let dispatcher: Arc<dyn ToolDispatch> = if options.transport.is_http() {
@@ -2874,8 +2867,7 @@ fn build_server_with_lifecycle(
             wiring.auditor.clone(),
         ))
     };
-    let server = OracleMcpServer::with_exports(version, registry, caps, dispatcher, exports)
-        .with_notifications(notifications);
+    let server = OracleMcpServer::with_exports(version, registry, caps, dispatcher, exports);
     BuiltServer {
         server,
         session_lifecycle,
