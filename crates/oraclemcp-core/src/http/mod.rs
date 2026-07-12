@@ -3477,6 +3477,17 @@ fn handle_operator_lane_cancel_route(
             }),
         );
     };
+    // Invalidate the whole MCP session, not just the lane. Remove the HTTP
+    // session first (lane.rs requires the caller to drop the HTTP session before
+    // the lane is closed), then its streaming replay buffer, then close the
+    // dispatch session. Without this an operator "kill" left the MCP session id
+    // and its buffered results usable — mirrors handle_mcp_delete's teardown.
+    if let Some(store) = &config.session_store {
+        store.remove(&binding.mcp_session_id);
+    }
+    if let Some(store) = &config.result_store {
+        store.remove_session(&binding.mcp_session_id);
+    }
     let terminated = lifecycle.close_session_with_reason(
         &binding.mcp_session_id,
         &binding.principal_key,

@@ -1543,6 +1543,75 @@ impl HttpSessionLifecycle for CancelRecordingLifecycle {
 }
 
 #[test]
+fn operator_lane_cancel_invalidates_the_mcp_session_and_replay_buffer() {
+    // QA100 .91: an operator lane kill must invalidate the WHOLE MCP session,
+    // not just close the lane. Before this fix the session id stayed resolvable
+    // in the session store and its buffered stream results remained replayable
+    // after an operator "kill".
+    let session_id = "mcp-session:lane-a";
+    let sessions = Arc::new(HttpSessionStore::default());
+    sessions.insert(
+        session_id.to_owned(),
+        "principal:subject-sha256:abc".to_owned(),
+        "2025-06-18".to_owned(),
+    );
+    let results = Arc::new(HttpResultStore::new());
+    results.ensure_session(session_id);
+    results.append_response(session_id, serde_json::json!({ "ok": true }));
+    assert_eq!(results.session_count(), 1);
+
+    let (auditor, _sink) = operator_auditor();
+    let lifecycle = Arc::new(CancelRecordingLifecycle::default());
+    let cfg = HttpTransportConfig {
+        stateful: true,
+        operator_auditor: Some(auditor),
+        session_store: Some(Arc::clone(&sessions)),
+        result_store: Some(Arc::clone(&results)),
+        session_lifecycle: Some(Arc::clone(&lifecycle) as Arc<dyn HttpSessionLifecycle>),
+        ..Default::default()
+    };
+    let cancel = HttpRequest::new(
+        "POST",
+        "/operator/v1/lanes/cancel",
+        [
+            ("host", "127.0.0.1"),
+            ("content-type", "application/json"),
+            ("accept", "application/json"),
+        ],
+        serde_json::json!({ "lane_id": "lane-a" })
+            .to_string()
+            .into_bytes(),
+    )
+    .with_peer_loopback(true);
+
+    let ok = handle_http_request(&test_server(), &cfg, cancel);
+    assert_eq!(ok.status, 200);
+    assert_eq!(
+        response_json(&ok)["data"]["terminated"],
+        serde_json::json!(true)
+    );
+
+    // The lane close still happened, and the MCP session is now fully invalid:
+    // the session store dropped it and its replay buffer is gone.
+    assert_eq!(lifecycle.closed.lock().expect("cancel lock").len(), 1);
+    assert!(
+        !sessions.remove(session_id),
+        "operator cancel must have already removed the HTTP session"
+    );
+    assert_eq!(
+        results.session_count(),
+        0,
+        "operator cancel must drop the session's stream replay buffer"
+    );
+    assert!(
+        results
+            .append_response_if_session(session_id, serde_json::json!({ "late": true }))
+            .is_none(),
+        "no stream result can be appended to a cancelled session"
+    );
+}
+
+#[test]
 fn operator_lane_cancel_is_operator_gated_and_audited() {
     let (auditor, sink) = operator_auditor();
     let lifecycle = Arc::new(CancelRecordingLifecycle::default());
