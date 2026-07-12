@@ -74,7 +74,9 @@ pub enum OutputMode {
     /// A row set (default).
     #[default]
     Rows,
-    /// A single scalar value.
+    /// A single scalar value. **Not yet supported** — rejected at load
+    /// ([`CustomToolDef::validate`]) until strict scalar shaping is implemented,
+    /// so an accepted definition's advertised shape always matches its behavior.
     Scalar,
 }
 
@@ -228,6 +230,16 @@ impl CustomToolDef {
         }
         if self.description.trim().is_empty() {
             return Err(invalid("description is required"));
+        }
+        // `output_mode = "scalar"` parses and is documented, but production
+        // execution never shapes the result — it silently returns the row set.
+        // Accepting it advertises a contract that does nothing, so reject it at
+        // load until strict scalar shaping is implemented: accepted configuration
+        // must equal behavior (QA100 .44).
+        if self.output_mode == OutputMode::Scalar {
+            return Err(invalid(
+                "output_mode = \"scalar\" is not yet supported; use output_mode = \"rows\"",
+            ));
         }
         let body = self.body()?; // exactly one body form
         // Parameter names: valid bind identifiers, unique both exactly AND
@@ -1411,6 +1423,50 @@ mod tests {
     }
 
     #[test]
+    fn output_mode_scalar_is_rejected_at_load_until_supported() {
+        // QA100 .44: scalar output shaping is unimplemented, so a scalar
+        // definition must be refused at load rather than silently returning a row
+        // set that does not match the advertised contract.
+        let err = parse_tools_file(
+            r#"
+            [[tool]]
+            name = "app_lookup"
+            description = "Look up an account"
+            sql = "SELECT :account_id FROM dual"
+            output_mode = "scalar"
+            [[tool.params]]
+            name = "account_id"
+            type = "integer"
+            required = true
+            description = "Account id"
+            "#,
+        )
+        .expect_err("output_mode = scalar must be rejected at load");
+        assert!(
+            matches!(&err, LoadError::Invalid { reason, .. } if reason.contains("scalar")),
+            "unexpected error: {err:?}"
+        );
+        // The default (rows) still loads.
+        assert!(
+            parse_tools_file(
+                r#"
+                [[tool]]
+                name = "app_lookup"
+                description = "Look up an account"
+                sql = "SELECT :account_id FROM dual"
+                output_mode = "rows"
+                [[tool.params]]
+                name = "account_id"
+                type = "integer"
+                required = true
+                description = "Account id"
+                "#,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn canonical_signature_is_stable_across_toml_field_order() {
         let key = key();
         let first = parse_tools_file(
@@ -1419,7 +1475,7 @@ mod tests {
             name = "app_lookup"
             description = "Look up an account"
             sql = "SELECT :account_id FROM dual"
-            output_mode = "scalar"
+            output_mode = "rows"
             declared_level = "READ_ONLY"
             [[tool.params]]
             name = "account_id"
@@ -1434,7 +1490,7 @@ mod tests {
             r#"
             [[tool]]
             declared_level = "READ_ONLY"
-            output_mode = "scalar"
+            output_mode = "rows"
             sql = "SELECT :account_id FROM dual"
             description = "Look up an account"
             name = "app_lookup"
@@ -1453,7 +1509,7 @@ mod tests {
         assert_eq!(
             sign(&first, &key),
             "oraclemcp-custom-tool:v2:hmac-sha256:\
-             da1866e2a4349f3aca6d8adf041b02bc0fd6f5bbaa98a65597b69896e24c58d7"
+             59f9f7837480370e5004158d8ad6e7a0d5fc344615758f412579d183c3d0e1fc"
         );
     }
 
