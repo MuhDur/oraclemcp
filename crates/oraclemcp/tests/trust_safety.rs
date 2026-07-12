@@ -258,9 +258,10 @@ fn a6_fence_tag_is_unpredictable_per_call() {
 #[cfg(feature = "live-xe")]
 mod live {
     use super::*;
-    use asupersync::Cx;
     use asupersync::runtime::RuntimeBuilder;
-    use oraclemcp_core::{DoctorContext, run_doctor};
+    use asupersync::{Cx, Outcome};
+    use oraclemcp::dispatch::OracleDispatcher;
+    use oraclemcp_core::{DispatchContext, DoctorContext, ToolDispatch, run_doctor};
     use oraclemcp_db::{
         LeaseManager, OracleBind, OracleConnectOptions, OracleConnection, RustOracleConnection,
     };
@@ -312,6 +313,104 @@ mod live {
                 None
             }
         }
+    }
+
+    async fn drop_qa102_objects(cx: &Cx, conn: &RustOracleConnection) {
+        for ddl in [
+            "DROP FUNCTION ORACLEMCP_QA102_SIDEFX",
+            "DROP TABLE ORACLEMCP_QA102_LOG PURGE",
+        ] {
+            let _ = conn.execute(cx, ddl, &[] as &[OracleBind]).await;
+        }
+    }
+
+    /// QA102 (live): Oracle accepts a zero-argument function without `()`.
+    /// The served semantic gate must resolve that bare value as executable code
+    /// and refuse both delivery modes before its autonomous write can occur.
+    #[test]
+    fn qa102_live_bare_zero_arg_function_never_executes() {
+        run_with_cx(|cx| async move {
+            let Some(setup) = connect_or_skip(
+                &cx,
+                "qa102_live_bare_zero_arg_function_never_executes/setup",
+            )
+            .await
+            else {
+                return;
+            };
+            drop_qa102_objects(&cx, &setup).await;
+            setup
+                .execute(
+                    &cx,
+                    "CREATE TABLE ORACLEMCP_QA102_LOG (N NUMBER NOT NULL)",
+                    &[] as &[OracleBind],
+                )
+                .await
+                .expect("create autonomous-write witness table");
+            setup
+                .execute(
+                    &cx,
+                    "CREATE OR REPLACE FUNCTION ORACLEMCP_QA102_SIDEFX RETURN NUMBER AUTHID DEFINER IS \
+                     PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ORACLEMCP_QA102_LOG VALUES (1); \
+                     COMMIT; RETURN 1; END;",
+                    &[] as &[OracleBind],
+                )
+                .await
+                .expect("create autonomous zero-argument function");
+            drop(setup);
+
+            let Some(served) = connect_or_skip(
+                &cx,
+                "qa102_live_bare_zero_arg_function_never_executes/served",
+            )
+            .await
+            else {
+                return;
+            };
+            let dispatcher = OracleDispatcher::new(Box::new(served));
+            for streaming in [false, true] {
+                let outcome = ToolDispatch::dispatch(
+                    &dispatcher,
+                    &cx,
+                    DispatchContext::default(),
+                    "oracle_query",
+                    serde_json::json!({
+                        "sql": "SELECT ORACLEMCP_QA102_SIDEFX FROM DUAL",
+                        "streaming": streaming
+                    }),
+                )
+                .await;
+                assert!(
+                    matches!(outcome, Outcome::Err(ref error) if error.error_class == oraclemcp_core::error::ErrorClass::ForbiddenStatement),
+                    "bare zero-argument function must fail closed in streaming={streaming}: {outcome:?}"
+                );
+            }
+            drop(dispatcher);
+
+            let Some(probe) = connect_or_skip(
+                &cx,
+                "qa102_live_bare_zero_arg_function_never_executes/probe",
+            )
+            .await
+            else {
+                return;
+            };
+            let rows = probe
+                .query_rows(
+                    &cx,
+                    "SELECT COUNT(*) AS N FROM ORACLEMCP_QA102_LOG",
+                    &[] as &[OracleBind],
+                )
+                .await
+                .expect("read autonomous-write witness");
+            let count = rows.first().and_then(|row| row.parse_i64("N"));
+            drop_qa102_objects(&cx, &probe).await;
+            assert_eq!(
+                count,
+                Some(0),
+                "refused reads must leave no autonomous write"
+            );
+        });
     }
 
     /// A1 (live): under `SET TRANSACTION READ ONLY`, the DATABASE itself refuses
