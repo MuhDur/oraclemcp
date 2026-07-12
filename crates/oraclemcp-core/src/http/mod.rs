@@ -588,6 +588,25 @@ pub struct HttpLaneBinding {
 
 const MAX_OPERATOR_EVENTS_PER_STREAM: usize = 128;
 
+/// Hard cap on the number of distinct `/operator/v1/events` replay streams. Keys
+/// are already bounded to active lanes per authenticated operator (a specific
+/// `lane_id` is validated against the active lane set at the call site); this cap
+/// additionally bounds accumulation from closed lanes and many operators over
+/// time, evicting the least-recently-updated stream when exceeded.
+const MAX_OPERATOR_EVENT_STREAMS: usize = 256;
+
+/// The default aggregate operator event stream. Always a valid `lane_id`; any
+/// other `lane_id` must name a currently active lane.
+const OPERATOR_AGGREGATE_LANE: &str = "operator";
+
+/// One operator event stream: its bounded event ring plus the last time it was
+/// touched (for least-recently-updated eviction).
+#[derive(Debug)]
+struct OperatorEventStream {
+    events: Vec<HttpBufferedEvent>,
+    last_updated: Instant,
+}
+
 /// Bounded `/operator/v1/events` replay buffer.
 ///
 /// Events are keyed by the redacted subject hash plus lane id. That makes resume
@@ -595,7 +614,7 @@ const MAX_OPERATOR_EVENTS_PER_STREAM: usize = 128;
 /// operators consult different rings.
 #[derive(Debug, Default)]
 pub struct OperatorEventStore {
-    streams: Mutex<HashMap<OperatorEventStreamKey, Vec<HttpBufferedEvent>>>,
+    streams: Mutex<HashMap<OperatorEventStreamKey, OperatorEventStream>>,
 }
 
 impl OperatorEventStore {
@@ -619,7 +638,24 @@ impl OperatorEventStore {
             lane_id: lane_id.to_owned(),
         };
         let mut streams = self.streams.lock();
-        let stream = streams.entry(key).or_default();
+        // Bound the number of live streams: when a NEW key would exceed the cap,
+        // evict the least-recently-updated stream first (defense in depth on top
+        // of the call-site lane_id validation).
+        if !streams.contains_key(&key)
+            && streams.len() >= MAX_OPERATOR_EVENT_STREAMS
+            && let Some(evict) = streams
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_updated)
+                .map(|(evict_key, _)| evict_key.clone())
+        {
+            streams.remove(&evict);
+        }
+        let entry = streams.entry(key).or_insert_with(|| OperatorEventStream {
+            events: Vec::new(),
+            last_updated: Instant::now(),
+        });
+        entry.last_updated = Instant::now();
+        let stream = &mut entry.events;
         let previous_seq = stream
             .last()
             .and_then(|event| operator_event_sequence(&event.id))
@@ -5358,6 +5394,27 @@ fn operator_events_response(
         request.query_param("cursor").is_none() && request.header("last-event-id").is_some();
     let active_lanes = operator_active_lanes_data(config);
     let lane_count = active_lanes["lanes"].as_array().map_or(0, Vec::len);
+    // A specific lane_id must name a currently active lane; only the default
+    // aggregate stream is always valid. This bounds the event-stream key space to
+    // the active lanes so a caller cannot mint unbounded distinct streams from
+    // attacker-chosen lane ids.
+    if lane_id != OPERATOR_AGGREGATE_LANE
+        && !active_lanes["lanes"].as_array().is_some_and(|lanes| {
+            lanes
+                .iter()
+                .any(|lane| lane.get("lane_id").and_then(Value::as_str) == Some(lane_id.as_str()))
+        })
+    {
+        return operator_json_response(
+            404,
+            &request.path,
+            json!({
+                "error": "operator_lane_not_active",
+                "message": "requested lane_id is not an active lane",
+                "lane_id": lane_id,
+            }),
+        );
+    }
     let subject_key = operator_subject.legacy_agent_identity();
     let events = match config.operator_events.append_snapshot_and_resume(
         &subject_key,
@@ -5399,7 +5456,7 @@ fn operator_event_lane_id(request: &HttpRequest) -> Result<String, Value> {
     let lane_id = request
         .query_param("lane_id")
         .or_else(|| request.query_param("lane"))
-        .unwrap_or("operator")
+        .unwrap_or(OPERATOR_AGGREGATE_LANE)
         .trim();
     if lane_id.is_empty() || lane_id.contains('/') || lane_id.len() > 128 {
         return Err(json!({

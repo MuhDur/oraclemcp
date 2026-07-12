@@ -1465,6 +1465,21 @@ impl StaticLaneLifecycle {
             }],
         }
     }
+
+    fn with_lanes(lane_ids: &[&str]) -> Self {
+        Self {
+            lanes: lane_ids
+                .iter()
+                .enumerate()
+                .map(|(i, lane_id)| HttpLaneSnapshot {
+                    lane_id: (*lane_id).to_owned(),
+                    generation: 7,
+                    status: "active",
+                    subject_id_hash: format!("subject-sha256:{i}"),
+                })
+                .collect(),
+        }
+    }
 }
 
 impl HttpSessionLifecycle for StaticLaneLifecycle {
@@ -2340,11 +2355,83 @@ fn audit_tail_reports_broken_hash_chain_without_exposing_raw_json_fields() {
 }
 
 #[test]
+fn operator_events_reject_an_inactive_lane_id() {
+    // QA100 .24: a specific lane_id must name an active lane; the default
+    // aggregate stream is always valid; a bogus lane is refused so a caller
+    // cannot mint unbounded distinct streams from attacker-chosen lane ids.
+    let (auditor, _sink) = operator_auditor();
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        operator_events: Arc::new(OperatorEventStore::new()),
+        session_lifecycle: Some(Arc::new(StaticLaneLifecycle::with_lanes(&["lane-a"]))),
+        ..Default::default()
+    };
+    let get = |target: &'static str| {
+        HttpRequest::new(
+            "GET",
+            target,
+            [("host", "127.0.0.1"), ("accept", "text/event-stream")],
+            Vec::new(),
+        )
+        .with_peer_loopback(true)
+    };
+    assert_eq!(
+        handle_http_request(
+            &test_server(),
+            &cfg,
+            get("/operator/v1/events?lane_id=lane-a")
+        )
+        .status,
+        200,
+        "an active lane is served"
+    );
+    assert_eq!(
+        handle_http_request(&test_server(), &cfg, get("/operator/v1/events")).status,
+        200,
+        "the default aggregate stream is always served"
+    );
+    let refused = handle_http_request(
+        &test_server(),
+        &cfg,
+        get("/operator/v1/events?lane_id=lane-nope"),
+    );
+    assert_eq!(refused.status, 404);
+    assert_eq!(
+        response_json(&refused)["data"]["error"],
+        serde_json::json!("operator_lane_not_active")
+    );
+}
+
+#[test]
+fn operator_event_store_caps_the_number_of_streams() {
+    // QA100 .24: the store bounds the number of distinct streams; excess ones are
+    // LRU-evicted so many lane ids cannot grow memory without limit.
+    let store = OperatorEventStore::new();
+    for i in 0..(MAX_OPERATOR_EVENT_STREAMS + 50) {
+        let _ = store.append_snapshot_and_resume(
+            "subject",
+            &format!("lane-{i}"),
+            None,
+            None,
+            false,
+            serde_json::json!({ "n": i }),
+        );
+    }
+    assert!(
+        store.streams.lock().len() <= MAX_OPERATOR_EVENT_STREAMS,
+        "operator event stream count must stay bounded"
+    );
+}
+
+#[test]
 fn operator_events_resume_is_lane_scoped() {
     let (auditor, _sink) = operator_auditor();
     let cfg = HttpTransportConfig {
         operator_auditor: Some(auditor),
         operator_events: Arc::new(OperatorEventStore::new()),
+        session_lifecycle: Some(Arc::new(StaticLaneLifecycle::with_lanes(&[
+            "lane-a", "lane-b",
+        ]))),
         ..Default::default()
     };
     let event_request = |target: &'static str, last_event_id: Option<&'static str>| {
@@ -2461,6 +2548,7 @@ fn operator_events_last_event_id_reports_gap_for_slow_consumer() {
     let cfg = HttpTransportConfig {
         operator_auditor: Some(auditor),
         operator_events: Arc::new(OperatorEventStore::new()),
+        session_lifecycle: Some(Arc::new(StaticLaneLifecycle::with_lanes(&["lane-a"]))),
         ..Default::default()
     };
     let event_request = |target: &'static str, last_event_id: Option<&'static str>| {
