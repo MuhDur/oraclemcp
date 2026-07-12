@@ -130,6 +130,25 @@ impl ToolDispatch for ScopeEchoDispatch {
     }
 }
 
+/// QA100 `.116`: a dispatcher whose structured result is far larger than a
+/// small whole-response budget, used to prove oversized responses are refused
+/// before they reach the wire or the stateful replay store.
+struct BigResultDispatch {
+    payload_bytes: usize,
+}
+impl ToolDispatch for BigResultDispatch {
+    fn dispatch<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _context: DispatchContext<'a>,
+        _name: &'a str,
+        _args: Value,
+    ) -> DispatchFuture<'a> {
+        let blob = "Q".repeat(self.payload_bytes);
+        Box::pin(async move { Outcome::Ok(serde_json::json!({ "blob": blob })) })
+    }
+}
+
 struct LaneThreadDispatch;
 impl ToolDispatch for LaneThreadDispatch {
     fn dispatch<'a>(
@@ -1271,6 +1290,155 @@ fn stateful_initialize_storm_cannot_exceed_registry_cardinality() {
 
     assert_eq!(sessions.len(), 4);
     assert_eq!(results.session_count(), 4);
+}
+
+fn big_result_http_server(payload_bytes: usize, ceiling: usize) -> OracleMcpServer {
+    let report = CapabilitiesReport::new(
+        "0.1.0",
+        vec![],
+        OperatingLevel::ReadOnly,
+        FeatureTiers {
+            live_db: false,
+            engine: true,
+            http_transport: true,
+        },
+    );
+    OracleMcpServer::new(
+        "0.1.0",
+        ToolRegistry::new(),
+        report,
+        Arc::new(BigResultDispatch { payload_bytes }),
+    )
+    .with_response_byte_budget(crate::response_budget::ResponseByteBudget::new(ceiling, 0))
+}
+
+// QA100 `.116`: an oversized tool response on the stateless JSON HTTP path is
+// refused with the bounded typed error, and the serialized wire body stays
+// within the ceiling.
+#[test]
+fn stateless_json_oversized_tool_response_is_refused_with_bounded_error() {
+    let cfg = HttpTransportConfig {
+        json_response: true,
+        stateful: false,
+        ..Default::default()
+    };
+    let server = big_result_http_server(16_384, 4_096);
+    let call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": { "name": "big_tool", "arguments": {} }
+    });
+    let response = handle_http_request(&server, &cfg, post(&call));
+    assert_eq!(response.status, 200);
+    let body = response_json(&response);
+    assert!(
+        body.get("result").is_none(),
+        "the oversized payload is not delivered"
+    );
+    assert_eq!(body["id"], serde_json::json!(7), "id is preserved");
+    assert_eq!(
+        body["error"]["data"]["reason"],
+        serde_json::json!("response_too_large")
+    );
+    assert!(
+        response.body.len() <= 4_096,
+        "the refused response body ({} bytes) stays within the whole-response ceiling",
+        response.body.len()
+    );
+    assert!(
+        !String::from_utf8_lossy(&response.body).contains(&"Q".repeat(64)),
+        "the oversized blob never reaches the wire"
+    );
+}
+
+// QA100 `.116`: on the stateful SSE path, an oversized tool response is refused
+// with the bounded typed error BEFORE replay insertion — the replay store never
+// retains the oversized payload, only the small bounded error.
+#[test]
+fn stateful_sse_oversized_tool_response_is_refused_before_replay_insertion() {
+    let result_store = Arc::new(HttpResultStore::new());
+    let cfg = HttpTransportConfig {
+        stateful: true,
+        session_store: Some(Arc::new(HttpSessionStore::default())),
+        result_store: Some(Arc::clone(&result_store)),
+        ..Default::default()
+    };
+    let server = big_result_http_server(64_000, 4_096);
+    let init = handle_http_request(&server, &cfg, post(&init_body()));
+    let session_id = init
+        .header("mcp-session-id")
+        .expect("stateful init session id")
+        .to_owned();
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "tools/call",
+        "params": { "name": "big_tool", "arguments": {} }
+    });
+    let call_request = HttpRequest::new(
+        "POST",
+        MCP_PATH,
+        [
+            ("host", "127.0.0.1"),
+            ("content-type", "application/json"),
+            ("accept", "application/json, text/event-stream"),
+            ("mcp-session-id", session_id.as_str()),
+            ("mcp-protocol-version", "2025-11-25"),
+        ],
+        call.to_string().into_bytes(),
+    );
+    let response = handle_http_request(&server, &cfg, call_request);
+    assert_eq!(response.status, 200);
+    assert_eq!(response.header("content-type"), Some("text/event-stream"));
+
+    let events = sse_json_events(&response);
+    let refused = events
+        .iter()
+        .find(|event| event["id"] == serde_json::json!(11))
+        .expect("the SSE stream carries the tool response frame");
+    assert!(refused.get("result").is_none());
+    assert_eq!(
+        refused["error"]["data"]["reason"],
+        serde_json::json!("response_too_large")
+    );
+    assert!(
+        !String::from_utf8_lossy(&response.body).contains(&"Q".repeat(64)),
+        "the oversized blob is not framed onto the SSE wire"
+    );
+
+    // The replay store retained only the bounded error, never the oversized
+    // payload: total retained bytes are far below the oversized payload size.
+    let (retained_total, sessions) = result_store.retained_bytes_for_test();
+    assert!(
+        retained_total < 4_096,
+        "replay retained only the bounded error ({retained_total} bytes), not the oversized payload"
+    );
+    assert!(
+        sessions.iter().all(|(_, bytes)| *bytes < 4_096),
+        "no session retained the oversized payload"
+    );
+
+    // Replaying the buffered result serves the bounded error, not the payload.
+    let replay = handle_http_request(
+        &server,
+        &cfg,
+        HttpRequest::new(
+            "GET",
+            "/mcp?cursor=0",
+            [
+                ("host", "127.0.0.1"),
+                ("accept", "text/event-stream"),
+                ("mcp-session-id", session_id.as_str()),
+            ],
+            Vec::new(),
+        ),
+    );
+    assert_eq!(replay.status, 200);
+    let replay_body = String::from_utf8_lossy(&replay.body);
+    assert!(replay_body.contains("response_too_large"));
+    assert!(!replay_body.contains(&"Q".repeat(64)));
 }
 
 struct StaticReadinessProbe(bool);

@@ -6392,10 +6392,14 @@ fn handle_mcp_post_exchange(
         }
     }
     let outcome = server.handle_jsonrpc_request_with_context_outcome(parsed, None, context);
+    // QA100 `.116`: the stateful/stateless buffered HTTP paths build their
+    // response here from the `_outcome` variant (bypassing the stdio wrapper),
+    // so enforce the whole-response byte budget before the value is framed for
+    // the wire and, on the stateful path, inserted into the replay store.
     let response = match outcome {
-        Outcome::Ok(Some(response)) => response,
+        Outcome::Ok(Some(response)) => server.enforce_response_byte_budget(response),
         Outcome::Ok(None) => return HttpExchange::Buffered(empty_response(202)),
-        Outcome::Err(error) => error.into_response(),
+        Outcome::Err(error) => server.enforce_response_byte_budget(error.into_response()),
         Outcome::Cancelled(reason) => {
             return HttpExchange::Buffered(dispatch_cancelled_response(&reason));
         }

@@ -26,6 +26,7 @@ use crate::request_budget::{
 use crate::resources::{
     PromptMessage, ResourceContents, ResourceUri, prompt_catalog, render_prompt, resource_templates,
 };
+use crate::response_budget::ResponseByteBudget;
 use crate::tools::{ToolAnnotations, ToolDescriptor, ToolRegistry};
 use oraclemcp_guard::OperatingLevel;
 
@@ -678,6 +679,12 @@ pub struct OracleMcpServer {
     /// `initialize`; a second stdio `initialize` is rejected (MCP lifecycle:
     /// initialize happens exactly once per session).
     stdio_negotiated: Arc<parking_lot::Mutex<Option<String>>>,
+    /// The whole-MCP-response byte budget (QA100 bead `.116`). One budget,
+    /// charged across every transport (stdio, stateless HTTP, stateful HTTP +
+    /// SSE replay), that bounds the whole serialized response — envelope,
+    /// metadata, cursor, framing, and retained copy — before it reaches the wire
+    /// or the replay store. See [`crate::response_budget`].
+    response_budget: ResponseByteBudget,
 }
 
 impl OracleMcpServer {
@@ -723,7 +730,34 @@ impl OracleMcpServer {
             subscriptions: Arc::new(crate::subscriptions::SubscriptionHub::unsupported()),
             notifications: Arc::new(crate::notifications::NotificationHub::new()),
             stdio_negotiated: Arc::new(parking_lot::Mutex::new(None)),
+            response_budget: ResponseByteBudget::default(),
         }
+    }
+
+    /// Override the whole-response byte budget (QA100 bead `.116`; builder).
+    /// Production uses [`ResponseByteBudget::default`]; this is the seam for a
+    /// future configurable ceiling and for exercising the budget under a small
+    /// cap in tests.
+    #[must_use]
+    pub fn with_response_byte_budget(mut self, response_budget: ResponseByteBudget) -> Self {
+        self.response_budget = response_budget;
+        self
+    }
+
+    /// The whole-response byte budget enforced on every finalized response
+    /// before it reaches the wire or the stateful replay store (QA100 `.116`).
+    #[must_use]
+    pub fn response_byte_budget(&self) -> ResponseByteBudget {
+        self.response_budget
+    }
+
+    /// Enforce [`Self::response_byte_budget`] on a finalized JSON-RPC response.
+    /// An in-budget response passes through byte-identical; an oversized one is
+    /// replaced by the bounded, typed "response too large" JSON-RPC error before
+    /// any transport writes it or the replay store retains it.
+    #[must_use]
+    pub(crate) fn enforce_response_byte_budget(&self, response: Value) -> Value {
+        self.response_budget.enforce(response)
     }
 
     /// The stdio session's negotiated protocol revision, once `initialize`
@@ -1181,7 +1215,14 @@ impl OracleMcpServer {
         id: Value,
         outcome: DispatchOutcome,
     ) -> Value {
-        jsonrpc_result(id, self.tool_result_from_outcome(outcome))
+        // QA100 `.116`: bound the whole serialized tool response here — this is
+        // the shared builder for the HTTP streaming/SSE tool paths, so the
+        // budget is applied before `append_final_response` retains it and before
+        // it is written to the wire.
+        self.enforce_response_byte_budget(jsonrpc_result(
+            id,
+            self.tool_result_from_outcome(outcome),
+        ))
     }
 
     fn handle_stdio_frame(&self, frame: &[u8], auth: &StdioAuthPolicy) -> Option<Value> {
@@ -1217,20 +1258,25 @@ impl OracleMcpServer {
         auth: Option<&StdioAuthPolicy>,
         context: DispatchContext<'_>,
     ) -> Option<Value> {
-        match self.handle_jsonrpc_request_with_context_outcome(request, auth, context) {
-            Outcome::Ok(response) => response,
-            Outcome::Err(error) => Some(error.into_response()),
-            Outcome::Cancelled(reason) => Some(jsonrpc_error(
-                Value::Null,
-                JSONRPC_SERVER_ERROR,
-                format!("Request cancelled: {reason}"),
-            )),
-            Outcome::Panicked(_) => Some(jsonrpc_error(
-                Value::Null,
-                JSONRPC_SERVER_ERROR,
-                "Request panicked",
-            )),
-        }
+        let response =
+            match self.handle_jsonrpc_request_with_context_outcome(request, auth, context) {
+                Outcome::Ok(response) => response,
+                Outcome::Err(error) => Some(error.into_response()),
+                Outcome::Cancelled(reason) => Some(jsonrpc_error(
+                    Value::Null,
+                    JSONRPC_SERVER_ERROR,
+                    format!("Request cancelled: {reason}"),
+                )),
+                Outcome::Panicked(_) => Some(jsonrpc_error(
+                    Value::Null,
+                    JSONRPC_SERVER_ERROR,
+                    "Request panicked",
+                )),
+            };
+        // QA100 `.116`: enforce the whole-response byte budget for the stdio and
+        // stateless-HTTP buffered paths that consume this method, before the
+        // response value is serialized to the wire.
+        response.map(|response| self.enforce_response_byte_budget(response))
     }
 
     pub(crate) fn handle_jsonrpc_request_with_context_outcome(
@@ -2708,6 +2754,79 @@ mod tests {
             let cx = Cx::current().expect("block_on installs a request Cx");
             server.run_tool_with_cx(&cx, name.to_owned(), args).await
         })
+    }
+
+    // QA100 `.116`: an oversized tool response placed on the *stdio* wire is
+    // refused with the bounded typed error, measured at the actual serialized
+    // wire boundary (`serve_stdio_with_io` writes these exact bytes).
+    #[test]
+    fn stdio_oversized_tool_response_is_refused_with_bounded_error() {
+        use crate::response_budget::{
+            OVERSIZED_RESPONSE_MAX_BYTES, RESPONSE_TOO_LARGE_CODE, ResponseByteBudget,
+        };
+        let server = server().with_response_byte_budget(ResponseByteBudget::new(2_048, 0));
+        // The echo dispatcher reflects the args, which the tool-result envelope
+        // then embeds twice (fenced text + structuredContent) — comfortably over
+        // the 2 KiB whole-response ceiling.
+        let call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "oracle_query",
+                "arguments": { "sql": "X".repeat(4_000) }
+            }
+        });
+        let replies = run_stdio_raw(&server, stdio_frame(&call));
+        let reply = replies
+            .iter()
+            .find(|reply| reply["id"] == serde_json::json!(9))
+            .expect("the tool call has a reply");
+        assert!(
+            reply.get("result").is_none(),
+            "the oversized payload must not be delivered"
+        );
+        assert_eq!(reply["id"], serde_json::json!(9), "id is preserved");
+        assert_eq!(
+            reply["error"]["code"],
+            serde_json::json!(RESPONSE_TOO_LARGE_CODE)
+        );
+        assert_eq!(
+            reply["error"]["data"]["reason"],
+            serde_json::json!("response_too_large")
+        );
+        let wire_bytes = serde_json::to_vec(reply).expect("reply serializes").len();
+        // Within the proven substitution bound (and hence the 2 KiB ceiling).
+        assert!(
+            wire_bytes <= OVERSIZED_RESPONSE_MAX_BYTES,
+            "the refused response ({wire_bytes} bytes) stays within the ceiling"
+        );
+    }
+
+    // QA100 `.116`: an in-budget tool response is unaffected — the budget only
+    // substitutes when the whole serialized response exceeds the ceiling.
+    #[test]
+    fn stdio_in_budget_tool_response_passes_through() {
+        let server = server();
+        let call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "oracle_query",
+                "arguments": { "sql": "SELECT 1 FROM dual" }
+            }
+        });
+        let replies = run_stdio_raw(&server, stdio_frame(&call));
+        let reply = replies
+            .iter()
+            .find(|reply| reply["id"] == serde_json::json!(4))
+            .expect("the tool call has a reply");
+        assert!(
+            reply.get("result").is_some(),
+            "an ordinary response is delivered intact"
+        );
+        assert!(reply.get("error").is_none());
     }
 
     #[test]
