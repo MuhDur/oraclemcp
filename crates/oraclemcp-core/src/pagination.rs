@@ -10,12 +10,16 @@
 //! cross-endpoint cursor fails closed (treated as an invalid argument), never
 //! silently reads a different slice.
 //!
-//! These lists are small and static per process, so server-side slicing on a
-//! signed offset is the simplest correct model; there is no server-side cursor
-//! state to leak or exhaust.
+//! Server-side slicing on a signed offset is the simplest correct model; there
+//! is no server-side cursor state to leak or exhaust. The cursor also binds a
+//! digest of the exact ordered, visible list it was issued against (its
+//! *revision*), so replaying a cursor after the catalog's names, order,
+//! descriptors, or visibility change is rejected as stale rather than silently
+//! paging an inconsistent snapshot.
 
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::tamper_token::{sign_token, verify_token};
 
@@ -33,19 +37,47 @@ fn scope_for(kind: &str) -> String {
     format!("{CURSOR_SCOPE}:{kind}")
 }
 
-/// Encode an opaque, tamper-evident cursor pointing at `next_offset` of the
-/// `kind` listing. The offset is the signed payload, so editing it invalidates
-/// the cursor.
-#[must_use]
-pub fn encode_cursor(kind: &str, next_offset: usize) -> String {
-    sign_token(&scope_for(kind), &next_offset.to_string(), &[kind])
+/// A digest of the exact ordered, visible list a cursor was issued against.
+///
+/// Any change to item names, order, descriptor contents, or visibility changes
+/// the serialized bytes and therefore this revision, so a cursor minted against
+/// an older catalog is detected as stale on replay. It rides inside the
+/// MAC-signed cursor, so it only needs to change when the list changes — it does
+/// not itself need to resist forgery (the tamper token does that).
+fn list_revision(items: &[Value]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(items).unwrap_or_default());
+    hasher
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
-/// Decode a client-supplied cursor for the `kind` listing back to an offset.
-/// `None` (absent cursor) starts at offset 0. A present-but-invalid cursor —
-/// forged, edited, or minted for a different list — is a hard
-/// `InvalidArguments` error (fail closed), never a silent reset to 0.
-pub fn decode_cursor(kind: &str, cursor: Option<&str>) -> Result<usize, ErrorEnvelope> {
+/// Encode an opaque, tamper-evident cursor pointing at `next_offset` of the
+/// `kind` listing at `revision`. The `revision:offset` payload is signed, so
+/// editing either field invalidates the cursor.
+#[must_use]
+pub fn encode_cursor(kind: &str, revision: &str, next_offset: usize) -> String {
+    sign_token(
+        &scope_for(kind),
+        &format!("{revision}:{next_offset}"),
+        &[kind],
+    )
+}
+
+/// Decode a client-supplied cursor for the `kind` listing at `current_revision`
+/// back to an offset. `None` (absent cursor) starts at offset 0. A
+/// present-but-invalid cursor — forged, edited, or minted for a different list —
+/// is a hard `InvalidArguments` error (fail closed), never a silent reset to 0.
+/// A cursor whose embedded revision no longer matches `current_revision` (the
+/// list changed since it was issued) is rejected as stale.
+pub fn decode_cursor(
+    kind: &str,
+    current_revision: &str,
+    cursor: Option<&str>,
+) -> Result<usize, ErrorEnvelope> {
     let Some(cursor) = cursor else {
         return Ok(0);
     };
@@ -60,7 +92,20 @@ pub fn decode_cursor(kind: &str, cursor: Option<&str>) -> Result<usize, ErrorEnv
         )
         .with_next_step("drop the cursor to restart from the first page")
     })?;
-    payload.parse::<usize>().map_err(|_| {
+    let (revision, offset) = payload.split_once(':').ok_or_else(|| {
+        ErrorEnvelope::new(
+            ErrorClass::InvalidArguments,
+            format!("invalid {kind} pagination cursor payload"),
+        )
+    })?;
+    if revision != current_revision {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::InvalidArguments,
+            format!("stale {kind} pagination cursor: the list changed since this page was issued"),
+        )
+        .with_next_step("drop the cursor and restart from the first page"));
+    }
+    offset.parse::<usize>().map_err(|_| {
         ErrorEnvelope::new(
             ErrorClass::InvalidArguments,
             format!("invalid {kind} pagination cursor payload"),
@@ -79,13 +124,15 @@ pub struct Page {
 }
 
 /// Slice `items` into a bounded page starting at the offset encoded in
-/// `cursor`. Out-of-range offsets (a stale cursor pointing past a now-shorter
-/// list) yield an empty final page with no `nextCursor`, which is a valid
-/// terminal page.
+/// `cursor`. The cursor is bound to a revision digest of `items`, so a cursor
+/// issued against a since-changed list is rejected as stale (`InvalidArguments`)
+/// rather than paging an inconsistent snapshot. A within-revision offset past
+/// the end yields an empty terminal page with no `nextCursor`.
 pub fn paginate(kind: &str, items: &[Value], cursor: Option<&str>) -> Result<Page, ErrorEnvelope> {
-    let offset = decode_cursor(kind, cursor)?.min(items.len());
+    let revision = list_revision(items);
+    let offset = decode_cursor(kind, &revision, cursor)?.min(items.len());
     let end = offset.saturating_add(LIST_PAGE_SIZE).min(items.len());
-    let next_cursor = (end < items.len()).then(|| encode_cursor(kind, end));
+    let next_cursor = (end < items.len()).then(|| encode_cursor(kind, &revision, end));
     Ok(Page {
         items: items[offset..end].to_vec(),
         next_cursor,
@@ -150,10 +197,47 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_cursor_past_the_end_yields_an_empty_terminal_page() {
-        let cursor = encode_cursor("tools", 9999);
-        let page = paginate("tools", &items(3), Some(&cursor)).expect("page");
+    fn a_within_revision_offset_past_the_end_yields_an_empty_terminal_page() {
+        let all = items(3);
+        // A cursor carrying the CURRENT list revision but an offset past the end
+        // (list unchanged) clamps to an empty terminal page rather than erroring.
+        let cursor = encode_cursor("tools", &list_revision(&all), 9999);
+        let page = paginate("tools", &all, Some(&cursor)).expect("page");
         assert!(page.items.is_empty());
         assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn a_cursor_is_rejected_once_the_list_changes_under_it() {
+        let v1 = items(LIST_PAGE_SIZE * 2);
+        let cursor = paginate("tools", &v1, None)
+            .expect("first page")
+            .next_cursor
+            .expect("more pages");
+        // The catalog changes (an item appended) between page 1 and page 2: the
+        // revision no longer matches, so the cursor is rejected as stale instead
+        // of paging an inconsistent snapshot.
+        let mut v2 = v1.clone();
+        v2.push(json!({ "i": 9_999 }));
+        let err = paginate("tools", &v2, Some(&cursor)).expect_err("stale cursor rejected");
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+        // A reordering (same length, same set) is also detected.
+        let mut v3 = v1.clone();
+        v3.swap(0, 1);
+        let err = paginate("tools", &v3, Some(&cursor)).expect_err("reorder rejected");
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+    }
+
+    #[test]
+    fn a_cursor_replays_cleanly_while_the_list_is_unchanged() {
+        let all = items(LIST_PAGE_SIZE * 2);
+        let cursor = paginate("tools", &all, None)
+            .expect("first page")
+            .next_cursor
+            .expect("more pages");
+        // Same list, same revision -> the second page is served.
+        let page = paginate("tools", &all, Some(&cursor)).expect("second page");
+        assert_eq!(page.items.len(), LIST_PAGE_SIZE);
+        assert_eq!(page.items[0]["i"].as_u64().unwrap(), LIST_PAGE_SIZE as u64);
     }
 }
