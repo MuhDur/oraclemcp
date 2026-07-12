@@ -104,6 +104,13 @@ struct Entry {
     deadline: MonotonicDeadline,
 }
 
+/// Hard cap on live execution grants retained in the store. Grants are
+/// single-use and TTL-bounded, so `issue` drops expired grants on every mint;
+/// the cap additionally bounds a burst of still-live grants so no `issue` call
+/// site can grow the store without limit. Sized well above any realistic count
+/// of concurrently-pending step-up grants for one process.
+pub const MAX_LIVE_GRANTS: usize = 1024;
+
 /// An in-process, single-use store of execution grants keyed by an opaque id.
 #[derive(Default)]
 pub struct ExecGrantStore {
@@ -120,6 +127,12 @@ impl ExecGrantStore {
 
     /// Mint a grant binding `sql`, `binding`, and `granted_level` for `ttl`.
     /// Returns the opaque token id the agent echoes back to `oracle_query_execute`.
+    ///
+    /// Every mint bounds the store so no call site can grow it without limit: it
+    /// first drops expired grants (a grant is single-use and TTL-bounded), then
+    /// enforces [`MAX_LIVE_GRANTS`] by evicting the grant nearest expiry. Eviction
+    /// fails closed — an evicted token is [`ExecGrantError::Unknown`] on the next
+    /// `consume`.
     pub fn issue(
         &self,
         sql: &str,
@@ -132,15 +145,27 @@ impl ExecGrantStore {
             std::process::id(),
             self.counter.fetch_add(1, Ordering::SeqCst)
         );
-        self.entries.lock().expect("poisoned").insert(
-            id.clone(),
-            Entry {
-                sql_digest: sql_digest(sql),
-                binding,
-                granted_level,
-                deadline: MonotonicDeadline::after(ttl),
-            },
-        );
+        let entry = Entry {
+            sql_digest: sql_digest(sql),
+            binding,
+            granted_level,
+            deadline: MonotonicDeadline::after(ttl),
+        };
+        let mut entries = self.entries.lock().expect("poisoned");
+        entries.retain(|_, e| !e.deadline.is_expired());
+        while entries.len() >= MAX_LIVE_GRANTS {
+            let evict = entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.deadline.remaining())
+                .map(|(key, _)| key.clone());
+            match evict {
+                Some(key) => {
+                    entries.remove(&key);
+                }
+                None => break,
+            }
+        }
+        entries.insert(id.clone(), entry);
         id
     }
 
@@ -366,18 +391,94 @@ mod tests {
     fn purge_drops_only_expired() {
         let store = ExecGrantStore::new();
         let binding = ExecGrantBinding::new("s", "lane", "subject", 1);
-        store.issue(
-            "a",
-            binding.clone(),
-            OperatingLevel::ReadWrite,
-            Duration::from_secs(0),
-        );
+        // Issue the LIVE grant first: `issue` now purges expired grants on every
+        // mint, so minting "b" after an expired "a" would already drop "a". Mint
+        // the live one first, then the expiring one, so `purge_expired` still has
+        // exactly one expired entry to drop and one live entry to keep.
         store.issue(
             "b",
-            binding,
+            binding.clone(),
             OperatingLevel::ReadWrite,
             Duration::from_secs(3600),
         );
+        store.issue(
+            "a",
+            binding,
+            OperatingLevel::ReadWrite,
+            Duration::from_secs(0),
+        );
         assert_eq!(store.purge_expired(), 1);
+    }
+
+    #[test]
+    fn issue_purges_expired_grants_before_insert() {
+        let store = ExecGrantStore::new();
+        let b = binding();
+        // An expired grant, then a live one: minting the live grant purges the
+        // expired entry, so it never accumulates.
+        let stale = store.issue(
+            SQL,
+            b.clone(),
+            OperatingLevel::ReadWrite,
+            Duration::from_secs(0),
+        );
+        let live = store.issue(SQL, b.clone(), OperatingLevel::ReadWrite, TTL);
+        assert_eq!(store.entries.lock().expect("poisoned").len(), 1);
+        assert_eq!(
+            store.consume(&stale, SQL, &b, OperatingLevel::ReadWrite),
+            Err(ExecGrantError::Unknown),
+            "the expired grant was purged during the next issue"
+        );
+        assert_eq!(
+            store.consume(&live, SQL, &b, OperatingLevel::ReadWrite),
+            Ok(OperatingLevel::ReadWrite)
+        );
+    }
+
+    #[test]
+    fn issue_enforces_hard_cap_on_live_grants() {
+        let store = ExecGrantStore::new();
+        let b = binding();
+        // Mint well past the cap with all-live grants: the store must never grow
+        // beyond MAX_LIVE_GRANTS, no matter how many grants a caller mints.
+        for _ in 0..(MAX_LIVE_GRANTS + 50) {
+            store.issue(SQL, b.clone(), OperatingLevel::ReadWrite, TTL);
+        }
+        assert_eq!(
+            store.entries.lock().expect("poisoned").len(),
+            MAX_LIVE_GRANTS
+        );
+    }
+
+    #[test]
+    fn hard_cap_evicts_the_grant_nearest_expiry_first() {
+        let store = ExecGrantStore::new();
+        let b = binding();
+        // A long-lived "keeper", then fill to force eviction with shorter-lived
+        // grants: eviction targets the grant nearest expiry, so the keeper — the
+        // furthest from expiry — survives and is still consumable.
+        let keeper = store.issue(
+            SQL,
+            b.clone(),
+            OperatingLevel::ReadWrite,
+            Duration::from_secs(7200),
+        );
+        for _ in 0..MAX_LIVE_GRANTS {
+            store.issue(
+                SQL,
+                b.clone(),
+                OperatingLevel::ReadWrite,
+                Duration::from_secs(3600),
+            );
+        }
+        assert_eq!(
+            store.entries.lock().expect("poisoned").len(),
+            MAX_LIVE_GRANTS
+        );
+        assert_eq!(
+            store.consume(&keeper, SQL, &b, OperatingLevel::ReadWrite),
+            Ok(OperatingLevel::ReadWrite),
+            "the furthest-from-expiry grant is never the eviction target"
+        );
     }
 }
