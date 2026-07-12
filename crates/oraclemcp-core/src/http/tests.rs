@@ -4473,7 +4473,11 @@ fn stateful_get_replays_buffered_lane_results_by_cursor() {
     let post = handle_http_request(&server, &cfg, post);
     assert_eq!(post.status, 200);
     let post_body = String::from_utf8(post.body).expect("SSE utf-8");
-    assert!(post_body.contains("id: 1/0"));
+    let response_event_id = post_body
+        .lines()
+        .find_map(|line| line.strip_prefix("id: 1/"))
+        .map(|binding| format!("1/{binding}"))
+        .expect("stateful response carries a session-bound event id");
     assert!(
         !post_body.contains(&caller_thread),
         "tool body must run on the lane thread, not the HTTP caller thread"
@@ -4493,13 +4497,13 @@ fn stateful_get_replays_buffered_lane_results_by_cursor() {
     assert_eq!(replay.status, 200);
     assert_eq!(replay.header("content-type"), Some("text/event-stream"));
     let replay_body = String::from_utf8(replay.body).expect("SSE utf-8");
-    assert!(replay_body.contains("id: 1/0"));
+    assert!(replay_body.contains(&format!("id: {response_event_id}")));
     assert!(replay_body.contains("\"id\":9"));
     assert!(replay_body.contains("\"tool\":\"oracle_query\""));
 
     let after = HttpRequest::new(
         "GET",
-        "/mcp?cursor=1/0",
+        &format!("/mcp?cursor={response_event_id}"),
         [
             ("host", "127.0.0.1"),
             ("accept", "text/event-stream"),
@@ -4530,7 +4534,8 @@ fn replay_store_replaces_oversized_responses_with_a_bounded_honest_gap() {
     let secret_payload = "not-retained-".repeat(128);
     let id =
         result_store.append_response(session_id, serde_json::json!({ "payload": secret_payload }));
-    assert_eq!(id, "1/0");
+    assert!(id.starts_with("1/"), "{id}");
+    assert_ne!(id, "1/0");
     let (total_bytes, sessions) = result_store.retained_bytes_for_test();
     assert!(total_bytes <= limits.max_global_bytes, "{total_bytes}");
     assert_eq!(sessions.len(), 1);
@@ -4540,7 +4545,7 @@ fn replay_store_replaces_oversized_responses_with_a_bounded_honest_gap() {
         .events_after(session_id, Some("0"), true)
         .expect("bounded replay marker");
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].id, "1/0");
+    assert_eq!(events[0].id, id);
     assert_eq!(events[0].event, Some("stream-gap"));
     assert_eq!(
         events[0].data["reason"],
@@ -4672,7 +4677,11 @@ fn stateful_get_reports_typed_expiry_when_cursor_falls_out_of_ring() {
     assert_eq!(response.status, 410);
     let body: Value = serde_json::from_slice(&response.body).expect("json expiry body");
     assert_eq!(body["error"], serde_json::json!("stream_cursor_expired"));
-    assert_eq!(body["oldest_event_id"], serde_json::json!("2/0"));
+    assert!(
+        body["oldest_event_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("2/"))
+    );
     assert!(
         body["next_step"]
             .as_str()
@@ -4723,9 +4732,9 @@ fn stateful_get_last_event_id_reports_gap_marker_for_slow_consumer() {
     assert_eq!(response.header("content-type"), Some("text/event-stream"));
     let body = String::from_utf8(response.body).expect("SSE utf-8");
     assert!(body.contains("event: stream-gap"));
-    assert!(body.contains("id: 1/gap"));
+    assert!(body.contains("id: 1/"));
     assert!(body.contains("\"type\":\"stream_gap\""));
-    assert!(body.contains("\"oldest_event_id\":\"2/0\""));
+    assert!(body.contains("\"oldest_event_id\":\"2/"));
     assert!(body.contains("\"seq\":128"));
 }
 
@@ -4794,7 +4803,7 @@ fn served_stateful_get_streams_chunked_sse_until_session_closes() {
     read_until(&mut stream, &mut raw, b"\"seq\":1");
     let text = String::from_utf8_lossy(&raw);
     assert!(text.contains("content-type: text/event-stream"));
-    assert!(text.contains("id: 1/0"));
+    assert!(text.contains("id: 1/"));
 
     result_store.remove_session(session_id);
     shutdown.store(true, Ordering::SeqCst);
@@ -5842,7 +5851,7 @@ fn oauth_stateful_get_accepts_strict_cookie_with_origin_only() {
     );
     assert_eq!(cookie_get.status, 200);
     let body = String::from_utf8(cookie_get.body).expect("SSE utf-8");
-    assert!(body.contains("id: 1/0"));
+    assert!(body.contains("id: 1/"));
     assert!(body.contains("\"seq\":1"));
 
     let missing_origin = handle_http_request(
@@ -7783,10 +7792,9 @@ fn write_query_stream_chunks_frames_each_chunk_as_an_sse_event() {
     let framed = write_query_stream_chunks(&mut body, chunks);
     assert_eq!(framed, 2, "one SSE frame per chunk");
     let text = String::from_utf8(body).expect("utf8 SSE body");
-    // Each chunk is its own `event: chunk` frame with a monotonic, resumable id.
+    // The low-level writer cannot promise replay, so it emits no fake ids.
     assert_eq!(text.matches("event: chunk\n").count(), 2);
-    assert!(text.contains("id: chunk/0\n"));
-    assert!(text.contains("id: chunk/1\n"));
+    assert!(!text.contains("id:"));
     // The chunk rows ride in the frame data (progressive delivery).
     assert!(text.contains("\"NAME\":\"a\""));
     assert!(text.contains("\"NAME\":\"c\""));
@@ -7823,6 +7831,9 @@ fn tool_stream_response_frames_each_row_before_final_result() {
             "truncated": false,
             "next_cursor": Value::Null
         })))
+    let result_store = Arc::new(HttpResultStore::new());
+    result_store.ensure_session("session-test");
+    result_store.ensure_session("other-session");
         .expect("send final streaming outcome");
     let response = HttpToolStream::new(
         test_server(),
@@ -7841,8 +7852,6 @@ fn tool_stream_response_frames_each_row_before_final_result() {
         2,
         "one row SSE frame per produced row"
     );
-    assert!(text.contains("id: row/0\n"));
-    assert!(text.contains("id: row/1\n"));
     assert!(text.contains("\"streaming_mode\":\"rows\""));
 
     let first_row = text.find("event: row\n").expect("row frame present");
@@ -7861,17 +7870,51 @@ fn sse_response_emits_chunk_frames_before_the_authoritative_result() {
     // its own `event: chunk` SSE event, THEN the authoritative response frame —
     // a plain client still reads the final result; a streaming-aware client
     // renders chunks progressively.
-    let cfg = HttpTransportConfig::default();
+    let result_store = Arc::new(HttpResultStore::new());
+    result_store.ensure_session("chunk-session");
+    let cfg = HttpTransportConfig {
+        stateful: true,
+        result_store: Some(Arc::clone(&result_store)),
+        ..Default::default()
+    };
     let request = post(&init_body()).with_peer_loopback(true);
     let response = sse_response(
         &cfg,
         &request,
         Some("tools/call"),
         streaming_query_response(),
-        None,
+        Some(Arc::clone(&result_store)),
         "principal-test",
         Some("1/0"),
     );
+    let retained = result_store
+        .events_after("session-test", None, false)
+        .expect("stream replay remains available");
+    assert_eq!(retained.len(), 3, "two rows and one final response");
+    assert_eq!(retained[0].event, Some("row"));
+    assert_eq!(retained[1].event, Some("row"));
+    assert_eq!(retained[2].event, None);
+    assert!(retained[0].id.starts_with("1/"));
+    assert!(retained[1].id.starts_with("2/"));
+    assert!(retained[2].id.starts_with("3/"));
+    for event in &retained {
+        assert!(text.contains(&format!("id: {}\n", event.id)));
+    }
+
+    let resumed = result_store
+        .events_after("session-test", Some(&retained[0].id), false)
+        .expect("the exact emitted row id is resumable");
+    assert_eq!(resumed, retained[1..]);
+    let wrong_session = result_store
+        .events_after("other-session", Some(&retained[0].id), false)
+        .expect_err("an emitted id cannot cross MCP session scope");
+    assert_eq!(wrong_session.status, 400);
+    let body: Value = serde_json::from_slice(&wrong_session.body).expect("scope error JSON");
+    assert_eq!(
+        body["error"],
+        serde_json::json!("stream_cursor_scope_mismatch")
+    );
+
     assert_eq!(response.status, 200);
     let text = String::from_utf8(response.body).expect("utf8 SSE body");
     assert_eq!(
@@ -7879,10 +7922,18 @@ fn sse_response_emits_chunk_frames_before_the_authoritative_result() {
         2,
         "two page chunks framed as SSE events"
     );
-    // The chunk frames precede the authoritative response frame (id 1/0).
-    let first_chunk = text.find("event: chunk\n").expect("chunk frame present");
+    let retained = result_store
+        .events_after("chunk-session", None, false)
+        .expect("chunk replay remains available");
+    assert_eq!(retained.len(), 3, "two chunks and the final response");
+    assert_eq!(retained[0].event, Some("chunk"));
+    assert_eq!(retained[1].event, Some("chunk"));
+    assert_eq!(retained[2].event, None);
+    let first_chunk = text
+        .find(&format!("id: {}\n", retained[0].id))
+        .expect("first resumable chunk frame");
     let response_frame = text
-        .find("id: 1/0\n")
+        .find(&format!("id: {}\n", retained[2].id))
         .expect("authoritative response frame");
     assert!(
         first_chunk < response_frame,
@@ -7899,9 +7950,9 @@ fn sse_response_emits_chunk_frames_before_the_authoritative_result() {
         &request,
         Some("tools/call"),
         inline,
-        None,
+        Some("chunk-session".to_owned()),
         "principal-test",
-        Some("1/0"),
+        None,
     );
     let plain_text = String::from_utf8(plain.body).expect("utf8");
     assert!(

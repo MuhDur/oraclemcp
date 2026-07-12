@@ -12,6 +12,12 @@ profile, request, or transport explicitly asks for it.
 | OCI IAM database-token source | Off per profile. `[profiles.oci].use_iam_token` defaults to `false`; `token_env`, `token_file`, and `token_exec` default to unset. | Set `use_iam_token = true` and configure at most one source, or rely on `ORACLEMCP_IAM_TOKEN`. Disable by setting `use_iam_token = false` or removing the source fields. | Tokens are resolved transiently, never logged, and refused over non-TCPS. `token_exec` is an argv array with no shell interpretation, a timeout, and an output cap. |
 | Pipelining | No force-enable config. Unknown until a live connection reports `connection.server_features.supports_pipelining`. | Upgrade to 0.8.0 and let the driver/server negotiation decide. There is no profile key that can force pipelining on an unsupported server. | The server treats pipelining as a negotiated transport capability, not an authorization decision. Unsupported or unknown support degrades to the ordinary request path. |
 
+Stateful HTTP assigns every row, chunk, and final response an opaque event ID
+bound to its MCP session and retains the frame before writing it to the socket.
+Reconnect with that exact `Last-Event-ID` to continue at the following frame.
+An ID from another session is rejected, while retention eviction produces the
+existing typed cursor-expiry or `stream-gap` response instead of silent replay.
+
 Related config reference:
 
 - [`configuration.md`](configuration.md)

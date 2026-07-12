@@ -1051,7 +1051,10 @@ impl HttpSessionStore {
         // until both maps contain it.
         let mut result_state = result_store.map(|store| store.state.lock());
         if let Some(result_state) = result_state.as_mut() {
-            result_state.sessions.entry(id.clone()).or_default();
+            result_state
+                .sessions
+                .entry(id.clone())
+                .or_insert_with(|| HttpResultSession::new(&id));
         }
         let now = Instant::now();
         let expires_at = (!idle_ttl.is_zero()).then(|| now.checked_add(idle_ttl).unwrap_or(now));
@@ -1262,12 +1265,13 @@ struct HttpResultStoreState {
     next_completion_ordinal: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct HttpResultSession {
     events: Vec<HttpRetainedEvent>,
     retained_bytes: usize,
     next_sequence: u64,
     dropped_through_sequence: u64,
+    cursor_binding: String,
 }
 
 #[derive(Debug)]
@@ -1278,6 +1282,16 @@ struct HttpRetainedEvent {
 }
 
 impl HttpResultSession {
+    fn new(session_id: &str) -> Self {
+        Self {
+            events: Vec::new(),
+            retained_bytes: 0,
+            next_sequence: 0,
+            dropped_through_sequence: 0,
+            cursor_binding: sha256_hex(session_id.as_bytes())[..32].to_owned(),
+        }
+    }
+
     fn evict_oldest(&mut self) -> Option<usize> {
         if self.events.is_empty() {
             return None;
@@ -1310,6 +1324,14 @@ impl HttpBufferedEvent {
         Self {
             id,
             event: None,
+            data: Arc::new(data),
+        }
+    }
+
+    fn named(id: String, event: &'static str, data: Value) -> Self {
+        Self {
+            id,
+            event: Some(event),
             data: Arc::new(data),
         }
     }
@@ -1376,7 +1398,7 @@ impl HttpResultStore {
             .lock()
             .sessions
             .entry(session_id.to_owned())
-            .or_default();
+            .or_insert_with(|| HttpResultSession::new(session_id));
     }
 
     #[cfg(test)]
@@ -1384,23 +1406,31 @@ impl HttpResultStore {
         self.state.lock().sessions.len()
     }
 
-    fn append_response_if_session(&self, session_id: &str, data: Value) -> Option<String> {
+    fn append_event_if_session(
+        &self,
+        session_id: &str,
+        event_name: Option<&'static str>,
+        data: Value,
+    ) -> Option<String> {
         let mut state = self.state.lock();
         if !state.sessions.contains_key(session_id) {
             return None;
         }
         let completion_ordinal = state.next_completion_ordinal;
         state.next_completion_ordinal = state.next_completion_ordinal.saturating_add(1);
-        let next_seq = {
+        let (next_seq, cursor_binding) = {
             let session = state
                 .sessions
                 .get_mut(session_id)
                 .expect("session presence was checked under the same store lock");
             session.next_sequence = session.next_sequence.saturating_add(1);
-            session.next_sequence
+            (session.next_sequence, session.cursor_binding.clone())
         };
-        let id = format!("{next_seq}/0");
-        let event = HttpBufferedEvent::data(id.clone(), data);
+        let id = format!("{next_seq}/{cursor_binding}");
+        let event = match event_name {
+            Some(event_name) => HttpBufferedEvent::named(id.clone(), event_name, data),
+            None => HttpBufferedEvent::data(id.clone(), data),
+        };
         let response_bytes = event.retained_bytes();
         let event = if response_bytes > self.limits.max_event_bytes {
             HttpBufferedEvent::oversized(id.clone(), response_bytes, self.limits.max_event_bytes)
@@ -1415,7 +1445,7 @@ impl HttpResultStore {
                 .expect("replay session was inserted under the same store lock");
             session.retained_bytes = session.retained_bytes.saturating_add(retained_bytes);
             session.events.push(HttpRetainedEvent {
-                event,
+                event: event.clone(),
                 retained_bytes,
                 completion_ordinal,
             });
@@ -1464,6 +1494,10 @@ impl HttpResultStore {
         Some(id)
     }
 
+    fn append_response_if_session(&self, session_id: &str, data: Value) -> Option<String> {
+        self.append_event_if_session(session_id, None, data)
+    }
+
     #[cfg(test)]
     fn append_response(&self, session_id: &str, data: Value) -> String {
         self.ensure_session(session_id);
@@ -1482,6 +1516,7 @@ impl HttpResultStore {
         let Some(session) = state.sessions.get(session_id) else {
             return Ok(Vec::new());
         };
+        validate_stream_cursor_binding(cursor, after_seq, &session.cursor_binding)?;
         let events = session.buffered_events();
         events_after_sequence(
             &events,
@@ -1489,6 +1524,7 @@ impl HttpResultStore {
             after_seq,
             cursor,
             gap_on_expired_cursor,
+            &session.cursor_binding,
         )
     }
 
@@ -1511,6 +1547,7 @@ impl HttpResultStore {
                 after_seq,
                 Some(&cursor),
                 true,
+                &session.cursor_binding,
             ) {
                 Ok(events) if !events.is_empty() => return HttpResultWait::Events(events),
                 Ok(_) => {}
@@ -1568,9 +1605,11 @@ mod request_target;
 mod sse_writer;
 mod wire;
 use request_target::split_request_target;
+#[cfg(test)]
+use sse_writer::write_query_stream_chunks;
 use sse_writer::{
-    write_chunked_sse_comment, write_chunked_sse_event, write_final_chunk,
-    write_query_stream_chunks, write_sse_event, write_streaming_sse_headers,
+    write_chunked_sse_comment, write_chunked_sse_event, write_final_chunk, write_sse_event,
+    write_streaming_sse_headers,
 };
 use wire::{read_http_request, write_http_response};
 
@@ -6212,7 +6251,7 @@ fn handle_mcp_post_exchange(
                 let response =
                     server.jsonrpc_tool_response_from_outcome(request_id, Outcome::Err(envelope));
                 let response_event_id = config.result_store.as_ref().and_then(|store| {
-                    store.append_response_if_session(&session_id, response.clone())
+                    append_nonstreaming_response_if_session(store, &session_id, &response)
                 });
                 return HttpExchange::Buffered(sse_response(
                     config,
@@ -6256,7 +6295,7 @@ fn handle_mcp_post_exchange(
         } else {
             http_session_id.as_deref().and_then(|session_id| {
                 config.result_store.as_ref().and_then(|store| {
-                    store.append_response_if_session(session_id, response.clone())
+                    append_nonstreaming_response_if_session(store, session_id, &response)
                 })
             })
         };
@@ -6525,7 +6564,7 @@ fn parse_stream_cursor(cursor: Option<&str>) -> Result<u64, HttpResponse> {
                     400,
                     &json!({
                         "error": "invalid_stream_cursor",
-                        "message": "cursor must be a Streamable HTTP event id such as 1 or 1/0",
+                        "message": "cursor must be the exact Streamable HTTP event id emitted for this MCP session",
                     }),
                 )
             })
@@ -6534,12 +6573,38 @@ fn parse_stream_cursor(cursor: Option<&str>) -> Result<u64, HttpResponse> {
     }
 }
 
+fn validate_stream_cursor_binding(
+    cursor: Option<&str>,
+    sequence: u64,
+    expected_binding: &str,
+) -> Result<(), HttpResponse> {
+    let Some(cursor) = cursor.filter(|cursor| !cursor.trim().is_empty()) else {
+        return Ok(());
+    };
+    let binding = cursor.split_once('/').map(|(_, binding)| binding);
+    if binding.is_none() || (sequence == 0 && binding == Some("0")) {
+        return Ok(());
+    }
+    if binding == Some(expected_binding) {
+        return Ok(());
+    }
+    Err(json_response(
+        400,
+        &json!({
+            "error": "stream_cursor_scope_mismatch",
+            "message": "the Streamable HTTP event id belongs to a different MCP session",
+            "next_step": "resume with an event id emitted for this MCP session, or omit Last-Event-ID to start at the retained head",
+        }),
+    ))
+}
+
 fn events_after_sequence(
     events: &[HttpBufferedEvent],
     dropped_through_sequence: u64,
     after_seq: u64,
     cursor: Option<&str>,
     gap_on_expired_cursor: bool,
+    cursor_binding: &str,
 ) -> Result<Vec<HttpBufferedEvent>, HttpResponse> {
     let oldest_retained_sequence = events
         .first()
@@ -6548,7 +6613,12 @@ fn events_after_sequence(
         || oldest_retained_sequence.is_some_and(|oldest| after_seq < oldest.saturating_sub(1));
     if cursor_expired {
         let oldest_event_id = events.first().map_or_else(
-            || format!("{}/0", dropped_through_sequence.saturating_add(1)),
+            || {
+                format!(
+                    "{}/{cursor_binding}",
+                    dropped_through_sequence.saturating_add(1)
+                )
+            },
             |event| event.id.clone(),
         );
         if !gap_on_expired_cursor {
@@ -6559,14 +6629,14 @@ fn events_after_sequence(
                     "message": "requested Streamable HTTP cursor is older than the retained event buffer",
                     "cursor": cursor.unwrap_or(""),
                     "oldest_event_id": oldest_event_id,
-                    "dropped_through_event_id": format!("{dropped_through_sequence}/0"),
+                    "dropped_through_event_id": format!("{dropped_through_sequence}/{cursor_binding}"),
                     "next_step": "restart the MCP session; the missing event range is no longer available for replay",
                 }),
             ));
         }
         let mut resumed = Vec::with_capacity(events.len().saturating_add(1));
         resumed.push(HttpBufferedEvent::gap(
-            format!("{dropped_through_sequence}/gap"),
+            format!("{dropped_through_sequence}/{cursor_binding}"),
             cursor,
             &oldest_event_id,
         ));
@@ -6690,7 +6760,8 @@ impl HttpToolStream {
         let response = crate::lane::block_on_lane_bridge(async {
             let cx = Cx::current().expect("block_on installs a request Cx");
             while let Ok(frame) = self.frames_rx.recv(&cx).await {
-                write_tool_stream_frame_buffered(&mut body, frame);
+                let event = self.retain_frame(frame);
+                write_tool_stream_event_buffered(&mut body, &event);
             }
             self.final_response(&cx).await
         });
@@ -6698,7 +6769,7 @@ impl HttpToolStream {
         write_sse_event(
             &mut body,
             None,
-            Some(response_event_id.as_deref().unwrap_or("1/0")),
+            response_event_id.as_deref(),
             None,
             Some(&response),
         );
@@ -6719,7 +6790,10 @@ impl HttpToolStream {
             let cx = Cx::current().expect("block_on installs a request Cx");
             loop {
                 match self.frames_rx.recv(&cx).await {
-                    Ok(frame) => write_tool_stream_frame_chunked(stream, frame)?,
+                    Ok(frame) => {
+                        let event = self.retain_frame(frame);
+                        write_tool_stream_event_chunked(stream, &event)?;
+                    }
                     Err(mpsc::RecvError::Disconnected) => break,
                     Err(mpsc::RecvError::Cancelled) => {
                         return Err(std::io::Error::new(
@@ -6736,7 +6810,7 @@ impl HttpToolStream {
         write_chunked_sse_event(
             stream,
             None,
-            Some(response_event_id.as_deref().unwrap_or("1/0")),
+            response_event_id.as_deref(),
             None,
             Some(&response),
         )?;
@@ -6763,47 +6837,48 @@ impl HttpToolStream {
             .as_ref()
             .and_then(|store| store.append_response_if_session(&self.session_id, response.clone()))
     }
-}
 
-fn write_tool_stream_frame_buffered(body: &mut Vec<u8>, frame: ToolStreamFrame) {
-    match frame {
-        ToolStreamFrame::Row { seq, row } => {
-            let id = format!("row/{seq}");
-            write_sse_event(
-                body,
-                Some("row"),
-                Some(&id),
-                None,
-                Some(&json!({ "seq": seq, "row": row })),
-            );
-        }
-        ToolStreamFrame::Chunk { seq, chunk } => {
-            let id = format!("chunk/{seq}");
-            write_sse_event(body, Some("chunk"), Some(&id), None, Some(&chunk));
-        }
+    fn retain_frame(&self, frame: ToolStreamFrame) -> HttpBufferedEvent {
+        let (event_name, data) = tool_stream_frame_data(frame);
+        let id = self
+            .result_store
+            .as_ref()
+            .and_then(|store| {
+                store.append_event_if_session(&self.session_id, Some(event_name), data.clone())
+            })
+            .unwrap_or_default();
+        HttpBufferedEvent::named(id, event_name, data)
     }
 }
 
-fn write_tool_stream_frame_chunked(
+fn tool_stream_frame_data(frame: ToolStreamFrame) -> (&'static str, Value) {
+    match frame {
+        ToolStreamFrame::Row { seq, row } => ("row", json!({ "seq": seq, "row": row })),
+        ToolStreamFrame::Chunk { chunk, .. } => ("chunk", chunk),
+    }
+}
+
+fn write_tool_stream_event_buffered(body: &mut Vec<u8>, event: &HttpBufferedEvent) {
+    write_sse_event(
+        body,
+        event.event,
+        (!event.id.is_empty()).then_some(event.id.as_str()),
+        None,
+        Some(&event.data),
+    );
+}
+
+fn write_tool_stream_event_chunked(
     stream: &mut impl Write,
-    frame: ToolStreamFrame,
+    event: &HttpBufferedEvent,
 ) -> std::io::Result<()> {
-    match frame {
-        ToolStreamFrame::Row { seq, row } => {
-            let id = format!("row/{seq}");
-            write_chunked_sse_event(
-                stream,
-                Some("row"),
-                Some(&id),
-                None,
-                Some(&json!({ "seq": seq, "row": row })),
-            )
-        }
-        ToolStreamFrame::Chunk { seq, chunk } => {
-            let id = format!("chunk/{seq}");
-            write_chunked_sse_event(stream, Some("chunk"), Some(&id), None, Some(&chunk))
-        }
-    }
+    write_chunked_sse_event(
+        stream,
+        event.event,
+        (!event.id.is_empty()).then_some(event.id.as_str()),
+        None,
+        Some(&event.data),
+    )
 }
 
 fn buffered_sse_response(events: &[HttpBufferedEvent]) -> HttpResponse {
@@ -6837,6 +6912,17 @@ fn streaming_query_chunks(response: &Value) -> Option<&Vec<Value>> {
         return None;
     }
     structured.get("chunks").and_then(Value::as_array)
+}
+
+fn append_nonstreaming_response_if_session(
+    store: &HttpResultStore,
+    session_id: &str,
+    response: &Value,
+) -> Option<String> {
+    streaming_query_chunks(response)
+        .is_none()
+        .then(|| store.append_response_if_session(session_id, response.clone()))
+        .flatten()
 }
 
 fn sse_response(
@@ -6874,13 +6960,42 @@ fn sse_response(
         // BEFORE the authoritative response frame, so a streaming-aware client
         // renders pages progressively while a plain client still reads the final
         // result. Purely additive — every non-streaming response is unchanged.
-        if let Some(chunks) = streaming_query_chunks(&response) {
-            write_query_stream_chunks(&mut body, chunks);
+        let chunks = streaming_query_chunks(&response).cloned();
+        let retained_chunks = chunks.as_ref().map(|chunks| {
+            chunks
+                .iter()
+                .cloned()
+                .map(|chunk| {
+                    let id = initialized_session_id
+                        .as_deref()
+                        .zip(config.result_store.as_deref())
+                        .and_then(|(session_id, store)| {
+                            store.append_event_if_session(session_id, Some("chunk"), chunk.clone())
+                        })
+                        .unwrap_or_default();
+                    HttpBufferedEvent::named(id, "chunk", chunk)
+                })
+                .collect::<Vec<_>>()
+        });
+        if let Some(chunks) = retained_chunks.as_ref() {
+            for chunk in chunks {
+                write_tool_stream_event_buffered(&mut body, chunk);
+            }
         }
+        let retained_response_event_id = if chunks.is_some() {
+            initialized_session_id
+                .as_deref()
+                .zip(config.result_store.as_deref())
+                .and_then(|(session_id, store)| {
+                    store.append_response_if_session(session_id, response.clone())
+                })
+        } else {
+            None
+        };
         write_sse_event(
             &mut body,
             None,
-            Some(response_event_id.unwrap_or("1/0")),
+            retained_response_event_id.as_deref().or(response_event_id),
             None,
             Some(&response),
         );
