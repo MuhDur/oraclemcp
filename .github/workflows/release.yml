@@ -5,6 +5,7 @@ name: Release
 # dependency order, builds GitHub assets, pushes the GHCR image, then publishes
 # server.json to the MCP registry. `workflow_dispatch` validates the gates/build
 # without publishing anything.
+# ROLLBACK_COVERAGE: crates.io=publish-crates github-release=release signed-artifacts=release ghcr=docker mcp-registry=publish-mcp-registry
 on:
   push:
     tags: ["v*"]

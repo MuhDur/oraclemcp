@@ -670,9 +670,31 @@ fn hardening_acceptance_suite_schedules_b11_component_gates() {
 
 #[test]
 fn rollback_runbook_dry_run_covers_release_surfaces() {
-    let output = run_script(
+    let missing_versions = run_script(
         "scripts/e2e/release_rollback_dry_run.sh",
         &["--log", "--dry-run"],
+    );
+    assert!(
+        !missing_versions.status.success(),
+        "rollback dry-run must refuse an implicit outward-facing version"
+    );
+    assert!(
+        String::from_utf8_lossy(&missing_versions.stderr)
+            .contains("both --broken-version and --previous-good are required"),
+        "missing-version refusal was not actionable: {}",
+        String::from_utf8_lossy(&missing_versions.stderr)
+    );
+
+    let output = run_script(
+        "scripts/e2e/release_rollback_dry_run.sh",
+        &[
+            "--log",
+            "--dry-run",
+            "--broken-version",
+            "9.9.9",
+            "--previous-good",
+            "9.9.8",
+        ],
     );
     assert!(
         output.status.success(),
@@ -686,30 +708,77 @@ fn rollback_runbook_dry_run_covers_release_surfaces() {
         .filter_map(|event| event["message"].as_str())
         .collect::<Vec<_>>();
     for expected in [
-        "cargo yank -p oraclemcp-error --vers 0.6.0",
-        "cargo yank -p oraclemcp-telemetry --vers 0.6.0",
-        "cargo yank -p oraclemcp-audit --vers 0.6.0",
-        "cargo yank -p oraclemcp-guard --vers 0.6.0",
-        "cargo yank -p oraclemcp-config --vers 0.6.0",
-        "cargo yank -p oraclemcp-db --vers 0.6.0",
-        "cargo yank -p oraclemcp-auth --vers 0.6.0",
-        "cargo yank -p oraclemcp-core --vers 0.6.0",
-        "cargo yank -p oraclemcp --vers 0.6.0",
-        "gh release edit v0.6.0 --prerelease",
-        "gh release delete v0.6.0 --yes --cleanup-tag",
-        "gh workflow run docker.yml -f version=0.4.1 -f variant=core",
-        "gh workflow run docker.yml -f version=0.4.1 -f variant=plsql-intelligence",
-        "git restore --source=v0.4.1 -- server.json",
-        "git commit -m chore: revert MCP registry listing to v0.4.1 server.json",
-        "gh workflow run publish-mcp.yml --ref main",
-        "npm deprecate oraclemcp@0.6.0",
-        "npm dist-tag add oraclemcp@0.4.1 latest",
-        "Homebrew and winget are pull-based",
-        "rollback plan covers crates.io, GitHub release, GHCR latest, server.json, npm, Homebrew, and winget",
+        "tag pipeline channels: crates.io, GitHub release, signed artifacts, GHCR, MCP registry; pending registry promotion: Homebrew, winget",
+        "release.yml owns tag publication; docker.yml and publish-mcp.yml are manual recovery auxiliaries",
+        "cargo yank -p oraclemcp-error --vers 9.9.9",
+        "cargo yank -p oraclemcp-telemetry --vers 9.9.9",
+        "cargo yank -p oraclemcp-audit --vers 9.9.9",
+        "cargo yank -p oraclemcp-guard --vers 9.9.9",
+        "cargo yank -p oraclemcp-config --vers 9.9.9",
+        "cargo yank -p oraclemcp-db --vers 9.9.9",
+        "cargo yank -p oraclemcp-auth --vers 9.9.9",
+        "cargo yank -p oraclemcp-core --vers 9.9.9",
+        "cargo yank -p oraclemcp --vers 9.9.9",
+        "approval=irreversible condition=exact oraclemcp@9.9.9 is published and operator approved yank",
+        "gh release edit v9.9.9 --prerelease",
+        "approval=destructive-optional condition=artifacts must be hidden",
+        "gh release delete v9.9.9 --yes --cleanup-tag",
+        "gh workflow run docker.yml -f version=9.9.8 -f variant=core -f operation=rollback",
+        "MCP registry: published versions are immutable and cannot be unpublished",
+        "cut a fixed higher version through release.yml because republishing 9.9.8 cannot become latest",
+        "Homebrew: only submit a rollback formula update if brew info resolves 9.9.9",
+        "winget: only submit a rollback manifest update if winget show resolves 9.9.9",
+        "rollback plan is non-mutating and covers the current tag pipeline",
     ] {
         assert!(
             messages.iter().any(|message| message.contains(expected)),
             "rollback runbook dry-run did not cover {expected}: {messages:?}"
+        );
+    }
+    for unsupported_command in [
+        "npm deprecate",
+        "npm dist-tag",
+        "variant=plsql-intelligence",
+        "git restore --source=v9.9.8 -- server.json",
+        "gh workflow run publish-mcp.yml --ref main",
+    ] {
+        assert!(
+            messages
+                .iter()
+                .all(|message| !message.contains(unsupported_command)),
+            "rollback plan emitted unsupported command {unsupported_command}: {messages:?}"
+        );
+    }
+
+    let release_workflow =
+        std::fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+            .expect("read tag release workflow");
+    assert!(release_workflow.contains("tags: [\"v*\"]"));
+    assert!(release_workflow.contains(
+        "ROLLBACK_COVERAGE: crates.io=publish-crates github-release=release \
+         signed-artifacts=release ghcr=docker mcp-registry=publish-mcp-registry"
+    ));
+    for job in [
+        "  publish-crates:",
+        "  release:",
+        "  docker:",
+        "  publish-mcp-registry:",
+    ] {
+        assert!(
+            release_workflow.contains(job),
+            "tag publication topology changed without rollback coverage: missing {job}"
+        );
+    }
+    for auxiliary in [
+        ".github/workflows/docker.yml",
+        ".github/workflows/publish-mcp.yml",
+    ] {
+        let workflow = std::fs::read_to_string(repo_root().join(auxiliary))
+            .unwrap_or_else(|error| panic!("read {auxiliary}: {error}"));
+        assert!(workflow.contains("  workflow_dispatch:"));
+        assert!(
+            !workflow.lines().any(|line| line == "  push:"),
+            "{auxiliary} must remain dispatch-only"
         );
     }
     assert!(

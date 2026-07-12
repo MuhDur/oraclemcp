@@ -155,7 +155,8 @@ fi
 if ! e2e_run_command "assert" bash scripts/installer_lint_and_offline_smoke.sh --log; then
   e2e_finish_fail "E7 installer lint/smoke failed"
 fi
-if ! e2e_run_command "assert" bash scripts/e2e/release_rollback_dry_run.sh --log --dry-run; then
+if ! e2e_run_command "assert" bash scripts/e2e/release_rollback_dry_run.sh --log --dry-run \
+  --broken-version 9.9.9 --previous-good 9.9.8; then
   e2e_finish_fail "H7 rollback runbook dry-run failed"
 fi
 if ! e2e_run_command "assert" bash scripts/validate_docker_provenance_workflow.sh; then

@@ -127,9 +127,13 @@ investigate, not a blocker:
    release notes / `CHANGELOG.md` entry for `vX.Y.Z`. That linked, green run on
    the frozen SHA *is* the release-gate evidence — there is nothing to attest
    beyond it.
-6. **Tag and publish.** Only after steps 4–5 hold, push the `vX.Y.Z` tag. The
-   `release.yml` / `docker.yml` / `publish-mcp.yml` workflows build the
-   artifacts on the pinned toolchain from that tag.
+6. **Tag and publish.** Only after steps 4–5 hold, push the `vX.Y.Z` tag.
+   `release.yml` is the single normal tag pipeline: it publishes crates.io,
+   signed multi-platform GitHub assets, GHCR, and then the MCP registry entry.
+   `docker.yml` and `publish-mcp.yml` are dispatch-only recovery/repair tools;
+   do not dispatch them during a healthy tag release. Homebrew and winget
+   manifests are attached to the GitHub release for separate registry
+   promotion. There is no npm/npx release channel.
 
 > **Honesty note.** This checklist documents the gates that exist today and the
 > procedure for proving them green on the RC. The "green on the frozen RC +
@@ -139,33 +143,46 @@ investigate, not a blocker:
 
 ---
 
-## Rollback runbook for a broken `v0.6.0`
+## Rollback runbook for a broken release
 
-Run the dry-run first and paste its JSON-line output into the incident notes:
+Name both the broken and previous-good versions explicitly, run the dry-run,
+and paste its JSON-line output into the incident notes:
 
 ```sh
-bash scripts/e2e/release_rollback_dry_run.sh --log --dry-run
+bash scripts/e2e/release_rollback_dry_run.sh --log --dry-run \
+  --broken-version X.Y.Z --previous-good A.B.C
 ```
 
-The dry-run is intentionally non-mutating and fails closed without `--dry-run`.
-After explicit operator approval, execute the reviewed commands in this order:
+The dry-run is intentionally non-mutating. It fails closed without `--dry-run`,
+without either version, for invalid versions, or when the documented workflow
+topology drifts. It enumerates publishable crates from current Cargo metadata
+instead of freezing a historical list. After explicit operator approval,
+execute only the commands whose publication checks prove that channel actually
+shipped the broken version:
 
-1. **Stop promotion.** Cancel still-running release, Docker, and MCP-registry
-   workflows for the broken tag before changing public state.
-2. **Yank crates.io packages.** Yank every published `0.6.0` crate:
-   `oraclemcp-error`, `oraclemcp-telemetry`, `oraclemcp-audit`,
-   `oraclemcp-guard`, `oraclemcp-config`, `oraclemcp-db`, `oraclemcp-auth`,
-   `oraclemcp-core`, and `oraclemcp`.
-3. **Mark or remove the GitHub release.** First mark `v0.6.0` as prerelease.
-   Delete the GitHub release and cleanup tag only if the artifacts must be
-   hidden; otherwise leave the prerelease visible with the incident note.
-4. **Revert GHCR `:latest` without rebuilding history.** Dispatch `docker.yml`
+1. **Stop the authoritative pipeline.** Inspect and cancel still-running
+   `release.yml` jobs for the broken tag before changing public state. The
+   Docker and MCP auxiliary workflows matter only if someone separately
+   dispatched a recovery action.
+2. **Reconcile every channel.** Record the `release.yml` run, crates.io package
+   versions, GitHub release assets/signatures/attestations, immutable and
+   rolling GHCR tags, MCP registry entry, and Homebrew/winget resolution. A
+   failed or skipped downstream job means that channel may need no rollback.
+3. **Yank crates.io packages only when present.** Each `cargo yank` is an
+   irreversible, separately approved action. Use the metadata-derived list in
+   the reviewed dry-run output; do not assume every workspace crate published.
+4. **Mark or remove the GitHub release.** Mark the broken release prerelease
+   only after approval. Deleting the release assets and tag is a separate,
+   destructive approval reserved for artifacts that must be hidden; otherwise
+   preserve the signed evidence and attach the incident note.
+5. **Revert GHCR `:latest` without rebuilding history.** Dispatch `docker.yml`
    for the previous good version with `variant=core` and
-   `operation=rollback`; if the PL/SQL intelligence image shipped, dispatch the
-   same version with `variant=plsql-intelligence`. The workflow resolves
-   `refs/tags/v<version>`, verifies Cargo/server metadata plus the existing
-   digest's keyless signature, and retags only `:latest` (or
-   `:plsql-intelligence-latest`). It never rewrites the versioned image. Use
+   `operation=rollback`. The normal oraclemcp tag pipeline does not publish the
+   separate PL/SQL intelligence image, so do not add that variant to this
+   incident unless its owning project independently confirms it shipped. The
+   workflow resolves `refs/tags/v<version>`, verifies Cargo/server metadata plus
+   the existing digest's keyless signature, and retags only `:latest`. It never
+   rewrites the versioned image. Use
    `operation=rebuild` only as a reproducibility proof: a digest mismatch is a
    hard failure and still leaves both versioned and rolling tags unchanged. A
    rebuild can repair an absent version tag from the exact release source, but
@@ -173,20 +190,25 @@ After explicit operator approval, execute the reviewed commands in this order:
    that already exists. For a legacy image without source-bound annotations,
    rollback refuses it; `operation=rebuild` may add the binding only after the
    exact-tag rebuild produces the already-published digest byte for byte.
-5. **Revert MCP registry metadata.** Restore `server.json` from the previous
-   good tag, commit that rollback on `main`, push, then dispatch
-   `publish-mcp.yml` so the registry no longer points at the broken image.
-6. **Handle npm correctly.** npm packages cannot be unpublished after the
-   short unpublish window and must not be treated as reversible. Deprecate
-   `oraclemcp@0.6.0` with a clear message and move the `latest` dist-tag back
-   to the previous good version.
-7. **Document Homebrew and winget lag.** Both are pull/manifest-update
-   channels. Submit rollback PRs or manifest updates promptly, but assume users
-   may still see the broken version until those ecosystems process the change.
+6. **Record, do not fake, the MCP registry rollback.** Published MCP registry
+   versions are immutable and currently cannot be deleted or unpublished; a
+   previous lower SemVer cannot displace the broken version as `latest`.
+   Restoring an old `server.json` on current `main` also violates this repo's
+   metadata preflight. Record the affected immutable entry and cut an expedited
+   fixed **higher** version through the normal `release.yml` tag pipeline.
+   `publish-mcp.yml` can repair a missing publication for the current metadata;
+   it cannot roll a published version back. See the registry's
+   [unpublish/immutability FAQ](https://modelcontextprotocol.io/registry/faq)
+   and [version ordering contract](https://modelcontextprotocol.io/registry/versioning).
+7. **Handle Homebrew and winget conditionally.** The tag pipeline attaches
+   manifests, but their registries are promoted separately and can lag. Submit
+   rollback PRs/manifest updates only when the registry actually resolves the
+   broken version, and record propagation state. npm is absent because it is
+   not a supported or published channel.
 
-Do not call this rollback complete until crates.io, GitHub release state, GHCR
-`:latest`, MCP registry `server.json`, npm deprecation/dist-tag, and the
-Homebrew/winget lag note are all recorded in the incident notes.
+Do not call this rollback complete until the incident notes record the state or
+explicit non-publication of crates.io, the GitHub release and signed artifacts,
+GHCR immutable/rolling tags, the MCP registry, and Homebrew/winget.
 
 ---
 
@@ -208,7 +230,8 @@ Required gates green on the RC commit:
 - [ ] sensitive-data   (secret_scan.sh)
 - [ ] release-acceptance (B.12: DL-9 + ERG-10 + DOC-10 + E0 + feature-powerset + arch-fitness)
 - [ ] release-metadata (release_preflight.sh)
-- [ ] rollback dry-run (scripts/e2e/release_rollback_dry_run.sh --log --dry-run)
+- [ ] rollback dry-run (scripts/e2e/release_rollback_dry_run.sh --log --dry-run
+      --broken-version X.Y.Z --previous-good A.B.C)
 - [ ] local-release-gate (scripts/local_release_gate.sh --log --commit-proof,
       committed sanitized synthetic proof under tests/artifacts/local_gate/)
 - [ ] real-adb-tcps-signoff (operator-run when real ADB/OCI-IAM creds are available:

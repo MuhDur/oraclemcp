@@ -71,11 +71,13 @@ active level.
 
 ## Release flow
 
-Versions are published from this repo. crates.io: `cargo publish --workspace`
-(cargo computes the topological order). Binaries + GitHub release: tag `vX.Y.Z`
-→ `.github/workflows/release.yml`. Docker (`ghcr.io/muhdur/oraclemcp`):
-`.github/workflows/docker.yml`. MCP registry: `server.json` +
-`.github/workflows/publish-mcp.yml` (GitHub OIDC).
+Versions are published from this repo. A `vX.Y.Z` tag drives the single normal
+pipeline, `.github/workflows/release.yml`: release gates, crates.io packages,
+signed multi-platform GitHub assets, `ghcr.io/muhdur/oraclemcp`, and the MCP
+registry entry from `server.json` (GitHub OIDC). `.github/workflows/docker.yml`
+and `.github/workflows/publish-mcp.yml` are manual recovery/repair auxiliaries,
+not additional tag pipelines. Homebrew and winget manifests ship as GitHub
+release assets for separate registry promotion. No npm/npx channel is offered.
 
 ## Issue tracking
 

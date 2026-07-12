@@ -13,7 +13,7 @@ Current generated evidence:
 | Doctor fixture/accounting gate | `crates/oraclemcp-core/src/doctor.rs` | current git checkout | `bash scripts/e2e/doctor_fixtures.sh --log` |
 | Agent ergonomics drift guard | `crates/oraclemcp/src/main.rs` | current git checkout | `bash scripts/oraclemcp_ergonomics_lint.sh` |
 | Release acceptance CI suite | `scripts/release_acceptance_ci_suite.sh` | current git checkout | `bash scripts/release_acceptance_ci_suite.sh --log --dry-run` |
-| Rollback runbook dry-run | `scripts/e2e/release_rollback_dry_run.sh` | current git checkout | `bash scripts/e2e/release_rollback_dry_run.sh --log --dry-run` |
+| Rollback runbook dry-run | `scripts/e2e/release_rollback_dry_run.sh` | current git checkout plus explicit synthetic broken/previous-good versions | `bash scripts/e2e/release_rollback_dry_run.sh --log --dry-run --broken-version 9.9.9 --previous-good 9.9.8` |
 | WP-G hardening acceptance suite | `scripts/e2e/hardening_acceptance.sh` | current git checkout | `bash scripts/e2e/hardening_acceptance.sh --log` |
 | Offline stdio protocol coverage | `crates/oraclemcp/tests/e2e_stdio.rs` | current git checkout | `cargo test -p oraclemcp --test e2e_stdio -- --nocapture` |
 | Offline HTTP OAuth/lane coverage | `crates/oraclemcp/tests/e2e_http_oauth.rs` | current git checkout | `cargo test -p oraclemcp --test e2e_http_oauth -- --nocapture` |
