@@ -423,6 +423,26 @@ fn release_upload_is_sequentially_blocked_by_distribution_verification() {
 }
 
 #[test]
+fn workflow_supply_chain_check_uses_runner_baseline_tools() {
+    let script =
+        std::fs::read_to_string(repo_root().join("scripts/workflow_supply_chain_check.sh"))
+            .expect("read workflow supply-chain check");
+    assert!(
+        !script
+            .lines()
+            .any(|line| line.trim_start().starts_with("rg ")),
+        "the dependency-free web runner does not provision ripgrep"
+    );
+
+    let output = run_script("scripts/workflow_supply_chain_check.sh", &[]);
+    assert!(
+        output.status.success(),
+        "workflow supply-chain check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn release_acceptance_suite_schedules_hci_component_gates() {
     let output = run_script(
         "scripts/release_acceptance_ci_suite.sh",

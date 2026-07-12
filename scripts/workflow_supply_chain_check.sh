@@ -17,9 +17,11 @@ while IFS=: read -r file line_number source; do
     echo "$file:$line_number: remote action is not pinned to a full commit SHA: $ref" >&2
     failures=1
   fi
-done < <(rg -n --glob '*.yml' --glob '*.yaml' '^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[^[:space:]#]+' .github/workflows)
+done < <(grep -RInE --include='*.yml' --include='*.yaml' \
+  '^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[^[:space:]#]+' .github/workflows)
 
-if rg -n --glob '*.yml' --glob '*.yaml' 'releases/latest|curl[^|]*\|[[:space:]]*(sh|bash|tar)' .github/workflows; then
+if grep -RInE --include='*.yml' --include='*.yaml' \
+  'releases/latest|curl[^|]*\|[[:space:]]*(sh|bash|tar)' .github/workflows; then
   echo "workflow contains a mutable executable download or curl pipeline" >&2
   failures=1
 fi
@@ -54,7 +56,7 @@ for workflow in .github/workflows/*.yml; do
   done <"$workflow"
 done
 
-installer_calls="$(rg -l 'bash scripts/install_mcp_publisher\.sh' \
+installer_calls="$(grep -lE 'bash scripts/install_mcp_publisher\.sh' \
   .github/workflows/release.yml .github/workflows/publish-mcp.yml | wc -l | tr -d '[:space:]')"
 if [[ "$installer_calls" != "2" ]]; then
   echo "both MCP publication workflows must use the pinned publisher installer" >&2
@@ -90,8 +92,8 @@ if verify_sha256 "$fixture" "$(printf '0%.0s' {1..64})" >/dev/null 2>&1; then
   failures=1
 fi
 
-verify_line="$(rg -n '^[[:space:]]*verify_sha256 \"\$archive\"' scripts/install_mcp_publisher.sh | cut -d: -f1)"
-extract_line="$(rg -n '^[[:space:]]*tar -xzf \"\$archive\"' scripts/install_mcp_publisher.sh | cut -d: -f1)"
+verify_line="$(grep -nE '^[[:space:]]*verify_sha256 \"\$archive\"' scripts/install_mcp_publisher.sh | cut -d: -f1)"
+extract_line="$(grep -nE '^[[:space:]]*tar -xzf \"\$archive\"' scripts/install_mcp_publisher.sh | cut -d: -f1)"
 if [[ -z "$verify_line" || -z "$extract_line" || "$verify_line" -ge "$extract_line" ]]; then
   echo "publisher archive must be verified before extraction" >&2
   failures=1
