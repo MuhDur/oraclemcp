@@ -262,6 +262,7 @@ pub fn oraclemcp_guard::classifier::StatementClass::from(T) -> T
 impl<T> typenum::type_operators::Same for oraclemcp_guard::classifier::StatementClass
 pub type oraclemcp_guard::classifier::StatementClass::Output = T
 pub fn oraclemcp_guard::classifier::analyze_batch(&str) -> oraclemcp_guard::classifier::BatchShape
+pub fn oraclemcp_guard::classifier::named_bind_placeholders(&str) -> alloc::vec::Vec<alloc::string::String>
 pub fn oraclemcp_guard::classifier::semantic_read_plan(&str) -> core::option::Option<oraclemcp_guard::resolver::SemanticReadPlan>
 pub fn oraclemcp_guard::classifier::stage_a(&str, &oraclemcp_guard::classifier::ClassifierConfig) -> oraclemcp_guard::classifier::StageA
 pub mod oraclemcp_guard::clock
@@ -448,6 +449,7 @@ impl<T> core::convert::From<T> for oraclemcp_guard::exec_grant::ExecGrantStore
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::from(T) -> T
 impl<T> typenum::type_operators::Same for oraclemcp_guard::exec_grant::ExecGrantStore
 pub type oraclemcp_guard::exec_grant::ExecGrantStore::Output = T
+pub const oraclemcp_guard::exec_grant::MAX_LIVE_GRANTS: usize
 pub mod oraclemcp_guard::levels
 #[non_exhaustive] pub enum oraclemcp_guard::levels::BlockReason
 pub oraclemcp_guard::levels::BlockReason::ExceedsCeiling
@@ -4556,6 +4558,7 @@ pub fn oraclemcp_guard::purity::UnknownOracle::routine_purity(&self, &oraclemcp_
 pub fn oraclemcp_guard::purity::UnknownOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::analyze_batch(&str) -> oraclemcp_guard::classifier::BatchShape
 pub fn oraclemcp_guard::is_allowed_alter_session(&str) -> bool
+pub fn oraclemcp_guard::named_bind_placeholders(&str) -> alloc::vec::Vec<alloc::string::String>
 pub fn oraclemcp_guard::read_only_setup_statements(oraclemcp_guard::levels::OperatingLevel) -> alloc::vec::Vec<&'static str>
 pub fn oraclemcp_guard::semantic_read_plan(&str) -> core::option::Option<oraclemcp_guard::resolver::SemanticReadPlan>
 pub fn oraclemcp_guard::sql_digest(&str) -> alloc::string::String
