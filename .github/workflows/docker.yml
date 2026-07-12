@@ -292,7 +292,7 @@ jobs:
 
       - name: Attest source-bound rebuild
         if: needs.verify-release.outputs.operation == 'rebuild'
-        uses: actions/attest-build-provenance@v3.2.0
+        uses: actions/attest-build-provenance@v4.1.1
         with:
           subject-name: ghcr.io/muhdur/oraclemcp
           subject-digest: ${{ steps.build.outputs.digest }}
