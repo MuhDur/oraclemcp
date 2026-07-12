@@ -105,6 +105,57 @@ fn name(parts: &[&str], role: SyntacticRole) -> RawName {
     RawName::new(parts.iter().map(|part| RawNamePart::unquoted(*part)), role)
 }
 
+async fn execute_ddl(cx: &Cx, conn: &dyn OracleConnection, sql: &str) {
+    conn.execute(cx, sql, &[])
+        .await
+        .unwrap_or_else(|error| panic!("live adversarial resolver fixture failed: {error}: {sql}"));
+}
+
+async fn execute_cleanup(cx: &Cx, conn: &dyn OracleConnection, sql: &str) {
+    let _ = conn.execute(cx, sql, &[]).await;
+}
+
+async fn scalar_i64(cx: &Cx, conn: &dyn OracleConnection, sql: &str, column: &str) -> i64 {
+    let rows = conn
+        .query_rows(cx, sql, &[])
+        .await
+        .unwrap_or_else(|error| panic!("live adversarial resolver query failed: {error}: {sql}"));
+    let [row] = rows.as_slice() else {
+        panic!(
+            "live adversarial resolver query returned {} rows: {sql}",
+            rows.len()
+        );
+    };
+    row.parse_i64(column)
+        .unwrap_or_else(|| panic!("live adversarial resolver query omitted {column}: {sql}"))
+}
+
+async fn cleanup_adversarial_fixture(cx: &Cx, conn: &dyn OracleConnection, current_schema: &str) {
+    execute_cleanup(
+        cx,
+        conn,
+        "BEGIN DBMS_RLS.DROP_POLICY(USER, 'ORACLEMCP_RES6_VPD', 'ORACLEMCP_RES6_POLICY'); EXCEPTION WHEN OTHERS THEN NULL; END;",
+    )
+    .await;
+    for sql in [
+        "DROP SYNONYM ORACLEMCP_RES6_REMOTE",
+        "DROP SYNONYM ORACLEMCP_RES6_FN_ALIAS",
+        "DROP SYNONYM ORACLEMCP_RES6_PKG_ALIAS",
+        "DROP VIEW ORACLEMCP_RES6_VIEW",
+        "DROP TABLE ORACLEMCP_RES6_VPD PURGE",
+        "DROP TABLE ORACLEMCP_RES6_LOG PURGE",
+        "DROP FUNCTION ORACLEMCP_RES6_POLICY_FN",
+        "DROP FUNCTION ORACLEMCP_RES6_HIDDEN_FN",
+        "DROP FUNCTION ORACLEMCP_RES6_TARGET_A",
+        "DROP FUNCTION ORACLEMCP_RES6_TARGET_B",
+        "DROP FUNCTION ORACLEMCP_RES6_MEMBER",
+        "DROP PACKAGE ORACLEMCP_RES6_PKG",
+    ] {
+        execute_cleanup(cx, conn, sql).await;
+    }
+    execute_cleanup(cx, conn, &format!("DROP PACKAGE {current_schema}")).await;
+}
+
 #[test]
 fn live_dictionary_resolution_preserves_identity_quotes_synonyms_and_overloads() {
     run_with_cx(|cx| async move {
@@ -195,6 +246,399 @@ fn live_dictionary_resolution_preserves_identity_quotes_synonyms_and_overloads()
         let mut stale = context.clone();
         stale.generation = CatalogGeneration(generation.0 + 1);
         assert_eq!(resolver.resolve(&dual, &stale), Resolution::Unresolved);
+    });
+}
+
+#[test]
+fn live_adversarial_resolver_corpus_fails_closed_and_invalidates_stale_evidence() {
+    if std::env::var("ORACLEMCP_RESOLVER_ADVERSARIAL").as_deref() != Ok("1") {
+        eprintln!(
+            "[live-xe] SKIP resolver adversarial DDL corpus: set \
+             ORACLEMCP_RESOLVER_ADVERSARIAL=1 with throwaway DBA-capable credentials"
+        );
+        return;
+    }
+    run_with_cx(|cx| async move {
+        const FIXTURE_USER: &str = "ORACLEMCP_RES6_USER";
+        const FIXTURE_PASSWORD: &str = "Resolver6_Test_Pw_42";
+        let admin = RustOracleConnection::connect(&cx, test_opts())
+            .await
+            .expect("explicit resolver adversarial run requires a reachable Oracle");
+        let admin_context = read_catalog_resolve_context(
+            &cx,
+            &admin,
+            CatalogGeneration(1),
+            StatementScope::default(),
+        )
+        .await
+        .expect("adversarial admin context");
+        cleanup_adversarial_fixture(&cx, &admin, &admin_context.current_schema).await;
+        execute_cleanup(&cx, &admin, &format!("DROP USER {FIXTURE_USER} CASCADE")).await;
+        execute_ddl(
+            &cx,
+            &admin,
+            &format!("CREATE USER {FIXTURE_USER} IDENTIFIED BY \"{FIXTURE_PASSWORD}\""),
+        )
+        .await;
+        execute_ddl(
+            &cx,
+            &admin,
+            &format!("ALTER USER {FIXTURE_USER} ENABLE EDITIONS"),
+        )
+        .await;
+        execute_ddl(
+            &cx,
+            &admin,
+            &format!(
+                "GRANT CREATE SESSION, CREATE TABLE, CREATE VIEW, CREATE PROCEDURE, \
+                 CREATE SYNONYM, UNLIMITED TABLESPACE TO {FIXTURE_USER}"
+            ),
+        )
+        .await;
+        execute_ddl(
+            &cx,
+            &admin,
+            &format!("GRANT EXECUTE_CATALOG_ROLE TO {FIXTURE_USER}"),
+        )
+        .await;
+        let mut fixture_opts = test_opts();
+        fixture_opts.username = Some(FIXTURE_USER.to_owned());
+        fixture_opts.password = Some(FIXTURE_PASSWORD.to_owned());
+        let conn = RustOracleConnection::connect(&cx, fixture_opts)
+            .await
+            .expect("connect edition-enabled adversarial fixture user");
+        let initial_context = read_catalog_resolve_context(
+            &cx,
+            &conn,
+            CatalogGeneration(1),
+            StatementScope::default(),
+        )
+        .await
+        .expect("live adversarial resolution context");
+        let current_schema = initial_context.current_schema.clone();
+        assert!(
+            !current_schema.is_empty()
+                && current_schema.len() <= 128
+                && current_schema
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'#')),
+            "dictionary CURRENT_SCHEMA must be safe to reuse as an unquoted fixture identifier"
+        );
+        cleanup_adversarial_fixture(&cx, &conn, &current_schema).await;
+
+        execute_ddl(&cx, &conn, "CREATE TABLE ORACLEMCP_RES6_LOG (ID NUMBER)").await;
+        execute_ddl(
+            &cx,
+            &conn,
+            "CREATE OR REPLACE FUNCTION ORACLEMCP_RES6_HIDDEN_FN RETURN NUMBER AUTHID DEFINER AS \
+             PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ORACLEMCP_RES6_LOG VALUES (1); \
+             COMMIT; RETURN 1; END;",
+        )
+        .await;
+        execute_ddl(
+            &cx,
+            &conn,
+            "CREATE VIEW ORACLEMCP_RES6_VIEW AS \
+             SELECT ORACLEMCP_RES6_HIDDEN_FN() AS MARKER FROM DUAL",
+        )
+        .await;
+        execute_ddl(&cx, &conn, "CREATE TABLE ORACLEMCP_RES6_VPD (ID NUMBER)").await;
+        execute_ddl(
+            &cx,
+            &conn,
+            "CREATE OR REPLACE FUNCTION ORACLEMCP_RES6_POLICY_FN( \
+                 SCHEMA_NAME VARCHAR2, OBJECT_NAME VARCHAR2) RETURN VARCHAR2 AUTHID DEFINER AS \
+             PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ORACLEMCP_RES6_LOG VALUES (2); \
+             COMMIT; RETURN '1=1'; END;",
+        )
+        .await;
+        execute_ddl(
+            &cx,
+            &conn,
+            "BEGIN DBMS_RLS.ADD_POLICY(OBJECT_SCHEMA => USER, \
+                 OBJECT_NAME => 'ORACLEMCP_RES6_VPD', POLICY_NAME => 'ORACLEMCP_RES6_POLICY', \
+                 FUNCTION_SCHEMA => USER, POLICY_FUNCTION => 'ORACLEMCP_RES6_POLICY_FN', \
+                 STATEMENT_TYPES => 'SELECT'); END;",
+        )
+        .await;
+
+        execute_ddl(
+            &cx,
+            &conn,
+            "CREATE OR REPLACE PACKAGE ORACLEMCP_RES6_PKG AS \
+                 FUNCTION ZERO RETURN NUMBER; \
+                 FUNCTION ZERO(P_VALUE NUMBER) RETURN NUMBER; \
+             END;",
+        )
+        .await;
+        execute_ddl(
+            &cx,
+            &conn,
+            "CREATE SYNONYM ORACLEMCP_RES6_PKG_ALIAS FOR ORACLEMCP_RES6_PKG",
+        )
+        .await;
+        execute_ddl(
+            &cx,
+            &conn,
+            "CREATE OR REPLACE FUNCTION ORACLEMCP_RES6_TARGET_A RETURN NUMBER AS \
+             BEGIN RETURN 1; END;",
+        )
+        .await;
+        execute_ddl(
+            &cx,
+            &conn,
+            "CREATE OR REPLACE FUNCTION ORACLEMCP_RES6_TARGET_B RETURN NUMBER AS \
+             BEGIN RETURN 2; END;",
+        )
+        .await;
+        execute_ddl(
+            &cx,
+            &conn,
+            "CREATE SYNONYM ORACLEMCP_RES6_FN_ALIAS FOR ORACLEMCP_RES6_TARGET_A",
+        )
+        .await;
+        execute_ddl(
+            &cx,
+            &conn,
+            "CREATE SYNONYM ORACLEMCP_RES6_REMOTE FOR SYS.DUAL@ORACLEMCP_RES6_LINK",
+        )
+        .await;
+        execute_ddl(
+            &cx,
+            &conn,
+            "CREATE OR REPLACE FUNCTION ORACLEMCP_RES6_MEMBER RETURN NUMBER AS \
+             BEGIN RETURN 3; END;",
+        )
+        .await;
+        execute_ddl(
+            &cx,
+            &conn,
+            &format!(
+                "CREATE OR REPLACE PACKAGE {current_schema} AS \
+                 FUNCTION ORACLEMCP_RES6_MEMBER RETURN NUMBER; END;"
+            ),
+        )
+        .await;
+
+        let hidden_view = name(&["oraclemcp_res6_view"], SyntacticRole::FromFactor);
+        let vpd_table = name(&["oraclemcp_res6_vpd"], SyntacticRole::FromFactor);
+        let package_member = name(
+            &["oraclemcp_res6_pkg_alias", "zero"],
+            SyntacticRole::ValuePosition,
+        );
+        let function_alias = name(&["oraclemcp_res6_fn_alias"], SyntacticRole::ValuePosition);
+        let remote_synonym = name(&["oraclemcp_res6_remote"], SyntacticRole::FromFactor);
+        let collision = name(
+            &[current_schema.as_str(), "oraclemcp_res6_member"],
+            SyntacticRole::ValuePosition,
+        );
+        let requested = [
+            hidden_view.clone(),
+            vpd_table.clone(),
+            package_member.clone(),
+            function_alias.clone(),
+            remote_synonym.clone(),
+            collision.clone(),
+        ];
+        let resolver = OracleCatalogResolver::load(&cx, &conn, &requested, &initial_context)
+            .await
+            .expect("load live adversarial dictionary evidence");
+
+        let Resolution::Resolved(view) = resolver.resolve(&hidden_view, &initial_context) else {
+            panic!("hidden-write view identity must resolve before purity rejects it");
+        };
+        assert_eq!(view.kind, CatalogObjectKind::View);
+        assert_eq!(
+            resolved_relations_read_purity(&cx, &conn, std::slice::from_ref(view.as_ref()))
+                .await
+                .expect("view purity proof"),
+            Purity::Unknown,
+            "views remain unknown because their query can invoke autonomous functions"
+        );
+
+        let Resolution::Resolved(table) = resolver.resolve(&vpd_table, &initial_context) else {
+            panic!("VPD table identity must resolve before policy proof rejects it");
+        };
+        assert_eq!(table.kind, CatalogObjectKind::Table);
+        assert_eq!(
+            resolved_relations_read_purity(&cx, &conn, std::slice::from_ref(table.as_ref()))
+                .await
+                .expect("VPD purity proof"),
+            Purity::Unknown,
+            "enabled SELECT VPD policy must prevent a read-only proof"
+        );
+        assert_eq!(
+            scalar_i64(
+                &cx,
+                &conn,
+                "SELECT COUNT(*) AS SIDE_EFFECTS FROM ORACLEMCP_RES6_LOG",
+                "SIDE_EFFECTS",
+            )
+            .await,
+            0,
+            "dictionary proof must not execute hidden view or VPD functions"
+        );
+
+        let Resolution::Resolved(member) = resolver.resolve(&package_member, &initial_context)
+        else {
+            panic!("unshadowed paren-less synonym package member must resolve");
+        };
+        assert_eq!(member.kind, CatalogObjectKind::Function);
+        assert_eq!(
+            member.container.as_ref().unwrap().name,
+            "ORACLEMCP_RES6_PKG"
+        );
+        assert_eq!(
+            member.overloads.len(),
+            1,
+            "required-input overload is excluded"
+        );
+        assert_eq!(member.identity.edition, initial_context.edition);
+        assert_eq!(member.synonym_chain.len(), 1);
+
+        let Resolution::Resolved(first_target) =
+            resolver.resolve(&function_alias, &initial_context)
+        else {
+            panic!("synonym-hidden zero-argument function must resolve");
+        };
+        assert_eq!(first_target.name, "ORACLEMCP_RES6_TARGET_A");
+        assert!(matches!(
+            resolver.resolve(&remote_synonym, &initial_context),
+            Resolution::Remote { .. }
+        ));
+        assert!(matches!(
+            resolver.resolve(&collision, &initial_context),
+            Resolution::Ambiguous { .. }
+        ));
+
+        let cache = OracleCatalogResolverCache::new();
+        let synonym_before = cache
+            .preload(
+                &cx,
+                &conn,
+                std::slice::from_ref(&function_alias),
+                StatementScope::default(),
+            )
+            .await
+            .expect("preload first synonym target");
+        let Resolution::Resolved(before_target) = cache.resolve(&function_alias, &synonym_before)
+        else {
+            panic!("first synonym target must be cached");
+        };
+        execute_ddl(
+            &cx,
+            &conn,
+            "CREATE OR REPLACE SYNONYM ORACLEMCP_RES6_FN_ALIAS FOR ORACLEMCP_RES6_TARGET_B",
+        )
+        .await;
+        cache.invalidate(CatalogInvalidation::Synonym);
+        assert_eq!(
+            cache.resolve(&function_alias, &synonym_before),
+            Resolution::Unresolved
+        );
+        let synonym_after = cache
+            .preload(
+                &cx,
+                &conn,
+                std::slice::from_ref(&function_alias),
+                StatementScope::default(),
+            )
+            .await
+            .expect("preload replacement synonym target");
+        let Resolution::Resolved(after_target) = cache.resolve(&function_alias, &synonym_after)
+        else {
+            panic!("replacement synonym target must resolve");
+        };
+        assert_eq!(before_target.name, "ORACLEMCP_RES6_TARGET_A");
+        assert_eq!(after_target.name, "ORACLEMCP_RES6_TARGET_B");
+        assert_ne!(before_target.identity, after_target.identity);
+
+        let overload_before = cache
+            .preload(
+                &cx,
+                &conn,
+                std::slice::from_ref(&package_member),
+                StatementScope::default(),
+            )
+            .await
+            .expect("preload package overloads");
+        let Resolution::Resolved(before_overloads) =
+            cache.resolve(&package_member, &overload_before)
+        else {
+            panic!("initial package overloads must resolve");
+        };
+        assert_eq!(before_overloads.overloads.len(), 1);
+        execute_ddl(
+            &cx,
+            &conn,
+            "CREATE OR REPLACE PACKAGE ORACLEMCP_RES6_PKG AS \
+                 FUNCTION ZERO RETURN NUMBER; \
+                 FUNCTION ZERO(P_VALUE VARCHAR2 DEFAULT NULL) RETURN NUMBER; \
+             END;",
+        )
+        .await;
+        execute_ddl(
+            &cx,
+            &conn,
+            "CREATE OR REPLACE SYNONYM ORACLEMCP_RES6_PKG_ALIAS FOR ORACLEMCP_RES6_PKG",
+        )
+        .await;
+        cache.invalidate(CatalogInvalidation::Overload);
+        assert_eq!(
+            cache.resolve(&package_member, &overload_before),
+            Resolution::Unresolved
+        );
+        let overload_after = cache
+            .preload(
+                &cx,
+                &conn,
+                std::slice::from_ref(&package_member),
+                StatementScope::default(),
+            )
+            .await
+            .expect("preload changed package overloads");
+        let Resolution::Resolved(after_overloads) = cache.resolve(&package_member, &overload_after)
+        else {
+            panic!("changed package overloads must resolve");
+        };
+        assert_eq!(after_overloads.overloads.len(), 2);
+
+        execute_ddl(&cx, &conn, "ALTER SESSION SET CURRENT_SCHEMA = SYS").await;
+        cache.invalidate(CatalogInvalidation::CurrentSchema);
+        assert_eq!(
+            cache.resolve(&package_member, &overload_after),
+            Resolution::Unresolved
+        );
+        let dual = name(&["dual"], SyntacticRole::FromFactor);
+        let changed_schema = cache
+            .preload(
+                &cx,
+                &conn,
+                std::slice::from_ref(&dual),
+                StatementScope::default(),
+            )
+            .await
+            .expect("preload after CURRENT_SCHEMA change");
+        assert_eq!(changed_schema.current_schema, "SYS");
+        assert!(matches!(
+            cache.resolve(&dual, &changed_schema),
+            Resolution::Resolved(_)
+        ));
+        execute_ddl(
+            &cx,
+            &conn,
+            &format!("ALTER SESSION SET CURRENT_SCHEMA = {current_schema}"),
+        )
+        .await;
+
+        cleanup_adversarial_fixture(&cx, &conn, &current_schema).await;
+        drop(conn);
+        execute_ddl(
+            &cx,
+            &admin,
+            &format!("ALTER USER {FIXTURE_USER} ACCOUNT LOCK"),
+        )
+        .await;
     });
 }
 

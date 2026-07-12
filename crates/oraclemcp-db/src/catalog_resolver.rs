@@ -557,7 +557,8 @@ impl DictionaryLookup<'_> {
                     .iter()
                     .filter(|relation| relation_matches_qualifier(relation, qualifier))
                     .collect::<Vec<_>>();
-                (matching, column.as_str(), true)
+                let relation_qualified = !matching.is_empty();
+                (matching, column.as_str(), relation_qualified)
             }
             [owner, relation_name, column] => {
                 let matching = relations
@@ -567,7 +568,8 @@ impl DictionaryLookup<'_> {
                             && relation_matches_owner_name(relation, owner, relation_name)
                     })
                     .collect::<Vec<_>>();
-                (matching, column.as_str(), true)
+                let relation_qualified = !matching.is_empty();
+                (matching, column.as_str(), relation_qualified)
             }
             _ => (Vec::new(), "", false),
         };
@@ -1659,6 +1661,69 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 3]
         );
+    }
+
+    #[test]
+    fn unshadowed_qualified_value_resolves_as_zero_arg_package_member() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new([
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                vec![row(&[
+                    ("OWNER", Some("APP")),
+                    ("SYNONYM_NAME", Some("PKG_ALIAS")),
+                    ("TABLE_OWNER", Some("APP")),
+                    ("TABLE_NAME", Some("PKG")),
+                    ("DB_LINK", None),
+                    ("OBJECT_ID", Some("101")),
+                    ("STATUS", Some("VALID")),
+                    ("EDITION_NAME", None),
+                ])],
+                vec![row(&[
+                    ("OWNER", Some("APP")),
+                    ("OBJECT_NAME", Some("PKG")),
+                    ("OBJECT_TYPE", Some("PACKAGE")),
+                    ("OBJECT_ID", Some("102")),
+                    ("STATUS", Some("VALID")),
+                    ("EDITION_NAME", None),
+                ])],
+                vec![row(&[
+                    ("SUBPROGRAM_ID", Some("1")),
+                    ("OVERLOAD", None),
+                    ("POSITION", Some("0")),
+                    ("DATA_LEVEL", Some("0")),
+                    ("IN_OUT", Some("OUT")),
+                    ("DEFAULTED", Some("N")),
+                ])],
+            ]);
+            let context = ResolveCtx::new("APP", "APP", oraclemcp_guard::CatalogGeneration(11));
+            let raw = RawName::new(
+                [
+                    RawNamePart::unquoted("pkg_alias"),
+                    RawNamePart::unquoted("zero"),
+                ],
+                SyntacticRole::ValuePosition,
+            );
+            let lookup = DictionaryLookup {
+                cx: &cx,
+                conn: &conn,
+                context: &context,
+            };
+
+            let Resolution::Resolved(resolved) = lookup
+                .resolve_value(&raw, &["PKG_ALIAS".to_owned(), "ZERO".to_owned()])
+                .await
+                .expect("dictionary resolution")
+            else {
+                panic!("unshadowed package.member must resolve");
+            };
+            assert_eq!(resolved.kind, CatalogObjectKind::Function);
+            assert_eq!(resolved.name, "ZERO");
+            assert_eq!(resolved.container.as_ref().unwrap().name, "PKG");
+            assert_eq!(resolved.synonym_chain.len(), 1);
+            assert_eq!(resolved.overloads.len(), 1);
+        });
     }
 
     #[test]
