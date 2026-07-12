@@ -22,12 +22,12 @@ One line installs or updates `oraclemcp` on macOS and Linux. It works as pasted
 for a human terminal and for a non-interactive agent run:
 
 ```sh
-curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version 0.8.0
+curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version 0.9.0
 ```
 
 The hosted script fetch includes a cache buster so stale CDN/proxy copies do not
 hide installer updates. This command is literal and copy-pasteable for release
-`0.8.0`; change only the version number when installing another release. Later
+`0.9.0`; change only the version number when installing another release. Later
 examples that contain `...`, `<pw>`, `<profile>`, or placeholder env values are
 templates: replace those placeholders before running them.
 
@@ -84,22 +84,22 @@ the normal command above is the install/update command.
 Preview the Linux/macOS host plan without changing the machine:
 
 ```sh
-curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --dry-run --version 0.8.0
+curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --dry-run --version 0.9.0
 ```
 
 From an installed binary, preview or run the same update path:
 
 ```sh
-oraclemcp --json self-update --dry-run --version 0.8.0
-oraclemcp self-update --version 0.8.0 --no-service
+oraclemcp --json self-update --dry-run --version 0.9.0
+oraclemcp self-update --version 0.9.0 --no-service
 ```
 
 On Windows, download and run the PowerShell installer:
 
 ```powershell
 iwr -UseBasicParsing https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.ps1 -OutFile install.ps1
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -Version 0.8.0
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.8.0
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -Version 0.9.0
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.9.0
 ```
 
 The Windows installer accepts the same release operations: `-Update` for the
@@ -109,7 +109,7 @@ verification posture. `prefer` installs after a hard SHA-256 check when cosign
 is missing; `require` fails without cosign.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Update -Version 0.8.0 -NoService
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Update -Version 0.9.0 -NoService
 ```
 
 For air-gapped hosts, download the release archive plus its `.sha256`, `.sig`,
@@ -117,12 +117,12 @@ For air-gapped hosts, download the release archive plus its `.sha256`, `.sig`,
 of the installer:
 
 ```sh
-bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz --version 0.8.0
+bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz --version 0.9.0
 ```
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 `
-  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.8.0
+  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.9.0
 ```
 
 The release installer does not silently fall back from a missing release archive
