@@ -7308,10 +7308,10 @@ impl CustomToolExecutor for ReadOnlyCustomToolExecutor<'_> {
             ));
         }
 
-        let sql = match body {
-            ToolBody::InlineSql(sql) => sql.to_owned(),
-            ToolBody::PackageCall(call) => format!("SELECT {call} AS VALUE FROM dual"),
-        };
+        // Only Form A reaches execution; Form B (`call = ...`) is rejected at
+        // catalog load, so the body is always inline SQL (QA100 .65).
+        let ToolBody::InlineSql(sql) = body;
+        let sql = sql.to_owned();
         ensure_resolved_read_only(self.cx, self.conn, self.catalog_cache, &sql).await?;
         // A9: operator-defined read tools also narrow the handler context to the
         // read-path capability row. The cancellation checkpoint runs under the

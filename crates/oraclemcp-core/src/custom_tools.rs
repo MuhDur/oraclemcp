@@ -7,14 +7,23 @@
 //! Definitions live in operator-controlled `~/.config/oraclemcp/tools.d/*.toml`
 //! (NEVER in the repo, like login scripts), are loaded at startup, and register
 //! into the same [`ToolRegistry`] so every MCP client discovers them via
-//! `tools/list`. A definition is **Form A** (inline SQL / multi-statement /
-//! full PL/SQL block) or **Form B** (wrap an existing DB package call). Both
-//! bind agent values as bind variables only — never interpolated (injection
-//! defense).
+//! `tools/list`. A definition is **Form A**: inline SQL / multi-statement /
+//! full PL/SQL block. Agent values bind as bind variables only — never
+//! interpolated (injection defense).
+//!
+//! **Scope (QA100 .65).** The design also sketched a **Form B** mode (`call =
+//! ...`, wrapping an existing DB package call) and a large-catalog
+//! **meta-dispatch** registration mode. Neither is wired end to end in
+//! production: Form B needs a per-generation `SideEffectOracle` purity proof the
+//! server never injects (so an accepted `call` could never clear the fail-closed
+//! classifier and execute), and meta-dispatch has no production registration or
+//! dispatch route. To keep accepted configuration equal to behavior, `call`
+//! definitions are **rejected at load** with actionable guidance and the
+//! meta-dispatch surface is **not built** — only Form A is supported.
 //!
 //! Submodule coverage: this file is the **loader + schema + registration**
-//! (P1-13a / 2.12.1); classify-at-load (2.12.2), Form A/B execution (2.12.3/4),
-//! HMAC signing (2.12.5), and meta-dispatch registration (2.12.6) layer on here.
+//! (P1-13a / 2.12.1); classify-at-load (2.12.2), Form A execution (2.12.3), and
+//! HMAC signing (2.12.5) layer on here.
 
 use oraclemcp_audit::HmacSha256Key;
 use oraclemcp_db::OracleBind;
@@ -92,6 +101,12 @@ pub struct CustomToolDef {
     #[serde(default)]
     pub sql: Option<String>,
     /// Form B body: an existing package call, e.g. `billing_api.get(:id)`.
+    /// **Not a supported execution mode** — rejected at load ([`Self::body`])
+    /// because the fail-closed classifier can never clear a package call without
+    /// a `SideEffectOracle` proof the server does not inject, so an accepted
+    /// `call` definition would never execute. Kept as a field so its presence is
+    /// detected and reported with actionable guidance (and stays authenticated
+    /// by the HMAC signature). Rewrite the wrapper as inline `sql`.
     #[serde(default)]
     pub call: Option<String>,
     /// Typed parameters (bind-only).
@@ -109,13 +124,13 @@ pub struct CustomToolDef {
     pub signature: Option<String>,
 }
 
-/// The body form of a custom tool.
+/// The body form of a custom tool. Only Form A (inline SQL / PL/SQL) is a
+/// supported execution mode; Form B (`call = ...` package wrappers) is rejected
+/// at load ([`CustomToolDef::body`]), so this enum carries only Form A.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolBody<'a> {
     /// Form A: inline SQL / PL/SQL.
     InlineSql(&'a str),
-    /// Form B: an existing package call.
-    PackageCall(&'a str),
 }
 
 /// Why loading a custom-tool definition failed.
@@ -197,14 +212,26 @@ fn is_bind_ident(s: &str) -> bool {
 }
 
 impl CustomToolDef {
-    /// The tool body, or an error if neither/both of `sql`/`call` were given.
+    /// The Form A inline-SQL body. `call = ...` (Form B package wrappers) is not
+    /// a supported execution mode and is rejected here at load with actionable
+    /// guidance; a definition with neither body is likewise rejected.
     pub fn body(&self) -> Result<ToolBody<'_>, LoadError> {
         match (&self.sql, &self.call) {
             (Some(s), None) => Ok(ToolBody::InlineSql(s)),
-            (None, Some(c)) => Ok(ToolBody::PackageCall(c)),
-            _ => Err(LoadError::Invalid {
+            // Form B needs a per-generation SideEffectOracle purity proof to
+            // clear the fail-closed classifier, which this server never wires; an
+            // accepted `call` definition could therefore never execute. Reject it
+            // at load so accepted configuration equals behavior (QA100 .65). This
+            // also covers a definition that set both `sql` and `call`.
+            (_, Some(_)) => Err(LoadError::Invalid {
                 name: self.name.clone(),
-                reason: "exactly one of `sql` (Form A) or `call` (Form B) is required".to_owned(),
+                reason: "`call` (Form B package wrappers) is not a supported execution mode; \
+                         rewrite it as inline SQL, e.g. `sql = \"SELECT pkg.fn(:x) FROM dual\"`"
+                    .to_owned(),
+            }),
+            (None, None) => Err(LoadError::Invalid {
+                name: self.name.clone(),
+                reason: "a `sql` (Form A inline SQL) body is required".to_owned(),
             }),
         }
     }
@@ -278,10 +305,7 @@ impl CustomToolDef {
         // quoted identifiers, `--`/`/* */` comments, PL/SQL `:=`, and `::` casts
         // never count. This is a TIGHTENING (refuse a broken definition); it never
         // relaxes any query-path guard verdict.
-        let body_sql = match body {
-            ToolBody::InlineSql(s) => s,
-            ToolBody::PackageCall(c) => c,
-        };
+        let ToolBody::InlineSql(body_sql) = body;
         let binds = named_bind_placeholders(body_sql); // uppercased, distinct
         for b in &binds {
             if !seen_ci.contains_key(b) {
@@ -374,18 +398,11 @@ pub struct LoadedTool {
 }
 
 impl CustomToolDef {
-    /// The string the classifier sees: Form A is the SQL/PLSQL as-is; Form B is
-    /// the package call wrapped in an anonymous block.
+    /// The string the classifier sees: the Form A SQL/PL-SQL as-is.
     fn classify_input(&self) -> Result<String, LoadError> {
-        Ok(match self.body()? {
-            ToolBody::InlineSql(s) => s.to_owned(),
-            // Form B wraps the call in a SELECT so the classifier consults the
-            // SideEffectOracle on the routine (P1-13d): the engine can PROVE the
-            // package read-only → Safe/auto-approved, or flag writes → ≥ Guarded.
-            // With the default Unknown oracle (no engine) it is fail-closed to
-            // Guarded — never silently Safe.
-            ToolBody::PackageCall(c) => format!("SELECT {c} FROM dual"),
-        })
+        // Only Form A reaches here; `body` rejects Form B (`call = ...`) at load.
+        let ToolBody::InlineSql(s) = self.body()?;
+        Ok(s.to_owned())
     }
 }
 
@@ -709,18 +726,20 @@ pub async fn execute_custom_tool(
     executor.run(body, loaded.required_level, &binds).await
 }
 
-// ── Catalog: first-class vs meta-dispatch registration (P1-13f / 2.12.6) ──────
+// ── Catalog: first-class registration (P1-13f) ────────────────────────────────
 
-/// The single meta-dispatch tool name (large-catalog mode).
-pub const RUN_NAMED_TOOL: &str = "oracle_run_named";
-
-/// A loaded, gated catalog of operator tools. Operators choose per profile
-/// between **first-class** registration (small catalog → each tool is its own
-/// MCP tool with a proper `inputSchema`) and **meta-dispatch** (large catalog →
-/// a single [`RUN_NAMED_TOOL`] keeps the top-level surface tiny; the full
-/// catalog is discoverable via `oracle_capabilities` and the `oracle://tools`
-/// resource). This keeps the ≤12 core-tool ergonomic budget intact — operator
-/// tools are additive.
+/// A loaded, gated catalog of operator tools. Each tool is registered as its own
+/// **first-class** MCP tool (with a proper `inputSchema`) via
+/// [`Self::register_first_class`], so every MCP client discovers it through
+/// `tools/list`. Operator tools are additive to the ≤12 core-tool budget.
+///
+/// A large-catalog **meta-dispatch** mode (a single `oracle_run_named` fan-out
+/// keeping the top-level surface tiny) was specified but never wired into
+/// production — no registration threshold, no dispatch route. It is
+/// intentionally omitted rather than shipped dormant: keeping it would advertise
+/// an execution surface nothing reaches (QA100 .65). A bounded large-catalog
+/// surface, if ever needed, must be added with end-to-end registration + dispatch
+/// routing, not as dead API.
 #[derive(Clone, Debug, Default)]
 pub struct CustomToolCatalog {
     tools: Vec<LoadedTool>,
@@ -751,82 +770,11 @@ impl CustomToolCatalog {
         self.tools.iter().find(|t| t.def.name == name)
     }
 
-    /// Register each tool as a first-class MCP tool (small-catalog mode).
+    /// Register each tool as a first-class MCP tool.
     pub fn register_first_class(&self, registry: &mut ToolRegistry) {
         for t in &self.tools {
             registry.register(t.def.to_descriptor());
         }
-    }
-
-    /// Register a single [`RUN_NAMED_TOOL`] meta-dispatch tool (large-catalog
-    /// mode) — the catalog stays discoverable via [`Self::catalog_json`].
-    pub fn register_meta_dispatch(&self, registry: &mut ToolRegistry) {
-        registry.register(ToolDescriptor::new(
-            RUN_NAMED_TOOL.to_owned(),
-            ToolTier::FoundationLiveDb,
-            format!(
-                "Run one of {} operator-defined tools by name: {{ name, params }}. \
-                 Discover the catalog via oracle_capabilities or the oracle://tools resource.",
-                self.tools.len()
-            ),
-        )
-        .with_input_schema(json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Name of the operator-defined tool from the oracle://tools catalog."
-                },
-                "params": {
-                    "type": "object",
-                    "description": "Parameters for the named tool, validated against that tool's catalog input_schema."
-                }
-            },
-            "required": ["name"],
-            "additionalProperties": false,
-        })));
-    }
-
-    /// Meta-dispatch: run the named tool with `params`. `args` is the
-    /// `oracle_run_named` payload `{ "name": "...", "params": { … } }`.
-    pub async fn run_named(
-        &self,
-        args: &Value,
-        executor: &dyn CustomToolExecutor,
-    ) -> Result<Value, ErrorEnvelope> {
-        let name = args["name"].as_str().ok_or_else(|| {
-            ErrorEnvelope::new(
-                ErrorClass::InvalidArguments,
-                "oracle_run_named requires a 'name'",
-            )
-        })?;
-        let loaded = self.get(name).ok_or_else(|| {
-            ErrorEnvelope::new(
-                ErrorClass::ObjectNotFound,
-                format!("no custom tool named '{name}'"),
-            )
-        })?;
-        let params = args.get("params").cloned().unwrap_or(Value::Null);
-        execute_custom_tool(loaded, &params, executor).await
-    }
-
-    /// The catalog document for `oracle_capabilities` and the `oracle://tools`
-    /// resource (P2-RES / 3.10): name, description, required level, inputSchema.
-    #[must_use]
-    pub fn catalog_json(&self) -> Value {
-        let entries: Vec<Value> = self
-            .tools
-            .iter()
-            .map(|t| {
-                json!({
-                    "name": t.def.name,
-                    "description": t.def.description,
-                    "required_level": t.required_level.as_str(),
-                    "input_schema": t.def.input_schema(),
-                })
-            })
-            .collect();
-        json!({ "tools": entries })
     }
 }
 
@@ -859,7 +807,7 @@ mod tests {
     "#;
 
     #[test]
-    fn parses_form_a_and_form_b() {
+    fn parses_form_a_and_rejects_form_b() {
         let a = parse_tools_file(FORM_A).expect("form A parses");
         assert_eq!(a.len(), 1);
         assert_eq!(a[0].name, "customer_360");
@@ -867,10 +815,13 @@ mod tests {
             a[0].body().unwrap(),
             ToolBody::InlineSql("SELECT * FROM customer_360_v WHERE id = :id")
         );
-        let b = parse_tools_file(FORM_B).expect("form B parses");
-        assert_eq!(
-            b[0].body().unwrap(),
-            ToolBody::PackageCall("billing_api.get_summary(:acct)")
+        // Form B (`call = ...`) is not a supported execution mode: it is rejected
+        // at load with actionable guidance, never silently accepted (QA100 .65).
+        let err = parse_tools_file(FORM_B).expect_err("form B is rejected at load");
+        assert!(
+            matches!(&err, LoadError::Invalid { name, reason }
+                if name == "billing_summary" && reason.contains("Form B")),
+            "unexpected error: {err:?}"
         );
     }
 
@@ -1100,9 +1051,11 @@ mod tests {
     }
 
     #[test]
-    fn form_b_call_binds_are_validated() {
-        // Form B (package call) binds are validated identically to Form A.
-        let ok = CustomToolDef {
+    fn form_b_is_rejected_regardless_of_binds() {
+        // Even a perfectly-formed Form B definition — declared params exactly
+        // matching the call's binds — is refused: Form B is not a supported
+        // execution mode, so it can never be silently accepted (QA100 .65).
+        let well_formed = CustomToolDef {
             name: "myco_wrap".to_owned(),
             description: "wrap a package".to_owned(),
             sql: None,
@@ -1115,13 +1068,16 @@ mod tests {
             declared_level: None,
             signature: None,
         };
-        assert!(ok.validate().is_ok());
-        // Drop the `region` param -> its bind is now unmatched -> load fails.
-        let mut missing = ok.clone();
-        missing.params.pop();
         assert!(matches!(
-            missing.validate(),
-            Err(LoadError::Invalid { reason, .. }) if reason.contains(":region")
+            well_formed.validate(),
+            Err(LoadError::Invalid { reason, .. }) if reason.contains("Form B")
+        ));
+        // Setting both `sql` and `call` is also Form B territory -> rejected.
+        let mut both = well_formed.clone();
+        both.sql = Some("SELECT * FROM t WHERE a = :acct AND b = :region".to_owned());
+        assert!(matches!(
+            both.validate(),
+            Err(LoadError::Invalid { reason, .. }) if reason.contains("Form B")
         ));
     }
 
@@ -1731,10 +1687,8 @@ mod tests {
         ) -> Result<Value, ErrorEnvelope> {
             // Bind-only: the executor receives the body + typed binds, never an
             // interpolated SQL string.
-            let body_str = match body {
-                ToolBody::InlineSql(s) => s.to_owned(),
-                ToolBody::PackageCall(c) => c.to_owned(),
-            };
+            let ToolBody::InlineSql(body_str) = body;
+            let body_str = body_str.to_owned();
             Ok(json!({
                 "body": body_str,
                 "level": level.as_str(),
@@ -1761,7 +1715,7 @@ mod tests {
         assert_eq!(out["body"], json!("SELECT * FROM t WHERE id = :id"));
     }
 
-    // ── Form B package wrapper (2.12.4) ───────────────────────────────────────
+    // ── Form B (package wrappers): rejected at load (QA100 .65) ───────────────
 
     fn def_call(name: &str, call: &str) -> CustomToolDef {
         CustomToolDef {
@@ -1777,7 +1731,7 @@ mod tests {
     }
 
     #[test]
-    fn form_b_proven_readonly_package_classifies_safe() {
+    fn form_b_rejected_at_load_even_with_a_proving_oracle() {
         use oraclemcp_guard::{ObjectRef, Purity, SideEffectOracle};
         use std::sync::Arc;
         struct ProvenOracle;
@@ -1786,31 +1740,28 @@ mod tests {
                 Purity::ProvenReadOnly
             }
         }
+        // Form B is rejected structurally at load, BEFORE classification, so even
+        // a classifier that could prove the package read-only cannot resurrect it.
+        // This makes the scope-down unconditional: accepted config == behavior.
         let c = oraclemcp_guard::Classifier::default().with_oracle(Arc::new(ProvenOracle));
         let d = def_call("cust360", "billing_api.get_360(:id)");
-        // The engine proves the package read-only -> Safe -> loads at READ_ONLY
-        // (auto-approved) even on a READ_ONLY profile.
-        let loaded =
-            classify_at_load(&d, &c, OperatingLevel::ReadOnly).expect("proven read-only loads");
-        assert_eq!(loaded.required_level, OperatingLevel::ReadOnly);
+        let err = classify_at_load(&d, &c, OperatingLevel::ReadOnly).unwrap_err();
+        assert!(matches!(err, LoadError::Invalid { reason, .. } if reason.contains("Form B")));
     }
 
     #[test]
-    fn form_b_unproven_package_is_fail_closed_to_guarded() {
-        // The default classifier has no engine oracle -> the package call cannot
-        // be proven read-only -> Guarded (>= ReadWrite), so it refuses on a
-        // READ_ONLY profile and only loads with write headroom.
+    fn form_b_rejected_at_load_without_an_oracle() {
+        // With the production default classifier (no engine oracle), a Form B
+        // package call is refused at load as unsupported — a clear, actionable
+        // error rather than an over-ceiling classification quirk — even when the
+        // profile grants write headroom that would otherwise admit it.
         let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
         let d = def_call("cust360", "billing_api.get_360(:id)");
-        let err = classify_at_load(&d, &c, OperatingLevel::ReadOnly).unwrap_err();
-        assert!(
-            matches!(err, LoadError::OverCeiling { required, .. } if required >= OperatingLevel::ReadWrite)
-        );
-        let loaded = classify_at_load(&d, &c, OperatingLevel::ReadWrite).expect("loads at RW");
-        assert!(loaded.required_level >= OperatingLevel::ReadWrite);
+        let err = classify_at_load(&d, &c, OperatingLevel::ReadWrite).unwrap_err();
+        assert!(matches!(err, LoadError::Invalid { reason, .. } if reason.contains("Form B")));
     }
 
-    // ── Catalog: first-class + meta-dispatch (2.12.6) ─────────────────────────
+    // ── Catalog: first-class registration (QA100 .65) ─────────────────────────
 
     fn catalog() -> CustomToolCatalog {
         let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
@@ -1839,62 +1790,8 @@ mod tests {
         cat.register_first_class(&mut reg);
         assert!(reg.tools.iter().any(|t| t.name == "t"));
         assert!(reg.tools.iter().any(|t| t.name == "lookup"));
-        assert!(!reg.tools.iter().any(|t| t.name == RUN_NAMED_TOOL));
-    }
-
-    #[test]
-    fn meta_dispatch_registers_a_single_tool() {
-        let cat = catalog();
-        let mut reg = ToolRegistry::new();
-        cat.register_meta_dispatch(&mut reg);
-        assert_eq!(reg.tools.len(), 1);
-        assert_eq!(reg.tools[0].name, RUN_NAMED_TOOL);
-        assert_eq!(
-            reg.tools[0]
-                .input_schema
-                .as_ref()
-                .expect("meta dispatch schema")["properties"]["name"]["type"],
-            json!("string")
-        );
-    }
-
-    #[test]
-    fn run_named_dispatches_and_rejects_unknown() {
-        let cat = catalog();
-        run_with_cx(|_cx| async {
-            let out = cat
-                .run_named(
-                    &json!({"name": "lookup", "params": {"k": "x"}}),
-                    &EchoExecutor,
-                )
-                .await
-                .expect("dispatches");
-            assert_eq!(out["bind_count"], json!(1));
-            let err = cat
-                .run_named(&json!({"name": "nope", "params": {}}), &EchoExecutor)
-                .await
-                .unwrap_err();
-            assert_eq!(err.error_class, ErrorClass::ObjectNotFound);
-            let err = cat
-                .run_named(&json!({"params": {}}), &EchoExecutor)
-                .await
-                .unwrap_err();
-            assert_eq!(err.error_class, ErrorClass::InvalidArguments);
-        });
-    }
-
-    #[test]
-    fn catalog_json_lists_the_tools() {
-        let cat = catalog();
-        let doc = cat.catalog_json();
-        let tools = doc["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 2);
-        assert!(
-            tools
-                .iter()
-                .all(|t| t["required_level"] == json!("READ_ONLY"))
-        );
-        assert!(tools.iter().any(|t| t["name"] == json!("lookup")));
-        assert_eq!(tools[0]["input_schema"]["type"], json!("object"));
+        // First-class is the only registration mode: no meta-dispatch fan-out
+        // tool is ever added (QA100 .65).
+        assert!(!reg.tools.iter().any(|t| t.name == "oracle_run_named"));
     }
 }

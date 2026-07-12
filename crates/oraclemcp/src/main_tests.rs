@@ -3406,6 +3406,57 @@ fn custom_tool_names_cannot_duplicate_or_shadow_advertised_tools() {
 }
 
 #[test]
+fn production_loader_rejects_form_b_package_calls() {
+    // QA100 .65: Form B (`call = ...`) is not a supported execution mode. The
+    // production catalog loader must refuse it at load with an actionable error,
+    // never register a tool that could never execute (accepted config ==
+    // behavior). Even a well-formed, unsigned definition on an unprotected
+    // profile is rejected.
+    let tools_dir = target_tmp_file("qa100-65-form-b");
+    fs::create_dir_all(&tools_dir).expect("create tools dir");
+    fs::write(
+        tools_dir.join("form_b.toml"),
+        r#"
+        [[tool]]
+        name = "myco_billing"
+        description = "Wrap the billing package"
+        call = "billing_api.get_summary(:acct)"
+        [[tool.params]]
+        name = "acct"
+        type = "string"
+        required = true
+        "#,
+    )
+    .expect("write form-b tool");
+    let err = load_custom_catalog_from_sources(Some(&tools_dir), None, false)
+        .expect_err("form B must be rejected by the production loader");
+    assert!(
+        err.message.contains("Form B"),
+        "unexpected error: {}",
+        err.message
+    );
+
+    // Form A on the same loader still loads and advertises.
+    fs::write(
+        tools_dir.join("form_b.toml"),
+        r#"
+        [[tool]]
+        name = "myco_billing"
+        description = "Read the billing summary"
+        sql = "SELECT amount FROM billing_summary_v WHERE acct = :acct"
+        [[tool.params]]
+        name = "acct"
+        type = "string"
+        required = true
+        "#,
+    )
+    .expect("rewrite as form A");
+    let catalog =
+        load_custom_catalog_from_sources(Some(&tools_dir), None, false).expect("form A loads");
+    assert_eq!(catalog.len(), 1);
+}
+
+#[test]
 fn custom_tool_catalog_and_sign_cli_enforce_hmac_key_size() {
     let tools_dir = target_tmp_file("qa2-custom-tool-keys");
     fs::create_dir_all(&tools_dir).expect("create tools dir");
@@ -3604,13 +3655,20 @@ fn build_server_advertises_the_active_custom_catalog_plus_capabilities() {
             None,
         )
         .expect("tools/list response");
+    let listed_tools = listed["result"]["tools"].as_array().expect("tools array");
     assert!(
-        listed["result"]["tools"]
-            .as_array()
-            .expect("tools array")
+        listed_tools
             .iter()
             .any(|tool| tool["name"] == serde_json::json!("startup_custom")),
         "startup custom catalog must come from the dispatch surface"
+    );
+    // The meta-dispatch fan-out tool is never registered: first-class is the
+    // only custom-tool registration mode in production (QA100 .65).
+    assert!(
+        !listed_tools
+            .iter()
+            .any(|tool| tool["name"] == serde_json::json!("oracle_run_named")),
+        "meta-dispatch surface must not be advertised"
     );
     // Smoke: the server clones (it is Clone) — proves it is fully built.
     let _ = server.clone();

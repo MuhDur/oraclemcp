@@ -116,8 +116,8 @@ pub use config_ops::{
 pub use connect::{SessionContext, build_session_context, profile_to_options, session_level_state};
 pub use custom_tools::{
     CustomToolCatalog, CustomToolDef, CustomToolExecutor, LoadError, LoadedTool, OutputMode,
-    ParamDef, ParamType, RUN_NAMED_TOOL, ToolBody, bind_params, classify_at_load,
-    enforce_signature, execute_custom_tool, load_tools, load_tools_for_profile, parse_tools_file,
+    ParamDef, ParamType, ToolBody, bind_params, classify_at_load, enforce_signature,
+    execute_custom_tool, load_tools, load_tools_for_profile, parse_tools_file,
     register_custom_tools, sign, verify_signature,
 };
 pub use dashboard_auth::{
