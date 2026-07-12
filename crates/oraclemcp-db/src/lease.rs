@@ -151,6 +151,14 @@ struct Lease {
     deadline: MonotonicDeadline,
     ttl: Duration,
     in_transaction: bool,
+    lifecycle: LeaseLifecycle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeaseLifecycle {
+    Active,
+    Revoking,
+    Revoked,
 }
 
 impl Lease {
@@ -258,6 +266,7 @@ impl LeaseManager {
             deadline: MonotonicDeadline::after(ttl),
             ttl,
             in_transaction: false,
+            lifecycle: LeaseLifecycle::Active,
         };
         self.leases
             .lock()
@@ -281,36 +290,57 @@ impl LeaseManager {
             .remove(id)
     }
 
-    /// Resolve a live (non-expired) lease handle. An expired lease is
-    /// force-cleaned and removed, and the call fails with `LeaseNotFound`. The
-    /// returned `Arc` must be `.lock(cx).await`-ed by the caller to operate on
-    /// the pinned session — the per-lease async mutex serializes its round
-    /// trips.
-    async fn live_lease(&self, cx: &Cx, id: &str) -> Result<Arc<AsyncMutex<Lease>>, DbError> {
-        let arc = self
+    fn lease_arc(&self, id: &str) -> Result<Arc<AsyncMutex<Lease>>, DbError> {
+        self.get(id)
+            .ok_or_else(|| DbError::LeaseNotFound(id.to_owned()))
+    }
+
+    fn remove_if_same(&self, id: &str, expected: &Arc<AsyncMutex<Lease>>) -> bool {
+        let mut leases = self.leases.lock().expect("lease map mutex poisoned");
+        let is_same = leases
             .get(id)
-            .ok_or_else(|| DbError::LeaseNotFound(id.to_owned()))?;
-        let expired = {
-            let mut lease = arc.lock(cx).await.map_err(lock_err)?;
-            if lease.deadline.is_expired() {
-                let _ = lease.force_rollback(cx).await;
-                true
-            } else {
-                false
-            }
-        };
-        if expired {
-            self.remove(id);
+            .is_some_and(|current| Arc::ptr_eq(current, expected));
+        if is_same {
+            leases.remove(id);
+        }
+        is_same
+    }
+
+    /// Re-check lifecycle, map membership, and expiry while holding the exact
+    /// same per-lease lock that protects the following DB operation. A handle
+    /// cloned before release/reap cannot pass this point after revocation.
+    async fn validate_locked(
+        &self,
+        cx: &Cx,
+        id: &str,
+        arc: &Arc<AsyncMutex<Lease>>,
+        lease: &mut Lease,
+    ) -> Result<(), DbError> {
+        let current = self
+            .leases
+            .lock()
+            .expect("lease map mutex poisoned")
+            .get(id)
+            .is_some_and(|candidate| Arc::ptr_eq(candidate, arc));
+        if lease.lifecycle != LeaseLifecycle::Active || !current {
+            return Err(DbError::LeaseNotFound(id.to_owned()));
+        }
+        if lease.deadline.is_expired() {
+            lease.lifecycle = LeaseLifecycle::Revoking;
+            self.remove_if_same(id, arc);
+            let _ = lease.force_rollback(cx).await;
+            lease.lifecycle = LeaseLifecycle::Revoked;
             return Err(DbError::LeaseNotFound(format!("{id} (expired)")));
         }
-        Ok(arc)
+        Ok(())
     }
 
     /// Renew a lease's TTL (clients renew at ~75% of the TTL). Errors if the
     /// lease is gone/expired.
     pub async fn renew(&self, cx: &Cx, id: &LeaseId) -> Result<LeaseInfo, DbError> {
-        let arc = self.live_lease(cx, &id.0).await?;
+        let arc = self.lease_arc(&id.0)?;
         let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
         lease.deadline = MonotonicDeadline::after(lease.ttl);
         Ok(lease.info(&id.0))
     }
@@ -321,61 +351,64 @@ impl LeaseManager {
         if let Some(arc) = self.remove(&id.0)
             && let Ok(mut lease) = arc.lock(cx).await
         {
+            lease.lifecycle = LeaseLifecycle::Revoking;
             let _ = lease.force_rollback(cx).await;
+            lease.lifecycle = LeaseLifecycle::Revoked;
             // Dropping the Arc/Lease closes the physical session.
         }
     }
 
     /// Begin an explicit transaction on the leased session.
     pub async fn begin_transaction(&self, cx: &Cx, id: &LeaseId) -> Result<(), DbError> {
-        let arc = self.live_lease(cx, &id.0).await?;
+        let arc = self.lease_arc(&id.0)?;
         let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
         lease.in_transaction = true;
         Ok(())
     }
 
     /// Commit the leased session's transaction.
     pub async fn commit(&self, cx: &Cx, id: &LeaseId) -> Result<(), DbError> {
-        let arc = self.live_lease(cx, &id.0).await?;
-        let result = {
-            let mut lease = arc.lock(cx).await.map_err(lock_err)?;
-            match lease.conn.commit(cx).await {
-                Ok(()) => {
-                    lease.in_transaction = false;
-                    Ok(())
-                }
-                Err(err) => Err(quarantine_error(
+        let arc = self.lease_arc(&id.0)?;
+        let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
+        match lease.conn.commit(cx).await {
+            Ok(()) => {
+                lease.in_transaction = false;
+                Ok(())
+            }
+            Err(err) => {
+                lease.lifecycle = LeaseLifecycle::Revoking;
+                self.remove_if_same(&id.0, &arc);
+                lease.lifecycle = LeaseLifecycle::Revoked;
+                Err(quarantine_error(
                     QuarantineOutcome::CommitInDoubt,
                     format!("commit failed; lease discarded: {err}"),
-                )),
+                ))
             }
-        };
-        if result.is_err() {
-            self.remove(&id.0);
         }
-        result
     }
 
     /// Roll back the leased session's transaction.
     pub async fn rollback(&self, cx: &Cx, id: &LeaseId) -> Result<(), DbError> {
-        let arc = self.live_lease(cx, &id.0).await?;
-        let result = {
-            let mut lease = arc.lock(cx).await.map_err(lock_err)?;
-            match lease.conn.rollback(cx).await {
-                Ok(()) => {
-                    lease.in_transaction = false;
-                    Ok(())
-                }
-                Err(err) => Err(quarantine_error(
+        let arc = self.lease_arc(&id.0)?;
+        let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
+        match lease.conn.rollback(cx).await {
+            Ok(()) => {
+                lease.in_transaction = false;
+                Ok(())
+            }
+            Err(err) => {
+                lease.lifecycle = LeaseLifecycle::Revoking;
+                self.remove_if_same(&id.0, &arc);
+                lease.lifecycle = LeaseLifecycle::Revoked;
+                Err(quarantine_error(
                     QuarantineOutcome::UnknownDiscarded,
                     format!("rollback failed; lease discarded: {err}"),
-                )),
+                ))
             }
-        };
-        if result.is_err() {
-            self.remove(&id.0);
         }
-        result
     }
 
     /// Create a savepoint on the leased session. `name` must be a simple
@@ -386,8 +419,9 @@ impl LeaseManager {
                 "invalid savepoint name: {name:?}"
             )));
         }
-        let arc = self.live_lease(cx, &id.0).await?;
+        let arc = self.lease_arc(&id.0)?;
         let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
         lease
             .conn
             .execute(cx, &format!("SAVEPOINT {name}"), &[])
@@ -415,10 +449,11 @@ impl LeaseManager {
         binds: &[crate::types::OracleBind],
     ) -> Result<PreviewImpact, DbError> {
         const SP: &str = "oraclemcp_preview";
-        let arc = self.live_lease(cx, &id.0).await?;
+        let arc = self.lease_arc(&id.0)?;
         let mut discard_lease = None;
-        let result = {
+        {
             let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+            self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
             let savepoint_sql = format!("SAVEPOINT {SP}");
             let rollback_sql = format!("ROLLBACK TO SAVEPOINT {SP}");
             db_checkpoint(cx, "oracle_lease.preview.savepoint.before")?;
@@ -429,7 +464,7 @@ impl LeaseManager {
                 Err(err) => Err(err),
             };
             let rollback_result = lease.conn.execute(cx, &rollback_sql, &[]).await;
-            match (preview_result, rollback_result) {
+            let result = match (preview_result, rollback_result) {
                 (Ok(rows_affected), Ok(_)) => {
                     db_checkpoint(cx, "oracle_lease.preview.rollback.after")?;
                     Ok(PreviewImpact {
@@ -458,19 +493,22 @@ impl LeaseManager {
                         format!("preview rollback failed; lease discarded: {cleanup_err}"),
                     ))
                 }
+            };
+            if discard_lease.is_some() {
+                lease.lifecycle = LeaseLifecycle::Revoking;
+                self.remove_if_same(&id.0, &arc);
+                lease.lifecycle = LeaseLifecycle::Revoked;
             }
-        };
-        if discard_lease.is_some() {
-            self.remove(&id.0);
+            result
         }
-        result
     }
 
     /// Enable `DBMS_OUTPUT` on the leased session (full line capture is the
     /// `oracle_session` tool's job, P1-SESS).
     pub async fn enable_dbms_output(&self, cx: &Cx, id: &LeaseId) -> Result<(), DbError> {
-        let arc = self.live_lease(cx, &id.0).await?;
-        let lease = arc.lock(cx).await.map_err(lock_err)?;
+        let arc = self.lease_arc(&id.0)?;
+        let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
         lease
             .conn
             .execute(cx, "BEGIN DBMS_OUTPUT.ENABLE(NULL); END;", &[])
@@ -493,16 +531,18 @@ impl LeaseManager {
                 "ALTER SESSION not on the allowlist: {statement:?}"
             )));
         }
-        let arc = self.live_lease(cx, &id.0).await?;
-        let lease = arc.lock(cx).await.map_err(lock_err)?;
+        let arc = self.lease_arc(&id.0)?;
+        let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
         lease.conn.execute(cx, statement, &[]).await?;
         Ok(())
     }
 
     /// A snapshot of a lease's state.
     pub async fn info(&self, cx: &Cx, id: &LeaseId) -> Result<LeaseInfo, DbError> {
-        let arc = self.live_lease(cx, &id.0).await?;
-        let lease = arc.lock(cx).await.map_err(lock_err)?;
+        let arc = self.lease_arc(&id.0)?;
+        let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
         Ok(lease.info(&id.0))
     }
 
@@ -514,25 +554,22 @@ impl LeaseManager {
             let map = self.leases.lock().expect("lease map mutex poisoned");
             map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         };
-        let mut expired = Vec::new();
+        let mut expired = 0;
         for (id, arc) in candidates {
-            let Ok(lease) = arc.lock(cx).await else {
+            let Ok(mut lease) = arc.lock(cx).await else {
                 continue;
             };
-            if lease.deadline.is_expired() {
-                expired.push(id);
+            if lease.lifecycle == LeaseLifecycle::Active
+                && lease.deadline.is_expired()
+                && self.remove_if_same(&id, &arc)
+            {
+                lease.lifecycle = LeaseLifecycle::Revoking;
+                let _ = lease.force_rollback(cx).await;
+                lease.lifecycle = LeaseLifecycle::Revoked;
+                expired += 1;
             }
         }
-        let mut count = 0;
-        for id in &expired {
-            if let Some(arc) = self.remove(id) {
-                if let Ok(mut lease) = arc.lock(cx).await {
-                    let _ = lease.force_rollback(cx).await;
-                }
-                count += 1;
-            }
-        }
-        count
+        expired
     }
 
     /// Number of active leases.
@@ -551,7 +588,9 @@ impl LeaseManager {
         let count = drained.len();
         for arc in &drained {
             if let Ok(mut lease) = arc.lock(cx).await {
+                lease.lifecycle = LeaseLifecycle::Revoking;
                 let _ = lease.force_rollback(cx).await;
+                lease.lifecycle = LeaseLifecycle::Revoked;
             }
         }
         count
@@ -1162,6 +1201,42 @@ mod tests {
             assert!(mgr.info(&cx, &id).await.is_ok());
             assert!(mgr.info(&cx, &id2).await.is_err());
             let _ = (log, log2);
+        });
+    }
+
+    #[test]
+    fn cloned_handle_cannot_cross_release_linearization_point() {
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (conn, log) = mock();
+            let id = mgr
+                .acquire(&cx, "dev", "a", Duration::from_secs(900), &[], conn)
+                .await
+                .expect("acquire");
+            mgr.begin_transaction(&cx, &id).await.expect("begin");
+            let stale = mgr.lease_arc(&id.0).expect("prevalidated handle");
+
+            mgr.release(&cx, &id).await;
+            let mut stale_lease = stale.lock(&cx).await.expect("stale handle lock");
+            let error = mgr
+                .validate_locked(&cx, &id.0, &stale, &mut stale_lease)
+                .await
+                .expect_err("released handle must stay revoked");
+            assert!(matches!(error, DbError::LeaseNotFound(_)));
+            drop(stale_lease);
+
+            assert_eq!(log.lock().unwrap().rollbacks, 1, "release rolls back once");
+            assert!(mgr.savepoint(&cx, &id, "late").await.is_err());
+            assert_eq!(
+                log.lock().unwrap().rollbacks,
+                1,
+                "stale work cannot clean twice"
+            );
+            assert_eq!(
+                mgr.release_all(&cx).await,
+                0,
+                "revoked lease is not redrained"
+            );
         });
     }
 
