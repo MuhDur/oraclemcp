@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   OperatorOutcomeNotice,
+  buildRefactorPreview,
   currentSchemaDiffPreview,
+  identifierOccurrences,
   schemaDiffInputIdentity
 } from "./App";
 import {
@@ -98,6 +100,47 @@ afterEach(() => {
   clearExplorerMetadataCache();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("workbench lexical text replacement", () => {
+  it("excludes comments, ordinary strings, q-quotes, and quoted identifiers", () => {
+    const source = `BEGIN
+  foo := 1;
+  value := 'foo';
+  -- foo
+  /* foo */
+  value := q'[foo]';
+  "foo" := 2;
+  pkg.foo := foo;
+END;`;
+    const occurrences = identifierOccurrences(source, "foo");
+    expect(occurrences.map((occurrence) => source.slice(occurrence.offset, occurrence.endOffset))).toEqual([
+      "foo",
+      "foo",
+      "foo"
+    ]);
+    const preview = buildRefactorPreview(source, "foo", "renamed");
+    expect(preview.error).toBeNull();
+    expect(preview.preview).toContain("renamed := 1");
+    expect(preview.preview).toContain("pkg.renamed := renamed");
+    expect(preview.preview).toContain("'foo'");
+    expect(preview.preview).toContain("q'[foo]'");
+    expect(preview.preview).toContain('"foo" := 2');
+  });
+
+  it("matches quoted identifiers exactly and preserves JavaScript selection offsets", () => {
+    const source = `π := "Mixed"; x := "MIXED";`;
+    const occurrences = identifierOccurrences(source, '"Mixed"');
+    expect(occurrences).toHaveLength(1);
+    expect(occurrences[0]?.offset).toBe(source.indexOf('"Mixed"'));
+    expect(occurrences[0]?.endOffset).toBe(source.indexOf('"Mixed"') + '"Mixed"'.length);
+  });
+
+  it("rejects invalid replacement syntax instead of presenting a rename artifact", () => {
+    const preview = buildRefactorPreview("BEGIN foo := 1; END;", "foo", "bad name");
+    expect(preview.preview).toBe("{}");
+    expect(preview.error).toMatch(/valid Oracle identifier/);
+  });
 });
 
 const explorerScope: ExplorerMetadataCacheKey = {

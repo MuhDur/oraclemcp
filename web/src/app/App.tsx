@@ -6271,6 +6271,7 @@ type IdentifierOccurrence = {
 type RefactorPreview = {
   occurrences: IdentifierOccurrence[];
   preview: string;
+  error: string | null;
 };
 
 function WorkbenchPage(): React.ReactElement {
@@ -6769,7 +6770,7 @@ function WorkbenchIdePanel({
         <div className="rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] p-3">
           <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
             <label className="block">
-              <span className={OM_LABEL}>Identifier</span>
+              <span className={OM_LABEL}>Text Find (Identifier Tokens)</span>
               <input
                 className={cn(OM_INPUT, "font-mono")}
                 value={identifier}
@@ -6778,7 +6779,7 @@ function WorkbenchIdePanel({
               />
             </label>
             <label className="block">
-              <span className={OM_LABEL}>Rename To</span>
+              <span className={OM_LABEL}>Text Replace With</span>
               <input
                 className={cn(OM_INPUT, "font-mono")}
                 value={replacement}
@@ -6792,11 +6793,20 @@ function WorkbenchIdePanel({
               <Search className="size-4" aria-hidden="true" />
               Selection
             </Button>
-            <Badge tone={usageRows.length > 0 ? "ok" : "off"}>{usageRows.length} usages</Badge>
-            <Badge tone={replacement.trim() ? "info" : "off"}>
-              {replacement.trim() ? "preview" : "rename idle"}
+            <Badge tone={usageRows.length > 0 ? "ok" : "off"}>{usageRows.length} text matches</Badge>
+            <Badge tone={replacement.trim() && !refactorPreview.error ? "info" : "off"}>
+              {replacement.trim() ? "text preview" : "replace idle"}
             </Badge>
           </div>
+          <p className="mt-2 text-xs font-semibold text-[var(--om-text-muted)]">
+            Lexical text replacement only. Comments and string literals are excluded; this does not
+            claim scope-aware semantic usages.
+          </p>
+          {refactorPreview.error ? (
+            <p className="mt-2 text-xs font-semibold text-[var(--om-copper)]" role="alert">
+              {refactorPreview.error}
+            </p>
+          ) : null}
           <div className="mt-3 max-h-36 space-y-2 overflow-auto">
             {usageRows.slice(0, 20).map((occurrence) => (
               <button
@@ -7693,58 +7703,174 @@ function plsqlPositionFromValue(value: unknown): PlsqlPosition | null {
   return { line, column, offset };
 }
 
-function identifierOccurrences(source: string, identifier: string): IdentifierOccurrence[] {
+export function identifierOccurrences(source: string, identifier: string): IdentifierOccurrence[] {
   const needle = identifier.trim();
-  if (!needle) {
+  const needleKind = oracleIdentifierKind(needle);
+  if (!needleKind) {
     return [];
   }
-  const lowerSource = source.toLocaleLowerCase();
-  const lowerNeedle = needle.toLocaleLowerCase();
   const occurrences: IdentifierOccurrence[] = [];
   let cursor = 0;
   while (cursor < source.length) {
-    const offset = lowerSource.indexOf(lowerNeedle, cursor);
-    if (offset < 0) {
-      break;
+    if (source.startsWith("--", cursor)) {
+      cursor = skipUntil(source, cursor + 2, "\n");
+      continue;
     }
-    const endOffset = offset + needle.length;
-    const before = offset > 0 ? source[offset - 1] : "";
-    const after = endOffset < source.length ? source[endOffset] : "";
-    if (!isPlsqlIdentifierChar(before) && !isPlsqlIdentifierChar(after)) {
-      const location = sourceLocationAtOffset(source, offset);
-      occurrences.push({
-        offset,
-        endOffset,
-        line: location.line,
-        column: location.column,
-        preview: linePreviewAtOffset(source, offset)
-      });
+    if (source.startsWith("/*", cursor)) {
+      cursor = skipUntil(source, cursor + 2, "*/");
+      continue;
     }
-    cursor = endOffset;
+    if (
+      (source[cursor] === "n" || source[cursor] === "N") &&
+      (source[cursor + 1] === "q" || source[cursor + 1] === "Q") &&
+      source[cursor + 2] === "'"
+    ) {
+      cursor = skipQQuotedLiteral(source, cursor + 1);
+      continue;
+    }
+    if ((source[cursor] === "q" || source[cursor] === "Q") && source[cursor + 1] === "'") {
+      cursor = skipQQuotedLiteral(source, cursor);
+      continue;
+    }
+    if ((source[cursor] === "n" || source[cursor] === "N") && source[cursor + 1] === "'") {
+      cursor = skipDelimitedIdentifierOrLiteral(source, cursor + 1, "'", true);
+      continue;
+    }
+    if (source[cursor] === "'") {
+      cursor = skipDelimitedIdentifierOrLiteral(source, cursor, "'", true);
+      continue;
+    }
+    if (source[cursor] === '"') {
+      const endOffset = skipDelimitedIdentifierOrLiteral(source, cursor, '"', true);
+      if (needleKind === "quoted" && source.slice(cursor, endOffset) === needle) {
+        occurrences.push(identifierOccurrence(source, cursor, endOffset));
+      }
+      cursor = endOffset;
+      continue;
+    }
+    if (isPlsqlIdentifierChar(source[cursor])) {
+      const offset = cursor;
+      while (cursor < source.length && isPlsqlIdentifierChar(source[cursor])) {
+        cursor += 1;
+      }
+      const token = source.slice(offset, cursor);
+      if (needleKind === "unquoted" && token.toUpperCase() === needle.toUpperCase()) {
+        occurrences.push(identifierOccurrence(source, offset, cursor));
+      }
+      continue;
+    }
+    cursor += 1;
   }
   return occurrences;
 }
 
-function buildRefactorPreview(
+function identifierOccurrence(
+  source: string,
+  offset: number,
+  endOffset: number
+): IdentifierOccurrence {
+      const location = sourceLocationAtOffset(source, offset);
+  return {
+    offset,
+    endOffset,
+    line: location.line,
+    column: location.column,
+    preview: linePreviewAtOffset(source, offset)
+  };
+}
+
+function skipUntil(source: string, start: number, terminator: string): number {
+  const found = source.indexOf(terminator, start);
+  return found < 0 ? source.length : found + terminator.length;
+}
+
+function skipDelimitedIdentifierOrLiteral(
+  source: string,
+  start: number,
+  delimiter: string,
+  doubledEscape: boolean
+): number {
+  let cursor = start + 1;
+  while (cursor < source.length) {
+    if (source[cursor] !== delimiter) {
+      cursor += 1;
+      continue;
+    }
+    if (doubledEscape && source[cursor + 1] === delimiter) {
+      cursor += 2;
+      continue;
+    }
+    return cursor + 1;
+  }
+  return source.length;
+}
+
+function skipQQuotedLiteral(source: string, start: number): number {
+  const opener = source[start + 2];
+  if (!opener || /\s/.test(opener)) {
+    return source.length;
+  }
+  const closer = ({ "[": "]", "(": ")", "{": "}", "<": ">" } as Record<string, string>)[
+    opener
+  ] ?? opener;
+  return skipUntil(source, start + 3, `${closer}'`);
+}
+
+function oracleIdentifierKind(identifier: string): "quoted" | "unquoted" | null {
+  if (/^[A-Za-z][A-Za-z0-9_$#]{0,127}$/.test(identifier)) {
+    return "unquoted";
+  }
+  if (identifier.startsWith('"') && identifier.endsWith('"')) {
+    const body = identifier.slice(1, -1);
+    const decoded = body.replaceAll('""', '"');
+    if (
+      decoded.length > 0 &&
+      decoded.length <= 128 &&
+      !/[\r\n\0]/.test(decoded) &&
+      body.replaceAll('""', "").includes('"') === false
+    ) {
+      return "quoted";
+    }
+  }
+  return null;
+}
+
+export function buildRefactorPreview(
   source: string,
   identifier: string,
   replacement: string
 ): RefactorPreview {
-  const occurrences = identifierOccurrences(source, identifier);
-  if (!identifier.trim() || !replacement.trim() || occurrences.length === 0) {
-    return { occurrences, preview: "{}" };
+  const needle = identifier.trim();
+  const replacementIdentifier = replacement.trim();
+  const occurrences = identifierOccurrences(source, needle);
+  if (!needle || !replacementIdentifier) {
+    return { occurrences, preview: "{}", error: null };
+  }
+  if (!oracleIdentifierKind(needle)) {
+    return { occurrences: [], preview: "{}", error: "Find must be one valid Oracle identifier." };
+  }
+  if (!oracleIdentifierKind(replacementIdentifier)) {
+    return {
+      occurrences,
+      preview: "{}",
+      error: "Replacement must be one valid Oracle identifier."
+    };
+  }
+  if (occurrences.length === 0) {
+    return { occurrences, preview: "{}", error: null };
   }
   let cursor = 0;
   const chunks: string[] = [];
   for (const occurrence of occurrences) {
-    chunks.push(source.slice(cursor, occurrence.offset), replacement);
+    chunks.push(source.slice(cursor, occurrence.offset), replacementIdentifier);
     cursor = occurrence.endOffset;
   }
   chunks.push(source.slice(cursor));
   const preview = chunks.join("");
   return {
     occurrences,
-    preview: preview.length > 2400 ? `${preview.slice(0, 2400)}\n...` : preview
+    preview: preview.length > 2400 ? `${preview.slice(0, 2400)}\n...` : preview,
+    error: null
   };
 }
 
