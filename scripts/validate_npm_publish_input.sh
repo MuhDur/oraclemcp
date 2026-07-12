@@ -40,14 +40,14 @@ if [[ "$without_build" == *-* ]]; then
   dist_tag=next
 fi
 
-if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-  {
-    printf 'version=%s\n' "$version"
-    printf 'tag=v%s\n' "$version"
-    printf 'dist_tag=%s\n' "$dist_tag"
-    printf 'auth_mode=%s\n' "$auth_mode"
-  } >>"$GITHUB_OUTPUT"
-else
+emit_outputs() {
   printf 'version=%s\ntag=v%s\ndist_tag=%s\nauth_mode=%s\n' \
     "$version" "$version" "$dist_tag" "$auth_mode"
+}
+
+# Keep the command-line contract deterministic even inside GitHub Actions,
+# where every child process inherits GITHUB_OUTPUT from the workflow step.
+emit_outputs
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  emit_outputs >>"$GITHUB_OUTPUT"
 fi

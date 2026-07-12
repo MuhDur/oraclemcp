@@ -707,6 +707,7 @@ fn npm_publish_dispatch_validator_rejects_injection_and_maps_dist_tags() {
             .arg(&validator)
             .env("REQUESTED_VERSION", version)
             .env("REQUESTED_AUTH_MODE", "oidc")
+            .env_remove("GITHUB_OUTPUT")
             .output()
             .expect("run npm dispatch validator");
         assert!(
@@ -719,6 +720,32 @@ fn npm_publish_dispatch_validator_rejects_injection_and_maps_dist_tags() {
         assert!(stdout.contains(&format!("tag=v{version}\n")));
         assert!(stdout.contains(&format!("dist_tag={expected_tag}\n")));
     }
+
+    let output = Command::new("bash")
+        .arg(&validator)
+        .env("REQUESTED_VERSION", "0.9.0-rc.1")
+        .env("REQUESTED_AUTH_MODE", "token")
+        // /dev/stderr lets the test observe the append-only Actions output
+        // channel without leaving a temporary file behind.
+        .env("GITHUB_OUTPUT", "/dev/stderr")
+        .output()
+        .expect("run npm dispatch validator with Actions output channel");
+    assert!(
+        output.status.success(),
+        "valid Actions input rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected_outputs = "version=0.9.0-rc.1\ntag=v0.9.0-rc.1\ndist_tag=next\nauth_mode=token\n";
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        expected_outputs,
+        "validator must retain its stdout contract inside GitHub Actions"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        expected_outputs,
+        "validator must append the same payload to GITHUB_OUTPUT"
+    );
 
     let marker = root.join("target/qa39-input-injection-marker");
     assert!(!marker.exists(), "QA39 marker unexpectedly pre-exists");
@@ -736,6 +763,7 @@ fn npm_publish_dispatch_validator_rejects_injection_and_maps_dist_tags() {
             .arg(&validator)
             .env("REQUESTED_VERSION", version)
             .env("REQUESTED_AUTH_MODE", "auto")
+            .env("GITHUB_OUTPUT", "/dev/stderr")
             .current_dir(&root)
             .output()
             .expect("run npm dispatch validator");
@@ -746,6 +774,10 @@ fn npm_publish_dispatch_validator_rejects_injection_and_maps_dist_tags() {
         assert!(
             !marker.exists(),
             "version executed shell syntax: {version:?}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("dist_tag="),
+            "rejected version emitted workflow outputs: {version:?}"
         );
     }
 }
