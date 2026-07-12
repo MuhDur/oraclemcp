@@ -1917,13 +1917,25 @@ fn oauth_principal_key_from_validated_token(token: &str) -> String {
     let stable_material = jwt_claims_unverified(token)
         .and_then(|claims| {
             let issuer = claims.get("iss").and_then(Value::as_str)?;
-            ["sub", "client_id", "azp"].iter().find_map(|claim| {
-                claims
-                    .get(*claim)
+            // Compose the issuer with EVERY present identity claim, not just the
+            // first. Two different OAuth clients (distinct client_id/azp) acting
+            // for the same subject must not collapse to one principal — otherwise
+            // one client's session/revocation would apply to the other. Claims
+            // are added in a fixed order so the key is deterministic; at least
+            // one of sub/client_id/azp must be present for a structured key.
+            let mut parts = vec![format!("iss={issuer}")];
+            for claim in ["sub", "client_id", "azp"] {
+                if let Some(value) = claims
+                    .get(claim)
                     .and_then(Value::as_str)
-                    .filter(|value| !value.trim().is_empty())
-                    .map(|value| format!("iss={issuer}\n{claim}={value}"))
-            })
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    parts.push(format!("{claim}={value}"));
+                }
+            }
+            // Only the issuer means no identity claim was present: fall back.
+            (parts.len() > 1).then(|| parts.join("\n"))
         })
         .unwrap_or_else(|| format!("token={}", sha256_hex(token.as_bytes())));
     format!("oauth:{}", sha256_hex(stable_material.as_bytes()))

@@ -7493,6 +7493,53 @@ fn jwt_with_scope(scope: &str) -> String {
 }
 
 #[test]
+fn oauth_principal_distinguishes_clients_that_share_a_subject() {
+    // QA100 .56: the principal key must compose the issuer with EVERY present
+    // identity claim, not just the first. Two different OAuth clients (distinct
+    // client_id/azp) acting for the same subject must map to distinct principals,
+    // or one client's session/revocation would leak onto the other.
+    let token = |sub: &str, client_id: Option<&str>, azp: Option<&str>| {
+        let header = b64url(br#"{"alg":"HS256","typ":"at+jwt"}"#);
+        let mut claims = serde_json::json!({
+            "iss": "https://idp.example",
+            "aud": "https://oraclemcp.example/mcp",
+            "exp": 9_999_999_999i64,
+            "sub": sub,
+        });
+        if let Some(client_id) = client_id {
+            claims["client_id"] = serde_json::json!(client_id);
+        }
+        if let Some(azp) = azp {
+            claims["azp"] = serde_json::json!(azp);
+        }
+        let payload = b64url(serde_json::to_string(&claims).unwrap().as_bytes());
+        format!("{header}.{payload}.{}", b64url(b"sig"))
+    };
+    let key = |t: &str| oauth_principal_key_from_validated_token(t);
+
+    assert_ne!(
+        key(&token("user-1", Some("client-a"), None)),
+        key(&token("user-1", Some("client-b"), None)),
+        "same subject via different client_id must not collapse to one principal"
+    );
+    assert_ne!(
+        key(&token("user-1", None, Some("app-a"))),
+        key(&token("user-1", None, Some("app-b"))),
+        "same subject via different azp must not collapse to one principal"
+    );
+    assert_eq!(
+        key(&token("user-1", Some("client-a"), Some("app-a"))),
+        key(&token("user-1", Some("client-a"), Some("app-a"))),
+        "identical issuer + subject + client + azp is one stable principal"
+    );
+    assert_ne!(
+        key(&token("user-1", Some("client-a"), None)),
+        key(&token("user-2", Some("client-a"), None)),
+        "different subjects on the same client stay distinct"
+    );
+}
+
+#[test]
 fn oauth_principal_is_stable_across_refresh_only_with_a_canonical_subject() {
     let token = |subject: Option<&str>, generation: u64| {
         let header = b64url(br#"{"alg":"HS256","typ":"at+jwt"}"#);
