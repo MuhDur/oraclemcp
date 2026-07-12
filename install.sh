@@ -70,7 +70,7 @@ soft-skips cosign with an explicit notice when it is absent, and does not
 install a service.
 
 Options:
-  --version <version>       Release version, e.g. 0.8.0 or v0.8.0 (default: latest)
+  --version <version>       Release version, e.g. 0.9.0 or v0.9.0 (default: latest)
   --target <triple>         Override detected target triple; Linux gnu triples
                             (x86_64/aarch64-unknown-linux-gnu) are accepted here
                             even though auto-detection always picks musl

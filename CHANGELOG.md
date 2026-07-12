@@ -6,7 +6,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-07-12
+
+### Breaking
+
+- `GuardDecision` now exposes `non_transactional_effect` and
+  `query_effect_requires_fetch`. Callers that construct the public struct must
+  initialize both fields. The metadata is required to keep sequence and
+  query-triggered effects behind explicit confirmation, so this line advances
+  to 0.9 rather than suppressing the breaking-change report.
+
+### Added
+
+- A separately bounded, mandatory-mTLS control listener can reserve remote
+  operator and readiness capacity before general HTTP parsing. Certificate
+  identity must be registered and operator-allowlisted; handshake, header, and
+  body deadlines are absolute. See
+  [2bc4c68](https://github.com/MuhDur/oraclemcp/commit/2bc4c68).
+- Stateful HTTP/SSE notifications are scoped to the owning MCP stream, with
+  isolated progress tokens, bounded replay, deterministic gaps, and catalog
+  refresh signals for elevation, de-escalation, and TTL expiry. See
+  [9cc1299](https://github.com/MuhDur/oraclemcp/commit/9cc1299) and
+  [c866330](https://github.com/MuhDur/oraclemcp/commit/c866330).
+
 ### Security
+
+- Session leases now use opaque random handles bound to the authenticated
+  owner; revocation is linearized and uncertain database calls quarantine the
+  session before reuse. See
+  [a32b168](https://github.com/MuhDur/oraclemcp/commit/a32b168),
+  [81eae00](https://github.com/MuhDur/oraclemcp/commit/81eae00), and
+  [6ca5a84](https://github.com/MuhDur/oraclemcp/commit/6ca5a84).
+- The fail-closed resolver gained a mock-free adversarial Oracle corpus and no
+  longer misclassifies multipart package values as relation-qualified names.
+  The corpus covers hidden writes, VPD, synonyms, overloads, ambiguity, and
+  invalidation without executing candidate routines. See
+  [ebf9bbe](https://github.com/MuhDur/oraclemcp/commit/ebf9bbe).
 
 - New audit records use schema v6 and replace the historical raw SQL preview
   with a fixed redaction marker before hashing, signing, local JSONL storage,

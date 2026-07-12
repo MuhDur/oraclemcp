@@ -189,7 +189,7 @@ after it resolves the target version.
 
 ```sh
 cargo binstall oraclemcp
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.8.0
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.9.0
 ```
 
 Pending registry-backed channels:
@@ -281,9 +281,9 @@ oraclemcp --json setup --write --profile db_ro
 docker run -i --rm \
   -v "$HOME/.config/oraclemcp:/root/.config/oraclemcp:ro" \
   -e ORACLE_APP_PASSWORD \
-  ghcr.io/muhdur/oraclemcp:0.8.0          # MCP over stdio, against the configured profile
+  ghcr.io/muhdur/oraclemcp:0.9.0          # MCP over stdio, against the configured profile
 
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.8.0   # tool surface only (no DB)
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.9.0   # tool surface only (no DB)
 ```
 
 An optional PL/SQL intelligence image is available from the manual Docker
@@ -292,8 +292,8 @@ it can start without a database connection and advertises the offline
 `oracle_plsql_*` tools immediately. Live PL/SQL tools still require a profile.
 
 ```sh
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.8.0-plsql-intelligence --json info
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.8.0-plsql-intelligence capabilities
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.9.0-plsql-intelligence --json info
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.9.0-plsql-intelligence capabilities
 ```
 
 Local feature-image builds resolve the PL/SQL engine crates from crates.io:
