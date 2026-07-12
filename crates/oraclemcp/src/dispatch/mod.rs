@@ -44,14 +44,14 @@ use oraclemcp_db::{
     describe_trigger, describe_view, execute_immediate_audit, explain_plan,
     find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects, list_schemas,
     paginated_sql, plan_cost_estimate, plscope_identifiers, plscope_statements, probe_dependents,
-    read_lob, read_query, read_query_as_of, read_query_named, sample_rows, search_objects,
-    search_source, serialize_row,
+    read_lob, read_query, read_query_as_of, read_query_named, resolved_relations_read_purity,
+    sample_rows, search_objects, search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope, ReasonCategory, StructuredReason};
 use oraclemcp_guard::{
-    Classifier, ClassifierConfig, DangerLevel, EscalationError, ExecGrantBinding, ExecGrantError,
-    ExecGrantStore, GuardDecision, LevelDecision, ObjectRef, OperatingLevel, Purity,
-    SessionLevelState, SideEffectOracle,
+    CatalogObjectKind, CatalogResolver, Classifier, ClassifierConfig, DangerLevel, EscalationError,
+    ExecGrantBinding, ExecGrantError, ExecGrantStore, GuardDecision, LevelDecision, ObjectRef,
+    OperatingLevel, Purity, Resolution, SessionLevelState, SideEffectOracle, semantic_read_plan,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -2916,6 +2916,86 @@ async fn owner_and_name_arg(
 fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
     ensure_read_only_decision(DEFAULT_CLASSIFIER.classify(sql))
         .map_err(|envelope| attach_parameterization_hint(envelope, sql))
+}
+
+struct ResolvedStatementPurity(Purity);
+
+impl SideEffectOracle for ResolvedStatementPurity {
+    fn statement_purity(&self, _base_objects: &[ObjectRef]) -> Purity {
+        self.0
+    }
+}
+
+fn unresolved_semantic_read(reason: &'static str) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::ForbiddenStatement,
+        format!("read-only server could not prove this statement safe: {reason}"),
+    )
+    .with_structured_reason(
+        StructuredReason::new(ReasonCategory::UnprovenSideEffect)
+            .with_offending_construct("unresolved semantic read dependency"),
+    )
+    .with_next_step(
+        "query an ordinary table using explicit table aliases and real columns; views, VPD-protected tables, virtual columns, remote objects, ambiguous names, and unrepresented query scopes are refused",
+    )
+}
+
+/// Resolve every caller-controlled read dependency against the exact live
+/// session before the submitted statement can execute. Dictionary lookup is
+/// observational I/O; the caller's SQL remains untouched until this returns.
+async fn ensure_resolved_read_only(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    sql: &str,
+) -> Result<(), ErrorEnvelope> {
+    ensure_read_only(sql)?;
+    let plan = semantic_read_plan(sql)
+        .ok_or_else(|| unresolved_semantic_read("query scope is not exactly representable"))?;
+    cache.invalidate(CatalogInvalidation::SemanticProofRefresh);
+    let mut names = plan.relations.clone();
+    names.extend(plan.values.iter().cloned());
+    let context = cache
+        .preload(cx, conn, &names, plan.statement_scope)
+        .await
+        .map_err(DbError::into_envelope)?;
+
+    let mut relations = Vec::with_capacity(plan.relations.len());
+    for name in &plan.relations {
+        let Resolution::Resolved(object) = cache.resolve(name, &context) else {
+            return Err(unresolved_semantic_read(
+                "a relation has no unique local catalog identity",
+            ));
+        };
+        relations.push(*object);
+    }
+    for name in &plan.values {
+        let Resolution::Resolved(object) = cache.resolve(name, &context) else {
+            return Err(unresolved_semantic_read(
+                "a value identifier is not a unique column",
+            ));
+        };
+        if object.kind != CatalogObjectKind::Column {
+            return Err(unresolved_semantic_read(
+                "a value identifier resolves to executable code rather than a column",
+            ));
+        }
+    }
+
+    let purity = resolved_relations_read_purity(cx, conn, &relations)
+        .await
+        .map_err(DbError::into_envelope)?;
+    if !purity.permits_safe() {
+        return Err(unresolved_semantic_read(
+            "a relation can invoke an unproven view, policy, or virtual-column dependency",
+        ));
+    }
+    let decision =
+        Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded())
+            .with_oracle(Arc::new(ResolvedStatementPurity(purity)))
+            .with_statement_unknown_guarded()
+            .classify(sql);
+    ensure_read_only_decision(decision).map_err(|error| attach_parameterization_hint(error, sql))
 }
 
 /// K7: if a refused statement carries inline literals at bind-safe positions,
@@ -7204,6 +7284,7 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
 struct ReadOnlyCustomToolExecutor<'a> {
     cx: &'a Cx,
     conn: &'a dyn OracleConnection,
+    catalog_cache: &'a OracleCatalogResolverCache,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -7231,7 +7312,7 @@ impl CustomToolExecutor for ReadOnlyCustomToolExecutor<'_> {
             ToolBody::InlineSql(sql) => sql.to_owned(),
             ToolBody::PackageCall(call) => format!("SELECT {call} AS VALUE FROM dual"),
         };
-        ensure_read_only(&sql)?;
+        ensure_resolved_read_only(self.cx, self.conn, self.catalog_cache, &sql).await?;
         // A9: operator-defined read tools also narrow the handler context to the
         // read-path capability row. The cancellation checkpoint runs under the
         // narrowed `read_cx`; only the locked, object-safe `OracleConnection`
@@ -8248,9 +8329,30 @@ impl OracleDispatcher {
                 // UNCHANGED — as_of never enters the classifier input, it only
                 // selects WHICH committed snapshot the proven read observes.
                 let as_of = query_as_of_from_args(parsed.as_of.as_ref())?;
+                let _ = parsed
+                    .binds
+                    .iter()
+                    .map(json_to_bind)
+                    .collect::<Result<Vec<_>, _>>()?;
+                if parsed.streaming && parsed.export {
+                    return Err(invalid_args(
+                        "streaming and export are mutually exclusive: choose incremental delivery OR a single export resource",
+                    ));
+                }
+                if parsed.streaming && as_of.is_some() {
+                    return Err(invalid_args(
+                        "streaming and as_of are mutually exclusive: page the flashback read with its cursor",
+                    ));
+                }
                 let executed_sql =
                     with_audit_marker(&parsed.sql, state.active_profile.as_deref(), "oracle_query");
-                let gate = ensure_read_only(&executed_sql);
+                let gate = ensure_resolved_read_only(
+                    cx,
+                    state.conn.as_ref(),
+                    &state.catalog_cache,
+                    &executed_sql,
+                )
+                .await;
                 QueryPrepared {
                     args: parsed,
                     executed_sql,
@@ -9108,6 +9210,7 @@ impl OracleDispatcher {
                 let a: ExplainPlanArgs = parse_args(name, args)?;
                 ensure_read_only(&a.sql)?;
                 ensure_explain_plan_write_allowed(&a, &scoped_level)?;
+                ensure_resolved_read_only(cx, conn, &state.catalog_cache, &a.sql).await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.before")?;
                 let rows = match explain_plan(cx, conn, &a.sql, a.read_only_standby).await {
                     Ok(rows) => rows,
@@ -9182,6 +9285,7 @@ impl OracleDispatcher {
                     let executor = ReadOnlyCustomToolExecutor {
                         cx,
                         conn: &observed_conn,
+                        catalog_cache: &state.catalog_cache,
                     };
                     execute_custom_tool(loaded, &args, &executor).await
                 } else {
@@ -9451,9 +9555,30 @@ impl OracleDispatcher {
                     ));
                 }
                 let as_of = query_as_of_from_args(parsed.as_of.as_ref())?;
+                let _ = parsed
+                    .binds
+                    .iter()
+                    .map(json_to_bind)
+                    .collect::<Result<Vec<_>, _>>()?;
+                if parsed.export {
+                    return Err(invalid_args(
+                        "streaming and export are mutually exclusive: choose incremental delivery OR a single export resource",
+                    ));
+                }
+                if as_of.is_some() {
+                    return Err(invalid_args(
+                        "streaming and as_of are mutually exclusive: page the flashback read with its cursor",
+                    ));
+                }
                 let executed_sql =
                     with_audit_marker(&parsed.sql, state.active_profile.as_deref(), "oracle_query");
-                let gate = ensure_read_only(&executed_sql);
+                let gate = ensure_resolved_read_only(
+                    cx,
+                    state.conn.as_ref(),
+                    &state.catalog_cache,
+                    &executed_sql,
+                )
+                .await;
                 QueryPrepared {
                     args: parsed,
                     executed_sql,

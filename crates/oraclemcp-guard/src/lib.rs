@@ -29,7 +29,8 @@ pub use enforcement::{
 };
 
 pub use classifier::{
-    BatchShape, Classifier, ClassifierConfig, GuardDecision, StageA, analyze_batch, stage_a,
+    BatchShape, Classifier, ClassifierConfig, GuardDecision, StageA, analyze_batch,
+    semantic_read_plan, stage_a,
 };
 pub use clock::MonotonicDeadline;
 pub use exec_grant::{ExecGrantBinding, ExecGrantError, ExecGrantStore};
@@ -41,7 +42,8 @@ pub use purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
 pub use resolver::{
     CatalogGeneration, CatalogObjectKind, CatalogResolver, QuoteSemantics, RawName, RawNamePart,
     Resolution, ResolveCtx, ResolvedContainer, ResolvedIdentity, ResolvedObject, ResolvedOverload,
-    StatementScope, SynonymHop, SyntacticRole, UnresolvedCatalogResolver,
+    SemanticReadPlan, StatementRelation, StatementScope, SynonymHop, SyntacticRole,
+    UnresolvedCatalogResolver,
 };
 pub use rewrite::suggest_parameterized_form;
 pub use stepup::{

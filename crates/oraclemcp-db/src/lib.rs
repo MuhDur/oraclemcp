@@ -93,7 +93,7 @@ pub use catalog_extract::{
 };
 pub use catalog_resolver::{
     CatalogInvalidation, MAX_CATALOG_NAMES, OracleCatalogResolver, OracleCatalogResolverCache,
-    read_catalog_resolve_context,
+    read_catalog_resolve_context, resolved_relations_read_purity,
 };
 pub use connection::{
     DRIVER_VERSION, DbRequestQuota, DbmsOutput, ExecuteOutcome, OracleConnection, OracleRoutineArg,

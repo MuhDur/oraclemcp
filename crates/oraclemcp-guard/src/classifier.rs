@@ -50,6 +50,10 @@ use oraclemcp_error::ReasonCategory;
 use crate::enforcement::alter_session_policy;
 use crate::levels::{DangerLevel, LevelDecision, OperatingLevel, SessionLevelState};
 use crate::purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
+use crate::resolver::{
+    QuoteSemantics, RawName, RawNamePart, SemanticReadPlan, StatementRelation, StatementScope,
+    SyntacticRole,
+};
 
 /// What the guard decided about a statement batch (before the level gate).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1994,6 +1998,159 @@ fn unresolved_qualified_calls(query: &Query) -> Vec<String> {
     visitor.unresolved
 }
 
+struct SemanticValueVisitor {
+    values: Vec<RawName>,
+}
+
+impl Visitor for SemanticValueVisitor {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        let parts = match expr {
+            Expr::Identifier(part) => std::slice::from_ref(part),
+            Expr::CompoundIdentifier(parts) => parts.as_slice(),
+            _ => return ControlFlow::Continue(()),
+        };
+        if parts.len() == 1 && is_semantic_builtin_identifier(&parts[0]) {
+            return ControlFlow::Continue(());
+        }
+        if let Some(name) = raw_name_from_idents(parts, SyntacticRole::ValuePosition) {
+            self.values.push(name);
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+fn is_semantic_builtin_identifier(ident: &Ident) -> bool {
+    if ident.quote_style.is_some() {
+        return false;
+    }
+    matches!(
+        ident.value.to_ascii_uppercase().as_str(),
+        "CURRENT_DATE"
+            | "CURRENT_TIMESTAMP"
+            | "CURRENT_USER"
+            | "LEVEL"
+            | "ROWID"
+            | "ROWNUM"
+            | "SESSION_USER"
+            | "SYSDATE"
+            | "SYSTIMESTAMP"
+            | "UID"
+            | "USER"
+    )
+}
+
+fn raw_name_part(ident: &Ident) -> RawNamePart {
+    RawNamePart {
+        text: ident.value.clone(),
+        quoting: if ident.quote_style.is_some() {
+            QuoteSemantics::Quoted
+        } else {
+            QuoteSemantics::Unquoted
+        },
+    }
+}
+
+fn raw_name_from_idents(parts: &[Ident], role: SyntacticRole) -> Option<RawName> {
+    if parts.is_empty() {
+        return None;
+    }
+    let mut raw_parts = parts.iter().map(raw_name_part).collect::<Vec<_>>();
+    let mut db_link = None;
+    if let Some(last) = raw_parts.last_mut()
+        && last.quoting == QuoteSemantics::Unquoted
+        && let Some((name, link)) = last.text.split_once('@')
+    {
+        if name.is_empty() || link.is_empty() || link.contains('@') {
+            return None;
+        }
+        let name = name.to_owned();
+        let link = link.to_owned();
+        last.text = name;
+        db_link = Some(RawNamePart::unquoted(link));
+    }
+    let mut name = RawName::new(raw_parts, role);
+    name.db_link = db_link;
+    Some(name)
+}
+
+fn raw_name_from_object(name: &sqlparser::ast::ObjectName, role: SyntacticRole) -> Option<RawName> {
+    let parts = name
+        .0
+        .iter()
+        .map(|part| part.as_ident().cloned())
+        .collect::<Option<Vec<_>>>()?;
+    raw_name_from_idents(&parts, role)
+}
+
+fn simple_statement_relation(factor: &TableFactor) -> Option<StatementRelation> {
+    let TableFactor::Table {
+        name, alias, args, ..
+    } = factor
+    else {
+        return None;
+    };
+    if args.is_some() {
+        return None;
+    }
+    let name = raw_name_from_object(name, SyntacticRole::FromFactor)?;
+    let alias = alias.as_ref().map(|alias| raw_name_part(&alias.name));
+    Some(StatementRelation { name, alias })
+}
+
+/// Build exact-name resolution work for the conservative served-read subset.
+///
+/// Only one query block containing plain table/view factors is planned. CTEs,
+/// set operations, derived/table-function factors, and other scope-bearing
+/// shapes return `None`; a safety caller must refuse those until a per-block
+/// resolver can represent them without alias leakage.
+#[must_use]
+pub fn semantic_read_plan(sql: &str) -> Option<SemanticReadPlan> {
+    let statements = Parser::parse_sql(&OracleDialect {}, sql).ok()?;
+    let [sqlparser::ast::Statement::Query(query)] = statements.as_slice() else {
+        return None;
+    };
+    if query.with.is_some() {
+        return None;
+    }
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return None;
+    };
+
+    let mut relations = Vec::new();
+    for table in &select.from {
+        relations.push(simple_statement_relation(&table.relation)?);
+        for join in &table.joins {
+            relations.push(simple_statement_relation(&join.relation)?);
+        }
+    }
+    let mut visitor = SemanticValueVisitor { values: Vec::new() };
+    let _ = query.visit(&mut visitor);
+    let mut seen_values = HashSet::new();
+    visitor
+        .values
+        .retain(|value| seen_values.insert(value.clone()));
+
+    let relation_names = relations
+        .iter()
+        .map(|relation| relation.name.clone())
+        .collect();
+    let aliases = relations
+        .iter()
+        .filter_map(|relation| relation.alias.clone())
+        .collect();
+    Some(SemanticReadPlan {
+        relations: relation_names,
+        values: visitor.values,
+        statement_scope: StatementScope {
+            aliases,
+            common_table_expressions: Vec::new(),
+            relations,
+        },
+    })
+}
+
 /// Convert a parsed `ObjectName` (the `schema.table` of a `FROM`/`JOIN` factor)
 /// into the guard's [`ObjectRef`]. Multi-part names keep the *last* part as the
 /// object name and the *second-to-last* as the schema (`a.b.c` → schema `b`,
@@ -3117,6 +3274,64 @@ mod tests {
         assert_eq!(d.required_level, Some(OperatingLevel::ReadOnly));
         // K8: an allowed read carries no refusal category.
         assert_eq!(d.reason_category, None);
+    }
+
+    #[test]
+    fn semantic_read_plan_preserves_relations_aliases_values_and_quotes() {
+        let plan = semantic_read_plan(
+            r#"SELECT o."Id", name, SYSDATE
+               FROM "App"."Orders" o
+               JOIN customers c ON c.id = o.customer_id
+               WHERE o.status = :status"#,
+        )
+        .expect("simple query has an exact semantic plan");
+        assert_eq!(plan.relations.len(), 2);
+        assert_eq!(plan.statement_scope.relations.len(), 2);
+        assert_eq!(plan.statement_scope.aliases.len(), 2);
+        assert_eq!(plan.relations[0].parts[0].text, "App");
+        assert_eq!(plan.relations[0].parts[0].quoting, QuoteSemantics::Quoted);
+        assert!(plan.values.iter().any(|name| {
+            name.parts.len() == 2
+                && name.parts[0].text.eq_ignore_ascii_case("o")
+                && name.parts[1].text == "Id"
+                && name.parts[1].quoting == QuoteSemantics::Quoted
+        }));
+        assert!(
+            !plan
+                .values
+                .iter()
+                .any(|name| name.parts.len() == 1 && name.parts[0].text == "SYSDATE"),
+            "Oracle pseudocolumn/built-in identifiers do not require catalog column proof"
+        );
+    }
+
+    #[test]
+    fn semantic_read_plan_exposes_parenthesis_free_callable_candidates() {
+        let plan =
+            semantic_read_plan("SELECT dangerous_fn, app_admin.run_ddl, pkg.member FROM dual")
+                .expect("simple query has a plan");
+        for expected in ["dangerous_fn", "run_ddl", "member"] {
+            assert!(
+                plan.values
+                    .iter()
+                    .any(|name| name.parts.last().is_some_and(|part| part.text == expected)),
+                "missing semantic value candidate {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_read_plan_refuses_unrepresented_query_scopes() {
+        for sql in [
+            "WITH q AS (SELECT id FROM t) SELECT id FROM q",
+            "SELECT x.id FROM (SELECT id FROM t) x",
+            "SELECT id FROM a UNION ALL SELECT id FROM b",
+        ] {
+            assert!(
+                semantic_read_plan(sql).is_none(),
+                "scope-bearing query must fail closed until represented: {sql}"
+            );
+        }
     }
 
     #[test]

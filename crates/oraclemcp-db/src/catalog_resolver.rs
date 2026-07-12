@@ -59,6 +59,17 @@ const MEMBER_ARGUMENTS_SQL: &str = "SELECT subprogram_id, overload, position, da
 const COLUMN_CONFLICT_SQL: &str = "SELECT owner, table_name, column_name, column_id \
     FROM all_tab_columns WHERE column_name = :1 AND ROWNUM <= :2";
 
+const RELATION_COLUMN_SQL: &str = "SELECT column_name, column_id FROM all_tab_columns \
+    WHERE owner = :1 AND table_name = :2 AND column_name = :3 AND ROWNUM <= 2";
+
+const SELECT_POLICY_SQL: &str = "SELECT policy_name FROM all_policies \
+    WHERE object_owner = :1 AND object_name = :2 \
+    AND enable = 'YES' AND sel = 'YES' AND ROWNUM <= 1";
+
+const VIRTUAL_COLUMN_SQL: &str = "SELECT column_name FROM all_tab_cols \
+    WHERE owner = :1 AND table_name = :2 \
+    AND virtual_column = 'YES' AND ROWNUM <= 1";
+
 /// Immutable set of live dictionary answers for one exact resolution context.
 #[derive(Debug, Clone)]
 pub struct OracleCatalogResolver {
@@ -93,6 +104,9 @@ pub enum CatalogInvalidation {
     Reconnect,
     /// Live session state changed while a dictionary snapshot was loading.
     SessionContextChanged,
+    /// A served read starts a fresh proof, preventing external DDL observed by
+    /// the session from inheriting a prior request's object identity.
+    SemanticProofRefresh,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -104,6 +118,7 @@ struct ResolverCacheKey {
     enabled_roles: Vec<String>,
     aliases: Vec<RawNamePart>,
     common_table_expressions: Vec<RawNamePart>,
+    relations: Vec<oraclemcp_guard::StatementRelation>,
     raw_name: RawName,
 }
 
@@ -117,6 +132,7 @@ impl ResolverCacheKey {
             enabled_roles: context.enabled_roles.iter().cloned().collect(),
             aliases: context.statement_scope.aliases.clone(),
             common_table_expressions: context.statement_scope.common_table_expressions.clone(),
+            relations: context.statement_scope.relations.clone(),
             raw_name: name.clone(),
         }
     }
@@ -310,6 +326,58 @@ impl CatalogResolver for OracleCatalogResolverCache {
     }
 }
 
+/// Prove that exact resolved relations cannot invoke user-controlled code on a
+/// plain fetch under the currently visible catalog.
+///
+/// The lean server deliberately proves only ordinary tables with no enabled
+/// SELECT VPD policy and no virtual columns. Views and every unknown object
+/// kind remain `Unknown`: their defining query can hide function invocation and
+/// cannot be cleared by object-type syntax alone.
+pub async fn resolved_relations_read_purity(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relations: &[ResolvedObject],
+) -> Result<oraclemcp_guard::Purity, DbError> {
+    if relations.is_empty() {
+        return Ok(oraclemcp_guard::Purity::ProvenReadOnly);
+    }
+    for relation in relations {
+        if relation.db_link.is_some()
+            || !matches!(relation.kind, CatalogObjectKind::Table)
+            || relation.identity.object_id == 0
+        {
+            return Ok(oraclemcp_guard::Purity::Unknown);
+        }
+        let policies = conn
+            .query_rows(
+                cx,
+                SELECT_POLICY_SQL,
+                &[
+                    OracleBind::from(relation.owner.as_str()),
+                    OracleBind::from(relation.name.as_str()),
+                ],
+            )
+            .await?;
+        if !policies.is_empty() {
+            return Ok(oraclemcp_guard::Purity::Unknown);
+        }
+        let virtual_columns = conn
+            .query_rows(
+                cx,
+                VIRTUAL_COLUMN_SQL,
+                &[
+                    OracleBind::from(relation.owner.as_str()),
+                    OracleBind::from(relation.name.as_str()),
+                ],
+            )
+            .await?;
+        if !virtual_columns.is_empty() {
+            return Ok(oraclemcp_guard::Purity::Unknown);
+        }
+    }
+    Ok(oraclemcp_guard::Purity::ProvenReadOnly)
+}
+
 impl OracleCatalogResolver {
     /// Load bounded dictionary evidence for `names` using `conn`.
     ///
@@ -464,20 +532,119 @@ impl DictionaryLookup<'_> {
         let Some(parts) = normalize_parts(&raw.parts) else {
             return Ok(Resolution::Unresolved);
         };
-        if parts.is_empty() || self.references_statement_scope(raw) {
+        if parts.is_empty() {
             return Ok(Resolution::Unresolved);
         }
 
         match raw.role {
-            SyntacticRole::FromFactor => self.resolve_from(raw, &parts).await,
-            SyntacticRole::CallWithArgs => self.resolve_callable(raw, &parts, false).await,
-            SyntacticRole::ValuePosition => {
-                if parts.len() == 1 && self.has_column_conflict(&parts[0]).await? {
-                    return Ok(Resolution::Unresolved);
-                }
-                self.resolve_callable(raw, &parts, true).await
+            SyntacticRole::FromFactor if !self.references_statement_scope(raw) => {
+                self.resolve_from(raw, &parts).await
+            }
+            SyntacticRole::CallWithArgs if !self.references_statement_scope(raw) => {
+                self.resolve_callable(raw, &parts, false).await
+            }
+            SyntacticRole::ValuePosition => self.resolve_value(raw, &parts).await,
+            _ => Ok(Resolution::Unresolved),
+        }
+    }
+
+    async fn resolve_value(&self, raw: &RawName, parts: &[String]) -> Result<Resolution, DbError> {
+        let relations = &self.context.statement_scope.relations;
+        let (candidate_relations, column, relation_qualified) = match parts {
+            [column] => (relations.iter().collect::<Vec<_>>(), column.as_str(), false),
+            [qualifier, column] => {
+                let matching = relations
+                    .iter()
+                    .filter(|relation| relation_matches_qualifier(relation, qualifier))
+                    .collect::<Vec<_>>();
+                (matching, column.as_str(), true)
+            }
+            [owner, relation_name, column] => {
+                let matching = relations
+                    .iter()
+                    .filter(|relation| {
+                        relation.alias.is_none()
+                            && relation_matches_owner_name(relation, owner, relation_name)
+                    })
+                    .collect::<Vec<_>>();
+                (matching, column.as_str(), true)
+            }
+            _ => (Vec::new(), "", false),
+        };
+        let mut columns = Vec::new();
+        for relation in candidate_relations {
+            if let Some(column) = self.resolve_relation_column(relation, column, raw).await? {
+                columns.push(column);
             }
         }
+        match columns.len() {
+            1 => return Ok(Resolution::Resolved(Box::new(columns.remove(0)))),
+            2.. => {
+                return Ok(Resolution::Ambiguous {
+                    candidates: columns.into_iter().map(|column| column.identity).collect(),
+                });
+            }
+            _ => {}
+        }
+        if relation_qualified {
+            // A visible relation qualifier shadows a package/schema name. A
+            // missing column is not permission to reinterpret `alias.member`
+            // as a zero-argument routine.
+            return Ok(Resolution::Unresolved);
+        }
+        if parts.len() == 1 && self.has_column_conflict(&parts[0]).await? {
+            return Ok(Resolution::Unresolved);
+        }
+        self.resolve_callable(raw, parts, true).await
+    }
+
+    async fn resolve_relation_column(
+        &self,
+        relation: &oraclemcp_guard::StatementRelation,
+        column: &str,
+        raw: &RawName,
+    ) -> Result<Option<ResolvedObject>, DbError> {
+        let Some(relation_parts) = normalize_parts(&relation.name.parts) else {
+            return Ok(None);
+        };
+        let Resolution::Resolved(object) =
+            self.resolve_from(&relation.name, &relation_parts).await?
+        else {
+            return Ok(None);
+        };
+        let rows = self
+            .conn
+            .query_rows(
+                self.cx,
+                RELATION_COLUMN_SQL,
+                &[
+                    OracleBind::from(object.owner.as_str()),
+                    OracleBind::from(object.name.as_str()),
+                    OracleBind::from(column),
+                ],
+            )
+            .await?;
+        if rows.len() != 1 || rows[0].parse_i64("COLUMN_ID").is_none() {
+            return Ok(None);
+        }
+        Ok(Some(ResolvedObject {
+            owner: object.owner.clone(),
+            name: column.to_owned(),
+            kind: CatalogObjectKind::Column,
+            container: Some(ResolvedContainer {
+                name: object.name.clone(),
+                kind: object.kind.clone(),
+            }),
+            member: None,
+            overloads: Vec::new(),
+            quote_exact: raw
+                .parts
+                .last()
+                .is_some_and(|part| part.quoting == QuoteSemantics::Quoted),
+            synonym_chain: object.synonym_chain.clone(),
+            db_link: None,
+            identity: object.identity.clone(),
+        }))
     }
 
     fn references_statement_scope(&self, raw: &RawName) -> bool {
@@ -1121,6 +1288,31 @@ fn parts_equal(left: &RawNamePart, right: &RawNamePart) -> bool {
     }
 }
 
+fn relation_matches_qualifier(
+    relation: &oraclemcp_guard::StatementRelation,
+    qualifier: &str,
+) -> bool {
+    relation
+        .alias
+        .as_ref()
+        .or_else(|| relation.name.parts.last())
+        .is_some_and(|part| match part.quoting {
+            QuoteSemantics::Unquoted => part.text.to_ascii_uppercase() == qualifier,
+            QuoteSemantics::Quoted => part.text == qualifier,
+        })
+}
+
+fn relation_matches_owner_name(
+    relation: &oraclemcp_guard::StatementRelation,
+    owner: &str,
+    name: &str,
+) -> bool {
+    let Some(parts) = normalize_parts(&relation.name.parts) else {
+        return false;
+    };
+    matches!(parts.as_slice(), [relation_owner, relation_name] if relation_owner == owner && relation_name == name)
+}
+
 fn object_kind(value: &str) -> CatalogObjectKind {
     match value {
         "TABLE" => CatalogObjectKind::Table,
@@ -1158,9 +1350,86 @@ fn cache_lock_error<T>(_error: std::sync::PoisonError<T>) -> DbError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::OracleCell;
-    use std::sync::{Arc, Barrier};
+    use crate::{OracleBackend, OracleCell, OracleConnectionInfo};
+    use asupersync::runtime::RuntimeBuilder;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
+
+    fn run_with_cx<F, Fut, T>(body: F) -> T
+    where
+        F: FnOnce(Cx) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("runtime installs Cx");
+            body(cx).await
+        })
+    }
+
+    struct ScriptedRows {
+        responses: Mutex<VecDeque<Vec<OracleRow>>>,
+        queries: Mutex<Vec<(String, Vec<OracleBind>)>>,
+    }
+
+    impl ScriptedRows {
+        fn new(responses: impl IntoIterator<Item = Vec<OracleRow>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                queries: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for ScriptedRows {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.queries
+                .lock()
+                .expect("queries lock")
+                .push((sql.to_owned(), binds.to_vec()));
+            self.responses
+                .lock()
+                .expect("responses lock")
+                .pop_front()
+                .ok_or_else(|| DbError::Query("unexpected dictionary query".to_owned()))
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Err(DbError::Execute("unexpected execute".to_owned()))
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Err(DbError::Execute("unexpected commit".to_owned()))
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Err(DbError::Execute("unexpected rollback".to_owned()))
+        }
+    }
 
     fn row(columns: &[(&str, Option<&str>)]) -> OracleRow {
         OracleRow {
@@ -1194,6 +1463,9 @@ mod tests {
             STANDALONE_ARGUMENTS_SQL,
             MEMBER_ARGUMENTS_SQL,
             COLUMN_CONFLICT_SQL,
+            RELATION_COLUMN_SQL,
+            SELECT_POLICY_SQL,
+            VIRTUAL_COLUMN_SQL,
         ] {
             assert!(!sql.contains("{}"));
         }
@@ -1215,6 +1487,99 @@ mod tests {
             &RawNamePart::unquoted("orders"),
             &RawNamePart::quoted("orders")
         ));
+
+        let relation = oraclemcp_guard::StatementRelation {
+            name: RawName::new(
+                [RawNamePart::unquoted("app"), RawNamePart::quoted("Orders")],
+                SyntacticRole::FromFactor,
+            ),
+            alias: Some(RawNamePart::quoted("o")),
+        };
+        assert!(relation_matches_qualifier(&relation, "o"));
+        assert!(!relation_matches_qualifier(&relation, "O"));
+        assert!(relation_matches_owner_name(&relation, "APP", "Orders"));
+        assert!(!relation_matches_owner_name(&relation, "APP", "ORDERS"));
+    }
+
+    fn table_object() -> ResolvedObject {
+        ResolvedObject {
+            owner: "APP".to_owned(),
+            name: "ORDERS".to_owned(),
+            kind: CatalogObjectKind::Table,
+            container: None,
+            member: None,
+            overloads: Vec::new(),
+            quote_exact: false,
+            synonym_chain: Vec::new(),
+            db_link: None,
+            identity: ResolvedIdentity {
+                object_id: 42,
+                edition: None,
+            },
+        }
+    }
+
+    #[test]
+    fn relation_purity_requires_plain_policy_free_non_virtual_tables() {
+        run_with_cx(|cx| async move {
+            let clean = ScriptedRows::new([Vec::new(), Vec::new()]);
+            assert_eq!(
+                resolved_relations_read_purity(&cx, &clean, &[table_object()])
+                    .await
+                    .expect("clean table proof"),
+                oraclemcp_guard::Purity::ProvenReadOnly
+            );
+            {
+                let queries = clean.queries.lock().expect("queries lock");
+                assert_eq!(queries.len(), 2);
+                assert_eq!(queries[0].0, SELECT_POLICY_SQL);
+                assert_eq!(queries[1].0, VIRTUAL_COLUMN_SQL);
+            }
+
+            let policy = ScriptedRows::new([vec![row(&[("POLICY_NAME", Some("P"))])]]);
+            assert_eq!(
+                resolved_relations_read_purity(&cx, &policy, &[table_object()])
+                    .await
+                    .expect("policy evidence"),
+                oraclemcp_guard::Purity::Unknown
+            );
+
+            let virtual_column =
+                ScriptedRows::new([Vec::new(), vec![row(&[("COLUMN_NAME", Some("TOTAL"))])]]);
+            assert_eq!(
+                resolved_relations_read_purity(&cx, &virtual_column, &[table_object()])
+                    .await
+                    .expect("virtual-column evidence"),
+                oraclemcp_guard::Purity::Unknown
+            );
+
+            for object in [
+                ResolvedObject {
+                    kind: CatalogObjectKind::View,
+                    ..table_object()
+                },
+                ResolvedObject {
+                    db_link: Some("REMOTE".to_owned()),
+                    ..table_object()
+                },
+                ResolvedObject {
+                    identity: ResolvedIdentity {
+                        object_id: 0,
+                        edition: None,
+                    },
+                    ..table_object()
+                },
+            ] {
+                let no_io = ScriptedRows::new([]);
+                assert_eq!(
+                    resolved_relations_read_purity(&cx, &no_io, std::slice::from_ref(&object))
+                        .await
+                        .expect("unsupported relation fails closed"),
+                    oraclemcp_guard::Purity::Unknown
+                );
+                assert!(no_io.queries.lock().expect("queries lock").is_empty());
+            }
+        });
     }
 
     #[test]
@@ -1446,6 +1811,7 @@ mod tests {
             CatalogInvalidation::Roles,
             CatalogInvalidation::Reconnect,
             CatalogInvalidation::SessionContextChanged,
+            CatalogInvalidation::SemanticProofRefresh,
         ];
         let mut prior = cache.generation().0;
         for reason in reasons {

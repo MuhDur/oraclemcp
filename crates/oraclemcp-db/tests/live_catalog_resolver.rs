@@ -7,10 +7,11 @@ use asupersync::{Cx, runtime::RuntimeBuilder};
 use oraclemcp_db::{
     AuthAdapter, CatalogInvalidation, OracleCatalogResolver, OracleCatalogResolverCache,
     OracleConnectOptions, OracleConnection, RustOracleConnection, read_catalog_resolve_context,
+    resolved_relations_read_purity,
 };
 use oraclemcp_guard::{
-    CatalogGeneration, CatalogObjectKind, CatalogResolver, RawName, RawNamePart, Resolution,
-    StatementScope, SyntacticRole,
+    CatalogGeneration, CatalogObjectKind, CatalogResolver, Purity, RawName, RawNamePart,
+    Resolution, StatementRelation, StatementScope, SyntacticRole,
 };
 
 fn run_with_cx<F, Fut, T>(body: F) -> T
@@ -27,6 +28,49 @@ where
         let cx = Cx::current().expect("runtime installs Cx");
         body(cx).await
     })
+}
+
+#[test]
+fn live_relation_column_and_hidden_effect_proof_use_exact_dictionary_identity() {
+    run_with_cx(|cx| async move {
+        let Some(conn) = connect_or_skip(&cx).await else {
+            return;
+        };
+        let relation = name(&["dual"], SyntacticRole::FromFactor);
+        let value = name(&["d", "dummy"], SyntacticRole::ValuePosition);
+        let scope = StatementScope {
+            aliases: vec![RawNamePart::unquoted("d")],
+            common_table_expressions: Vec::new(),
+            relations: vec![StatementRelation {
+                name: relation.clone(),
+                alias: Some(RawNamePart::unquoted("d")),
+            }],
+        };
+        let cache = OracleCatalogResolverCache::new();
+        let context = cache
+            .preload(&cx, &conn, &[relation.clone(), value.clone()], scope)
+            .await
+            .expect("live relation and column preload");
+        let Resolution::Resolved(table) = cache.resolve(&relation, &context) else {
+            panic!("DUAL relation must resolve");
+        };
+        let Resolution::Resolved(column) = cache.resolve(&value, &context) else {
+            panic!("D.DUMMY must resolve as a column");
+        };
+        assert_eq!(table.kind, CatalogObjectKind::Table);
+        assert_eq!(column.kind, CatalogObjectKind::Column);
+        assert_eq!(
+            column.container.as_ref().map(|item| item.name.as_str()),
+            Some("DUAL")
+        );
+        assert_eq!(column.identity, table.identity);
+        assert_eq!(
+            resolved_relations_read_purity(&cx, &conn, std::slice::from_ref(table.as_ref()))
+                .await
+                .expect("live hidden-effect proof"),
+            Purity::ProvenReadOnly
+        );
+    });
 }
 
 fn test_opts() -> OracleConnectOptions {
@@ -164,6 +208,7 @@ fn live_statement_scope_shadows_dictionary_objects() {
         let scope = StatementScope {
             aliases: vec![RawNamePart::unquoted("dual")],
             common_table_expressions: Vec::new(),
+            relations: Vec::new(),
         };
         let context = read_catalog_resolve_context(&cx, &conn, CatalogGeneration(19), scope)
             .await

@@ -79,6 +79,34 @@ impl RawName {
 pub struct StatementScope {
     pub aliases: Vec<RawNamePart>,
     pub common_table_expressions: Vec<RawNamePart>,
+    /// Catalog-backed relations visible to expressions in this query block.
+    /// Derived/CTE outputs are intentionally omitted unless their identity can
+    /// be proven; omission makes their columns unresolved rather than guessed.
+    pub relations: Vec<StatementRelation>,
+}
+
+/// A real `FROM`/`JOIN` relation and its optional statement-local alias.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StatementRelation {
+    pub name: RawName,
+    pub alias: Option<RawNamePart>,
+}
+
+/// Fully parsed resolution work for one conservatively supported read query.
+///
+/// Complex query shapes that cannot be represented without per-block scope do
+/// not produce this plan; served callers must refuse them rather than silently
+/// falling back to syntactic guesses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticReadPlan {
+    /// Real top-level `FROM`/`JOIN` objects whose hidden query effects must be
+    /// proven read-only.
+    pub relations: Vec<RawName>,
+    /// Bare or qualified identifiers evaluated as values. Each must resolve to
+    /// a real column (or another explicitly safe data identity).
+    pub values: Vec<RawName>,
+    /// Exact statement-local relation/alias scope used for value resolution.
+    pub statement_scope: StatementScope,
 }
 
 /// Monotonic catalog-cache generation owned by the database-facing consumer.
@@ -119,6 +147,7 @@ impl ResolveCtx {
 #[non_exhaustive]
 pub enum CatalogObjectKind {
     Table,
+    Column,
     View,
     MaterializedView,
     Sequence,

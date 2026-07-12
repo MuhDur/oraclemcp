@@ -30,6 +30,224 @@ fn session_bundle(conn: impl OracleConnection + 'static) -> ProfileConnectionBun
     ProfileConnectionBundle::new(Box::new(conn), None)
 }
 
+#[derive(Default)]
+struct SemanticGuardState {
+    caller_queries: AtomicUsize,
+}
+
+struct SemanticGuardMock {
+    state: Arc<SemanticGuardState>,
+}
+
+fn semantic_row(columns: &[(&str, Option<&str>)]) -> OracleRow {
+    OracleRow {
+        columns: columns
+            .iter()
+            .map(|(name, value)| {
+                (
+                    (*name).to_owned(),
+                    OracleCell::new("VARCHAR2", value.map(str::to_owned)),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn string_bind(binds: &[OracleBind], index: usize) -> Option<&str> {
+    match binds.get(index) {
+        Some(OracleBind::String(value)) => Some(value),
+        _ => None,
+    }
+}
+
+/// Shared live-catalog model for dispatcher mocks whose test concern is above
+/// semantic resolution. Dedicated security tests use `SemanticGuardMock`
+/// instead, so views, policies, and callables are never cleared by this model.
+fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>> {
+    let normalized = sql.to_ascii_lowercase();
+    if normalized.contains("sys_context('userenv', 'session_user')") {
+        return Some(vec![semantic_row(&[
+            ("SESSION_USER", Some("APP")),
+            ("CURRENT_SCHEMA", Some("APP")),
+            ("EDITION_NAME", Some("ORA$BASE")),
+        ])]);
+    }
+    if normalized.contains("from session_roles") {
+        return Some(Vec::new());
+    }
+    if normalized.contains("from all_objects")
+        && normalized.contains("object_id, status, edition_name")
+    {
+        let owner = string_bind(binds, 0).unwrap_or("APP");
+        let name = string_bind(binds, 1).unwrap_or("DUAL");
+        return Some(vec![semantic_row(&[
+            ("OWNER", Some(owner)),
+            ("OBJECT_NAME", Some(name)),
+            ("OBJECT_TYPE", Some("TABLE")),
+            ("OBJECT_ID", Some("42")),
+            ("STATUS", Some("VALID")),
+            ("EDITION_NAME", None),
+        ])]);
+    }
+    if normalized.contains("from all_synonyms")
+        || normalized.contains("from all_arguments")
+        || (normalized.contains("from all_tab_columns") && !normalized.contains("table_name = :2"))
+    {
+        return Some(Vec::new());
+    }
+    if normalized.contains("from all_tab_columns") && normalized.contains("table_name = :2") {
+        let column = string_bind(binds, 2).unwrap_or("VALUE");
+        return Some(vec![semantic_row(&[
+            ("COLUMN_NAME", Some(column)),
+            ("COLUMN_ID", Some("1")),
+        ])]);
+    }
+    if normalized.contains("from all_policies") || normalized.contains("from all_tab_cols") {
+        return Some(Vec::new());
+    }
+    None
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for SemanticGuardMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            current_schema: Some("APP".to_owned()),
+            session_user: Some("APP".to_owned()),
+            current_edition: Some("ORA$BASE".to_owned()),
+            ..Default::default()
+        })
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let normalized = sql.to_ascii_lowercase();
+        if normalized.contains("sys_context('userenv', 'session_user')") {
+            return Ok(vec![semantic_row(&[
+                ("SESSION_USER", Some("APP")),
+                ("CURRENT_SCHEMA", Some("APP")),
+                ("EDITION_NAME", Some("ORA$BASE")),
+            ])]);
+        }
+        if normalized.contains("from session_roles") {
+            return Ok(Vec::new());
+        }
+        if normalized.contains("from all_objects") {
+            let name = string_bind(binds, 1).unwrap_or_default();
+            let kind = match name {
+                "ORDERS" | "POLICY_TABLE" => "TABLE",
+                "SIDE_VIEW" => "VIEW",
+                "DANGEROUS_FN" => "FUNCTION",
+                _ => return Ok(Vec::new()),
+            };
+            return Ok(vec![semantic_row(&[
+                ("OWNER", Some("APP")),
+                ("OBJECT_NAME", Some(name)),
+                ("OBJECT_TYPE", Some(kind)),
+                ("OBJECT_ID", Some("42")),
+                ("STATUS", Some("VALID")),
+                ("EDITION_NAME", None),
+            ])]);
+        }
+        if normalized.contains("from all_synonyms") {
+            return Ok(Vec::new());
+        }
+        if normalized.contains("from all_arguments") {
+            return Ok(vec![semantic_row(&[
+                ("SUBPROGRAM_ID", Some("1")),
+                ("OVERLOAD", None),
+                ("POSITION", Some("0")),
+                ("DATA_LEVEL", Some("0")),
+                ("IN_OUT", Some("OUT")),
+                ("DEFAULTED", Some("N")),
+            ])]);
+        }
+        if normalized.contains("from all_tab_columns") && normalized.contains("table_name = :2") {
+            let column = string_bind(binds, 2).unwrap_or_default();
+            return Ok((column == "ID")
+                .then(|| semantic_row(&[("COLUMN_NAME", Some("ID")), ("COLUMN_ID", Some("1"))]))
+                .into_iter()
+                .collect());
+        }
+        if normalized.contains("from all_tab_columns") {
+            return Ok(Vec::new());
+        }
+        if normalized.contains("from all_policies") {
+            return Ok((string_bind(binds, 1) == Some("POLICY_TABLE"))
+                .then(|| semantic_row(&[("POLICY_NAME", Some("P"))]))
+                .into_iter()
+                .collect());
+        }
+        if normalized.contains("from all_tab_cols") {
+            return Ok(Vec::new());
+        }
+        self.state.caller_queries.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![semantic_row(&[("ID", Some("1"))])])
+    }
+
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        Ok(0)
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+fn semantic_dispatcher() -> (OracleDispatcher, Arc<SemanticGuardState>) {
+    let state = Arc::new(SemanticGuardState::default());
+    (
+        OracleDispatcher::new(Box::new(SemanticGuardMock {
+            state: Arc::clone(&state),
+        })),
+        state,
+    )
+}
+
+#[test]
+fn served_read_gate_executes_only_exact_plain_table_columns() {
+    let (dispatcher, state) = semantic_dispatcher();
+    dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({"sql": "SELECT o.id FROM app.orders o"}),
+        )
+        .expect("exact table column is proven read-only");
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn served_read_gate_refuses_view_policy_and_zero_arg_function_before_evaluation() {
+    for sql in [
+        "SELECT * FROM app.side_view",
+        "SELECT * FROM app.policy_table",
+        "SELECT dangerous_fn FROM app.orders",
+    ] {
+        let (dispatcher, state) = semantic_dispatcher();
+        let error = dispatcher
+            .dispatch("oracle_query", json!({"sql": sql}))
+            .expect_err("hidden or executable dependency must fail closed");
+        assert_eq!(error.error_class, ErrorClass::ForbiddenStatement, "{sql}");
+        assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0, "{sql}");
+    }
+}
+
 #[test]
 fn read_path_handler_work_runs_under_narrowed_read_cx() {
     // A9 (finding 7): the production read path narrows the handler context to
@@ -207,8 +425,11 @@ impl OracleConnection for OneRowMock {
         &self,
         _cx: &Cx,
         sql: &str,
-        _b: &[OracleBind],
+        binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+            return Ok(rows);
+        }
         let sql_lower = sql.to_ascii_lowercase();
         if sql_lower.contains("from all_users") {
             return Ok(vec![OracleRow {
@@ -403,8 +624,11 @@ impl OracleConnection for LabeledMock {
         &self,
         _cx: &Cx,
         sql: &str,
-        _b: &[OracleBind],
+        binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+            return Ok(rows);
+        }
         self.counts.query.fetch_add(1, Ordering::SeqCst);
         let column = if sql.to_ascii_lowercase().contains("all_objects") {
             "SCHEMA_NAME"
@@ -470,6 +694,9 @@ impl OracleConnection for SourceLookupMock {
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+            return Ok(rows);
+        }
         if sql.contains("SELECT type") {
             return Ok(vec![
                 OracleRow {
@@ -530,9 +757,12 @@ impl OracleConnection for FailingMock {
     async fn query_rows(
         &self,
         _cx: &Cx,
-        _sql: &str,
-        _b: &[OracleBind],
+        sql: &str,
+        binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+            return Ok(rows);
+        }
         Err(DbError::Query(
             "ORA-00942: table or view does not exist".to_owned(),
         ))
@@ -862,8 +1092,11 @@ impl OracleConnection for ExecRecordingMock {
         &self,
         _cx: &Cx,
         sql: &str,
-        _b: &[OracleBind],
+        binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+            return Ok(rows);
+        }
         let sql_lc = sql.to_ascii_lowercase();
         if sql_lc.contains("from all_errors") {
             return Ok(self
@@ -8314,9 +8547,12 @@ mod read_only_backstop_wiring {
         async fn query_rows(
             &self,
             _cx: &Cx,
-            _sql: &str,
-            _b: &[OracleBind],
+            sql: &str,
+            binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
+            if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+                return Ok(rows);
+            }
             Ok(vec![OracleRow {
                 columns: vec![(
                     "N".to_owned(),
@@ -8873,8 +9109,11 @@ impl OracleConnection for RowStreamMock {
         &self,
         _cx: &Cx,
         sql: &str,
-        _b: &[OracleBind],
+        binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+            return Ok(rows);
+        }
         Ok(self.rows(sql))
     }
     async fn query_row_stream(
@@ -8923,8 +9162,11 @@ impl OracleConnection for StreamOffsetMock {
         &self,
         _cx: &Cx,
         sql: &str,
-        _b: &[OracleBind],
+        binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+            return Ok(rows);
+        }
         let (offset, fetch) = Self::window(sql);
         let end = offset.saturating_add(fetch).min(self.total);
         let start = offset.min(self.total);
@@ -10160,9 +10402,12 @@ mod qa106_uncertain_read_ownership {
         async fn query_rows(
             &self,
             _cx: &Cx,
-            _sql: &str,
-            _binds: &[OracleBind],
+            sql: &str,
+            binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
+            if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+                return Ok(rows);
+            }
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 return match self.failure {
                     FirstFailure::Cancelled => Err(DbError::Cancelled(
