@@ -28,6 +28,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 futures-core.workspace = true
+getrandom = "0.2"
 # D1-traces (bead oraclemcp-040-epic-wp-d-1il.3): enable oracledb's `tracing`
 # feature so DB-call spans flow into the OTLP trace layer. It only adds the
 # `tracing` dep (no async runtime), so the engine-free boundary holds.

@@ -1137,23 +1137,32 @@ fn live_lease_lifecycle_on_a_pinned_session() {
             .await
             .expect("acquire lease");
         assert_eq!(mgr.active_count(), 1);
-        let info = mgr.info(&cx, &id).await.expect("info");
+        let info = mgr.info(&cx, "agent-live", &id).await.expect("info");
         assert_eq!(info.agent_identity, "agent-live");
         assert!(info.expires_in_ms > 0);
 
         // Side-effect-free transaction lifecycle on the pinned session.
-        mgr.begin_transaction(&cx, &id).await.expect("begin");
-        mgr.savepoint(&cx, &id, "oraclemcp_sp1")
+        mgr.begin_transaction(&cx, "agent-live", &id)
+            .await
+            .expect("begin");
+        mgr.savepoint(&cx, "agent-live", &id, "oraclemcp_sp1")
             .await
             .expect("savepoint");
-        mgr.rollback(&cx, &id).await.expect("rollback");
-        mgr.commit(&cx, &id).await.expect("commit (no-op)");
-        let renewed = mgr.renew(&cx, &id).await.expect("renew");
+        mgr.rollback(&cx, "agent-live", &id)
+            .await
+            .expect("rollback");
+        mgr.commit(&cx, "agent-live", &id)
+            .await
+            .expect("commit (no-op)");
+        let renewed = mgr.renew(&cx, "agent-live", &id).await.expect("renew");
         assert!(renewed.expires_in_ms > 0);
 
-        mgr.release(&cx, &id).await;
+        mgr.release(&cx, "agent-live", &id).await.expect("release");
         assert_eq!(mgr.active_count(), 0);
-        assert!(mgr.info(&cx, &id).await.is_err(), "released lease is gone");
+        assert!(
+            mgr.info(&cx, "agent-live", &id).await.is_err(),
+            "released lease is gone"
+        );
     });
 }
 
@@ -1306,7 +1315,7 @@ fn live_savepoint_preview_is_ground_truth_and_rolls_back() {
             .await
             .expect("lease");
         let impact = mgr
-            .preview_dml(&cx, &id, &format!("DELETE FROM {table}"), &[])
+            .preview_dml(&cx, "agent", &id, &format!("DELETE FROM {table}"), &[])
             .await
             .expect("preview");
         assert_eq!(
@@ -1314,7 +1323,7 @@ fn live_savepoint_preview_is_ground_truth_and_rolls_back() {
             "ground-truth blast radius, not an estimate"
         );
         assert!(impact.rolled_back);
-        mgr.release(&cx, &id).await;
+        mgr.release(&cx, "agent", &id).await.expect("release");
 
         // The DB is unchanged — all 3 rows still present.
         let rows = setup

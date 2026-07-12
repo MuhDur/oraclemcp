@@ -177,7 +177,14 @@ async fn client_soak(
         });
         let agent = format!("agent-{client_id}");
         let id = match mgr
-            .acquire(cx, "soak", agent, Duration::from_secs(900), &[], conn)
+            .acquire(
+                cx,
+                "soak",
+                agent.as_str(),
+                Duration::from_secs(900),
+                &[],
+                conn,
+            )
             .await
         {
             Ok(id) => id,
@@ -188,14 +195,15 @@ async fn client_soak(
         // Deterministic 70/20/10 read/describe/preview mix.
         let op = (client_id + iteration) % 10;
         let outcome: Result<(), DbError> = if op < 7 {
-            mgr.info(cx, &id).await.map(|_| ())
+            mgr.info(cx, &agent, &id).await.map(|_| ())
         } else if op < 9 {
             // A read round trip on the pinned session via begin/rollback bracket.
-            mgr.begin_transaction(cx, &id).await
+            mgr.begin_transaction(cx, &agent, &id).await
         } else {
             // Preview DML: SAVEPOINT -> DML -> ROLLBACK TO SAVEPOINT (no commit).
             mgr.preview_dml(
                 cx,
+                &agent,
                 &id,
                 "UPDATE t SET x = x WHERE id = :1",
                 &[OracleBind::I64(1)],
@@ -207,7 +215,7 @@ async fn client_soak(
         // Release the lease no matter the op outcome (ready-or-dead): the
         // session is never held past this point.
         let dirty = outcome.is_err();
-        mgr.release(cx, &id).await;
+        let _ = mgr.release(cx, &agent, &id).await;
         ledger.on_release(dirty);
         if outcome.is_ok() {
             completed += 1;

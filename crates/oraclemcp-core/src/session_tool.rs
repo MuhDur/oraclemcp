@@ -172,6 +172,15 @@ fn escalation_error_to_envelope(e: EscalationError) -> ErrorEnvelope {
     }
 }
 
+fn lease_owner(context: DispatchContext<'_>) -> Result<&str, ErrorEnvelope> {
+    context.principal_key().ok_or_else(|| {
+        ErrorEnvelope::new(
+            ErrorClass::PolicyDenied,
+            "lease action requires a server-derived subject identity",
+        )
+    })
+}
+
 /// Snapshot the operating-level view (the `get_session` payload + escalate result).
 fn level_view(level: &SessionLevelState) -> Value {
     json!({
@@ -233,9 +242,10 @@ pub async fn oracle_session(
             }))
         }
         SessionAction::LeaseRenew { lease_id } => {
+            let owner = lease_owner(context)?;
             let info = deps
                 .leases
-                .renew(cx, &LeaseId(lease_id))
+                .renew(cx, owner, &LeaseId(lease_id))
                 .await
                 .map_err(oraclemcp_db::DbError::into_envelope)?;
             let mut v = serde_json::to_value(&info).unwrap_or(Value::Null);
@@ -245,7 +255,11 @@ pub async fn oracle_session(
             Ok(v)
         }
         SessionAction::LeaseRelease { lease_id } => {
-            deps.leases.release(cx, &LeaseId(lease_id.clone())).await;
+            let owner = lease_owner(context)?;
+            deps.leases
+                .release(cx, owner, &LeaseId(lease_id.clone()))
+                .await
+                .map_err(oraclemcp_db::DbError::into_envelope)?;
             Ok(json!({ "action": "lease_release", "lease_id": lease_id, "released": true }))
         }
         SessionAction::DeEscalate => {
@@ -268,43 +282,49 @@ pub async fn oracle_session(
                     format!("ALTER SESSION not on the allowlist: {statement:?}"),
                 ));
             }
+            let owner = lease_owner(context)?;
             deps.leases
-                .apply_session_statement(cx, &LeaseId(lease_id), &statement)
+                .apply_session_statement(cx, owner, &LeaseId(lease_id), &statement)
                 .await
                 .map_err(oraclemcp_db::DbError::into_envelope)?;
             Ok(json!({ "action": "set_session", "applied": statement }))
         }
         SessionAction::EnableDbmsOutput { lease_id } => {
+            let owner = lease_owner(context)?;
             deps.leases
-                .enable_dbms_output(cx, &LeaseId(lease_id))
+                .enable_dbms_output(cx, owner, &LeaseId(lease_id))
                 .await
                 .map_err(oraclemcp_db::DbError::into_envelope)?;
             Ok(json!({ "action": "enable_dbms_output", "enabled": true }))
         }
         SessionAction::Begin { lease_id } => {
+            let owner = lease_owner(context)?;
             deps.leases
-                .begin_transaction(cx, &LeaseId(lease_id))
+                .begin_transaction(cx, owner, &LeaseId(lease_id))
                 .await
                 .map_err(oraclemcp_db::DbError::into_envelope)?;
             Ok(json!({ "action": "begin", "in_transaction": true }))
         }
         SessionAction::Commit { lease_id } => {
+            let owner = lease_owner(context)?;
             deps.leases
-                .commit(cx, &LeaseId(lease_id))
+                .commit(cx, owner, &LeaseId(lease_id))
                 .await
                 .map_err(oraclemcp_db::DbError::into_envelope)?;
             Ok(json!({ "action": "commit", "in_transaction": false }))
         }
         SessionAction::Rollback { lease_id } => {
+            let owner = lease_owner(context)?;
             deps.leases
-                .rollback(cx, &LeaseId(lease_id))
+                .rollback(cx, owner, &LeaseId(lease_id))
                 .await
                 .map_err(oraclemcp_db::DbError::into_envelope)?;
             Ok(json!({ "action": "rollback", "in_transaction": false }))
         }
         SessionAction::Savepoint { lease_id, name } => {
+            let owner = lease_owner(context)?;
             deps.leases
-                .savepoint(cx, &LeaseId(lease_id), &name)
+                .savepoint(cx, owner, &LeaseId(lease_id), &name)
                 .await
                 .map_err(oraclemcp_db::DbError::into_envelope)?;
             Ok(json!({ "action": "savepoint", "name": name }))
@@ -534,6 +554,29 @@ mod tests {
         )
         .expect_err("missing server subject is fail-closed");
         assert_eq!(err.error_class, ErrorClass::PolicyDenied);
+    }
+
+    #[test]
+    fn every_lease_bound_action_requires_server_derived_subject() {
+        let leases = LeaseManager::new();
+        let mut level = SessionLevelState::new(OperatingLevel::ReadWrite, false);
+        let stepup = StepUpRegistry::new();
+        let acq = OkAcquirer;
+        let mut d = deps(&leases, &mut level, &stepup, &acq);
+        for action in [
+            r#"{"action":"lease_renew","lease_id":"opaque"}"#,
+            r#"{"action":"lease_release","lease_id":"opaque"}"#,
+            r#"{"action":"begin","lease_id":"opaque"}"#,
+            r#"{"action":"commit","lease_id":"opaque"}"#,
+            r#"{"action":"rollback","lease_id":"opaque"}"#,
+            r#"{"action":"savepoint","lease_id":"opaque","name":"sp1"}"#,
+            r#"{"action":"enable_dbms_output","lease_id":"opaque"}"#,
+            r#"{"action":"set_session","lease_id":"opaque","statement":"ALTER SESSION SET CURRENT_SCHEMA = HR"}"#,
+        ] {
+            let error = sess_with_context(DispatchContext::default(), parse(action), &mut d)
+                .expect_err("missing principal must fail closed");
+            assert_eq!(error.error_class, ErrorClass::PolicyDenied, "{action}");
+        }
     }
 
     #[test]

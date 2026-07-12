@@ -3031,19 +3031,19 @@ pub struct oraclemcp_db::LeaseManager
 impl oraclemcp_db::LeaseManager
 pub async fn oraclemcp_db::LeaseManager::acquire(&self, &asupersync::cx::cx::Cx, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::time::Duration, &[alloc::string::String], alloc::boxed::Box<dyn oraclemcp_db::OracleConnection>) -> core::result::Result<oraclemcp_db::LeaseId, oraclemcp_db::DbError>
 pub fn oraclemcp_db::LeaseManager::active_count(&self) -> usize
-pub async fn oraclemcp_db::LeaseManager::apply_session_statement(&self, &asupersync::cx::cx::Cx, &oraclemcp_db::LeaseId, &str) -> core::result::Result<(), oraclemcp_db::DbError>
-pub async fn oraclemcp_db::LeaseManager::begin_transaction(&self, &asupersync::cx::cx::Cx, &oraclemcp_db::LeaseId) -> core::result::Result<(), oraclemcp_db::DbError>
-pub async fn oraclemcp_db::LeaseManager::commit(&self, &asupersync::cx::cx::Cx, &oraclemcp_db::LeaseId) -> core::result::Result<(), oraclemcp_db::DbError>
-pub async fn oraclemcp_db::LeaseManager::enable_dbms_output(&self, &asupersync::cx::cx::Cx, &oraclemcp_db::LeaseId) -> core::result::Result<(), oraclemcp_db::DbError>
-pub async fn oraclemcp_db::LeaseManager::info(&self, &asupersync::cx::cx::Cx, &oraclemcp_db::LeaseId) -> core::result::Result<oraclemcp_db::LeaseInfo, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::LeaseManager::apply_session_statement(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId, &str) -> core::result::Result<(), oraclemcp_db::DbError>
+pub async fn oraclemcp_db::LeaseManager::begin_transaction(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId) -> core::result::Result<(), oraclemcp_db::DbError>
+pub async fn oraclemcp_db::LeaseManager::commit(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId) -> core::result::Result<(), oraclemcp_db::DbError>
+pub async fn oraclemcp_db::LeaseManager::enable_dbms_output(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId) -> core::result::Result<(), oraclemcp_db::DbError>
+pub async fn oraclemcp_db::LeaseManager::info(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId) -> core::result::Result<oraclemcp_db::LeaseInfo, oraclemcp_db::DbError>
 pub fn oraclemcp_db::LeaseManager::new() -> Self
-pub async fn oraclemcp_db::LeaseManager::preview_dml(&self, &asupersync::cx::cx::Cx, &oraclemcp_db::LeaseId, &str, &[oraclemcp_db::OracleBind]) -> core::result::Result<oraclemcp_db::PreviewImpact, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::LeaseManager::preview_dml(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId, &str, &[oraclemcp_db::OracleBind]) -> core::result::Result<oraclemcp_db::PreviewImpact, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::LeaseManager::reap_expired(&self, &asupersync::cx::cx::Cx) -> usize
-pub async fn oraclemcp_db::LeaseManager::release(&self, &asupersync::cx::cx::Cx, &oraclemcp_db::LeaseId)
+pub async fn oraclemcp_db::LeaseManager::release(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId) -> core::result::Result<(), oraclemcp_db::DbError>
 pub async fn oraclemcp_db::LeaseManager::release_all(&self, &asupersync::cx::cx::Cx) -> usize
-pub async fn oraclemcp_db::LeaseManager::renew(&self, &asupersync::cx::cx::Cx, &oraclemcp_db::LeaseId) -> core::result::Result<oraclemcp_db::LeaseInfo, oraclemcp_db::DbError>
-pub async fn oraclemcp_db::LeaseManager::rollback(&self, &asupersync::cx::cx::Cx, &oraclemcp_db::LeaseId) -> core::result::Result<(), oraclemcp_db::DbError>
-pub async fn oraclemcp_db::LeaseManager::savepoint(&self, &asupersync::cx::cx::Cx, &oraclemcp_db::LeaseId, &str) -> core::result::Result<(), oraclemcp_db::DbError>
+pub async fn oraclemcp_db::LeaseManager::renew(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId) -> core::result::Result<oraclemcp_db::LeaseInfo, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::LeaseManager::rollback(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId) -> core::result::Result<(), oraclemcp_db::DbError>
+pub async fn oraclemcp_db::LeaseManager::savepoint(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId, &str) -> core::result::Result<(), oraclemcp_db::DbError>
 impl core::default::Default for oraclemcp_db::LeaseManager
 pub fn oraclemcp_db::LeaseManager::default() -> oraclemcp_db::LeaseManager
 impl !core::marker::Freeze for oraclemcp_db::LeaseManager

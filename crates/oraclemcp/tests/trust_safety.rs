@@ -610,9 +610,9 @@ mod live {
                 )
                 .await
                 .expect("acquire stamps the session identity on a live session");
-            let info = mgr.info(&cx, &lease).await.expect("lease info");
+            let info = mgr.info(&cx, "agent-a7", &lease).await.expect("lease info");
             assert_eq!(info.agent_identity, "agent-a7");
-            mgr.release(&cx, &lease).await;
+            mgr.release(&cx, "agent-a7", &lease).await.expect("release");
 
             // (2) Prove the engine persists the tags: tag a probe session with
             // the same DBMS calls and read them back via describe()/SYS_CONTEXT.

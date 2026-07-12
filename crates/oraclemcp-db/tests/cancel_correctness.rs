@@ -152,6 +152,7 @@ fn cancelled_preview_discards_session_dirty_never_commits() {
         let err = mgr
             .preview_dml(
                 &cx,
+                "agent",
                 &id,
                 "UPDATE employees SET name = name WHERE id = :1",
                 &[OracleBind::I64(1)],
@@ -177,7 +178,10 @@ fn cancelled_preview_discards_session_dirty_never_commits() {
             "a connection cancelled mid-flight is discarded DIRTY — never reused"
         );
         // The discarded lease is no longer usable.
-        assert!(mgr.info(&cx, &id).await.is_err(), "discarded lease is gone");
+        assert!(
+            mgr.info(&cx, "agent", &id).await.is_err(),
+            "discarded lease is gone"
+        );
     });
 }
 
@@ -201,7 +205,9 @@ fn release_all_force_rolls_back_open_transactions_on_shutdown() {
             )
             .await
             .expect("acquire");
-        mgr.begin_transaction(&cx, &id).await.expect("begin");
+        mgr.begin_transaction(&cx, "agent", &id)
+            .await
+            .expect("begin");
 
         // Graceful shutdown: every lease is force-rolled-back and dropped.
         let released = mgr.release_all(&cx).await;

@@ -2079,6 +2079,7 @@ dependencies = [
  "async-trait",
  "criterion",
  "futures-core",
+ "getrandom 0.2.17",
  "oracledb",
  "oracledb-protocol",
  "oraclemcp-error",

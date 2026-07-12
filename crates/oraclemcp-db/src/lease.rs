@@ -13,6 +13,7 @@
 //! [`OracleConnection`] trait), so it is fully unit-testable with a mock.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -38,6 +39,7 @@ const CLIENT_IDENTIFIER_MAX: usize = 64;
 /// Environment variable an operator/host may set to label the driving agent
 /// model in `V$SESSION`. Best-effort, non-secret; absent → `oraclemcp`.
 const AGENT_MODEL_ENV: &str = "ORACLEMCP_AGENT_MODEL";
+const LEASE_UNAVAILABLE: &str = "lease unavailable";
 
 /// One DBMS call in the session-tagging sequence: a PL/SQL block and its binds.
 type TagStatement = (&'static str, Vec<crate::types::OracleBind>);
@@ -196,6 +198,23 @@ fn quarantine_error(outcome: QuarantineOutcome, message: impl Into<String>) -> D
     }
 }
 
+/// Compare canonical server-derived owners without a data-dependent early
+/// return. Lease owners are authorization identities rather than secrets, but
+/// keeping the denial path uniform avoids turning mismatches into a useful
+/// enumeration signal.
+fn owner_matches(expected: &str, supplied: &str) -> bool {
+    let expected = expected.as_bytes();
+    let supplied = supplied.as_bytes();
+    let mut difference = expected.len() ^ supplied.len();
+    let width = expected.len().max(supplied.len());
+    for index in 0..width {
+        difference |= usize::from(
+            expected.get(index).copied().unwrap_or(0) ^ supplied.get(index).copied().unwrap_or(0),
+        );
+    }
+    difference == 0
+}
+
 /// Manages session leases. Cheap to clone-share via `Arc`. Each lease's
 /// physical session is serialized behind its own async [`AsyncMutex`] so a DB
 /// round trip (which is now `.await`-ed) can hold the guard across the await
@@ -205,7 +224,6 @@ fn quarantine_error(outcome: QuarantineOutcome, message: impl Into<String>) -> D
 #[derive(Default)]
 pub struct LeaseManager {
     leases: Mutex<HashMap<String, Arc<AsyncMutex<Lease>>>>,
-    counter: AtomicU64,
     generation: AtomicU64,
 }
 
@@ -216,9 +234,16 @@ impl LeaseManager {
         Self::default()
     }
 
-    fn next_id(&self) -> LeaseId {
-        let n = self.counter.fetch_add(1, Ordering::SeqCst);
-        LeaseId(format!("lease-{}-{n}", std::process::id()))
+    fn next_id() -> Result<LeaseId, DbError> {
+        let mut entropy = [0_u8; 32];
+        getrandom::getrandom(&mut entropy)
+            .map_err(|error| DbError::Internal(format!("lease entropy unavailable: {error}")))?;
+        let mut id = String::with_capacity(6 + entropy.len() * 2);
+        id.push_str("lease_");
+        for byte in entropy {
+            write!(&mut id, "{byte:02x}").expect("writing into a String cannot fail");
+        }
+        Ok(LeaseId(id))
     }
 
     fn next_generation(&self) -> u64 {
@@ -257,8 +282,7 @@ impl LeaseManager {
             conn.execute(cx, sql, &binds).await?;
         }
 
-        let id = self.next_id();
-        let lease = Lease {
+        let lease = Arc::new(AsyncMutex::new(Lease {
             profile,
             agent_identity,
             generation: self.next_generation(),
@@ -267,12 +291,15 @@ impl LeaseManager {
             ttl,
             in_transaction: false,
             lifecycle: LeaseLifecycle::Active,
-        };
-        self.leases
-            .lock()
-            .expect("lease map mutex poisoned")
-            .insert(id.0.clone(), Arc::new(AsyncMutex::new(lease)));
-        Ok(id)
+        }));
+        loop {
+            let id = Self::next_id()?;
+            let mut leases = self.leases.lock().expect("lease map mutex poisoned");
+            if !leases.contains_key(&id.0) {
+                leases.insert(id.0.clone(), lease.clone());
+                return Ok(id);
+            }
+        }
     }
 
     fn get(&self, id: &str) -> Option<Arc<AsyncMutex<Lease>>> {
@@ -283,16 +310,9 @@ impl LeaseManager {
             .cloned()
     }
 
-    fn remove(&self, id: &str) -> Option<Arc<AsyncMutex<Lease>>> {
-        self.leases
-            .lock()
-            .expect("lease map mutex poisoned")
-            .remove(id)
-    }
-
     fn lease_arc(&self, id: &str) -> Result<Arc<AsyncMutex<Lease>>, DbError> {
         self.get(id)
-            .ok_or_else(|| DbError::LeaseNotFound(id.to_owned()))
+            .ok_or_else(|| DbError::LeaseNotFound(LEASE_UNAVAILABLE.to_owned()))
     }
 
     fn remove_if_same(&self, id: &str, expected: &Arc<AsyncMutex<Lease>>) -> bool {
@@ -313,6 +333,7 @@ impl LeaseManager {
         &self,
         cx: &Cx,
         id: &str,
+        owner: &str,
         arc: &Arc<AsyncMutex<Lease>>,
         lease: &mut Lease,
     ) -> Result<(), DbError> {
@@ -322,15 +343,18 @@ impl LeaseManager {
             .expect("lease map mutex poisoned")
             .get(id)
             .is_some_and(|candidate| Arc::ptr_eq(candidate, arc));
-        if lease.lifecycle != LeaseLifecycle::Active || !current {
-            return Err(DbError::LeaseNotFound(id.to_owned()));
+        if lease.lifecycle != LeaseLifecycle::Active
+            || !current
+            || !owner_matches(&lease.agent_identity, owner)
+        {
+            return Err(DbError::LeaseNotFound(LEASE_UNAVAILABLE.to_owned()));
         }
         if lease.deadline.is_expired() {
             lease.lifecycle = LeaseLifecycle::Revoking;
             self.remove_if_same(id, arc);
             let _ = lease.force_rollback(cx).await;
             lease.lifecycle = LeaseLifecycle::Revoked;
-            return Err(DbError::LeaseNotFound(format!("{id} (expired)")));
+            return Err(DbError::LeaseNotFound(LEASE_UNAVAILABLE.to_owned()));
         }
         Ok(())
     }
@@ -364,41 +388,51 @@ impl LeaseManager {
 
     /// Renew a lease's TTL (clients renew at ~75% of the TTL). Errors if the
     /// lease is gone/expired.
-    pub async fn renew(&self, cx: &Cx, id: &LeaseId) -> Result<LeaseInfo, DbError> {
+    pub async fn renew(&self, cx: &Cx, owner: &str, id: &LeaseId) -> Result<LeaseInfo, DbError> {
         let arc = self.lease_arc(&id.0)?;
         let mut lease = arc.lock(cx).await.map_err(lock_err)?;
-        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
+        self.validate_locked(cx, &id.0, owner, &arc, &mut lease)
+            .await?;
         lease.deadline = MonotonicDeadline::after(lease.ttl);
         Ok(lease.info(&id.0))
     }
 
     /// Release a lease: force-rollback any open transaction and drop the
-    /// session. Idempotent.
-    pub async fn release(&self, cx: &Cx, id: &LeaseId) {
-        if let Some(arc) = self.remove(&id.0)
-            && let Ok(mut lease) = arc.lock(cx).await
-        {
-            lease.lifecycle = LeaseLifecycle::Revoking;
-            let _ = lease.force_rollback(cx).await;
-            lease.lifecycle = LeaseLifecycle::Revoked;
-            // Dropping the Arc/Lease closes the physical session.
-        }
+    /// session.
+    pub async fn release(&self, cx: &Cx, owner: &str, id: &LeaseId) -> Result<(), DbError> {
+        let arc = self.lease_arc(&id.0)?;
+        let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+        self.validate_locked(cx, &id.0, owner, &arc, &mut lease)
+            .await?;
+        lease.lifecycle = LeaseLifecycle::Revoking;
+        self.remove_if_same(&id.0, &arc);
+        let _ = lease.force_rollback(cx).await;
+        lease.lifecycle = LeaseLifecycle::Revoked;
+        // Dropping the Arc/Lease closes the physical session.
+        Ok(())
     }
 
     /// Begin an explicit transaction on the leased session.
-    pub async fn begin_transaction(&self, cx: &Cx, id: &LeaseId) -> Result<(), DbError> {
+    pub async fn begin_transaction(
+        &self,
+        cx: &Cx,
+        owner: &str,
+        id: &LeaseId,
+    ) -> Result<(), DbError> {
         let arc = self.lease_arc(&id.0)?;
         let mut lease = arc.lock(cx).await.map_err(lock_err)?;
-        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
+        self.validate_locked(cx, &id.0, owner, &arc, &mut lease)
+            .await?;
         lease.in_transaction = true;
         Ok(())
     }
 
     /// Commit the leased session's transaction.
-    pub async fn commit(&self, cx: &Cx, id: &LeaseId) -> Result<(), DbError> {
+    pub async fn commit(&self, cx: &Cx, owner: &str, id: &LeaseId) -> Result<(), DbError> {
         let arc = self.lease_arc(&id.0)?;
         let mut lease = arc.lock(cx).await.map_err(lock_err)?;
-        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
+        self.validate_locked(cx, &id.0, owner, &arc, &mut lease)
+            .await?;
         match lease.conn.commit(cx).await {
             Ok(()) => {
                 lease.in_transaction = false;
@@ -417,10 +451,11 @@ impl LeaseManager {
     }
 
     /// Roll back the leased session's transaction.
-    pub async fn rollback(&self, cx: &Cx, id: &LeaseId) -> Result<(), DbError> {
+    pub async fn rollback(&self, cx: &Cx, owner: &str, id: &LeaseId) -> Result<(), DbError> {
         let arc = self.lease_arc(&id.0)?;
         let mut lease = arc.lock(cx).await.map_err(lock_err)?;
-        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
+        self.validate_locked(cx, &id.0, owner, &arc, &mut lease)
+            .await?;
         match lease.conn.rollback(cx).await {
             Ok(()) => {
                 lease.in_transaction = false;
@@ -440,7 +475,13 @@ impl LeaseManager {
 
     /// Create a savepoint on the leased session. `name` must be a simple
     /// unquoted identifier (validated to prevent injection).
-    pub async fn savepoint(&self, cx: &Cx, id: &LeaseId, name: &str) -> Result<(), DbError> {
+    pub async fn savepoint(
+        &self,
+        cx: &Cx,
+        owner: &str,
+        id: &LeaseId,
+        name: &str,
+    ) -> Result<(), DbError> {
         if !is_simple_identifier(name) {
             return Err(DbError::Execute(format!(
                 "invalid savepoint name: {name:?}"
@@ -448,7 +489,8 @@ impl LeaseManager {
         }
         let arc = self.lease_arc(&id.0)?;
         let mut lease = arc.lock(cx).await.map_err(lock_err)?;
-        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
+        self.validate_locked(cx, &id.0, owner, &arc, &mut lease)
+            .await?;
         let was_in_transaction = lease.in_transaction;
         // SAVEPOINT may have succeeded even when the response is cancelled or
         // lost. Mark transaction state before crossing that boundary so
@@ -484,6 +526,7 @@ impl LeaseManager {
     pub async fn preview_dml(
         &self,
         cx: &Cx,
+        owner: &str,
         id: &LeaseId,
         sql: &str,
         binds: &[crate::types::OracleBind],
@@ -493,7 +536,8 @@ impl LeaseManager {
         let mut discard_lease = None;
         {
             let mut lease = arc.lock(cx).await.map_err(lock_err)?;
-            self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
+            self.validate_locked(cx, &id.0, owner, &arc, &mut lease)
+                .await?;
             let savepoint_sql = format!("SAVEPOINT {SP}");
             let rollback_sql = format!("ROLLBACK TO SAVEPOINT {SP}");
             db_checkpoint(cx, "oracle_lease.preview.savepoint.before")?;
@@ -565,10 +609,16 @@ impl LeaseManager {
 
     /// Enable `DBMS_OUTPUT` on the leased session (full line capture is the
     /// `oracle_session` tool's job, P1-SESS).
-    pub async fn enable_dbms_output(&self, cx: &Cx, id: &LeaseId) -> Result<(), DbError> {
+    pub async fn enable_dbms_output(
+        &self,
+        cx: &Cx,
+        owner: &str,
+        id: &LeaseId,
+    ) -> Result<(), DbError> {
         let arc = self.lease_arc(&id.0)?;
         let mut lease = arc.lock(cx).await.map_err(lock_err)?;
-        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
+        self.validate_locked(cx, &id.0, owner, &arc, &mut lease)
+            .await?;
         match lease
             .conn
             .execute(cx, "BEGIN DBMS_OUTPUT.ENABLE(NULL); END;", &[])
@@ -596,6 +646,7 @@ impl LeaseManager {
     pub async fn apply_session_statement(
         &self,
         cx: &Cx,
+        owner: &str,
         id: &LeaseId,
         statement: &str,
     ) -> Result<(), DbError> {
@@ -606,7 +657,8 @@ impl LeaseManager {
         }
         let arc = self.lease_arc(&id.0)?;
         let mut lease = arc.lock(cx).await.map_err(lock_err)?;
-        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
+        self.validate_locked(cx, &id.0, owner, &arc, &mut lease)
+            .await?;
         match lease.conn.execute(cx, statement, &[]).await {
             Ok(_) => Ok(()),
             Err(error) if error.is_uncertain_session_state() => Err(self
@@ -617,10 +669,11 @@ impl LeaseManager {
     }
 
     /// A snapshot of a lease's state.
-    pub async fn info(&self, cx: &Cx, id: &LeaseId) -> Result<LeaseInfo, DbError> {
+    pub async fn info(&self, cx: &Cx, owner: &str, id: &LeaseId) -> Result<LeaseInfo, DbError> {
         let arc = self.lease_arc(&id.0)?;
         let mut lease = arc.lock(cx).await.map_err(lock_err)?;
-        self.validate_locked(cx, &id.0, &arc, &mut lease).await?;
+        self.validate_locked(cx, &id.0, owner, &arc, &mut lease)
+            .await?;
         Ok(lease.info(&id.0))
     }
 
@@ -1021,6 +1074,13 @@ mod tests {
         );
     }
 
+    fn assert_lease_unavailable(error: &DbError) {
+        assert!(
+            matches!(error, DbError::LeaseNotFound(message) if message == LEASE_UNAVAILABLE),
+            "denial must be uniform: {error:?}"
+        );
+    }
+
     /// Run an async test body on a fresh current-thread runtime, handing it the
     /// installed request `Cx`.
     fn run_with_cx<F, Fut, T>(body: F) -> T
@@ -1065,7 +1125,7 @@ mod tests {
                 );
             }
             assert_eq!(mgr.active_count(), 1);
-            let info = mgr.info(&cx, &id).await.expect("info");
+            let info = mgr.info(&cx, "agent-claude", &id).await.expect("info");
             assert_eq!(info.agent_identity, "agent-claude");
             assert!(!info.in_transaction);
         });
@@ -1086,11 +1146,124 @@ mod tests {
                 .await
                 .expect("second acquire");
 
-            let first_info = mgr.info(&cx, &first).await.expect("first info");
-            let second_info = mgr.info(&cx, &second).await.expect("second info");
+            let first_info = mgr.info(&cx, "agent-a", &first).await.expect("first info");
+            let second_info = mgr
+                .info(&cx, "agent-b", &second)
+                .await
+                .expect("second info");
             assert_eq!(first_info.generation, 1);
             assert_eq!(second_info.generation, 2);
             assert!(second_info.generation > first_info.generation);
+        });
+    }
+
+    #[test]
+    fn lease_ids_are_random_opaque_and_unique() {
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let mut ids = std::collections::HashSet::new();
+            for _ in 0..16 {
+                let (conn, _) = mock();
+                let id = mgr
+                    .acquire(&cx, "dev", "owner", Duration::from_secs(900), &[], conn)
+                    .await
+                    .expect("acquire");
+                assert!(id.0.starts_with("lease_"));
+                assert_eq!(id.0.len(), 6 + 64, "256-bit handle encoded as hex");
+                assert!(id.0[6..].bytes().all(|byte| byte.is_ascii_hexdigit()));
+                assert!(
+                    !id.0.starts_with(&format!("lease-{}-", std::process::id())),
+                    "legacy process-id/counter format must be absent"
+                );
+                assert!(ids.insert(id.0), "random handle collision");
+            }
+            assert_eq!(mgr.active_count(), 16);
+        });
+    }
+
+    #[test]
+    fn every_cross_owner_action_is_denied_before_db_work() {
+        const OWNER: &str = "oauth:issuer-a:client-a:subject-a";
+        const ATTACKER: &str = "oauth:issuer-a:client-b:subject-a";
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (conn, log) = mock();
+            let id = mgr
+                .acquire(&cx, "dev", OWNER, Duration::from_secs(900), &[], conn)
+                .await
+                .expect("acquire");
+            let baseline = log.lock().unwrap().executed.len();
+
+            assert_lease_unavailable(&mgr.renew(&cx, ATTACKER, &id).await.unwrap_err());
+            assert_lease_unavailable(&mgr.info(&cx, ATTACKER, &id).await.unwrap_err());
+            assert_lease_unavailable(&mgr.begin_transaction(&cx, ATTACKER, &id).await.unwrap_err());
+            assert_lease_unavailable(&mgr.commit(&cx, ATTACKER, &id).await.unwrap_err());
+            assert_lease_unavailable(&mgr.rollback(&cx, ATTACKER, &id).await.unwrap_err());
+            assert_lease_unavailable(
+                &mgr.savepoint(&cx, ATTACKER, &id, "SP_ATTACK")
+                    .await
+                    .unwrap_err(),
+            );
+            assert_lease_unavailable(
+                &mgr.preview_dml(&cx, ATTACKER, &id, "UPDATE t SET x = x", &[])
+                    .await
+                    .unwrap_err(),
+            );
+            assert_lease_unavailable(
+                &mgr.enable_dbms_output(&cx, ATTACKER, &id)
+                    .await
+                    .unwrap_err(),
+            );
+            assert_lease_unavailable(
+                &mgr.apply_session_statement(
+                    &cx,
+                    ATTACKER,
+                    &id,
+                    "ALTER SESSION SET CURRENT_SCHEMA = HR",
+                )
+                .await
+                .unwrap_err(),
+            );
+            assert_lease_unavailable(&mgr.release(&cx, ATTACKER, &id).await.unwrap_err());
+
+            {
+                let log = log.lock().unwrap();
+                assert_eq!(log.executed.len(), baseline, "no attacker DB call");
+                assert_eq!(log.commits, 0);
+                assert_eq!(log.rollbacks, 0);
+            }
+
+            // A refreshed token resolving to the exact same canonical owner
+            // retains access; a different OAuth client tuple above does not.
+            mgr.begin_transaction(&cx, OWNER, &id)
+                .await
+                .expect("same canonical owner can begin");
+            mgr.rollback(&cx, OWNER, &id)
+                .await
+                .expect("same canonical owner can rollback");
+            mgr.release(&cx, OWNER, &id)
+                .await
+                .expect("same canonical owner can release");
+        });
+    }
+
+    #[test]
+    fn unknown_and_wrong_owner_denials_are_indistinguishable() {
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (conn, _) = mock();
+            let id = mgr
+                .acquire(&cx, "dev", "owner", Duration::from_secs(900), &[], conn)
+                .await
+                .expect("acquire");
+            let wrong = mgr.info(&cx, "wrong", &id).await.unwrap_err();
+            let unknown = mgr
+                .info(&cx, "owner", &LeaseId("lease_unknown".to_owned()))
+                .await
+                .unwrap_err();
+            assert_lease_unavailable(&wrong);
+            assert_lease_unavailable(&unknown);
+            assert_eq!(wrong.to_string(), unknown.to_string());
         });
     }
 
@@ -1236,12 +1409,12 @@ mod tests {
                 .acquire(&cx, "dev", "a", Duration::from_secs(900), &[], conn)
                 .await
                 .expect("acquire");
-            mgr.begin_transaction(&cx, &id).await.expect("begin");
-            assert!(mgr.info(&cx, &id).await.unwrap().in_transaction);
-            mgr.commit(&cx, &id).await.expect("commit");
-            assert!(!mgr.info(&cx, &id).await.unwrap().in_transaction);
-            mgr.begin_transaction(&cx, &id).await.expect("begin2");
-            mgr.rollback(&cx, &id).await.expect("rollback");
+            mgr.begin_transaction(&cx, "a", &id).await.expect("begin");
+            assert!(mgr.info(&cx, "a", &id).await.unwrap().in_transaction);
+            mgr.commit(&cx, "a", &id).await.expect("commit");
+            assert!(!mgr.info(&cx, "a", &id).await.unwrap().in_transaction);
+            mgr.begin_transaction(&cx, "a", &id).await.expect("begin2");
+            mgr.rollback(&cx, "a", &id).await.expect("rollback");
             let log = log.lock().unwrap();
             assert_eq!(log.commits, 1);
             assert_eq!(log.rollbacks, 1);
@@ -1264,9 +1437,9 @@ mod tests {
                 )
                 .await
                 .expect("acquire");
-            mgr.begin_transaction(&cx, &id).await.expect("begin");
+            mgr.begin_transaction(&cx, "a", &id).await.expect("begin");
             let err = mgr
-                .commit(&cx, &id)
+                .commit(&cx, "a", &id)
                 .await
                 .expect_err("lost commit response is in doubt");
             assert!(
@@ -1282,7 +1455,7 @@ mod tests {
             assert_eq!(log.lock().unwrap().commits, 1);
             assert_eq!(mgr.active_count(), 0, "in-doubt commit quarantines lease");
             assert!(
-                mgr.info(&cx, &id).await.is_err(),
+                mgr.info(&cx, "a", &id).await.is_err(),
                 "quarantined lease is never reused"
             );
         });
@@ -1304,9 +1477,9 @@ mod tests {
                 )
                 .await
                 .expect("acquire");
-            mgr.begin_transaction(&cx, &id).await.expect("begin");
+            mgr.begin_transaction(&cx, "a", &id).await.expect("begin");
             let err = mgr
-                .rollback(&cx, &id)
+                .rollback(&cx, "a", &id)
                 .await
                 .expect_err("rollback failure quarantines");
             assert!(
@@ -1336,7 +1509,7 @@ mod tests {
                 .await
                 .expect("acquire");
             // begin_transaction should reap the already-expired lease.
-            let err = mgr.begin_transaction(&cx, &id).await.unwrap_err();
+            let err = mgr.begin_transaction(&cx, "a", &id).await.unwrap_err();
             assert!(matches!(err, DbError::LeaseNotFound(_)));
             assert_eq!(mgr.active_count(), 0, "expired lease was reaped");
             assert_eq!(log.lock().unwrap().commits, 0);
@@ -1352,7 +1525,7 @@ mod tests {
                 .acquire(&cx, "dev", "a", Duration::from_secs(900), &[], conn)
                 .await
                 .expect("acquire");
-            mgr.begin_transaction(&cx, &id).await.expect("begin");
+            mgr.begin_transaction(&cx, "a", &id).await.expect("begin");
             let (conn2, log2) = mock();
             let id2 = mgr
                 .acquire(&cx, "dev", "b", Duration::from_secs(0), &[], conn2)
@@ -1360,8 +1533,8 @@ mod tests {
                 .expect("acquire2");
             let reaped = mgr.reap_expired(&cx).await;
             assert!(reaped >= 1);
-            assert!(mgr.info(&cx, &id).await.is_ok());
-            assert!(mgr.info(&cx, &id2).await.is_err());
+            assert!(mgr.info(&cx, "a", &id).await.is_ok());
+            assert!(mgr.info(&cx, "b", &id2).await.is_err());
             let _ = (log, log2);
         });
     }
@@ -1375,20 +1548,20 @@ mod tests {
                 .acquire(&cx, "dev", "a", Duration::from_secs(900), &[], conn)
                 .await
                 .expect("acquire");
-            mgr.begin_transaction(&cx, &id).await.expect("begin");
+            mgr.begin_transaction(&cx, "a", &id).await.expect("begin");
             let stale = mgr.lease_arc(&id.0).expect("prevalidated handle");
 
-            mgr.release(&cx, &id).await;
+            mgr.release(&cx, "a", &id).await.expect("release");
             let mut stale_lease = stale.lock(&cx).await.expect("stale handle lock");
             let error = mgr
-                .validate_locked(&cx, &id.0, &stale, &mut stale_lease)
+                .validate_locked(&cx, &id.0, "a", &stale, &mut stale_lease)
                 .await
                 .expect_err("released handle must stay revoked");
             assert!(matches!(error, DbError::LeaseNotFound(_)));
             drop(stale_lease);
 
             assert_eq!(log.lock().unwrap().rollbacks, 1, "release rolls back once");
-            assert!(mgr.savepoint(&cx, &id, "late").await.is_err());
+            assert!(mgr.savepoint(&cx, "a", &id, "late").await.is_err());
             assert_eq!(
                 log.lock().unwrap().rollbacks,
                 1,
@@ -1411,9 +1584,13 @@ mod tests {
                 .acquire(&cx, "dev", "a", Duration::from_secs(900), &[], conn)
                 .await
                 .expect("acquire");
-            assert!(mgr.savepoint(&cx, &id, "sp1").await.is_ok());
-            assert!(mgr.savepoint(&cx, &id, "sp1; DROP TABLE t").await.is_err());
-            assert!(mgr.savepoint(&cx, &id, "1bad").await.is_err());
+            assert!(mgr.savepoint(&cx, "a", &id, "sp1").await.is_ok());
+            assert!(
+                mgr.savepoint(&cx, "a", &id, "sp1; DROP TABLE t")
+                    .await
+                    .is_err()
+            );
+            assert!(mgr.savepoint(&cx, "a", &id, "1bad").await.is_err());
         });
     }
 
@@ -1428,7 +1605,7 @@ mod tests {
                 .expect("acquire");
 
             let err = mgr
-                .apply_session_statement(&cx, &id, "ALTER SESSION SET CONTAINER = CDB$ROOT")
+                .apply_session_statement(&cx, "a", &id, "ALTER SESSION SET CONTAINER = CDB$ROOT")
                 .await
                 .expect_err("forbidden alter session must be rejected in lease layer");
             assert!(matches!(err, DbError::UnsupportedFeature(_)), "{err:?}");
@@ -1441,7 +1618,7 @@ mod tests {
                 "forbidden statement must not reach the database"
             );
 
-            mgr.apply_session_statement(&cx, &id, "ALTER SESSION SET CURRENT_SCHEMA = HR")
+            mgr.apply_session_statement(&cx, "a", &id, "ALTER SESSION SET CURRENT_SCHEMA = HR")
                 .await
                 .expect("allowlisted alter session");
             assert!(
@@ -1468,14 +1645,14 @@ mod tests {
             .await;
 
             let error = mgr
-                .savepoint(&cx, &id, "SP_CANCEL")
+                .savepoint(&cx, "a", &id, "SP_CANCEL")
                 .await
                 .expect_err("uncertain savepoint is quarantined");
             assert_quarantined_rolled_back(&error);
             assert_eq!(mgr.active_count(), 0);
             assert_eq!(log.lock().unwrap().rollbacks, 1);
             let calls = log.lock().unwrap().executed.len();
-            assert!(mgr.savepoint(&cx, &id, "LATE").await.is_err());
+            assert!(mgr.savepoint(&cx, "a", &id, "LATE").await.is_err());
             assert_eq!(log.lock().unwrap().executed.len(), calls);
         });
     }
@@ -1491,16 +1668,16 @@ mod tests {
                 DbError::Cancelled("response lost after DBMS_OUTPUT effect".to_owned()),
             )
             .await;
-            mgr.begin_transaction(&cx, &id).await.expect("begin");
+            mgr.begin_transaction(&cx, "a", &id).await.expect("begin");
 
             let error = mgr
-                .enable_dbms_output(&cx, &id)
+                .enable_dbms_output(&cx, "a", &id)
                 .await
                 .expect_err("uncertain enablement is quarantined");
             assert_quarantined_rolled_back(&error);
             assert_eq!(mgr.active_count(), 0);
             assert_eq!(log.lock().unwrap().rollbacks, 1);
-            assert!(mgr.info(&cx, &id).await.is_err());
+            assert!(mgr.info(&cx, "a", &id).await.is_err());
         });
     }
 
@@ -1516,16 +1693,16 @@ mod tests {
                 DbError::Cancelled("response lost after ALTER SESSION effect".to_owned()),
             )
             .await;
-            mgr.begin_transaction(&cx, &id).await.expect("begin");
+            mgr.begin_transaction(&cx, "a", &id).await.expect("begin");
 
             let error = mgr
-                .apply_session_statement(&cx, &id, ALTER)
+                .apply_session_statement(&cx, "a", &id, ALTER)
                 .await
                 .expect_err("uncertain ALTER SESSION is quarantined");
             assert_quarantined_rolled_back(&error);
             assert_eq!(mgr.active_count(), 0);
             assert_eq!(log.lock().unwrap().rollbacks, 1);
-            assert!(mgr.info(&cx, &id).await.is_err());
+            assert!(mgr.info(&cx, "a", &id).await.is_err());
         });
     }
 
@@ -1542,7 +1719,7 @@ mod tests {
             .await;
 
             let error = mgr
-                .preview_dml(&cx, &id, "UPDATE employees SET name = name", &[])
+                .preview_dml(&cx, "a", &id, "UPDATE employees SET name = name", &[])
                 .await
                 .expect_err("uncertain preview savepoint is quarantined");
             assert_quarantined_rolled_back(&error);
@@ -1573,13 +1750,13 @@ mod tests {
             .await;
 
             let error = mgr
-                .apply_session_statement(&cx, &id, ALTER)
+                .apply_session_statement(&cx, "a", &id, ALTER)
                 .await
                 .expect_err("deterministic Oracle error is returned");
             assert!(matches!(error, DbError::Execute(_)));
             assert!(!error.is_uncertain_session_state());
             assert_eq!(mgr.active_count(), 1);
-            mgr.savepoint(&cx, &id, "AFTER_ERROR")
+            mgr.savepoint(&cx, "a", &id, "AFTER_ERROR")
                 .await
                 .expect("known-safe failure leaves lease reusable");
             assert_eq!(log.lock().unwrap().rollbacks, 0);
@@ -1595,8 +1772,8 @@ mod tests {
                 .acquire(&cx, "dev", "a", Duration::from_secs(900), &[], conn)
                 .await
                 .expect("acquire");
-            let before = mgr.info(&cx, &id).await.unwrap().expires_in_ms;
-            let renewed = mgr.renew(&cx, &id).await.expect("renew");
+            let before = mgr.info(&cx, "a", &id).await.unwrap().expires_in_ms;
+            let renewed = mgr.renew(&cx, "a", &id).await.expect("renew");
             assert!(renewed.expires_in_ms > 0);
             // Roughly the full TTL again.
             assert!(renewed.expires_in_ms >= before.saturating_sub(1000));
@@ -1622,6 +1799,7 @@ mod tests {
             let err = mgr
                 .preview_dml(
                     &cx,
+                    "a",
                     &id,
                     "UPDATE employees SET name = name WHERE employee_id = :1",
                     &[OracleBind::I64(100)],
@@ -1679,6 +1857,7 @@ mod tests {
             let err = mgr
                 .preview_dml(
                     &cx,
+                    "a",
                     &id,
                     "DELETE FROM employees WHERE employee_id = :1",
                     &[OracleBind::I64(100)],
@@ -1706,7 +1885,7 @@ mod tests {
                 "uncertain preview cleanup removes the lease from reuse"
             );
             assert!(
-                mgr.info(&cx, &id).await.is_err(),
+                mgr.info(&cx, "a", &id).await.is_err(),
                 "discarded lease is no longer usable"
             );
         });

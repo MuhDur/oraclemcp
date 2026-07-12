@@ -88,11 +88,13 @@ fn lease_teardown_with_open_transaction_forces_rollback() {
             .acquire(&cx, "dev", "agent-a", Duration::from_secs(900), &[], conn)
             .await
             .expect("acquire");
-        mgr.begin_transaction(&cx, &id).await.expect("begin txn");
+        mgr.begin_transaction(&cx, "agent-a", &id)
+            .await
+            .expect("begin txn");
         assert_eq!(mgr.active_count(), 1);
 
         // Teardown (same path expiry-reaping uses) must force a rollback.
-        mgr.release(&cx, &id).await;
+        mgr.release(&cx, "agent-a", &id).await.expect("release");
         assert_eq!(
             rollbacks.load(Ordering::SeqCst),
             1,
@@ -115,7 +117,10 @@ fn expired_lease_is_reaped() {
             .await
             .expect("acquire");
         assert!(mgr.reap_expired(&cx).await >= 1, "expired lease reaped");
-        assert!(mgr.info(&cx, &id).await.is_err(), "reaped lease is gone");
+        assert!(
+            mgr.info(&cx, "b", &id).await.is_err(),
+            "reaped lease is gone"
+        );
     });
 }
 
