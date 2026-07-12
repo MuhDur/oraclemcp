@@ -1,7 +1,7 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -879,12 +879,34 @@ fn run_restore(
     let stop = stop_step(manager, &options.name)?;
     let start = start_step(manager, &options.name)?;
 
+    let mut apply_report: Option<RestoreApplyReport> = None;
     if !options.dry_run {
         execute_steps(std::slice::from_ref(&stop))?;
-        prepared.apply()?;
-        execute_steps(std::slice::from_ref(&start))?;
+        match prepared.apply() {
+            Ok(report) => {
+                apply_report = Some(report);
+                execute_steps(std::slice::from_ref(&start))?;
+            }
+            Err(apply_err) => {
+                // The transaction rolled the original state back (or preserved
+                // durable recovery artifacts); bring the service back up on its
+                // recovered state before surfacing the failure.
+                let _ = execute_steps(std::slice::from_ref(&start));
+                return Err(apply_err);
+            }
+        }
     }
 
+    let quarantine = apply_report.as_ref().map(|report| {
+        serde_json::json!({
+            "state": report.state_quarantine.as_ref().map(|path| path.display().to_string()),
+            "files": report
+                .file_quarantines
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>(),
+        })
+    });
     let payload = serde_json::json!({
         "ok": true,
         "kind": "oraclemcp_service_restore",
@@ -896,6 +918,7 @@ fn run_restore(
         "target_config_path": options.config_path.display().to_string(),
         "target_audit_path": options.audit_path.display().to_string(),
         "audit_verification": audit_verification,
+        "pre_restore_quarantine": quarantine,
         "steps": [stop, start],
     });
     let audit_text = match audit_verification {
@@ -1056,22 +1079,174 @@ fn service_backup_store_error(error: oraclemcp_core::FileStoreError) -> ServiceE
     service_store_error(error)
 }
 
+/// Bounded retries for capturing a self-consistent audit log + head-anchor pair
+/// during a hot backup (bead oraclemcp-qa100 .26). A pair that stays torn across
+/// this budget fails the backup closed rather than publishing an unrestorable
+/// artifact.
+const AUDIT_PAIR_MAX_ATTEMPTS: usize = 4;
+
 fn copy_audit_for_backup(
     audit_path: &Path,
     output: &Path,
 ) -> Result<(BackupFileManifest, BackupFileManifest), ServiceError> {
-    // Keep the audit payload independent from the state-tree snapshot even when
-    // its live path happens to sit below the state directory. Restore targets
-    // are current, explicit operator configuration; source_path is provenance
-    // only and is never a write authority.
+    copy_audit_for_backup_probed(audit_path, output, |_| {})
+}
+
+/// Copy the audit log and its signed head anchor into the backup as a *consistent
+/// pair* (bead oraclemcp-qa100 .26), as defense in depth on top of the
+/// service-owner lock (bead .1) that already forces backups offline.
+///
+/// Two disciplines protect the pair even if that lock is ever bypassed by a
+/// non-auditor writer:
+///
+///  1. **Anchor before log.** The auditor fsyncs a record *then* updates the
+///     anchor, so the source anchor is never ahead of the source log. Copying
+///     the anchor first means any durable append that lands between the two
+///     copies can only leave the copied anchor *behind* the copied log
+///     (`AnchorStatus::Behind`), which restore accepts. The reverse order — the
+///     filename sort copies `audit.jsonl` before `audit.jsonl.anchor` — can
+///     strand an anchor ahead of the log (`AnchorViolation::Truncated`), which
+///     restore refuses as tampering.
+///  2. **Verify + bounded retry.** After each attempt the copied pair is
+///     re-read and structurally checked for tearing (anchor seq ahead of the
+///     copied log head, or a head-hash mismatch). A torn copy is retried; a pair
+///     that stays torn fails the backup closed.
+///
+/// Keep the audit payload independent from the state-tree snapshot even when its
+/// live path happens to sit below the state directory: restore always
+/// authenticates and applies *this* pair, so an incidental (unordered) copy of
+/// the same files inside the state tree is never the restore-authoritative pair.
+/// Restore targets are current, explicit operator configuration; `source_path`
+/// is provenance only and is never a write authority.
+///
+/// `between_copies` is a test seam invoked after the anchor copy and before the
+/// log copy (the exact race window); it is a no-op in production.
+fn copy_audit_for_backup_probed(
+    audit_path: &Path,
+    output: &Path,
+    mut between_copies: impl FnMut(usize),
+) -> Result<(BackupFileManifest, BackupFileManifest), ServiceError> {
     let anchor_source = oraclemcp_audit::anchor_path_for(audit_path);
-    let audit = copy_optional_file(audit_path, &output.join("audit").join("audit.jsonl"))?;
-    let anchor = copy_optional_file(
-        &anchor_source,
-        &output.join("audit").join("audit.jsonl.anchor"),
-    )?;
-    require_audit_anchor_pair(&audit, &anchor, "backup")?;
-    Ok((audit, anchor))
+    let anchor_dest = output.join("audit").join("audit.jsonl.anchor");
+    let log_dest = output.join("audit").join("audit.jsonl");
+    let mut last_reason = String::from("no attempt completed");
+    for attempt in 0..AUDIT_PAIR_MAX_ATTEMPTS {
+        // Anchor first (see the ordering discipline above).
+        let anchor = copy_optional_file(&anchor_source, &anchor_dest)?;
+        between_copies(attempt);
+        let audit = copy_optional_file(audit_path, &log_dest)?;
+        require_audit_anchor_pair(&audit, &anchor, "backup")?;
+        match classify_backup_audit_pair(&log_dest, &anchor_dest, &audit)? {
+            AuditPairConsistency::ConsistentOrAbsent => return Ok((audit, anchor)),
+            AuditPairConsistency::Torn(reason) => last_reason = reason,
+        }
+    }
+    Err(ServiceError::new(
+        "ORACLEMCP_SERVICE_BACKUP_AUDIT_TORN",
+        format!(
+            "audit log and head anchor stayed inconsistent across {AUDIT_PAIR_MAX_ATTEMPTS} attempts ({last_reason}); refusing to publish an unrestorable backup"
+        ),
+        3,
+    ))
+}
+
+/// Whether a copied audit log + anchor pair is safe to publish.
+enum AuditPairConsistency {
+    /// Both absent, or the anchor is `Match`/`Behind` the log head.
+    ConsistentOrAbsent,
+    /// The copied anchor runs ahead of the copied log (or a partial/interleaved
+    /// copy). Retryable — the source may still settle.
+    Torn(String),
+}
+
+/// Minimal projection of an audit record for the keyless structural cross-check.
+#[derive(Deserialize)]
+struct AuditRecordHead {
+    seq: u64,
+    entry_hash: String,
+}
+
+/// Structurally cross-check the copied anchor against the copied log with
+/// *bounded memory* and *without the audit signing key* (backup holds only the
+/// manifest signing key; the anchor MAC is authenticated later at restore).
+///
+/// The only thing that must never ship is an anchor ahead of the log
+/// (`AnchorViolation::Truncated`). The log is scanned line by line, retaining
+/// only the head seq and whether some record matches the anchor's `seq` +
+/// `entry_hash`; a torn or interleaved copy is reported as retryable rather than
+/// a hard error, so a concurrent writer is ridden out by a re-copy.
+fn classify_backup_audit_pair(
+    log_dest: &Path,
+    anchor_dest: &Path,
+    audit: &BackupFileManifest,
+) -> Result<AuditPairConsistency, ServiceError> {
+    // A one-sided pair is already rejected by require_audit_anchor_pair; both
+    // absent is a consistent (empty) pair.
+    if !audit.present {
+        return Ok(AuditPairConsistency::ConsistentOrAbsent);
+    }
+    let anchor_body = match fs::read_to_string(anchor_dest) {
+        Ok(body) => body,
+        Err(e) => {
+            return Ok(AuditPairConsistency::Torn(format!(
+                "copied head anchor could not be re-read: {e}"
+            )));
+        }
+    };
+    let anchor: oraclemcp_audit::ChainAnchor = match serde_json::from_str(anchor_body.trim()) {
+        Ok(anchor) => anchor,
+        Err(e) => {
+            return Ok(AuditPairConsistency::Torn(format!(
+                "copied head anchor is not yet parseable: {e}"
+            )));
+        }
+    };
+    let log = File::open(log_dest)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_READ_FAILED", log_dest, e))?;
+    let mut reader = BufReader::new(log);
+    let mut line = String::new();
+    let mut head_seq = 0_u64;
+    let mut saw_record = false;
+    let mut anchor_record_matches = false;
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_READ_FAILED", log_dest, e))?;
+        if read == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let record: AuditRecordHead = match serde_json::from_str(trimmed) {
+            Ok(record) => record,
+            Err(e) => {
+                return Ok(AuditPairConsistency::Torn(format!(
+                    "copied audit log has an unparseable record (partial copy?): {e}"
+                )));
+            }
+        };
+        saw_record = true;
+        head_seq = head_seq.max(record.seq);
+        if record.seq == anchor.seq && record.entry_hash == anchor.entry_hash {
+            anchor_record_matches = true;
+        }
+    }
+    if !saw_record || anchor.seq > head_seq {
+        return Ok(AuditPairConsistency::Torn(format!(
+            "anchor seq {} is ahead of the copied log head {head_seq}",
+            anchor.seq
+        )));
+    }
+    if !anchor_record_matches {
+        return Ok(AuditPairConsistency::Torn(format!(
+            "anchor seq {} does not match any copied log record's entry hash",
+            anchor.seq
+        )));
+    }
+    Ok(AuditPairConsistency::ConsistentOrAbsent)
 }
 
 fn require_audit_anchor_pair(
@@ -1169,13 +1344,67 @@ fn copy_dir_snapshot_inner(
         .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_SYNC_FAILED", target, e))
 }
 
+/// What a successful transactional restore left behind, surfaced so operators
+/// can find the retained pre-restore trees (bead oraclemcp-qa100 .25).
+#[derive(Debug, Default, Clone)]
+struct RestoreApplyReport {
+    state_quarantine: Option<PathBuf>,
+    file_quarantines: Vec<PathBuf>,
+}
+
+/// A file written next to its live destination, fsynced and ready to be renamed
+/// into place during the commit phase.
+#[derive(Debug)]
+struct StagedOutsideFile {
+    temp_path: PathBuf,
+    target_path: PathBuf,
+}
+
+/// One committed rename recorded so the transaction can be undone in reverse:
+/// `to` is where the entry now lives, and undo renames it back to `from`.
+#[derive(Debug)]
+struct CommittedRename {
+    from: PathBuf,
+    to: PathBuf,
+}
+
 impl PreparedRestore {
-    fn apply(&mut self) -> Result<(), ServiceError> {
-        let state_dir = open_or_create_dir_chain(
-            &self.state_target.root,
-            &self.state_target.relative_path,
-            &self.state_target.display_path,
-        )?;
+    /// Apply the authenticated backup as an *exact transactional replacement*
+    /// (bead oraclemcp-qa100 .25).
+    ///
+    /// The complete replacement state tree is first built in a private sibling
+    /// staging directory and every out-of-tree file is written to a fsynced
+    /// sibling temp — no live byte is touched during this phase. The commit
+    /// phase then quarantines the prior state tree under a timestamped sibling
+    /// and swaps the staged tree in with a single atomic rename, doing the same
+    /// quarantine-then-rename for each out-of-tree file. Any failure during the
+    /// commit rolls the renames back in reverse, leaving the original running
+    /// state intact (the caller then best-effort restarts the service). A
+    /// restore therefore ends in exactly one of two states — the complete prior
+    /// tree or the complete restored tree — never a half-applied mix, and any
+    /// post-backup file removed by the replacement survives in the retained
+    /// quarantine rather than in the live tree.
+    fn apply(&mut self) -> Result<RestoreApplyReport, ServiceError> {
+        let state_display = self.state_target.display_path.clone();
+
+        // Tighten-only (fail closed): refuse a symlinked live state directory
+        // rather than quarantine-and-replace it, so a restore can never be
+        // redirected through an operator- or attacker-planted link.
+        if let Ok(metadata) = fs::symlink_metadata(&state_display)
+            && metadata.file_type().is_symlink()
+        {
+            return Err(ServiceError::new(
+                "ORACLEMCP_SERVICE_RESTORE_UNSAFE_PATH",
+                format!(
+                    "refusing to restore over symlinked state directory {}",
+                    state_display.display()
+                ),
+                2,
+            ));
+        }
+
+        // Post-restore inventory the committed tree must match exactly: the
+        // authenticated state files plus any in-tree config/audit destinations.
         let mut expected_inventory = self
             .state_files
             .iter()
@@ -1191,83 +1420,425 @@ impl PreparedRestore {
         .into_iter()
         .flatten()
         {
-            if let Ok(relative) = target
-                .display_path
-                .strip_prefix(&self.state_target.display_path)
-                && !relative.as_os_str().is_empty()
-            {
-                expected_inventory.push(portable_relative_path(relative)?);
+            if let Some(relative) = in_tree_relative(&state_display, &target.display_path) {
+                expected_inventory.push(portable_relative_path(&relative)?);
             }
         }
         expected_inventory.sort();
         expected_inventory.dedup();
-        let existing_inventory = inventory_target_tree(&state_dir)?;
-        if existing_inventory
-            .iter()
-            .any(|path| expected_inventory.binary_search(path).is_err())
-        {
-            return Err(ServiceError::new(
-                "ORACLEMCP_SERVICE_RESTORE_TARGET_INVALID",
-                format!(
-                    "target state directory contains files outside the authenticated backup inventory: {existing_inventory:?}"
-                ),
-                2,
-            ));
-        }
+
+        // ---- Phase 1: stage everything; no live byte is touched. ----
+        let (staging_dir_path, staging_dir) = create_private_staging_dir(&self.state_target)?;
         for file in &mut self.state_files {
             let target = PreparedTarget {
-                root: state_dir.try_clone().map_err(|e| {
+                root: staging_dir.try_clone().map_err(|e| {
                     service_io_error(
-                        "ORACLEMCP_SERVICE_RESTORE_TARGET_INVALID",
-                        &self.state_target.display_path,
+                        "ORACLEMCP_SERVICE_RESTORE_WRITE_FAILED",
+                        &staging_dir_path,
                         e,
                     )
                 })?,
                 relative_path: file.relative_path.clone(),
-                display_path: self.state_target.display_path.join(&file.relative_path),
+                display_path: staging_dir_path.join(&file.relative_path),
             };
             write_prepared_file(&mut file.source, &target)?;
         }
-        if let Some(config) = self.config.as_mut() {
-            write_prepared_file(config, &self.config_target)?;
+        let mut outside_files = Vec::new();
+        Self::stage_member(
+            self.config.as_mut(),
+            &self.config_target,
+            &state_display,
+            &staging_dir,
+            &staging_dir_path,
+            &mut outside_files,
+        )?;
+        Self::stage_member(
+            self.audit.as_mut(),
+            &self.audit_target,
+            &state_display,
+            &staging_dir,
+            &staging_dir_path,
+            &mut outside_files,
+        )?;
+        Self::stage_member(
+            self.audit_anchor.as_mut(),
+            &self.audit_anchor_target,
+            &state_display,
+            &staging_dir,
+            &staging_dir_path,
+            &mut outside_files,
+        )?;
+
+        // Identity captured before the swap to detect a post-commit dir swap.
+        let staging_ident = dir_identity(&staging_dir).ok();
+
+        // ---- Phase 2: commit transactionally; roll back on any failure. ----
+        let mut undo: Vec<CommittedRename> = Vec::new();
+        let mut report = RestoreApplyReport::default();
+        match commit_restore(
+            &self.state_target,
+            &state_display,
+            &staging_dir_path,
+            &outside_files,
+            &expected_inventory,
+            staging_ident,
+            &mut undo,
+            &mut report,
+        ) {
+            Ok(()) => Ok(report),
+            Err(commit_err) => {
+                if rollback_restore(&undo) {
+                    // Original state is whole again; sweep the orphaned staging
+                    // artifacts so the only durable leftover is the recovered
+                    // live tree.
+                    let _ = fs::remove_dir_all(&staging_dir_path);
+                    for staged in &outside_files {
+                        let _ = fs::remove_file(&staged.temp_path);
+                    }
+                    Err(commit_err)
+                } else {
+                    // Rollback was incomplete: keep every artifact and point the
+                    // operator at the durable recovery inputs.
+                    Err(ServiceError::new(
+                        commit_err.code,
+                        format!(
+                            "{}; automatic rollback was incomplete — recover manually from staging {} and any `.pre-restore` / `.restore-staging` siblings",
+                            commit_err.message,
+                            staging_dir_path.display()
+                        ),
+                        commit_err.exit_code,
+                    ))
+                }
+            }
         }
-        if let Some(audit) = self.audit.as_mut() {
-            write_prepared_file(audit, &self.audit_target)?;
-        }
-        if let Some(anchor) = self.audit_anchor.as_mut() {
-            write_prepared_file(anchor, &self.audit_anchor_target)?;
-        }
-        let restored_inventory = inventory_target_tree(&state_dir)?;
-        if restored_inventory != expected_inventory {
-            return Err(ServiceError::new(
-                "ORACLEMCP_SERVICE_RESTORE_TARGET_INVALID",
-                format!(
-                    "target state inventory changed during restore (expected {expected_inventory:?}, found {restored_inventory:?})"
-                ),
-                2,
-            ));
-        }
-        let current_state_dir =
-            open_dir_chain_nofollow(&self.state_target.root, &self.state_target.relative_path)
-                .map_err(|e| {
+    }
+
+    /// Stage one optional member: written inside the staging state tree when its
+    /// destination sits under the state directory, otherwise as a fsynced
+    /// sibling temp queued for the commit swap.
+    fn stage_member(
+        source: Option<&mut PreparedBackupFile>,
+        target: &PreparedTarget,
+        state_display: &Path,
+        staging_dir: &Dir,
+        staging_dir_path: &Path,
+        outside_files: &mut Vec<StagedOutsideFile>,
+    ) -> Result<(), ServiceError> {
+        let Some(source) = source else {
+            return Ok(());
+        };
+        if let Some(relative) = in_tree_relative(state_display, &target.display_path) {
+            let in_tree = PreparedTarget {
+                root: staging_dir.try_clone().map_err(|e| {
                     service_io_error(
-                        "ORACLEMCP_SERVICE_RESTORE_UNSAFE_PATH",
-                        &self.state_target.display_path,
+                        "ORACLEMCP_SERVICE_RESTORE_WRITE_FAILED",
+                        staging_dir_path,
                         e,
                     )
-                })?;
-        if !same_capability_identity(&state_dir, &current_state_dir)? {
-            return Err(ServiceError::new(
-                "ORACLEMCP_SERVICE_RESTORE_UNSAFE_PATH",
-                format!(
-                    "target state directory {} was replaced during restore",
-                    self.state_target.display_path.display()
-                ),
-                2,
-            ));
+                })?,
+                relative_path: relative.clone(),
+                display_path: staging_dir_path.join(&relative),
+            };
+            write_prepared_file(source, &in_tree)
+        } else {
+            outside_files.push(stage_outside_file(source, target)?);
+            Ok(())
         }
-        Ok(())
     }
+}
+
+/// The destination's path relative to the state directory, or `None` when it
+/// sits outside the state tree (or *is* the state directory).
+fn in_tree_relative(state_display: &Path, target_display: &Path) -> Option<PathBuf> {
+    match target_display.strip_prefix(state_display) {
+        Ok(relative) if !relative.as_os_str().is_empty() => Some(relative.to_path_buf()),
+        _ => None,
+    }
+}
+
+/// A `.<name>.<tag>.<pid>.<nanos>` sibling of `path` for staging/quarantine.
+fn transaction_sibling(path: &Path, tag: &str) -> PathBuf {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let name = path
+        .file_name()
+        .map_or_else(|| OsString::from("restore-target"), OsStr::to_os_string);
+    let mut file = OsString::from(".");
+    file.push(&name);
+    file.push(format!(
+        ".{tag}.{}.{}",
+        std::process::id(),
+        timestamp_suffix()
+    ));
+    parent.join(file)
+}
+
+/// Create the private sibling directory that will hold the fully-staged
+/// replacement state tree, returning its path and an open capability to it.
+fn create_private_staging_dir(
+    state_target: &PreparedTarget,
+) -> Result<(PathBuf, Dir), ServiceError> {
+    // The staging directory is a sibling of the state directory; make sure that
+    // shared parent chain exists (a fresh restore target may not have it yet)
+    // before creating the private staging directory beside it.
+    let parent_relative = state_target
+        .relative_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    open_or_create_dir_chain(
+        &state_target.root,
+        parent_relative,
+        &state_target.display_path,
+    )?;
+    let path = transaction_sibling(&state_target.display_path, "restore-staging");
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&path)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_RESTORE_WRITE_FAILED", &path, e))?;
+    let dir = Dir::open_ambient_dir(&path, ambient_authority())
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_RESTORE_UNSAFE_PATH", &path, e))?;
+    Ok((path, dir))
+}
+
+/// Write `source` into a fsynced sibling temp of `target`, ready for the commit
+/// swap. The temp is created O_EXCL and never follows a symlink.
+fn stage_outside_file(
+    source: &mut PreparedBackupFile,
+    target: &PreparedTarget,
+) -> Result<StagedOutsideFile, ServiceError> {
+    let file_name = target.relative_path.file_name().ok_or_else(|| {
+        ServiceError::new(
+            "ORACLEMCP_SERVICE_RESTORE_TARGET_INVALID",
+            format!(
+                "restore target {} has no file name",
+                target.display_path.display()
+            ),
+            2,
+        )
+    })?;
+    let parent_path = target
+        .relative_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = open_or_create_dir_chain(&target.root, parent_path, &target.display_path)?;
+    let temp_name = OsString::from(format!(
+        ".{}.restore-staging.{}.{}",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        timestamp_suffix()
+    ));
+    let mut options = CapOpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut output = parent.open_with(&temp_name, &options).map_err(|e| {
+        service_io_error(
+            "ORACLEMCP_SERVICE_RESTORE_WRITE_FAILED",
+            &target.display_path,
+            e,
+        )
+    })?;
+    source.snapshot.seek(SeekFrom::Start(0)).map_err(|e| {
+        service_io_error(
+            "ORACLEMCP_SERVICE_RESTORE_WRITE_FAILED",
+            &target.display_path,
+            e,
+        )
+    })?;
+    let copied = io::copy(&mut source.snapshot, &mut output).map_err(|e| {
+        service_io_error(
+            "ORACLEMCP_SERVICE_RESTORE_WRITE_FAILED",
+            &target.display_path,
+            e,
+        )
+    })?;
+    if copied != source.bytes {
+        return Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_RESTORE_WRITE_FAILED",
+            format!(
+                "private restore snapshot for {} changed length unexpectedly",
+                target.display_path.display()
+            ),
+            3,
+        ));
+    }
+    output.sync_all().map_err(|e| {
+        service_io_error(
+            "ORACLEMCP_SERVICE_RESTORE_WRITE_FAILED",
+            &target.display_path,
+            e,
+        )
+    })?;
+    drop(output);
+    #[cfg(not(windows))]
+    parent
+        .open(".")
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| {
+            service_io_error(
+                "ORACLEMCP_SERVICE_RESTORE_WRITE_FAILED",
+                &target.display_path,
+                e,
+            )
+        })?;
+    let temp_path = target
+        .display_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(&temp_name);
+    Ok(StagedOutsideFile {
+        temp_path,
+        target_path: target.display_path.clone(),
+    })
+}
+
+/// Commit the staged replacement into place, recording every rename so a failure
+/// can be rolled back. Quarantines (never destroys) each prior tree/file.
+#[allow(clippy::too_many_arguments)]
+fn commit_restore(
+    state_target: &PreparedTarget,
+    state_display: &Path,
+    staging_dir_path: &Path,
+    outside_files: &[StagedOutsideFile],
+    expected_inventory: &[String],
+    staging_ident: Option<(u64, u64)>,
+    undo: &mut Vec<CommittedRename>,
+    report: &mut RestoreApplyReport,
+) -> Result<(), ServiceError> {
+    // Quarantine the prior state tree, then swap the staged tree in atomically.
+    if fs::symlink_metadata(state_display).is_ok() {
+        let quarantine = transaction_sibling(state_display, "pre-restore");
+        rename_tracked(state_display, &quarantine, undo)?;
+        report.state_quarantine = Some(quarantine);
+    }
+    rename_tracked(staging_dir_path, state_display, undo)?;
+    sync_parent_dir(state_display).map_err(|e| {
+        service_io_error("ORACLEMCP_SERVICE_RESTORE_WRITE_FAILED", state_display, e)
+    })?;
+
+    // Commit each out-of-tree file the same quarantine-then-rename way.
+    for staged in outside_files {
+        if let Ok(metadata) = fs::symlink_metadata(&staged.target_path) {
+            if metadata.file_type().is_symlink() {
+                return Err(ServiceError::new(
+                    "ORACLEMCP_SERVICE_RESTORE_UNSAFE_PATH",
+                    format!(
+                        "refusing to replace symlinked restore target {}",
+                        staged.target_path.display()
+                    ),
+                    2,
+                ));
+            }
+            let quarantine = transaction_sibling(&staged.target_path, "pre-restore");
+            rename_tracked(&staged.target_path, &quarantine, undo)?;
+            report.file_quarantines.push(quarantine);
+        }
+        rename_tracked(&staged.temp_path, &staged.target_path, undo)?;
+        sync_parent_dir(&staged.target_path).map_err(|e| {
+            service_io_error(
+                "ORACLEMCP_SERVICE_RESTORE_WRITE_FAILED",
+                &staged.target_path,
+                e,
+            )
+        })?;
+    }
+
+    verify_committed_state_tree(state_target, expected_inventory, staging_ident)
+}
+
+/// Rename `from` to `to`, recording the move for a possible rollback.
+fn rename_tracked(
+    from: &Path,
+    to: &Path,
+    undo: &mut Vec<CommittedRename>,
+) -> Result<(), ServiceError> {
+    fs::rename(from, to)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_RESTORE_WRITE_FAILED", to, e))?;
+    undo.push(CommittedRename {
+        from: from.to_path_buf(),
+        to: to.to_path_buf(),
+    });
+    Ok(())
+}
+
+/// Undo every recorded rename in reverse. Returns whether every step reverted;
+/// a `false` means some artifact must be recovered manually.
+fn rollback_restore(undo: &[CommittedRename]) -> bool {
+    let mut fully_reverted = true;
+    for step in undo.iter().rev() {
+        if fs::rename(&step.to, &step.from).is_err() {
+            fully_reverted = false;
+        }
+    }
+    fully_reverted
+}
+
+/// Re-open the committed state directory and prove it is the staged tree (dir
+/// identity unchanged since the swap) and matches the authenticated inventory
+/// exactly.
+fn verify_committed_state_tree(
+    state_target: &PreparedTarget,
+    expected_inventory: &[String],
+    staging_ident: Option<(u64, u64)>,
+) -> Result<(), ServiceError> {
+    let state_dir = open_dir_chain_nofollow(&state_target.root, &state_target.relative_path)
+        .map_err(|e| {
+            service_io_error(
+                "ORACLEMCP_SERVICE_RESTORE_UNSAFE_PATH",
+                &state_target.display_path,
+                e,
+            )
+        })?;
+    if let Some(expected_ident) = staging_ident
+        && dir_identity(&state_dir)? != expected_ident
+    {
+        return Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_RESTORE_UNSAFE_PATH",
+            format!(
+                "restored state directory {} was replaced during the commit",
+                state_target.display_path.display()
+            ),
+            2,
+        ));
+    }
+    let inventory = inventory_target_tree(&state_dir)?;
+    if inventory != expected_inventory {
+        return Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_RESTORE_TARGET_INVALID",
+            format!(
+                "restored state inventory does not match the authenticated backup (expected {expected_inventory:?}, found {inventory:?})"
+            ),
+            2,
+        ));
+    }
+    Ok(())
+}
+
+/// The `(dev, ino)` identity of an open directory capability.
+fn dir_identity(dir: &Dir) -> Result<(u64, u64), ServiceError> {
+    let metadata = dir.dir_metadata().map_err(|e| {
+        ServiceError::new(
+            "ORACLEMCP_SERVICE_RESTORE_TARGET_INVALID",
+            format!("failed to inspect restore directory identity: {e}"),
+            3,
+        )
+    })?;
+    Ok((metadata.dev(), metadata.ino()))
 }
 
 fn copy_optional_file(source: &Path, target: &Path) -> Result<BackupFileManifest, ServiceError> {
@@ -4660,5 +5231,252 @@ mod tests {
                 || caps.effective.memory_max_bytes.is_some()
                 || caps.effective.oom_score_adjust.is_some()
         );
+    }
+
+    // ---- bead oraclemcp-qa100 .26: audit log + head anchor as a consistent pair ----
+
+    fn audit_pair_draft() -> AuditEntryDraft {
+        AuditEntryDraft {
+            subject: AuditSubject::new("operator", "qa26"),
+            db_evidence: None,
+            cancel: None,
+            tool: "oracle_execute".to_owned(),
+            sql: "update app.t set c = 1 where id = :id".to_owned(),
+            danger_level: "READ_WRITE".to_owned(),
+            decision: AuditDecision::Allowed,
+            rows_affected: Some(1),
+            outcome: AuditOutcome::Succeeded,
+        }
+    }
+
+    fn audit_record_line(record: &AuditRecord) -> String {
+        format!(
+            "{}\n",
+            serde_json::to_string(record).expect("audit record json")
+        )
+    }
+
+    fn audit_anchor_line(record: &AuditRecord, key: &SigningKey) -> String {
+        format!(
+            "{}\n",
+            serde_json::to_string(&oraclemcp_audit::ChainAnchor::signed(
+                record.seq,
+                &record.entry_hash,
+                key,
+            ))
+            .expect("anchor json")
+        )
+    }
+
+    #[test]
+    fn backup_audit_pair_stays_restorable_when_append_lands_between_copies() {
+        let root = test_root("qa26-append-between-copies");
+        let audit_dir = root.join("live/audit");
+        fs::create_dir_all(&audit_dir).expect("audit dir");
+        let audit_path = audit_dir.join("audit.jsonl");
+        let anchor_path = oraclemcp_audit::anchor_path_for(&audit_path);
+        let output = root.join("backup");
+
+        let key = SigningKey::new("default", b"qa26-audit-pair-key-0123456789ab".to_vec())
+            .expect("valid key");
+        let draft = audit_pair_draft();
+        let rec1 = AuditRecord::chained_signed(&draft, 1, GENESIS_HASH, "t1".to_owned(), &key);
+        let rec2 = AuditRecord::chained_signed(&draft, 2, &rec1.entry_hash, "t2".to_owned(), &key);
+        fs::write(&audit_path, audit_record_line(&rec1)).expect("seed log seq 1");
+        fs::write(&anchor_path, audit_anchor_line(&rec1, &key)).expect("seed anchor seq 1");
+
+        // A durable append of seq 2 lands *after* the anchor copy and *before* the
+        // log copy (the exact race window). Anchor-first ordering leaves the copied
+        // pair anchor-behind, which restore accepts — never Truncated.
+        let (audit, anchor) = copy_audit_for_backup_probed(&audit_path, &output, |attempt| {
+            if attempt == 0 {
+                fs::write(
+                    &audit_path,
+                    format!("{}{}", audit_record_line(&rec1), audit_record_line(&rec2)),
+                )
+                .expect("append seq 2");
+                fs::write(&anchor_path, audit_anchor_line(&rec2, &key)).expect("advance anchor");
+            }
+        })
+        .expect("a consistent pair is captured on the first attempt");
+        assert!(audit.present && anchor.present);
+
+        // The published pair verifies as Behind (restorable), never Truncated.
+        let copied_anchor: oraclemcp_audit::ChainAnchor = serde_json::from_str(
+            fs::read_to_string(output.join("audit/audit.jsonl.anchor"))
+                .expect("copied anchor")
+                .trim(),
+        )
+        .expect("anchor json");
+        assert_eq!(copied_anchor.seq, 1);
+        let log = File::open(output.join("audit/audit.jsonl")).expect("copied log");
+        let status = oraclemcp_audit::check_anchor_reader(
+            BufReader::new(log),
+            &copied_anchor,
+            std::slice::from_ref(&key),
+        )
+        .expect("copied pair cross-checks");
+        assert!(matches!(
+            status,
+            oraclemcp_audit::AnchorStatus::Behind { behind_by: 1 }
+        ));
+    }
+
+    #[test]
+    fn backup_refuses_to_publish_a_torn_audit_pair() {
+        let root = test_root("qa26-torn-pair");
+        let audit_dir = root.join("live/audit");
+        fs::create_dir_all(&audit_dir).expect("audit dir");
+        let audit_path = audit_dir.join("audit.jsonl");
+        let anchor_path = oraclemcp_audit::anchor_path_for(&audit_path);
+        let output = root.join("backup");
+
+        let key = SigningKey::new("default", b"qa26-torn-pair-key-0123456789abcd".to_vec())
+            .expect("valid key");
+        let draft = audit_pair_draft();
+        let rec1 = AuditRecord::chained_signed(&draft, 1, GENESIS_HASH, "t1".to_owned(), &key);
+        let rec2 = AuditRecord::chained_signed(&draft, 2, &rec1.entry_hash, "t2".to_owned(), &key);
+        // A bypassed writer left the source anchor ahead of the log (seq 2 anchor,
+        // seq 1 log) — exactly the AnchorViolation::Truncated shape restore refuses.
+        fs::write(&audit_path, audit_record_line(&rec1)).expect("seed log seq 1");
+        fs::write(&anchor_path, audit_anchor_line(&rec2, &key)).expect("seed ahead anchor");
+
+        let err =
+            copy_audit_for_backup(&audit_path, &output).expect_err("torn pair must fail closed");
+        assert_eq!(err.code, "ORACLEMCP_SERVICE_BACKUP_AUDIT_TORN");
+        assert!(err.message.contains("ahead"));
+    }
+
+    #[test]
+    fn backup_audit_pair_retries_until_the_source_settles() {
+        let root = test_root("qa26-retry-settles");
+        let audit_dir = root.join("live/audit");
+        fs::create_dir_all(&audit_dir).expect("audit dir");
+        let audit_path = audit_dir.join("audit.jsonl");
+        let anchor_path = oraclemcp_audit::anchor_path_for(&audit_path);
+        let output = root.join("backup");
+
+        let key = SigningKey::new("default", b"qa26-retry-key-0123456789abcdef00".to_vec())
+            .expect("valid key");
+        let draft = audit_pair_draft();
+        let rec1 = AuditRecord::chained_signed(&draft, 1, GENESIS_HASH, "t1".to_owned(), &key);
+        fs::write(&audit_path, audit_record_line(&rec1)).expect("seed log");
+        fs::write(&anchor_path, audit_anchor_line(&rec1, &key)).expect("seed anchor");
+
+        let mut observed_attempts = 0;
+        let (audit, anchor) = copy_audit_for_backup_probed(&audit_path, &output, |attempt| {
+            observed_attempts = attempt + 1;
+            if attempt == 0 {
+                // The source is momentarily torn between the two copies: the log
+                // vanishes after the anchor was copied, so the copied pair tears.
+                fs::write(&audit_path, b"").expect("truncate source log");
+            } else {
+                // The source has settled; the re-copy sees a consistent log.
+                fs::write(&audit_path, audit_record_line(&rec1)).expect("restore source log");
+            }
+        })
+        .expect("a bounded retry captures a consistent pair");
+        assert!(
+            observed_attempts >= 2,
+            "expected at least one retry, saw {observed_attempts}"
+        );
+        assert!(audit.present && anchor.present);
+        assert_eq!(
+            fs::read_to_string(output.join("audit/audit.jsonl")).expect("copied log"),
+            audit_record_line(&rec1)
+        );
+    }
+
+    // ---- bead oraclemcp-qa100 .25: restore is an exact transactional replacement ----
+
+    #[test]
+    fn restore_replaces_exactly_and_quarantines_post_backup_files() {
+        let fixture = restore_fixture("qa25-exact-replacement");
+        // The live state tree drifted after the backup: a stale value plus a
+        // post-backup file that is absent from the authenticated backup.
+        fs::create_dir_all(fixture.state_target.join("metrics")).expect("live metrics dir");
+        fs::write(
+            fixture.state_target.join("metrics/snapshot.json"),
+            b"stale-drifted\n",
+        )
+        .expect("stale live state");
+        fs::write(
+            fixture.state_target.join("post-backup-secret.json"),
+            b"leaked-after-backup\n",
+        )
+        .expect("post-backup live file");
+
+        let mut prepared = prepare_restore(&fixture.options()).expect("prepare restore");
+        let report = prepared.apply().expect("exact transactional replacement");
+
+        // The active tree is now exactly the backup.
+        assert_eq!(
+            fs::read(fixture.state_target.join("metrics/snapshot.json")).expect("restored state"),
+            b"fixture-state\n"
+        );
+        // The post-backup file is gone from the active tree ...
+        assert!(
+            !fixture
+                .state_target
+                .join("post-backup-secret.json")
+                .exists(),
+            "post-backup file must not survive in the active tree"
+        );
+        // ... and preserved in the timestamped quarantine, never destroyed.
+        let quarantine = report.state_quarantine.expect("state tree quarantined");
+        assert_eq!(
+            fs::read(quarantine.join("post-backup-secret.json"))
+                .expect("quarantined post-backup file"),
+            b"leaked-after-backup\n"
+        );
+        assert_eq!(
+            fs::read(quarantine.join("metrics/snapshot.json")).expect("quarantined stale state"),
+            b"stale-drifted\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rolls_back_to_original_state_on_mid_commit_failure() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = restore_fixture("qa25-mid-commit-rollback");
+        // A live original that must survive a failed restore intact — never a
+        // hybrid of old and new bytes.
+        fs::create_dir_all(fixture.state_target.join("metrics")).expect("live metrics dir");
+        fs::write(
+            fixture.state_target.join("metrics/snapshot.json"),
+            b"ORIGINAL-live\n",
+        )
+        .expect("original state");
+        fs::write(fixture.state_target.join("live-only.txt"), b"keep-me\n")
+            .expect("live-only file");
+
+        // Force the *outside* config commit to fail after the state tree has
+        // already swapped in: the destination is a symlink, which commit refuses.
+        fs::create_dir_all(fixture.config_target.parent().expect("config parent"))
+            .expect("config dir");
+        let decoy = fixture.root.join("config-decoy.toml");
+        fs::write(&decoy, b"decoy\n").expect("decoy target");
+        symlink(&decoy, &fixture.config_target).expect("symlink config destination");
+
+        let mut prepared = prepare_restore(&fixture.options()).expect("prepare restore");
+        let err = prepared
+            .apply()
+            .expect_err("a symlinked config target aborts the commit");
+        assert_eq!(err.code, "ORACLEMCP_SERVICE_RESTORE_UNSAFE_PATH");
+
+        // The live state was rolled back to the complete original tree.
+        assert_eq!(
+            fs::read(fixture.state_target.join("metrics/snapshot.json"))
+                .expect("rolled-back state"),
+            b"ORIGINAL-live\n"
+        );
+        assert_eq!(
+            fs::read(fixture.state_target.join("live-only.txt")).expect("rolled-back live-only"),
+            b"keep-me\n"
+        );
+        // The restore never wrote through the symlink into the decoy.
+        assert_eq!(fs::read(&decoy).expect("decoy untouched"), b"decoy\n");
     }
 }
