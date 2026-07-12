@@ -5673,6 +5673,7 @@ fn principal_session_close_clears_sessions_buffers_and_lanes() {
             &self,
             principal_key: &str,
             reason: DispatchCloseReason,
+            _min_generation: Option<u64>,
         ) -> usize {
             self.closed
                 .lock()
@@ -5716,6 +5717,7 @@ fn principal_session_close_clears_sessions_buffers_and_lanes() {
             &cfg,
             "client:sha256:aaa",
             DispatchCloseReason::SessionDelete,
+            None,
         ),
         2
     );
@@ -5747,6 +5749,61 @@ fn principal_session_close_clears_sessions_buffers_and_lanes() {
             "client:sha256:aaa".to_owned(),
             DispatchCloseReason::SessionDelete
         )]
+    );
+}
+
+#[test]
+fn principal_session_close_forwards_the_revocation_generation_floor() {
+    // QA100 .92: the HTTP revoke/rotate bridge must forward the bumped credential
+    // generation to the lane lifecycle so it can install a per-principal admission
+    // floor. This proves the wiring between close_http_principal_sessions and the
+    // lifecycle carries the generation, not merely the principal/reason.
+    #[derive(Debug, Default)]
+    struct RecordingLifecycle {
+        installed: std::sync::Mutex<Vec<(String, Option<u64>)>>,
+    }
+
+    impl HttpSessionLifecycle for RecordingLifecycle {
+        fn close_session(&self, _session_id: &str, _principal_key: &str) -> bool {
+            false
+        }
+
+        fn close_principal_sessions(
+            &self,
+            principal_key: &str,
+            _reason: DispatchCloseReason,
+            min_generation: Option<u64>,
+        ) -> usize {
+            self.installed
+                .lock()
+                .expect("test lifecycle mutex")
+                .push((principal_key.to_owned(), min_generation));
+            1
+        }
+    }
+
+    let lifecycle = Arc::new(RecordingLifecycle::default());
+    let cfg = HttpTransportConfig {
+        stateful: true,
+        session_lifecycle: Some(lifecycle.clone()),
+        ..Default::default()
+    };
+
+    close_http_principal_sessions(
+        &cfg,
+        "client:sha256:aaa",
+        DispatchCloseReason::SessionDelete,
+        Some(7),
+    );
+
+    assert_eq!(
+        lifecycle
+            .installed
+            .lock()
+            .expect("test lifecycle mutex")
+            .as_slice(),
+        &[("client:sha256:aaa".to_owned(), Some(7))],
+        "the bumped credential generation must reach the lane lifecycle floor",
     );
 }
 
@@ -8318,6 +8375,7 @@ fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak()
             &self,
             principal_key: &str,
             reason: DispatchCloseReason,
+            _min_generation: Option<u64>,
         ) -> usize {
             self.closed
                 .lock()

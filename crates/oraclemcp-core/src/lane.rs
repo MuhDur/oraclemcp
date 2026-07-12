@@ -1070,6 +1070,16 @@ struct LaneLifecycleState {
     key_tokens: HashMap<LaneKey, Weak<LaneCloseState>>,
     principal_tokens: HashMap<String, Weak<LaneCloseState>>,
     global_token: Arc<LaneCloseState>,
+    /// Minimum admissible credential-store generation per principal (QA100 .92).
+    ///
+    /// A credential revoke/rotate installs the bumped generation here, under the
+    /// same lifecycle-lock critical section that invalidates the principal's
+    /// lane-close tokens and drains its registered lanes. Lane resolution refuses
+    /// any context whose observed credential generation is below this floor, so a
+    /// request that authenticated before the revoke cannot mint or reuse a lane
+    /// after the revoke becomes authoritative — even the qa112-untracked case
+    /// where a fresh resolution begins *after* cleanup completes.
+    principal_min_generation: HashMap<String, u64>,
 }
 
 impl LaneLifecycleState {
@@ -1079,6 +1089,28 @@ impl LaneLifecycleState {
             key_tokens: HashMap::new(),
             principal_tokens: HashMap::new(),
             global_token: Arc::new(LaneCloseState::new()),
+            principal_min_generation: HashMap::new(),
+        }
+    }
+
+    /// Install a revoke/rotate generation floor for `principal_key`, keeping the
+    /// floor monotonic so a late or reordered call can never lower it.
+    fn raise_min_generation(&mut self, principal_key: &str, generation: u64) {
+        let entry = self
+            .principal_min_generation
+            .entry(principal_key.to_owned())
+            .or_insert(0);
+        *entry = (*entry).max(generation);
+    }
+
+    /// Whether a context that observed `presented` credential generation may
+    /// resolve a lane for `principal_key`. Fail-closed: when a floor exists and
+    /// the context carries no generation, or a generation below the floor, the
+    /// resolution is refused.
+    fn generation_admissible(&self, principal_key: &str, presented: Option<u64>) -> bool {
+        match self.principal_min_generation.get(principal_key) {
+            Some(&floor) => presented.is_some_and(|generation| generation >= floor),
+            None => true,
         }
     }
 
@@ -1294,6 +1326,20 @@ impl StatefulLaneDispatch {
         lane
     }
 
+    /// Whether a request that observed `credential_generation` at admission may
+    /// still resolve a lane for `principal_key` (QA100 .92). Reads the credential
+    /// generation floor under the lifecycle lock only; it never touches the
+    /// registry, so the canonical Lifecycle -> Registry order is preserved.
+    fn generation_admissible(
+        &self,
+        principal_key: &str,
+        credential_generation: Option<u64>,
+    ) -> bool {
+        self.lifecycle
+            .lock()
+            .generation_admissible(principal_key, credential_generation)
+    }
+
     fn begin_lane_resolution(&self, key: LaneKey) -> LaneResolutionTicket<'_> {
         let mut state = self.lifecycle.lock();
         let key_token = state.key_token(&key);
@@ -1372,6 +1418,16 @@ impl StatefulLaneDispatch {
             .map_err(|_| lane_resolution_cancelled_error())?;
         let session_id = context.http_session_id().ok_or_else(lease_required)?;
         let principal_key = context.principal_key().unwrap_or("anonymous-http");
+        let credential_generation = context.credential_generation();
+        // QA100 .92: refuse fail-closed, before consuming any admission capacity,
+        // when this request authenticated against a credential generation that a
+        // revoke/rotate has since superseded. This fast path gives a deterministic
+        // refusal for the sequential (revoke-completes, then in-flight request
+        // reaches resolution) interleaving; the final-insert re-check below closes
+        // the concurrent mint race under the lifecycle lock.
+        if !self.generation_admissible(principal_key, credential_generation) {
+            return Err(lane_credential_revoked_error());
+        }
         let key = LaneKey::new(session_id, principal_key);
         let lifecycle_ticket = self.begin_lane_resolution(key.clone());
         if let Some(lane) = self.reusable_lane(&key) {
@@ -1449,6 +1505,18 @@ impl StatefulLaneDispatch {
             drop(lifecycle);
             candidate.close_with_reason(reason);
             return Err(lane_lifecycle_closed_error(reason));
+        }
+        // QA100 .92: authoritative fail-closed re-check under the lifecycle lock.
+        // A credential revoke/rotate installs its generation floor in the SAME
+        // lifecycle-lock critical section that drains registered lanes, so this
+        // check + the insert below are linearizable against it: either the floor
+        // was installed before this block (this stale context is refused) or the
+        // insert wins and the concurrent close then drains the freshly inserted
+        // lane. A generation observed before the revoke can never leak a lane out.
+        if !lifecycle.generation_admissible(&key.principal_key, credential_generation) {
+            drop(lifecycle);
+            candidate.close_with_reason(DispatchCloseReason::SessionDelete);
+            return Err(lane_credential_revoked_error());
         }
         let mut lanes = self.lock_lanes();
         if let Some(lane) = lanes
@@ -1579,9 +1647,23 @@ impl HttpSessionLifecycle for StatefulLaneDispatch {
         let _ = StatefulLaneDispatch::close_all_sessions(self);
     }
 
-    fn close_principal_sessions(&self, principal_key: &str, reason: DispatchCloseReason) -> usize {
+    fn close_principal_sessions(
+        &self,
+        principal_key: &str,
+        reason: DispatchCloseReason,
+        min_generation: Option<u64>,
+    ) -> usize {
         let (lanes, count) = {
             let mut lifecycle = self.lifecycle.lock();
+            // QA100 .92 linearization point: install the revoke/rotate generation
+            // floor BEFORE (and atomically with) draining this principal's lanes,
+            // all under the one lifecycle-lock hold. After this critical section
+            // returns, resolve_lane's floor check refuses any context that
+            // authenticated under an earlier generation, and its final insert is
+            // serialized against this drain by the same lock.
+            if let Some(generation) = min_generation {
+                lifecycle.raise_min_generation(principal_key, generation);
+            }
             if let Some(token) = lifecycle
                 .principal_tokens
                 .remove(principal_key)
@@ -1737,6 +1819,20 @@ fn lane_lifecycle_closed_error(reason: DispatchCloseReason) -> ErrorEnvelope {
         ),
     )
     .with_next_step("initialize a fresh MCP session after the lifecycle transition before retrying")
+}
+
+/// QA100 .92: a request that authenticated under a credential generation that a
+/// later revoke/rotate has superseded is refused fail-closed at lane resolution.
+fn lane_credential_revoked_error() -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::RuntimeStateRequired,
+        "stateful lane resolution refused: the client credential was revoked or \
+         rotated after this request was admitted (stale credential generation)",
+    )
+    .with_next_step(
+        "re-authenticate with the current client credential and initialize a fresh \
+         MCP session before retrying",
+    )
 }
 
 fn lane_send_error<T>(name: &str, error: SendError<T>) -> ErrorEnvelope {
@@ -2939,21 +3035,29 @@ mod tests {
             session_id: &str,
             principal_key: &str,
         ) -> JoinHandle<DispatchOutcome> {
+            self.spawn_dispatch_with_generation(session_id, principal_key, None)
+        }
+
+        fn spawn_dispatch_with_generation(
+            &self,
+            session_id: &str,
+            principal_key: &str,
+            credential_generation: Option<u64>,
+        ) -> JoinHandle<DispatchOutcome> {
             let registry = Arc::clone(&self.registry);
             let session_id = session_id.to_owned();
             let principal_key = principal_key.to_owned();
             thread::spawn(move || {
                 block_on_lane_bridge(async {
                     let cx = Cx::current().expect("bridge installs Cx");
+                    let mut context = DispatchContext::default()
+                        .with_http_session_id(&session_id)
+                        .with_principal_key(&principal_key);
+                    if let Some(generation) = credential_generation {
+                        context = context.with_credential_generation(generation);
+                    }
                     registry
-                        .dispatch(
-                            &cx,
-                            DispatchContext::default()
-                                .with_http_session_id(&session_id)
-                                .with_principal_key(&principal_key),
-                            "lifecycle-race",
-                            Value::Null,
-                        )
+                        .dispatch(&cx, context, "lifecycle-race", Value::Null)
                         .await
                 })
             })
@@ -4486,6 +4590,7 @@ mod tests {
                 harness.registry.as_ref(),
                 "revoked-principal",
                 DispatchCloseReason::SessionDelete,
+                None,
             ),
             1,
             "the principal close reports its in-flight lane creation",
@@ -4517,6 +4622,7 @@ mod tests {
                 harness.registry.as_ref(),
                 "rotated-principal",
                 DispatchCloseReason::SessionDelete,
+                None,
             ),
             1,
         );
@@ -4565,6 +4671,253 @@ mod tests {
                 .registry
                 .close_session("reinitialized-session", "rotated-principal")
         );
+    }
+
+    // ---- QA100 .92: linearize credential revocation with lane admission ----
+
+    /// A stateful lane registry whose factory build and dispatcher execution are
+    /// each counted, so a refusal can prove that nothing was minted or run.
+    fn counting_stateful_registry(
+        builder_runs: &Arc<std::sync::atomic::AtomicUsize>,
+        dispatch_runs: &Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Arc<StatefulLaneDispatch> {
+        let counted_builders = Arc::clone(builder_runs);
+        let counted_dispatches = Arc::clone(dispatch_runs);
+        let factory_builder: Arc<LaneDispatchFactoryBuilder> = Arc::new(move |_lane_context| {
+            counted_builders.fetch_add(1, Ordering::SeqCst);
+            let dispatch_runs = Arc::clone(&counted_dispatches);
+            let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, _lane_context| {
+                let dispatcher: Arc<dyn ToolDispatch> = Arc::new(LifecycleRaceDispatch {
+                    executions: Arc::clone(&dispatch_runs),
+                });
+                Box::pin(async move { Ok(dispatcher) })
+            });
+            Ok(PreparedLaneDispatch::new(factory, DEFAULT_REQUEST_TIMEOUT))
+        });
+        Arc::new(StatefulLaneDispatch::with_dispatch_factory_builder(
+            factory_builder,
+            None,
+        ))
+    }
+
+    fn dispatch_with_credential_generation(
+        registry: &Arc<StatefulLaneDispatch>,
+        session_id: &str,
+        principal_key: &str,
+        credential_generation: Option<u64>,
+    ) -> DispatchOutcome {
+        let registry = Arc::clone(registry);
+        let session_id = session_id.to_owned();
+        let principal_key = principal_key.to_owned();
+        block_on_lane_bridge(async move {
+            let cx = Cx::current().expect("bridge installs Cx");
+            let mut context = DispatchContext::default()
+                .with_http_session_id(&session_id)
+                .with_principal_key(&principal_key);
+            if let Some(generation) = credential_generation {
+                context = context.with_credential_generation(generation);
+            }
+            registry
+                .dispatch(&cx, context, "credential-generation-probe", Value::Null)
+                .await
+        })
+    }
+
+    #[test]
+    fn stale_credential_generation_is_refused_after_revocation_completes() {
+        // This is the qa112-untracked interleaving. A revoke/rotate for the
+        // principal runs to completion FIRST: sessions and lanes are drained, so
+        // the lifecycle close-token path has nothing left to invalidate and a
+        // later resolution would mint a brand-new (valid) token. The request that
+        // authenticated at the pre-revoke generation only now reaches resolution.
+        // Binding admission to the credential generation floor makes it fail
+        // closed before any factory build, lane insertion, or dispatch.
+        let builder_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dispatch_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = counting_stateful_registry(&builder_runs, &dispatch_runs);
+
+        // The revoke to generation 2 completes. No live lane exists yet, so this
+        // drains nothing but installs the generation floor for the principal.
+        assert_eq!(
+            HttpSessionLifecycle::close_principal_sessions(
+                registry.as_ref(),
+                "revoked-principal",
+                DispatchCloseReason::SessionDelete,
+                Some(2),
+            ),
+            0,
+            "no live lane existed when the revocation ran",
+        );
+
+        let outcome = dispatch_with_credential_generation(
+            &registry,
+            "inflight-session",
+            "revoked-principal",
+            Some(1),
+        );
+        let Outcome::Err(error) = outcome else {
+            panic!("a stale-generation resolution must fail closed: {outcome:?}");
+        };
+        assert_eq!(error.error_class, ErrorClass::RuntimeStateRequired);
+        assert!(
+            error.message.contains("revoked or rotated"),
+            "the refusal must name the credential-generation cause: {error:?}",
+        );
+        assert_eq!(
+            registry.lane_count(),
+            0,
+            "a stale pre-revocation context must not mint a lane",
+        );
+        assert_eq!(
+            builder_runs.load(Ordering::SeqCst),
+            0,
+            "a refused stale context must not build a lane factory",
+        );
+        assert_eq!(
+            dispatch_runs.load(Ordering::SeqCst),
+            0,
+            "a refused stale context must not reach the dispatcher",
+        );
+    }
+
+    #[test]
+    fn fresh_credential_generation_admits_a_lane_after_revocation() {
+        // The post-revocation NEW admission carries the current generation and
+        // must still work: the floor admits presented >= floor.
+        let builder_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dispatch_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = counting_stateful_registry(&builder_runs, &dispatch_runs);
+
+        HttpSessionLifecycle::close_principal_sessions(
+            registry.as_ref(),
+            "rotated-principal",
+            DispatchCloseReason::SessionDelete,
+            Some(2),
+        );
+
+        let outcome = dispatch_with_credential_generation(
+            &registry,
+            "fresh-session",
+            "rotated-principal",
+            Some(2),
+        );
+        assert!(
+            matches!(outcome, Outcome::Ok(_)),
+            "a context at the current generation must be admitted: {outcome:?}",
+        );
+        assert_eq!(registry.lane_count(), 1);
+        assert_eq!(builder_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(dispatch_runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn normal_resolution_without_revocation_still_admits_every_context() {
+        // No revoke/rotate ran, so there is no floor. Both a credential-bound
+        // context and an unauthenticated (no-generation) context resolve as
+        // before — the gate is a strict tightening, never a new refusal.
+        let builder_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dispatch_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = counting_stateful_registry(&builder_runs, &dispatch_runs);
+
+        let with_generation = dispatch_with_credential_generation(
+            &registry,
+            "credentialed-session",
+            "credentialed-principal",
+            Some(1),
+        );
+        assert!(
+            matches!(with_generation, Outcome::Ok(_)),
+            "a credential-bound context with no floor must resolve: {with_generation:?}",
+        );
+
+        let without_generation = dispatch_with_credential_generation(
+            &registry,
+            "anonymous-session",
+            "anonymous-principal",
+            None,
+        );
+        assert!(
+            matches!(without_generation, Outcome::Ok(_)),
+            "a context with no credential generation must resolve: {without_generation:?}",
+        );
+        assert_eq!(registry.lane_count(), 2);
+        assert_eq!(dispatch_runs.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn revocation_generation_floor_invalidates_concurrent_inflight_creation() {
+        // The concurrent interleaving: a resolution is already in flight (blocked
+        // mid-creation) when the revoke installs the generation floor and drains
+        // the principal. It must fail closed with no lane and no capacity leak —
+        // composing the .92 floor install with the qa112 close-token path without
+        // regressing it.
+        let harness = LifecycleRaceHarness::new();
+        let caller =
+            harness.spawn_dispatch_with_generation("revoked-session", "revoked-principal", Some(1));
+        harness.builder_entered.wait();
+
+        assert_eq!(
+            HttpSessionLifecycle::close_principal_sessions(
+                harness.registry.as_ref(),
+                "revoked-principal",
+                DispatchCloseReason::SessionDelete,
+                Some(2),
+            ),
+            1,
+            "the concurrent in-flight creation is a live lifecycle resource",
+        );
+        harness.assert_invalidated(caller, DispatchCloseReason::SessionDelete);
+
+        // After the revoke, a stale (generation 1) re-resolution for a fresh
+        // session under the same principal is still refused by the floor, while a
+        // current (generation 2) admission succeeds.
+        let stale = harness.spawn_dispatch_with_generation(
+            "post-revoke-stale-session",
+            "revoked-principal",
+            Some(1),
+        );
+        let Outcome::Err(error) = stale.join().expect("stale caller joined") else {
+            panic!("a stale post-revoke resolution must fail closed");
+        };
+        assert_eq!(error.error_class, ErrorClass::RuntimeStateRequired);
+        assert!(error.message.contains("revoked or rotated"), "{error:?}");
+        assert_eq!(harness.registry.lane_count(), 0);
+    }
+
+    #[test]
+    fn credential_generation_floor_is_monotonic_under_reordered_installs() {
+        // A later, reordered close carrying a LOWER generation must never lower an
+        // installed floor; the highest revoke/rotate generation wins.
+        let builder_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dispatch_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = counting_stateful_registry(&builder_runs, &dispatch_runs);
+
+        HttpSessionLifecycle::close_principal_sessions(
+            registry.as_ref(),
+            "principal",
+            DispatchCloseReason::SessionDelete,
+            Some(3),
+        );
+        // A stale, reordered install for an earlier generation must not regress
+        // the floor.
+        HttpSessionLifecycle::close_principal_sessions(
+            registry.as_ref(),
+            "principal",
+            DispatchCloseReason::SessionDelete,
+            Some(2),
+        );
+
+        let below = dispatch_with_credential_generation(&registry, "s-below", "principal", Some(2));
+        assert!(
+            matches!(below, Outcome::Err(_)),
+            "generation 2 stays below the generation-3 floor: {below:?}",
+        );
+        let at = dispatch_with_credential_generation(&registry, "s-at", "principal", Some(3));
+        assert!(
+            matches!(at, Outcome::Ok(_)),
+            "generation 3 meets the floor: {at:?}",
+        );
+        assert_eq!(registry.lane_count(), 1);
     }
 
     #[test]

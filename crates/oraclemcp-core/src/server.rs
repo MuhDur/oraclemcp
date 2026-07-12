@@ -378,6 +378,7 @@ pub struct DispatchContext<'a> {
     scope_grant: Option<&'a crate::http::ScopeGrant>,
     http_session_id: Option<&'a str>,
     principal_key: Option<&'a str>,
+    credential_generation: Option<u64>,
     lane_id: Option<&'a str>,
     lane_generation: Option<u64>,
     request_started_at: Option<Instant>,
@@ -407,6 +408,21 @@ impl<'a> DispatchContext<'a> {
     #[must_use]
     pub fn with_principal_key(mut self, principal_key: &'a str) -> Self {
         self.principal_key = Some(principal_key);
+        self
+    }
+
+    /// Attach the credential-store generation observed when this request was
+    /// admitted (validated).
+    ///
+    /// The client credential store bumps a monotonic per-principal generation on
+    /// every revoke/rotate. Binding admission to the observed generation lets
+    /// synchronous lane resolution refuse — fail-closed — to mint or reuse a lane
+    /// for a context that authenticated before a subsequent revoke/rotate became
+    /// authoritative (QA100 .92). A request already in flight when the credential
+    /// was revoked therefore cannot obtain a fresh working lane afterward.
+    #[must_use]
+    pub fn with_credential_generation(mut self, generation: u64) -> Self {
+        self.credential_generation = Some(generation);
         self
     }
 
@@ -478,6 +494,13 @@ impl<'a> DispatchContext<'a> {
         self.principal_key
     }
 
+    /// The credential-store generation observed when this request was admitted,
+    /// if it authenticated against a per-principal client credential.
+    #[must_use]
+    pub fn credential_generation(self) -> Option<u64> {
+        self.credential_generation
+    }
+
     /// The server-owned dispatch lane id for this request, if it crossed one.
     #[must_use]
     pub fn lane_id(self) -> Option<&'a str> {
@@ -522,6 +545,7 @@ impl<'a> DispatchContext<'a> {
             scope_grant: self.scope_grant.cloned(),
             http_session_id: self.http_session_id.map(str::to_owned),
             principal_key: self.principal_key.map(str::to_owned),
+            credential_generation: self.credential_generation,
             lane_id: self.lane_id.map(str::to_owned),
             lane_generation: self.lane_generation,
             request_started_at: self.request_started_at,
@@ -540,6 +564,7 @@ pub struct OwnedDispatchContext {
     scope_grant: Option<crate::http::ScopeGrant>,
     http_session_id: Option<String>,
     principal_key: Option<String>,
+    credential_generation: Option<u64>,
     lane_id: Option<String>,
     lane_generation: Option<u64>,
     request_started_at: Option<Instant>,
@@ -556,6 +581,7 @@ impl OwnedDispatchContext {
             scope_grant: self.scope_grant.as_ref(),
             http_session_id: self.http_session_id.as_deref(),
             principal_key: self.principal_key.as_deref(),
+            credential_generation: self.credential_generation,
             lane_id: self.lane_id.as_deref(),
             lane_generation: self.lane_generation,
             request_started_at: self.request_started_at,

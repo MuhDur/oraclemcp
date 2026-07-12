@@ -907,10 +907,17 @@ pub trait HttpSessionLifecycle: std::fmt::Debug + Send + Sync {
     /// Close every live session/lane owned by one principal. Credential
     /// revoke/rotate uses this to force grant revocation without needing the
     /// client's individual MCP session ids.
+    ///
+    /// `min_generation`, when present, is the credential-store generation the
+    /// revoke/rotate installed. Implementations bind it as a per-principal
+    /// admission floor so an in-flight request that authenticated under an
+    /// earlier generation cannot resolve a fresh lane after this call becomes
+    /// authoritative (QA100 .92).
     fn close_principal_sessions(
         &self,
         _principal_key: &str,
         _reason: DispatchCloseReason,
+        _min_generation: Option<u64>,
     ) -> usize {
         0
     }
@@ -1699,6 +1706,10 @@ struct ValidatedOAuthRequest {
 struct AuthenticatedHttpRequest {
     scope_grant: Option<ScopeGrant>,
     principal_key: String,
+    /// Credential-store generation observed at authentication, for callers that
+    /// authenticated against a per-client bearer credential (QA100 .92). `None`
+    /// for OAuth/mTLS principals, which are not governed by the credential store.
+    credential_generation: Option<u64>,
 }
 
 fn authenticate_client_credential_request(
@@ -1719,6 +1730,7 @@ fn authenticate_client_credential_request(
         Ok(authenticated) => Ok(Some(AuthenticatedHttpRequest {
             scope_grant: Some(ScopeGrant(authenticated.scopes)),
             principal_key: authenticated.principal_key,
+            credential_generation: Some(authenticated.generation),
         })),
         Err(ClientCredentialError::AuthenticationFailed | ClientCredentialError::Revoked(_)) => {
             Err(client_credential_unauthorized_response())
@@ -1898,6 +1910,7 @@ fn authenticate_http_request(
         return Ok(Some(AuthenticatedHttpRequest {
             scope_grant: Some(validated.scope_grant),
             principal_key: validated.principal_key,
+            credential_generation: None,
         }));
     }
 
@@ -1911,6 +1924,7 @@ fn authenticate_http_request(
         return Ok(Some(AuthenticatedHttpRequest {
             scope_grant: None,
             principal_key,
+            credential_generation: None,
         }));
     }
 
@@ -2458,6 +2472,9 @@ fn handle_http_exchange(
     let principal_key = authenticated
         .as_ref()
         .map(|auth| auth.principal_key.as_str());
+    let credential_generation = authenticated
+        .as_ref()
+        .and_then(|auth| auth.credential_generation);
     match request.method.as_str() {
         "GET" => handle_mcp_get(config, &request, principal_key, allow_streaming_get),
         "DELETE" => HttpExchange::Buffered(handle_mcp_delete(
@@ -2465,7 +2482,14 @@ fn handle_http_exchange(
             &request,
             stateful_principal_key(principal_key),
         )),
-        "POST" => handle_mcp_post_exchange(server, config, &request, scope_grant, principal_key),
+        "POST" => handle_mcp_post_exchange(
+            server,
+            config,
+            &request,
+            scope_grant,
+            principal_key,
+            credential_generation,
+        ),
         _ => HttpExchange::Buffered(empty_response(405).with_header(
             "allow",
             if config.stateful {
@@ -4744,6 +4768,7 @@ fn handle_operator_client_credentials_route(
                         config,
                         &lifecycle.principal_key,
                         DispatchCloseReason::SessionDelete,
+                        Some(lifecycle.generation),
                     );
                     operator_json_response(
                         200,
@@ -4776,6 +4801,7 @@ fn handle_operator_client_credentials_route(
                         config,
                         &lifecycle.principal_key,
                         DispatchCloseReason::SessionDelete,
+                        Some(lifecycle.generation),
                     );
                     let client = store
                         .list()
@@ -6463,6 +6489,7 @@ fn handle_mcp_post_exchange(
     request: &HttpRequest,
     scope_grant: Option<&ScopeGrant>,
     principal_key: Option<&str>,
+    credential_generation: Option<u64>,
 ) -> HttpExchange {
     if !content_type_is_json(request) {
         return HttpExchange::Buffered(empty_response(415));
@@ -6559,6 +6586,11 @@ fn handle_mcp_post_exchange(
     // stateless unauthenticated HTTP must carry `anonymous-http` explicitly so
     // a missing principal remains unambiguous for the stdio transport.
     context = context.with_principal_key(session_principal_key);
+    // QA100 .92: carry the credential generation observed at admission so lane
+    // resolution can refuse a stale (pre-revoke/rotate) context fail-closed.
+    if let Some(generation) = credential_generation {
+        context = context.with_credential_generation(generation);
+    }
     if config.stateful
         && let Some((request_id, name, args)) = streaming_oracle_query_call(&parsed)
         && let Some(session_id) = http_session_id.clone()
@@ -6653,7 +6685,7 @@ fn handle_mcp_post(
     scope_grant: Option<&ScopeGrant>,
     principal_key: Option<&str>,
 ) -> HttpResponse {
-    handle_mcp_post_exchange(server, config, request, scope_grant, principal_key)
+    handle_mcp_post_exchange(server, config, request, scope_grant, principal_key, None)
         .into_buffered_response()
 }
 
@@ -7674,6 +7706,7 @@ pub fn close_http_principal_sessions(
     config: &HttpTransportConfig,
     principal_key: &str,
     reason: DispatchCloseReason,
+    min_generation: Option<u64>,
 ) -> usize {
     let session_ids = config
         .session_store
@@ -7688,7 +7721,7 @@ pub fn close_http_principal_sessions(
     let closed_lanes = config
         .session_lifecycle
         .as_ref()
-        .map(|lifecycle| lifecycle.close_principal_sessions(principal_key, reason))
+        .map(|lifecycle| lifecycle.close_principal_sessions(principal_key, reason, min_generation))
         .unwrap_or(0);
     closed_lanes.max(session_ids.len())
 }
