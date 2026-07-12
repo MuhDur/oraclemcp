@@ -108,6 +108,47 @@ else
   bad "canonical projection flagged nondeterministic-only changes"
 fi
 
+# 3b) npm may emit the same package identity for multiple installation paths.
+# Compatible duplicates collapse to one component/dependency while retaining
+# both paths; conflicting hashes or other security/legal metadata fail closed.
+jq '
+  .components[0].properties += [
+    {"name":"cdx:npm:package:path", "value":"node_modules/parent-a/node_modules/react"}
+  ]
+  | .components += [(.components[0]
+      | .properties = ((.properties | map(select(.name != "cdx:npm:package:path"))) + [
+          {"name":"cdx:npm:package:path", "value":"node_modules/parent-b/node_modules/react"}
+        ]))]
+  | .dependencies += [.dependencies[1]]
+' "$WORK/dashboard.json" >"$WORK/duplicate-dashboard.json"
+
+if bash "$SCRIPT" --normalize-dashboard <"$WORK/duplicate-dashboard.json" \
+    >"$WORK/normalized-dashboard.json" &&
+  jq -e '
+    ([.components[] | select(."bom-ref" == "react@19.2.7")] | length) == 1 and
+    ([.dependencies[] | select(.ref == "react@19.2.7")] | length) == 1 and
+    ([.components[] | select(."bom-ref" == "react@19.2.7")
+      | .properties[]
+      | select(.name == "cdx:npm:package:path")
+      | .value] | sort) == [
+        "node_modules/parent-a/node_modules/react",
+        "node_modules/parent-b/node_modules/react"
+      ]
+  ' "$WORK/normalized-dashboard.json" >/dev/null; then
+  ok "normalizer collapses compatible duplicate refs and preserves installation paths"
+else
+  bad "normalizer did not safely collapse compatible duplicate refs"
+fi
+
+jq '(.components[1].hashes[0].content) = "cccccccccccccccccccccccccccccccc"' \
+  "$WORK/duplicate-dashboard.json" >"$WORK/conflicting-dashboard.json"
+if ! bash "$SCRIPT" --normalize-dashboard <"$WORK/conflicting-dashboard.json" \
+    >"$WORK/conflicting-normalized.json" 2>/dev/null; then
+  ok "normalizer refuses conflicting duplicate component metadata"
+else
+  bad "normalizer accepted conflicting duplicate component metadata"
+fi
+
 # ---- synthetic merged artifact for --artifact ----
 jq -n --arg v "$DASH_VERSION" '
 {

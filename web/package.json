@@ -12,7 +12,7 @@
     "dev": "vite",
     "build": "vite build && npm run sbom && bash ../scripts/dashboard_bundle_check.sh --write-hash",
     "preview": "vite preview",
-    "sbom": "npm sbom --sbom-format cyclonedx --json > dist/oraclemcp-dashboard.cyclonedx.json",
+    "sbom": "bash ../scripts/release_sbom_check.sh --generate-dashboard dist/oraclemcp-dashboard.cyclonedx.json",
     "test": "vitest run",
     "contract": "npm run build && vitest run",
     "check": "tsc --noEmit && npm run build && vitest run"

@@ -17,6 +17,8 @@ usage() {
 usage: scripts/release_sbom_check.sh --source
        scripts/release_sbom_check.sh --artifact <oraclemcp-version.cdx.json>
        scripts/release_sbom_check.sh --canonical <sbom.cdx.json>
+       scripts/release_sbom_check.sh --generate-dashboard <output.cyclonedx.json>
+       scripts/release_sbom_check.sh --normalize-dashboard [input.cyclonedx.json]
 USAGE
 }
 
@@ -67,6 +69,52 @@ CLOSURE_JQ='
     and all(.dependencies[]?; all((.dependsOn // [])[]; . as $d | any($known[]; . == $d)))
 '
 
+# npm identifies components by package name and version, so two installations
+# of the same version can be emitted with the same bom-ref. CycloneDX requires
+# component bom-refs to be unique. Collapse only duplicates whose security and
+# legal metadata is identical after removing the installation-path property;
+# preserve every distinct property and dependency edge. Conflicting duplicate
+# metadata is refused rather than silently choosing one component.
+NORMALIZE_DASHBOARD_JQ='
+  def without_installation_path:
+    .properties = ((.properties // [])
+      | map(select(.name != "cdx:npm:package:path"))
+      | unique
+      | sort_by([.name // "", .value // ""]));
+  def merge_component_group:
+    . as $group
+    | ([$group[] | without_installation_path] | unique) as $identities
+    | if ($identities | length) != 1 then
+        error("conflicting duplicate component bom-ref: \($group[0]["bom-ref"])")
+      else
+        $group[0]
+        | .properties = ([$group[] | .properties[]?]
+          | unique
+          | sort_by([.name // "", .value // ""]))
+      end;
+  def merge_dependency_group:
+    . as $group
+    | ([$group[] | del(.dependsOn)] | unique) as $identities
+    | if ($identities | length) != 1 then
+        error("conflicting duplicate dependency ref: \($group[0].ref)")
+      else
+        $group[0]
+        | .dependsOn = ([$group[] | .dependsOn[]?] | unique | sort)
+      end;
+  if any(.components[]?; has("bom-ref") | not) then
+    error("dashboard component is missing bom-ref")
+  else
+    .components = ((.components // [])
+      | sort_by(."bom-ref")
+      | group_by(."bom-ref")
+      | map(merge_component_group))
+    | .dependencies = ((.dependencies // [])
+      | sort_by(.ref)
+      | group_by(.ref)
+      | map(merge_dependency_group))
+  end
+'
+
 canonicalize() {
   local file="$1"
   local out="$2"
@@ -77,6 +125,22 @@ check_closure() {
   local file="$1"
   jq -e "$CLOSURE_JQ" "$file" >/dev/null ||
     fail "$file has duplicate component bom-refs or dangling dependency references"
+}
+
+generate_dashboard() {
+  local output="$1"
+  local raw_dir="$ROOT/target/release-sbom-check"
+  local raw
+  raw="$raw_dir/$(basename "$output").raw"
+  mkdir -p "$raw_dir" "$(dirname "$output")"
+
+  # npm 10.9.4 truncates `npm sbom` at 64 KiB when its stdout is a pipe on
+  # some supported runtimes. Capture the complete raw document to a file before
+  # normalizing it so generation cannot silently accept a partial stream.
+  (cd "$ROOT/web" && npm sbom --sbom-format cyclonedx --json >"$raw")
+  jq -S "$NORMALIZE_DASHBOARD_JQ" "$raw" >"$output"
+  validate_schema "$output"
+  check_closure "$output"
 }
 
 # Schema validation. Prefers a real CycloneDX JSON-Schema validator when one is
@@ -137,7 +201,7 @@ check_source() {
   local existing_normalized="$check_dir/existing-dashboard.normalized.json"
   local current_normalized="$check_dir/current-dashboard.normalized.json"
   mkdir -p "$check_dir"
-  (cd "$ROOT/web" && npm sbom --sbom-format cyclonedx --json >"$current_dashboard_sbom")
+  generate_dashboard "$current_dashboard_sbom"
 
   # Compare the CANONICAL projection (hashes/licenses/scope/properties/external
   # references + dependency edges preserved) rather than a bare identity subset,
@@ -229,6 +293,28 @@ case "$1" in
     need jq
     [ -f "$2" ] || fail "missing SBOM: $2"
     jq -S "$CANONICAL_JQ" "$2"
+    ;;
+  --normalize-dashboard)
+    [ "$#" -le 2 ] || {
+      usage
+      exit 2
+    }
+    need jq
+    if [ "$#" -eq 2 ]; then
+      [ -f "$2" ] || fail "missing dashboard SBOM: $2"
+      jq -S "$NORMALIZE_DASHBOARD_JQ" "$2"
+    else
+      jq -S "$NORMALIZE_DASHBOARD_JQ"
+    fi
+    ;;
+  --generate-dashboard)
+    [ "$#" -eq 2 ] || {
+      usage
+      exit 2
+    }
+    need jq
+    need npm
+    generate_dashboard "$2"
     ;;
   *)
     usage
