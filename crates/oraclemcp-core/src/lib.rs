@@ -105,7 +105,8 @@ pub use client_credentials::{
 pub use config_ops::{
     ConfigApplyOutcome, ConfigApplyReport, ConfigDraftPlan, ConfigDraftPreview, ConfigFieldChange,
     ConfigOpsBackend, ConfigOpsError, ConfigOpsService, ConfigOpsStatus, ConfigRedactedDiff,
-    ConfigReloadApplier, ConfigReloadApplyReport, ConfigRollbackOutcome, ConfigRollbackReport,
+    ConfigReloadApplier, ConfigReloadApplyReport, ConfigReviewEvidence, ConfigReviewedDraftPreview,
+    ConfigRollbackOutcome, ConfigRollbackReport,
 };
 pub use connect::{SessionContext, build_session_context, profile_to_options, session_level_state};
 pub use custom_tools::{

@@ -4130,6 +4130,25 @@ fn operator_config_draft_apply_and_rollback_are_redacted_and_audited() {
         .expect("current hash")
         .to_owned();
 
+    let direct_apply = handle_http_request(
+        &test_server(),
+        &cfg,
+        operator_json_post(
+            "/operator/v1/config/apply",
+            &serde_json::json!({ "draft_toml": draft }),
+        ),
+    );
+    assert_eq!(direct_apply.status, 400);
+    assert_eq!(
+        response_json(&direct_apply)["data"]["error"],
+        serde_json::json!("invalid_config_request")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("target preserved"),
+        current,
+        "dashboard apply cannot bypass preview"
+    );
+
     let preview = handle_http_request(
         &test_server(),
         &cfg,
@@ -4156,6 +4175,14 @@ fn operator_config_draft_apply_and_rollback_are_redacted_and_audited() {
         preview_json["data"]["preview"]["current_sha256"],
         serde_json::json!(current_sha)
     );
+    let preview_token = preview_json["data"]["preview"]["preview_token"]
+        .as_str()
+        .expect("preview token")
+        .to_owned();
+    let draft_sha = preview_json["data"]["preview"]["draft_sha256"]
+        .as_str()
+        .expect("draft hash")
+        .to_owned();
 
     let apply = handle_http_request(
         &test_server(),
@@ -4164,7 +4191,9 @@ fn operator_config_draft_apply_and_rollback_are_redacted_and_audited() {
             "/operator/v1/config/apply",
             &serde_json::json!({
                 "draft_toml": draft,
-                "expected_current_sha256": current_sha,
+                "preview_token": preview_token,
+                "expected_draft_sha256": draft_sha,
+                "confirm_preview": true,
             }),
         ),
     );
@@ -4176,6 +4205,14 @@ fn operator_config_draft_apply_and_rollback_are_redacted_and_audited() {
     assert_eq!(
         apply_json["data"]["outcome"]["reload"]["status"],
         serde_json::json!("applied")
+    );
+    assert_eq!(
+        apply_json["data"]["outcome"]["review"]["draft_sha256"],
+        preview_json["data"]["preview"]["draft_sha256"]
+    );
+    assert_eq!(
+        apply_json["data"]["outcome"]["review"]["redacted_diff_sha256"],
+        preview_json["data"]["preview"]["redacted_diff_sha256"]
     );
     assert_eq!(
         applied_plans.lock().last().cloned(),

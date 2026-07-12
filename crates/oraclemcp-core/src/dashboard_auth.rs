@@ -221,6 +221,22 @@ impl DashboardAuth {
         Ok(session_view(&session))
     }
 
+    /// Return a non-secret binding for server-side authorities scoped to this
+    /// exact browser session. The raw cookie/session id never leaves this type.
+    pub(crate) fn session_binding(
+        &self,
+        cookie_header: Option<&str>,
+    ) -> Result<String, DashboardAuthError> {
+        let session = self.valid_session(cookie_header)?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"oraclemcp.dashboard.session-binding.v1\0");
+        hasher.update(session.id.as_bytes());
+        Ok(format!(
+            "dashboard-session-sha256:{}",
+            hex_bytes(&hasher.finalize())
+        ))
+    }
+
     /// Validate a dashboard POST against the cookie, CSRF token, and scoped
     /// action ticket for the requested route.
     pub fn validate_action(

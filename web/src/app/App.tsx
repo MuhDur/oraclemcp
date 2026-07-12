@@ -1717,6 +1717,7 @@ function ConfigPage(): React.ReactElement {
   const [preview, setPreview] = React.useState<ConfigDraftPreview | null>(null);
   const [applyOutcome, setApplyOutcome] = React.useState<ConfigApplyData | null>(null);
   const [lastError, setLastError] = React.useState<string | null>(null);
+  const [previewConfirmed, setPreviewConfirmed] = React.useState(false);
   const session = useQuery({
     queryKey: ["dashboard-session"],
     queryFn: fetchDashboardSession,
@@ -1740,6 +1741,7 @@ function ConfigPage(): React.ReactElement {
     },
     onSuccess: (response) => {
       setPreview(response.data.preview);
+      setPreviewConfirmed(false);
       setApplyOutcome(null);
       setLastError(null);
     },
@@ -1752,13 +1754,21 @@ function ConfigPage(): React.ReactElement {
       if (!session.data) {
         throw new Error("dashboard session is not ready");
       }
-      const expected =
-        activePreview?.current_sha256 ?? status?.status.current_sha256 ?? "";
-      return applyConfigDraft(session.data, draftToml, expected);
+      if (!activePreview) {
+        throw new Error("preview the exact draft before applying");
+      }
+      return applyConfigDraft(
+        session.data,
+        draftToml,
+        activePreview.preview_token,
+        activePreview.draft_sha256,
+        previewConfirmed
+      );
     },
     onSuccess: (response) => {
       setApplyOutcome(response.data);
       setPreview(null);
+      setPreviewConfirmed(false);
       setLastError(null);
       queryClient.invalidateQueries({ queryKey: ["operator-config"] });
     },
@@ -1776,6 +1786,7 @@ function ConfigPage(): React.ReactElement {
     onSuccess: () => {
       setApplyOutcome(null);
       setPreview(null);
+      setPreviewConfirmed(false);
       setLastError(null);
       queryClient.invalidateQueries({ queryKey: ["operator-config"] });
     },
@@ -1784,6 +1795,10 @@ function ConfigPage(): React.ReactElement {
     }
   });
   const canSubmit = draftToml.trim().length > 0 && session.status === "success";
+  const canApply =
+    canSubmit &&
+    activePreview !== null &&
+    (!activePreview.confirmation_required || previewConfirmed);
   const busy =
     previewMutation.isPending || applyMutation.isPending || rollbackMutation.isPending;
 
@@ -1806,7 +1821,11 @@ function ConfigPage(): React.ReactElement {
           <div className="space-y-3 p-4">
             <textarea
               value={draftToml}
-              onChange={(event) => setDraftToml(event.target.value)}
+              onChange={(event) => {
+                setDraftToml(event.target.value);
+                setPreview(null);
+                setPreviewConfirmed(false);
+              }}
               spellCheck={false}
               className="min-h-72 w-full resize-y rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] p-3 font-mono text-sm leading-6 text-[var(--om-text-bright)] outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
               aria-label="Config draft TOML"
@@ -1824,12 +1843,22 @@ function ConfigPage(): React.ReactElement {
               <Button
                 type="button"
                 variant="primary"
-                disabled={!canSubmit || busy}
+                disabled={!canApply || busy}
                 onClick={() => applyMutation.mutate()}
               >
                 <Play className="size-4" aria-hidden="true" />
                 Apply
               </Button>
+              {activePreview?.confirmation_required ? (
+                <label className="flex items-center gap-2 text-sm text-[var(--om-text-muted)]">
+                  <input
+                    type="checkbox"
+                    checked={previewConfirmed}
+                    onChange={(event) => setPreviewConfirmed(event.target.checked)}
+                  />
+                  I reviewed the sensitive change: {activePreview.confirmation_reasons.join(", ")}
+                </label>
+              ) : null}
               {applyOutcome ? (
                 <Button
                   type="button"

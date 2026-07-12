@@ -3032,7 +3032,13 @@ fn handle_operator_api_route(
         OperatorRouteKind::ConfigStatus
         | OperatorRouteKind::ConfigDraft
         | OperatorRouteKind::ConfigApply
-        | OperatorRouteKind::ConfigRollback => handle_operator_config_route(config, request, route),
+        | OperatorRouteKind::ConfigRollback => handle_operator_config_route(
+            config,
+            request,
+            operator_subject,
+            route,
+            dashboard_browser,
+        ),
         OperatorRouteKind::ChangeProposalsList
         | OperatorRouteKind::ChangeProposalsDraft
         | OperatorRouteKind::ChangeProposalsApply => handle_operator_change_proposal_route(
@@ -3467,7 +3473,9 @@ fn operator_vsession_data() -> Value {
 fn handle_operator_config_route(
     config: &HttpTransportConfig,
     request: &HttpRequest,
+    operator_subject: &AuditSubject,
     route: OperatorRouteKind,
+    dashboard_browser: bool,
 ) -> HttpResponse {
     let Some(config_ops) = config.config_ops.as_ref() else {
         return operator_json_response(
@@ -3479,6 +3487,21 @@ fn handle_operator_config_route(
                 "message": "operator config workflow is not configured for this transport",
             }),
         );
+    };
+
+    let review_binding = if dashboard_browser {
+        let Some(auth) = config.dashboard_auth.as_ref() else {
+            return dashboard_auth_required_response();
+        };
+        match auth.session_binding(request.header("cookie")) {
+            Ok(binding) => binding,
+            Err(_) => return dashboard_auth_required_response(),
+        }
+    } else {
+        format!(
+            "operator:{}",
+            operator_subject_id_hash(&operator_subject.legacy_agent_identity())
+        )
     };
 
     match route {
@@ -3493,20 +3516,24 @@ fn handle_operator_config_route(
             ),
             Err(error) => operator_config_error_response(&request.path, error),
         },
-        OperatorRouteKind::ConfigDraft => match config_draft_toml_from_request(request)
-            .and_then(|draft| config_ops.stage(&draft).map_err(config_error_value))
-        {
-            Ok(preview) => operator_json_response(
-                200,
-                &request.path,
-                json!({
-                    "source": "config_ops",
-                    "preview": preview,
-                    "redaction": "draft TOML and secret references are not echoed",
-                }),
-            ),
-            Err((status, data)) => operator_json_response(status, &request.path, data),
-        },
+        OperatorRouteKind::ConfigDraft => {
+            match config_draft_toml_from_request(request).and_then(|draft| {
+                config_ops
+                    .stage_reviewed(&draft, &review_binding)
+                    .map_err(config_error_value)
+            }) {
+                Ok(preview) => operator_json_response(
+                    200,
+                    &request.path,
+                    json!({
+                        "source": "config_ops",
+                        "preview": preview,
+                        "redaction": "draft TOML and secret references are not echoed",
+                    }),
+                ),
+                Err((status, data)) => operator_json_response(status, &request.path, data),
+            }
+        }
         OperatorRouteKind::ConfigApply => {
             let payload = match operator_config_json_payload(request) {
                 Ok(payload) => payload,
@@ -3524,10 +3551,33 @@ fn handle_operator_config_route(
             if draft.len() > CONFIG_DRAFT_MAX_BYTES {
                 return operator_json_response(413, &request.path, config_draft_too_large());
             }
-            let expected = payload
-                .get("expected_current_sha256")
-                .and_then(Value::as_str);
-            match config_ops.apply(draft, expected) {
+            let Some(preview_token) = payload.get("preview_token").and_then(Value::as_str) else {
+                return operator_json_response(
+                    400,
+                    &request.path,
+                    missing_config_field("preview_token"),
+                );
+            };
+            let Some(expected_draft_sha256) =
+                payload.get("expected_draft_sha256").and_then(Value::as_str)
+            else {
+                return operator_json_response(
+                    400,
+                    &request.path,
+                    missing_config_field("expected_draft_sha256"),
+                );
+            };
+            let confirmed = payload
+                .get("confirm_preview")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            match config_ops.apply_reviewed(
+                draft,
+                expected_draft_sha256,
+                preview_token,
+                &review_binding,
+                confirmed,
+            ) {
                 Ok(outcome) => operator_json_response(
                     200,
                     &request.path,
@@ -4738,6 +4788,31 @@ fn config_error_value(error: ConfigOpsError) -> (u16, Value) {
             json!({
                 "error": "config_rollback_unknown",
                 "message": "rollback id is unknown or already consumed",
+            }),
+        ),
+        ConfigOpsError::PreviewRequired => (
+            400,
+            json!({
+                "error": "config_preview_required",
+                "message": "apply requires a live reviewed config preview",
+            }),
+        ),
+        ConfigOpsError::InvalidPreviewToken
+        | ConfigOpsError::PreviewExpired
+        | ConfigOpsError::PreviewDraftChanged => (
+            409,
+            json!({
+                "error": "config_preview_invalid",
+                "message": "the reviewed config preview is invalid, expired, consumed, or no longer matches",
+                "next_step": "preview the current draft again before applying",
+            }),
+        ),
+        ConfigOpsError::PreviewConfirmationRequired => (
+            409,
+            json!({
+                "error": "config_preview_confirmation_required",
+                "message": "this reviewed config change requires explicit confirmation",
+                "next_step": "review the redacted reasons and resubmit with confirm_preview=true",
             }),
         ),
         ConfigOpsError::FileStore(_) | ConfigOpsError::Io(_) => (

@@ -11,7 +11,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oraclemcp_config::{
     ConfigError, ConfigReloadPlan, ConnectionProfile, OracleMcpConfig, ProfileMetadata,
@@ -56,6 +56,21 @@ pub enum ConfigOpsError {
         /// Hash read immediately before apply.
         actual_sha256: String,
     },
+    /// The apply request did not present a live review token.
+    #[error("config apply requires a reviewed preview token")]
+    PreviewRequired,
+    /// The review token was unknown, already consumed, or bound elsewhere.
+    #[error("config preview token is invalid or already consumed")]
+    InvalidPreviewToken,
+    /// The review token expired before apply.
+    #[error("config preview token expired")]
+    PreviewExpired,
+    /// The submitted draft no longer matches the reviewed bytes.
+    #[error("config draft changed after preview")]
+    PreviewDraftChanged,
+    /// A sensitive preview requires an explicit second confirmation.
+    #[error("config preview requires explicit confirmation")]
+    PreviewConfirmationRequired,
     /// The requested rollback id is unknown to this process.
     #[error("unknown config rollback id")]
     UnknownRollbackId,
@@ -96,6 +111,37 @@ pub struct ConfigDraftPreview {
     pub redacted_diff: ConfigRedactedDiff,
     /// Conservative S5 reload/drain plan between current and draft configs.
     pub reload_plan: ConfigReloadPlan,
+}
+
+/// Browser/operator preview plus the opaque authority required for apply.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ConfigReviewedDraftPreview {
+    /// Redacted preview of the exact reviewed draft.
+    #[serde(flatten)]
+    pub preview: ConfigDraftPreview,
+    /// Opaque, single-use review authority. This is never persisted.
+    pub preview_token: String,
+    /// Safe digest used to correlate preview and apply evidence.
+    pub preview_token_sha256: String,
+    /// Digest of the exact redacted diff shown to the operator.
+    pub redacted_diff_sha256: String,
+    /// Wall-clock expiry shown to the operator UI.
+    pub preview_expires_unix: u64,
+    /// Whether apply requires a deliberate second confirmation.
+    pub confirmation_required: bool,
+    /// Redacted reasons for the deliberate confirmation step.
+    pub confirmation_reasons: Vec<String>,
+}
+
+/// Secret-safe evidence binding an apply to its reviewed preview.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ConfigReviewEvidence {
+    /// Digest of the single-use token, never the token itself.
+    pub preview_token_sha256: String,
+    /// Digest of the exact applied draft bytes.
+    pub draft_sha256: String,
+    /// Digest of the exact redacted diff that was reviewed.
+    pub redacted_diff_sha256: String,
 }
 
 /// Staged config draft. Raw TOML is deliberately private and not serializable.
@@ -255,6 +301,8 @@ pub struct ConfigApplyOutcome {
     pub reload: ConfigReloadApplyReport,
     /// Opaque id accepted by [`ConfigOpsService::rollback`].
     pub rollback_id: String,
+    /// Evidence that this apply consumed the matching reviewed preview.
+    pub review: Option<ConfigReviewEvidence>,
 }
 
 /// Rollback result plus live reload/drain report for the restored config.
@@ -425,6 +473,21 @@ pub struct ConfigOpsService {
     /// and keeps disk plus live-generation transitions indivisible in-process.
     apply_lock: Mutex<()>,
     rollback_reports: Mutex<BTreeMap<String, ConfigApplyReport>>,
+    reviewed_previews: Mutex<BTreeMap<String, ReviewedConfigDraft>>,
+    preview_ttl: Duration,
+}
+
+const CONFIG_PREVIEW_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_REVIEWED_CONFIG_PREVIEWS: usize = 128;
+
+struct ReviewedConfigDraft {
+    binding_sha256: String,
+    current_sha256: String,
+    draft_sha256: String,
+    redacted_diff_sha256: String,
+    confirmation_required: bool,
+    expires_at: Instant,
+    created_at: Instant,
 }
 
 impl ConfigOpsService {
@@ -441,6 +504,8 @@ impl ConfigOpsService {
             reload_applier,
             apply_lock: Mutex::new(()),
             rollback_reports: Mutex::new(BTreeMap::new()),
+            reviewed_previews: Mutex::new(BTreeMap::new()),
+            preview_ttl: CONFIG_PREVIEW_TTL,
         }
     }
 
@@ -467,6 +532,144 @@ impl ConfigOpsService {
             .map(|plan| plan.preview().clone())
     }
 
+    /// Stage a draft for an operator and mint a bounded, single-use apply authority.
+    pub fn stage_reviewed(
+        &self,
+        draft_toml: &str,
+        review_binding: &str,
+    ) -> Result<ConfigReviewedDraftPreview, ConfigOpsError> {
+        self.stage_reviewed_at(draft_toml, review_binding, Instant::now(), unix_now())
+    }
+
+    fn stage_reviewed_at(
+        &self,
+        draft_toml: &str,
+        review_binding: &str,
+        now: Instant,
+        now_unix: u64,
+    ) -> Result<ConfigReviewedDraftPreview, ConfigOpsError> {
+        let _apply_guard = self.apply_lock.lock();
+        let plan = self
+            .backend
+            .stage_config_draft(&self.target_path, draft_toml)?;
+        let preview = plan.preview().clone();
+        let redacted_diff_sha256 = redacted_diff_sha256(&preview.redacted_diff);
+        let confirmation_reasons = config_confirmation_reasons(&preview);
+        let confirmation_required = !confirmation_reasons.is_empty();
+        let preview_token = random_preview_token()?;
+        let preview_token_sha256 = oraclemcp_audit::sha256_hex(preview_token.as_bytes());
+        let expires_at = now + self.preview_ttl;
+        let mut previews = self.reviewed_previews.lock();
+        prune_reviewed_previews(&mut previews, now);
+        while previews.len() >= MAX_REVIEWED_CONFIG_PREVIEWS {
+            let Some(oldest) = previews
+                .iter()
+                .min_by_key(|(_, entry)| entry.created_at)
+                .map(|(token, _)| token.clone())
+            else {
+                break;
+            };
+            previews.remove(&oldest);
+        }
+        previews.insert(
+            preview_token.clone(),
+            ReviewedConfigDraft {
+                binding_sha256: review_binding_sha256(review_binding),
+                current_sha256: preview.current_sha256.clone(),
+                draft_sha256: preview.draft_sha256.clone(),
+                redacted_diff_sha256: redacted_diff_sha256.clone(),
+                confirmation_required,
+                expires_at,
+                created_at: now,
+            },
+        );
+        Ok(ConfigReviewedDraftPreview {
+            preview,
+            preview_token,
+            preview_token_sha256,
+            redacted_diff_sha256,
+            preview_expires_unix: now_unix.saturating_add(self.preview_ttl.as_secs()),
+            confirmation_required,
+            confirmation_reasons,
+        })
+    }
+
+    /// Apply only the exact bytes authorized by a live reviewed preview.
+    ///
+    /// The token is claimed before validation, so mismatch, cross-session use,
+    /// expiry, and concurrent replay all consume the authority and fail closed.
+    pub fn apply_reviewed(
+        &self,
+        draft_toml: &str,
+        expected_draft_sha256: &str,
+        preview_token: &str,
+        review_binding: &str,
+        confirmed: bool,
+    ) -> Result<ConfigApplyOutcome, ConfigOpsError> {
+        self.apply_reviewed_at(
+            draft_toml,
+            expected_draft_sha256,
+            preview_token,
+            review_binding,
+            confirmed,
+            Instant::now(),
+        )
+    }
+
+    fn apply_reviewed_at(
+        &self,
+        draft_toml: &str,
+        expected_draft_sha256: &str,
+        preview_token: &str,
+        review_binding: &str,
+        confirmed: bool,
+        now: Instant,
+    ) -> Result<ConfigApplyOutcome, ConfigOpsError> {
+        let preview_token = preview_token.trim();
+        if preview_token.is_empty() {
+            return Err(ConfigOpsError::PreviewRequired);
+        }
+        let _apply_guard = self.apply_lock.lock();
+        let reviewed = self
+            .reviewed_previews
+            .lock()
+            .remove(preview_token)
+            .ok_or(ConfigOpsError::InvalidPreviewToken)?;
+        if reviewed.expires_at <= now {
+            return Err(ConfigOpsError::PreviewExpired);
+        }
+        if reviewed.binding_sha256 != review_binding_sha256(review_binding) {
+            return Err(ConfigOpsError::InvalidPreviewToken);
+        }
+        let submitted_sha256 = oraclemcp_audit::sha256_hex(draft_toml.as_bytes());
+        if expected_draft_sha256.trim() != reviewed.draft_sha256
+            || submitted_sha256 != reviewed.draft_sha256
+        {
+            return Err(ConfigOpsError::PreviewDraftChanged);
+        }
+        if reviewed.confirmation_required && !confirmed {
+            return Err(ConfigOpsError::PreviewConfirmationRequired);
+        }
+        let plan = self
+            .backend
+            .stage_config_draft(&self.target_path, draft_toml)?;
+        if plan.preview().current_sha256 != reviewed.current_sha256 {
+            return Err(ConfigOpsError::CurrentChanged {
+                expected_sha256: reviewed.current_sha256,
+                actual_sha256: plan.preview().current_sha256.clone(),
+            });
+        }
+        if redacted_diff_sha256(&plan.preview().redacted_diff) != reviewed.redacted_diff_sha256 {
+            return Err(ConfigOpsError::PreviewDraftChanged);
+        }
+        let review = ConfigReviewEvidence {
+            preview_token_sha256: oraclemcp_audit::sha256_hex(preview_token.as_bytes()),
+            draft_sha256: reviewed.draft_sha256,
+            redacted_diff_sha256: reviewed.redacted_diff_sha256,
+        };
+        self.apply_plan_locked(plan, Some(review))
+    }
+
     /// Apply a draft after validating that the previewed base hash still
     /// matches, then ask the live service to consume the reload plan.
     pub fn apply(
@@ -488,6 +691,14 @@ impl ConfigOpsService {
                 actual_sha256: plan.preview().current_sha256.clone(),
             });
         }
+        self.apply_plan_locked(plan, None)
+    }
+
+    fn apply_plan_locked(
+        &self,
+        plan: ConfigDraftPlan,
+        review: Option<ConfigReviewEvidence>,
+    ) -> Result<ConfigApplyOutcome, ConfigOpsError> {
         let current_config = plan.current_config.clone();
         let next_config = plan.draft_config.clone();
         let report = self.backend.apply_config_draft(&plan)?;
@@ -500,10 +711,12 @@ impl ConfigOpsService {
         // explicit and bounds the map to one actionable rollback.
         rollback_reports.clear();
         rollback_reports.insert(rollback_id.clone(), report.clone());
+        self.reviewed_previews.lock().clear();
         Ok(ConfigApplyOutcome {
             apply: report,
             reload,
             rollback_id,
+            review,
         })
     }
 
@@ -568,6 +781,69 @@ fn rollback_id_for(report: &ConfigApplyReport) -> String {
     );
     let digest = oraclemcp_audit::sha256_hex(material.as_bytes());
     format!("rollback-{}", &digest[..32])
+}
+
+fn redacted_diff_sha256(diff: &ConfigRedactedDiff) -> String {
+    let encoded = serde_json::to_vec(diff).expect("redacted config diff must serialize");
+    oraclemcp_audit::sha256_hex(&encoded)
+}
+
+fn review_binding_sha256(review_binding: &str) -> String {
+    let mut material = b"oraclemcp-config-review-binding-v1\0".to_vec();
+    material.extend_from_slice(review_binding.as_bytes());
+    oraclemcp_audit::sha256_hex(&material)
+}
+
+fn random_preview_token() -> Result<String, ConfigOpsError> {
+    let mut random = [0_u8; 32];
+    getrandom::getrandom(&mut random)
+        .map_err(|error| ConfigOpsError::Io(format!("preview-token generation failed: {error}")))?;
+    let mut token = String::with_capacity("config-preview-v1-".len() + random.len() * 2);
+    token.push_str("config-preview-v1-");
+    for byte in random {
+        use std::fmt::Write as _;
+        write!(&mut token, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok(token)
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn prune_reviewed_previews(previews: &mut BTreeMap<String, ReviewedConfigDraft>, now: Instant) {
+    previews.retain(|_, preview| preview.expires_at > now);
+}
+
+fn config_confirmation_reasons(preview: &ConfigDraftPreview) -> Vec<String> {
+    let mut reasons = BTreeSet::new();
+    if !preview.reload_plan.restart_required.is_empty() {
+        reasons.insert("restart-required configuration change".to_owned());
+    }
+    if !preview.reload_plan.draining_profiles().is_empty() {
+        reasons.insert("profile drain or connection replacement".to_owned());
+    }
+    if preview.redacted_diff.changes.iter().any(|change| {
+        let path = change.path.as_str();
+        path.starts_with("http.oauth")
+            || path.starts_with("http.mtls")
+            || path.starts_with("http.tls")
+            || path.starts_with("http.operator")
+            || path == "http.allow_remote"
+            || path == "http.trusted_https_termination"
+            || path.starts_with("audit.key")
+            || path.starts_with("audit.verification_keys")
+            || path.contains(".metadata.max_level")
+            || path.contains(".metadata.default_level")
+            || path.contains(".metadata.protected")
+            || path.contains(".metadata.mcp_exposed")
+    }) {
+        reasons.insert("authorization, authentication, or exposure change".to_owned());
+    }
+    reasons.into_iter().collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1902,6 +2178,168 @@ mod tests {
         assert_eq!(
             parsed.profile("prod").expect("prod profile").max_level(),
             oraclemcp_config::OperatingLevel::ReadOnly
+        );
+    }
+
+    #[test]
+    fn reviewed_apply_binds_exact_bytes_binding_and_single_use() {
+        let (backend, target) = backend("reviewed-exact-binding");
+        let current = profile_config("current:1521/svc");
+        let reviewed = profile_config("reviewed:1521/svc");
+        let substituted = profile_config("substituted:1521/svc");
+        write_atomic_path(&target, current.as_bytes()).expect("seed current config");
+        let service = ConfigOpsService::new(backend, target.clone(), None);
+
+        let preview = service
+            .stage_reviewed(&reviewed, "operator-session-a")
+            .expect("review draft");
+        let cross_session = service
+            .apply_reviewed(
+                &reviewed,
+                &preview.preview.draft_sha256,
+                &preview.preview_token,
+                "operator-session-b",
+                true,
+            )
+            .expect_err("cross-session token must fail");
+        assert!(matches!(cross_session, ConfigOpsError::InvalidPreviewToken));
+        assert_eq!(fs::read_to_string(&target).expect("read current"), current);
+        assert!(matches!(
+            service.apply_reviewed(
+                &reviewed,
+                &preview.preview.draft_sha256,
+                &preview.preview_token,
+                "operator-session-a",
+                true,
+            ),
+            Err(ConfigOpsError::InvalidPreviewToken)
+        ));
+
+        let preview = service
+            .stage_reviewed(&reviewed, "operator-session-a")
+            .expect("review draft again");
+        let drift = service
+            .apply_reviewed(
+                &substituted,
+                &preview.preview.draft_sha256,
+                &preview.preview_token,
+                "operator-session-a",
+                true,
+            )
+            .expect_err("different bytes must fail");
+        assert!(matches!(drift, ConfigOpsError::PreviewDraftChanged));
+        assert_eq!(fs::read_to_string(&target).expect("read current"), current);
+
+        let preview = service
+            .stage_reviewed(&reviewed, "operator-session-a")
+            .expect("review exact draft");
+        let outcome = service
+            .apply_reviewed(
+                &reviewed,
+                &preview.preview.draft_sha256,
+                &preview.preview_token,
+                "operator-session-a",
+                true,
+            )
+            .expect("exact reviewed draft applies");
+        let evidence = outcome.review.expect("review evidence");
+        assert_eq!(evidence.draft_sha256, preview.preview.draft_sha256);
+        assert_eq!(evidence.redacted_diff_sha256, preview.redacted_diff_sha256);
+        assert_eq!(evidence.preview_token_sha256, preview.preview_token_sha256);
+        assert_eq!(fs::read_to_string(&target).expect("read applied"), reviewed);
+        assert!(matches!(
+            service.apply_reviewed(
+                &reviewed,
+                &preview.preview.draft_sha256,
+                &preview.preview_token,
+                "operator-session-a",
+                true,
+            ),
+            Err(ConfigOpsError::InvalidPreviewToken)
+        ));
+    }
+
+    #[test]
+    fn reviewed_apply_rejects_expiry_base_race_and_missing_confirmation() {
+        let (backend, target) = backend("reviewed-expiry-race-confirm");
+        let current = privileged_profile_config("current:1521/svc", "READ_ONLY");
+        let sensitive = privileged_profile_config("current:1521/svc", "ADMIN");
+        let external = privileged_profile_config("external:1521/svc", "READ_ONLY");
+        write_atomic_path(&target, current.as_bytes()).expect("seed current config");
+        let mut service = ConfigOpsService::new(backend, target.clone(), None);
+        service.preview_ttl = Duration::from_secs(2);
+        let start = Instant::now();
+
+        let expired = service
+            .stage_reviewed_at(&sensitive, "operator", start, 100)
+            .expect("stage expiring preview");
+        assert!(expired.confirmation_required);
+        assert_eq!(expired.preview_expires_unix, 102);
+        assert!(matches!(
+            service.apply_reviewed_at(
+                &sensitive,
+                &expired.preview.draft_sha256,
+                &expired.preview_token,
+                "operator",
+                true,
+                start + Duration::from_secs(2),
+            ),
+            Err(ConfigOpsError::PreviewExpired)
+        ));
+        assert_eq!(fs::read_to_string(&target).expect("read current"), current);
+
+        let unconfirmed = service
+            .stage_reviewed_at(&sensitive, "operator", start, 100)
+            .expect("stage sensitive preview");
+        assert!(matches!(
+            service.apply_reviewed_at(
+                &sensitive,
+                &unconfirmed.preview.draft_sha256,
+                &unconfirmed.preview_token,
+                "operator",
+                false,
+                start,
+            ),
+            Err(ConfigOpsError::PreviewConfirmationRequired)
+        ));
+        assert_eq!(fs::read_to_string(&target).expect("read current"), current);
+
+        let raced = service
+            .stage_reviewed_at(&sensitive, "operator", start, 100)
+            .expect("stage raced preview");
+        write_atomic_path(&target, external.as_bytes()).expect("external edit");
+        assert!(matches!(
+            service.apply_reviewed_at(
+                &sensitive,
+                &raced.preview.draft_sha256,
+                &raced.preview_token,
+                "operator",
+                true,
+                start,
+            ),
+            Err(ConfigOpsError::CurrentChanged { .. })
+        ));
+        assert_eq!(
+            fs::read_to_string(&target).expect("preserved external"),
+            external
+        );
+    }
+
+    #[test]
+    fn reviewed_preview_registry_is_bounded() {
+        let (backend, target) = backend("reviewed-preview-bound");
+        let current = profile_config("current:1521/svc");
+        write_atomic_path(&target, current.as_bytes()).expect("seed current config");
+        let service = ConfigOpsService::new(backend, target, None);
+        for index in 0..(MAX_REVIEWED_CONFIG_PREVIEWS + 17) {
+            let draft = profile_config(&format!("draft-{index}:1521/svc"));
+            service
+                .stage_reviewed(&draft, "operator")
+                .expect("bounded preview");
+        }
+        assert_eq!(
+            service.reviewed_previews.lock().len(),
+            MAX_REVIEWED_CONFIG_PREVIEWS
         );
     }
 }

@@ -492,6 +492,12 @@ export type ConfigDraftPreview = {
     changes: ConfigFieldChange[];
   };
   reload_plan: ConfigReloadPlan;
+  preview_token: string;
+  preview_token_sha256: string;
+  redacted_diff_sha256: string;
+  preview_expires_unix: number;
+  confirmation_required: boolean;
+  confirmation_reasons: string[];
 };
 
 export type ConfigOpsStatusData = {
@@ -522,6 +528,11 @@ export type ConfigApplyOutcome = {
     message: string;
   };
   rollback_id: string;
+  review?: {
+    preview_token_sha256: string;
+    draft_sha256: string;
+    redacted_diff_sha256: string;
+  } | null;
 };
 
 export type ConfigApplyData = {
@@ -1201,11 +1212,15 @@ export async function previewConfigDraft(
 export async function applyConfigDraft(
   session: DashboardSession,
   draftToml: string,
-  expectedCurrentSha256: string
+  previewToken: string,
+  expectedDraftSha256: string,
+  confirmPreview: boolean
 ): Promise<OperatorResponse<ConfigApplyData>> {
   return operatorPost("/operator/v1/config/apply", session, {
     draft_toml: draftToml,
-    expected_current_sha256: expectedCurrentSha256
+    preview_token: previewToken,
+    expected_draft_sha256: expectedDraftSha256,
+    confirm_preview: confirmPreview
   });
 }
 
