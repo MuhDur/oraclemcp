@@ -1,5 +1,6 @@
 {
   "data": {
+    "nextCursor": null,
     "proposals": [
       {
         "author": "agent",
@@ -21,7 +22,6 @@
             },
             "id": "stmt-fixture",
             "sql_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
-            "sql_template": "UPDATE accounts SET status = :1 WHERE id = :2",
             "stored_verdict_present": true,
             "unit": "dml"
           }

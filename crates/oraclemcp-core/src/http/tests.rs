@@ -3895,6 +3895,160 @@ fn cp_apply_reclassifies_never_trusts_stored_verdict() {
     );
 }
 
+fn change_proposals_test_config() -> (OracleMcpServer, HttpTransportConfig, String) {
+    let (auditor, _sink) = operator_auditor();
+    let dir = dashboard_test_dir("change-proposals-list");
+    let store = Arc::new(
+        crate::change_proposal::ChangeProposalStore::open(dir.join("state"))
+            .expect("proposal store"),
+    );
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        change_proposals: Some(store),
+        ..Default::default()
+    };
+    let server = test_server();
+    let write_sql = "UPDATE accounts SET status = :1 WHERE id = :2";
+    let draft = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/change-proposals/draft",
+            &serde_json::json!({
+                "profile": "prod",
+                "author": "agent",
+                "title": "Hold account",
+                "statements": [{
+                    "sql_template": write_sql,
+                    "binds": ["HOLD", 42]
+                }]
+            }),
+        ),
+    );
+    assert_eq!(draft.status, 200);
+    let proposal_id = response_json(&draft)["data"]["proposal"]["id"]
+        .as_str()
+        .expect("proposal id")
+        .to_owned();
+    (server, cfg, proposal_id)
+}
+
+#[test]
+fn change_proposals_list_returns_stripped_projection_with_etag_and_next_cursor() {
+    let (server, cfg, _proposal_id) = change_proposals_test_config();
+
+    let list = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_get("/operator/v1/change-proposals"),
+    );
+    assert_eq!(list.status, 200);
+    let etag = list.header("etag").expect("list carries an ETag validator");
+    assert!(!etag.is_empty(), "ETag must be a non-empty validator");
+
+    let body = String::from_utf8(list.body.clone()).expect("list body utf8");
+    assert!(
+        !body.contains("UPDATE accounts"),
+        "list projection must not serialize sql_template bodies"
+    );
+
+    let list_json = response_json(&list);
+    let statement = &list_json["data"]["proposals"][0]["statements"][0];
+    assert!(
+        statement["sql_sha256"]
+            .as_str()
+            .expect("sql digest present")
+            .starts_with("sha256:"),
+        "list statement keeps the SQL digest"
+    );
+    assert_eq!(
+        statement.get("sql_template"),
+        None,
+        "list statement omits the sql_template body"
+    );
+    assert_eq!(statement["unit"], serde_json::json!("dml"));
+    assert_eq!(
+        list_json["data"]["nextCursor"],
+        Value::Null,
+        "a single-page board reports no next cursor"
+    );
+    assert_eq!(
+        list_json["data"]["source"],
+        serde_json::json!("change_proposals")
+    );
+}
+
+#[test]
+fn change_proposals_list_answers_304_on_matching_if_none_match() {
+    let (server, cfg, _proposal_id) = change_proposals_test_config();
+
+    let first = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_get("/operator/v1/change-proposals"),
+    );
+    assert_eq!(first.status, 200);
+    let etag = first
+        .header("etag")
+        .expect("first list carries an ETag")
+        .to_owned();
+
+    let revalidated = handle_http_request(
+        &server,
+        &cfg,
+        operator_get_owned("/operator/v1/change-proposals".to_owned(), Some(&etag)),
+    );
+    assert_eq!(
+        revalidated.status, 304,
+        "an unchanged board revalidates to 304 Not Modified"
+    );
+    assert!(
+        revalidated.body.is_empty(),
+        "a 304 response carries no body"
+    );
+    assert_eq!(
+        revalidated.header("etag"),
+        Some(etag.as_str()),
+        "the 304 response echoes the ETag validator"
+    );
+}
+
+#[test]
+fn change_proposal_detail_route_returns_full_sql_template() {
+    let (server, cfg, proposal_id) = change_proposals_test_config();
+
+    let detail = handle_http_request(
+        &server,
+        &cfg,
+        operator_get_owned(format!("/operator/v1/change-proposals/{proposal_id}"), None),
+    );
+    assert_eq!(detail.status, 200);
+    let detail_json = response_json(&detail);
+    assert_eq!(
+        detail_json["data"]["source"],
+        serde_json::json!("change_proposals")
+    );
+    assert_eq!(
+        detail_json["data"]["proposal"]["statements"][0]["sql_template"],
+        serde_json::json!("UPDATE accounts SET status = :1 WHERE id = :2"),
+        "the detail view restores the sql_template the list projection omits"
+    );
+
+    let missing = handle_http_request(
+        &server,
+        &cfg,
+        operator_get_owned(
+            "/operator/v1/change-proposals/cp-does-not-exist".to_owned(),
+            None,
+        ),
+    );
+    assert_eq!(missing.status, 404);
+    assert_eq!(
+        response_json(&missing)["data"]["error"],
+        serde_json::json!("unknown_change_proposal")
+    );
+}
+
 #[test]
 fn schema_diff_export_is_redacted_and_review_gated() {
     let (auditor, _sink) = operator_auditor();
@@ -4077,6 +4231,34 @@ fn source_history_snapshots_prior_source_and_revert_drafts_review_proposal() {
     assert_eq!(
         history_json["data"]["snapshots"][0]["id"],
         serde_json::json!(snapshot_id)
+    );
+    assert_eq!(
+        history_json["data"]["nextCursor"],
+        Value::Null,
+        "a single-page history reports no next cursor"
+    );
+    let history_etag = history
+        .header("etag")
+        .expect("source-history list carries an ETag")
+        .to_owned();
+    assert!(!history_etag.is_empty());
+
+    let history_revalidated = handle_http_request(
+        &server,
+        &cfg,
+        operator_get_owned(
+            "/operator/v1/source-history".to_owned(),
+            Some(&history_etag),
+        ),
+    );
+    assert_eq!(
+        history_revalidated.status, 304,
+        "an unchanged source-history board revalidates to 304"
+    );
+    assert!(history_revalidated.body.is_empty());
+    assert_eq!(
+        history_revalidated.header("etag"),
+        Some(history_etag.as_str())
     );
 
     let revert = handle_http_request(
@@ -4451,6 +4633,19 @@ fn operator_json_get(path: &'static str) -> HttpRequest {
         Vec::new(),
     )
     .with_peer_loopback(true)
+}
+
+/// GET with a runtime-owned path and an optional `If-None-Match` validator, for
+/// the by-id detail route and conditional-request assertions.
+fn operator_get_owned(path: String, if_none_match: Option<&str>) -> HttpRequest {
+    let mut headers: Vec<(String, String)> = vec![
+        ("host".to_owned(), "127.0.0.1".to_owned()),
+        ("accept".to_owned(), "application/json".to_owned()),
+    ];
+    if let Some(validator) = if_none_match {
+        headers.push(("if-none-match".to_owned(), validator.to_owned()));
+    }
+    HttpRequest::new("GET", path, headers, Vec::new()).with_peer_loopback(true)
 }
 
 fn ticket_from_pairing_url(url: &str) -> &str {

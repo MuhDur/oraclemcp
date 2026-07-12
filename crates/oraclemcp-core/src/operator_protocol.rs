@@ -613,6 +613,7 @@ pub fn operator_fixture_values() -> Vec<(&'static str, Value)> {
                 "/operator/v1/change-proposals",
                 json!({
                     "source": "change_proposals",
+                    "nextCursor": null,
                     "proposals": [{
                         "schema_version": 1,
                         "id": "cp-fixture",
@@ -627,7 +628,6 @@ pub fn operator_fixture_values() -> Vec<(&'static str, Value)> {
                         "statements": [{
                             "id": "stmt-fixture",
                             "unit": "dml",
-                            "sql_template": "UPDATE accounts SET status = :1 WHERE id = :2",
                             "sql_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
                             "bind_count": 2,
                             "commit": false,
@@ -649,6 +649,7 @@ pub fn operator_fixture_values() -> Vec<(&'static str, Value)> {
                 "/operator/v1/source-history",
                 json!({
                     "source": "source_history",
+                    "nextCursor": null,
                     "snapshots": [{
                         "schema_version": 1,
                         "id": "srcsnap-fixture",

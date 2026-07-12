@@ -1,5 +1,6 @@
 {
   "data": {
+    "nextCursor": null,
     "snapshots": [
       {
         "created_at": "unix:00000000000000000001.000000000",

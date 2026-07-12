@@ -83,6 +83,7 @@ import {
   fetchClientCredentials,
   fetchDashboardSession,
   fetchChangeProposals,
+  fetchChangeProposalDetail,
   fetchSourceHistory,
   fetchOperatorConfig,
   fetchOperatorHealth,
@@ -109,6 +110,7 @@ import {
   type CapacityLimitSource,
   type ChangeProposalApplyUnit,
   type ChangeProposalAuthorKind,
+  type ChangeProposalListView,
   type ChangeProposalView,
   type DashboardSession,
   type SchemaDiffExportData,
@@ -465,7 +467,7 @@ function OverviewPage(): React.ReactElement {
   });
   const reviews = useQuery({
     queryKey: ["change-proposals"],
-    queryFn: fetchChangeProposals,
+    queryFn: () => fetchChangeProposals(),
     refetchInterval: 15_000
   });
   const eventLog = useOperatorEventLog("operator");
@@ -2721,7 +2723,7 @@ function OverviewReviewsPanel({
   proposals,
   pending
 }: {
-  proposals: ChangeProposalView[];
+  proposals: ChangeProposalListView[];
   pending: boolean;
 }): React.ReactElement {
   const visible = proposals.slice(0, 3);
@@ -5175,6 +5177,8 @@ function ReviewsPage(): React.ReactElement {
   const [confirm, setConfirm] = React.useState("");
   const [applyCommit, setApplyCommit] = React.useState(true);
   const [lastResult, setLastResult] = React.useState<ReviewResult | null>(null);
+  const [proposalsCursor, setProposalsCursor] = React.useState<string | undefined>(undefined);
+  const [historyCursor, setHistoryCursor] = React.useState<string | undefined>(undefined);
 
   const session = useQuery({
     queryKey: ["dashboard-session"],
@@ -5184,17 +5188,19 @@ function ReviewsPage(): React.ReactElement {
     retry: 1
   });
   const proposalsQuery = useQuery({
-    queryKey: ["change-proposals"],
-    queryFn: fetchChangeProposals,
+    queryKey: ["change-proposals", proposalsCursor ?? "start"],
+    queryFn: () => fetchChangeProposals(proposalsCursor),
     refetchInterval: 10_000
   });
   const sourceHistoryQuery = useQuery({
-    queryKey: ["source-history"],
-    queryFn: fetchSourceHistory,
+    queryKey: ["source-history", historyCursor ?? "start"],
+    queryFn: () => fetchSourceHistory(historyCursor),
     refetchInterval: 15_000
   });
   const proposals = proposalsQuery.data?.data.proposals ?? [];
+  const proposalsNextCursor = proposalsQuery.data?.data.nextCursor ?? null;
   const snapshots = sourceHistoryQuery.data?.data.snapshots ?? [];
+  const historyNextCursor = sourceHistoryQuery.data?.data.nextCursor ?? null;
   const filtered = React.useMemo(() => {
     const needle = filter.trim().toLowerCase();
     if (!needle) {
@@ -5204,13 +5210,37 @@ function ReviewsPage(): React.ReactElement {
   }, [filter, proposals]);
   const selected =
     proposals.find((proposal) => proposal.id === selectedId) ?? filtered[0] ?? proposals[0] ?? null;
+  const selectedProposalId = selected?.id ?? null;
   const needsConfirm = selected?.statements.some((statement) => statement.unit !== "read") ?? false;
+
+  // The polled list omits sql_template bodies; fetch the full detail (with SQL
+  // text) for the selected proposal on demand.
+  const detailQuery = useQuery({
+    queryKey: ["change-proposal-detail", selectedProposalId],
+    queryFn: () => fetchChangeProposalDetail(selectedProposalId as string),
+    enabled: Boolean(selectedProposalId),
+    refetchInterval: 10_000
+  });
+  const selectedDetail = detailQuery.data?.data.proposal ?? null;
 
   React.useEffect(() => {
     if (!selectedId && filtered[0]) {
       setSelectedId(filtered[0].id);
     }
   }, [filtered, selectedId]);
+
+  // Cursors are bound to the board revision; if the store changed under a held
+  // cursor the server rejects it, so fall back to the first page.
+  React.useEffect(() => {
+    if (proposalsQuery.isError && proposalsCursor) {
+      setProposalsCursor(undefined);
+    }
+  }, [proposalsQuery.isError, proposalsCursor]);
+  React.useEffect(() => {
+    if (sourceHistoryQuery.isError && historyCursor) {
+      setHistoryCursor(undefined);
+    }
+  }, [sourceHistoryQuery.isError, historyCursor]);
 
   const draftMutation = useMutation({
     mutationFn: async () => {
@@ -5236,6 +5266,7 @@ function ReviewsPage(): React.ReactElement {
     onSuccess: (response) => {
       setLastResult(reviewSuccess("Draft", response));
       setSelectedId(response.data.proposal.id);
+      setProposalsCursor(undefined);
       queryClient.invalidateQueries({ queryKey: ["change-proposals"] });
     },
     onError: (error) => {
@@ -5280,6 +5311,7 @@ function ReviewsPage(): React.ReactElement {
     onSuccess: (response) => {
       setLastResult(reviewSuccess("Revert draft", response));
       setSelectedId(response.data.proposal.id);
+      setProposalsCursor(undefined);
       queryClient.invalidateQueries({ queryKey: ["change-proposals"] });
     },
     onError: (error) => {
@@ -5365,12 +5397,30 @@ function ReviewsPage(): React.ReactElement {
                 ))
               )}
             </div>
+            {proposalsCursor || proposalsNextCursor ? (
+              <ListPager
+                atStart={!proposalsCursor}
+                onFirst={() => setProposalsCursor(undefined)}
+                onNext={
+                  proposalsNextCursor
+                    ? () => setProposalsCursor(proposalsNextCursor)
+                    : undefined
+                }
+                pending={proposalsQuery.isFetching}
+              />
+            ) : null}
           </ConsolePanel>
           <SourceHistoryPanel
             snapshots={snapshots}
             pending={sourceHistoryQuery.isFetching || revertMutation.isPending}
             blocked={sourceHistoryQuery.isError}
             onDraftRevert={(snapshot) => revertMutation.mutate(snapshot)}
+            atStart={!historyCursor}
+            onFirst={() => setHistoryCursor(undefined)}
+            onNext={
+              historyNextCursor ? () => setHistoryCursor(historyNextCursor) : undefined
+            }
+            hasPager={Boolean(historyCursor || historyNextCursor)}
           />
           <SchemaDiffPanel
             session={session.data ?? null}
@@ -5378,6 +5428,7 @@ function ReviewsPage(): React.ReactElement {
             onDrafted={(proposal, response) => {
               setLastResult(reviewSuccess("Migration draft", response));
               setSelectedId(proposal.id);
+              setProposalsCursor(undefined);
               queryClient.invalidateQueries({ queryKey: ["change-proposals"] });
             }}
           />
@@ -5497,7 +5548,17 @@ function ReviewsPage(): React.ReactElement {
                 />
               </label>
             </div>
-            {selected ? <ProposalStatementTable proposal={selected} /> : null}
+            {selected ? (
+              selectedDetail ? (
+                <ProposalStatementTable proposal={selectedDetail} />
+              ) : (
+                <p className="mt-4 text-sm font-semibold text-[var(--om-text-muted)]">
+                  {detailQuery.isError
+                    ? "statement detail unavailable"
+                    : "loading statement detail…"}
+                </p>
+              )
+            ) : null}
             <div className="mt-4 flex flex-wrap items-center gap-3">
               <label className={OM_CHECK_LABEL}>
                 <input
@@ -5527,6 +5588,34 @@ function ReviewsPage(): React.ReactElement {
         </div>
       </div>
     </PageFrame>
+  );
+}
+
+function ListPager({
+  atStart,
+  onFirst,
+  onNext,
+  pending
+}: {
+  atStart: boolean;
+  onFirst: () => void;
+  onNext?: () => void;
+  pending: boolean;
+}): React.ReactElement {
+  return (
+    <div className="flex items-center justify-between gap-3 border-t border-[var(--om-border)] px-4 py-3">
+      <Button type="button" variant="secondary" disabled={atStart || pending} onClick={onFirst}>
+        First page
+      </Button>
+      <Button
+        type="button"
+        variant="secondary"
+        disabled={!onNext || pending}
+        onClick={() => onNext?.()}
+      >
+        Next page
+      </Button>
+    </div>
   );
 }
 
@@ -5571,12 +5660,20 @@ function SourceHistoryPanel({
   snapshots,
   pending,
   blocked,
-  onDraftRevert
+  onDraftRevert,
+  atStart,
+  onFirst,
+  onNext,
+  hasPager
 }: {
   snapshots: SourceSnapshotView[];
   pending: boolean;
   blocked: boolean;
   onDraftRevert: (snapshot: SourceSnapshotView) => void;
+  atStart: boolean;
+  onFirst: () => void;
+  onNext?: () => void;
+  hasPager: boolean;
 }): React.ReactElement {
   return (
     <ConsolePanel>
@@ -5634,6 +5731,9 @@ function SourceHistoryPanel({
           ))
         )}
       </div>
+      {hasPager ? (
+        <ListPager atStart={atStart} onFirst={onFirst} onNext={onNext} pending={pending} />
+      ) : null}
     </ConsolePanel>
   );
 }
@@ -6080,19 +6180,24 @@ function safeFilename(value: string): string {
   return normalized || "schema-diff-migration";
 }
 
-function proposalSearchText(proposal: ChangeProposalView): string {
+function proposalSearchText(proposal: ChangeProposalListView): string {
+  // The list projection omits sql_template bodies; search over the metadata and
+  // the per-statement SQL digest instead. Full text is available in the detail
+  // view fetched on selection.
   return [
     proposal.title,
     proposal.profile,
     proposal.author,
     proposal.id,
-    ...proposal.statements.map((statement) => statement.sql_template)
+    ...proposal.statements.map((statement) => statement.sql_sha256)
   ]
     .join(" ")
     .toLowerCase();
 }
 
-function proposalLevelTone(proposal: ChangeProposalView): "neutral" | "ok" | "warn" | "off" | "info" {
+function proposalLevelTone(
+  proposal: ChangeProposalListView
+): "neutral" | "ok" | "warn" | "off" | "info" {
   if (proposal.statements.some((statement) => statement.unit === "ddl")) {
     return "warn";
   }

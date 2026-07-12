@@ -3034,6 +3034,7 @@ enum OperatorRouteKind {
     ConfigApply,
     ConfigRollback,
     ChangeProposalsList,
+    ChangeProposalsDetail,
     ChangeProposalsDraft,
     ChangeProposalsApply,
     SchemaDiff,
@@ -3079,8 +3080,29 @@ fn operator_route_kind(path: &str) -> OperatorRouteKind {
         "/operator/v1/actions/execute" => OperatorRouteKind::ActionExecute,
         "/operator/v1/session/set-level" => OperatorRouteKind::SetLevel,
         "/operator/v1/session/switch-profile" => OperatorRouteKind::SwitchProfile,
+        // Single-segment proposal ids resolve to the by-id detail route. The
+        // `draft`/`apply` sub-routes are matched exactly above, so they never
+        // reach this guard.
+        path if change_proposal_detail_id(path).is_some() => {
+            OperatorRouteKind::ChangeProposalsDetail
+        }
         _ => OperatorRouteKind::NotFound,
     }
+}
+
+const CHANGE_PROPOSAL_DETAIL_PREFIX: &str = "/operator/v1/change-proposals/";
+
+/// Extract the proposal id from a `/operator/v1/change-proposals/{id}` detail
+/// path, or `None` when `path` is not a single-segment detail route. The
+/// `draft` and `apply` sub-routes own exact matches and are never ids, and a
+/// value with an embedded `/` is rejected so the store never sees a multi-part
+/// segment.
+fn change_proposal_detail_id(path: &str) -> Option<&str> {
+    let id = path.strip_prefix(CHANGE_PROPOSAL_DETAIL_PREFIX)?;
+    if id.is_empty() || id.contains('/') || id == "draft" || id == "apply" {
+        return None;
+    }
+    Some(id)
 }
 
 impl OperatorRouteKind {
@@ -3157,6 +3179,7 @@ fn handle_operator_api_route(
             dashboard_browser,
         ),
         OperatorRouteKind::ChangeProposalsList
+        | OperatorRouteKind::ChangeProposalsDetail
         | OperatorRouteKind::ChangeProposalsDraft
         | OperatorRouteKind::ChangeProposalsApply => handle_operator_change_proposal_route(
             server,
@@ -3769,17 +3792,50 @@ fn handle_operator_change_proposal_route(
     };
 
     match route {
-        OperatorRouteKind::ChangeProposalsList => match store.list() {
-            Ok(proposals) => operator_json_response(
-                200,
-                &request.path,
-                json!({
-                    "source": "change_proposals",
-                    "proposals": proposals,
-                }),
-            ),
-            Err(error) => operator_change_proposal_error_response(&request.path, error),
-        },
+        OperatorRouteKind::ChangeProposalsList => {
+            let etag = match store.etag() {
+                Ok(etag) => etag,
+                Err(error) => {
+                    return operator_change_proposal_error_response(&request.path, error);
+                }
+            };
+            // A polling board revalidates with the last-seen validator; an
+            // unchanged store answers 304 with the ETag and no body.
+            if request.header("if-none-match") == Some(etag.as_str()) {
+                return empty_response(304).with_header("etag", &etag);
+            }
+            match store.list_page(request.query_param("cursor")) {
+                Ok(page) => operator_json_response(
+                    200,
+                    &request.path,
+                    json!({
+                        "source": "change_proposals",
+                        "proposals": page.proposals,
+                        "nextCursor": page.next_cursor,
+                    }),
+                )
+                .with_header("etag", &page.etag),
+                Err(error) => operator_change_proposal_error_response(&request.path, error),
+            }
+        }
+        OperatorRouteKind::ChangeProposalsDetail => {
+            let Some(id) = change_proposal_detail_id(&request.path) else {
+                return operator_not_found_response(request);
+            };
+            // The detail view carries the full sql_template bodies the list
+            // projection omits; the board fetches it on selection.
+            match store.detail(id) {
+                Ok(proposal) => operator_json_response(
+                    200,
+                    &request.path,
+                    json!({
+                        "source": "change_proposals",
+                        "proposal": proposal,
+                    }),
+                ),
+                Err(error) => operator_change_proposal_error_response(&request.path, error),
+            }
+        }
         OperatorRouteKind::ChangeProposalsDraft => {
             if !content_type_is_json(request) {
                 return empty_response(415);
@@ -4496,16 +4552,30 @@ fn handle_operator_source_history_route(
 
     match route {
         OperatorRouteKind::SourceHistoryList => {
-            match history.list(source_history_filter_from_request(request)) {
-                Ok(snapshots) => operator_json_response(
+            let etag = match history.etag() {
+                Ok(etag) => etag,
+                Err(error) => {
+                    return operator_source_history_error_response(&request.path, error);
+                }
+            };
+            if request.header("if-none-match") == Some(etag.as_str()) {
+                return empty_response(304).with_header("etag", &etag);
+            }
+            match history.list_page(
+                source_history_filter_from_request(request),
+                request.query_param("cursor"),
+            ) {
+                Ok(page) => operator_json_response(
                     200,
                     &request.path,
                     json!({
                         "source": "source_history",
-                        "snapshots": snapshots,
+                        "snapshots": page.snapshots,
+                        "nextCursor": page.next_cursor,
                         "redaction": "source text is omitted from history list responses",
                     }),
-                ),
+                )
+                .with_header("etag", &page.etag),
                 Err(error) => operator_source_history_error_response(&request.path, error),
             }
         }

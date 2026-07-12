@@ -660,9 +660,45 @@ export type ChangeProposalView = {
   stored_verdict_present: boolean;
 };
 
+// List projection carried by the polled board endpoint. It mirrors the full
+// statement view but drops the `sql_template` body (fetched on selection via
+// the by-id detail route) so list responses stay bounded.
+export type ChangeProposalStatementListView = {
+  id: string;
+  unit: ChangeProposalApplyUnit;
+  sql_sha256: string;
+  bind_count: number;
+  commit: boolean;
+  capture_dbms_output: boolean;
+  draft_verdict: ChangeProposalClassifierView;
+  stored_verdict_present: boolean;
+};
+
+export type ChangeProposalListView = {
+  schema_version: number;
+  id: string;
+  profile: string;
+  author: ChangeProposalAuthorKind;
+  author_id_hash: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  statement_count: number;
+  statements: ChangeProposalStatementListView[];
+  stored_verdict_present: boolean;
+};
+
 export type ChangeProposalListData = {
   source: string;
-  proposals: ChangeProposalView[];
+  proposals: ChangeProposalListView[];
+  nextCursor?: string | null;
+};
+
+// The by-id detail response restores the full statement bodies (with
+// `sql_template`) that the list projection omits.
+export type ChangeProposalDetailData = {
+  source: string;
+  proposal: ChangeProposalView;
 };
 
 export type ChangeProposalDraftStatement = {
@@ -726,6 +762,7 @@ export type SourceSnapshotView = {
 export type SourceHistoryListData = {
   source: string;
   snapshots: SourceSnapshotView[];
+  nextCursor?: string | null;
   redaction?: string;
 };
 
@@ -1170,12 +1207,25 @@ export async function cancelLane(
   });
 }
 
-export async function fetchChangeProposals(): Promise<OperatorResponse<ChangeProposalListData>> {
-  return operatorGet("/operator/v1/change-proposals");
+export async function fetchChangeProposals(
+  cursor?: string
+): Promise<OperatorResponse<ChangeProposalListData>> {
+  const suffix = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+  return operatorGet(`/operator/v1/change-proposals${suffix}`);
 }
 
-export async function fetchSourceHistory(): Promise<OperatorResponse<SourceHistoryListData>> {
-  return operatorGet("/operator/v1/source-history?max_rows=100");
+export async function fetchChangeProposalDetail(
+  id: string
+): Promise<OperatorResponse<ChangeProposalDetailData>> {
+  return operatorGet(`/operator/v1/change-proposals/${encodeURIComponent(id)}`);
+}
+
+export async function fetchSourceHistory(
+  cursor?: string
+): Promise<OperatorResponse<SourceHistoryListData>> {
+  const base = "/operator/v1/source-history?max_rows=100";
+  const suffix = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
+  return operatorGet(`${base}${suffix}`);
 }
 
 export async function fetchClientCredentials(): Promise<OperatorResponse<ClientCredentialsData>> {
@@ -1575,16 +1625,34 @@ export async function fetchAuditTail(
   return parsed as OperatorResponse<AuditTailData>;
 }
 
+// Per-path conditional-request cache. A polled GET revalidates with the
+// last-seen ETag; an unchanged endpoint answers 304 and we reuse the cached,
+// referentially-stable response so React skips re-rendering.
+const operatorGetCache = new Map<string, { etag: string; value: unknown }>();
+
 async function operatorGet<T extends Record<string, unknown>>(
   path: string
 ): Promise<OperatorResponse<T>> {
+  const headers: Record<string, string> = { accept: "application/json" };
+  const cached = operatorGetCache.get(path);
+  if (cached) {
+    headers["if-none-match"] = cached.etag;
+  }
   const response = await fetch(path, {
-    headers: { accept: "application/json" },
+    headers,
     cache: "no-store",
     credentials: "same-origin"
   });
+  if (response.status === 304 && cached) {
+    return cached.value as OperatorResponse<T>;
+  }
   const parsed = (await response.json()) as unknown;
-  return requireSuccessfulOperatorResponse<T>(response.status, parsed);
+  const result = requireSuccessfulOperatorResponse<T>(response.status, parsed);
+  const etag = response.headers.get("etag");
+  if (etag) {
+    operatorGetCache.set(path, { etag, value: result });
+  }
+  return result;
 }
 
 function setOptionalParam(params: URLSearchParams, key: string, value: string): void {
