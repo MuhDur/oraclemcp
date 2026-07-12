@@ -1357,9 +1357,12 @@ fn a_forged_or_cross_endpoint_cursor_is_rejected_with_invalid_params() {
 
     // 2) A cursor whose signed offset is edited (replace the offset body but
     //    keep the MAC tag) is rejected — the body is part of the MAC.
-    let (body, tag) = real.rsplit_once('.').expect("cursor has a tag");
-    assert_eq!(body, "100", "first tools page advances by the page size");
-    let forged = format!("9999.{tag}");
+    let (payload, tag) = real.rsplit_once('.').expect("cursor has a tag");
+    let (revision, offset) = payload
+        .split_once(':')
+        .expect("cursor payload binds a catalog revision and offset");
+    assert_eq!(offset, "100", "first tools page advances by the page size");
+    let forged = format!("{revision}:9999.{tag}");
     let forged_replies = run_script_on(
         &server,
         vec![json!({
