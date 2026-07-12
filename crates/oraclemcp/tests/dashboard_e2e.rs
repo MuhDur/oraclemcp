@@ -565,13 +565,20 @@ fn w10_client_credentials_screen_is_redacted_and_isolated() {
             "client_credentials_unavailable",
         ],
     );
+    let operator_protocol = read_repo_file("crates/oraclemcp-core/src/operator_protocol.rs");
     assert_contains_all(
-        "dashboard client credential tickets",
-        &dashboard_auth,
+        "operator-protocol client credential POST routes are browser-ticketed",
+        &operator_protocol,
         &[
-            "(\"POST\", \"/operator/v1/client-credentials/rotate\")",
-            "(\"POST\", \"/operator/v1/client-credentials/revoke\")",
+            "path: \"/operator/v1/client-credentials/rotate\"",
+            "path: \"/operator/v1/client-credentials/revoke\"",
+            "browser_post: true",
         ],
+    );
+    assert_contains_all(
+        "dashboard derives per-route action tickets from the route specs",
+        &dashboard_auth,
+        &["OPERATOR_ROUTE_SPECS"],
     );
     assert_contains_all(
         "dashboard client credential API",
@@ -680,10 +687,19 @@ fn wd_history_source_snapshots_and_revert_are_review_gated() {
             "SourceHistoryRevertData",
         ],
     );
+    let operator_protocol = read_repo_file("crates/oraclemcp-core/src/operator_protocol.rs");
     assert_contains_all(
-        "dashboard source-history tickets",
+        "operator-protocol source-history revert POST route is browser-ticketed",
+        &operator_protocol,
+        &[
+            "path: \"/operator/v1/source-history/revert\"",
+            "browser_post: true",
+        ],
+    );
+    assert_contains_all(
+        "dashboard derives per-route action tickets from the route specs",
         &dashboard_auth,
-        &["(\"POST\", \"/operator/v1/source-history/revert\")"],
+        &["OPERATOR_ROUTE_SPECS"],
     );
     assert_contains_all(
         "source-history docs",
@@ -732,7 +748,7 @@ fn wd_diff_schema_diff_exports_migration_through_reviews() {
             "function SchemaDiffPanel",
             "aria-label=\"schema diff before snapshot\"",
             "aria-label=\"schema diff after snapshot\"",
-            "previewSchemaDiff(session, before, after, title)",
+            "previewSchemaDiff(session, before, after, input.title)",
             "downloadTextFile(`${safeFilename(preview.title)}.sql`, preview.migration_script)",
             "proposal_statements",
             "draftChangeProposal(session",
@@ -756,10 +772,16 @@ fn wd_diff_schema_diff_exports_migration_through_reviews() {
             "schema_diff_export_is_redacted_and_review_gated",
         ],
     );
+    let operator_protocol = read_repo_file("crates/oraclemcp-core/src/operator_protocol.rs");
     assert_contains_all(
-        "schema diff dashboard action ticket",
+        "operator-protocol schema-diff POST route is browser-ticketed",
+        &operator_protocol,
+        &["path: \"/operator/v1/schema-diff\"", "browser_post: true"],
+    );
+    assert_contains_all(
+        "dashboard derives per-route action tickets from the route specs",
         &dashboard_auth,
-        &["(\"POST\", \"/operator/v1/schema-diff\")"],
+        &["OPERATOR_ROUTE_SPECS"],
     );
     assert_contains_all(
         "schema diff export builder",
