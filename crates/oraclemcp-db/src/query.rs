@@ -102,6 +102,12 @@ pub async fn read_query(
 ) -> Result<QueryResponse, DbError> {
     let fetch = caps.max_rows.saturating_add(1).max(1);
     let wrapped = paginated_sql(sql, offset, fetch);
+    if let Some(page) = conn
+        .query_bounded_page(cx, &wrapped, binds, caps, offset, serialize_opts)
+        .await?
+    {
+        return Ok(page);
+    }
     let rows = conn
         .query_rows_with_serialize_options(cx, &wrapped, binds, serialize_opts)
         .await?;
@@ -122,6 +128,12 @@ pub async fn read_query_named(
 ) -> Result<QueryResponse, DbError> {
     let fetch = caps.max_rows.saturating_add(1).max(1);
     let wrapped = paginated_sql(sql, offset, fetch);
+    if let Some(page) = conn
+        .query_bounded_page_named(cx, &wrapped, binds, caps, offset, serialize_opts)
+        .await?
+    {
+        return Ok(page);
+    }
     let rows = conn
         .query_rows_named_with_serialize_options(cx, &wrapped, binds, serialize_opts)
         .await?;
@@ -243,7 +255,100 @@ pub async fn read_query_as_of(
     }
 }
 
-fn query_response_from_rows_checked<Caps>(
+pub(crate) struct QueryPageBuilder {
+    caps: QueryCaps,
+    offset: usize,
+    columns: Vec<String>,
+    column_cache: Option<PageColumnCache>,
+    rows: Vec<Value>,
+    total_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QueryPagePush {
+    Accepted,
+    ByteLimit,
+}
+
+impl QueryPageBuilder {
+    pub(crate) fn new(caps: QueryCaps, offset: usize) -> Self {
+        Self {
+            caps,
+            offset,
+            columns: Vec::new(),
+            column_cache: None,
+            rows: Vec::with_capacity(caps.max_rows),
+            total_bytes: 0,
+        }
+    }
+
+    pub(crate) fn push_with_options<Caps>(
+        &mut self,
+        cx: &Cx<Caps>,
+        row: &crate::types::OracleRow,
+        serialize_opts: &SerializeOptions,
+    ) -> Result<QueryPagePush, DbError> {
+        if self.rows.len() >= self.caps.max_rows {
+            return Ok(QueryPagePush::ByteLimit);
+        }
+        if self.rows.len().is_multiple_of(64) {
+            db_checkpoint(cx, "oracle_query.serialize.rows")?;
+        }
+        if self.column_cache.is_none() {
+            self.columns = row.columns.iter().map(|(name, _)| name.clone()).collect();
+            self.column_cache = Some(PageColumnCache::from_row(row));
+        }
+        let remaining = self.caps.max_result_bytes.saturating_sub(self.total_bytes);
+        let serialized = self
+            .column_cache
+            .as_ref()
+            .expect("first row installs the column cache")
+            .serialize_row_with_budget(row, serialize_opts, remaining);
+        let (value, size) = match serialized {
+            Ok(serialized) => serialized,
+            Err(size) if self.rows.is_empty() => {
+                return Err(DbError::QueryRowTooLarge {
+                    row_offset: self.offset,
+                    row_bytes: size,
+                    max_result_bytes: self.caps.max_result_bytes,
+                });
+            }
+            Err(_) => return Ok(QueryPagePush::ByteLimit),
+        };
+        let Some(next_total) =
+            checked_byte_budget_add(self.total_bytes, size, self.caps.max_result_bytes)
+        else {
+            return Ok(QueryPagePush::ByteLimit);
+        };
+        self.total_bytes = next_total;
+        self.rows.push(value);
+        Ok(QueryPagePush::Accepted)
+    }
+
+    #[must_use]
+    pub(crate) fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub(crate) fn finish<Caps>(
+        self,
+        cx: &Cx<Caps>,
+        truncated: bool,
+    ) -> Result<QueryResponse, DbError> {
+        db_checkpoint(cx, "oracle_query.serialize.after")?;
+        let next_cursor = truncated.then(|| (self.offset + self.rows.len()).to_string());
+        Ok(QueryResponse {
+            columns: self.columns,
+            row_count: self.rows.len(),
+            rows: self.rows,
+            truncated,
+            next_cursor,
+            total_bytes: self.total_bytes,
+        })
+    }
+}
+
+pub(crate) fn query_response_from_rows_checked<Caps>(
     cx: &Cx<Caps>,
     rows: Vec<crate::types::OracleRow>,
     caps: QueryCaps,
@@ -252,71 +357,15 @@ fn query_response_from_rows_checked<Caps>(
 ) -> Result<QueryResponse, DbError> {
     db_checkpoint(cx, "oracle_query.serialize.before")?;
     let more_by_rows = rows.len() > caps.max_rows;
-    let page = &rows[..rows.len().min(caps.max_rows)];
-
-    let columns: Vec<String> = page
-        .first()
-        .map(|r| r.columns.iter().map(|(n, _)| n.clone()).collect())
-        .unwrap_or_default();
-    let column_cache = page.first().map(PageColumnCache::from_row);
-
-    let mut out_rows: Vec<Value> = Vec::with_capacity(page.len());
-    let mut total_bytes = 0usize;
+    let mut builder = QueryPageBuilder::new(caps, offset);
     let mut byte_truncated = false;
-    for (idx, row) in page.iter().enumerate() {
-        if idx % 64 == 0 {
-            db_checkpoint(cx, "oracle_query.serialize.rows")?;
-        }
-        let remaining = caps.max_result_bytes.saturating_sub(total_bytes);
-        let serialized = match &column_cache {
-            Some(cache) => cache.serialize_row_with_budget(row, serialize_opts, remaining),
-            None => PageColumnCache::from_row(row).serialize_row_with_budget(
-                row,
-                serialize_opts,
-                remaining,
-            ),
-        };
-        let (value, size) = match serialized {
-            Ok(serialized) => serialized,
-            Err(size) => {
-                if out_rows.is_empty() {
-                    return Err(DbError::QueryRowTooLarge {
-                        row_offset: offset.saturating_add(idx),
-                        row_bytes: size,
-                        max_result_bytes: caps.max_result_bytes,
-                    });
-                }
-                byte_truncated = true;
-                break;
-            }
-        };
-        let Some(next_total) = checked_byte_budget_add(total_bytes, size, caps.max_result_bytes)
-        else {
-            // The row was admitted against the exact remaining budget above;
-            // fail closed if checked aggregate accounting ever disagrees.
+    for row in rows.iter().take(caps.max_rows) {
+        if builder.push_with_options(cx, row, serialize_opts)? == QueryPagePush::ByteLimit {
             byte_truncated = true;
             break;
-        };
-        total_bytes = next_total;
-        out_rows.push(value);
+        }
     }
-
-    let truncated = more_by_rows || byte_truncated;
-    let next_cursor = if truncated {
-        Some((offset + out_rows.len()).to_string())
-    } else {
-        None
-    };
-
-    db_checkpoint(cx, "oracle_query.serialize.after")?;
-    Ok(QueryResponse {
-        columns,
-        row_count: out_rows.len(),
-        rows: out_rows,
-        truncated,
-        next_cursor,
-        total_bytes,
-    })
+    builder.finish(cx, more_by_rows || byte_truncated)
 }
 
 #[cfg(test)]
@@ -423,6 +472,107 @@ mod tests {
         }
     }
 
+    struct BoundedPageMock {
+        rows: Vec<OracleRow>,
+        generated: std::sync::atomic::AtomicUsize,
+        named_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl BoundedPageMock {
+        fn new(rows: Vec<OracleRow>) -> Self {
+            Self {
+                rows,
+                generated: std::sync::atomic::AtomicUsize::new(0),
+                named_calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn page(
+            &self,
+            cx: &Cx,
+            caps: QueryCaps,
+            offset: usize,
+            serialize_opts: &SerializeOptions,
+        ) -> Result<QueryResponse, DbError> {
+            let mut builder = QueryPageBuilder::new(caps, offset);
+            let mut truncated = false;
+            let available = self.rows.len().saturating_sub(offset);
+            for row in self.rows.iter().skip(offset) {
+                self.generated
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if builder.push_with_options(cx, row, serialize_opts)? == QueryPagePush::ByteLimit {
+                    truncated = true;
+                    break;
+                }
+                if builder.row_count() >= caps.max_rows {
+                    truncated = builder.row_count() < available;
+                    break;
+                }
+            }
+            builder.finish(cx, truncated)
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for BoundedPageMock {
+        fn backend(&self) -> crate::types::OracleBackend {
+            crate::types::OracleBackend::RustOracle
+        }
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            panic!("bounded page hook must run before Vec materialization")
+        }
+        async fn query_bounded_page(
+            &self,
+            cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+            caps: QueryCaps,
+            offset: usize,
+            serialize_opts: &SerializeOptions,
+        ) -> Result<Option<QueryResponse>, DbError> {
+            self.page(cx, caps, offset, serialize_opts).map(Some)
+        }
+        async fn query_bounded_page_named(
+            &self,
+            cx: &Cx,
+            _sql: &str,
+            binds: &[(String, OracleBind)],
+            caps: QueryCaps,
+            offset: usize,
+            serialize_opts: &SerializeOptions,
+        ) -> Result<Option<QueryResponse>, DbError> {
+            assert_eq!(binds, &[("id".to_owned(), OracleBind::I64(42))]);
+            self.named_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.page(cx, caps, offset, serialize_opts).map(Some)
+        }
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
     fn run(n: usize, caps: QueryCaps) -> QueryResponse {
         run_with_cx(|cx| async move {
             read_query(
@@ -460,6 +610,130 @@ mod tests {
         });
         assert_eq!(response.row_count, 2);
         assert_eq!(response.next_cursor.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn ordinary_positional_and_named_reads_prefer_bounded_page_hook() {
+        let rows = varied_rows(5_000);
+        let conn = BoundedPageMock::new(rows);
+        run_with_cx(|cx| async move {
+            let caps = QueryCaps {
+                max_rows: 7,
+                max_result_bytes: 1_000_000,
+            };
+            let positional = read_query(
+                &cx,
+                &conn,
+                "SELECT id FROM t WHERE id = :1",
+                &[OracleBind::I64(42)],
+                caps,
+                0,
+                &SerializeOptions::default(),
+            )
+            .await
+            .expect("bounded positional page");
+            assert_eq!(positional.row_count, 7);
+            assert_eq!(positional.next_cursor.as_deref(), Some("7"));
+            assert_eq!(
+                conn.generated.load(std::sync::atomic::Ordering::SeqCst),
+                7,
+                "the producer is stopped at the row cap instead of materializing 5000 rows"
+            );
+
+            let named = read_query_named(
+                &cx,
+                &conn,
+                "SELECT id FROM t WHERE id = :id",
+                &[("id".to_owned(), OracleBind::I64(42))],
+                caps,
+                7,
+                &SerializeOptions::default(),
+            )
+            .await
+            .expect("bounded named page");
+            assert_eq!(named.row_count, 7);
+            assert_eq!(named.next_cursor.as_deref(), Some("14"));
+            assert_eq!(
+                conn.named_calls.load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            assert_eq!(
+                conn.generated.load(std::sync::atomic::Ordering::SeqCst),
+                14,
+                "named reads use the same bounded producer"
+            );
+        });
+    }
+
+    #[test]
+    fn bounded_page_stops_before_later_oversize_and_resume_does_not_skip_it() {
+        let small = OracleRow {
+            columns: vec![(
+                "V".to_owned(),
+                OracleCell::new("VARCHAR2", Some("ok".to_owned())),
+            )],
+        };
+        let oversized = OracleRow {
+            columns: vec![(
+                "V".to_owned(),
+                OracleCell::new("VARCHAR2", Some("x".repeat(16_384))),
+            )],
+        };
+        let conn = BoundedPageMock::new(
+            std::iter::once(small)
+                .chain(std::iter::once(oversized))
+                .chain(varied_rows(5_000))
+                .collect(),
+        );
+        run_with_cx(|cx| async move {
+            let caps = QueryCaps {
+                max_rows: 5_000,
+                max_result_bytes: 128,
+            };
+            let first = read_query(
+                &cx,
+                &conn,
+                "SELECT v FROM t",
+                &[],
+                caps,
+                0,
+                &SerializeOptions::default(),
+            )
+            .await
+            .expect("first small row forms a bounded page");
+            assert_eq!(first.row_count, 1);
+            assert_eq!(first.next_cursor.as_deref(), Some("1"));
+            assert_eq!(
+                conn.generated.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "only the admitted row plus one bounded candidate is materialized"
+            );
+
+            let error = read_query(
+                &cx,
+                &conn,
+                "SELECT v FROM t",
+                &[],
+                caps,
+                1,
+                &SerializeOptions::default(),
+            )
+            .await
+            .expect_err("resuming must confront, not skip, the oversized row");
+            assert!(matches!(
+                error,
+                DbError::QueryRowTooLarge {
+                    row_offset: 1,
+                    max_result_bytes: 128,
+                    ..
+                }
+            ));
+            assert_eq!(
+                conn.generated.load(std::sync::atomic::Ordering::SeqCst),
+                3,
+                "resume materializes only the same oversized candidate"
+            );
+        });
     }
 
     #[test]

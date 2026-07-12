@@ -263,11 +263,11 @@ impl OracleMetadataCacheKey {
     }
 }
 
-fn capped_text_value(text: &str, cap: Option<usize>) -> Value {
+fn capped_text_value(text: &str, cap: Option<usize>, source_length: Option<usize>) -> Value {
     let Some(cap) = cap else {
         return Value::String(text.to_owned());
     };
-    let char_length = text.chars().count();
+    let char_length = source_length.unwrap_or_else(|| text.chars().count());
     if char_length > cap {
         let value: String = text.chars().take(cap).collect();
         json!({ "value": value, "truncated": true, "char_length": char_length })
@@ -492,7 +492,9 @@ fn serialize_cell_classified(cell: &OracleCell, col: ColumnRepr, opts: &Serializ
             // canonicalize to ISO-8601 here (the only reliable place).
             Value::String(canonicalize_datetime(text))
         }
-        TypeRepr::Text | TypeRepr::Raw => capped_text_value(text, opts.max_text_chars),
+        TypeRepr::Text | TypeRepr::Raw => {
+            capped_text_value(text, opts.max_text_chars, cell.source_length)
+        }
         TypeRepr::Clob => {
             let char_length = cell.source_length.unwrap_or_else(|| text.chars().count());
             if char_length > opts.max_lob_chars {

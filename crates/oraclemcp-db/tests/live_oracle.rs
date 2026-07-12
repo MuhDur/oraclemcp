@@ -1193,6 +1193,76 @@ fn live_query_pagination_caps_and_cursor() {
 }
 
 #[test]
+fn live_bounded_page_streams_wide_rows_and_preserves_named_binds() {
+    run_with_cx(|cx| async move {
+        let conn = match RustOracleConnection::connect(&cx, test_opts()).await {
+            Ok(conn) => conn,
+            Err(error) => {
+                eprintln!("[live-xe] SKIP live_bounded_page_streams_wide_rows: {error}");
+                return;
+            }
+        };
+        let caps = QueryCaps {
+            max_rows: 5_000,
+            max_result_bytes: 4_096,
+        };
+        let sql = "SELECT level AS id, RPAD('x', 200, 'x') AS payload \
+                   FROM dual CONNECT BY level <= 5000 ORDER BY level";
+        let first =
+            oraclemcp_db::read_query(&cx, &conn, sql, &[], caps, 0, &SerializeOptions::default())
+                .await
+                .expect("bounded wide-row page");
+        assert!(
+            first.row_count < 5_000,
+            "byte cap stops fetch before row cap"
+        );
+        assert!(first.total_bytes <= caps.max_result_bytes);
+        let next = first
+            .next_cursor
+            .as_deref()
+            .expect("wide result is truncated")
+            .parse::<usize>()
+            .expect("numeric cursor");
+        assert_eq!(next, first.row_count);
+        let second = oraclemcp_db::read_query(
+            &cx,
+            &conn,
+            sql,
+            &[],
+            caps,
+            next,
+            &SerializeOptions::default(),
+        )
+        .await
+        .expect("resumed bounded page");
+        assert_ne!(
+            first.rows[0], second.rows[0],
+            "resume neither repeats nor skips"
+        );
+        assert_eq!(
+            second.rows[0]["ID"],
+            serde_json::Value::String((next + 1).to_string())
+        );
+
+        let named = oraclemcp_db::read_query_named(
+            &cx,
+            &conn,
+            "SELECT :wanted AS value FROM dual",
+            &[("wanted".to_owned(), OracleBind::I64(42))],
+            QueryCaps::default(),
+            0,
+            &SerializeOptions::default(),
+        )
+        .await
+        .expect("named bind through bounded page path");
+        assert_eq!(
+            named.rows[0]["VALUE"],
+            serde_json::Value::String("42".to_owned())
+        );
+    });
+}
+
+#[test]
 fn live_savepoint_preview_is_ground_truth_and_rolls_back() {
     run_with_cx(|cx| async move {
         let setup = match RustOracleConnection::connect(&cx, test_opts()).await {

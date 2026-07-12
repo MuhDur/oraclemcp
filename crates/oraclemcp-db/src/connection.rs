@@ -761,6 +761,22 @@ pub trait OracleConnection: Send + Sync {
         let _ = serialize_opts;
         self.query_rows(cx, sql, binds).await
     }
+    /// Fetch and serialize one bounded positional-bind page without retaining
+    /// materialized rows outside the page byte budget. `None` asks the caller
+    /// to use the compatibility `query_rows` path for backends that do not yet
+    /// implement bounded paging.
+    async fn query_bounded_page(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+        caps: crate::query::QueryCaps,
+        offset: usize,
+        serialize_opts: &SerializeOptions,
+    ) -> Result<Option<crate::query::QueryResponse>, DbError> {
+        let _ = (cx, sql, binds, caps, offset, serialize_opts);
+        Ok(None)
+    }
     /// Start a row-by-row stream for a proven read. Backends that cannot return
     /// an owned stream should fail explicitly so callers can retain the existing
     /// chunked streaming path.
@@ -801,6 +817,19 @@ pub trait OracleConnection: Send + Sync {
     ) -> Result<Vec<OracleRow>, DbError> {
         let _ = serialize_opts;
         self.query_rows_named(cx, sql, binds).await
+    }
+    /// Named-bind counterpart of [`OracleConnection::query_bounded_page`].
+    async fn query_bounded_page_named(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[(String, OracleBind)],
+        caps: crate::query::QueryCaps,
+        offset: usize,
+        serialize_opts: &SerializeOptions,
+    ) -> Result<Option<crate::query::QueryResponse>, DbError> {
+        let _ = (cx, sql, binds, caps, offset, serialize_opts);
+        Ok(None)
     }
     /// Run a DML/DDL statement; returns rows affected (`SQL%ROWCOUNT`).
     ///
@@ -1190,6 +1219,7 @@ mod driver {
     };
     use crate::auth_adapter::AuthAdapter;
     use crate::error::{ConnectFailureKind, DbError};
+    use crate::query::{QueryCaps, QueryPageBuilder, QueryPagePush, QueryResponse};
     use crate::serialize::{SerializeOptions, StructuredDecodeCaps, json_byte_len};
     use crate::types::{
         OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleNestedResult,
@@ -1227,6 +1257,7 @@ mod driver {
     use std::time::Duration;
 
     const FETCH_BATCH_ROWS: u32 = 512;
+    pub(super) const BOUNDED_PAGE_FETCH_ROWS: u32 = 1;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct LobReadLimits {
@@ -2098,6 +2129,160 @@ mod driver {
         Ok(converted)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn collect_bounded_query_page(
+        cx: &Cx,
+        inner: &mut oracledb::Connection,
+        mut result: QueryResult,
+        opts: &OracleConnectOptions,
+        serialize_opts: &SerializeOptions,
+        limits: super::WireLimits,
+        caps: QueryCaps,
+        offset: usize,
+    ) -> Result<QueryResponse, DbError> {
+        use std::collections::VecDeque;
+
+        let cursor_id = result.cursor_id;
+        let collected = async {
+            if result.implicit_resultsets.is_some() {
+                return Err(DbError::UnsupportedFeature(
+                    "bounded SELECT paging does not admit implicit result sets".to_owned(),
+                ));
+            }
+            let mut columns = result.columns.clone();
+            let mut rows: VecDeque<_> = std::mem::take(&mut result.rows).into();
+            let mut previous_row = rows.back().cloned();
+            let has_parent_result = !columns.is_empty();
+            let mut builder = QueryPageBuilder::new(caps, offset);
+
+            if has_parent_result
+                && rows.is_empty()
+                && cursor_id != 0
+                && columns_require_define(&columns)
+            {
+                let timeout_ms =
+                    limits.effective_timeout_ms(cx, "oracle_db.query_bounded_page.define_fetch")?;
+                let fetch = bounded_fetch_batch(
+                    timeout_ms,
+                    inner.define_and_fetch_rows_with_columns(
+                        cx,
+                        cursor_id,
+                        BOUNDED_PAGE_FETCH_ROWS,
+                        &columns,
+                        None,
+                    ),
+                )
+                .await;
+                let fetched = resolve_fetch_batch(cx, inner, fetch, opts).await?;
+                if !fetched.columns.is_empty() {
+                    columns = fetched.columns.clone();
+                }
+                previous_row = fetched.rows.last().cloned();
+                rows.extend(fetched.rows);
+                result.more_rows = fetched.more_rows;
+            }
+
+            loop {
+                while let Some(row) = rows.pop_front() {
+                    previous_row = Some(row);
+                    let row_serialize_opts =
+                        bounded_cell_options(serialize_opts, caps.max_result_bytes);
+                    let row = row_to_oracle_row(
+                        cx,
+                        inner,
+                        &columns,
+                        previous_row
+                            .as_deref()
+                            .expect("current row is retained as the duplicate-column seed"),
+                        opts,
+                        &row_serialize_opts,
+                        limits.clone(),
+                        0,
+                    )
+                    .await?;
+                    if builder.push_with_options(cx, &row, &row_serialize_opts)?
+                        == QueryPagePush::ByteLimit
+                    {
+                        return builder.finish(cx, true);
+                    }
+                    if builder.row_count() >= caps.max_rows {
+                        return builder.finish(cx, !rows.is_empty() || result.more_rows);
+                    }
+                }
+
+                if !has_parent_result || !result.more_rows || cursor_id == 0 {
+                    return builder.finish(cx, false);
+                }
+                let timeout_ms =
+                    limits.effective_timeout_ms(cx, "oracle_db.query_bounded_page.fetch")?;
+                let fetch = if columns_require_define(&columns) {
+                    bounded_fetch_batch(
+                        timeout_ms,
+                        inner.define_and_fetch_rows_with_columns(
+                            cx,
+                            cursor_id,
+                            BOUNDED_PAGE_FETCH_ROWS,
+                            &columns,
+                            previous_row.as_deref(),
+                        ),
+                    )
+                    .await
+                } else {
+                    bounded_fetch_batch(
+                        timeout_ms,
+                        inner.fetch_rows_with_columns(
+                            cx,
+                            cursor_id,
+                            BOUNDED_PAGE_FETCH_ROWS,
+                            &columns,
+                            previous_row.as_deref(),
+                        ),
+                    )
+                    .await
+                };
+                let fetched = resolve_fetch_batch(cx, inner, fetch, opts).await?;
+                if !fetched.columns.is_empty() {
+                    columns = fetched.columns.clone();
+                }
+                previous_row = fetched.rows.last().cloned();
+                rows.extend(fetched.rows);
+                result.more_rows = fetched.more_rows;
+            }
+        }
+        .await;
+        if cursor_id != 0 {
+            inner.release_cursor(cursor_id);
+        }
+        collected
+    }
+
+    pub(super) fn bounded_cell_options(
+        base: &SerializeOptions,
+        page_bytes: usize,
+    ) -> SerializeOptions {
+        let max_text_chars = Some(
+            base.max_text_chars
+                .map_or(page_bytes, |cap| cap.min(page_bytes)),
+        );
+        let max_blob_bytes = base.max_blob_bytes.min(page_bytes.saturating_mul(3) / 4);
+        SerializeOptions {
+            numbers_as_float: base.numbers_as_float,
+            max_text_chars,
+            max_lob_chars: base.max_lob_chars.min(page_bytes),
+            max_blob_bytes,
+            max_nested_cursor_rows: base.max_nested_cursor_rows,
+            max_nested_cursor_cells: base.max_nested_cursor_cells,
+            max_nested_cursor_bytes: base.max_nested_cursor_bytes.min(page_bytes),
+            max_nested_cursor_depth: base.max_nested_cursor_depth,
+            structured_decode_caps: StructuredDecodeCaps::new(
+                base.structured_decode_caps.max_rows,
+                base.structured_decode_caps.max_cells,
+                base.structured_decode_caps.max_bytes.min(page_bytes),
+                base.structured_decode_caps.max_depth,
+            ),
+        }
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     pub(super) enum FetchBatchError<E> {
         Driver(E),
@@ -2468,28 +2653,113 @@ mod driver {
         Box::pin(async move {
             let mut out = Vec::with_capacity(rows.len());
             for row in rows {
-                let mut cells = Vec::with_capacity(columns.len());
-                for (idx, meta) in columns.iter().enumerate() {
-                    let value = row.get(idx).cloned().flatten();
-                    cells.push((
-                        meta.name().to_owned(),
-                        value_to_cell(
-                            cx,
-                            inner,
-                            meta,
-                            value,
-                            opts,
-                            serialize_opts,
-                            limits.clone(),
-                            depth,
-                        )
-                        .await?,
-                    ));
-                }
-                out.push(OracleRow { columns: cells });
+                out.push(
+                    row_to_oracle_row(
+                        cx,
+                        inner,
+                        columns,
+                        &row,
+                        opts,
+                        serialize_opts,
+                        limits.clone(),
+                        depth,
+                    )
+                    .await?,
+                );
             }
             Ok(out)
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn row_to_oracle_row<'a>(
+        cx: &'a Cx,
+        inner: &'a mut oracledb::Connection,
+        columns: &'a [ColumnMetadata],
+        row: &'a [Option<QueryValue>],
+        opts: &'a OracleConnectOptions,
+        serialize_opts: &'a SerializeOptions,
+        limits: super::WireLimits,
+        depth: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<OracleRow, DbError>> + 'a>> {
+        Box::pin(async move {
+            let mut cells = Vec::with_capacity(columns.len());
+            for (idx, meta) in columns.iter().enumerate() {
+                let value = row.get(idx).and_then(Option::as_ref);
+                let oracle_type = oracle_type_name(meta);
+                let bounded_cell = match value {
+                    Some(QueryValue::Text(value) | QueryValue::Rowid(value)) => Some(
+                        bounded_text_cell(oracle_type, value, serialize_opts.max_text_chars),
+                    ),
+                    Some(QueryValue::TextRaw { bytes, .. } | QueryValue::Raw(bytes)) => Some(
+                        bounded_binary_cell(oracle_type, bytes, serialize_opts.max_blob_bytes),
+                    ),
+                    Some(QueryValue::Object(value)) => Some(OracleCell::structured(
+                        oracle_type,
+                        structured_object_marker(value),
+                    )),
+                    Some(QueryValue::Vector(value)) => Some(OracleCell::structured(
+                        oracle_type,
+                        structured_vector_with_caps(value, serialize_opts.structured_decode_caps),
+                    )),
+                    Some(QueryValue::Json(value)) => Some(OracleCell::structured(
+                        oracle_type,
+                        structured_json_value(value, serialize_opts.structured_decode_caps),
+                    )),
+                    Some(QueryValue::Array(values)) => Some(OracleCell::structured(
+                        oracle_type,
+                        structured_array_with_caps(values, serialize_opts.structured_decode_caps),
+                    )),
+                    _ => None,
+                };
+                cells.push((
+                    meta.name().to_owned(),
+                    match bounded_cell {
+                        Some(cell) => cell,
+                        None => {
+                            value_to_cell(
+                                cx,
+                                inner,
+                                meta,
+                                value.cloned(),
+                                opts,
+                                serialize_opts,
+                                limits.clone(),
+                                depth,
+                            )
+                            .await?
+                        }
+                    },
+                ));
+            }
+            Ok(OracleRow { columns: cells })
+        })
+    }
+
+    pub(super) fn bounded_text_cell(
+        oracle_type: String,
+        value: &str,
+        max_chars: Option<usize>,
+    ) -> OracleCell {
+        let source_length = value.chars().count();
+        let stored = max_chars
+            .filter(|cap| source_length > *cap)
+            .map_or_else(|| value.to_owned(), |cap| value.chars().take(cap).collect());
+        let mut cell = OracleCell::new(oracle_type, Some(stored));
+        cell.source_length = Some(source_length);
+        cell
+    }
+
+    pub(super) fn bounded_binary_cell(
+        oracle_type: String,
+        bytes: &[u8],
+        max_bytes: usize,
+    ) -> OracleCell {
+        let source_length = bytes.len();
+        let mut cell =
+            OracleCell::binary(oracle_type, bytes[..source_length.min(max_bytes)].to_vec());
+        cell.source_length = Some(source_length);
+        cell
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4922,6 +5192,46 @@ mod driver {
             Ok(rows)
         }
 
+        async fn query_bounded_page(
+            &self,
+            cx: &Cx,
+            sql: &str,
+            binds: &[OracleBind],
+            caps: crate::query::QueryCaps,
+            offset: usize,
+            serialize_opts: &SerializeOptions,
+        ) -> Result<Option<crate::query::QueryResponse>, DbError> {
+            super::db_checkpoint(cx, "oracle_db.query_bounded_page.before")?;
+            let binds: Vec<BindValue> = binds.iter().map(to_bind).collect();
+            let limits = self.wire_limits()?;
+            let mut inner = self.lock_inner(cx).await?;
+            let result = execute_with_timeout(
+                cx,
+                &mut inner,
+                sql,
+                BOUNDED_PAGE_FETCH_ROWS,
+                &binds,
+                limits.clone(),
+                &self.opts,
+                "bounded query",
+            )
+            .await?;
+            let page = collect_bounded_query_page(
+                cx,
+                &mut inner,
+                result,
+                &self.opts,
+                serialize_opts,
+                limits,
+                caps,
+                offset,
+            )
+            .await?;
+            drop(inner);
+            super::db_checkpoint(cx, "oracle_db.query_bounded_page.after")?;
+            Ok(Some(page))
+        }
+
         async fn query_row_stream(
             &self,
             cx: &Cx,
@@ -5035,6 +5345,54 @@ mod driver {
             drop(inner);
             super::db_checkpoint(cx, "oracle_db.query_rows_named.after")?;
             Ok(rows)
+        }
+
+        async fn query_bounded_page_named(
+            &self,
+            cx: &Cx,
+            sql: &str,
+            binds: &[(String, OracleBind)],
+            caps: crate::query::QueryCaps,
+            offset: usize,
+            serialize_opts: &SerializeOptions,
+        ) -> Result<Option<crate::query::QueryResponse>, DbError> {
+            super::db_checkpoint(cx, "oracle_db.query_bounded_page_named.before")?;
+            let binds: Vec<(String, BindValue)> = binds
+                .iter()
+                .map(|(name, bind)| (name.clone(), to_bind(bind)))
+                .collect();
+            let ordered_binds = if binds.is_empty() {
+                Vec::new()
+            } else {
+                order_named_binds_for_driver(sql, binds)
+            };
+            let limits = self.wire_limits()?;
+            let mut inner = self.lock_inner(cx).await?;
+            let result = execute_with_timeout(
+                cx,
+                &mut inner,
+                sql,
+                BOUNDED_PAGE_FETCH_ROWS,
+                &ordered_binds,
+                limits.clone(),
+                &self.opts,
+                "bounded named query",
+            )
+            .await?;
+            let page = collect_bounded_query_page(
+                cx,
+                &mut inner,
+                result,
+                &self.opts,
+                serialize_opts,
+                limits,
+                caps,
+                offset,
+            )
+            .await?;
+            drop(inner);
+            super::db_checkpoint(cx, "oracle_db.query_bounded_page_named.after")?;
+            Ok(Some(page))
         }
 
         async fn execute(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
@@ -5320,10 +5678,63 @@ mod tests {
     use super::*;
     use crate::auth_adapter::AuthAdapter;
     use crate::types::OracleSessionIdentity;
+    use asupersync::runtime::RuntimeBuilder;
+
+    #[test]
+    fn bounded_page_cell_options_cap_every_expandable_cell_to_one_page() {
+        assert_eq!(
+            driver::BOUNDED_PAGE_FETCH_ROWS,
+            1,
+            "the driver may retain only the current Oracle row"
+        );
+        let base = SerializeOptions {
+            max_text_chars: None,
+            max_lob_chars: usize::MAX,
+            max_blob_bytes: usize::MAX,
+            max_nested_cursor_bytes: usize::MAX,
+            structured_decode_caps: crate::serialize::StructuredDecodeCaps::new(
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+            ),
+            ..SerializeOptions::default()
+        };
+        let bounded = driver::bounded_cell_options(&base, 1_024);
+        assert_eq!(bounded.max_text_chars, Some(1_024));
+        assert_eq!(bounded.max_lob_chars, 1_024);
+        assert_eq!(bounded.max_blob_bytes, 768);
+        assert_eq!(bounded.max_nested_cursor_bytes, 1_024);
+        assert_eq!(bounded.structured_decode_caps.max_bytes, 1_024);
+        assert_eq!(bounded.max_nested_cursor_rows, base.max_nested_cursor_rows);
+        assert_eq!(
+            bounded.max_nested_cursor_cells,
+            base.max_nested_cursor_cells
+        );
+
+        let text = driver::bounded_text_cell(
+            "VARCHAR2".to_owned(),
+            &"x".repeat(4_096),
+            bounded.max_text_chars,
+        );
+        assert_eq!(text.text().map(str::len), Some(1_024));
+        assert_eq!(text.source_length, Some(4_096));
+        assert_eq!(
+            crate::serialize::serialize_cell(&text, &bounded),
+            serde_json::json!({
+                "value": "x".repeat(1_024),
+                "truncated": true,
+                "char_length": 4_096
+            })
+        );
+
+        let binary = driver::bounded_binary_cell("RAW".to_owned(), &vec![7; 4_096], 768);
+        assert_eq!(binary.bytes.as_ref().map(Vec::len), Some(768));
+        assert_eq!(binary.source_length, Some(4_096));
+    }
 
     #[test]
     fn thin_mode_rejects_external_auth_before_connecting() {
-        use asupersync::runtime::RuntimeBuilder;
         let opts = crate::types::OracleConnectOptions {
             connect_string: "localhost:1521/FREEPDB1".to_owned(),
             external_auth: true,
