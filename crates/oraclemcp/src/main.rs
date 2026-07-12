@@ -5166,6 +5166,8 @@ fn run_client_credentials_cmd(robot_json: bool, command: ClientCredentialCliComm
                     "client": issued.view,
                     "bearer": bearer,
                     "bearer_shown_once": true,
+                    "durability": issued.durability.as_str(),
+                    "durability_warning": issued.durability.warning(),
                     "serve_args": ["serve", "--listen", "127.0.0.1:7070", "--client-credentials"],
                     "rotation_command": ["oraclemcp", "clients", "rotate", client_id],
                     "revocation_command": ["oraclemcp", "clients", "revoke", issued.client_id],
@@ -5185,6 +5187,8 @@ fn run_client_credentials_cmd(robot_json: bool, command: ClientCredentialCliComm
                     "client": issued.view,
                     "bearer": bearer,
                     "bearer_shown_once": true,
+                    "durability": issued.durability.as_str(),
+                    "durability_warning": issued.durability.warning(),
                     "closed_principal": client_lifecycle_json(&lifecycle),
                     "next_step": "restart or close active sessions for this client so old in-memory grants are gone",
                 })
@@ -5195,6 +5199,8 @@ fn run_client_credentials_cmd(robot_json: bool, command: ClientCredentialCliComm
                 serde_json::json!({
                     "kind": "client_credential_revoked",
                     "store_path": store_path,
+                    "durability": lifecycle.durability.as_str(),
+                    "durability_warning": lifecycle.durability.warning(),
                     "closed_principal": client_lifecycle_json(&lifecycle),
                     "next_step": "restart or close active sessions for this client so in-memory grants are gone",
                 })
@@ -5226,6 +5232,8 @@ fn client_lifecycle_json(lifecycle: &ClientCredentialLifecycle) -> serde_json::V
         "client_id": &lifecycle.client_id,
         "subject_id_hash": operator_subject_id_hash(&lifecycle.principal_key),
         "generation": lifecycle.generation,
+        "durability": lifecycle.durability.as_str(),
+        "durability_warning": lifecycle.durability.warning(),
     })
 }
 
@@ -5258,6 +5266,16 @@ fn client_credential_text(value: &serde_json::Value) -> String {
     if let Some(bearer) = value["bearer"].as_str() {
         out.push_str("bearer (shown once): ");
         out.push_str(bearer);
+        out.push('\n');
+    }
+    if let Some(durability) = value["durability"].as_str() {
+        out.push_str("durability: ");
+        out.push_str(durability);
+        out.push('\n');
+    }
+    if let Some(warning) = value["durability_warning"].as_str() {
+        out.push_str("warning: ");
+        out.push_str(warning);
         out.push('\n');
     }
     if let Some(closed) = value.get("closed_principal") {

@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use oraclemcp_auth::Secret;
@@ -62,6 +63,44 @@ pub enum ClientCredentialError {
     /// The OS random source failed.
     #[error("random source failed: {0}")]
     Random(String),
+    /// Persistence failed and the on-disk authority could not be reconciled.
+    #[error(
+        "client credential persistence is uncertain; restart and inspect the store before retrying"
+    )]
+    PersistenceUncertain,
+}
+
+/// Durability evidence for a completed credential mutation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClientCredentialDurability {
+    /// The atomic file-store write, rename, and directory sync all completed.
+    Durable,
+    /// The write reported an error after the candidate became the readable
+    /// authority; memory was reconciled to those exact bytes so the one-time
+    /// bearer can still be returned, but crash durability needs operator review.
+    ReconciledAfterWriteError,
+}
+
+impl ClientCredentialDurability {
+    /// Stable operator/CLI spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Durable => "durable",
+            Self::ReconciledAfterWriteError => "reconciled_after_write_error",
+        }
+    }
+
+    /// Actionable warning for a completed but not fully confirmed directory sync.
+    #[must_use]
+    pub const fn warning(self) -> Option<&'static str> {
+        match self {
+            Self::Durable => None,
+            Self::ReconciledAfterWriteError => Some(
+                "the exact credential generation is active and its one-time bearer was returned, but the atomic write reported a post-write durability error; retain the bearer and verify the store before restart",
+            ),
+        }
+    }
 }
 
 /// Request to issue a new per-client credential.
@@ -97,6 +136,8 @@ pub struct IssuedClientCredential {
     pub bearer: Secret,
     /// Redacted operator view after issuance.
     pub view: ClientCredentialView,
+    /// Evidence about persistence of this exact generation.
+    pub durability: ClientCredentialDurability,
 }
 
 impl std::fmt::Debug for IssuedClientCredential {
@@ -106,6 +147,7 @@ impl std::fmt::Debug for IssuedClientCredential {
             .field("principal_key", &self.principal_key)
             .field("bearer", &self.bearer)
             .field("view", &self.view)
+            .field("durability", &self.durability)
             .finish()
     }
 }
@@ -135,6 +177,8 @@ pub struct ClientCredentialLifecycle {
     pub principal_key: String,
     /// New generation after the lifecycle mutation.
     pub generation: u64,
+    /// Evidence about persistence of this exact generation.
+    pub durability: ClientCredentialDurability,
 }
 
 /// Public credential status.
@@ -179,7 +223,7 @@ pub struct ClientCredentialView {
     pub revoked_at: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ClientCredentialFile {
     schema_version: u16,
     clients: Vec<ClientCredentialRecord>,
@@ -194,7 +238,7 @@ impl Default for ClientCredentialFile {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ClientCredentialRecord {
     client_id: String,
     label: String,
@@ -235,13 +279,22 @@ impl ClientCredentialRecord {
         }
     }
 
-    fn lifecycle(&self) -> ClientCredentialLifecycle {
+    fn lifecycle(&self, durability: ClientCredentialDurability) -> ClientCredentialLifecycle {
         ClientCredentialLifecycle {
             client_id: self.client_id.clone(),
             principal_key: principal_key_for_client_id(&self.client_id),
             generation: self.generation,
+            durability,
         }
     }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CredentialPersistFault {
+    BeforeCommit,
+    AfterVisibleCommit,
+    CorruptAuthority,
 }
 
 /// Service-owned per-client credential store.
@@ -251,6 +304,9 @@ pub struct ClientCredentialStore {
     id: StoreId,
     path: PathBuf,
     file: Mutex<ClientCredentialFile>,
+    persistence_uncertain: AtomicBool,
+    #[cfg(test)]
+    persist_fault: Mutex<Option<CredentialPersistFault>>,
 }
 
 impl ClientCredentialStore {
@@ -288,6 +344,9 @@ impl ClientCredentialStore {
             id,
             path,
             file: Mutex::new(file),
+            persistence_uncertain: AtomicBool::new(false),
+            #[cfg(test)]
+            persist_fault: Mutex::new(None),
         })
     }
 
@@ -302,9 +361,11 @@ impl ClientCredentialStore {
         &self,
         request: ClientCredentialIssueRequest,
     ) -> Result<IssuedClientCredential, ClientCredentialError> {
+        self.ensure_persistence_certain()?;
         let label = normalize_label(&request.label)?;
         let scopes = normalize_scopes(request.scopes)?;
         let mut file = self.file.lock();
+        self.ensure_persistence_certain()?;
         let (client_id, bearer) = loop {
             let client_id = generate_client_id()?;
             if file.clients.iter().all(|c| c.client_id != client_id) {
@@ -328,14 +389,16 @@ impl ClientCredentialStore {
         };
         let view = record.view();
         let principal_key = principal_key_for_client_id(&client_id);
-        file.clients.push(record);
-        sort_clients(&mut file.clients);
-        self.persist_locked(&file)?;
+        let mut next = file.clone();
+        next.clients.push(record);
+        sort_clients(&mut next.clients);
+        let durability = self.persist_and_install(&mut file, next)?;
         Ok(IssuedClientCredential {
             client_id,
             principal_key,
             bearer: Secret::new(bearer),
             view,
+            durability,
         })
     }
 
@@ -350,8 +413,10 @@ impl ClientCredentialStore {
         bearer: &str,
         source_addr: Option<&str>,
     ) -> Result<AuthenticatedClientCredential, ClientCredentialError> {
+        self.ensure_persistence_certain()?;
         let client_id = parse_bearer_client_id(bearer)?;
         let mut file = self.file.lock();
+        self.ensure_persistence_certain()?;
         let record_index = file
             .clients
             .iter()
@@ -380,22 +445,24 @@ impl ClientCredentialStore {
         if !credential_ok {
             return Err(ClientCredentialError::AuthenticationFailed);
         }
-        let record = &mut file.clients[index];
+        let record = &file.clients[index];
         if revoked {
             return Err(ClientCredentialError::Revoked(record.client_id.clone()));
         }
-        record.last_used_at = Some(unix_timestamp());
-        record.last_source_addr = source_addr
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
         let authenticated = AuthenticatedClientCredential {
             client_id: record.client_id.clone(),
             principal_key: principal_key_for_client_id(&record.client_id),
             scopes: record.scopes.clone(),
             generation: record.generation,
         };
-        self.persist_locked(&file)?;
+        let mut next = file.clone();
+        let next_record = &mut next.clients[index];
+        next_record.last_used_at = Some(unix_timestamp());
+        next_record.last_source_addr = source_addr
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        self.persist_and_install(&mut file, next)?;
         Ok(authenticated)
     }
 
@@ -405,30 +472,44 @@ impl ClientCredentialStore {
         &self,
         client_id: &str,
     ) -> Result<(IssuedClientCredential, ClientCredentialLifecycle), ClientCredentialError> {
+        self.ensure_persistence_certain()?;
         validate_client_id(client_id)?;
         let mut file = self.file.lock();
-        let Some(record) = file.clients.iter_mut().find(|c| c.client_id == client_id) else {
+        self.ensure_persistence_certain()?;
+        let Some(record_index) = file.clients.iter().position(|c| c.client_id == client_id) else {
             return Err(ClientCredentialError::UnknownClient(client_id.to_owned()));
         };
+        let record = &file.clients[record_index];
         if record.revoked_at.is_some() {
             return Err(ClientCredentialError::Revoked(record.client_id.clone()));
         }
         let bearer = generate_bearer(&record.client_id)?;
         let salt = random_hex(HASH_SALT_BYTES)?;
+        let mut next = file.clone();
+        let record = &mut next.clients[record_index];
         record.credential_hash = credential_hash(&salt, &bearer);
         record.credential_salt = salt;
         record.generation = record.generation.saturating_add(1);
         record.rotated_at = Some(unix_timestamp());
         record.last_used_at = None;
         record.last_source_addr = None;
+        let client_id = record.client_id.clone();
+        let principal_key = principal_key_for_client_id(&record.client_id);
+        let view = record.view();
+        let durability = self.persist_and_install(&mut file, next)?;
         let issued = IssuedClientCredential {
-            client_id: record.client_id.clone(),
-            principal_key: principal_key_for_client_id(&record.client_id),
+            client_id: client_id.clone(),
+            principal_key: principal_key.clone(),
             bearer: Secret::new(bearer),
-            view: record.view(),
+            view,
+            durability,
         };
-        let lifecycle = record.lifecycle();
-        self.persist_locked(&file)?;
+        let lifecycle = ClientCredentialLifecycle {
+            client_id,
+            principal_key,
+            generation: issued.view.generation,
+            durability,
+        };
         Ok((issued, lifecycle))
     }
 
@@ -438,25 +519,103 @@ impl ClientCredentialStore {
         &self,
         client_id: &str,
     ) -> Result<ClientCredentialLifecycle, ClientCredentialError> {
+        self.ensure_persistence_certain()?;
         validate_client_id(client_id)?;
         let mut file = self.file.lock();
-        let Some(record) = file.clients.iter_mut().find(|c| c.client_id == client_id) else {
+        self.ensure_persistence_certain()?;
+        let Some(record_index) = file.clients.iter().position(|c| c.client_id == client_id) else {
             return Err(ClientCredentialError::UnknownClient(client_id.to_owned()));
         };
+        let record = &file.clients[record_index];
         if record.revoked_at.is_none() {
+            let mut next = file.clone();
+            let record = &mut next.clients[record_index];
             record.revoked_at = Some(unix_timestamp());
             record.generation = record.generation.saturating_add(1);
             record.last_used_at = None;
             record.last_source_addr = None;
-            let lifecycle = record.lifecycle();
-            self.persist_locked(&file)?;
+            let client_id = record.client_id.clone();
+            let principal_key = principal_key_for_client_id(&record.client_id);
+            let generation = record.generation;
+            let durability = self.persist_and_install(&mut file, next)?;
+            let lifecycle = ClientCredentialLifecycle {
+                client_id,
+                principal_key,
+                generation,
+                durability,
+            };
             return Ok(lifecycle);
         }
-        Ok(record.lifecycle())
+        Ok(record.lifecycle(ClientCredentialDurability::Durable))
     }
 
-    fn persist_locked(&self, file: &ClientCredentialFile) -> Result<(), ClientCredentialError> {
-        persist_file(&self.store, &self.owner, &self.id, file)
+    fn persist_and_install(
+        &self,
+        live: &mut ClientCredentialFile,
+        next: ClientCredentialFile,
+    ) -> Result<ClientCredentialDurability, ClientCredentialError> {
+        match self.persist_candidate(&next) {
+            Ok(()) => {
+                *live = next;
+                Ok(ClientCredentialDurability::Durable)
+            }
+            Err(error) => match load_file(&self.path) {
+                Ok(on_disk) if on_disk == next => {
+                    *live = on_disk;
+                    Ok(ClientCredentialDurability::ReconciledAfterWriteError)
+                }
+                Ok(on_disk) if on_disk == *live => Err(error),
+                Ok(_) | Err(_) => {
+                    self.persistence_uncertain.store(true, Ordering::Release);
+                    Err(ClientCredentialError::PersistenceUncertain)
+                }
+            },
+        }
+    }
+
+    fn persist_candidate(&self, next: &ClientCredentialFile) -> Result<(), ClientCredentialError> {
+        #[cfg(test)]
+        let fault = self.persist_fault.lock().take();
+        #[cfg(test)]
+        if fault == Some(CredentialPersistFault::BeforeCommit) {
+            return Err(ClientCredentialError::Store(FileStoreError::Io(
+                "injected pre-write credential persistence failure".to_owned(),
+            )));
+        }
+
+        persist_file(&self.store, &self.owner, &self.id, next)?;
+
+        #[cfg(test)]
+        match fault {
+            Some(CredentialPersistFault::AfterVisibleCommit) => {
+                return Err(ClientCredentialError::Store(FileStoreError::Io(
+                    "injected post-write credential persistence failure".to_owned(),
+                )));
+            }
+            Some(CredentialPersistFault::CorruptAuthority) => {
+                fs::write(&self.path, b"{corrupt").map_err(|error| {
+                    ClientCredentialError::Store(FileStoreError::Io(error.to_string()))
+                })?;
+                return Err(ClientCredentialError::Store(FileStoreError::Io(
+                    "injected corrupt post-write credential persistence failure".to_owned(),
+                )));
+            }
+            Some(CredentialPersistFault::BeforeCommit) | None => {}
+        }
+        Ok(())
+    }
+
+    fn ensure_persistence_certain(&self) -> Result<(), ClientCredentialError> {
+        if self.persistence_uncertain.load(Ordering::Acquire) {
+            Err(ClientCredentialError::PersistenceUncertain)
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_persist(&self, fault: CredentialPersistFault) {
+        *self.persist_fault.lock() = Some(fault);
     }
 }
 
@@ -809,5 +968,211 @@ mod tests {
             .authenticate_bearer(&bearer, None)
             .expect("persisted bearer hash validates");
         assert_eq!(auth.client_id, client_id);
+    }
+
+    #[test]
+    fn pre_write_failures_never_publish_issue_rotate_revoke_or_last_use() {
+        let store = ClientCredentialStore::open(test_root("pre-write-rollback")).expect("store");
+        let issued = issue_read_client(&store);
+        let client_id = issued.client_id.clone();
+        let old_bearer = issued.bearer.expose().to_owned();
+
+        let before_issue = fs::read(store.path()).expect("baseline disk bytes");
+        let before_list = store.list();
+        store.fail_next_persist(CredentialPersistFault::BeforeCommit);
+        assert!(matches!(
+            store.issue(ClientCredentialIssueRequest::new(
+                "must not publish",
+                vec!["oracle:read".to_owned()],
+            )),
+            Err(ClientCredentialError::Store(_))
+        ));
+        assert_eq!(store.list(), before_list);
+        assert_eq!(
+            fs::read(store.path()).expect("disk after issue"),
+            before_issue
+        );
+
+        store.fail_next_persist(CredentialPersistFault::BeforeCommit);
+        assert!(matches!(
+            store.rotate(&client_id),
+            Err(ClientCredentialError::Store(_))
+        ));
+        assert_eq!(store.list(), before_list);
+        assert_eq!(
+            fs::read(store.path()).expect("disk after rotate"),
+            before_issue
+        );
+
+        store.fail_next_persist(CredentialPersistFault::BeforeCommit);
+        assert!(matches!(
+            store.revoke(&client_id),
+            Err(ClientCredentialError::Store(_))
+        ));
+        assert_eq!(store.list(), before_list);
+        assert_eq!(
+            fs::read(store.path()).expect("disk after revoke"),
+            before_issue
+        );
+
+        store.fail_next_persist(CredentialPersistFault::BeforeCommit);
+        assert!(matches!(
+            store.authenticate_bearer(&old_bearer, Some("127.0.0.1:1")),
+            Err(ClientCredentialError::Store(_))
+        ));
+        assert_eq!(store.list(), before_list);
+        assert_eq!(
+            fs::read(store.path()).expect("disk after last-use"),
+            before_issue
+        );
+        assert!(store.authenticate_bearer(&old_bearer, None).is_ok());
+        let root = store.store.root().to_path_buf();
+        drop(store);
+        assert!(
+            ClientCredentialStore::open(root)
+                .expect("reopen unchanged store")
+                .authenticate_bearer(&old_bearer, None)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn post_write_error_reconciles_exact_bytes_and_never_loses_new_bearer() {
+        let root = test_root("post-write-reconcile");
+        let store = ClientCredentialStore::open(&root).expect("store");
+        store.fail_next_persist(CredentialPersistFault::AfterVisibleCommit);
+        let issued_after_error = store
+            .issue(ClientCredentialIssueRequest::new(
+                "issued after visible error",
+                vec!["oracle:read".to_owned()],
+            ))
+            .expect("visible issue reconciles and returns its bearer");
+        assert_eq!(
+            issued_after_error.durability,
+            ClientCredentialDurability::ReconciledAfterWriteError
+        );
+        assert!(
+            store
+                .authenticate_bearer(issued_after_error.bearer.expose(), None)
+                .is_ok()
+        );
+
+        let issued = issue_read_client(&store);
+        let client_id = issued.client_id.clone();
+        let old_bearer = issued.bearer.expose().to_owned();
+
+        store.fail_next_persist(CredentialPersistFault::AfterVisibleCommit);
+        let (rotated, lifecycle) = store.rotate(&client_id).expect("visible write reconciles");
+        assert_eq!(
+            rotated.durability,
+            ClientCredentialDurability::ReconciledAfterWriteError
+        );
+        assert_eq!(lifecycle.durability, rotated.durability);
+        let new_bearer = rotated.bearer.expose().to_owned();
+        assert!(matches!(
+            store.authenticate_bearer(&old_bearer, None),
+            Err(ClientCredentialError::AuthenticationFailed)
+        ));
+        assert_eq!(
+            store
+                .authenticate_bearer(&new_bearer, None)
+                .expect("new bearer remains deliverable")
+                .generation,
+            2
+        );
+
+        store.fail_next_persist(CredentialPersistFault::AfterVisibleCommit);
+        let revoked = store.revoke(&client_id).expect("visible revoke reconciles");
+        assert_eq!(
+            revoked.durability,
+            ClientCredentialDurability::ReconciledAfterWriteError
+        );
+        assert!(matches!(
+            store.authenticate_bearer(&new_bearer, None),
+            Err(ClientCredentialError::Revoked(_))
+        ));
+        drop(store);
+        let reopened = ClientCredentialStore::open(root).expect("reopen reconciled store");
+        assert!(matches!(
+            reopened.authenticate_bearer(&new_bearer, None),
+            Err(ClientCredentialError::Revoked(_))
+        ));
+    }
+
+    #[test]
+    fn irreconcilable_persistence_failure_poison_stops_auth_and_mutation() {
+        let store = ClientCredentialStore::open(test_root("persistence-poison")).expect("store");
+        let issued = issue_read_client(&store);
+        let bearer = issued.bearer.expose().to_owned();
+
+        store.fail_next_persist(CredentialPersistFault::CorruptAuthority);
+        assert!(matches!(
+            store.rotate(&issued.client_id),
+            Err(ClientCredentialError::PersistenceUncertain)
+        ));
+        assert!(matches!(
+            store.authenticate_bearer(&bearer, None),
+            Err(ClientCredentialError::PersistenceUncertain)
+        ));
+        assert!(matches!(
+            store.revoke(&issued.client_id),
+            Err(ClientCredentialError::PersistenceUncertain)
+        ));
+        assert!(matches!(
+            store.issue(ClientCredentialIssueRequest::new(
+                "blocked while uncertain",
+                vec!["oracle:read".to_owned()],
+            )),
+            Err(ClientCredentialError::PersistenceUncertain)
+        ));
+    }
+
+    #[test]
+    fn concurrent_authenticate_and_rotate_observe_whole_generations() {
+        let store = std::sync::Arc::new(
+            ClientCredentialStore::open(test_root("auth-rotate-linearizable")).expect("store"),
+        );
+        let issued = issue_read_client(&store);
+        let client_id = issued.client_id.clone();
+        let mut bearer = issued.bearer.expose().to_owned();
+
+        for expected_generation in 2..=17 {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+            let auth_store = std::sync::Arc::clone(&store);
+            let auth_barrier = std::sync::Arc::clone(&barrier);
+            let old_bearer = bearer.clone();
+            let auth = std::thread::spawn(move || {
+                auth_barrier.wait();
+                auth_store.authenticate_bearer(&old_bearer, None)
+            });
+            let rotate_store = std::sync::Arc::clone(&store);
+            let rotate_barrier = std::sync::Arc::clone(&barrier);
+            let rotate_client_id = client_id.clone();
+            let rotate = std::thread::spawn(move || {
+                rotate_barrier.wait();
+                rotate_store.rotate(&rotate_client_id)
+            });
+            barrier.wait();
+
+            match auth.join().expect("auth thread") {
+                Ok(authenticated) => assert_eq!(authenticated.generation, expected_generation - 1),
+                Err(ClientCredentialError::AuthenticationFailed) => {}
+                Err(error) => panic!("concurrent auth returned an impossible state: {error}"),
+            }
+            let (rotated, lifecycle) = rotate
+                .join()
+                .expect("rotate thread")
+                .expect("rotation commits");
+            assert_eq!(lifecycle.generation, expected_generation);
+            assert_eq!(rotated.view.generation, expected_generation);
+            bearer = rotated.bearer.expose().to_owned();
+            assert_eq!(
+                store
+                    .authenticate_bearer(&bearer, None)
+                    .expect("new generation authenticates")
+                    .generation,
+                expected_generation
+            );
+        }
     }
 }

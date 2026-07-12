@@ -4468,6 +4468,8 @@ fn handle_operator_client_credentials_route(
                             "client": issued.view,
                             "bearer": issued.bearer.expose(),
                             "bearer_shown_once": true,
+                            "durability": issued.durability.as_str(),
+                            "durability_warning": issued.durability.warning(),
                             "closed_principal": client_credential_lifecycle_json(&lifecycle),
                             "closed_sessions": closed_sessions,
                             "redaction": "stored credential metadata is redacted; the rotated bearer is returned once",
@@ -4500,6 +4502,8 @@ fn handle_operator_client_credentials_route(
                             "source": "client_credentials",
                             "status": "revoked",
                             "client": client,
+                            "durability": lifecycle.durability.as_str(),
+                            "durability_warning": lifecycle.durability.warning(),
                             "closed_principal": client_credential_lifecycle_json(&lifecycle),
                             "closed_sessions": closed_sessions,
                             "redaction": "bearer tokens are never returned by revoke",
@@ -4566,6 +4570,8 @@ fn client_credential_lifecycle_json(
         "client_id": &lifecycle.client_id,
         "subject_id_hash": operator_subject_id_hash(&lifecycle.principal_key),
         "generation": lifecycle.generation,
+        "durability": lifecycle.durability.as_str(),
+        "durability_warning": lifecycle.durability.warning(),
     })
 }
 
@@ -4583,6 +4589,7 @@ fn operator_client_credential_error_response(
         }
         ClientCredentialError::Store(_)
         | ClientCredentialError::Serialization(_)
+        | ClientCredentialError::PersistenceUncertain
         | ClientCredentialError::Parse(_)
         | ClientCredentialError::Random(_) => (500, "client_credential_store_failed"),
     };

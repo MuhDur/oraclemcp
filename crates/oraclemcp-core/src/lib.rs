@@ -98,9 +98,9 @@ pub use change_proposal::{
     ChangeProposalStatementView, ChangeProposalStore, ChangeProposalView,
 };
 pub use client_credentials::{
-    AuthenticatedClientCredential, ClientCredentialError, ClientCredentialIssueRequest,
-    ClientCredentialLifecycle, ClientCredentialStatus, ClientCredentialStore, ClientCredentialView,
-    IssuedClientCredential, looks_like_client_bearer,
+    AuthenticatedClientCredential, ClientCredentialDurability, ClientCredentialError,
+    ClientCredentialIssueRequest, ClientCredentialLifecycle, ClientCredentialStatus,
+    ClientCredentialStore, ClientCredentialView, IssuedClientCredential, looks_like_client_bearer,
 };
 pub use config_ops::{
     ConfigApplyOutcome, ConfigApplyReport, ConfigDraftPlan, ConfigDraftPreview, ConfigFieldChange,

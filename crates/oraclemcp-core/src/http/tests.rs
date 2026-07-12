@@ -7316,6 +7316,35 @@ fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak()
     assert!(!list_text.contains("credential_hash"));
     assert!(!list_text.contains("credential_salt"));
 
+    store.fail_next_persist(crate::client_credentials::CredentialPersistFault::BeforeCommit);
+    let failed_rotate = handle_http_request(
+        &test_server(),
+        &cfg,
+        dashboard_post(
+            "/operator/v1/client-credentials/rotate",
+            &rotate_ticket,
+            serde_json::json!({ "client_id": read_client_id }),
+        ),
+    );
+    assert_eq!(failed_rotate.status, 500);
+    assert!(
+        lifecycle
+            .closed
+            .lock()
+            .expect("test lifecycle mutex")
+            .is_empty(),
+        "a failed durable mutation must not close sessions for an unpublished generation"
+    );
+    assert_eq!(
+        session_store.principal_for("read-session").as_deref(),
+        Some(read_principal.as_str())
+    );
+    assert!(
+        store.authenticate_bearer(&read_bearer, None).is_ok(),
+        "the old bearer remains authoritative after a pre-write failure"
+    );
+
+    store.fail_next_persist(crate::client_credentials::CredentialPersistFault::AfterVisibleCommit);
     let rotate = handle_http_request(
         &test_server(),
         &cfg,
@@ -7334,6 +7363,14 @@ fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak()
     assert_eq!(
         rotate_body["data"]["bearer_shown_once"],
         serde_json::json!(true)
+    );
+    assert_eq!(
+        rotate_body["data"]["durability"],
+        serde_json::json!("reconciled_after_write_error")
+    );
+    assert_eq!(
+        rotate_body["data"]["closed_principal"]["durability"],
+        serde_json::json!("reconciled_after_write_error")
     );
     let rotate_text = String::from_utf8(rotate.body.clone()).expect("rotate body UTF-8");
     assert!(!rotate_text.contains(&read_bearer));
@@ -7362,6 +7399,10 @@ fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak()
     assert_eq!(revoke.status, 200);
     let revoke_body = response_json(&revoke);
     assert_eq!(revoke_body["data"]["status"], serde_json::json!("revoked"));
+    assert_eq!(
+        revoke_body["data"]["closed_principal"]["durability"],
+        serde_json::json!("durable")
+    );
     assert!(revoke_body["data"].get("bearer").is_none());
     let revoke_text = String::from_utf8(revoke.body.clone()).expect("revoke body UTF-8");
     assert!(!revoke_text.contains(&execute_bearer));
