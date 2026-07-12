@@ -27,6 +27,87 @@ use oraclemcp_db::{
 use oraclemcp_guard::{OperatingLevel, SessionLevelState};
 use serde_json::{Value, json};
 
+/// Answer the catalog-resolver's live dictionary probes so an offline mock can
+/// satisfy `ensure_resolved_read_only` (the res4 semantic-read-proof gate). On
+/// the `oracle_query` read path the resolver first reads the session context,
+/// then resolves every `FROM` relation and value identifier against the `ALL_*`
+/// dictionary views before the caller's SQL runs. These synthetic answers
+/// present the session as `APP`, every referenced relation as an ordinary,
+/// VALID, policy-free `TABLE`, and every referenced identifier as a unique real
+/// column, so a plain `SELECT` is proven read-only offline. Bind values are
+/// echoed so any object/column name resolves. Returns `None` for the caller's
+/// own statement so the mock's fixed result rows are returned unchanged.
+fn resolver_dictionary_rows(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>> {
+    if sql.contains("SYS_CONTEXT('USERENV', 'SESSION_USER')") {
+        return Some(vec![OracleRow {
+            columns: vec![
+                ("SESSION_USER".to_owned(), resolver_text("APP")),
+                ("CURRENT_SCHEMA".to_owned(), resolver_text("APP")),
+                ("EDITION_NAME".to_owned(), resolver_text("ORA$BASE")),
+            ],
+        }]);
+    }
+    if sql.contains("session_roles") {
+        return Some(Vec::new());
+    }
+    if sql.contains("FROM all_objects WHERE owner = :1 AND object_name = :2") {
+        return Some(vec![OracleRow {
+            columns: vec![
+                ("OWNER".to_owned(), resolver_text(resolver_bind(binds, 0))),
+                (
+                    "OBJECT_NAME".to_owned(),
+                    resolver_text(resolver_bind(binds, 1)),
+                ),
+                ("OBJECT_TYPE".to_owned(), resolver_text("TABLE")),
+                (
+                    "OBJECT_ID".to_owned(),
+                    OracleCell::new("NUMBER", Some("1001".to_owned())),
+                ),
+                ("STATUS".to_owned(), resolver_text("VALID")),
+                ("EDITION_NAME".to_owned(), resolver_text("ORA$BASE")),
+            ],
+        }]);
+    }
+    if sql.contains("FROM all_synonyms") {
+        return Some(Vec::new());
+    }
+    if sql.contains("all_tab_columns") && sql.contains("table_name = :2") {
+        return Some(vec![OracleRow {
+            columns: vec![
+                (
+                    "COLUMN_NAME".to_owned(),
+                    resolver_text(resolver_bind(binds, 2)),
+                ),
+                (
+                    "COLUMN_ID".to_owned(),
+                    OracleCell::new("NUMBER", Some("1".to_owned())),
+                ),
+            ],
+        }]);
+    }
+    if sql.contains("all_tab_columns") && sql.contains("column_name = :1") {
+        return Some(Vec::new());
+    }
+    if sql.contains("all_policies") {
+        return Some(Vec::new());
+    }
+    if sql.contains("all_tab_cols") && sql.contains("virtual_column") {
+        return Some(Vec::new());
+    }
+    None
+}
+
+fn resolver_text(value: &str) -> OracleCell {
+    OracleCell::new("VARCHAR2", Some(value.to_owned()))
+}
+
+fn resolver_bind(binds: &[OracleBind], index: usize) -> &str {
+    match binds.get(index) {
+        Some(OracleBind::String(text)) => text.as_str(),
+        _ => "",
+    }
+}
+
 /// A driver-free mock whose every query fails with a classifiable ORA- error,
 /// so a live tool call exercises the DbError -> ErrorEnvelope path offline.
 struct FailingMock;
@@ -80,9 +161,12 @@ impl OracleConnection for SuccessfulQueryMock {
     async fn query_rows(
         &self,
         _cx: &Cx,
-        _sql: &str,
-        _b: &[OracleBind],
+        sql: &str,
+        b: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        if let Some(rows) = resolver_dictionary_rows(sql, b) {
+            return Ok(rows);
+        }
         Ok(vec![OracleRow {
             columns: vec![(
                 "OBJECT_COUNT".to_owned(),
