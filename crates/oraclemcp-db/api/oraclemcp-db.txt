@@ -6805,6 +6805,7 @@ pub async fn oraclemcp_db::sample_rows(&asupersync::cx::cx::Cx, &dyn oraclemcp_d
 pub async fn oraclemcp_db::search_objects(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, core::option::Option<&str>, core::option::Option<&str>, oraclemcp_db::SearchDetailLevel, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::SearchObject>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::search_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, &str, core::option::Option<&str>, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::select_diagnostics_source(bool, bool) -> oraclemcp_db::DiagnosticsSource
+pub fn oraclemcp_db::selected_endpoint_uses_tcps(&oraclemcp_db::OracleConnectOptions) -> core::result::Result<bool, oraclemcp_db::DbError>
 pub fn oraclemcp_db::sequence_ceiling_sql(oraclemcp_db::ViewTier, u8) -> (&'static str, alloc::string::String)
 pub fn oraclemcp_db::serialize_cell(&oraclemcp_db::OracleCell, &oraclemcp_db::SerializeOptions) -> serde_json::value::Value
 pub fn oraclemcp_db::serialize_row(&oraclemcp_db::OracleRow, &oraclemcp_db::SerializeOptions) -> serde_json::value::Value

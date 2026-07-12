@@ -95,9 +95,13 @@ pub enum IamTokenError {
     /// before the token reaches the driver.
     #[error(
         "OCI IAM database-token auth requires a TLS (TCPS) transport; use a tcps:// connect \
-         string, a PROTOCOL=TCPS descriptor, or a wallet-backed TLS profile"
+         string or a connect descriptor whose selected address uses PROTOCOL=TCPS"
     )]
     NonTcpsTransport,
+    /// The configured Oracle Net target could not be resolved and parsed far
+    /// enough to prove the selected endpoint's transport before token I/O.
+    #[error("OCI IAM database-token auth requires a resolvable Oracle Net TCPS endpoint")]
+    TransportUnresolved,
     /// More than one of `token_env` / `token_file` / `token_exec` is configured.
     /// The sources are mutually exclusive so an operator's intent is never
     /// silently disambiguated — a profile with two sources fails closed.
@@ -526,27 +530,6 @@ fn run_token_exec_with_timeout(
     Ok(trimmed.to_owned())
 }
 
-/// Whether a profile's transport is provably TLS/TCPS *before* opening the
-/// socket — the same fail-closed signals the B2 adapter uses
-/// (`transport_is_tcps`): a `tcps://` scheme, a `PROTOCOL=TCPS` descriptor, a
-/// configured wallet directory, or an explicit server-cert DN. A bare TNS alias
-/// backed by an OCI wallet is covered by `wallet_location`.
-#[must_use]
-pub fn profile_transport_is_tcps(profile: &ConnectionProfile) -> bool {
-    let connect_string = profile.connect_string.as_deref().unwrap_or_default();
-    let compact: String = connect_string
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    let tls_connect_string = compact.starts_with("tcps://") || compact.contains("protocol=tcps");
-    let wallet_or_cert = profile
-        .oci
-        .as_ref()
-        .is_some_and(|oci| oci.wallet_location.is_some() || oci.ssl_server_cert_dn.is_some());
-    tls_connect_string || wallet_or_cert
-}
-
 /// Resolve the server-side IAM database token for `profile` (env/file source)
 /// and inject it into `options.iam_token`, so the B2 adapter wires it through
 /// `with_access_token`. A **no-op** when the profile does not use IAM-token auth.
@@ -572,22 +555,29 @@ pub fn inject_iam_token_with(
     let Some(oci) = profile.oci.as_ref() else {
         return Ok(());
     };
-    // Source selection (mutually exclusive; ambiguity fails closed) happens before
-    // any I/O — but it spawns nothing, so the TCPS gate below still runs before a
-    // token_exec command is ever executed.
-    let Some(source) = ServerIamTokenSource::from_oci(oci)? else {
+    if !oci.use_iam_token {
         return Ok(());
-    };
-    // Refuse a token on a non-TCPS transport BEFORE resolving it: a database access
-    // token must never be exposed on a plaintext socket, and a `token_exec` command
-    // must never even run on a non-TCPS profile.
-    if !profile_transport_is_tcps(profile) {
+    }
+    // Resolve aliases and parse the selected endpoint BEFORE even constructing
+    // the token source. This is the exact first-address protocol model used by
+    // the pinned driver; wallet/certificate settings are never transport proof.
+    let uses_tcps = oraclemcp_db::selected_endpoint_uses_tcps(options).map_err(|_| {
+        tracing::warn!(
+            reason = "transport-unresolved",
+            "IAM token source refused (fail-closed)"
+        );
+        IamTokenError::TransportUnresolved
+    })?;
+    if !uses_tcps {
         tracing::warn!(
             reason = "non-tcps",
             "IAM token source refused (fail-closed)"
         );
         return Err(IamTokenError::NonTcpsTransport);
     }
+    let Some(source) = ServerIamTokenSource::from_oci(oci)? else {
+        return Ok(());
+    };
     let token = source.get_token_with(env_lookup)?;
     options.iam_token = Some(token);
     Ok(())
@@ -705,6 +695,31 @@ mod tests {
         .into_iter()
         .next()
         .expect("profile")
+    }
+
+    fn connect_options_for(profile: &ConnectionProfile) -> OracleConnectOptions {
+        OracleConnectOptions {
+            connect_string: profile.connect_string.clone().unwrap_or_default(),
+            wallet_location: profile
+                .oci
+                .as_ref()
+                .and_then(|oci| oci.wallet_location.clone()),
+            ssl_server_cert_dn: profile
+                .oci
+                .as_ref()
+                .and_then(|oci| oci.ssl_server_cert_dn.clone()),
+            use_iam_token: profile.oci.as_ref().is_some_and(|oci| oci.use_iam_token),
+            ..Default::default()
+        }
+    }
+
+    fn tns_fixtures_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("fixtures")
+            .join("tns")
     }
 
     #[test]
@@ -828,10 +843,7 @@ mod tests {
     #[test]
     fn inject_sets_options_token_over_tcps() {
         let profile = tcps_profile();
-        let mut opts = OracleConnectOptions {
-            use_iam_token: true,
-            ..Default::default()
-        };
+        let mut opts = connect_options_for(&profile);
         let env = env_map(&[(IAM_TOKEN_ENV, "resolved.jwt.token")]);
         inject_iam_token_with(&profile, &mut opts, &env).expect("inject over tcps");
         assert_eq!(opts.iam_token.as_deref(), Some("resolved.jwt.token"));
@@ -855,7 +867,7 @@ mod tests {
         .into_iter()
         .next()
         .expect("profile");
-        let mut opts = OracleConnectOptions::default();
+        let mut opts = connect_options_for(&profile);
         let env = env_map(&[(IAM_TOKEN_ENV, "SECRET_JWT_SENTINEL.payload.sig")]);
         let err = inject_iam_token_with(&profile, &mut opts, &env).expect_err("non-tcps refused");
         assert_eq!(err, IamTokenError::NonTcpsTransport);
@@ -880,7 +892,7 @@ mod tests {
         .into_iter()
         .next()
         .expect("profile");
-        let mut opts = OracleConnectOptions::default();
+        let mut opts = connect_options_for(&profile);
         inject_iam_token_with(&profile, &mut opts, env_map(&[])).expect("noop");
         assert!(opts.iam_token.is_none());
     }
@@ -1267,7 +1279,7 @@ mod tests {
             token_exec = ["{printf}", "resolved.exec.jwt"]
             "#
         ));
-        let mut opts = OracleConnectOptions::default();
+        let mut opts = connect_options_for(&profile);
         inject_iam_token_with(&profile, &mut opts, env_map(&[])).expect("inject over tcps");
         assert_eq!(opts.iam_token.as_deref(), Some("resolved.exec.jwt"));
     }
@@ -1291,6 +1303,7 @@ mod tests {
             username = "app"
             [profiles.oci]
             use_iam_token = true
+            wallet_location = "/tmp/qa73-wallet-does-not-upgrade-tcp"
             token_exec = ["{touch}", "{marker}"]
             "#,
             touch = touch,
@@ -1301,7 +1314,7 @@ mod tests {
         .into_iter()
         .next()
         .expect("profile");
-        let mut opts = OracleConnectOptions::default();
+        let mut opts = connect_options_for(&profile);
         let err =
             inject_iam_token_with(&profile, &mut opts, env_map(&[])).expect_err("non-tcps refused");
         assert_eq!(err, IamTokenError::NonTcpsTransport);
@@ -1315,6 +1328,102 @@ mod tests {
     }
 
     #[test]
+    fn tcp_first_mixed_descriptor_refuses_before_env_resolution() {
+        let mut profile = tcps_profile();
+        profile.connect_string = Some(
+            "(DESCRIPTION=(ADDRESS_LIST=\
+                (ADDRESS=(PROTOCOL=TCP)(HOST=plain)(PORT=1521))\
+                (ADDRESS=(PROTOCOL=TCPS)(HOST=secure)(PORT=2484)))\
+                (CONNECT_DATA=(SERVICE_NAME=svc)))"
+                .to_owned(),
+        );
+        let mut opts = connect_options_for(&profile);
+        let lookups = std::cell::Cell::new(0usize);
+        let err = inject_iam_token_with(&profile, &mut opts, |_| {
+            lookups.set(lookups.get() + 1);
+            Some("must.not.be.resolved".to_owned())
+        })
+        .expect_err("the first selected address is plaintext");
+        assert_eq!(err, IamTokenError::NonTcpsTransport);
+        assert_eq!(lookups.get(), 0, "token source must not be consulted");
+        assert!(opts.iam_token.is_none());
+    }
+
+    #[test]
+    fn tcps_first_mixed_descriptor_resolves_the_token() {
+        let mut profile = tcps_profile();
+        profile.connect_string = Some(
+            "(DESCRIPTION=(ADDRESS_LIST=\
+                (ADDRESS=(PROTOCOL=TCPS)(HOST=secure)(PORT=2484))\
+                (ADDRESS=(PROTOCOL=TCP)(HOST=plain)(PORT=1521)))\
+                (CONNECT_DATA=(SERVICE_NAME=svc)))"
+                .to_owned(),
+        );
+        let mut opts = connect_options_for(&profile);
+        inject_iam_token_with(
+            &profile,
+            &mut opts,
+            env_map(&[(IAM_TOKEN_ENV, "selected.tcps.token")]),
+        )
+        .expect("the selected first address is TCPS");
+        assert_eq!(opts.iam_token.as_deref(), Some("selected.tcps.token"));
+    }
+
+    #[test]
+    fn tns_alias_transport_is_resolved_before_token_io() {
+        if std::env::var_os("TNS_ADMIN").is_some() {
+            return;
+        }
+        let mut profile = tcps_profile();
+        profile.connect_string = Some("ez_plain".to_owned());
+        profile.oci.as_mut().expect("OCI").wallet_location = Some(tns_fixtures_dir());
+        let mut opts = connect_options_for(&profile);
+        let lookups = std::cell::Cell::new(0usize);
+        let err = inject_iam_token_with(&profile, &mut opts, |_| {
+            lookups.set(lookups.get() + 1);
+            Some("must.not.be.resolved".to_owned())
+        })
+        .expect_err("plaintext alias is refused");
+        assert_eq!(err, IamTokenError::NonTcpsTransport);
+        assert_eq!(lookups.get(), 0, "alias proof precedes token lookup");
+
+        profile.connect_string = Some("primary_tcps".to_owned());
+        let mut opts = connect_options_for(&profile);
+        inject_iam_token_with(
+            &profile,
+            &mut opts,
+            env_map(&[(IAM_TOKEN_ENV, "alias.tcps.token")]),
+        )
+        .expect("TCPS alias resolves before token lookup");
+        assert_eq!(opts.iam_token.as_deref(), Some("alias.tcps.token"));
+    }
+
+    #[test]
+    fn missing_or_malformed_target_refuses_before_token_io() {
+        if std::env::var_os("TNS_ADMIN").is_some() {
+            return;
+        }
+        for (connect_string, wallet_location) in [
+            ("does_not_exist", tns_fixtures_dir()),
+            ("anything", tns_fixtures_dir().join("cycle")),
+        ] {
+            let mut profile = tcps_profile();
+            profile.connect_string = Some(connect_string.to_owned());
+            profile.oci.as_mut().expect("OCI").wallet_location = Some(wallet_location);
+            let mut opts = connect_options_for(&profile);
+            let lookups = std::cell::Cell::new(0usize);
+            let err = inject_iam_token_with(&profile, &mut opts, |_| {
+                lookups.set(lookups.get() + 1);
+                Some("must.not.be.resolved".to_owned())
+            })
+            .expect_err("unresolved target is refused");
+            assert_eq!(err, IamTokenError::TransportUnresolved);
+            assert_eq!(lookups.get(), 0, "token source must not be consulted");
+            assert!(opts.iam_token.is_none());
+        }
+    }
+
+    #[test]
     fn inject_ambiguous_source_is_fail_closed() {
         let profile = tcps_profile_with_oci(
             r#"
@@ -1323,7 +1432,7 @@ mod tests {
             token_exec = ["/usr/bin/fetch"]
             "#,
         );
-        let mut opts = OracleConnectOptions::default();
+        let mut opts = connect_options_for(&profile);
         let err = inject_iam_token_with(&profile, &mut opts, env_map(&[]))
             .expect_err("ambiguous source refused");
         assert_eq!(err, IamTokenError::AmbiguousSource);

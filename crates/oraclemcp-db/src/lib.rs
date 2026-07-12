@@ -99,7 +99,7 @@ pub use connection::{
     DRIVER_VERSION, DbRequestQuota, DbmsOutput, ExecuteOutcome, OracleConnection, OracleRoutineArg,
     QueryRowStream, QueryRowStreamStart, RustOracleConnection, WalletCertValidity,
     WalletFileChoice, WalletResolutionReport, WalletResolveError, resolve_wallet_choice,
-    wallet_certificate_validity,
+    selected_endpoint_uses_tcps, wallet_certificate_validity,
 };
 pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compiled};
 pub use drcp::{DrcpConfig, SessionPurity};

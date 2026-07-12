@@ -147,7 +147,6 @@ pub use http::{
 };
 pub use iam_token::{
     IAM_TOKEN_ENV, IamTokenError, ServerIamTokenSource, inject_iam_token, jwt_exp_unix,
-    profile_transport_is_tcps,
 };
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
 pub use lane::{
