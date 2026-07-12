@@ -13,10 +13,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::file_store::{FileStore, FileStoreError, ServiceOwner, StoreId};
+use crate::pagination::{LIST_PAGE_SIZE, decode_cursor, encode_cursor};
 
 const SOURCE_SNAPSHOT_COLLECTION: &str = "source-snapshots";
 const SOURCE_HISTORY_COLLECTION: &str = "source-history";
 const SOURCE_HISTORY_EXTENSION: &str = "json";
+/// Tamper-token scope for source-history list cursors.
+const SOURCE_HISTORY_CURSOR_KIND: &str = "source-history";
 const SOURCE_HISTORY_SCHEMA_VERSION: u8 = 2;
 const LEGACY_SOURCE_HISTORY_SCHEMA_VERSION: u8 = 1;
 
@@ -187,6 +190,84 @@ impl SourceHistoryStore {
             entries.truncate(limit);
         }
         Ok(entries)
+    }
+
+    /// Conditional-request validator for the source-history board.
+    ///
+    /// Unchanged between two polls, it lets the caller answer `304 Not Modified`
+    /// without re-reading the history files; it also doubles as the [`list_page`]
+    /// cursor revision so a cursor minted before an append is rejected as stale.
+    ///
+    /// [`list_page`]: SourceHistoryStore::list_page
+    pub fn etag(&self) -> Result<String, SourceHistoryError> {
+        Ok(self.store.collection_etag(SOURCE_HISTORY_COLLECTION)?)
+    }
+
+    /// List one bounded, newest-first page of source-history entries. Source text
+    /// is never included.
+    ///
+    /// Unlike [`list`], the page is capped at [`LIST_PAGE_SIZE`] with an opaque
+    /// signed `next_cursor` when more entries remain, so a polled response stays
+    /// bounded regardless of how large the history grows. A caller `max_rows`
+    /// still caps the visible universe before paging. A single malformed JSONL
+    /// record is skipped rather than failing the entire listing.
+    ///
+    /// [`list`]: SourceHistoryStore::list
+    pub fn list_page(
+        &self,
+        filter: SourceHistoryFilter,
+        cursor: Option<&str>,
+    ) -> Result<SourceSnapshotPage, SourceHistoryError> {
+        let etag = self.etag()?;
+        let dir = self.store.root().join(SOURCE_HISTORY_COLLECTION);
+        let mut entries = Vec::new();
+        if dir.exists() {
+            for entry in fs::read_dir(&dir).map_err(|e| SourceHistoryError::Io(e.to_string()))? {
+                let entry = entry.map_err(|e| SourceHistoryError::Io(e.to_string()))?;
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let bytes = fs::read(&path).map_err(|e| SourceHistoryError::Io(e.to_string()))?;
+                for line in bytes.split(|byte| *byte == b'\n') {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    // Skip a single corrupt record rather than hiding the board.
+                    let Ok(view) = serde_json::from_slice::<SourceSnapshotView>(line) else {
+                        continue;
+                    };
+                    if filter.matches(&view) {
+                        entries.push(view);
+                    }
+                }
+            }
+        }
+        entries.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.profile.cmp(&b.profile))
+                .then_with(|| a.owner.cmp(&b.owner))
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.object_type.cmp(&b.object_type))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        // A caller-supplied max_rows caps the visible universe; the structural
+        // page cap below always applies on top of it.
+        if let Some(limit) = filter.max_rows {
+            entries.truncate(limit);
+        }
+        let offset = decode_cursor(SOURCE_HISTORY_CURSOR_KIND, &etag, cursor)
+            .map_err(|_| SourceHistoryError::Invalid("invalid or stale pagination cursor"))?
+            .min(entries.len());
+        let end = offset.saturating_add(LIST_PAGE_SIZE).min(entries.len());
+        let next_cursor =
+            (end < entries.len()).then(|| encode_cursor(SOURCE_HISTORY_CURSOR_KIND, &etag, end));
+        Ok(SourceSnapshotPage {
+            snapshots: entries[offset..end].to_vec(),
+            next_cursor,
+            etag,
+        })
     }
 
     /// Load a full snapshot by id for a revert draft.
@@ -365,6 +446,19 @@ pub struct SourceSnapshotView {
     pub subject_id_hash: String,
 }
 
+/// One bounded page of source-history rows plus its conditional-request
+/// validator. Source text is never included in a row.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct SourceSnapshotPage {
+    /// The newest-first history rows in this page.
+    pub snapshots: Vec<SourceSnapshotView>,
+    /// Opaque signed cursor for the next page, or `None` when exhausted.
+    pub next_cursor: Option<String>,
+    /// Validator matching [`SourceHistoryStore::etag`]; also the cursor
+    /// revision, so a cursor is rejected once the store changes under it.
+    pub etag: String,
+}
+
 /// Input for recording a snapshot fetched from the live dispatcher.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceSnapshotDraft {
@@ -397,7 +491,8 @@ pub enum SourceHistoryError {
     /// JSON serialization or parsing failed.
     #[error("source-history json error: {0}")]
     Json(String),
-    /// Invalid caller input.
+    /// Invalid caller input, or a pagination cursor that was invalid, tampered,
+    /// or stale.
     #[error("invalid source-history request: {0}")]
     Invalid(&'static str),
     /// The requested snapshot id does not exist.
@@ -1002,5 +1097,120 @@ mod tests {
             .load_snapshot(&view.id)
             .expect("quoted snapshot loaded");
         assert_eq!(loaded.view(), view);
+    }
+
+    fn history_root(name: &str) -> std::path::PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/source-history-tests")
+            .join(format!("page-{name}-{}-{stamp}", std::process::id()))
+    }
+
+    fn record_procedure(store: &SourceHistoryStore, name: &str) -> SourceSnapshotView {
+        let upper = name.to_ascii_uppercase();
+        store
+            .record_snapshot(SourceSnapshotDraft {
+                profile: "prod".to_owned(),
+                owner: "app".to_owned(),
+                owner_quoted: false,
+                name: name.to_owned(),
+                name_quoted: false,
+                object_type: "procedure".to_owned(),
+                target_identity_sha256: source_identity_sha256("APP", &upper, "PROCEDURE"),
+                source_kind: "all_source".to_owned(),
+                source: format!("CREATE OR REPLACE PROCEDURE {name} IS BEGIN NULL; END;"),
+                proposal_id: format!("cp-{name}"),
+                statement_id: format!("stmt-{name}"),
+                statement_sql_sha256: "sha256:stmt".to_owned(),
+                lane_id: Some("operator".to_owned()),
+                subject_id_hash: "subject-sha256:test".to_owned(),
+            })
+            .expect("snapshot recorded")
+    }
+
+    #[test]
+    fn list_page_bounds_and_paginates_without_leaking_source() {
+        let store = SourceHistoryStore::open(history_root("bound")).expect("store");
+        let total = LIST_PAGE_SIZE + 3;
+        for i in 0..total {
+            record_procedure(&store, &format!("p{i}"));
+        }
+
+        let first = store
+            .list_page(SourceHistoryFilter::default(), None)
+            .expect("first page");
+        assert_eq!(first.snapshots.len(), LIST_PAGE_SIZE, "page is capped");
+        assert!(!first.etag.is_empty());
+        let rendered = serde_json::to_string(&first.snapshots).expect("serialize page");
+        assert!(
+            !rendered.contains("BEGIN NULL"),
+            "history rows never carry source text"
+        );
+
+        let cursor = first.next_cursor.clone().expect("more pages remain");
+        let second = store
+            .list_page(SourceHistoryFilter::default(), Some(&cursor))
+            .expect("second page");
+        assert_eq!(second.snapshots.len(), total - LIST_PAGE_SIZE);
+        assert!(second.next_cursor.is_none(), "last page has no cursor");
+
+        let mut ids: Vec<String> = first.snapshots.iter().map(|s| s.id.clone()).collect();
+        ids.extend(second.snapshots.iter().map(|s| s.id.clone()));
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "every row appears exactly once");
+
+        // A row appended after the cursor was minted changes the validator, so
+        // the cursor is rejected as stale instead of skipping or duplicating.
+        record_procedure(&store, "pnew");
+        let stale = store
+            .list_page(SourceHistoryFilter::default(), Some(&cursor))
+            .expect_err("stale cursor rejected");
+        assert!(matches!(stale, SourceHistoryError::Invalid(_)));
+    }
+
+    #[test]
+    fn list_page_skips_a_malformed_record_line() {
+        let root = history_root("malformed");
+        let store = SourceHistoryStore::open(&root).expect("store");
+        let good = record_procedure(&store, "good");
+
+        let dir = root.join(SOURCE_HISTORY_COLLECTION);
+        for entry in fs::read_dir(&dir).expect("read history dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+                use std::io::Write as _;
+                let mut file = fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .expect("open jsonl");
+                file.write_all(b"{ this is not valid json\n")
+                    .expect("append corrupt line");
+            }
+        }
+
+        let page = store
+            .list_page(SourceHistoryFilter::default(), None)
+            .expect("a single corrupt line must not fail the listing");
+        assert_eq!(page.snapshots.len(), 1);
+        assert_eq!(page.snapshots[0].id, good.id);
+    }
+
+    #[test]
+    fn etag_tracks_appends_and_matches_the_page() {
+        let store = SourceHistoryStore::open(history_root("etag")).expect("store");
+        let empty = store.etag().expect("empty etag");
+        assert_eq!(empty, store.etag().expect("empty etag again"));
+
+        record_procedure(&store, "p1");
+        let one = store.etag().expect("etag after append");
+        assert_ne!(one, empty, "an append changes the validator");
+        let page = store
+            .list_page(SourceHistoryFilter::default(), None)
+            .expect("page");
+        assert_eq!(one, page.etag, "the page reports the current validator");
     }
 }

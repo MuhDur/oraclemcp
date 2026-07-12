@@ -14,11 +14,14 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::file_store::{FileStore, FileStoreError, ServiceOwner, StoreId};
+use crate::pagination::{LIST_PAGE_SIZE, decode_cursor, encode_cursor};
 
 const CHANGE_PROPOSAL_COLLECTION: &str = "change-proposals";
 const CHANGE_PROPOSAL_EXTENSION: &str = "json";
 const CHANGE_PROPOSAL_SCHEMA_VERSION: u8 = 1;
 const MAX_PROPOSAL_STATEMENTS: usize = 32;
+/// Tamper-token scope for change-proposal list cursors.
+const CHANGE_PROPOSAL_CURSOR_KIND: &str = "change-proposals";
 
 /// Persistent change-proposal store.
 pub struct ChangeProposalStore {
@@ -69,6 +72,76 @@ impl ChangeProposalStore {
                 .then_with(|| a.id.cmp(&b.id))
         });
         Ok(proposals)
+    }
+
+    /// Conditional-request validator for the proposal board.
+    ///
+    /// Unchanged between two polls, it lets the caller answer `304 Not Modified`
+    /// without rebuilding the board; it also doubles as the [`list_page`] cursor
+    /// revision so a cursor minted against an older store is rejected as stale.
+    ///
+    /// [`list_page`]: ChangeProposalStore::list_page
+    pub fn etag(&self) -> Result<String, ChangeProposalError> {
+        Ok(self.store.collection_etag(CHANGE_PROPOSAL_COLLECTION)?)
+    }
+
+    /// List one bounded, newest-first page of proposal board entries.
+    ///
+    /// Unlike [`list`], the projection never carries `sql_template`: only
+    /// lightweight metadata and the per-statement digest ride in the page, so the
+    /// polled response stays small. Fetch the full SQL on selection through
+    /// [`detail`]. A single malformed or oversized proposal file is skipped
+    /// rather than failing the whole board, and the page is capped at
+    /// [`LIST_PAGE_SIZE`] with an opaque signed `next_cursor` when more remain.
+    ///
+    /// [`list`]: ChangeProposalStore::list
+    /// [`detail`]: ChangeProposalStore::detail
+    pub fn list_page(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<ChangeProposalPage, ChangeProposalError> {
+        let etag = self.etag()?;
+        let dir = self.store.root().join(CHANGE_PROPOSAL_COLLECTION);
+        let mut proposals = Vec::new();
+        if dir.exists() {
+            for entry in fs::read_dir(&dir).map_err(|e| ChangeProposalError::Io(e.to_string()))? {
+                let entry = entry.map_err(|e| ChangeProposalError::Io(e.to_string()))?;
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some(CHANGE_PROPOSAL_EXTENSION)
+                {
+                    continue;
+                }
+                // A single corrupt or oversized record must fail locally, never
+                // hide the entire board from the operator.
+                if let Ok(proposal) = load_proposal_from_path(&path) {
+                    proposals.push(proposal.list_view());
+                }
+            }
+        }
+        proposals.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| a.profile.cmp(&b.profile))
+                .then_with(|| a.title.cmp(&b.title))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let offset = decode_cursor(CHANGE_PROPOSAL_CURSOR_KIND, &etag, cursor)
+            .map_err(|_| ChangeProposalError::Invalid("invalid or stale pagination cursor"))?
+            .min(proposals.len());
+        let end = offset.saturating_add(LIST_PAGE_SIZE).min(proposals.len());
+        let next_cursor =
+            (end < proposals.len()).then(|| encode_cursor(CHANGE_PROPOSAL_CURSOR_KIND, &etag, end));
+        Ok(ChangeProposalPage {
+            proposals: proposals[offset..end].to_vec(),
+            next_cursor,
+            etag,
+        })
+    }
+
+    /// Load one proposal's full review view, including the `sql_template` bodies
+    /// that the list projection omits. Bind values remain redacted.
+    pub fn detail(&self, id: &str) -> Result<ChangeProposalView, ChangeProposalError> {
+        Ok(self.load(id)?.view())
     }
 
     /// Persist a new proposal draft and return the redacted board view.
@@ -122,7 +195,8 @@ pub enum ChangeProposalError {
     /// JSON serialization or parsing failed.
     #[error("change proposal json error: {0}")]
     Json(String),
-    /// The request body is malformed.
+    /// The request body is malformed, or a pagination cursor was invalid,
+    /// tampered, or stale.
     #[error("invalid change proposal: {0}")]
     Invalid(&'static str),
     /// The requested proposal id does not exist.
@@ -267,6 +341,32 @@ impl ChangeProposal {
         })
     }
 
+    /// Bounded list projection for the polled board endpoint. It carries the
+    /// same metadata as [`ChangeProposal::view`] but omits every `sql_template`
+    /// body (retained only in the detail view) so list responses stay small even
+    /// as the proposal corpus grows. Bind values and stored verdicts remain
+    /// redacted exactly as in [`ChangeProposal::view`].
+    #[must_use]
+    pub fn list_view(&self) -> ChangeProposalListView {
+        ChangeProposalListView {
+            schema_version: self.schema_version,
+            id: self.id.clone(),
+            profile: self.profile.clone(),
+            author: self.author,
+            author_id_hash: self.author_id_hash.clone(),
+            title: self.title.clone(),
+            created_at: self.created_at.clone(),
+            updated_at: self.updated_at.clone(),
+            statement_count: self.statements.len(),
+            statements: self
+                .statements
+                .iter()
+                .map(ChangeProposalStatement::list_view)
+                .collect(),
+            stored_verdict_present: self.stored_verdict.is_some(),
+        }
+    }
+
     /// Redacted board view. It keeps templates visible for review but omits
     /// captured bind values and any stored verdict payload.
     #[must_use]
@@ -360,6 +460,21 @@ impl ChangeProposalStatement {
             stored_verdict_present: self.stored_verdict.is_some(),
         }
     }
+
+    /// List projection that carries the SQL digest but not the `sql_template`
+    /// body itself, so the polled board response stays bounded.
+    fn list_view(&self) -> ChangeProposalStatementListView {
+        ChangeProposalStatementListView {
+            id: self.id.clone(),
+            unit: self.unit,
+            sql_sha256: prefixed_sha256_hex(self.sql_template.as_bytes()),
+            bind_count: self.binds.len(),
+            commit: self.commit,
+            capture_dbms_output: self.capture_dbms_output,
+            draft_verdict: self.draft_verdict.clone(),
+            stored_verdict_present: self.stored_verdict.is_some(),
+        }
+    }
 }
 
 /// Redacted draft outcome.
@@ -391,6 +506,49 @@ pub struct ChangeProposalStatementView {
     pub id: String,
     pub unit: ChangeProposalApplyUnit,
     pub sql_template: String,
+    pub sql_sha256: String,
+    pub bind_count: usize,
+    pub commit: bool,
+    pub capture_dbms_output: bool,
+    pub draft_verdict: ChangeProposalClassifierView,
+    pub stored_verdict_present: bool,
+}
+
+/// One bounded page of proposal board entries plus its conditional-request
+/// validator. Every entry omits `sql_template` (see [`ChangeProposalListView`]).
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct ChangeProposalPage {
+    /// The newest-first list projections in this page.
+    pub proposals: Vec<ChangeProposalListView>,
+    /// Opaque signed cursor for the next page, or `None` when exhausted.
+    pub next_cursor: Option<String>,
+    /// Validator matching [`ChangeProposalStore::etag`]; also the cursor
+    /// revision, so a cursor is rejected once the store changes under it.
+    pub etag: String,
+}
+
+/// Redacted list projection for the polled board. It mirrors
+/// [`ChangeProposalView`] but drops every `sql_template` body.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ChangeProposalListView {
+    pub schema_version: u8,
+    pub id: String,
+    pub profile: String,
+    pub author: ChangeProposalAuthorKind,
+    pub author_id_hash: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub statement_count: usize,
+    pub statements: Vec<ChangeProposalStatementListView>,
+    pub stored_verdict_present: bool,
+}
+
+/// Redacted statement list projection: the SQL digest without the SQL body.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ChangeProposalStatementListView {
+    pub id: String,
+    pub unit: ChangeProposalApplyUnit,
     pub sql_sha256: String,
     pub bind_count: usize,
     pub commit: bool,
@@ -501,5 +659,129 @@ mod tests {
             view.statements[0].draft_verdict.required_level.as_deref(),
             Some("READ_WRITE")
         );
+    }
+
+    fn store_root(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/change-proposal-tests")
+            .join(format!("{name}-{}-{stamp}", std::process::id()))
+    }
+
+    fn draft_one(store: &ChangeProposalStore, title: &str, sql: &str) -> ChangeProposalView {
+        store
+            .draft(
+                ChangeProposalDraftRequest {
+                    profile: "prod".to_owned(),
+                    author: ChangeProposalAuthorKind::Agent,
+                    title: Some(title.to_owned()),
+                    statements: vec![ChangeProposalStatementDraft {
+                        sql_template: sql.to_owned(),
+                        binds: Vec::new(),
+                        unit: None,
+                        commit: None,
+                        capture_dbms_output: None,
+                        stored_verdict: None,
+                    }],
+                    stored_verdict: None,
+                },
+                "subject-sha256:test".to_owned(),
+            )
+            .expect("draft")
+            .proposal
+    }
+
+    #[test]
+    fn list_page_omits_sql_template_but_detail_retains_it() {
+        let store = ChangeProposalStore::open(store_root("strip")).expect("store");
+        let view = draft_one(
+            &store,
+            "Hold",
+            "UPDATE accounts SET status = :1 WHERE id = :2",
+        );
+
+        let page = store.list_page(None).expect("page");
+        assert_eq!(page.proposals.len(), 1);
+        assert!(page.next_cursor.is_none());
+        assert!(!page.etag.is_empty());
+        let rendered = serde_json::to_string(&page.proposals).expect("serialize list page");
+        assert!(
+            !rendered.contains("UPDATE accounts"),
+            "the list projection must not ship sql_template bodies"
+        );
+        assert!(
+            rendered.contains("sql_sha256"),
+            "the list projection keeps the SQL digest for review"
+        );
+
+        let detail = store.detail(&view.id).expect("detail");
+        let detail_rendered = serde_json::to_string(&detail).expect("serialize detail");
+        assert!(
+            detail_rendered.contains("UPDATE accounts"),
+            "the detail view retains the full sql_template"
+        );
+    }
+
+    #[test]
+    fn list_page_bounds_pages_and_rejects_a_stale_cursor() {
+        let store = ChangeProposalStore::open(store_root("page")).expect("store");
+        let total = LIST_PAGE_SIZE + 2;
+        for i in 0..total {
+            draft_one(&store, &format!("cp-{i}"), &format!("SELECT {i} FROM dual"));
+        }
+
+        let first = store.list_page(None).expect("first page");
+        assert_eq!(first.proposals.len(), LIST_PAGE_SIZE, "page is capped");
+        let cursor = first.next_cursor.clone().expect("more pages remain");
+        let second = store.list_page(Some(&cursor)).expect("second page");
+        assert_eq!(second.proposals.len(), total - LIST_PAGE_SIZE);
+        assert!(second.next_cursor.is_none(), "last page has no cursor");
+
+        let mut ids: Vec<String> = first.proposals.iter().map(|p| p.id.clone()).collect();
+        ids.extend(second.proposals.iter().map(|p| p.id.clone()));
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "every proposal appears exactly once");
+
+        // Appending a proposal changes the store validator, so the in-flight
+        // cursor is rejected as stale rather than paging an inconsistent board.
+        draft_one(&store, "cp-new", "SELECT 9999 FROM dual");
+        let stale = store
+            .list_page(Some(&cursor))
+            .expect_err("stale cursor rejected");
+        assert!(matches!(stale, ChangeProposalError::Invalid(_)));
+    }
+
+    #[test]
+    fn list_page_skips_a_malformed_proposal_file() {
+        let root = store_root("malformed");
+        let store = ChangeProposalStore::open(&root).expect("store");
+        draft_one(&store, "good", "SELECT 1 FROM dual");
+
+        let corrupt = root
+            .join(CHANGE_PROPOSAL_COLLECTION)
+            .join("cp-garbage.json");
+        std::fs::write(&corrupt, b"{ this is not valid json").expect("write corrupt record");
+
+        let page = store
+            .list_page(None)
+            .expect("a single corrupt record must not fail the whole board");
+        assert_eq!(page.proposals.len(), 1);
+        assert_eq!(page.proposals[0].title, "good");
+    }
+
+    #[test]
+    fn etag_is_stable_until_the_board_changes() {
+        let store = ChangeProposalStore::open(store_root("etag")).expect("store");
+        let empty = store.etag().expect("empty etag");
+        assert_eq!(empty, store.etag().expect("empty etag again"));
+
+        draft_one(&store, "one", "SELECT 1 FROM dual");
+        let one = store.etag().expect("etag after draft");
+        assert_ne!(one, empty, "a new proposal changes the validator");
+        assert_eq!(one, store.etag().expect("etag stable while unchanged"));
     }
 }

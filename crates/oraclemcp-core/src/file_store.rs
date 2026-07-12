@@ -460,6 +460,59 @@ impl FileStore {
         })
     }
 
+    /// Compute a cheap, content-sensitive validator (an ETag) for a collection.
+    ///
+    /// The digest covers each regular file's name, byte length, and modified
+    /// time — no record is opened or parsed — so an unchanged collection yields a
+    /// stable value a polling client can use for conditional (`304 Not Modified`)
+    /// requests, while any append, rewrite, or removal changes it. A missing
+    /// collection hashes to a stable empty marker rather than erroring, and this
+    /// read never creates the collection directory.
+    pub fn collection_etag(&self, collection: &str) -> Result<String> {
+        validate_segment("collection", collection)?;
+        let dir = self.root.join(collection);
+        let mut entries: Vec<(Vec<u8>, u64, u128)> = Vec::new();
+        match fs::read_dir(&dir) {
+            Ok(read_dir) => {
+                for entry in read_dir {
+                    let entry = entry.map_err(|e| FileStoreError::Io(e.to_string()))?;
+                    let metadata = entry
+                        .metadata()
+                        .map_err(|e| FileStoreError::Io(e.to_string()))?;
+                    if !metadata.is_file() {
+                        continue;
+                    }
+                    let modified = metadata
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+                        .map_or(0, |elapsed| elapsed.as_nanos());
+                    entries.push((
+                        entry.file_name().as_encoded_bytes().to_vec(),
+                        metadata.len(),
+                        modified,
+                    ));
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(FileStoreError::Io(err.to_string())),
+        }
+        entries.sort();
+        let mut hasher = Sha256::new();
+        hasher.update((entries.len() as u64).to_be_bytes());
+        for (name, len, modified) in &entries {
+            hasher.update((name.len() as u64).to_be_bytes());
+            hasher.update(name);
+            hasher.update(len.to_be_bytes());
+            hasher.update(modified.to_be_bytes());
+        }
+        Ok(hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect())
+    }
+
     fn collection_dir(&self, collection: &str) -> Result<PathBuf> {
         validate_segment("collection", collection)?;
         let dir = self.root.join(collection);
@@ -633,6 +686,43 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/file-store-tests")
             .join(format!("{name}-{}-{stamp}", std::process::id()))
+    }
+
+    #[test]
+    fn collection_etag_is_stable_and_moves_with_mutations() {
+        let store = FileStore::open(test_root("etag")).expect("store");
+        let owner = store.acquire_service_owner("test").expect("lock");
+
+        // A missing collection hashes to a stable marker without creating it.
+        let empty = store.collection_etag("board").expect("empty etag");
+        assert_eq!(
+            empty,
+            store.collection_etag("board").expect("empty etag again"),
+            "the empty-collection validator is stable"
+        );
+        assert!(
+            !store.root().join("board").exists(),
+            "reading the validator must not create the collection directory"
+        );
+
+        let id = StoreId::content_hashed("row", &["a"]).expect("id");
+        store
+            .write_atomic(&owner, "board", &id, "json", br#"{"n":1}"#)
+            .expect("write one");
+        let one = store.collection_etag("board").expect("one etag");
+        assert_ne!(one, empty, "adding a file changes the validator");
+        assert_eq!(
+            one,
+            store.collection_etag("board").expect("one etag again"),
+            "an unchanged collection yields the same validator"
+        );
+
+        // Rewriting the same id with new content must change the validator.
+        store
+            .write_atomic(&owner, "board", &id, "json", br#"{"n":22}"#)
+            .expect("rewrite");
+        let two = store.collection_etag("board").expect("two etag");
+        assert_ne!(two, one, "rewriting a record changes the validator");
     }
 
     #[test]
