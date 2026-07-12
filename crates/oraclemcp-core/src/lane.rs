@@ -2187,6 +2187,7 @@ fn run_lane_loop_with_factory(
                 frames,
                 reply,
             } => {
+                // block-on-boundary: each stream command gets a fresh lane-owned Cx.
                 runtime.block_on(async {
                     let cx = Cx::current().expect("lane runtime installs a stream command Cx");
                     let context = lane_command_context(&cx, &caller, enqueued_at, &context);
@@ -2281,6 +2282,7 @@ fn run_lane_loop_with_factory(
                 detail,
                 reply,
             } => {
+                // block-on-boundary: each surface command gets a fresh lane-owned Cx.
                 runtime.block_on(async {
                     let cx = Cx::current().expect("lane runtime installs a surface command Cx");
                     let context = lane_command_context(&cx, &caller, enqueued_at, &context);
