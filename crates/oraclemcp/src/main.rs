@@ -912,6 +912,16 @@ struct RuntimeConnections {
     stateless: Option<Box<dyn OracleConnection>>,
 }
 
+impl std::fmt::Debug for RuntimeConnections {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The trait objects are not `Debug`; surface only the shape so tests can
+        // `expect_err`/`unwrap` a `Result<RuntimeConnections, _>`.
+        f.debug_struct("RuntimeConnections")
+            .field("stateless", &self.stateless.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 enum RuntimeConnectionPlan {
     Profile(String),
     Default,
@@ -1452,6 +1462,45 @@ fn exposed_profiles_summary(config: &OracleMcpConfig) -> String {
 /// anywhere, the auditor is optional: a configured key still builds one (so
 /// escalation previews/log stay available), otherwise `None` (pure reads never
 /// touch the chain).
+/// Create the audit log's parent directory with private, symlink-safe
+/// semantics (bead oraclemcp-qa100 .15): reject a symlink/non-directory at the
+/// path, create any new directories `0700` on Unix, and harden an existing
+/// directory's mode down to `0700`. Unlike a plain `create_dir_all`, this fails
+/// closed on an unsafe filesystem object and never leaves the audit directory
+/// group/world-accessible under a permissive umask or a custom layout.
+fn create_private_audit_dir(path: &Path) -> std::io::Result<()> {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "{} is a symlink or non-directory; audit logs require a private directory",
+                    path.display()
+                ),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = metadata.permissions().mode() & 0o777;
+            if mode != 0o700 {
+                let mut permissions = metadata.permissions();
+                permissions.set_mode(0o700);
+                fs::set_permissions(path, permissions)?;
+            }
+        }
+        return Ok(());
+    }
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
 fn build_auditor(
     audit: &AuditConfig,
     level: &SessionLevelState,
@@ -1507,11 +1556,11 @@ fn build_auditor(
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        fs::create_dir_all(parent).map_err(|e| {
+        create_private_audit_dir(parent).map_err(|e| {
             (
                 "ORACLEMCP_AUDIT_PATH_INVALID",
                 format!(
-                    "failed to create audit log directory {}: {e}",
+                    "failed to create private audit log directory {}: {e}",
                     parent.display()
                 ),
             )
@@ -4889,9 +4938,10 @@ fn run_audit_verify(
     with_db_evidence: bool,
 ) -> ExitCode {
     use oraclemcp_audit::{
-        AnchorStatus, AnchorViolation, VerifyOutcome, anchor_path_for, check_anchor, load_anchor,
-        parse_jsonl, verify_records,
+        AnchorReaderError, AnchorStatus, AnchorViolation, JsonlError, VerifyOutcome,
+        anchor_path_for, check_anchor_reader, load_anchor, parse_jsonl, verify_reader,
     };
+    use std::io::BufReader;
 
     let keyring = match audit_verification_keyring(key_id_override) {
         Ok(keyring) => keyring,
@@ -4901,8 +4951,14 @@ fn run_audit_verify(
         }
     };
 
-    let body = match fs::read_to_string(file) {
-        Ok(body) => body,
+    // Stream verification with BOUNDED MEMORY (bead oraclemcp-qa100 .29): a
+    // permanent, never-pruned audit log can be multi-gigabyte, so `audit verify`
+    // must not `read_to_string` + parse every record into a `Vec`. The optional
+    // `--with-db-evidence` correlation scan below is an explicit operator opt-in
+    // and still buffers the full history.
+    let open_stream = || std::fs::File::open(file).map(BufReader::new);
+    let reader = match open_stream() {
+        Ok(reader) => reader,
         Err(e) => {
             emit_status_error(
                 robot_json,
@@ -4912,15 +4968,23 @@ fn run_audit_verify(
             return ExitCode::from(2);
         }
     };
-    let records = match parse_jsonl(&body) {
-        Ok(records) => records,
-        Err(e) => {
+    let outcome = match verify_reader(reader, keyring.verification_keys()) {
+        Ok(outcome) => outcome,
+        Err(JsonlError::Malformed(e)) => {
             emit_status_error(robot_json, "ORACLEMCP_AUDIT_MALFORMED", &e.to_string());
+            return ExitCode::from(2);
+        }
+        Err(JsonlError::Io(e)) => {
+            emit_status_error(
+                robot_json,
+                "ORACLEMCP_AUDIT_READ_FAILED",
+                &format!("failed to read audit log {}: {e}", file.display()),
+            );
             return ExitCode::from(2);
         }
     };
 
-    match verify_records(&records, keyring.verification_keys()) {
+    match outcome {
         VerifyOutcome::Ok {
             records: record_count,
         } => {
@@ -4943,56 +5007,77 @@ fn run_audit_verify(
                     "note": "no head anchor sidecar; tail truncation is not locally detectable \
                              for this log (legacy log, or the anchor was removed)",
                 }),
-                Some(anchor) => match check_anchor(&records, anchor, keyring.verification_keys()) {
-                    Ok(AnchorStatus::Match) => serde_json::json!({
-                        "status": "match",
-                        "seq": anchor.seq,
-                    }),
-                    Ok(AnchorStatus::Behind { behind_by }) => serde_json::json!({
-                        "status": "behind",
-                        "seq": anchor.seq,
-                        "behind_by": behind_by,
-                        "note": "anchor is behind the chain head — explainable (crash between \
-                                 record fsync and anchor update, or buffered read records); \
-                                 never tamper evidence on its own",
-                    }),
-                    // `AnchorStatus` is #[non_exhaustive]; fail closed on any
-                    // future variant this binary does not understand.
-                    Ok(_) => {
-                        emit_status_error(
-                            robot_json,
-                            "ORACLEMCP_AUDIT_UNVERIFIABLE",
-                            "unrecognized head-anchor status",
-                        );
-                        return ExitCode::from(2);
-                    }
-                    Err(violation) => {
-                        let truncated = matches!(violation, AnchorViolation::Truncated { .. });
-                        let payload = serde_json::json!({
-                            "ok": false,
-                            "file": file.display().to_string(),
-                            "records": record_count,
-                            "anchor_file": anchor_path.display().to_string(),
-                            "anchor_seq": anchor.seq,
-                            "reason": violation.to_string(),
-                            "truncated": truncated,
-                        });
-                        if robot_json {
-                            let _ = write_stdout_line(&serde_json::to_string(&payload).unwrap());
-                        } else if truncated {
-                            let _ = write_stdout_line(&format!(
-                                "TRUNCATED: {violation} (anchor: {})",
-                                anchor_path.display()
-                            ));
-                        } else {
-                            let _ = write_stdout_line(&format!(
-                                "BROKEN: head anchor check failed: {violation} (anchor: {})",
-                                anchor_path.display()
-                            ));
+                Some(anchor) => {
+                    // Bounded streaming anchor cross-check (bead
+                    // oraclemcp-qa100 .29): re-open the log and stream it rather
+                    // than retaining every record from verification.
+                    let anchor_reader = match open_stream() {
+                        Ok(reader) => reader,
+                        Err(e) => {
+                            emit_status_error(
+                                robot_json,
+                                "ORACLEMCP_AUDIT_READ_FAILED",
+                                &format!("failed to re-read audit log {}: {e}", file.display()),
+                            );
+                            return ExitCode::from(2);
                         }
-                        return ExitCode::from(2);
+                    };
+                    match check_anchor_reader(anchor_reader, anchor, keyring.verification_keys()) {
+                        Ok(AnchorStatus::Match) => serde_json::json!({
+                            "status": "match",
+                            "seq": anchor.seq,
+                        }),
+                        Ok(AnchorStatus::Behind { behind_by }) => serde_json::json!({
+                            "status": "behind",
+                            "seq": anchor.seq,
+                            "behind_by": behind_by,
+                            "note": "anchor is behind the chain head — explainable (crash between \
+                                     record fsync and anchor update, or buffered read records); \
+                                     never tamper evidence on its own",
+                        }),
+                        // `AnchorStatus` is #[non_exhaustive]; fail closed on any
+                        // future variant this binary does not understand.
+                        Ok(_) => {
+                            emit_status_error(
+                                robot_json,
+                                "ORACLEMCP_AUDIT_UNVERIFIABLE",
+                                "unrecognized head-anchor status",
+                            );
+                            return ExitCode::from(2);
+                        }
+                        Err(AnchorReaderError::Read(message)) => {
+                            emit_status_error(robot_json, "ORACLEMCP_AUDIT_READ_FAILED", &message);
+                            return ExitCode::from(2);
+                        }
+                        Err(AnchorReaderError::Violation(violation)) => {
+                            let truncated = matches!(violation, AnchorViolation::Truncated { .. });
+                            let payload = serde_json::json!({
+                                "ok": false,
+                                "file": file.display().to_string(),
+                                "records": record_count,
+                                "anchor_file": anchor_path.display().to_string(),
+                                "anchor_seq": anchor.seq,
+                                "reason": violation.to_string(),
+                                "truncated": truncated,
+                            });
+                            if robot_json {
+                                let _ =
+                                    write_stdout_line(&serde_json::to_string(&payload).unwrap());
+                            } else if truncated {
+                                let _ = write_stdout_line(&format!(
+                                    "TRUNCATED: {violation} (anchor: {})",
+                                    anchor_path.display()
+                                ));
+                            } else {
+                                let _ = write_stdout_line(&format!(
+                                    "BROKEN: head anchor check failed: {violation} (anchor: {})",
+                                    anchor_path.display()
+                                ));
+                            }
+                            return ExitCode::from(2);
+                        }
                     }
-                },
+                }
             };
             let mut payload = serde_json::json!({
                 "ok": true,
@@ -5000,7 +5085,26 @@ fn run_audit_verify(
                 "records": record_count,
                 "anchor": anchor_payload,
             });
-            let db_evidence_summary = with_db_evidence.then(|| audit_db_evidence_summary(&records));
+            // `--with-db-evidence` is an explicit operator opt-in for a full
+            // correlation scan, so it (only) buffers the whole history here; the
+            // default verification path above stays bounded (bead qa100 .29).
+            let db_evidence_summary = if with_db_evidence {
+                match fs::read_to_string(file)
+                    .map_err(|e| e.to_string())
+                    .and_then(|body| {
+                        parse_jsonl(&body)
+                            .map(|records| audit_db_evidence_summary(&records))
+                            .map_err(|e| e.to_string())
+                    }) {
+                    Ok(summary) => Some(summary),
+                    Err(message) => {
+                        emit_status_error(robot_json, "ORACLEMCP_AUDIT_READ_FAILED", &message);
+                        return ExitCode::from(2);
+                    }
+                }
+            } else {
+                None
+            };
             if let Some(summary) = db_evidence_summary.as_ref()
                 && let serde_json::Value::Object(obj) = &mut payload
             {

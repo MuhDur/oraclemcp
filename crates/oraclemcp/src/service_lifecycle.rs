@@ -1,7 +1,7 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -9,7 +9,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cap_fs_ext::{DirExt as _, FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt as _};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, DirBuilder as CapDirBuilder, OpenOptions as CapOpenOptions};
-use oraclemcp_audit::{SigningKey, VerifyOutcome, ct_eq, parse_jsonl, sha256_hex, verify_records};
+use oraclemcp_audit::{
+    AnchorReaderError, JsonlError, SigningKey, VerifyOutcome, check_anchor_reader, ct_eq,
+    sha256_hex, verify_reader,
+};
 use oraclemcp_core::{DoctorServiceUnitCaps, DoctorServiceUnitLimitCaps, FileStore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -1408,11 +1411,57 @@ fn copy_regular_file(source: &Path, target: &Path) -> Result<(), ServiceError> {
     {
         create_private_dir_all(parent)?;
     }
-    let mut bytes = Vec::new();
-    File::open(source)
-        .and_then(|mut file| file.read_to_end(&mut bytes))
+    // Stream the copy in bounded chunks (bead oraclemcp-qa100 .29): the audit log
+    // is copied verbatim during backup/restore and can be multi-gigabyte, so it
+    // must not be slurped into a `Vec`. A private same-directory temp is filled
+    // in 64 KiB chunks, fsynced, then atomically renamed over the target, so a
+    // disk-full mid-copy fails without ever partially replacing the target.
+    stream_copy_private_file_atomic(source, target)
+}
+
+/// Copy `source` into `target` atomically with bounded memory: write a private
+/// same-directory temporary in fixed-size chunks, fsync it, rename over the
+/// target, then fsync the directory. The target is only ever replaced by a
+/// complete, fsynced file.
+fn stream_copy_private_file_atomic(source: &Path, target: &Path) -> Result<(), ServiceError> {
+    let mut input = File::open(source)
         .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_READ_FAILED", source, e))?;
-    write_private_file_atomic(target, &bytes)
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            ServiceError::new(
+                "ORACLEMCP_SERVICE_BACKUP_WRITE_FAILED",
+                format!("invalid file target {}", target.display()),
+                2,
+            )
+        })?;
+    let tmp = parent.join(format!(
+        ".{file_name}.tmp.{}.{}",
+        std::process::id(),
+        timestamp_suffix()
+    ));
+    let mut out = create_new_private_file(&tmp)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_WRITE_FAILED", &tmp, e))?;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_READ_FAILED", source, e))?;
+        if read == 0 {
+            break;
+        }
+        out.write_all(&buffer[..read])
+            .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_WRITE_FAILED", &tmp, e))?;
+    }
+    out.sync_all()
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_WRITE_FAILED", &tmp, e))?;
+    drop(out);
+    fs::rename(&tmp, target)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_WRITE_FAILED", target, e))?;
+    sync_dir(parent)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_SYNC_FAILED", parent, e))
 }
 
 fn create_new_private_dir(path: &Path) -> Result<(), ServiceError> {
@@ -1963,22 +2012,27 @@ fn verify_prepared_audit(
             2,
         ));
     };
-    let body = read_prepared_string(audit, "audit log")?;
-    let records = parse_jsonl(&body).map_err(|e| {
-        ServiceError::new(
-            "ORACLEMCP_SERVICE_RESTORE_AUDIT_MALFORMED",
-            format!("backup audit log is malformed: {e}"),
-            2,
-        )
-    })?;
-    if records.is_empty() {
-        return Err(ServiceError::new(
-            "ORACLEMCP_SERVICE_RESTORE_AUDIT_UNVERIFIABLE",
-            "an empty audit log is not authenticated restore evidence",
-            2,
-        ));
-    }
-    let record_count = match verify_records(&records, keys) {
+    // Stream-verify the staged audit snapshot with BOUNDED MEMORY (bead
+    // oraclemcp-qa100 .29): the snapshot is already staged to a private tempfile
+    // via a 64 KiB copy, but the previous verify path then `read_to_string`'d the
+    // whole log and parsed every record into a `Vec`, so a multi-gigabyte backup
+    // would exhaust memory during restore preflight. `verify_reader` walks it
+    // line by line, retaining only O(1) chain state.
+    rewind_prepared(audit, "audit log")?;
+    let outcome =
+        verify_reader(BufReader::new(&mut audit.snapshot), keys).map_err(|e| match e {
+            JsonlError::Malformed(parse) => ServiceError::new(
+                "ORACLEMCP_SERVICE_RESTORE_AUDIT_MALFORMED",
+                format!("backup audit log is malformed: {parse}"),
+                2,
+            ),
+            JsonlError::Io(io) => ServiceError::new(
+                "ORACLEMCP_SERVICE_RESTORE_PREFLIGHT_FAILED",
+                format!("failed to read staged audit log: {io}"),
+                3,
+            ),
+        })?;
+    let record_count = match outcome {
         VerifyOutcome::Ok { records } => records,
         VerifyOutcome::Broken { seq, index, reason } => {
             return Err(ServiceError::new(
@@ -1995,6 +2049,15 @@ fn verify_prepared_audit(
             ));
         }
     };
+    if record_count == 0 {
+        return Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_RESTORE_AUDIT_UNVERIFIABLE",
+            "an empty audit log is not authenticated restore evidence",
+            2,
+        ));
+    }
+    // The anchor sidecar is a single small JSON object; reading it whole is
+    // already bounded.
     let anchor_body = read_prepared_string(anchor, "audit head anchor")?;
     let chain_anchor: oraclemcp_audit::ChainAnchor =
         serde_json::from_str(&anchor_body).map_err(|e| {
@@ -2004,17 +2067,47 @@ fn verify_prepared_audit(
                 2,
             )
         })?;
-    if let Err(violation) = oraclemcp_audit::check_anchor(&records, &chain_anchor, keys) {
-        return Err(ServiceError::new(
-            "ORACLEMCP_SERVICE_RESTORE_AUDIT_BROKEN",
-            format!("backup audit chain failed the head-anchor check: {violation}"),
-            2,
-        ));
+    // Bounded streaming anchor cross-check over the staged snapshot (a second
+    // pass; the chain already verified so `seq == index + 1` holds).
+    rewind_prepared(audit, "audit log")?;
+    match check_anchor_reader(BufReader::new(&mut audit.snapshot), &chain_anchor, keys) {
+        Ok(_) => {}
+        Err(AnchorReaderError::Violation(violation)) => {
+            return Err(ServiceError::new(
+                "ORACLEMCP_SERVICE_RESTORE_AUDIT_BROKEN",
+                format!("backup audit chain failed the head-anchor check: {violation}"),
+                2,
+            ));
+        }
+        Err(AnchorReaderError::Read(message)) => {
+            return Err(ServiceError::new(
+                "ORACLEMCP_SERVICE_RESTORE_PREFLIGHT_FAILED",
+                format!("failed to read staged audit log for the head-anchor check: {message}"),
+                3,
+            ));
+        }
     }
+    // Leave the staged snapshot rewound for whatever applies it downstream.
+    rewind_prepared(audit, "audit log")?;
     Ok(RestoreAuditVerification::Verified {
         records: record_count,
         file: "audit/audit.jsonl".to_owned(),
     })
+}
+
+/// Rewind a staged backup file to its start before a streaming pass.
+fn rewind_prepared(prepared: &mut PreparedBackupFile, label: &str) -> Result<(), ServiceError> {
+    prepared
+        .snapshot
+        .seek(SeekFrom::Start(0))
+        .map(drop)
+        .map_err(|e| {
+            ServiceError::new(
+                "ORACLEMCP_SERVICE_RESTORE_PREFLIGHT_FAILED",
+                format!("failed to rewind staged {label}: {e}"),
+                3,
+            )
+        })
 }
 
 fn read_prepared_string(

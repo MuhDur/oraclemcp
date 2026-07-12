@@ -10,17 +10,20 @@
 //! log, at-most-once execute); pure reads may use a batched group-commit flush.
 
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{BufReader, Seek, SeekFrom, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
 use thiserror::Error;
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 use crate::anchor::{AnchorFile, ChainAnchor, load_anchor};
 use crate::keyring::AuditKeyring;
 use crate::record::{AuditCorrelation, AuditEntryDraft, AuditRecord, GENESIS_HASH, SigningKey};
-use crate::verify::{BrokenReason, VerifyOutcome, parse_jsonl, verify_records};
+use crate::verify::{BrokenReason, ChainVerifier, JsonlError, JsonlReader, VerifyOutcome};
 
 /// Stable identity of an already-open filesystem object. Comparing identities
 /// from the open handles (rather than path strings) catches symlink, hard-link,
@@ -148,21 +151,12 @@ impl AuditLogLock {
     /// fail closed if another instance already holds it.
     fn acquire(audit_path: &Path) -> Result<Self, AuditError> {
         let lock_path = lock_path_for(audit_path);
-        let mut file = OpenOptions::new()
-            .create(true)
-            // Never truncate on open: a contender must not wipe the holder's
-            // recorded pid. The holder truncates via `set_len(0)` only AFTER it
-            // owns the lock (below).
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&lock_path)
-            .map_err(|e| {
-                AuditError::Io(format!(
-                    "cannot open audit lock sidecar {}: {e}",
-                    lock_path.display()
-                ))
-            })?;
+        // Symlink-safe, private (0600), never-truncate-on-open sidecar: a
+        // contender must not wipe the holder's recorded pid, and a pre-planted
+        // symlink at the lock path must not redirect the truncate/pid write onto
+        // another operator-writable file (bead oraclemcp-qa100 .15). The holder
+        // truncates via `set_len(0)` only AFTER it owns the lock (below).
+        let mut file = open_private_lock_file(&lock_path)?;
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
@@ -214,6 +208,126 @@ fn read_holder_pid(lock_path: &Path) -> Option<u32> {
 #[cfg(test)]
 thread_local! {
     pub(crate) static PARENT_DIR_FSYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Reject a pre-planted symlink or non-regular filesystem object at `path`
+/// *before* creating/opening it (bead oraclemcp-qa100 .15). In a shared or
+/// attacker-writable audit directory a symlink at the log/lock/anchor path would
+/// otherwise redirect or truncate an operator-writable target; a FIFO/device
+/// would block or corrupt. Audit files must be private *regular* files, so
+/// anything else fails closed. An absent path is fine — the open creates it.
+fn reject_unsafe_existing(path: &Path) -> Result<(), AuditError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() || !file_type.is_file() {
+                Err(AuditError::Io(format!(
+                    "refusing to open audit path {} — it is a symlink, directory, FIFO, device, or \
+                     other non-regular object; audit files must be private regular files (inspect \
+                     the path and its parent directory ownership/mode, then retry)",
+                    path.display()
+                )))
+            } else {
+                Ok(())
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(AuditError::Io(format!(
+            "cannot inspect audit path {} before opening it: {e}",
+            path.display()
+        ))),
+    }
+}
+
+/// After opening, confirm the OPEN handle is a regular file — catching a TOCTOU
+/// swap between [`reject_unsafe_existing`] and the open — and, on Unix, harden
+/// its mode to owner-only `0600` (bead oraclemcp-qa100 .15). `File::set_permissions`
+/// acts on the descriptor (`fchmod`), so it hardens the exact opened inode with
+/// no path race. This both tightens a create made under a permissive umask and
+/// hardens an existing overly-broad audit/lock file down to `0600`.
+fn harden_open_regular_file(file: &File, path: &Path) -> Result<(), AuditError> {
+    let metadata = file.metadata().map_err(|e| {
+        AuditError::Io(format!(
+            "cannot stat opened audit file {} to confirm it is a private regular file: {e}",
+            path.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(AuditError::Io(format!(
+            "audit path {} is not a regular file after opening (the path may have been swapped); \
+             refusing to write audit records to it",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(0o600);
+            file.set_permissions(permissions).map_err(|e| {
+                AuditError::Io(format!(
+                    "cannot set private 0600 mode on audit file {}: {e}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Open (creating when absent) a private, symlink-safe append handle for the
+/// audit log at `path`: reject a pre-planted non-regular target, create with
+/// mode `0600` on Unix, then confirm/harden the opened inode.
+fn open_private_append_file(path: &Path) -> Result<File, AuditError> {
+    reject_unsafe_existing(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options
+        .open(path)
+        .map_err(|e| AuditError::Io(format!("failed to open audit log {}: {e}", path.display())))?;
+    harden_open_regular_file(&file, path)?;
+    Ok(file)
+}
+
+/// Open (creating when absent) a private, symlink-safe read/write handle for the
+/// audit `<log>.lock` sidecar. Never truncates on open (a contender must not
+/// wipe the holder's recorded pid); creates `0600` on Unix and confirms/hardens
+/// the opened inode.
+fn open_private_lock_file(path: &Path) -> Result<File, AuditError> {
+    reject_unsafe_existing(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path).map_err(|e| {
+        AuditError::Io(format!(
+            "cannot open audit lock sidecar {}: {e}",
+            path.display()
+        ))
+    })?;
+    harden_open_regular_file(&file, path)?;
+    Ok(file)
+}
+
+/// Create a brand-new private file at `path`, failing closed if it already
+/// exists (`O_CREAT|O_EXCL`, which also refuses a pre-planted symlink). Used for
+/// the anchor's unpredictable same-directory temporary (bead oraclemcp-qa100 .15).
+pub(crate) fn create_new_private_file(path: &Path) -> Result<File, AuditError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path).map_err(|e| {
+        AuditError::Io(format!(
+            "cannot create private audit temporary {}: {e}",
+            path.display()
+        ))
+    })?;
+    harden_open_regular_file(&file, path)?;
+    Ok(file)
 }
 
 /// fsync the parent directory of `path` so a *newly created* file's directory
@@ -287,11 +401,10 @@ impl FileAuditSink {
         // Lock BEFORE opening the append fd: fail fast on contention, and never
         // leave a half-armed writer if the lock is already held.
         let lock = AuditLogLock::acquire(path)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(|e| AuditError::Io(e.to_string()))?;
+        // Symlink-safe, private (0600) append handle: reject a pre-planted
+        // symlink/non-regular target and harden the opened inode to owner-only
+        // (bead oraclemcp-qa100 .15).
+        let file = open_private_append_file(path)?;
         // Directory durability: if we just created the audit log or its lock
         // sidecar, fsync the parent directory so the new file survives a crash
         // instead of vanishing with the tamper-evidence it was about to hold.
@@ -378,10 +491,11 @@ impl AuditSink for MemoryAuditSink {
 /// increase by exactly one. Returns a human description of the first break, or
 /// `None` for a structurally intact prefix.
 ///
-/// This is the subset of [`crate::verify_records`] that needs no signing key,
-/// so [`Auditor::resume_from`] can reject a forked interior at startup without
-/// false-refusing a legitimately key-rotated chain (whose MAC walk needs keys
-/// this auditor may not hold).
+/// This is the subset of [`crate::verify_records`] that needs no signing key.
+/// The production resume path now folds this walk into the single streaming
+/// [`ChainVerifier`] pass (bead oraclemcp-qa100 .29); this standalone helper is
+/// retained only so a test can assert a forgery is *structurally* intact.
+#[cfg(test)]
 fn structural_break(records: &[AuditRecord]) -> Option<String> {
     let mut prev_hash: &str = GENESIS_HASH;
     let mut prev_seq: Option<u64> = None;
@@ -412,6 +526,140 @@ fn structural_break(records: &[AuditRecord]) -> Option<String> {
         prev_seq = Some(record.seq);
     }
     None
+}
+
+/// The resume seed captured from the last durable record of an existing audit
+/// log: enough to continue the ONE hash chain without retaining every record.
+struct ResumeTail {
+    seq: u64,
+    entry_hash: String,
+    key_id: Option<String>,
+}
+
+/// Stream an existing audit log line by line with **bounded memory**, running the
+/// same structural (keyless) + keyed verification the previous whole-file resume
+/// path ran, and return the last record as the resume seed (bead
+/// oraclemcp-qa100 .29). Absent or empty log → `Ok(None)` (fresh genesis).
+fn analyze_resume_log(
+    audit_path: &Path,
+    keys: &[SigningKey],
+) -> Result<Option<ResumeTail>, AuditError> {
+    let disp = audit_path.display();
+    let file = match File::open(audit_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(AuditError::ResumeRefused(format!(
+                "cannot read audit log {disp} to resume the hash chain: {e}; inspect the file and \
+                 its permissions, then restart"
+            )));
+        }
+    };
+    let mut reader = JsonlReader::new(BufReader::new(file));
+    let mut verifier = ChainVerifier::new(keys);
+    let mut index = 0usize;
+    let mut tail: Option<ResumeTail> = None;
+    loop {
+        let record = match reader.next_record() {
+            Ok(Some(record)) => record,
+            Ok(None) => break,
+            Err(JsonlError::Io(e)) => {
+                return Err(AuditError::ResumeRefused(format!(
+                    "cannot read audit log {disp} to resume the hash chain: {e}; inspect the file \
+                     and its permissions, then restart"
+                )));
+            }
+            Err(JsonlError::Malformed(e)) => {
+                return Err(AuditError::ResumeRefused(format!(
+                    "audit log {disp} has a malformed record ({e}); a torn or tampered tail cannot \
+                     seed a continuing chain — run `oraclemcp audit verify {disp}`, then repair or \
+                     roll the file back to its last well-formed line before restarting"
+                )));
+            }
+        };
+        if let Some(VerifyOutcome::Broken { seq, reason, .. }) = verifier.observe(index, &record) {
+            return Err(map_resume_break(audit_path, seq, &reason));
+        }
+        tail = Some(ResumeTail {
+            seq: record.seq,
+            entry_hash: record.entry_hash.clone(),
+            key_id: record.key_id.clone(),
+        });
+        index += 1;
+    }
+    Ok(tail)
+}
+
+/// Render the whole-file resume refusal messages from a streamed
+/// [`VerifyOutcome::Broken`], preserving the structural-vs-keyed wording the old
+/// two-phase (`structural_break` then `verify_records`) path produced.
+fn map_resume_break(audit_path: &Path, seq: u64, reason: &BrokenReason) -> AuditError {
+    let disp = audit_path.display();
+    match reason {
+        BrokenReason::HashMismatch
+        | BrokenReason::PrevHashMismatch
+        | BrokenReason::SeqNotMonotonic { .. } => AuditError::ResumeRefused(format!(
+            "audit log {disp} has a broken chain interior ({reason}); a tampered or torn interior \
+             cannot seed a continuing chain — run `oraclemcp audit verify {disp}`, then repair \
+             before restarting"
+        )),
+        BrokenReason::UnknownKeyId(key_id) => AuditError::ResumeRefused(format!(
+            "audit log {disp} record at seq {seq} names audit key_id {key_id:?}, which is absent \
+             from the configured active+historical keyring; run `oraclemcp audit verify {disp}` \
+             with the complete keyring and restore the authentic records before restarting"
+        )),
+        BrokenReason::SignatureMismatch => AuditError::ResumeRefused(format!(
+            "audit log {disp} record at seq {seq} has a keyed MAC that does not verify under its \
+             configured audit key; run `oraclemcp audit verify {disp}` with the complete keyring \
+             and restore the authentic records before restarting"
+        )),
+        BrokenReason::Unsigned => AuditError::ResumeRefused(format!(
+            "audit log {disp} record at seq {seq} is unsigned and cannot seed a signed chain; run \
+             `oraclemcp audit verify {disp}` with the complete keyring and restore the authentic \
+             records before restarting"
+        )),
+        other => AuditError::ResumeRefused(format!(
+            "audit log {disp} record at seq {seq} failed verification: {other}; run `oraclemcp \
+             audit verify {disp}` with the complete keyring and restore the authentic records \
+             before restarting"
+        )),
+    }
+}
+
+/// Second bounded streaming pass used only by the anchor divergence check:
+/// return the `entry_hash` of the record at `target_seq`, or `None` if the log
+/// is shorter (already handled as truncation by the caller). Never materializes
+/// the whole chain.
+fn find_entry_hash_at_seq(
+    audit_path: &Path,
+    target_seq: u64,
+) -> Result<Option<String>, AuditError> {
+    let disp = audit_path.display();
+    let file = match File::open(audit_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(AuditError::ResumeRefused(format!(
+                "cannot re-read audit log {disp} to confirm the anchored record: {e}"
+            )));
+        }
+    };
+    let mut reader = JsonlReader::new(BufReader::new(file));
+    loop {
+        match reader.next_record() {
+            Ok(Some(record)) => {
+                if record.seq == target_seq {
+                    return Ok(Some(record.entry_hash));
+                }
+            }
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                return Err(AuditError::ResumeRefused(format!(
+                    "cannot re-read audit log {disp} to confirm the anchored record: {e}"
+                )));
+            }
+        }
+    }
 }
 
 struct ChainState {
@@ -507,72 +755,25 @@ impl Auditor {
     /// record-fsync-before-anchor ordering the writer maintains is untouched.
     pub fn resume_from(self, audit_path: &Path) -> Result<Self, AuditError> {
         let disp = audit_path.display();
-        let body = match std::fs::read_to_string(audit_path) {
-            Ok(body) => body,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => {
-                return Err(AuditError::ResumeRefused(format!(
-                    "cannot read audit log {disp} to resume the hash chain: {e}; inspect the file \
-                     and its permissions, then restart"
-                )));
-            }
-        };
-        let records = parse_jsonl(&body).map_err(|e| {
-            AuditError::ResumeRefused(format!(
-                "audit log {disp} has a malformed record ({e}); a torn or tampered tail cannot \
-                 seed a continuing chain — run `oraclemcp audit verify {disp}`, then repair or \
-                 roll the file back to its last well-formed line before restarting"
-            ))
-        })?;
 
-        // Keyless structural pre-check of the whole on-disk prefix BEFORE we seed
-        // the chain state from its tail. `parse_jsonl` only proves each line is
-        // well-formed JSON; on its own it would let resume blindly continue from
-        // `records.last()` even when the interior is forked — a deleted/reordered
-        // middle record, or an in-place edit — as long as the LAST line still
-        // parses. The head anchor does not cover this: it attests only the head
-        // seq/hash, so an interior deletion whose surviving tail still matches
-        // the anchored head slips the anchor cross-check entirely. Walking the
-        // hash links + monotonic seq here catches it at startup and fails closed.
-        // The keyed MAC is deliberately NOT checked (a legitimately rotated chain
-        // carries records under prior key_ids that this auditor's single active
-        // key cannot verify — that stays the job of `oraclemcp audit verify`).
-        if let Some(reason) = structural_break(&records) {
-            return Err(AuditError::ResumeRefused(format!(
-                "audit log {disp} has a broken chain interior ({reason}); a tampered or torn \
-                 interior cannot seed a continuing chain — run `oraclemcp audit verify {disp}`, \
-                 then repair before restarting"
-            )));
-        }
-
-        // Authenticate every record under the configured active+historical
-        // keyring. A rotation is explicit only when the prior key is present;
-        // skipping an unknown key would let a forged mixed-key interior seed a
-        // continuing chain.
-        if let VerifyOutcome::Broken { seq, reason, .. } =
-            verify_records(&records, self.keyring.verification_keys())
-        {
-            let detail = match reason {
-                BrokenReason::UnknownKeyId(key_id) => format!(
-                    "record at seq {seq} names audit key_id {key_id:?}, which is absent from the \
-                     configured active+historical keyring"
-                ),
-                BrokenReason::SignatureMismatch => format!(
-                    "record at seq {seq} has a keyed MAC that does not verify under its configured \
-                     audit key"
-                ),
-                BrokenReason::Unsigned => {
-                    format!("record at seq {seq} is unsigned and cannot seed a signed chain")
-                }
-                other => format!("record at seq {seq} failed verification: {other}"),
-            };
-            return Err(AuditError::ResumeRefused(format!(
-                "audit log {disp} {detail}; run `oraclemcp audit verify {disp}` with the complete \
-                 keyring and restore the authentic records before restarting"
-            )));
-        }
-        let Some(tail) = records.last() else {
-            // Empty log: nothing to resume; the fresh genesis state is correct.
+        // Stream the whole on-disk prefix with BOUNDED MEMORY (bead
+        // oraclemcp-qa100 .29): a permanent, never-pruned audit log can be
+        // multi-gigabyte, so resume must NOT `read_to_string` + parse every
+        // record into a `Vec`. `analyze_resume_log` walks the file line by line
+        // through a capped buffer, keeping only O(1) chain state, and still runs
+        // the identical checks the old whole-file path did:
+        //  - each line must parse (a torn/tampered tail fails closed);
+        //  - the keyless structural walk (hash link + monotonic seq) rejects a
+        //    forked interior — a deleted/reordered middle record or an in-place
+        //    edit — that a bare parse or the head-anchor check would miss (the
+        //    anchor attests only the head seq/hash);
+        //  - every record is authenticated under the configured active+historical
+        //    keyring (an unknown key or bad MAC on any record fails closed;
+        //    rotation is explicit only when the prior key is present).
+        // It retains just the last record as the resume seed.
+        let Some(tail) = analyze_resume_log(audit_path, self.keyring.verification_keys())? else {
+            // Absent or empty log: nothing to resume; fresh genesis state is
+            // correct.
             return Ok(self);
         };
 
@@ -602,8 +803,12 @@ impl Auditor {
                     anchor.seq, tail.seq
                 )));
             }
-            if let Some(anchored) = records.iter().find(|r| r.seq == anchor.seq)
-                && anchored.entry_hash != anchor.entry_hash
+            // Divergence at the anchored seq: a second bounded streaming pass
+            // fetches only that one record's entry_hash (the verified chain is
+            // contiguous, so it exists at or before the tail) — never the whole
+            // Vec.
+            if let Some(anchored_hash) = find_entry_hash_at_seq(audit_path, anchor.seq)?
+                && anchored_hash != anchor.entry_hash
             {
                 return Err(AuditError::ResumeRefused(format!(
                     "record at the anchored seq {} in {disp} does not match the head anchor's \
@@ -780,6 +985,7 @@ impl Auditor {
 mod tests {
     use super::*;
     use crate::record::{AuditDecision, AuditOutcome, AuditSubject};
+    use crate::verify::{parse_jsonl, verify_records};
     use std::sync::Arc;
     use std::thread;
 
@@ -1974,6 +2180,179 @@ mod tests {
             None,
             "an empty chain must not create a seq=0 head anchor"
         );
+    }
+
+    // --- Symlink / mode hardening (bead oraclemcp-qa100 .15) ---
+
+    #[cfg(unix)]
+    #[test]
+    fn open_fails_closed_on_a_symlinked_audit_log_and_leaves_the_target_intact() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let victim = dir.path().join("operator-writable");
+        std::fs::write(&victim, b"operator-secret\n").expect("seed victim");
+        let audit = dir.path().join("audit.jsonl");
+        symlink(&victim, &audit).expect("preplant audit symlink");
+
+        let err = FileAuditSink::open(&audit)
+            .err()
+            .expect("a symlinked audit path must fail closed");
+        assert!(matches!(err, AuditError::Io(_)), "got {err:?}");
+        assert_eq!(
+            std::fs::read(&victim).expect("victim readable"),
+            b"operator-secret\n",
+            "the redirected target must be byte-unchanged"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_fails_closed_on_a_symlinked_lock_sidecar_and_leaves_the_target_intact() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let victim = dir.path().join("operator-writable");
+        std::fs::write(&victim, b"keepme\n").expect("seed victim");
+        let audit = dir.path().join("audit.jsonl");
+        symlink(&victim, lock_path_for(&audit)).expect("preplant lock symlink");
+
+        let err = FileAuditSink::open(&audit)
+            .err()
+            .expect("a symlinked lock sidecar must fail closed");
+        assert!(matches!(err, AuditError::Io(_)), "got {err:?}");
+        assert_eq!(
+            std::fs::read(&victim).expect("victim readable"),
+            b"keepme\n",
+            "the lock-redirected target must not be truncated/overwritten"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_rejects_directory_and_fifo_targets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let as_dir = dir.path().join("audit-as-dir.jsonl");
+        std::fs::create_dir(&as_dir).expect("create dir target");
+        assert!(
+            matches!(FileAuditSink::open(&as_dir), Err(AuditError::Io(_))),
+            "a directory at the audit path must be rejected"
+        );
+
+        // FIFO rejection is best-effort: skip cleanly where mkfifo is absent.
+        let fifo = dir.path().join("audit-fifo.jsonl");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if made {
+            assert!(
+                matches!(FileAuditSink::open(&fifo), Err(AuditError::Io(_))),
+                "a FIFO at the audit path must be rejected"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_audit_files_are_0600_and_existing_broad_modes_are_hardened() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| {
+            std::fs::metadata(path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        {
+            let _sink = FileAuditSink::open(&path).expect("open new");
+            assert_eq!(mode(&path), 0o600, "new audit log is owner-only");
+            assert_eq!(
+                mode(&lock_path_for(&path)),
+                0o600,
+                "new lock sidecar is owner-only"
+            );
+        }
+        // Overly-broad pre-existing files are hardened down to 0600 on reopen.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
+            .expect("loosen log");
+        std::fs::set_permissions(lock_path_for(&path), std::fs::Permissions::from_mode(0o644))
+            .expect("loosen lock");
+        {
+            let _sink = FileAuditSink::open(&path).expect("reopen existing");
+            assert_eq!(mode(&path), 0o600, "broad audit mode hardened to 0600");
+            assert_eq!(
+                mode(&lock_path_for(&path)),
+                0o600,
+                "broad lock mode hardened to 0600"
+            );
+        }
+    }
+
+    // --- Bounded streaming resume (bead oraclemcp-qa100 .29) ---
+
+    #[test]
+    fn resume_streams_a_large_log_and_still_fails_closed_on_a_torn_tail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open")),
+                test_key(),
+            );
+            for i in 0..6_000 {
+                auditor
+                    .append(
+                        &draft(&format!("DELETE FROM t WHERE id={i}"), "GUARDED"),
+                        format!("t{i}"),
+                        false,
+                    )
+                    .expect("append");
+            }
+            auditor.flush().expect("group-commit flush");
+        }
+        assert!(
+            std::fs::metadata(&path).expect("stat").len() > 1_000_000,
+            "fixture must be a multi-block file so streaming actually matters"
+        );
+
+        // Bounded resume continues the ONE chain rather than loading every record.
+        let auditor = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open")),
+            test_key(),
+        )
+        .resume_from(&path)
+        .expect("resume large log with bounded memory");
+        let next = auditor
+            .append(
+                &draft("DELETE FROM t WHERE id=next", "GUARDED"),
+                "tn".to_owned(),
+                true,
+            )
+            .expect("append after large resume");
+        assert_eq!(next.seq, 6_001, "resume seeded from the streamed tail");
+        drop(auditor);
+
+        // A torn final line in the large log is still detected at resume.
+        {
+            let mut file = OpenOptions::new().append(true).open(&path).expect("reopen");
+            file.write_all(b"{\"seq\":6002,\"partial\":")
+                .expect("write torn tail");
+        }
+        let refused = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open")),
+            test_key(),
+        )
+        .resume_from(&path);
+        match refused {
+            Err(AuditError::ResumeRefused(message)) => assert!(
+                message.contains("malformed"),
+                "a torn tail in a large log must refuse with a repair message, got: {message}"
+            ),
+            Err(other) => panic!("expected ResumeRefused, got {other:?}"),
+            Ok(_) => panic!("a torn tail in a large log must still refuse startup"),
+        }
     }
 
     // A sink that forwards to a shared Arc<MemoryAuditSink> (so the test keeps a

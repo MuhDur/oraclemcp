@@ -23,8 +23,8 @@ mod unified;
 mod verify;
 
 pub use anchor::{
-    ANCHOR_VERSION, AnchorFile, AnchorLoadError, AnchorStatus, AnchorViolation, ChainAnchor,
-    anchor_path_for, check_anchor, load_anchor,
+    ANCHOR_VERSION, AnchorFile, AnchorLoadError, AnchorReaderError, AnchorStatus, AnchorViolation,
+    ChainAnchor, anchor_path_for, check_anchor, check_anchor_reader, load_anchor,
 };
 pub use hmac::{
     HmacSha256Key, HmacSha256KeyError, MIN_HMAC_SHA256_KEY_BYTES, ct_eq, hmac_sha256,
@@ -46,7 +46,10 @@ pub use shipping_spool::{
 };
 pub use sink::{AuditError, AuditSink, Auditor, FileAuditSink, MemoryAuditSink};
 pub use unified::{UnifiedAuditError, UnifiedAuditPolicy, is_simple_identifier};
-pub use verify::{BrokenReason, ParseError, VerifyOutcome, parse_jsonl, verify_records};
+pub use verify::{
+    BrokenReason, JsonlError, MAX_AUDIT_LINE_LEN, ParseError, VerifyOutcome, parse_jsonl,
+    verify_reader, verify_records,
+};
 
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error;

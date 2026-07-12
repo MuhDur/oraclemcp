@@ -42,15 +42,18 @@
 //! advisory rather than failing, because pre-anchor logs are indistinguishable;
 //! operators should treat an unexpectedly missing anchor as suspicious.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use crate::hmac::ct_eq;
 use crate::record::{AuditRecord, SigningKey};
 use crate::sink::AuditError;
+use crate::verify::JsonlReader;
 
 /// Current anchor document version.
 pub const ANCHOR_VERSION: u16 = 1;
@@ -143,17 +146,17 @@ impl AnchorFile {
         let anchor = ChainAnchor::signed(seq, entry_hash, &self.key);
         let mut body = serde_json::to_vec(&anchor).map_err(|e| AuditError::Io(e.to_string()))?;
         body.push(b'\n');
-        let mut tmp = self.path.as_os_str().to_owned();
-        tmp.push(".tmp");
-        let tmp = PathBuf::from(tmp);
+        // Unpredictable, same-directory temporary opened with O_CREAT|O_EXCL
+        // (bead oraclemcp-qa100 .15): the previous fixed `<anchor>.tmp` with
+        // truncate-on-open could be a pre-planted symlink that every durable
+        // append repeatedly truncates, diverting the write to another
+        // operator-writable file. An exclusive create on an unpredictable name
+        // refuses a symlink and cannot be pre-planted; the same-directory
+        // location keeps the final `rename` atomic.
+        let tmp = anchor_tmp_path(&self.path);
         let io_err = |e: std::io::Error| AuditError::Io(e.to_string());
         {
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&tmp)
-                .map_err(io_err)?;
+            let mut file = crate::sink::create_new_private_file(&tmp)?;
             file.write_all(&body).map_err(io_err)?;
             // fsync the tmp content BEFORE the rename: a crash must never
             // surface a renamed-but-empty/partial anchor (that would look like
@@ -162,6 +165,30 @@ impl AnchorFile {
         }
         fs::rename(&tmp, &self.path).map_err(io_err)
     }
+}
+
+/// Process-wide counter feeding [`anchor_tmp_path`] for collision-free,
+/// unpredictable temporary names.
+static ANCHOR_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// An unpredictable, hidden, same-directory temporary path for the atomic anchor
+/// replacement (bead oraclemcp-qa100 .15). Same directory as the anchor so the
+/// final `rename` is atomic; pid + process-wide counter + nanoseconds make it
+/// unpredictable so it cannot be pre-planted as a symlink target.
+fn anchor_tmp_path(anchor_path: &Path) -> PathBuf {
+    let parent = anchor_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let stem = anchor_path.file_name().map_or_else(
+        || "audit.anchor".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let seq = ANCHOR_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    parent.join(format!(".{stem}.tmp.{}.{seq}.{nanos}", std::process::id()))
 }
 
 /// Why loading an anchor sidecar failed. Any error here is fail-closed at
@@ -306,6 +333,95 @@ pub fn check_anchor(
         _ => Err(AnchorViolation::HeadHashMismatch {
             anchor_seq: anchor.seq,
         }),
+    }
+}
+
+/// A streaming [`check_anchor`] failure: either an anchor cross-check violation
+/// or an error reading/parsing the streamed chain (bead oraclemcp-qa100 .29).
+#[derive(Debug)]
+pub enum AnchorReaderError {
+    /// The anchor cross-check failed — always fail-closed (see [`AnchorViolation`]).
+    Violation(AnchorViolation),
+    /// The streamed audit log could not be read or parsed to complete the
+    /// cross-check.
+    Read(String),
+}
+
+impl std::fmt::Display for AnchorReaderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AnchorReaderError::Violation(v) => v.fmt(f),
+            AnchorReaderError::Read(m) => write!(f, "audit chain unreadable for anchor check: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for AnchorReaderError {}
+
+/// Cross-check a head anchor against an audit chain streamed from any
+/// [`BufRead`] source, with **bounded memory** — the streaming equivalent of
+/// [`check_anchor`] (bead oraclemcp-qa100 .29).
+///
+/// The caller must have already verified the chain (e.g. via
+/// [`crate::verify_reader`]) so that `seq == index + 1` holds; this pass then
+/// retains only the running record count and the `entry_hash` of the anchored
+/// `seq`, never the whole chain. Semantics match [`check_anchor`] exactly: an
+/// unknown key id or MAC mismatch on the anchor, a chain shorter than the
+/// anchored head, or a hash mismatch at the anchored seq is a violation; a
+/// longer chain that still passes through the anchored record is
+/// [`AnchorStatus::Behind`].
+pub fn check_anchor_reader<R: BufRead>(
+    reader: R,
+    anchor: &ChainAnchor,
+    keys: &[SigningKey],
+) -> Result<AnchorStatus, AnchorReaderError> {
+    // Authenticate the anchor before trusting its plaintext seq/entry_hash — no
+    // records needed, so this fails fast exactly as `check_anchor` does.
+    let Some(key) = keys.iter().find(|k| k.key_id() == anchor.key_id) else {
+        return Err(AnchorReaderError::Violation(AnchorViolation::UnknownKeyId(
+            anchor.key_id.clone(),
+        )));
+    };
+    if !anchor.mac_is_valid(key) {
+        return Err(AnchorReaderError::Violation(AnchorViolation::MacMismatch));
+    }
+
+    let mut records = JsonlReader::new(reader);
+    let mut chain_records = 0usize;
+    let mut anchored_hash: Option<String> = None;
+    loop {
+        match records.next_record() {
+            Ok(Some(record)) => {
+                chain_records += 1;
+                if record.seq == anchor.seq {
+                    anchored_hash = Some(record.entry_hash.clone());
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return Err(AnchorReaderError::Read(e.to_string())),
+        }
+    }
+
+    if (chain_records as u64) < anchor.seq {
+        return Err(AnchorReaderError::Violation(AnchorViolation::Truncated {
+            anchor_seq: anchor.seq,
+            chain_records,
+        }));
+    }
+    match anchored_hash {
+        Some(hash) if hash == anchor.entry_hash => {
+            let behind_by = (chain_records as u64) - anchor.seq;
+            if behind_by == 0 {
+                Ok(AnchorStatus::Match)
+            } else {
+                Ok(AnchorStatus::Behind { behind_by })
+            }
+        }
+        _ => Err(AnchorReaderError::Violation(
+            AnchorViolation::HeadHashMismatch {
+                anchor_seq: anchor.seq,
+            },
+        )),
     }
 }
 
@@ -474,6 +590,31 @@ mod tests {
         assert!(!anchor_path.with_extension("anchor.tmp").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn anchor_file_is_private_0600_and_strands_no_fixed_temp() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let anchor_path = dir.path().join("audit.jsonl.anchor");
+        let writer = AnchorFile::new(&anchor_path, key());
+        writer.record_head(1, "sha256:h1").expect("first anchor");
+        writer.record_head(2, "sha256:h2").expect("second anchor");
+        let mode = std::fs::metadata(&anchor_path)
+            .expect("anchor metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "anchor sidecar is owner-only");
+        // The old fixed `<anchor>.tmp` is gone, and no unpredictable temp is left
+        // stranded after a successful rename.
+        let strays = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .count();
+        assert_eq!(strays, 0, "no temporary anchor files remain");
+    }
+
     #[test]
     fn anchor_mac_preimage_binds_domain_seq_and_hash() {
         let k = key();
@@ -509,6 +650,74 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("audit head anchor unreadable"), "{msg}");
         assert!(msg.contains(dir.path().to_string_lossy().as_ref()), "{msg}");
+    }
+
+    #[test]
+    fn check_anchor_reader_matches_check_anchor_across_statuses() {
+        // The streaming cross-check (bead oraclemcp-qa100 .29) reproduces
+        // check_anchor exactly with bounded memory.
+        let body_of = |records: &[AuditRecord]| -> String {
+            records
+                .iter()
+                .map(|r| serde_json::to_string(r).expect("serialize") + "\n")
+                .collect()
+        };
+        let stream = |records: &[AuditRecord], anchor: &ChainAnchor, keys: &[SigningKey]| {
+            check_anchor_reader(std::io::Cursor::new(body_of(records)), anchor, keys)
+        };
+
+        // Match.
+        let records = signed_chain(3);
+        let anchor = anchor_at(&records, 3);
+        assert_eq!(
+            stream(&records, &anchor, &[key()]).unwrap(),
+            AnchorStatus::Match
+        );
+
+        // Behind: anchor names seq 2 while the chain runs to 3.
+        let behind = anchor_at(&records, 2);
+        assert_eq!(
+            stream(&records, &behind, &[key()]).unwrap(),
+            AnchorStatus::Behind { behind_by: 1 }
+        );
+
+        // Truncated: anchor attests seq 3 but only two records survive.
+        let anchor3 = anchor_at(&records, 3);
+        match stream(&records[..2], &anchor3, &[key()]) {
+            Err(AnchorReaderError::Violation(AnchorViolation::Truncated {
+                anchor_seq,
+                chain_records,
+            })) => assert_eq!((anchor_seq, chain_records), (3, 2)),
+            other => panic!("expected truncation, got {other:?}"),
+        }
+
+        // Head-hash mismatch at the anchored seq.
+        let diverged = ChainAnchor::signed(2, "sha256:not-the-real-head", &key());
+        match stream(&records, &diverged, &[key()]) {
+            Err(AnchorReaderError::Violation(AnchorViolation::HeadHashMismatch { anchor_seq })) => {
+                assert_eq!(anchor_seq, 2);
+            }
+            other => panic!("expected head-hash mismatch, got {other:?}"),
+        }
+
+        // Unknown key id — refused before any record is read.
+        let other_key = SigningKey::new("k2", vec![0x5a; 32]).expect("k2");
+        let foreign = ChainAnchor::signed(3, &records[2].entry_hash, &other_key);
+        match stream(&records, &foreign, &[key()]) {
+            Err(AnchorReaderError::Violation(AnchorViolation::UnknownKeyId(id))) => {
+                assert_eq!(id, "k2");
+            }
+            other => panic!("expected unknown key id, got {other:?}"),
+        }
+
+        // MAC mismatch — forged sidecar without the key.
+        let mut forged = anchor_at(&records, 3);
+        forged.mac = "hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            .to_owned();
+        match stream(&records, &forged, &[key()]) {
+            Err(AnchorReaderError::Violation(AnchorViolation::MacMismatch)) => {}
+            other => panic!("expected MAC mismatch, got {other:?}"),
+        }
     }
 
     #[test]

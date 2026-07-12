@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 # Validate release SBOM source wiring and merged CycloneDX release artifacts.
+#
+# Freshness is checked against a CANONICAL CycloneDX projection that preserves
+# every stable security/legal field — component hashes, licenses, scope,
+# properties and external references — plus the dependency graph, dropping only
+# proven-nondeterministic generator fields (serial number, build timestamp, tool
+# versions). A stale or degraded SBOM that silently loses a hash or a license
+# therefore FAILS the gate instead of passing as "fresh" (bead
+# oraclemcp-qa100 .42).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -8,12 +16,17 @@ usage() {
   cat >&2 <<'USAGE'
 usage: scripts/release_sbom_check.sh --source
        scripts/release_sbom_check.sh --artifact <oraclemcp-version.cdx.json>
+       scripts/release_sbom_check.sh --canonical <sbom.cdx.json>
 USAGE
 }
 
 fail() {
   echo "release-sbom-check: $*" >&2
   exit 1
+}
+
+note() {
+  echo "release-sbom-check: NOTE $*" >&2
 }
 
 need() {
@@ -26,11 +39,76 @@ require_grep() {
   grep -F "$needle" "$path" >/dev/null || fail "$path must contain: $needle"
 }
 
+# Canonical CycloneDX projection (bead oraclemcp-qa100 .42).
+#
+# Preserves ALL stable content — the whole metadata.component, and every
+# component field including hashes, licenses, scope, properties and
+# externalReferences — plus the dependency edges. Only genuinely
+# nondeterministic generator fields are removed: the random serialNumber, the
+# build timestamp, and the tool list (whose versions drift between runs). Every
+# array is deep-sorted so array-ordering differences between otherwise-identical
+# documents do not read as drift. `jq -S` sorts object keys.
+CANONICAL_JQ='
+  def sort_deep: walk(if type == "array" then sort_by(tojson) else . end);
+  del(.serialNumber)
+  | del(.metadata.timestamp)
+  | del(.metadata.tools)
+  | sort_deep
+'
+
+# Dependency-closure + duplicate-ref invariants for any CycloneDX document:
+# component bom-refs are unique, and every dependency ref / dependsOn target
+# resolves to a component bom-ref or the root metadata component. Emits `true`.
+CLOSURE_JQ='
+  ([ .components[]? | .["bom-ref"] // empty ]) as $refs
+  | ([ .metadata.component["bom-ref"] // empty ] + $refs) as $known
+  | (($refs | length) == ($refs | unique | length))
+    and all(.dependencies[]?; (.ref as $r | any($known[]; . == $r)))
+    and all(.dependencies[]?; all((.dependsOn // [])[]; . as $d | any($known[]; . == $d)))
+'
+
+canonicalize() {
+  local file="$1"
+  local out="$2"
+  jq -S "$CANONICAL_JQ" "$file" >"$out"
+}
+
+check_closure() {
+  local file="$1"
+  jq -e "$CLOSURE_JQ" "$file" >/dev/null ||
+    fail "$file has duplicate component bom-refs or dangling dependency references"
+}
+
+# Schema validation. Prefers a real CycloneDX JSON-Schema validator when one is
+# available; otherwise runs structural "schema-lite" invariants and NOTEs that
+# full schema validation was skipped (bead oraclemcp-qa100 .42: degrade
+# gracefully, name what could not run locally).
+validate_schema() {
+  local file="$1"
+  if command -v check-jsonschema >/dev/null 2>&1 &&
+    [ -n "${CYCLONEDX_SCHEMA:-}" ] && [ -f "${CYCLONEDX_SCHEMA:-}" ]; then
+    check-jsonschema --schemafile "$CYCLONEDX_SCHEMA" "$file" >/dev/null ||
+      fail "$file failed CycloneDX JSON-Schema validation"
+    return 0
+  fi
+  jq -e '
+    .bomFormat == "CycloneDX"
+    and (.specVersion | type) == "string"
+    and (.metadata.component | type) == "object"
+    and ((.components // []) | all(type == "object" and has("bom-ref") and has("name")))
+    and ((.dependencies // []) | all(type == "object" and has("ref")))
+  ' "$file" >/dev/null ||
+    fail "$file is not a structurally valid CycloneDX document"
+  note "full CycloneDX JSON-Schema validation skipped (no validator on PATH); ran structural schema-lite checks on $file"
+}
+
 check_source() {
   need jq
   need npm
 
-  local dashboard_sbom="$ROOT/web/dist/oraclemcp-dashboard.cyclonedx.json"
+  # Allow tests to point the "existing" dashboard SBOM at a copy so
+  # failure-on-mutation can be exercised without editing the tracked file.
+  local dashboard_sbom="${SBOM_DASHBOARD_OVERRIDE:-$ROOT/web/dist/oraclemcp-dashboard.cyclonedx.json}"
   local package_json="$ROOT/web/package.json"
   local workflow="$ROOT/.github/workflows/release.yml"
 
@@ -49,6 +127,11 @@ check_source() {
   ' --arg name "$package_name" --arg version "$package_version" "$dashboard_sbom" >/dev/null ||
     fail "dashboard SBOM is not current for $package_name@$package_version"
 
+  # The checked-in dashboard SBOM must itself be integrity-complete and
+  # schema-valid, and its dependency graph must close.
+  validate_schema "$dashboard_sbom"
+  check_closure "$dashboard_sbom"
+
   local check_dir="$ROOT/target/release-sbom-check"
   local current_dashboard_sbom="$check_dir/current-dashboard.cyclonedx.json"
   local existing_normalized="$check_dir/existing-dashboard.normalized.json"
@@ -56,58 +139,13 @@ check_source() {
   mkdir -p "$check_dir"
   (cd "$ROOT/web" && npm sbom --sbom-format cyclonedx --json >"$current_dashboard_sbom")
 
-  jq -S '
-    def normalized:
-      {
-        root: .metadata.component,
-        components: (
-          (.components // [])
-          | map({
-              "bom-ref": .["bom-ref"],
-              name,
-              version,
-              purl
-            })
-          | sort_by(."bom-ref")
-        ),
-        dependencies: (
-          (.dependencies // [])
-          | map({
-              ref,
-              dependsOn: ((.dependsOn // []) | sort)
-            })
-          | sort_by(.ref)
-        )
-      };
-    normalized
-  ' "$dashboard_sbom" >"$existing_normalized"
-  jq -S '
-    def normalized:
-      {
-        root: .metadata.component,
-        components: (
-          (.components // [])
-          | map({
-              "bom-ref": .["bom-ref"],
-              name,
-              version,
-              purl
-            })
-          | sort_by(."bom-ref")
-        ),
-        dependencies: (
-          (.dependencies // [])
-          | map({
-              ref,
-              dependsOn: ((.dependsOn // []) | sort)
-            })
-          | sort_by(.ref)
-        )
-      };
-    normalized
-  ' "$current_dashboard_sbom" >"$current_normalized"
+  # Compare the CANONICAL projection (hashes/licenses/scope/properties/external
+  # references + dependency edges preserved) rather than a bare identity subset,
+  # so a dropped or mutated hash/license makes the gate fail.
+  canonicalize "$dashboard_sbom" "$existing_normalized"
+  canonicalize "$current_dashboard_sbom" "$current_normalized"
   cmp -s "$existing_normalized" "$current_normalized" ||
-    fail "dashboard SBOM is stale for web/package-lock.json; run npm run build in web/"
+    fail "dashboard SBOM is stale or degraded for web/package-lock.json (hash/license/metadata drift); run npm run build in web/"
 
   require_grep "pattern: oraclemcp-*-*-*" "$workflow"
   require_grep "name: oraclemcp-dashboard-dist" "$workflow"
@@ -151,6 +189,11 @@ check_artifact() {
   ' --arg dashboard_purl "$dashboard_purl" "$artifact" >/dev/null ||
     fail "release SBOM must merge Rust cargo and dashboard npm components"
 
+  # The merged artifact must also be schema-valid and have a closed dependency
+  # graph — no dangling refs, no duplicate component bom-refs.
+  validate_schema "$artifact"
+  check_closure "$artifact"
+
   echo "release-sbom-check: OK artifact=$artifact"
 }
 
@@ -173,6 +216,19 @@ case "$1" in
       exit 2
     }
     check_artifact "$2"
+    ;;
+  --canonical)
+    # Emit the canonical projection of an SBOM (bead oraclemcp-qa100 .42): the
+    # exact bytes the freshness gate compares. Reused by the test harness to
+    # prove a mutated hash/license changes the canonical output while a
+    # timestamp/tool/serialNumber change does not.
+    [ "$#" -eq 2 ] || {
+      usage
+      exit 2
+    }
+    need jq
+    [ -f "$2" ] || fail "missing SBOM: $2"
+    jq -S "$CANONICAL_JQ" "$2"
     ;;
   *)
     usage

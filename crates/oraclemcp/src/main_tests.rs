@@ -8,6 +8,7 @@
 use super::*;
 use oraclemcp_audit::{AuditRecord, DbEvidence};
 use oraclemcp_config::HttpOAuthConfig;
+use std::sync::atomic::AtomicUsize;
 
 #[test]
 fn self_update_uses_only_authenticated_embedded_installer_bytes() {

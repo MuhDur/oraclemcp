@@ -16,8 +16,21 @@
 //! `key_id`, new under a new one) verifies end to end.
 
 use std::collections::BTreeSet;
+use std::io::{self, BufRead};
 
 use crate::record::{AuditRecord, GENESIS_HASH, SigningKey};
+
+/// Maximum bytes permitted in one JSONL audit record line (excluding the
+/// terminating newline).
+///
+/// Audit records carry only exact/normalized SQL **hashes** plus a fixed
+/// redaction marker — never SQL text, bind values, or secrets — so a well-formed
+/// record serializes to a few hundred bytes. A line beyond this generous cap is a
+/// torn append or an adversarial oversized artifact on an operator-controlled
+/// path; the streaming reader refuses it rather than buffering an unbounded line
+/// into memory (bead oraclemcp-qa100 .29). 1 MiB leaves ample headroom for future
+/// additive fields while keeping per-line memory bounded regardless of file size.
+pub const MAX_AUDIT_LINE_LEN: usize = 1 << 20;
 
 /// The result of verifying a chain: OK, or the first broken link with a reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,86 +113,132 @@ fn key_for<'a>(keys: &'a [SigningKey], key_id: &str) -> Option<&'a SigningKey> {
     keys.iter().find(|k| k.key_id() == key_id)
 }
 
+/// Incremental hash-chain verifier: fed records one at a time in order, it
+/// reproduces [`verify_records`] exactly while retaining only O(1) state (prior
+/// hash + seq, the active key id, and the small set of retired key ids). This is
+/// the shared core behind both the slice API and the streaming [`verify_reader`],
+/// so a multi-gigabyte audit log verifies without ever materializing every
+/// record in memory (bead oraclemcp-qa100 .29).
+pub(crate) struct ChainVerifier<'a> {
+    keys: &'a [SigningKey],
+    prev_hash: String,
+    prev_seq: Option<u64>,
+    current_key_id: Option<String>,
+    retired_key_ids: BTreeSet<String>,
+    count: usize,
+}
+
+impl<'a> ChainVerifier<'a> {
+    pub(crate) fn new(keys: &'a [SigningKey]) -> Self {
+        Self {
+            keys,
+            prev_hash: GENESIS_HASH.to_owned(),
+            prev_seq: None,
+            current_key_id: None,
+            retired_key_ids: BTreeSet::new(),
+            count: 0,
+        }
+    }
+
+    /// Number of records verified so far (== chain length once the stream ends
+    /// with no break).
+    pub(crate) fn count(&self) -> usize {
+        self.count
+    }
+
+    /// Verify the next record at `index`. Returns the first [`VerifyOutcome::Broken`]
+    /// on failure (leaving state unchanged so the caller stops), or `None` after
+    /// advancing the chain state.
+    pub(crate) fn observe(&mut self, index: usize, record: &AuditRecord) -> Option<VerifyOutcome> {
+        let broken = |reason| {
+            Some(VerifyOutcome::Broken {
+                seq: record.seq,
+                index,
+                reason,
+            })
+        };
+        // 1) hash recomputes from content (in-place edit).
+        if !record.hash_is_valid() {
+            return broken(BrokenReason::HashMismatch);
+        }
+        // 2) prev_hash links to the previous entry_hash.
+        if record.prev_hash != self.prev_hash {
+            return broken(BrokenReason::PrevHashMismatch);
+        }
+        // 3) seq increases by exactly one.
+        let expected_seq = self.prev_seq.map_or(1, |s| s + 1);
+        if record.seq != expected_seq {
+            return broken(BrokenReason::SeqNotMonotonic {
+                expected: expected_seq,
+                found: record.seq,
+            });
+        }
+        // 4) keyed MAC verifies under the record's key_id.
+        let Some(key_id) = record.key_id.as_deref() else {
+            return broken(BrokenReason::Unsigned);
+        };
+        let Some(key) = key_for(self.keys, key_id) else {
+            return broken(BrokenReason::UnknownKeyId(key_id.to_owned()));
+        };
+        if !record.signature_is_valid(key) {
+            return broken(BrokenReason::SignatureMismatch);
+        }
+        if self.current_key_id.as_deref() != Some(key_id) {
+            if let Some(previous) = self.current_key_id.take() {
+                self.retired_key_ids.insert(previous);
+            }
+            if self.retired_key_ids.contains(key_id) {
+                return broken(BrokenReason::KeyIdReused(key_id.to_owned()));
+            }
+            self.current_key_id = Some(key_id.to_owned());
+        }
+
+        self.prev_hash = record.entry_hash.clone();
+        self.prev_seq = Some(record.seq);
+        self.count += 1;
+        None
+    }
+}
+
 /// Re-walk an ordered slice of records and verify hash links, monotonic seq,
 /// and the keyed MAC under the supplied key set. Returns the first broken link,
 /// or [`VerifyOutcome::Ok`].
 #[must_use]
 pub fn verify_records(records: &[AuditRecord], keys: &[SigningKey]) -> VerifyOutcome {
-    let mut prev_hash = GENESIS_HASH.to_owned();
-    let mut prev_seq: Option<u64> = None;
-    let mut current_key_id: Option<&str> = None;
-    let mut retired_key_ids = BTreeSet::new();
+    let mut verifier = ChainVerifier::new(keys);
     for (index, record) in records.iter().enumerate() {
-        // 1) hash recomputes from content (in-place edit).
-        if !record.hash_is_valid() {
-            return VerifyOutcome::Broken {
-                seq: record.seq,
-                index,
-                reason: BrokenReason::HashMismatch,
-            };
+        if let Some(broken) = verifier.observe(index, record) {
+            return broken;
         }
-        // 2) prev_hash links to the previous entry_hash.
-        if record.prev_hash != prev_hash {
-            return VerifyOutcome::Broken {
-                seq: record.seq,
-                index,
-                reason: BrokenReason::PrevHashMismatch,
-            };
-        }
-        // 3) seq increases by exactly one.
-        let expected_seq = prev_seq.map_or(1, |s| s + 1);
-        if record.seq != expected_seq {
-            return VerifyOutcome::Broken {
-                seq: record.seq,
-                index,
-                reason: BrokenReason::SeqNotMonotonic {
-                    expected: expected_seq,
-                    found: record.seq,
-                },
-            };
-        }
-        // 4) keyed MAC verifies under the record's key_id.
-        let Some(key_id) = record.key_id.as_deref() else {
-            return VerifyOutcome::Broken {
-                seq: record.seq,
-                index,
-                reason: BrokenReason::Unsigned,
-            };
-        };
-        let Some(key) = key_for(keys, key_id) else {
-            return VerifyOutcome::Broken {
-                seq: record.seq,
-                index,
-                reason: BrokenReason::UnknownKeyId(key_id.to_owned()),
-            };
-        };
-        if !record.signature_is_valid(key) {
-            return VerifyOutcome::Broken {
-                seq: record.seq,
-                index,
-                reason: BrokenReason::SignatureMismatch,
-            };
-        }
-        if current_key_id != Some(key_id) {
-            if let Some(previous) = current_key_id {
-                retired_key_ids.insert(previous.to_owned());
-            }
-            if retired_key_ids.contains(key_id) {
-                return VerifyOutcome::Broken {
-                    seq: record.seq,
-                    index,
-                    reason: BrokenReason::KeyIdReused(key_id.to_owned()),
-                };
-            }
-            current_key_id = Some(key_id);
-        }
-
-        prev_hash = record.entry_hash.clone();
-        prev_seq = Some(record.seq);
     }
     VerifyOutcome::Ok {
-        records: records.len(),
+        records: verifier.count(),
     }
+}
+
+/// Stream an audit log from any [`BufRead`] source and verify the full chain
+/// with **bounded memory** — only O(1) chain state plus one capped line buffer,
+/// regardless of total file size (bead oraclemcp-qa100 .29). Behaviourally
+/// identical to `parse_jsonl` followed by [`verify_records`]: a malformed or
+/// oversized line surfaces as [`JsonlError::Malformed`] with the same one-based
+/// physical line semantics, and the verify verdict is the same
+/// [`VerifyOutcome`]. An I/O failure mid-stream surfaces as [`JsonlError::Io`].
+pub fn verify_reader<R: BufRead>(
+    reader: R,
+    keys: &[SigningKey],
+) -> Result<VerifyOutcome, JsonlError> {
+    let mut records = JsonlReader::new(reader);
+    let mut verifier = ChainVerifier::new(keys);
+    let mut index = 0usize;
+    while let Some(record) = records.next_record()? {
+        if let Some(broken) = verifier.observe(index, &record) {
+            return Ok(broken);
+        }
+        index += 1;
+    }
+    Ok(VerifyOutcome::Ok {
+        records: verifier.count(),
+    })
 }
 
 /// Parse a JSONL audit file body into records, surfacing the first malformed
@@ -197,6 +256,124 @@ pub fn parse_jsonl(body: &str) -> Result<Vec<AuditRecord>, ParseError> {
         records.push(record);
     }
     Ok(records)
+}
+
+/// A failure while streaming JSONL records from a reader: either an I/O error
+/// or a malformed/oversized line. Callers map both to their own fail-closed
+/// diagnostics (bead oraclemcp-qa100 .29).
+#[derive(Debug)]
+pub enum JsonlError {
+    /// The underlying reader returned an I/O error.
+    Io(io::Error),
+    /// A line was not a well-formed JSON record, or exceeded
+    /// [`MAX_AUDIT_LINE_LEN`].
+    Malformed(ParseError),
+}
+
+impl std::fmt::Display for JsonlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JsonlError::Io(e) => write!(f, "audit log read error: {e}"),
+            JsonlError::Malformed(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for JsonlError {}
+
+/// A streaming, memory-bounded reader over a newline-delimited audit log.
+///
+/// Yields one parsed [`AuditRecord`] per non-blank physical line, mirroring
+/// [`parse_jsonl`] exactly (blank lines skipped, one-based physical line
+/// numbers, trailing-newline tolerance) but reading through a capped buffer so a
+/// single line can never grow beyond [`MAX_AUDIT_LINE_LEN`] in memory — an
+/// unterminated or oversized line fails closed instead of allocating without
+/// bound.
+pub(crate) struct JsonlReader<R: BufRead> {
+    reader: R,
+    line_no: usize,
+    line: Vec<u8>,
+}
+
+impl<R: BufRead> JsonlReader<R> {
+    pub(crate) fn new(reader: R) -> Self {
+        Self {
+            reader,
+            line_no: 0,
+            line: Vec::new(),
+        }
+    }
+
+    /// The next non-blank record, `Ok(None)` at end of input, or an error for a
+    /// malformed/oversized line or an I/O failure.
+    pub(crate) fn next_record(&mut self) -> Result<Option<AuditRecord>, JsonlError> {
+        loop {
+            self.line.clear();
+            if !self.read_physical_line()? {
+                return Ok(None);
+            }
+            self.line_no += 1;
+            // Mirror `str::lines`: a trailing "\r\n" drops the "\r" too.
+            let mut slice: &[u8] = &self.line;
+            if slice.last() == Some(&b'\r') {
+                slice = &slice[..slice.len() - 1];
+            }
+            // Blank-line tolerance identical to `parse_jsonl` (which trims a
+            // `&str`): a valid-UTF-8 whitespace-only line is skipped but still
+            // counted; anything else is handed to the parser.
+            if let Ok(text) = std::str::from_utf8(slice)
+                && text.trim().is_empty()
+            {
+                continue;
+            }
+            let record: AuditRecord = serde_json::from_slice(slice).map_err(|e| {
+                JsonlError::Malformed(ParseError {
+                    line: self.line_no,
+                    message: e.to_string(),
+                })
+            })?;
+            return Ok(Some(record));
+        }
+    }
+
+    /// Read one physical line (up to and excluding the next `\n`) into
+    /// `self.line`, capped at [`MAX_AUDIT_LINE_LEN`]. Returns `Ok(false)` only at
+    /// a clean end of input with no pending bytes.
+    fn read_physical_line(&mut self) -> Result<bool, JsonlError> {
+        let mut saw_bytes = false;
+        loop {
+            let available = match self.reader.fill_buf() {
+                Ok(buf) => buf,
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(JsonlError::Io(e)),
+            };
+            if available.is_empty() {
+                return Ok(saw_bytes);
+            }
+            saw_bytes = true;
+            let (chunk, found_newline) = match available.iter().position(|&b| b == b'\n') {
+                Some(newline) => (&available[..newline], true),
+                None => (available, false),
+            };
+            // Cap before buffering so an unterminated/oversized line can never
+            // exhaust memory. Direct field access (not a `&mut self` method)
+            // keeps `self.line` and the `self.reader` borrow disjoint.
+            if self.line.len() + chunk.len() > MAX_AUDIT_LINE_LEN {
+                return Err(JsonlError::Malformed(ParseError {
+                    line: self.line_no + 1,
+                    message: format!(
+                        "audit record line exceeds the {MAX_AUDIT_LINE_LEN}-byte maximum"
+                    ),
+                }));
+            }
+            self.line.extend_from_slice(chunk);
+            let consume = chunk.len() + usize::from(found_newline);
+            self.reader.consume(consume);
+            if found_newline {
+                return Ok(true);
+            }
+        }
+    }
 }
 
 /// A malformed JSONL line.
@@ -519,5 +696,139 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("line 3"), "{msg}");
         assert!(msg.contains(&err.message), "{msg}");
+    }
+
+    // --- Streaming verification (bead oraclemcp-qa100 .29) ---
+
+    fn body_of(records: &[AuditRecord]) -> String {
+        records
+            .iter()
+            .map(|r| serde_json::to_string(r).expect("serialize") + "\n")
+            .collect()
+    }
+
+    #[test]
+    fn verify_reader_matches_the_slice_api_on_a_good_chain() {
+        let records = signed_chain(5);
+        let body = body_of(&records);
+        assert_eq!(
+            verify_reader(io::Cursor::new(&body), &[key()]).expect("no io/parse error"),
+            VerifyOutcome::Ok { records: 5 }
+        );
+        // Blank-line and trailing-newline tolerance identical to parse_jsonl.
+        let padded = format!("\n{body}\n");
+        assert_eq!(
+            verify_reader(io::Cursor::new(padded), &[key()]).expect("tolerant"),
+            VerifyOutcome::Ok { records: 5 }
+        );
+    }
+
+    #[test]
+    fn verify_reader_preserves_first_error_line_and_seq_semantics() {
+        // Every tamper/torn case reports the same first seq/line the whole-file
+        // parse_jsonl + verify_records path did.
+        let base = signed_chain(4);
+
+        // In-place edit at seq 2 (hash mismatch).
+        let mut edited = base.clone();
+        edited[1].sql_preview = "SELECT 1".to_owned();
+        match verify_reader(io::Cursor::new(body_of(&edited)), &[key()]).expect("stream") {
+            VerifyOutcome::Broken { seq, index, reason } => {
+                assert_eq!((seq, index, reason), (2, 1, BrokenReason::HashMismatch));
+            }
+            other => panic!("expected hash mismatch, got {other:?}"),
+        }
+
+        // Prev-hash break: drop the middle record (surviving tail relinks wrong).
+        let deleted = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&base[0]).unwrap(),
+            serde_json::to_string(&base[2]).unwrap()
+        );
+        match verify_reader(io::Cursor::new(deleted), &[key()]).expect("stream") {
+            VerifyOutcome::Broken { seq, reason, .. } => {
+                assert_eq!((seq, reason), (3, BrokenReason::PrevHashMismatch));
+            }
+            other => panic!("expected prev-hash break, got {other:?}"),
+        }
+
+        // Unknown key id: verify with the wrong keyring.
+        let other_key = SigningKey::new("k2", vec![0x5a; 32]).expect("k2");
+        match verify_reader(io::Cursor::new(body_of(&base)), &[other_key]).expect("stream") {
+            VerifyOutcome::Broken { seq, reason, .. } => {
+                assert_eq!(
+                    (seq, reason),
+                    (1, BrokenReason::UnknownKeyId("k1".to_owned()))
+                );
+            }
+            other => panic!("expected unknown key id, got {other:?}"),
+        }
+
+        // Malformed / torn tail: last line is partial JSON.
+        let torn = format!("{}{{\"seq\":2,\"partial\":", body_of(&base[..1]));
+        match verify_reader(io::Cursor::new(torn), &[key()]) {
+            Err(JsonlError::Malformed(e)) => assert_eq!(e.line, 2),
+            other => panic!("expected malformed line 2, got {other:?}"),
+        }
+    }
+
+    /// A reader that yields `byte` forever and never a newline — models an
+    /// unterminated/adversarial oversized line.
+    struct InfiniteByte(u8);
+    impl io::Read for InfiniteByte {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            buf.fill(self.0);
+            Ok(buf.len())
+        }
+    }
+
+    #[test]
+    fn verify_reader_caps_an_oversized_line_with_bounded_memory() {
+        // An unterminated line must fail closed at MAX_AUDIT_LINE_LEN rather than
+        // buffer without bound. If the cap did not hold this would allocate
+        // forever; instead it returns promptly with a Malformed(oversized) error.
+        let reader = io::BufReader::new(InfiniteByte(b'a'));
+        match verify_reader(reader, &[key()]) {
+            Err(JsonlError::Malformed(e)) => {
+                assert_eq!(e.line, 1);
+                assert!(
+                    e.message.contains("exceeds") && e.message.contains("maximum"),
+                    "{e}"
+                );
+            }
+            other => panic!("expected oversized-line refusal, got {other:?}"),
+        }
+        // A record padded to just over the cap is also refused.
+        let mut giant = String::with_capacity(MAX_AUDIT_LINE_LEN + 16);
+        giant.push_str(&"a".repeat(MAX_AUDIT_LINE_LEN + 1));
+        giant.push('\n');
+        match verify_reader(io::Cursor::new(giant), &[key()]) {
+            Err(JsonlError::Malformed(_)) => {}
+            other => panic!("expected oversized refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_reader_streams_a_large_chain_without_retaining_records() {
+        // A large log verifies through the fixed-size line buffer. The chain is
+        // long enough that a whole-file Vec of records would dwarf the reader's
+        // O(1) working set — the point of the streaming path.
+        let records = signed_chain(20_000);
+        let body = body_of(&records);
+        assert!(
+            body.len() > 1_000_000,
+            "fixture exercises a multi-block file"
+        );
+        assert_eq!(
+            verify_reader(io::Cursor::new(&body), &[key()]).expect("stream large"),
+            VerifyOutcome::Ok { records: 20_000 }
+        );
+        // A single tampered record deep in the large log is still caught.
+        let mut tampered = records;
+        tampered[12_345].sql_preview = "SELECT 1".to_owned();
+        match verify_reader(io::Cursor::new(body_of(&tampered)), &[key()]).expect("stream") {
+            VerifyOutcome::Broken { seq, .. } => assert_eq!(seq, 12_346),
+            other => panic!("expected a broken record deep in the log, got {other:?}"),
+        }
     }
 }
