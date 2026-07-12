@@ -455,9 +455,19 @@ impl ClientCredentialStore {
             scopes: record.scopes.clone(),
             generation: record.generation,
         };
+        // Coalesce the last-use write. `last_used_at`/`last_source_addr` are
+        // coarse observability fields, so refreshing them at most once per window
+        // avoids a full fsync+rename+dir-fsync on EVERY successful bearer auth —
+        // which a client hammering the endpoint could otherwise weaponize into an
+        // I/O DoS / flash-wear amplifier. A first use (no prior timestamp) always
+        // persists.
+        let now = unix_timestamp();
+        if !should_persist_last_use(record.last_used_at.as_deref(), &now) {
+            return Ok(authenticated);
+        }
         let mut next = file.clone();
         let next_record = &mut next.clients[index];
-        next_record.last_used_at = Some(unix_timestamp());
+        next_record.last_used_at = Some(now);
         next_record.last_source_addr = source_addr
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -816,10 +826,58 @@ fn unix_timestamp() -> String {
     format!("unix:{secs}")
 }
 
+/// How long a client's `last_used_at` may go un-refreshed before the next
+/// successful auth persists it again. Coalesces the durable last-use write to at
+/// most one per window (see `authenticate_bearer`).
+const LAST_USED_COALESCE_WINDOW_SECS: u64 = 60;
+
+/// Parse a `unix:NN…` timestamp string back to whole seconds.
+fn unix_timestamp_secs(value: &str) -> Option<u64> {
+    value
+        .strip_prefix("unix:")
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
+/// Whether a successful auth should durably persist the refreshed `last_used_at`.
+/// Persists when there is no prior (or unparseable) timestamp, or when `now` has
+/// advanced at least [`LAST_USED_COALESCE_WINDOW_SECS`] past the stored one; a
+/// more recent stored timestamp is left as-is (the write is coalesced). A stored
+/// timestamp in the future (clock rewind) also persists, correcting it.
+fn should_persist_last_use(prev: Option<&str>, now: &str) -> bool {
+    match (prev.and_then(unix_timestamp_secs), unix_timestamp_secs(now)) {
+        (Some(prev_secs), Some(now_secs)) => {
+            now_secs < prev_secs
+                || now_secs.saturating_sub(prev_secs) >= LAST_USED_COALESCE_WINDOW_SECS
+        }
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;
+
+    #[test]
+    fn last_use_write_is_coalesced_within_the_window() {
+        let ts = |secs: u64| format!("unix:{secs}");
+        // No prior (or unparseable) timestamp -> always persist.
+        assert!(should_persist_last_use(None, &ts(1_000)));
+        assert!(should_persist_last_use(Some("garbage"), &ts(1_000)));
+        // Refreshed within the window -> coalesced (skip the durable write).
+        assert!(!should_persist_last_use(Some(&ts(1_000)), &ts(1_000)));
+        assert!(!should_persist_last_use(
+            Some(&ts(1_000)),
+            &ts(1_000 + LAST_USED_COALESCE_WINDOW_SECS - 1)
+        ));
+        // At/past the window -> persist again.
+        assert!(should_persist_last_use(
+            Some(&ts(1_000)),
+            &ts(1_000 + LAST_USED_COALESCE_WINDOW_SECS)
+        ));
+        // A stored timestamp in the future (clock rewind) -> persist to correct.
+        assert!(should_persist_last_use(Some(&ts(5_000)), &ts(1_000)));
+    }
 
     fn test_root(name: &str) -> PathBuf {
         let stamp = SystemTime::now()
