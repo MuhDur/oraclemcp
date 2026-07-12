@@ -2517,6 +2517,62 @@ fn operator_events_last_event_id_reports_gap_for_slow_consumer() {
     );
 }
 
+fn idempotency_fact(key: &str) -> OperatorIdempotencyFacts {
+    OperatorIdempotencyFacts {
+        storage_key: key.to_owned(),
+        request_id: key.to_owned(),
+        idempotency_key_sha256: "k".to_owned(),
+        fingerprint_sha256: "f".to_owned(),
+        lane_id: None,
+        lane_generation: None,
+        subject_id_hash: "s".to_owned(),
+        grant_sha256: None,
+        sql_sha256: None,
+        operator_audit_seq: 0,
+        started_at: "t".to_owned(),
+        completed_at: None,
+    }
+}
+
+#[test]
+fn idempotency_capacity_eviction_spares_in_progress_and_drops_completed() {
+    // QA100 .23: capacity eviction must never drop an in-progress entry
+    // (response is None) — doing so would discard the marker a retry relies on
+    // and let the operator action double-execute. Only completed entries are
+    // evictable.
+    let mut entries = std::collections::HashMap::new();
+    // Oldest entry is in-progress; it must survive.
+    entries.insert(
+        "in-progress".to_owned(),
+        OperatorIdempotencyEntry {
+            facts: idempotency_fact("in-progress"),
+            response: None,
+            created_at: std::time::Instant::now(),
+        },
+    );
+    // Fill past the cap with newer, completed entries.
+    for i in 0..OPERATOR_IDEMPOTENCY_MAX_ENTRIES {
+        let key = format!("done-{i}");
+        entries.insert(
+            key.clone(),
+            OperatorIdempotencyEntry {
+                facts: idempotency_fact(&key),
+                response: Some(empty_response(200)),
+                created_at: std::time::Instant::now(),
+            },
+        );
+    }
+    assert!(entries.len() > OPERATOR_IDEMPOTENCY_MAX_ENTRIES);
+
+    evict_completed_operator_idempotency_entries_to_capacity(&mut entries);
+
+    assert!(entries.len() < OPERATOR_IDEMPOTENCY_MAX_ENTRIES);
+    assert!(
+        entries.contains_key("in-progress"),
+        "an in-progress idempotency entry must never be evicted for capacity"
+    );
+}
+
 #[test]
 fn operator_action_idempotency_replays_same_response_and_conflicts_on_drift() {
     let (auditor, _sink) = operator_auditor();

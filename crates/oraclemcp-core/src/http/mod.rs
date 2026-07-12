@@ -691,7 +691,10 @@ impl OperatorIdempotencyLedger {
 
     fn begin(&self, route: &str, facts: OperatorIdempotencyFacts) -> OperatorIdempotencyBegin {
         let mut entries = self.entries.lock();
-        prune_operator_idempotency_entries(&mut entries);
+        // Drop only genuinely TTL-expired entries before the lookup (an expired
+        // key must read as absent). Capacity eviction happens AFTER the lookup,
+        // on the fresh-insert path, so it can never evict the key being served.
+        prune_expired_operator_idempotency_entries(&mut entries);
         match entries.get(&facts.storage_key) {
             Some(entry) if entry.facts.fingerprint_sha256 != facts.fingerprint_sha256 => {
                 OperatorIdempotencyBegin::Conflict(operator_json_response(
@@ -717,6 +720,11 @@ impl OperatorIdempotencyLedger {
                 )),
             },
             None => {
+                // A genuinely new key: enforce the capacity cap now, evicting
+                // only completed entries — never an in-progress one, whose retry
+                // would otherwise lose its marker and double-execute. Runs after
+                // the lookup, so it can never evict the entry for this key.
+                evict_completed_operator_idempotency_entries_to_capacity(&mut entries);
                 let storage_key = facts.storage_key.clone();
                 entries.insert(
                     storage_key.clone(),
@@ -806,18 +814,35 @@ enum OperatorIdempotencyBegin {
     Conflict(HttpResponse),
 }
 
-fn prune_operator_idempotency_entries(entries: &mut HashMap<String, OperatorIdempotencyEntry>) {
+/// Drop TTL-expired idempotency entries. Safe to run before a key lookup: an
+/// expired entry must read as absent so the action can proceed afresh.
+fn prune_expired_operator_idempotency_entries(
+    entries: &mut HashMap<String, OperatorIdempotencyEntry>,
+) {
     let now = Instant::now();
     entries.retain(|_, entry| now.duration_since(entry.created_at) <= OPERATOR_IDEMPOTENCY_TTL);
+}
+
+/// Enforce the capacity bound by evicting the oldest COMPLETED entries. An
+/// in-progress entry (`response` is `None`) is never evicted — dropping it would
+/// discard the marker a concurrent retry relies on and let the operator action
+/// double-execute. If every entry is in-progress the cap may be briefly
+/// exceeded; the in-progress count is separately bounded by request-concurrency
+/// limits and drains as operations complete. Called only on a fresh insert,
+/// after the key lookup, so it can never evict the key being served.
+fn evict_completed_operator_idempotency_entries_to_capacity(
+    entries: &mut HashMap<String, OperatorIdempotencyEntry>,
+) {
     while entries.len() >= OPERATOR_IDEMPOTENCY_MAX_ENTRIES {
-        let Some(oldest) = entries
+        let Some(oldest_completed) = entries
             .iter()
+            .filter(|(_, entry)| entry.response.is_some())
             .min_by_key(|(_, entry)| entry.created_at)
             .map(|(key, _)| key.clone())
         else {
             break;
         };
-        entries.remove(&oldest);
+        entries.remove(&oldest_completed);
     }
 }
 
