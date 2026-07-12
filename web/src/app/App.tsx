@@ -2043,6 +2043,11 @@ function ConfigApplyPanel({
 function ClientsPage(): React.ReactElement {
   const [rotated, setRotated] = React.useState<ClientCredentialRotateData | null>(null);
   const [lastError, setLastError] = React.useState<string | null>(null);
+  const [lastNotice, setLastNotice] = React.useState<string | null>(null);
+  const [pendingAction, setPendingAction] = React.useState<ClientCredentialPendingAction | null>(
+    null
+  );
+  const [typedClientId, setTypedClientId] = React.useState("");
   const session = useQuery({
     queryKey: ["dashboard-session"],
     queryFn: fetchDashboardSession,
@@ -2065,6 +2070,7 @@ function ClientsPage(): React.ReactElement {
     onSuccess: (response) => {
       setRotated(response.data);
       setLastError(null);
+      setLastNotice(null);
       queryClient.invalidateQueries({ queryKey: ["client-credentials"] });
     },
     onError: (error) => {
@@ -2078,8 +2084,9 @@ function ClientsPage(): React.ReactElement {
       }
       return revokeClientCredential(session.data, client.client_id);
     },
-    onSuccess: () => {
+    onSuccess: (_response, client) => {
       setLastError(null);
+      setLastNotice(`Client ${client.client_id} revoked.`);
       queryClient.invalidateQueries({ queryKey: ["client-credentials"] });
     },
     onError: (error) => {
@@ -2088,6 +2095,32 @@ function ClientsPage(): React.ReactElement {
   });
   const rows = clients.data?.data.clients ?? [];
   const busy = rotateMutation.isPending || revokeMutation.isPending;
+  const requestAction = (
+    kind: ClientCredentialPendingAction["kind"],
+    client: ClientCredentialView
+  ): void => {
+    if (busy) {
+      return;
+    }
+    setLastError(null);
+    setLastNotice(null);
+    setTypedClientId("");
+    setPendingAction({ kind, client });
+  };
+  const confirmAction = (): void => {
+    const action = pendingAction;
+    if (!action || busy || !clientCredentialConfirmationReady(action, typedClientId)) {
+      return;
+    }
+    setPendingAction(null);
+    setTypedClientId("");
+    if (action.kind === "rotate") {
+      setRotated(null);
+      rotateMutation.mutate(action.client);
+    } else {
+      revokeMutation.mutate(action.client);
+    }
+  };
 
   return (
     <PageFrame
@@ -2104,6 +2137,19 @@ function ClientsPage(): React.ReactElement {
         {rotated ? (
           <ClientCredentialBearerPanel rotated={rotated} onDismiss={() => setRotated(null)} />
         ) : null}
+        {pendingAction ? (
+          <ClientCredentialConfirmationDialog
+            action={pendingAction}
+            busy={busy}
+            typedClientId={typedClientId}
+            onTypedClientId={setTypedClientId}
+            onCancel={() => {
+              setPendingAction(null);
+              setTypedClientId("");
+            }}
+            onConfirm={confirmAction}
+          />
+        ) : null}
         <ClientCredentialTable
           rows={rows}
           sessionReady={session.status === "success"}
@@ -2111,9 +2157,10 @@ function ClientsPage(): React.ReactElement {
           busy={busy}
           rotatingClientId={rotateMutation.variables?.client_id ?? null}
           revokingClientId={revokeMutation.variables?.client_id ?? null}
-          onRotate={(client) => rotateMutation.mutate(client)}
-          onRevoke={(client) => revokeMutation.mutate(client)}
+          onRotate={(client) => requestAction("rotate", client)}
+          onRevoke={(client) => requestAction("revoke", client)}
         />
+        {lastNotice ? <Badge tone="ok">{lastNotice}</Badge> : null}
         {lastError || clients.isError ? (
           <Badge tone="warn" className="max-w-full whitespace-normal break-all">
             {lastError ?? (clients.error instanceof Error ? clients.error.message : "client credentials unavailable")}
@@ -2153,6 +2200,7 @@ function ClientCredentialBearerPanel({
   rotated: ClientCredentialRotateData;
   onDismiss: () => void;
 }): React.ReactElement {
+  const [copied, setCopied] = React.useState(false);
   return (
     <Surface className="overflow-hidden">
       <PanelHeader
@@ -2170,12 +2218,113 @@ function ClientCredentialBearerPanel({
         <pre className="max-h-32 overflow-auto rounded-md bg-[var(--om-surface-elevated)] p-3 font-mono text-xs leading-5 text-[var(--om-text-bright)]">
           {rotated.bearer}
         </pre>
-        <Button type="button" variant="secondary" onClick={onDismiss}>
+        <p className="text-xs font-semibold text-[var(--om-text-muted)]">
+          This replacement bearer is shown once. Save it before acknowledging.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => {
+              if (typeof navigator !== "undefined" && navigator.clipboard) {
+                void navigator.clipboard.writeText(rotated.bearer).then(() => setCopied(true));
+              }
+            }}
+          >
+            <KeyRound className="size-4" aria-hidden="true" />
+            {copied ? "Copied" : "Copy bearer"}
+          </Button>
+          <Button type="button" variant="secondary" onClick={onDismiss}>
           <Ban className="size-4" aria-hidden="true" />
-          Clear
-        </Button>
+            I saved it — clear
+          </Button>
+        </div>
       </div>
     </Surface>
+  );
+}
+
+type ClientCredentialPendingAction = {
+  kind: "rotate" | "revoke";
+  client: ClientCredentialView;
+};
+
+export function clientCredentialConfirmationReady(
+  action: ClientCredentialPendingAction,
+  typedClientId: string
+): boolean {
+  return typedClientId === action.client.client_id;
+}
+
+function ClientCredentialConfirmationDialog({
+  action,
+  busy,
+  typedClientId,
+  onTypedClientId,
+  onCancel,
+  onConfirm
+}: {
+  action: ClientCredentialPendingAction;
+  busy: boolean;
+  typedClientId: string;
+  onTypedClientId: (value: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}): React.ReactElement {
+  const destructiveLabel = action.kind === "rotate" ? "Rotate credential" : "Revoke credential";
+  return (
+    <div
+      className="rounded-md border border-[color-mix(in_srgb,var(--om-copper)_55%,transparent)] bg-[var(--om-surface)] p-4 shadow-lg"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="client-credential-confirm-title"
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && !busy) {
+          onCancel();
+        }
+      }}
+    >
+      <h3
+        id="client-credential-confirm-title"
+        className="text-base font-semibold text-[var(--om-text-bright)]"
+      >
+        {destructiveLabel}
+      </h3>
+      <p className="mt-2 text-sm text-[var(--om-text-muted)]">
+        <span className="font-mono font-semibold text-[var(--om-text-bright)]">
+          {action.client.client_id}
+        </span>{" "}
+        ({action.client.label}), generation {action.client.generation}, scopes{" "}
+        {action.client.scopes.join(", ") || "none"}. This closes its active MCP sessions.
+        {action.kind === "rotate"
+          ? " The replacement bearer is shown once."
+          : " Revocation cannot be undone."}
+      </p>
+      <label className="mt-3 block">
+        <span className={OM_LABEL}>Type the exact client ID to confirm</span>
+        <input
+          className={cn(OM_INPUT, "font-mono")}
+          value={typedClientId}
+          autoFocus
+          autoComplete="off"
+          spellCheck={false}
+          onChange={(event) => onTypedClientId(event.target.value)}
+        />
+      </label>
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Button type="button" variant="secondary" disabled={busy} onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button
+          type="button"
+          variant="primary"
+          disabled={busy || !clientCredentialConfirmationReady(action, typedClientId)}
+          onClick={onConfirm}
+        >
+          {busy ? "Working" : destructiveLabel}
+        </Button>
+      </div>
+    </div>
   );
 }
 

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   OperatorOutcomeNotice,
   buildRefactorPreview,
+  clientCredentialConfirmationReady,
   currentSchemaDiffPreview,
   identifierOccurrences,
   schemaDiffInputIdentity
@@ -140,6 +141,28 @@ END;`;
     const preview = buildRefactorPreview("BEGIN foo := 1; END;", "foo", "bad name");
     expect(preview.preview).toBe("{}");
     expect(preview.error).toMatch(/valid Oracle identifier/);
+  });
+});
+
+describe("client credential destructive confirmation", () => {
+  const client = {
+    client_id: "client-prod-7",
+    label: "production agent",
+    scopes: ["oracle:read"],
+    status: "active" as const,
+    subject_id_hash: "sha256:client",
+    generation: 4,
+    created_at: "unix:1"
+  };
+
+  it("requires the exact selected client ID for both rotation and revocation", () => {
+    for (const kind of ["rotate", "revoke"] as const) {
+      const action = { kind, client };
+      expect(clientCredentialConfirmationReady(action, "")).toBe(false);
+      expect(clientCredentialConfirmationReady(action, "client-prod")).toBe(false);
+      expect(clientCredentialConfirmationReady(action, "CLIENT-PROD-7")).toBe(false);
+      expect(clientCredentialConfirmationReady(action, client.client_id)).toBe(true);
+    }
   });
 });
 
