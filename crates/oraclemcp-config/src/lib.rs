@@ -2408,7 +2408,7 @@ mod tests {
             "http://localhost:8080/ingest",
             "ftp://siem.example.com/ingest",
             "https:///missing-host",
-            "https://user:secret@siem.example.com/ingest",
+            "https://user:secret@siem.example.com/ingest", // sensitive-lint:allow deliberate invalid fixture
             "https://siem.example.com:0/ingest",
             "https://siem.example.com/ingest#fragment",
             "https://siem.example.com/ingest\r\nx-forged: value",
