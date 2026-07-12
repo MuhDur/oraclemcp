@@ -1933,9 +1933,14 @@ fn http_tls_material_builds_native_tls_config() {
         mtls_client_fingerprints: vec![
             "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff".to_owned(),
         ],
+        control_listen: Some("127.0.0.1:7443".to_owned()),
         ..Default::default()
     };
-    let http = apply_http_cli_overrides(HttpConfig::default(), &args);
+    let mut base = HttpConfig::default();
+    base.operator.allowed_subjects = vec![
+        "mtls:sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff".to_owned(),
+    ];
+    let http = apply_http_cli_overrides(base, &args);
     assert_eq!(
         http.tls
             .as_ref()
@@ -1948,6 +1953,10 @@ fn http_tls_material_builds_native_tls_config() {
     assert!(cfg.tls.is_some());
     assert!(cfg.mtls_required);
     assert!(!cfg.transport.mtls_clients.is_empty());
+    assert_eq!(
+        cfg.control.as_ref().map(|control| control.listen.as_str()),
+        Some("127.0.0.1:7443")
+    );
 }
 
 #[test]

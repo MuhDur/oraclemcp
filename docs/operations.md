@@ -404,6 +404,14 @@ surface. Everything below concerns the HTTP transport (`serve --listen`).
   still needs per-client credentials, OAuth, or an explicit `--allow-no-auth`
   dev opt-in, and a non-loopback bind still needs `ORACLEMCP_HTTP_ALLOW_REMOTE=1`
   even with TLS.
+- **Dedicated control ingress.** Configure `[http.control]` (or
+  `serve --control-listen <ADDR>`) only with native mTLS, a registered client
+  fingerprint, and that `mtls:<fingerprint>` in
+  `[http.operator].allowed_subjects`. This second listener serves only exact
+  `/healthz`, `/readyz`, and `/operator/v1/*` routes. TLS handshakes and
+  authenticated control requests have separate worker caps, so hostile sockets
+  on the ordinary listener cannot consume the remote incident-response reserve.
+  A CA-valid but unregistered certificate is closed before HTTP parsing.
 
 Recommended production posture: bind behind a reverse proxy or service mesh,
 use one scoped credential per MCP client or require OAuth with the narrowest

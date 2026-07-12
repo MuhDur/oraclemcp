@@ -60,7 +60,8 @@ use oraclemcp_auth::{
     resolve_secret_with,
 };
 use oraclemcp_config::{
-    AuditConfig, CONFIG_PATH_ENV, ConnectionProfile, HttpConfig, HttpTlsConfig, OracleMcpConfig,
+    AuditConfig, CONFIG_PATH_ENV, ConnectionProfile, HttpConfig, HttpControlConfig, HttpTlsConfig,
+    OracleMcpConfig,
 };
 use oraclemcp_core::admission::DEFAULT_READ_PER_PROFILE_CAP;
 use oraclemcp_core::http::SinglePrincipalGuard;
@@ -492,6 +493,10 @@ struct HttpServeArgs {
     /// Registered mTLS client leaf certificate SHA-256 fingerprint.
     #[arg(long = "mtls-client-fingerprint")]
     mtls_client_fingerprints: Vec<String>,
+    /// Start a separately bounded mandatory-mTLS operator/readiness listener.
+    /// Reuses --tls-*, --mtls-client-ca, and registered fingerprint material.
+    #[arg(long = "control-listen")]
+    control_listen: Option<String>,
     /// Accept service-owned per-client `ocmcp_*` bearer credentials.
     #[arg(long = "client-credentials")]
     client_credentials: bool,
@@ -2936,6 +2941,11 @@ fn apply_http_cli_overrides(mut config: HttpConfig, cli: &HttpServeArgs) -> Http
         .mtls
         .client_fingerprints
         .extend(cli.mtls_client_fingerprints.iter().cloned());
+    if let Some(listen) = &cli.control_listen {
+        let mut control = config.control.unwrap_or_default();
+        control.listen = listen.clone();
+        config.control = Some(control);
+    }
 
     config
 }
@@ -2964,6 +2974,7 @@ struct ResolvedHttpTransportConfig {
     tls: Option<Arc<TlsServerConfig>>,
     mtls_required: bool,
     allow_remote: bool,
+    control: Option<HttpControlConfig>,
 }
 
 #[derive(Clone)]
@@ -3165,6 +3176,7 @@ fn http_transport_config_from_merged(
         tls,
         mtls_required,
         allow_remote: http.allow_remote,
+        control: http.control,
     })
 }
 
@@ -3527,7 +3539,10 @@ fn run_serve(
             );
             let server = built.server;
             let ResolvedHttpTransportConfig {
-                mut transport, tls, ..
+                mut transport,
+                tls,
+                control,
+                ..
             } = resolved_http;
             transport.session_lifecycle = built.session_lifecycle;
             transport.operator_audit_tail_path = auditor.as_ref().map(|_| {
@@ -3685,18 +3700,76 @@ fn run_serve(
                     return ExitCode::from(error.exit_code);
                 }
             };
-            let service_transport = match tls {
-                Some(tls) => ServiceTransport::Https {
+            let control_transport = if let Some(control) = control {
+                let control_listener = match TcpListener::bind(&control.listen) {
+                    Ok(listener) => listener,
+                    Err(error) => {
+                        emit_status_error(
+                            robot_json,
+                            "ORACLEMCP_CONTROL_LISTEN_BIND_FAILED",
+                            &format!(
+                                "mandatory-mTLS control-listener bind error on {}: {error}",
+                                control.listen
+                            ),
+                        );
+                        pinger.shutdown();
+                        drop(telemetry);
+                        return ExitCode::from(1);
+                    }
+                };
+                let authenticated_workers = control
+                    .operator_workers
+                    .saturating_add(control.doctor_workers);
+                let mut control_config = transport.clone();
+                control_config.stateful = false;
+                control_config.session_store = None;
+                control_config.result_store = None;
+                control_config.dashboard_auth = None;
+                control_config.transport_admission = Arc::new(AdmissionController::with_reserved(
+                    authenticated_workers,
+                    authenticated_workers,
+                    control.operator_workers,
+                    control.doctor_workers,
+                ));
+                let preauth_admission = Arc::new(AdmissionController::new(
+                    control.preauth_workers,
+                    control.preauth_workers,
+                ));
+                eprintln!(
+                    "oraclemcp serve: dedicated mandatory-mTLS control transport on {} enabled (preauth={}, operator={}, doctor={}).",
+                    control.listen,
+                    control.preauth_workers,
+                    control.operator_workers,
+                    control.doctor_workers,
+                );
+                Some((control_listener, control_config, preauth_admission))
+            } else {
+                None
+            };
+            let service_transport = match (tls, control_transport) {
+                (Some(tls), Some((control_listener, control_config, preauth_admission))) => {
+                    ServiceTransport::HttpsWithControl {
+                        listener,
+                        control_listener,
+                        server,
+                        config: transport,
+                        control_config: Box::new(control_config),
+                        control_preauth_admission: preauth_admission,
+                        tls,
+                    }
+                }
+                (Some(tls), None) => ServiceTransport::Https {
                     listener,
                     server,
                     config: transport,
                     tls,
                 },
-                None => ServiceTransport::Http {
+                (None, None) => ServiceTransport::Http {
                     listener,
                     server,
                     config: transport,
                 },
+                (None, Some(_)) => unreachable!("validated control ingress requires TLS"),
             };
             let mut service_app = match start_oraclemcp_service_app_with_transport(
                 None,

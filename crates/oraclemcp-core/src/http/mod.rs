@@ -7831,6 +7831,67 @@ pub fn serve_https_until(
     Ok(())
 }
 
+/// Serve a separately bounded, mandatory-mTLS control ingress until shutdown.
+///
+/// Certificate verification and registration are completed before any HTTP
+/// request bytes are parsed. The pre-authentication handshake ledger is
+/// independent from the authenticated operator/readiness ledger in
+/// `config.transport_admission`, so an unauthenticated peer can never consume a
+/// control reserve. Only exact health/readiness and operator routes can promote
+/// the authenticated control probe; every other route fails closed.
+///
+/// # Errors
+/// Returns fatal listener errors. Individual TLS/auth/request failures are
+/// isolated to their bounded connection worker.
+pub fn serve_control_https_until(
+    listener: TcpListener,
+    server: OracleMcpServer,
+    config: &HttpTransportConfig,
+    tls: Arc<TlsServerConfig>,
+    preauth_admission: Arc<AdmissionController>,
+    shutdown: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    listener.set_nonblocking(true)?;
+    let config = Arc::new(listener_config(config, EffectiveHttpScheme::Https));
+    let mut workers: Vec<JoinHandle<()>> = Vec::new();
+    while !shutdown.load(Ordering::SeqCst) {
+        reap_finished_workers(&mut workers);
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let cx = detached_admission_cx();
+                let preauth_permit =
+                    match preauth_admission.try_admit(&cx, HTTP_CONTROL_PREAUTH_CAPACITY_SUBJECT) {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            tracing::debug!(
+                                "dedicated control TLS handshake rejected at pre-auth capacity"
+                            );
+                            continue;
+                        }
+                    };
+                let server = server.clone();
+                let config = Arc::clone(&config);
+                let tls = Arc::clone(&tls);
+                workers.push(std::thread::spawn(move || {
+                    if let Err(e) =
+                        handle_control_tls_connection(stream, &server, &config, tls, preauth_permit)
+                    {
+                        tracing::debug!(error = %e, "dedicated control HTTPS connection failed");
+                    }
+                }));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    for worker in workers {
+        let _ = worker.join();
+    }
+    Ok(())
+}
+
 fn reap_finished_workers(workers: &mut Vec<JoinHandle<()>>) {
     let mut index = 0;
     while index < workers.len() {
@@ -8008,6 +8069,86 @@ fn handle_tls_connection(
     result
 }
 
+fn handle_control_tls_connection(
+    mut stream: TcpStream,
+    server: &OracleMcpServer,
+    config: &HttpTransportConfig,
+    tls: Arc<TlsServerConfig>,
+    preauth_permit: AdmissionPermit,
+) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT))?;
+    let mut connection = ServerConnection::new(tls).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("TLS setup: {e}"))
+    })?;
+    let peer_addr = stream.peer_addr().ok();
+    let peer_is_loopback = peer_addr.is_some_and(|addr| addr.ip().is_loopback());
+    complete_tls_handshake(
+        &mut stream,
+        &mut connection,
+        CONTROL_INGRESS_HANDSHAKE_TIMEOUT,
+    )?;
+    let fingerprint = connection
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .map(|cert| cert_fingerprint_sha256(cert.as_ref()))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "dedicated control ingress requires a verified client certificate",
+            )
+        })?;
+    let principal_key = config
+        .mtls_clients
+        .principal_key_for_fingerprint(&fingerprint)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "dedicated control ingress client certificate is not registered",
+            )
+        })?;
+    config
+        .operator_authority
+        .authorize(Some(&principal_key), false)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "dedicated control ingress certificate is not operator-authorized",
+            )
+        })?;
+
+    // Authentication is complete before any HTTP bytes are parsed. Move this
+    // worker from the separately bounded handshake ledger into the control
+    // reserve; an unauthenticated peer can therefore never hold this permit.
+    let cx = detached_admission_cx();
+    let mut control_permit = config
+        .transport_admission
+        .try_admit_control_probe(&cx)
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "dedicated control ingress is at authenticated capacity",
+            )
+        })?;
+    drop(preauth_permit);
+
+    stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT))?;
+    let mut stream = StreamOwned::new(connection, stream);
+    let result = handle_stream(
+        &mut stream,
+        server,
+        config,
+        peer_is_loopback,
+        peer_addr.map(|addr| addr.to_string()),
+        Some(fingerprint),
+        &mut control_permit,
+    );
+    stream.conn.send_close_notify();
+    let _ = stream.flush();
+    result
+}
+
 fn complete_tls_handshake(
     stream: &mut TcpStream,
     connection: &mut ServerConnection,
@@ -8151,6 +8292,9 @@ const REQUEST_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Short exposure window for the single loopback-only pre-auth control probe.
 const CONTROL_PROBE_INGRESS_TIMEOUT: Duration = Duration::from_secs(1);
+/// Absolute TLS deadline on the separately bounded remote control ingress.
+const CONTROL_INGRESS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const HTTP_CONTROL_PREAUTH_CAPACITY_SUBJECT: &str = "control-mtls-handshake";
 
 fn reason_phrase(status: u16) -> &'static str {
     match status {

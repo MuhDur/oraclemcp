@@ -233,6 +233,10 @@ data, not instructions, and the trust-block injector marks the boundary.
 2.1 bearer enforcement or an explicit `--allow-no-auth` dev opt-in; non-loopback
 binds require `ORACLEMCP_HTTP_ALLOW_REMOTE=1`; `Host`/`Origin` allowlists; native
 rustls TLS and optional mTLS. stdio's trust boundary is the parent process.
+For off-box incident response, optional `[http.control]` provides a separate
+mandatory-mTLS listener. It establishes a registered certificate identity
+before parsing HTTP, serves only readiness/operator routes, and has independent
+pre-authentication and authenticated worker caps.
 
 *Evidence (green; CI):*
 - `crates/oraclemcp-core/src/http/mod.rs` (OAuth enforcement, scope grants,
@@ -258,7 +262,8 @@ budget (telemetry failure never blocks the request path).
 - `crates/oraclemcp-core/src/request_budget.rs` — request budget with tests.
 - `crates/oraclemcp-core/src/http/mod.rs` —
   `serve_http_until_bounds_connection_workers_before_request_parse`,
-  `served_stateful_get_sse_subscribers_are_capped`.
+  `served_stateful_get_sse_subscribers_are_capped`, and the dedicated mTLS
+  control-ingress saturation/deadline guards.
 - `crates/oraclemcp-telemetry/src/otlp/pump.rs` —
   `submit_is_non_blocking_and_shutdown_is_bounded`, `overflow_drops_newest_and_counts`.
 

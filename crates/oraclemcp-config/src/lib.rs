@@ -527,6 +527,13 @@ impl AuditShippingConfig {
 
 /// Default idle TTL for stateful Streamable HTTP sessions.
 pub const DEFAULT_HTTP_STATEFUL_IDLE_TTL_SECONDS: u64 = 900;
+/// Default maximum number of simultaneous, not-yet-authenticated mTLS
+/// handshakes on the dedicated control listener.
+pub const DEFAULT_HTTP_CONTROL_PREAUTH_WORKERS: usize = 4;
+/// Hard configuration ceiling for every dedicated control-listener worker
+/// class. This keeps a typo from turning an incident-response listener into an
+/// unbounded thread source.
+pub const MAX_HTTP_CONTROL_WORKERS: usize = 64;
 
 fn default_http_stateful_idle_ttl_seconds() -> u64 {
     DEFAULT_HTTP_STATEFUL_IDLE_TTL_SECONDS
@@ -557,6 +564,10 @@ pub struct HttpConfig {
     pub mtls: HttpMtlsConfig,
     /// Optional TLS material for the native HTTPS listener.
     pub tls: Option<HttpTlsConfig>,
+    /// Optional separately bounded, mandatory-mTLS control listener. This
+    /// listener admits only registered certificate identities and only serves
+    /// readiness or operator routes.
+    pub control: Option<HttpControlConfig>,
     /// Operator-authority policy for `/operator/v1`.
     pub operator: HttpOperatorConfig,
     /// Release gate for the browser Safe SQL Workbench. The workbench remains
@@ -588,6 +599,7 @@ impl Default for HttpConfig {
             oauth: None,
             mtls: HttpMtlsConfig::default(),
             tls: None,
+            control: None,
             operator: HttpOperatorConfig::default(),
             dashboard_workbench: false,
             trusted_https_termination: false,
@@ -608,7 +620,102 @@ impl HttpConfig {
         if let Some(tls) = &self.tls {
             tls.validate()?;
         }
+        if let Some(control) = &self.control {
+            control.validate()?;
+            let Some(tls) = self.tls.as_ref() else {
+                return Err(ConfigError::InvalidHttp {
+                    field: "http.control",
+                    reason: "requires http.tls with a client_ca_path (mandatory mTLS)",
+                });
+            };
+            if tls.client_ca_path.is_none() {
+                return Err(ConfigError::InvalidHttp {
+                    field: "http.control",
+                    reason: "requires http.tls.client_ca_path (mandatory mTLS)",
+                });
+            }
+            if self.mtls.client_fingerprints.is_empty() {
+                return Err(ConfigError::InvalidHttp {
+                    field: "http.control",
+                    reason: "requires at least one registered http.mtls.client_fingerprints entry",
+                });
+            }
+            let has_remote_operator = self.operator.allowed_subjects.iter().any(|subject| {
+                let Some(fingerprint) = subject.strip_prefix("mtls:") else {
+                    return false;
+                };
+                let Some(fingerprint) = normalize_sha256_fingerprint(fingerprint) else {
+                    return false;
+                };
+                self.mtls
+                    .client_fingerprints
+                    .iter()
+                    .filter_map(|candidate| normalize_sha256_fingerprint(candidate))
+                    .any(|candidate| candidate == fingerprint)
+            });
+            if !has_remote_operator {
+                return Err(ConfigError::InvalidHttp {
+                    field: "http.control",
+                    reason: "requires an allowed mtls:<registered-fingerprint> in http.operator.allowed_subjects",
+                });
+            }
+        }
         self.operator.validate()?;
+        Ok(())
+    }
+}
+
+/// Dedicated remote control-listener configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HttpControlConfig {
+    /// Separate socket address for the mandatory-mTLS control listener.
+    pub listen: String,
+    /// Maximum concurrent TLS handshakes before certificate identity exists.
+    pub preauth_workers: usize,
+    /// Authenticated operator-request worker reserve.
+    pub operator_workers: usize,
+    /// Authenticated health/readiness worker reserve.
+    pub doctor_workers: usize,
+}
+
+impl Default for HttpControlConfig {
+    fn default() -> Self {
+        Self {
+            listen: "127.0.0.1:7071".to_owned(),
+            preauth_workers: DEFAULT_HTTP_CONTROL_PREAUTH_WORKERS,
+            operator_workers: 1,
+            doctor_workers: 1,
+        }
+    }
+}
+
+impl HttpControlConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.listen.trim().is_empty() {
+            return Err(ConfigError::InvalidHttp {
+                field: "http.control.listen",
+                reason: "must be non-empty",
+            });
+        }
+        for (field, value) in [
+            ("http.control.preauth_workers", self.preauth_workers),
+            ("http.control.operator_workers", self.operator_workers),
+            ("http.control.doctor_workers", self.doctor_workers),
+        ] {
+            if value == 0 || value > MAX_HTTP_CONTROL_WORKERS {
+                return Err(ConfigError::InvalidHttp {
+                    field,
+                    reason: "must be between 1 and 64",
+                });
+            }
+        }
+        if self.operator_workers.saturating_add(self.doctor_workers) > MAX_HTTP_CONTROL_WORKERS {
+            return Err(ConfigError::InvalidHttp {
+                field: "http.control",
+                reason: "operator_workers + doctor_workers must not exceed 64",
+            });
+        }
         Ok(())
     }
 }
@@ -1607,6 +1714,105 @@ mod tests {
             err,
             ConfigError::InvalidOperator {
                 field: "http.operator.allowed_subjects",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dedicated_control_listener_requires_registered_mtls_operator() {
+        const FINGERPRINT: &str =
+            "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let cfg = OracleMcpConfig::from_toml_str(&format!(
+            r#"
+            [http.control]
+            listen = "0.0.0.0:7071"
+            preauth_workers = 4
+            operator_workers = 1
+            doctor_workers = 1
+
+            [http.tls]
+            cert_chain_path = "/run/oraclemcp/server.pem"
+            private_key_path = "/run/oraclemcp/server.key"
+            client_ca_path = "/run/oraclemcp/client-ca.pem"
+
+            [http.mtls]
+            client_fingerprints = ["{FINGERPRINT}"]
+
+            [http.operator]
+            allow_loopback_owner = false
+            allowed_subjects = ["mtls:{FINGERPRINT}"]
+            "#,
+        ))
+        .expect("separately bounded mTLS control listener validates");
+        let control = cfg.http.control.expect("control config");
+        assert_eq!(control.listen, "0.0.0.0:7071");
+        assert_eq!(control.preauth_workers, 4);
+        assert_eq!(control.operator_workers, 1);
+        assert_eq!(control.doctor_workers, 1);
+    }
+
+    #[test]
+    fn dedicated_control_listener_fails_closed_without_mtls_prerequisites() {
+        for toml in [
+            r#"
+                [http.control]
+                listen = "127.0.0.1:7071"
+            "#,
+            r#"
+                [http.control]
+                listen = "127.0.0.1:7071"
+
+                [http.tls]
+                cert_chain_path = "server.pem"
+                private_key_path = "server.key"
+            "#,
+            r#"
+                [http.control]
+                listen = "127.0.0.1:7071"
+
+                [http.tls]
+                cert_chain_path = "server.pem"
+                private_key_path = "server.key"
+                client_ca_path = "client-ca.pem"
+            "#,
+        ] {
+            assert!(matches!(
+                OracleMcpConfig::from_toml_str(toml),
+                Err(ConfigError::InvalidHttp {
+                    field: "http.control",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn dedicated_control_listener_caps_are_bounded() {
+        const FINGERPRINT: &str =
+            "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let err = OracleMcpConfig::from_toml_str(&format!(
+            r#"
+            [http.control]
+            preauth_workers = 65
+
+            [http.tls]
+            cert_chain_path = "server.pem"
+            private_key_path = "server.key"
+            client_ca_path = "client-ca.pem"
+
+            [http.mtls]
+            client_fingerprints = ["{FINGERPRINT}"]
+
+            [http.operator]
+            allowed_subjects = ["mtls:{FINGERPRINT}"]
+            "#,
+        ))
+        .expect_err("oversized control worker cap rejected");
+        assert!(matches!(
+            err,
+            ConfigError::InvalidHttp {
+                field: "http.control.preauth_workers",
                 ..
             }
         ));

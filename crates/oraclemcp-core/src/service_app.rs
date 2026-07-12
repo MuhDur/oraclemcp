@@ -28,7 +28,10 @@ use asupersync::types::{Budget, CancelKind, RegionId};
 use parking_lot::Mutex;
 use serde::Serialize;
 
-use crate::http::{HttpTransportConfig, serve_http_until, serve_https_until};
+use crate::admission::AdmissionController;
+use crate::http::{
+    HttpTransportConfig, serve_control_https_until, serve_http_until, serve_https_until,
+};
 use crate::server::OracleMcpServer;
 use crate::tls::TlsServerConfig;
 
@@ -516,6 +519,25 @@ pub enum ServiceTransport {
         /// TLS server config.
         tls: Arc<TlsServerConfig>,
     },
+    /// Ordinary HTTPS plus an independently bounded, mandatory-mTLS control
+    /// listener. Both accept loops share one shutdown flag but no admission
+    /// permits.
+    HttpsWithControl {
+        /// Ordinary MCP HTTPS listener.
+        listener: TcpListener,
+        /// Dedicated control HTTPS listener.
+        control_listener: TcpListener,
+        /// MCP and operator server surface shared by both listeners.
+        server: OracleMcpServer,
+        /// Ordinary HTTP transport configuration.
+        config: HttpTransportConfig,
+        /// Control-only transport configuration and authenticated reserve.
+        control_config: Box<HttpTransportConfig>,
+        /// Bounded pre-certificate handshake admission.
+        control_preauth_admission: Arc<AdmissionController>,
+        /// Mandatory-mTLS server configuration shared by both listeners.
+        tls: Arc<TlsServerConfig>,
+    },
 }
 
 impl ServiceTransport {
@@ -541,6 +563,23 @@ impl ServiceTransport {
                 config: config.clone(),
                 tls: Arc::clone(tls),
             }),
+            Self::HttpsWithControl {
+                listener,
+                control_listener,
+                server,
+                config,
+                control_config,
+                control_preauth_admission,
+                tls,
+            } => Ok(Self::HttpsWithControl {
+                listener: listener.try_clone()?,
+                control_listener: control_listener.try_clone()?,
+                server: server.clone(),
+                config: config.clone(),
+                control_config: Box::new((**control_config).clone()),
+                control_preauth_admission: Arc::clone(control_preauth_admission),
+                tls: Arc::clone(tls),
+            }),
         }
     }
 
@@ -557,6 +596,40 @@ impl ServiceTransport {
                 config,
                 tls,
             } => serve_https_until(listener, server, &config, tls, shutdown),
+            Self::HttpsWithControl {
+                listener,
+                control_listener,
+                server,
+                config,
+                control_config,
+                control_preauth_admission,
+                tls,
+            } => {
+                let control_shutdown = Arc::clone(&shutdown);
+                let control_server = server.clone();
+                let control_tls = Arc::clone(&tls);
+                let control_handle = std::thread::Builder::new()
+                    .name("oraclemcp-control-transport".to_owned())
+                    .spawn(move || {
+                        let result = serve_control_https_until(
+                            control_listener,
+                            control_server,
+                            &control_config,
+                            control_tls,
+                            control_preauth_admission,
+                            Arc::clone(&control_shutdown),
+                        );
+                        control_shutdown.store(true, Ordering::SeqCst);
+                        result
+                    })?;
+                let ordinary_result =
+                    serve_https_until(listener, server, &config, tls, Arc::clone(&shutdown));
+                shutdown.store(true, Ordering::SeqCst);
+                let control_result = control_handle
+                    .join()
+                    .map_err(|_| std::io::Error::other("control transport thread panicked"))?;
+                ordinary_result.and(control_result)
+            }
         }
     }
 }

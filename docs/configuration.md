@@ -475,7 +475,13 @@ loopback-only), `json_response` (default `false`), `stateful` (default `false`),
 `dashboard_workbench` (default `false`), the optional `[http.oauth]`
 resource-server table, the `[http.mtls]` client
 fingerprint registry, the optional `[http.tls]` rustls material, and the
-`[http.operator]` operator-authority table. Idle
+`[http.operator]` operator-authority table. Optional `[http.control]` starts a
+second, separately bounded incident-response listener. It requires
+`http.tls.client_ca_path`, at least one registered mTLS fingerprint, and the
+matching `mtls:<fingerprint>` in `http.operator.allowed_subjects`. Its
+`preauth_workers` (default 4), `operator_workers` (default 1), and
+`doctor_workers` (default 1) are independently capped at 64; ordinary MCP and
+dashboard routes are never served there. Idle
 stateful sessions are reaped by sending a close message to the owning lane; the
 watchdog never touches the Oracle connection from the HTTP thread. When OAuth or
 per-client credentials are enabled, granted `oracle:*` scopes can only **lower**
@@ -491,6 +497,13 @@ It accepts RFC 9068 JWT access tokens only: `typ` must be `at+jwt` or
 Adding `[http.tls.client_ca_path]` requires mTLS client certs, but only leaf DER
 SHA-256 fingerprints listed in `[http.mtls].client_fingerprints` become
 `mtls:sha256:<hex>` principals.
+
+On `[http.control]`, TLS and registered-certificate identity complete before
+the server parses any HTTP header. Unauthenticated handshakes consume only the
+pre-authentication cap, never the authenticated operator/readiness reserve.
+TLS handshake and HTTP header/body phases use monotonic absolute deadlines, so
+a byte-trickling peer cannot retain either class indefinitely. The ordinary
+listener keeps its existing fail-closed admission policy.
 
 `[http.operator]` is binary in this line: a request is operator-authorized only
 when it is the unauthenticated loopback local-owner path

@@ -523,6 +523,19 @@ hs256_secret_ref = "env:ORACLEMCP_OAUTH_HS256_SECRET"
 #
 # [http.mtls]
 # client_fingerprints = ["sha256:<client-leaf-der-sha256>"]
+#
+# Optional dedicated remote incident-response ingress. This is a second,
+# separately bounded listener; it is mandatory-mTLS and accepts only registered
+# certificates. The same fingerprint must also be allow-listed as an operator.
+# [http.control]
+# listen = "0.0.0.0:7071"
+# preauth_workers = 4
+# operator_workers = 1
+# doctor_workers = 1
+#
+# [http.operator]
+# allow_loopback_owner = true
+# allowed_subjects = ["mtls:sha256:<client-leaf-der-sha256>"]
 
 [[profiles]]
 name = "dev_ro"
