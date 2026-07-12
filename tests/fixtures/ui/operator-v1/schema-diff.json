@@ -6,8 +6,12 @@
           "ddl_chars": 45,
           "ddl_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
           "kind": "added",
-          "name": "APP_V",
+          "name": {
+            "quoted": false,
+            "text": "APP_V"
+          },
           "object_type": "VIEW",
+          "owner": null,
           "source_replaceable": true
         }
       ],
@@ -16,8 +20,12 @@
           "ddl_chars": 64,
           "ddl_sha256": "sha256:1f8b10508c06b6d97931f83be25776c3bb82cd6cdf1374ee05bed0dde144f86c",
           "kind": "changed",
-          "name": "APP_T",
+          "name": {
+            "quoted": false,
+            "text": "APP_T"
+          },
           "object_type": "TABLE",
+          "owner": null,
           "source_replaceable": false
         }
       ],
@@ -31,9 +39,13 @@
         "ddl_sha256": "sha256:1f8b10508c06b6d97931f83be25776c3bb82cd6cdf1374ee05bed0dde144f86c",
         "executable": false,
         "kind": "manual_review",
-        "name": "APP_T",
+        "name": {
+          "quoted": false,
+          "text": "APP_T"
+        },
         "object_type": "TABLE",
         "order": 0,
+        "owner": null,
         "source_replaceable": false
       },
       {
@@ -41,9 +53,13 @@
         "ddl_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
         "executable": true,
         "kind": "create",
-        "name": "APP_V",
+        "name": {
+          "quoted": false,
+          "text": "APP_V"
+        },
         "object_type": "VIEW",
         "order": 1,
+        "owner": null,
         "source_replaceable": true
       }
     ],

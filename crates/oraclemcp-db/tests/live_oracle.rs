@@ -28,9 +28,10 @@ use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
     AuthAdapter, CatalogExtractRequest, CatalogRowSetName, DbError, DependentsProbe, DrcpConfig,
-    OracleBind, OracleConnectOptions, OracleConnection, OracleSessionIdentity, QueryCaps,
-    RustOracleConnection, SearchDetailLevel, SessionPurity, explain_plan, extract_catalog_rowsets,
-    plan_cost_estimate, probe_dependents, search_objects,
+    OracleBind, OracleConnectOptions, OracleConnection, OracleIdentifier, OracleSessionIdentity,
+    QueryCaps, RustOracleConnection, SchemaObject, SchemaObjectType, SchemaSnapshot,
+    SearchDetailLevel, SessionPurity, compare_schemas, explain_plan, extract_catalog_rowsets,
+    migration_plan, plan_cost_estimate, probe_dependents, search_objects,
 };
 use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use serde_json::json;
@@ -650,6 +651,74 @@ fn live_server_features_probe_matches_generation() {
             features.edition,
             features.partitioning,
         );
+    });
+}
+
+#[test]
+fn live_schema_diff_drop_targets_exact_quoted_identity() {
+    run_with_cx(|cx| async move {
+        let test_name = "live_schema_diff_drop_targets_exact_quoted_identity";
+        let Some(conn) = connect_or_skip(&cx, test_name, test_opts()).await else {
+            return;
+        };
+        let folded = "ORACLEMCP_QA98_FOO";
+        let quoted = "oraclemcp_qa98_foo";
+        let folded_sql = folded.to_owned();
+        let quoted_sql = format!("\"{quoted}\"");
+        for target in [&folded_sql, &quoted_sql] {
+            let _ = conn
+                .execute(&cx, &format!("DROP TABLE {target} PURGE"), &[])
+                .await;
+        }
+        conn.execute(&cx, &format!("CREATE TABLE {folded_sql} (id NUMBER)"), &[])
+            .await
+            .expect("create ordinary folded table");
+        conn.execute(&cx, &format!("CREATE TABLE {quoted_sql} (id NUMBER)"), &[])
+            .await
+            .expect("create distinct quoted lowercase table");
+
+        let object = |text: &str, quoted: bool| SchemaObject {
+            owner: None,
+            object_type: SchemaObjectType::Table,
+            name: OracleIdentifier {
+                text: text.to_owned(),
+                quoted,
+            },
+            ddl: String::new(),
+        };
+        let before = SchemaSnapshot {
+            objects: vec![object(folded, false), object(quoted, true)],
+        };
+        let after = SchemaSnapshot {
+            objects: vec![object(quoted, true)],
+        };
+        let diff = compare_schemas(&before, &after).expect("exact identities coexist");
+        assert_eq!(diff.dropped.len(), 1);
+        let plan = migration_plan(&diff).expect("exact drop plan");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].ddl, format!("DROP TABLE {folded}"));
+        conn.execute(&cx, &plan[0].ddl, &[])
+            .await
+            .expect("execute generated exact drop");
+
+        let rows = conn
+            .query_rows(
+                &cx,
+                "SELECT table_name FROM user_tables WHERE table_name IN (:1, :2) ORDER BY table_name",
+                &[OracleBind::from(folded), OracleBind::from(quoted)],
+            )
+            .await
+            .expect("inspect exact remaining table identities");
+        assert_eq!(
+            rows.len(),
+            1,
+            "generated drop must remove exactly one table"
+        );
+        assert_eq!(rows[0].text("TABLE_NAME"), Some(quoted));
+
+        conn.execute(&cx, &format!("DROP TABLE {quoted_sql} PURGE"), &[])
+            .await
+            .expect("clean up quoted table");
     });
 }
 

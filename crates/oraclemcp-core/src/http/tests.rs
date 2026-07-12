@@ -3408,12 +3408,14 @@ fn schema_diff_export_is_redacted_and_review_gated() {
                     "objects": [
                         {
                             "object_type": "TABLE",
-                            "name": "T_OLD",
+                            "owner": null,
+                            "name": {"text": "T_OLD", "quoted": false},
                             "ddl": "create table t_old (id number)"
                         },
                         {
                             "object_type": "TABLE",
-                            "name": "T_CHANGED",
+                            "owner": null,
+                            "name": {"text": "T_CHANGED", "quoted": false},
                             "ddl": "create table t_changed (id number)"
                         }
                     ]
@@ -3422,12 +3424,14 @@ fn schema_diff_export_is_redacted_and_review_gated() {
                     "objects": [
                         {
                             "object_type": "TABLE",
-                            "name": "T_CHANGED",
+                            "owner": null,
+                            "name": {"text": "T_CHANGED", "quoted": false},
                             "ddl": "create table t_changed (id number, name varchar2(30))"
                         },
                         {
                             "object_type": "VIEW",
-                            "name": "V_NEW",
+                            "owner": null,
+                            "name": {"text": "V_NEW", "quoted": false},
                             "ddl": "create or replace view v_new as select id from t_changed"
                         }
                     ]
@@ -3442,6 +3446,10 @@ fn schema_diff_export_is_redacted_and_review_gated() {
     assert_eq!(body["data"]["summary"]["added"], serde_json::json!(1));
     assert_eq!(body["data"]["summary"]["dropped"], serde_json::json!(1));
     assert_eq!(body["data"]["summary"]["changed"], serde_json::json!(1));
+    assert_eq!(
+        body["data"]["diff"]["changed"][0]["name"],
+        serde_json::json!({"text": "T_CHANGED", "quoted": false})
+    );
     assert_eq!(
         body["data"]["diff"]["changed"][0].get("ddl"),
         None,

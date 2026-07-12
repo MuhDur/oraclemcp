@@ -1,8 +1,8 @@
 //! Operator schema diff and migration export response builder.
 
 use oraclemcp_db::{
-    ChangeKind, MigrationStep, SchemaDiff, SchemaObject, SchemaSnapshot, StepKind, compare_schemas,
-    migration_plan,
+    ChangeKind, MigrationStep, OracleIdentifier, SchemaDiff, SchemaObject, SchemaObjectType,
+    SchemaSnapshot, StepKind, compare_schemas, migration_plan,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -46,8 +46,10 @@ pub(crate) fn schema_diff_export_data(
         .filter(|value| !value.is_empty())
         .unwrap_or("Schema diff migration")
         .to_owned();
-    let diff = compare_schemas(&request.before, &request.after);
-    let steps = migration_plan(&diff);
+    let diff = compare_schemas(&request.before, &request.after)
+        .map_err(|error| SchemaDiffExportError::Invalid(error.to_string()))?;
+    let steps =
+        migration_plan(&diff).map_err(|error| SchemaDiffExportError::Invalid(error.to_string()))?;
     let proposal_statements = proposal_statements_from_steps(&steps);
     let script = render_migration_script(&title, &steps);
     let response = SchemaDiffExportData {
@@ -119,8 +121,9 @@ struct SchemaDiffView {
 #[derive(Clone, Debug, Serialize)]
 struct SchemaObjectDiffView {
     kind: ChangeKind,
-    object_type: String,
-    name: String,
+    owner: Option<OracleIdentifier>,
+    object_type: SchemaObjectType,
+    name: OracleIdentifier,
     ddl_sha256: String,
     ddl_chars: usize,
     source_replaceable: bool,
@@ -130,8 +133,9 @@ struct SchemaObjectDiffView {
 struct MigrationStepView {
     order: usize,
     kind: StepKind,
-    object_type: String,
-    name: String,
+    owner: Option<OracleIdentifier>,
+    object_type: SchemaObjectType,
+    name: OracleIdentifier,
     ddl_sha256: String,
     ddl_chars: usize,
     executable: bool,
@@ -148,32 +152,11 @@ fn validate_snapshot(
         )));
     }
     for (index, object) in snapshot.objects.iter().enumerate() {
-        validate_label(label, index, "object_type", &object.object_type)?;
-        validate_label(label, index, "name", &object.name)?;
         if object.ddl.len() > MAX_OBJECT_DDL_BYTES {
             return Err(SchemaDiffExportError::Invalid(format!(
                 "{label}.objects[{index}].ddl exceeds {MAX_OBJECT_DDL_BYTES} bytes"
             )));
         }
-    }
-    Ok(())
-}
-
-fn validate_label(
-    snapshot: &'static str,
-    index: usize,
-    field: &'static str,
-    value: &str,
-) -> Result<(), SchemaDiffExportError> {
-    if value.trim().is_empty() {
-        return Err(SchemaDiffExportError::Invalid(format!(
-            "{snapshot}.objects[{index}].{field} must be non-empty"
-        )));
-    }
-    if value.chars().any(char::is_control) {
-        return Err(SchemaDiffExportError::Invalid(format!(
-            "{snapshot}.objects[{index}].{field} must not contain control characters"
-        )));
     }
     Ok(())
 }
@@ -201,11 +184,12 @@ fn diff_view(diff: &SchemaDiff) -> SchemaDiffView {
 fn object_view(kind: ChangeKind, object: &SchemaObject) -> SchemaObjectDiffView {
     SchemaObjectDiffView {
         kind,
-        object_type: object.object_type.clone(),
+        owner: object.owner.clone(),
+        object_type: object.object_type,
         name: object.name.clone(),
         ddl_sha256: prefixed_sha256_hex(object.ddl.as_bytes()),
         ddl_chars: object.ddl.chars().count(),
-        source_replaceable: is_source_replaceable(&object.object_type),
+        source_replaceable: is_source_replaceable(object.object_type),
     }
 }
 
@@ -213,12 +197,13 @@ fn step_view(step: &MigrationStep) -> MigrationStepView {
     MigrationStepView {
         order: step.order,
         kind: step.kind,
-        object_type: step.object_type.clone(),
+        owner: step.owner.clone(),
+        object_type: step.object_type,
         name: step.name.clone(),
         ddl_sha256: prefixed_sha256_hex(step.ddl.as_bytes()),
         ddl_chars: step.ddl.chars().count(),
         executable: step_is_executable(step),
-        source_replaceable: is_source_replaceable(&step.object_type),
+        source_replaceable: is_source_replaceable(step.object_type),
     }
 }
 
@@ -262,11 +247,15 @@ fn render_migration_script(title: &str, steps: &[MigrationStep]) -> String {
     }
     for step in steps {
         out.push_str(&format!(
-            "-- step {}: {:?} {}.{} sha256={}\n",
+            "-- step {}: {:?} {} {} sha256={}\n",
             step.order + 1,
             step.kind,
-            sanitize_comment(&step.object_type),
-            sanitize_comment(&step.name),
+            step.object_type.as_str(),
+            sanitize_comment(
+                &step
+                    .qualified_name()
+                    .unwrap_or_else(|_| "<invalid identifier>".to_owned()),
+            ),
             prefixed_sha256_hex(step.ddl.as_bytes())
         ));
         if step.kind == StepKind::ManualReview {
@@ -314,14 +303,14 @@ fn terminated_statement(step: &MigrationStep) -> String {
 fn is_sqlplus_block_step(step: &MigrationStep) -> bool {
     matches!(step.kind, StepKind::Create | StepKind::Replace)
         && matches!(
-            step.object_type.to_ascii_uppercase().as_str(),
-            "FUNCTION"
-                | "PROCEDURE"
-                | "PACKAGE"
-                | "PACKAGE BODY"
-                | "TRIGGER"
-                | "TYPE"
-                | "TYPE BODY"
+            step.object_type,
+            SchemaObjectType::Function
+                | SchemaObjectType::Procedure
+                | SchemaObjectType::Package
+                | SchemaObjectType::PackageBody
+                | SchemaObjectType::Trigger
+                | SchemaObjectType::Type
+                | SchemaObjectType::TypeBody
         )
 }
 
@@ -335,18 +324,18 @@ fn sanitize_comment(value: &str) -> String {
         .collect()
 }
 
-fn is_source_replaceable(object_type: &str) -> bool {
+fn is_source_replaceable(object_type: SchemaObjectType) -> bool {
     matches!(
-        object_type.to_ascii_uppercase().as_str(),
-        "VIEW"
-            | "FUNCTION"
-            | "PROCEDURE"
-            | "PACKAGE"
-            | "PACKAGE BODY"
-            | "TRIGGER"
-            | "TYPE"
-            | "TYPE BODY"
-            | "SYNONYM"
+        object_type,
+        SchemaObjectType::View
+            | SchemaObjectType::Function
+            | SchemaObjectType::Procedure
+            | SchemaObjectType::Package
+            | SchemaObjectType::PackageBody
+            | SchemaObjectType::Trigger
+            | SchemaObjectType::Type
+            | SchemaObjectType::TypeBody
+            | SchemaObjectType::Synonym
     )
 }
 
@@ -368,9 +357,22 @@ mod tests {
 
     fn obj(object_type: &str, name: &str, ddl: &str) -> SchemaObject {
         SchemaObject {
-            object_type: object_type.to_owned(),
-            name: name.to_owned(),
+            owner: None,
+            object_type: match object_type {
+                "TABLE" => SchemaObjectType::Table,
+                "VIEW" => SchemaObjectType::View,
+                "PACKAGE" => SchemaObjectType::Package,
+                other => panic!("unsupported test object type {other}"),
+            },
+            name: identifier(name),
             ddl: ddl.to_owned(),
+        }
+    }
+
+    fn identifier(text: &str) -> OracleIdentifier {
+        OracleIdentifier {
+            text: text.to_owned(),
+            quoted: false,
         }
     }
 
@@ -449,8 +451,9 @@ mod tests {
         let steps = [MigrationStep {
             order: 0,
             kind: StepKind::ManualReview,
-            object_type: "TABLE".to_owned(),
-            name: "T_CHANGED".to_owned(),
+            object_type: SchemaObjectType::Table,
+            owner: None,
+            name: identifier("T_CHANGED"),
             ddl: "-- REVIEW REQUIRED\nCREATE TABLE t_changed (note varchar2(40) default q'[\nDROP TABLE victims;\n]');\rDROP USER bare_cr CASCADE;\n/\nPROMPT still-not-a-command"
                 .to_owned(),
         }];
@@ -482,29 +485,33 @@ mod tests {
             MigrationStep {
                 order: 0,
                 kind: StepKind::Replace,
-                object_type: "PACKAGE".to_owned(),
-                name: "P".to_owned(),
+                object_type: SchemaObjectType::Package,
+                owner: None,
+                name: identifier("P"),
                 ddl: "CREATE OR REPLACE PACKAGE p AS\n  PROCEDURE run;\nEND p;".to_owned(),
             },
             MigrationStep {
                 order: 1,
                 kind: StepKind::Replace,
-                object_type: "PROCEDURE".to_owned(),
-                name: "RUN".to_owned(),
+                object_type: SchemaObjectType::Procedure,
+                owner: None,
+                name: identifier("RUN"),
                 ddl: "CREATE OR REPLACE PROCEDURE run AS BEGIN NULL; END;\n/".to_owned(),
             },
             MigrationStep {
                 order: 2,
                 kind: StepKind::Replace,
-                object_type: "VIEW".to_owned(),
-                name: "V".to_owned(),
+                object_type: SchemaObjectType::View,
+                owner: None,
+                name: identifier("V"),
                 ddl: "CREATE OR REPLACE VIEW v AS SELECT 1 x FROM dual;".to_owned(),
             },
             MigrationStep {
                 order: 3,
                 kind: StepKind::Drop,
-                object_type: "PACKAGE".to_owned(),
-                name: "OLD_P".to_owned(),
+                object_type: SchemaObjectType::Package,
+                owner: None,
+                name: identifier("OLD_P"),
                 ddl: "DROP PACKAGE old_p".to_owned(),
             },
         ];
@@ -540,6 +547,103 @@ mod tests {
         assert!(
             err.to_string().contains("too many objects"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_identical_and_conflicting_duplicate_identities_with_indexes() {
+        for second_ddl in ["same", "different"] {
+            let request = SchemaDiffExportRequest {
+                before: SchemaSnapshot {
+                    objects: vec![obj("TABLE", "foo", "same"), obj("TABLE", "FOO", second_ddl)],
+                },
+                after: SchemaSnapshot::default(),
+                title: None,
+            };
+
+            let error = schema_diff_export_data(request).expect_err("duplicates rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("before snapshot entries 0 and 1 have duplicate identity TABLE FOO"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_object_allowlist_and_identifier_validation_fail_closed() {
+        let unsupported = serde_json::from_value::<SchemaDiffExportRequest>(json!({
+            "before": {"objects": [{
+                "owner": null,
+                "object_type": "TABLE; DROP USER VICTIM CASCADE",
+                "name": {"text": "T", "quoted": false},
+                "ddl": ""
+            }]},
+            "after": {"objects": []}
+        }));
+        assert!(
+            unsupported.is_err(),
+            "unsupported type must fail deserialization"
+        );
+
+        let malformed_name = SchemaDiffExportRequest {
+            before: SchemaSnapshot {
+                objects: vec![SchemaObject {
+                    owner: None,
+                    object_type: SchemaObjectType::Table,
+                    name: OracleIdentifier {
+                        text: "T; DROP USER VICTIM CASCADE".to_owned(),
+                        quoted: false,
+                    },
+                    ddl: String::new(),
+                }],
+            },
+            after: SchemaSnapshot::default(),
+            title: None,
+        };
+        let error = schema_diff_export_data(malformed_name).expect_err("malformed name rejected");
+        assert!(error.to_string().contains("simple unquoted"));
+    }
+
+    #[test]
+    fn quoted_mixed_case_owner_and_escaped_name_render_as_one_drop_target() {
+        let request = SchemaDiffExportRequest {
+            before: SchemaSnapshot {
+                objects: vec![SchemaObject {
+                    owner: Some(OracleIdentifier {
+                        text: "MixedOwner".to_owned(),
+                        quoted: true,
+                    }),
+                    object_type: SchemaObjectType::Table,
+                    name: OracleIdentifier {
+                        text: "odd\"; DROP USER VICTIM CASCADE --".to_owned(),
+                        quoted: true,
+                    },
+                    ddl: String::new(),
+                }],
+            },
+            after: SchemaSnapshot::default(),
+            title: None,
+        };
+
+        let data = schema_diff_export_data(request).expect("quoted identifier is legal");
+        let sql = data["proposal_statements"][0]["sql_template"]
+            .as_str()
+            .expect("drop SQL");
+        assert_eq!(
+            sql,
+            "DROP TABLE \"MixedOwner\".\"odd\"\"; DROP USER VICTIM CASCADE --\""
+        );
+        assert_eq!(
+            sql.matches(';').count(),
+            1,
+            "semicolon remains inside quotes"
+        );
+        assert_eq!(data["migration_steps"][0]["name"]["quoted"], json!(true));
+        assert_eq!(
+            data["migration_steps"][0]["owner"]["text"],
+            json!("MixedOwner")
         );
     }
 }

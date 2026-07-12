@@ -826,6 +826,13 @@ coverage, not as a universal DDL undo guarantee.
 The Reviews page also exposes schema diff + migration export for two supplied
 schema snapshots. The diff view is redacted to object metadata, hashes, and
 counts; the generated migration script is an explicit reviewable file artifact.
+Snapshot identities are explicit: each object carries an optional
+`owner: {text, quoted}`, an allowlisted `object_type`, and
+`name: {text, quoted}`. Unquoted names use Oracle's uppercase folding while
+quoted names remain exact; duplicate concrete identities are rejected rather
+than collapsed. Generated drops quote owner/name safely, and operations such as
+standalone constraints or body-only drops remain review-only when the snapshot
+lacks the parent-object context needed for correct DDL.
 Drafting executable steps creates a normal DDL Change Proposal, so apply still
 uses apply-time reclassification, confirmation, profile ceilings, idempotency,
 and audit. The export is honest about Oracle DDL atomicity: successful DDL steps

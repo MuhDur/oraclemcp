@@ -690,8 +690,9 @@ pub fn operator_fixture_values() -> Vec<(&'static str, Value)> {
                     "diff": {
                         "added": [{
                             "kind": "added",
+                            "owner": null,
                             "object_type": "VIEW",
-                            "name": "APP_V",
+                            "name": {"text": "APP_V", "quoted": false},
                             "ddl_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
                             "ddl_chars": 45,
                             "source_replaceable": true
@@ -699,8 +700,9 @@ pub fn operator_fixture_values() -> Vec<(&'static str, Value)> {
                         "dropped": [],
                         "changed": [{
                             "kind": "changed",
+                            "owner": null,
                             "object_type": "TABLE",
-                            "name": "APP_T",
+                            "name": {"text": "APP_T", "quoted": false},
                             "ddl_sha256": "sha256:1f8b10508c06b6d97931f83be25776c3bb82cd6cdf1374ee05bed0dde144f86c",
                             "ddl_chars": 64,
                             "source_replaceable": false
@@ -709,8 +711,9 @@ pub fn operator_fixture_values() -> Vec<(&'static str, Value)> {
                     "migration_steps": [{
                         "order": 0,
                         "kind": "manual_review",
+                        "owner": null,
                         "object_type": "TABLE",
-                        "name": "APP_T",
+                        "name": {"text": "APP_T", "quoted": false},
                         "ddl_sha256": "sha256:1f8b10508c06b6d97931f83be25776c3bb82cd6cdf1374ee05bed0dde144f86c",
                         "ddl_chars": 128,
                         "executable": false,
@@ -718,8 +721,9 @@ pub fn operator_fixture_values() -> Vec<(&'static str, Value)> {
                     }, {
                         "order": 1,
                         "kind": "create",
+                        "owner": null,
                         "object_type": "VIEW",
-                        "name": "APP_V",
+                        "name": {"text": "APP_V", "quoted": false},
                         "ddl_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
                         "ddl_chars": 45,
                         "executable": true,

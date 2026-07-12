@@ -140,8 +140,8 @@ pub use query::{
     read_query_named,
 };
 pub use schema_diff::{
-    ChangeKind, MigrationStep, SchemaDiff, SchemaObject, SchemaSnapshot, StepKind, compare_schemas,
-    migration_plan,
+    ChangeKind, MigrationStep, OracleIdentifier, SchemaDiff, SchemaDiffError, SchemaObject,
+    SchemaObjectType, SchemaSnapshot, StepKind, compare_schemas, migration_plan,
 };
 pub use serialize::{
     OracleMetadataCacheKey, SerializeOptions, StructuredDecodeCaps, TypeRepr, base64_encode,
