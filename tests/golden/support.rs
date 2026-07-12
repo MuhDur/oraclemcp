@@ -261,10 +261,11 @@ fn scrub_value(value: &Value) -> Value {
         Value::Array(values) => Value::Array(values.iter().map(scrub_value).collect()),
         Value::String(text) => {
             // Value-aware domain scrubbing first (session ids, cursor/export MAC
-            // tags, fence tags, UUID-like tokens), then the shared redaction pass
-            // so no absolute path, host:port, or memory address can ever leak
-            // into a committed golden.
-            let domain = scrub_export_uri(&scrub_text(text));
+            // tags, fence tags, UUID-like tokens, the per-session Streamable HTTP
+            // event-id binding), then the shared redaction pass so no absolute
+            // path, host:port, or memory address can ever leak into a committed
+            // golden.
+            let domain = scrub_stream_event_id(&scrub_export_uri(&scrub_text(text)));
             Value::String(redaction_scrubber().scrub(&domain))
         }
         other => other.clone(),
@@ -319,6 +320,25 @@ fn scrub_export_uri(value: &str) -> String {
         return scrub_cursor_token(value);
     }
     value.to_owned()
+}
+
+/// Normalize the volatile per-session binding in a Streamable HTTP / operator
+/// SSE event id (`<seq>/<32-hex>`) to `<seq>/[SESSION]`.
+///
+/// The binding is `sha256(session-id)[..32]` (see `HttpResultSession::new`): it
+/// is STABLE within a single SSE stream — so a client can resume with the exact
+/// `Last-Event-ID` it last saw — but FRESH per session, because the session id
+/// itself is minted from the OS CSPRNG (`new_session_id`). That makes the raw
+/// binding change on every test run, so freezing it would bless a flaky value.
+/// Masking only the 32-hex hash keeps the deterministic `<seq>` prefix, so the
+/// golden still proves the ordering and the `<seq>/<binding>` shape a resuming
+/// client relies on. The heartbeat id `0/0` and any `<seq>/0` literal are left
+/// untouched — the binding `0` is a stable sentinel, not a per-session hash.
+fn scrub_stream_event_id(text: &str) -> String {
+    static BINDING: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\b(\d+)/[0-9a-f]{32}\b").expect("stream event id binding regex is valid")
+    });
+    BINDING.replace_all(text, "${1}/[SESSION]").into_owned()
 }
 
 /// Within a flat JSON text payload, normalize the MAC tag of every

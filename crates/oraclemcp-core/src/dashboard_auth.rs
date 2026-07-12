@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use asupersync::Cx;
-use asupersync::http::h1::http_client::HttpClient;
+use asupersync::http::h1::http_client::{HttpClient, ParsedUrl, Scheme};
 use asupersync::http::h1::types::Method;
 #[cfg(test)]
 use asupersync::runtime::RuntimeBuilder;
@@ -25,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use oraclemcp_audit::{ct_eq, hmac_sha256};
+
 use crate::operator_protocol::OPERATOR_ROUTE_SPECS;
 
 /// One-time local bootstrap route used by `oraclemcp dashboard`.
@@ -33,6 +35,16 @@ pub const DASHBOARD_PAIR_PATH: &str = "/dashboard/pair";
 pub const DASHBOARD_SESSION_PATH: &str = "/dashboard/session";
 /// Liveness path probed before minting a dashboard pairing ticket (B3.1 / D1).
 pub const DASHBOARD_HTTP_PROBE_PATH: &str = "/healthz";
+/// Request challenge used to bind pairing to one live listener instance.
+pub const DASHBOARD_PROBE_CHALLENGE_HEADER: &str = "x-oraclemcp-dashboard-challenge";
+/// Hash of the not-yet-released pairing secret covered by the listener proof.
+pub const DASHBOARD_PROBE_TOKEN_HASH_HEADER: &str = "x-oraclemcp-dashboard-token-sha256";
+/// Listener instance identity returned only for a well-formed pairing probe.
+pub const DASHBOARD_INSTANCE_HEADER: &str = "x-oraclemcp-dashboard-instance";
+/// Listener-configured audience returned with the pairing proof.
+pub const DASHBOARD_AUDIENCE_HEADER: &str = "x-oraclemcp-dashboard-audience";
+/// HMAC capability proof binding the challenge, token hash, and audience.
+pub const DASHBOARD_PROOF_HEADER: &str = "x-oraclemcp-dashboard-proof";
 /// Short timeout for the pre-mint dashboard HTTP probe.
 pub const DASHBOARD_HTTP_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Dashboard session cookie. It is deliberately distinct from the MCP cookie.
@@ -54,6 +66,35 @@ pub struct DashboardPairingTicket {
     pub expires_unix: u64,
     /// The 0600 ticket file consumed by the running service.
     pub ticket_file: PathBuf,
+}
+
+/// Opaque preflight state. The raw token remains in the CLI process until a
+/// listener answers the instance-bound probe.
+pub struct DashboardPairingRequest {
+    audience: String,
+    token: String,
+    token_sha256: String,
+    challenge: String,
+}
+
+impl fmt::Debug for DashboardPairingRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DashboardPairingRequest")
+            .field("audience", &self.audience)
+            .field("token", &"<redacted>")
+            .field("token_sha256", &self.token_sha256)
+            .field("challenge", &self.challenge)
+            .finish()
+    }
+}
+
+/// Capability proof returned by the probed listener. It is useful only with
+/// the still-private pairing token whose hash it covers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DashboardListenerProof {
+    instance_id: String,
+    audience: String,
+    proof: String,
 }
 
 impl fmt::Debug for DashboardPairingTicket {
@@ -100,6 +141,8 @@ pub enum DashboardAuthError {
     InvalidTicket,
     #[error("dashboard pairing ticket expired")]
     ExpiredTicket,
+    #[error("dashboard pairing ticket is bound to a different listener or audience")]
+    ListenerBindingMismatch,
     #[error("dashboard session cookie is missing")]
     MissingSession,
     #[error("dashboard session is invalid or expired")]
@@ -127,6 +170,10 @@ pub enum DashboardAuthError {
 struct TicketFile {
     schema_version: u8,
     token_sha256: String,
+    challenge: String,
+    listener_instance_id: String,
+    listener_proof: String,
+    audience: String,
     issued_unix: u64,
     expires_unix: u64,
     purpose: String,
@@ -141,22 +188,32 @@ struct DashboardSession {
 }
 
 /// In-memory dashboard session store plus the runtime-dir ticket reader.
-#[derive(Debug)]
 pub struct DashboardAuth {
     ticket_dir: PathBuf,
+    instance_id: String,
+    instance_secret: [u8; TOKEN_BYTES],
+    audience: String,
     sessions: Mutex<HashMap<String, DashboardSession>>,
     session_ttl: Duration,
 }
 
 impl DashboardAuth {
     /// Build dashboard auth against the shared runtime ticket directory.
-    #[must_use]
-    pub fn new(ticket_dir: PathBuf) -> Self {
-        Self {
+    pub fn new(ticket_dir: PathBuf, audience: &str) -> Result<Self, DashboardAuthError> {
+        let audience = canonical_dashboard_audience(audience)?;
+        let mut instance_secret = [0_u8; TOKEN_BYTES];
+        getrandom::getrandom(&mut instance_secret).map_err(|error| DashboardAuthError::Io {
+            operation: "read OS randomness",
+            message: error.to_string(),
+        })?;
+        Ok(Self {
             ticket_dir,
+            instance_id: sha256_hex(&instance_secret),
+            instance_secret,
+            audience,
             sessions: Mutex::new(HashMap::new()),
             session_ttl: Duration::from_secs(DASHBOARD_SESSION_TTL_SECONDS),
-        }
+        })
     }
 
     /// Runtime directory this instance consumes one-time tickets from.
@@ -165,10 +222,31 @@ impl DashboardAuth {
         &self.ticket_dir
     }
 
+    /// Stable, non-secret identity for this process-local listener instance.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    /// Canonical scheme/host/port audience this listener accepts pairing for.
+    #[must_use]
+    pub fn audience(&self) -> &str {
+        &self.audience
+    }
+
+    /// Produce an instance capability proof for a pre-release token hash.
+    pub fn pairing_probe_proof(&self, challenge: &str, token_sha256: &str) -> Option<String> {
+        if !is_lower_hex_64(challenge) || !is_lower_hex_64(token_sha256) {
+            return None;
+        }
+        Some(self.proof_for(challenge, token_sha256))
+    }
+
     /// Consume one local pairing ticket and mint an HttpOnly dashboard cookie.
     pub fn exchange_ticket(
         &self,
         token: &str,
+        audience: &str,
         secure_cookie: bool,
     ) -> Result<DashboardLogin, DashboardAuthError> {
         let token = token.trim();
@@ -180,11 +258,20 @@ impl DashboardAuth {
         let raw = fs::read_to_string(&path).map_err(|_| DashboardAuthError::InvalidTicket)?;
         let ticket: TicketFile =
             serde_json::from_str(&raw).map_err(|_| DashboardAuthError::InvalidTicket)?;
-        if ticket.schema_version != 1
+        if ticket.schema_version != 2
             || ticket.purpose != "oraclemcp-dashboard-pairing"
             || ticket.token_sha256 != token_hash
         {
             return Err(DashboardAuthError::InvalidTicket);
+        }
+        let audience = canonical_dashboard_audience(audience)?;
+        let expected_proof = self.proof_for(&ticket.challenge, &ticket.token_sha256);
+        if ticket.listener_instance_id != self.instance_id
+            || ticket.audience != self.audience
+            || audience != self.audience
+            || !ct_eq(ticket.listener_proof.as_bytes(), expected_proof.as_bytes())
+        {
+            return Err(DashboardAuthError::ListenerBindingMismatch);
         }
         if unix_now() > ticket.expires_unix {
             let _ = fs::remove_file(&path);
@@ -210,6 +297,12 @@ impl DashboardAuth {
             ),
             expires_unix,
         })
+    }
+
+    fn proof_for(&self, challenge: &str, token_sha256: &str) -> String {
+        let message =
+            dashboard_probe_message(challenge, token_sha256, &self.audience, &self.instance_id);
+        hex_bytes(&hmac_sha256(&self.instance_secret, &message))
     }
 
     /// Return same-origin session info for a valid dashboard session cookie.
@@ -286,6 +379,18 @@ impl DashboardAuth {
     }
 }
 
+impl fmt::Debug for DashboardAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DashboardAuth")
+            .field("ticket_dir", &self.ticket_dir)
+            .field("instance_id", &self.instance_id)
+            .field("instance_secret", &"<redacted>")
+            .field("audience", &self.audience)
+            .field("session_ttl", &self.session_ttl)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Directory shared by the CLI shell and the running service for one-time
 /// dashboard pairing tickets.
 #[must_use]
@@ -299,19 +404,27 @@ pub fn default_dashboard_ticket_dir() -> PathBuf {
     std::env::temp_dir().join(format!("oraclemcp-dashboard-{user}"))
 }
 
-/// Probe `base_url` for a running oraclemcp HTTP listener before minting a pairing
-/// ticket. Uses `/healthz` (liveness — OK even when the DB is down).
+/// Prepare a pairing request without releasing its raw bearer to any listener.
+pub fn prepare_dashboard_pairing(
+    base_url: &str,
+) -> Result<DashboardPairingRequest, DashboardAuthError> {
+    let audience = canonical_dashboard_audience(base_url)?;
+    let token = random_hex(TOKEN_BYTES)?;
+    Ok(DashboardPairingRequest {
+        audience,
+        token_sha256: sha256_hex(token.as_bytes()),
+        token,
+        challenge: random_hex(TOKEN_BYTES)?,
+    })
+}
+
+/// Probe the requested listener for a capability proof bound to the still
+/// private pairing token. Uses `/healthz` (liveness even when the DB is down).
 pub async fn probe_dashboard_http_service(
     cx: &Cx,
-    base_url: &str,
-) -> Result<(), DashboardAuthError> {
-    let base = base_url.trim();
-    if base.is_empty() {
-        return Err(DashboardAuthError::ServiceUnreachable {
-            base_url: base_url.to_owned(),
-            detail: "empty base URL".to_owned(),
-        });
-    }
+    request: &DashboardPairingRequest,
+) -> Result<DashboardListenerProof, DashboardAuthError> {
+    let base = &request.audience;
     let probe_url = format!(
         "{}{}",
         base.trim_end_matches('/'),
@@ -326,7 +439,22 @@ pub async fn probe_dashboard_http_service(
     let client = HttpClient::new();
     let response = asupersync::time::timeout(cx.now(), timeout, async {
         client
-            .request(cx, Method::Get, &probe_url, Vec::new(), Vec::new())
+            .request(
+                cx,
+                Method::Get,
+                &probe_url,
+                vec![
+                    (
+                        DASHBOARD_PROBE_CHALLENGE_HEADER.to_owned(),
+                        request.challenge.clone(),
+                    ),
+                    (
+                        DASHBOARD_PROBE_TOKEN_HASH_HEADER.to_owned(),
+                        request.token_sha256.clone(),
+                    ),
+                ],
+                Vec::new(),
+            )
             .await
     })
     .await
@@ -338,34 +466,72 @@ pub async fn probe_dashboard_http_service(
         base_url: base_owned.clone(),
         detail: e.to_string(),
     })?;
-    if (200..300).contains(&response.status) {
-        Ok(())
-    } else {
-        Err(DashboardAuthError::ServiceUnreachable {
+    if !(200..300).contains(&response.status) {
+        return Err(DashboardAuthError::ServiceUnreachable {
             base_url: base_owned,
             detail: format!("HTTP {}", response.status),
-        })
+        });
     }
+    let header = |name: &str| {
+        response
+            .headers
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.trim().to_owned())
+    };
+    let instance_id = header(DASHBOARD_INSTANCE_HEADER);
+    let audience = header(DASHBOARD_AUDIENCE_HEADER);
+    let proof = header(DASHBOARD_PROOF_HEADER);
+    let (Some(instance_id), Some(audience), Some(proof)) = (instance_id, audience, proof) else {
+        return Err(DashboardAuthError::ServiceUnreachable {
+            base_url: base_owned,
+            detail: "listener did not return an oraclemcp pairing proof".to_owned(),
+        });
+    };
+    if !is_lower_hex_64(&instance_id)
+        || !is_lower_hex_64(&proof)
+        || canonical_dashboard_audience(&audience).ok().as_deref()
+            != Some(request.audience.as_str())
+    {
+        return Err(DashboardAuthError::ServiceUnreachable {
+            base_url: base_owned,
+            detail: "listener returned an invalid or mismatched pairing proof".to_owned(),
+        });
+    }
+    Ok(DashboardListenerProof {
+        instance_id,
+        audience,
+        proof,
+    })
 }
 
 /// Create a 0600, short-lived local pairing ticket and return the browser URL.
 pub fn mint_dashboard_pairing_ticket(
     ticket_dir: &Path,
-    base_url: &str,
+    request: DashboardPairingRequest,
+    listener: DashboardListenerProof,
 ) -> Result<DashboardPairingTicket, DashboardAuthError> {
+    if listener.audience != request.audience
+        || !is_lower_hex_64(&listener.instance_id)
+        || !is_lower_hex_64(&listener.proof)
+    {
+        return Err(DashboardAuthError::ListenerBindingMismatch);
+    }
     prepare_ticket_dir(ticket_dir)?;
-    let token = random_hex(TOKEN_BYTES)?;
-    let token_sha256 = sha256_hex(token.as_bytes());
     let issued_unix = unix_now();
     let expires_unix = issued_unix.saturating_add(DASHBOARD_PAIRING_TTL_SECONDS);
     let ticket = TicketFile {
-        schema_version: 1,
-        token_sha256: token_sha256.clone(),
+        schema_version: 2,
+        token_sha256: request.token_sha256.clone(),
+        challenge: request.challenge,
+        listener_instance_id: listener.instance_id,
+        listener_proof: listener.proof,
+        audience: listener.audience,
         issued_unix,
         expires_unix,
         purpose: "oraclemcp-dashboard-pairing".to_owned(),
     };
-    let ticket_file = ticket_path(ticket_dir, &token_sha256);
+    let ticket_file = ticket_path(ticket_dir, &request.token_sha256);
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -389,15 +555,31 @@ pub fn mint_dashboard_pairing_ticket(
         message: e.to_string(),
     })?;
     let url = format!(
-        "{}{}?ticket={token}",
-        base_url.trim_end_matches('/'),
-        DASHBOARD_PAIR_PATH
+        "{}{}?ticket={}",
+        request.audience.trim_end_matches('/'),
+        DASHBOARD_PAIR_PATH,
+        request.token,
     );
     Ok(DashboardPairingTicket {
         url,
         expires_unix,
         ticket_file,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn mint_dashboard_pairing_ticket_for_test(
+    auth: &DashboardAuth,
+) -> Result<DashboardPairingTicket, DashboardAuthError> {
+    let request = prepare_dashboard_pairing(auth.audience())?;
+    let proof = DashboardListenerProof {
+        instance_id: auth.instance_id().to_owned(),
+        audience: auth.audience().to_owned(),
+        proof: auth
+            .pairing_probe_proof(&request.challenge, &request.token_sha256)
+            .ok_or(DashboardAuthError::InvalidTicket)?,
+    };
+    mint_dashboard_pairing_ticket(auth.ticket_dir(), request, proof)
 }
 
 fn prepare_ticket_dir(ticket_dir: &Path) -> Result<(), DashboardAuthError> {
@@ -420,6 +602,67 @@ fn prepare_ticket_dir(ticket_dir: &Path) -> Result<(), DashboardAuthError> {
 
 fn ticket_path(ticket_dir: &Path, token_sha256: &str) -> PathBuf {
     ticket_dir.join(format!("dashboard-ticket-{token_sha256}.json"))
+}
+
+/// Normalize and restrict dashboard bootstrap to an exact loopback audience.
+/// The canonical form always includes the effective port so scheme/port drift
+/// cannot silently retarget a ticket.
+pub fn canonical_dashboard_audience(base_url: &str) -> Result<String, DashboardAuthError> {
+    let parsed = ParsedUrl::parse(base_url.trim()).map_err(|error| {
+        DashboardAuthError::ServiceUnreachable {
+            base_url: base_url.to_owned(),
+            detail: error.to_string(),
+        }
+    })?;
+    if parsed.path != "/" {
+        return Err(DashboardAuthError::ServiceUnreachable {
+            base_url: base_url.to_owned(),
+            detail: "dashboard base URL must not contain a path, query, or fragment".to_owned(),
+        });
+    }
+    let host = parsed.host.to_ascii_lowercase();
+    let ip_host = host.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host == "localhost"
+        || ip_host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    if !loopback {
+        return Err(DashboardAuthError::ServiceUnreachable {
+            base_url: base_url.to_owned(),
+            detail: "dashboard pairing is restricted to an exact loopback listener".to_owned(),
+        });
+    }
+    let scheme = match parsed.scheme {
+        Scheme::Http => "http",
+        Scheme::Https => "https",
+    };
+    Ok(format!("{scheme}://{host}:{}", parsed.port))
+}
+
+fn dashboard_probe_message(
+    challenge: &str,
+    token_sha256: &str,
+    audience: &str,
+    instance_id: &str,
+) -> Vec<u8> {
+    [
+        b"oraclemcp.dashboard.listener-proof.v1\0".as_slice(),
+        challenge.as_bytes(),
+        b"\0",
+        token_sha256.as_bytes(),
+        b"\0",
+        audience.as_bytes(),
+        b"\0",
+        instance_id.as_bytes(),
+    ]
+    .concat()
+}
+
+fn is_lower_hex_64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn session_view(session: &DashboardSession) -> DashboardSessionView {
@@ -537,11 +780,38 @@ mod tests {
             .expect("pairing URL has ticket")
     }
 
+    fn auth_and_ticket(dir: PathBuf, base_url: &str) -> (DashboardAuth, DashboardPairingTicket) {
+        let auth = DashboardAuth::new(dir.clone(), base_url).expect("dashboard auth builds");
+        let request = prepare_dashboard_pairing(base_url).expect("pairing prepares");
+        let proof = DashboardListenerProof {
+            instance_id: auth.instance_id().to_owned(),
+            audience: auth.audience().to_owned(),
+            proof: auth
+                .pairing_probe_proof(&request.challenge, &request.token_sha256)
+                .expect("well-formed probe proof"),
+        };
+        let ticket =
+            mint_dashboard_pairing_ticket(&dir, request, proof).expect("pairing ticket mints");
+        (auth, ticket)
+    }
+
+    fn listener_proof(
+        auth: &DashboardAuth,
+        request: &DashboardPairingRequest,
+    ) -> DashboardListenerProof {
+        DashboardListenerProof {
+            instance_id: auth.instance_id().to_owned(),
+            audience: auth.audience().to_owned(),
+            proof: auth
+                .pairing_probe_proof(&request.challenge, &request.token_sha256)
+                .expect("well-formed probe proof"),
+        }
+    }
+
     #[test]
     fn pairing_ticket_is_single_use_and_hash_only() {
         let dir = test_dir("single-use");
-        let ticket =
-            mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1:7070").expect("ticket mints");
+        let (auth, ticket) = auth_and_ticket(dir, "http://127.0.0.1:7070");
         let token = token_from_url(&ticket.url);
         let file = fs::read_to_string(&ticket.ticket_file).expect("ticket file is readable");
         assert!(
@@ -549,16 +819,15 @@ mod tests {
             "ticket file stores only a hash, not the bootstrap secret"
         );
 
-        let auth = DashboardAuth::new(dir);
         let login = auth
-            .exchange_ticket(token, false)
+            .exchange_ticket(token, auth.audience(), false)
             .expect("first exchange works");
         assert!(
             login.session_cookie.contains("HttpOnly")
                 && login.session_cookie.contains("SameSite=Strict")
         );
         assert!(matches!(
-            auth.exchange_ticket(token, false),
+            auth.exchange_ticket(token, auth.audience(), false),
             Err(DashboardAuthError::InvalidTicket)
         ));
     }
@@ -566,11 +835,11 @@ mod tests {
     #[test]
     fn csrf_and_action_ticket_are_route_scoped() {
         let dir = test_dir("scoped");
-        let ticket =
-            mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1:7070").expect("ticket mints");
+        let (auth, ticket) = auth_and_ticket(dir, "http://127.0.0.1:7070");
         let token = token_from_url(&ticket.url);
-        let auth = DashboardAuth::new(dir);
-        let login = auth.exchange_ticket(token, false).expect("login works");
+        let login = auth
+            .exchange_ticket(token, auth.audience(), false)
+            .expect("login works");
         let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
         let view = auth
             .session_view(Some(cookie_pair))
@@ -643,6 +912,62 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn pairing_ticket_is_bound_to_exact_listener_instance_and_audience() {
+        let dir = test_dir("listener-binding");
+        let base = "http://127.0.0.1:7070";
+        let intended = DashboardAuth::new(dir.clone(), base).expect("intended listener builds");
+        let other_instance = DashboardAuth::new(dir.clone(), base).expect("other listener builds");
+        let request = prepare_dashboard_pairing(base).expect("pairing prepares");
+        let proof = listener_proof(&intended, &request);
+        let ticket = mint_dashboard_pairing_ticket(&dir, request, proof).expect("ticket mints");
+        let token = token_from_url(&ticket.url);
+
+        assert!(matches!(
+            other_instance.exchange_ticket(token, other_instance.audience(), false),
+            Err(DashboardAuthError::ListenerBindingMismatch)
+        ));
+        intended
+            .exchange_ticket(token, intended.audience(), false)
+            .expect("binding failure does not consume intended ticket");
+
+        let drifted =
+            DashboardAuth::new(dir, "http://127.0.0.1:7071").expect("drifted listener builds");
+        assert_ne!(drifted.audience(), intended.audience());
+    }
+
+    #[test]
+    fn listener_proof_cannot_be_replayed_for_a_substituted_pairing_token() {
+        let dir = test_dir("proof-substitution");
+        let base = "http://127.0.0.1:7070";
+        let auth = DashboardAuth::new(dir.clone(), base).expect("listener builds");
+        let mut request = prepare_dashboard_pairing(base).expect("pairing prepares");
+        let proof = listener_proof(&auth, &request);
+        request.token = random_hex(TOKEN_BYTES).expect("replacement token");
+        request.token_sha256 = sha256_hex(request.token.as_bytes());
+        let ticket = mint_dashboard_pairing_ticket(&dir, request, proof)
+            .expect("structurally valid proof persists for server verification");
+        assert!(matches!(
+            auth.exchange_ticket(token_from_url(&ticket.url), auth.audience(), false),
+            Err(DashboardAuthError::ListenerBindingMismatch)
+        ));
+    }
+
+    #[test]
+    fn dashboard_pairing_rejects_remote_and_non_base_urls() {
+        for invalid in [
+            "http://192.0.2.1:7070",
+            "http://127.0.0.1:7070/path",
+            "http://127.0.0.1:7070/?query=1",
+            "ftp://127.0.0.1:7070",
+        ] {
+            assert!(
+                prepare_dashboard_pairing(invalid).is_err(),
+                "invalid dashboard audience must fail: {invalid}"
+            );
+        }
+    }
+
     fn spawn_healthz_stub() -> (
         u16,
         std::thread::JoinHandle<()>,
@@ -680,31 +1005,36 @@ mod tests {
     // Drives the async probe on a dedicated test runtime. `block_on` is allowed
     // here because the concurrency-lint scans production code only (#[cfg(test)]
     // is skipped) — this mirrors the real CLI boundary (`main::block_on_connect`).
-    fn probe_blocking(base_url: &str) -> Result<(), DashboardAuthError> {
+    fn probe_blocking(
+        request: &DashboardPairingRequest,
+    ) -> Result<DashboardListenerProof, DashboardAuthError> {
         let reactor =
             asupersync::runtime::reactor::create_reactor().expect("test probe reactor builds");
         let runtime = RuntimeBuilder::current_thread()
             .with_reactor(reactor)
             .build()
             .expect("test probe runtime builds");
-        runtime.block_on(async move {
+        runtime.block_on(async {
             let cx = Cx::current().expect("block_on installs a current Cx");
-            probe_dashboard_http_service(&cx, base_url).await
+            probe_dashboard_http_service(&cx, request).await
         })
     }
 
     #[test]
     fn probe_dashboard_http_service_refuses_unreachable_base_url() {
-        let err = probe_blocking("http://127.0.0.1:1").expect_err("closed port");
+        let request = prepare_dashboard_pairing("http://127.0.0.1:1").expect("pairing prepares");
+        let err = probe_blocking(&request).expect_err("closed port");
         assert!(matches!(err, DashboardAuthError::ServiceUnreachable { .. }));
         assert!(err.to_string().contains("no oraclemcp HTTP service at"));
     }
 
     #[test]
-    fn probe_dashboard_http_service_accepts_healthz_liveness() {
+    fn probe_dashboard_http_service_refuses_generic_healthz_liveness() {
         let (port, handle, shutdown) = spawn_healthz_stub();
         let base = format!("http://127.0.0.1:{port}");
-        probe_blocking(&base).expect("healthz stub answers");
+        let request = prepare_dashboard_pairing(&base).expect("pairing prepares");
+        let error = probe_blocking(&request).expect_err("generic healthz stub is unauthenticated");
+        assert!(error.to_string().contains("pairing proof"));
         shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = handle.join();
     }

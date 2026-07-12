@@ -13,6 +13,10 @@ use oraclemcp_audit::{
     GENESIS_HASH, SigningKey, anchor_path_for,
 };
 use oraclemcp_config::{CONFIG_PATH_ENV, OperatingLevel, OracleMcpConfig};
+use oraclemcp_core::{
+    DASHBOARD_AUDIENCE_HEADER, DASHBOARD_INSTANCE_HEADER, DASHBOARD_PROBE_CHALLENGE_HEADER,
+    DASHBOARD_PROBE_TOKEN_HASH_HEADER, DASHBOARD_PROOF_HEADER, DashboardAuth,
+};
 
 fn temp_config(contents: &str) -> PathBuf {
     let dir = temp_dir("config");
@@ -162,18 +166,47 @@ fn audit_verify_cli_uses_active_and_historical_keyring() {
 fn spawn_healthz_stub() -> (u16, thread::JoinHandle<()>, Arc<AtomicBool>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind healthz stub");
     let port = listener.local_addr().expect("stub addr").port();
+    let audience = format!("http://127.0.0.1:{port}");
+    let auth = Arc::new(
+        DashboardAuth::new(temp_dir("dashboard-proof-listener"), &audience)
+            .expect("dashboard proof listener builds"),
+    );
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_flag = Arc::clone(&shutdown);
+    let proof_auth = Arc::clone(&auth);
     let handle = thread::spawn(move || {
         listener
             .set_nonblocking(true)
             .expect("nonblocking stub listener");
-        let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
         while !shutdown_flag.load(Ordering::Relaxed) {
             if let Ok((mut stream, _)) = listener.accept() {
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
                 let mut buf = [0u8; 2048];
-                let _ = stream.read(&mut buf);
+                let bytes = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..bytes]);
+                let header = |name: &str| {
+                    request.lines().find_map(|line| {
+                        let (candidate, value) = line.split_once(':')?;
+                        candidate.eq_ignore_ascii_case(name).then(|| value.trim())
+                    })
+                };
+                let proof_headers = header(DASHBOARD_PROBE_CHALLENGE_HEADER)
+                    .zip(header(DASHBOARD_PROBE_TOKEN_HASH_HEADER))
+                    .and_then(|(challenge, token_hash)| {
+                        proof_auth
+                            .pairing_probe_proof(challenge, token_hash)
+                            .map(|proof| {
+                                format!(
+                                    "{DASHBOARD_INSTANCE_HEADER}: {}\r\n{DASHBOARD_AUDIENCE_HEADER}: {}\r\n{DASHBOARD_PROOF_HEADER}: {proof}\r\n",
+                                    proof_auth.instance_id(),
+                                    proof_auth.audience(),
+                                )
+                            })
+                    })
+                    .unwrap_or_default();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\n{proof_headers}Content-Length: 2\r\nConnection: close\r\n\r\nok"
+                );
                 let _ = stream.write_all(response.as_bytes());
             }
             thread::sleep(Duration::from_millis(5));

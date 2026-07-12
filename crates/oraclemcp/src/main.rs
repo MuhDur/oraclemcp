@@ -81,8 +81,8 @@ use oraclemcp_core::{
     TlsServerConfig, ToolDispatch, ToolStreamSender, WriteIntentLog, apply_legacy_state_migration,
     build_server_config, default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
     mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file,
-    probe_dashboard_http_service, requires_mtls, run_doctor, service_app_doctor_snapshot, sign,
-    start_oraclemcp_service_app_with_transport,
+    prepare_dashboard_pairing, probe_dashboard_http_service, requires_mtls, run_doctor,
+    service_app_doctor_snapshot, sign, start_oraclemcp_service_app_with_transport,
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
@@ -198,12 +198,12 @@ enum Command {
         #[command(subcommand)]
         command: ClientCredentialCliCommand,
     },
-    /// Open the local browser dashboard through a one-time pairing ticket.
+    /// Print a listener-bound one-time dashboard pairing URL.
     Dashboard {
         /// Base URL of the running local oraclemcp HTTP service.
         #[arg(long, default_value = "http://127.0.0.1:7070")]
         url: String,
-        /// Print the pairing URL without trying to launch a browser.
+        /// Suppress the manual-open reminder (pairing URLs are never auto-launched).
         #[arg(long)]
         no_open: bool,
     },
@@ -923,9 +923,55 @@ async fn try_open_runtime_connections(
     resolved: ResolvedProfile,
 ) -> Result<RuntimeConnections, DbError> {
     let (session_options, stateless_options, pool_settings) = runtime_connection_options(resolved);
-    let session = try_open_connection(cx, session_options).await?;
-    let stateless = try_open_stateless_connection(cx, stateless_options, pool_settings).await?;
+    try_open_runtime_connections_with(
+        || try_open_connection(cx, session_options),
+        || try_open_stateless_connection(cx, stateless_options, pool_settings),
+    )
+    .await
+}
+
+/// Open the authoritative pinned session before attempting the optional pool.
+///
+/// The pinned session remains usable when pool bootstrap fails: dispatch already
+/// has a guarded fallback for stateless reads, while discarding the proven
+/// session would turn an availability-only pool failure into a total outage.
+async fn try_open_runtime_connections_with<OpenSession, SessionFuture, OpenPool, PoolFuture>(
+    open_session: OpenSession,
+    open_pool: OpenPool,
+) -> Result<RuntimeConnections, DbError>
+where
+    OpenSession: FnOnce() -> SessionFuture,
+    SessionFuture: std::future::Future<Output = Result<Box<dyn OracleConnection>, DbError>>,
+    OpenPool: FnOnce() -> PoolFuture,
+    PoolFuture: std::future::Future<Output = Result<Option<Box<dyn OracleConnection>>, DbError>>,
+{
+    let session = open_session().await?;
+    let stateless = match open_pool().await {
+        Ok(stateless) => stateless,
+        Err(_) => {
+            // Never render the driver error here: connection strings and
+            // credential-adjacent details can be embedded in connect errors.
+            // The stable class is enough for operators and log metrics.
+            tracing::warn!(
+                failure_class = "optional_pool_bootstrap_failed",
+                fallback = "guarded_pinned_session",
+                "optional stateless pool unavailable; retaining the live pinned session"
+            );
+            None
+        }
+    };
     Ok(RuntimeConnections { session, stateless })
+}
+
+fn runtime_connection_strategy(
+    pool_configured: bool,
+    connections: &RuntimeConnections,
+) -> &'static str {
+    match (pool_configured, connections.stateless.is_some()) {
+        (true, true) => "hybrid_pool",
+        (true, false) => "hybrid_pool_degraded",
+        (false, _) => "single_session",
+    }
 }
 
 /// Split one fully-resolved profile into the two physical-connection plans.
@@ -3065,7 +3111,9 @@ fn http_transport_config_from_merged(
                 .map(|subject| subject.trim().to_owned())
                 .collect(),
         },
-        dashboard_auth: Some(Arc::new(DashboardAuth::new(default_dashboard_ticket_dir()))),
+        // Bound to the actual native loopback listener after bind, including a
+        // concrete port when the caller requested port zero.
+        dashboard_auth: None,
         // Observability is wired in run_serve (HealthState/Metrics/probe).
         observability: ObservabilityState::default(),
         ..Default::default()
@@ -3552,6 +3600,41 @@ fn run_serve(
                     return ExitCode::from(1);
                 }
             };
+            let listener_addr = match listener.local_addr() {
+                Ok(listener_addr) => listener_addr,
+                Err(error) => {
+                    emit_status_error(
+                        robot_json,
+                        "ORACLEMCP_DASHBOARD_LISTENER_IDENTITY_UNAVAILABLE",
+                        &format!("failed to identify bound HTTP listener: {error}"),
+                    );
+                    pinger.shutdown();
+                    drop(telemetry);
+                    return ExitCode::from(1);
+                }
+            };
+            if listener_addr.ip().is_loopback() {
+                let host = match listener_addr.ip() {
+                    std::net::IpAddr::V4(address) => address.to_string(),
+                    std::net::IpAddr::V6(address) => format!("[{address}]"),
+                };
+                let scheme = if tls_enabled { "https" } else { "http" };
+                let audience = format!("{scheme}://{host}:{}", listener_addr.port());
+                transport.dashboard_auth =
+                    match DashboardAuth::new(default_dashboard_ticket_dir(), &audience) {
+                        Ok(auth) => Some(Arc::new(auth)),
+                        Err(error) => {
+                            emit_status_error(
+                                robot_json,
+                                "ORACLEMCP_DASHBOARD_LISTENER_IDENTITY_UNAVAILABLE",
+                                &error.to_string(),
+                            );
+                            pinger.shutdown();
+                            drop(telemetry);
+                            return ExitCode::from(1);
+                        }
+                    };
+            }
             let _service_instance_guard = match acquire_service_instance_guard(&addr) {
                 Ok(guard) => guard,
                 Err(error) => {
@@ -3754,31 +3837,53 @@ fn run_dashboard_cmd(
     no_open: bool,
 ) -> ExitCode {
     let ticket_dir = default_dashboard_ticket_dir();
+    let pairing_request = match prepare_dashboard_pairing(base_url) {
+        Ok(request) => request,
+        Err(error) => {
+            if robot_json {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "kind": "error",
+                        "code": "ORACLEMCP_DASHBOARD_URL_INVALID",
+                        "message": error.to_string(),
+                    })
+                );
+            } else {
+                eprintln!("{binary_name} dashboard: {error}");
+            }
+            return ExitCode::from(2);
+        }
+    };
     // Single sanctioned sync->async boundary for the CLI path (same helper used by
     // connect/doctor); the library probe itself is a pure `async fn(&Cx, ...)`.
-    if let Err(e) =
-        block_on_connect(|cx| async move { probe_dashboard_http_service(&cx, base_url).await })
-    {
-        let code = if matches!(e, DashboardAuthError::ServiceUnreachable { .. }) {
-            "ORACLEMCP_DASHBOARD_SERVICE_UNREACHABLE"
-        } else {
-            "ORACLEMCP_DASHBOARD_PROBE_FAILED"
-        };
-        if robot_json {
-            eprintln!(
-                "{}",
-                serde_json::json!({
-                    "kind": "error",
-                    "code": code,
-                    "message": e.to_string(),
-                })
-            );
-        } else {
-            eprintln!("{binary_name} dashboard: {e}");
+    let probe_request = &pairing_request;
+    let listener_proof = match block_on_connect(|cx| async move {
+        probe_dashboard_http_service(&cx, probe_request).await
+    }) {
+        Ok(proof) => proof,
+        Err(e) => {
+            let code = if matches!(e, DashboardAuthError::ServiceUnreachable { .. }) {
+                "ORACLEMCP_DASHBOARD_SERVICE_UNREACHABLE"
+            } else {
+                "ORACLEMCP_DASHBOARD_PROBE_FAILED"
+            };
+            if robot_json {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "kind": "error",
+                        "code": code,
+                        "message": e.to_string(),
+                    })
+                );
+            } else {
+                eprintln!("{binary_name} dashboard: {e}");
+            }
+            return ExitCode::from(2);
         }
-        return ExitCode::from(2);
-    }
-    let ticket = match mint_dashboard_pairing_ticket(&ticket_dir, base_url) {
+    };
+    let ticket = match mint_dashboard_pairing_ticket(&ticket_dir, pairing_request, listener_proof) {
         Ok(ticket) => ticket,
         Err(e) => {
             if robot_json {
@@ -3796,30 +3901,15 @@ fn run_dashboard_cmd(
             return ExitCode::from(2);
         }
     };
-    let opened = if no_open {
-        false
-    } else {
-        match open_dashboard_url(&ticket.url) {
-            Ok(()) => true,
-            Err(e) => {
-                if robot_json {
-                    eprintln!(
-                        "{}",
-                        serde_json::json!({
-                            "kind": "warning",
-                            "code": "ORACLEMCP_DASHBOARD_OPEN_FAILED",
-                            "message": e.to_string(),
-                        })
-                    );
-                } else {
-                    eprintln!(
-                        "{binary_name} dashboard: browser launch failed; open the printed URL manually"
-                    );
-                }
-                false
-            }
-        }
-    };
+    // Never pass the one-time bearer URL to xdg-open/open/cmd: child process
+    // argv and desktop launcher metadata are visible to other local processes.
+    // The URL is emitted only on this command's stdout for deliberate opening.
+    let opened = false;
+    if !no_open && !robot_json {
+        eprintln!(
+            "{binary_name} dashboard: automatic browser launch is disabled for pairing-secret safety; open the printed URL manually"
+        );
+    }
     if robot_json {
         let output = serde_json::json!({
             "kind": "dashboard_pairing",
@@ -3834,30 +3924,6 @@ fn run_dashboard_cmd(
         )
     } else {
         stdout_exit(write_stdout_line(&ticket.url), ExitCode::SUCCESS)
-    }
-}
-
-fn open_dashboard_url(url: &str) -> io::Result<()> {
-    #[cfg(target_os = "macos")]
-    let status = std::process::Command::new("open").arg(url).status()?;
-    #[cfg(target_os = "windows")]
-    let status = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .status()?;
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let status = std::process::Command::new("xdg-open").arg(url).status()?;
-    #[cfg(not(any(unix, target_os = "windows")))]
-    let status = {
-        let _ = url;
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "automatic browser launch is not supported on this platform",
-        ));
-    };
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other("browser launcher exited unsuccessfully"))
     }
 }
 
@@ -5730,8 +5796,9 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
     let connect_timeout_seconds = resolved.connect_timeout_seconds;
     let inactivity_timeout_seconds = resolved.inactivity_timeout_seconds;
     let keepalive_minutes = resolved.keepalive_minutes;
-    let connection_strategy = Some(
-        if resolved.pool_settings.is_some() {
+    let pool_configured = resolved.pool_settings.is_some();
+    let configured_connection_strategy = Some(
+        if pool_configured {
             "hybrid_pool"
         } else {
             "single_session"
@@ -5744,32 +5811,36 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
     // attempt, so the near-expiry diagnostic works even when the connect fails.
     let iam_token = resolved.opts.iam_token.clone();
     match block_on_connect(|cx| async move { try_open_runtime_connections(&cx, resolved).await }) {
-        Ok(connections) => DoctorProfileContext {
-            conn: Some(connections.session),
-            connection_error: None,
-            wallet_location,
-            protected_profile_writable,
-            connection_strategy,
-            call_timeout_resolved: true,
-            call_timeout,
-            connect_timeout_seconds,
-            inactivity_timeout_seconds,
-            keepalive_minutes,
-            proxy_user,
-            profile_caps,
-            auth_capabilities,
-            sensitive_values,
-            // Online: a live connection is attempted; the offline credential
-            // hint does not apply.
-            credential_env_hint: None,
-            iam_token,
-        },
+        Ok(connections) => {
+            let connection_strategy =
+                Some(runtime_connection_strategy(pool_configured, &connections).to_owned());
+            DoctorProfileContext {
+                conn: Some(connections.session),
+                connection_error: None,
+                wallet_location,
+                protected_profile_writable,
+                connection_strategy,
+                call_timeout_resolved: true,
+                call_timeout,
+                connect_timeout_seconds,
+                inactivity_timeout_seconds,
+                keepalive_minutes,
+                proxy_user,
+                profile_caps,
+                auth_capabilities,
+                sensitive_values,
+                // Online: a live connection is attempted; the offline credential
+                // hint does not apply.
+                credential_env_hint: None,
+                iam_token,
+            }
+        }
         Err(e) => DoctorProfileContext {
             conn: None,
             connection_error: Some(doctor_connection_error(e)),
             wallet_location,
             protected_profile_writable,
-            connection_strategy,
+            connection_strategy: configured_connection_strategy,
             call_timeout_resolved: true,
             call_timeout,
             connect_timeout_seconds,

@@ -58,8 +58,10 @@ use crate::client_credentials::{
 };
 use crate::config_ops::{ConfigOpsError, ConfigOpsService};
 use crate::dashboard_auth::{
-    DASHBOARD_ACTION_TICKET_HEADER, DASHBOARD_CSRF_HEADER, DASHBOARD_PAIR_PATH,
-    DASHBOARD_SESSION_PATH, DashboardAuth,
+    DASHBOARD_ACTION_TICKET_HEADER, DASHBOARD_AUDIENCE_HEADER, DASHBOARD_CSRF_HEADER,
+    DASHBOARD_INSTANCE_HEADER, DASHBOARD_PAIR_PATH, DASHBOARD_PROBE_CHALLENGE_HEADER,
+    DASHBOARD_PROBE_TOKEN_HASH_HEADER, DASHBOARD_PROOF_HEADER, DASHBOARD_SESSION_PATH,
+    DashboardAuth,
 };
 use crate::file_store::FileStoreError;
 use crate::operator_protocol::{
@@ -2429,7 +2431,7 @@ fn handle_dashboard_pairing_route(
     if cookie_policy == PrivilegedCookiePolicy::Suppress {
         return dashboard_auth_error_response(403, "dashboard_pairing_requires_secure_transport");
     }
-    match auth.exchange_ticket(ticket, cookie_policy.secure()) {
+    match auth.exchange_ticket(ticket, auth.audience(), cookie_policy.secure()) {
         Ok(login) => with_dashboard_security_headers(
             empty_response(303)
                 .with_header("location", "/")
@@ -6061,10 +6063,22 @@ fn handle_observability_route(
                 return Some(empty_response(405).with_header("allow", "GET"));
             }
             let (status, report) = health.liveness();
-            Some(json_response(
+            let mut response = json_response(
                 status,
                 &serde_json::to_value(&report).unwrap_or(Value::Null),
-            ))
+            );
+            if let (Some(auth), Some(challenge), Some(token_sha256)) = (
+                config.dashboard_auth.as_ref(),
+                request.header(DASHBOARD_PROBE_CHALLENGE_HEADER),
+                request.header(DASHBOARD_PROBE_TOKEN_HASH_HEADER),
+            ) && let Some(proof) = auth.pairing_probe_proof(challenge, token_sha256)
+            {
+                response = response
+                    .with_header(DASHBOARD_INSTANCE_HEADER, auth.instance_id())
+                    .with_header(DASHBOARD_AUDIENCE_HEADER, auth.audience())
+                    .with_header(DASHBOARD_PROOF_HEADER, &proof);
+            }
+            Some(response)
         }
         READYZ_PATH => {
             let health = obs.health.as_ref()?;

@@ -116,11 +116,13 @@ pub use custom_tools::{
     register_custom_tools, sign, verify_signature,
 };
 pub use dashboard_auth::{
-    DASHBOARD_ACTION_TICKET_HEADER, DASHBOARD_CSRF_HEADER, DASHBOARD_HTTP_PROBE_PATH,
-    DASHBOARD_HTTP_PROBE_TIMEOUT, DASHBOARD_PAIR_PATH, DASHBOARD_SESSION_COOKIE,
-    DASHBOARD_SESSION_PATH, DashboardAuth, DashboardAuthError, DashboardPairingTicket,
-    DashboardSessionView, default_dashboard_ticket_dir, mint_dashboard_pairing_ticket,
-    probe_dashboard_http_service,
+    DASHBOARD_ACTION_TICKET_HEADER, DASHBOARD_AUDIENCE_HEADER, DASHBOARD_CSRF_HEADER,
+    DASHBOARD_HTTP_PROBE_PATH, DASHBOARD_HTTP_PROBE_TIMEOUT, DASHBOARD_INSTANCE_HEADER,
+    DASHBOARD_PAIR_PATH, DASHBOARD_PROBE_CHALLENGE_HEADER, DASHBOARD_PROBE_TOKEN_HASH_HEADER,
+    DASHBOARD_PROOF_HEADER, DASHBOARD_SESSION_COOKIE, DASHBOARD_SESSION_PATH, DashboardAuth,
+    DashboardAuthError, DashboardListenerProof, DashboardPairingRequest, DashboardPairingTicket,
+    DashboardSessionView, canonical_dashboard_audience, default_dashboard_ticket_dir,
+    mint_dashboard_pairing_ticket, prepare_dashboard_pairing, probe_dashboard_http_service,
 };
 pub use doctor::{
     AuthModeClass, CheckResult, CheckStatus, DoctorAuthCapabilities, DoctorAuthModeCapability,

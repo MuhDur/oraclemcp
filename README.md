@@ -163,13 +163,15 @@ oraclemcp --json clients issue --label claude --scope oracle:read
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Service -Yes -Profile db_ro
 ```
 
-Open the operator dashboard through the paired browser flow:
+Request a listener-bound one-time pairing URL, then open the printed URL:
 
 ```sh
 om dashboard
 ```
 
-The dashboard uses a one-time loopback pairing ticket, then an HttpOnly,
+The CLI never passes the bearer URL to a desktop launcher (where process argv
+could expose it). The dashboard uses a one-time loopback pairing ticket bound to
+the exact live listener instance and scheme/host/port, then an HttpOnly,
 SameSite=Strict cookie plus CSRF and route-scoped action tickets. The cookie is
 `Secure` under native TLS or explicit trusted HTTPS termination; the only
 non-Secure exception is server-observed loopback HTTP, and remote plaintext

@@ -15,8 +15,8 @@ use oraclemcp_auth::{ResourceServerConfig, SignatureVerifier};
 use oraclemcp_core::OracleMcpServer;
 use oraclemcp_core::capabilities::{CapabilitiesReport, FeatureTiers};
 use oraclemcp_core::http::{
-    HttpRequest, HttpResponse, HttpSessionStore, HttpTransportConfig, MCP_PATH, OAuthEnforcement,
-    PROTECTED_RESOURCE_METADATA_PATH, handle_http_request, serve_http_until,
+    HttpRequest, HttpResponse, HttpResultStore, HttpSessionStore, HttpTransportConfig, MCP_PATH,
+    OAuthEnforcement, PROTECTED_RESOURCE_METADATA_PATH, handle_http_request, serve_http_until,
 };
 use oraclemcp_core::server::{DispatchContext, DispatchFuture, ToolDispatch};
 use oraclemcp_core::tools::{ToolDescriptor, ToolRegistry, ToolTier};
@@ -489,6 +489,12 @@ fn golden_http_stateful_streamable_session() {
         json_response: true,
         stateful: true,
         session_store: Some(Arc::new(HttpSessionStore::default())),
+        // Mirror production: `serve_http_until` always provisions a result store
+        // for stateful transports, so the authoritative response frame carries a
+        // resumable `<seq>/<binding>` event id. Provisioning it here keeps this
+        // canonical golden faithful to the served path (the volatile per-session
+        // binding is normalized to `[SESSION]` by the golden framework).
+        result_store: Some(Arc::new(HttpResultStore::new())),
         ..Default::default()
     };
     let server = harness_server();

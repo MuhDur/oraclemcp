@@ -2973,7 +2973,9 @@ fn dashboard_workbench_ddl_apply_is_release_gated() {
         calls: Arc::clone(&calls),
     }));
     let dir = dashboard_test_dir("ddl-gate");
-    let auth = Arc::new(DashboardAuth::new(dir.clone()));
+    let auth = Arc::new(
+        DashboardAuth::new(dir.clone(), "http://127.0.0.1").expect("dashboard auth builds"),
+    );
     let cfg = HttpTransportConfig {
         dashboard_auth: Some(Arc::clone(&auth)),
         operator_auditor: Some(auditor),
@@ -3025,10 +3027,10 @@ fn dashboard_workbench_ddl_apply_is_release_gated() {
     for (case_index, (tool, arguments)) in cases.iter().enumerate() {
         for (route_index, path) in routes.iter().enumerate() {
             let ticket =
-                crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
+                crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
                     .expect("ticket mints");
             let login = auth
-                .exchange_ticket(ticket_from_pairing_url(&ticket.url), false)
+                .exchange_ticket(ticket_from_pairing_url(&ticket.url), auth.audience(), false)
                 .expect("login works");
             let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
             let view = auth
@@ -3095,16 +3097,18 @@ fn dashboard_structured_ddl_preview_remains_available() {
         calls: Arc::clone(&calls),
     }));
     let dir = dashboard_test_dir("ddl-preview");
-    let auth = Arc::new(DashboardAuth::new(dir.clone()));
+    let auth = Arc::new(
+        DashboardAuth::new(dir.clone(), "http://127.0.0.1").expect("dashboard auth builds"),
+    );
     let cfg = HttpTransportConfig {
         dashboard_auth: Some(Arc::clone(&auth)),
         operator_auditor: Some(auditor),
         ..Default::default()
     };
-    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
+    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
         .expect("ticket mints");
     let login = auth
-        .exchange_ticket(ticket_from_pairing_url(&ticket.url), false)
+        .exchange_ticket(ticket_from_pairing_url(&ticket.url), auth.audience(), false)
         .expect("login works");
     let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
     let view = auth
@@ -3958,13 +3962,15 @@ fn ticket_from_pairing_url(url: &str) -> &str {
 fn dashboard_pairing_sets_strict_cookie_and_session_view() {
     let (auditor, _sink) = operator_auditor();
     let dir = dashboard_test_dir("pairing");
-    let auth = Arc::new(DashboardAuth::new(dir.clone()));
+    let auth = Arc::new(
+        DashboardAuth::new(dir.clone(), "http://127.0.0.1").expect("dashboard auth builds"),
+    );
     let cfg = HttpTransportConfig {
         dashboard_auth: Some(Arc::clone(&auth)),
         operator_auditor: Some(auditor),
         ..Default::default()
     };
-    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
+    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
         .expect("ticket mints");
     let token = ticket_from_pairing_url(&ticket.url);
 
@@ -4064,12 +4070,15 @@ fn dashboard_pairing_sets_strict_cookie_and_session_view() {
 #[test]
 fn dashboard_pairing_uses_secure_cookie_on_effective_https() {
     let dir = dashboard_test_dir("pairing-secure");
+    let auth = Arc::new(
+        DashboardAuth::new(dir.clone(), "https://127.0.0.1").expect("dashboard auth builds"),
+    );
     let cfg = HttpTransportConfig {
         effective_scheme: EffectiveHttpScheme::Https,
-        dashboard_auth: Some(Arc::new(DashboardAuth::new(dir.clone()))),
+        dashboard_auth: Some(Arc::clone(&auth)),
         ..Default::default()
     };
-    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "https://127.0.0.1")
+    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
         .expect("ticket mints");
     let token = ticket_from_pairing_url(&ticket.url);
     let pair = handle_http_request(
@@ -4248,16 +4257,18 @@ fn malicious_page_cannot_trigger_dashboard_gated_action() {
         calls: Arc::clone(&calls),
     }));
     let dir = dashboard_test_dir("csrf");
-    let auth = Arc::new(DashboardAuth::new(dir.clone()));
+    let auth = Arc::new(
+        DashboardAuth::new(dir.clone(), "http://127.0.0.1").expect("dashboard auth builds"),
+    );
     let cfg = HttpTransportConfig {
         dashboard_auth: Some(Arc::clone(&auth)),
         operator_auditor: Some(auditor),
         ..Default::default()
     };
-    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
+    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
         .expect("ticket mints");
     let login = auth
-        .exchange_ticket(ticket_from_pairing_url(&ticket.url), false)
+        .exchange_ticket(ticket_from_pairing_url(&ticket.url), auth.audience(), false)
         .expect("login works");
     let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
     let view = auth
@@ -5227,6 +5238,44 @@ fn healthz_is_ok_even_while_db_is_down() {
 }
 
 #[test]
+fn healthz_pairing_probe_is_bound_to_listener_token_and_audience() {
+    let dir = dashboard_test_dir("listener-proof");
+    let auth =
+        Arc::new(DashboardAuth::new(dir, "http://127.0.0.1:7070").expect("dashboard auth builds"));
+    let mut cfg = obs_config(HealthState::new("0.1.0"), None, None);
+    cfg.dashboard_auth = Some(Arc::clone(&auth));
+    let challenge = "a".repeat(64);
+    let token_sha256 = "b".repeat(64);
+    let request = HttpRequest::new(
+        "GET",
+        HEALTHZ_PATH,
+        [
+            ("host", "127.0.0.1"),
+            (DASHBOARD_PROBE_CHALLENGE_HEADER, challenge.as_str()),
+            (DASHBOARD_PROBE_TOKEN_HASH_HEADER, token_sha256.as_str()),
+        ],
+        Vec::new(),
+    );
+    let response = handle_http_request(&test_server(), &cfg, request);
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.header(DASHBOARD_INSTANCE_HEADER),
+        Some(auth.instance_id())
+    );
+    assert_eq!(
+        response.header(DASHBOARD_AUDIENCE_HEADER),
+        Some(auth.audience())
+    );
+    let expected = auth
+        .pairing_probe_proof(&challenge, &token_sha256)
+        .expect("well-formed proof");
+    assert_eq!(
+        response.header(DASHBOARD_PROOF_HEADER),
+        Some(expected.as_str())
+    );
+}
+
+#[test]
 fn readyz_is_503_when_db_unreachable_and_200_when_reachable() {
     let health = HealthState::new("0.1.0");
     health.set_ready(true); // pool established
@@ -5396,7 +5445,9 @@ fn surface_inventory_authn_no_leak() {
 
     let dir = dashboard_test_dir("surface-inventory");
     let dashboard_cfg = HttpTransportConfig {
-        dashboard_auth: Some(Arc::new(DashboardAuth::new(dir))),
+        dashboard_auth: Some(Arc::new(
+            DashboardAuth::new(dir, "http://127.0.0.1").expect("dashboard auth builds"),
+        )),
         operator_auditor: operator_cfg.operator_auditor.clone(),
         ..Default::default()
     };
@@ -7581,7 +7632,9 @@ fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak()
     result_store.append_response("execute-session", serde_json::json!({ "stale": "execute" }));
 
     let dir = dashboard_test_dir("operator-client-credentials");
-    let auth = Arc::new(DashboardAuth::new(dir.clone()));
+    let auth = Arc::new(
+        DashboardAuth::new(dir.clone(), "http://127.0.0.1").expect("dashboard auth builds"),
+    );
     let cfg = HttpTransportConfig {
         dashboard_auth: Some(Arc::clone(&auth)),
         operator_auditor: Some(auditor),
@@ -7591,10 +7644,10 @@ fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak()
         session_lifecycle: Some(lifecycle.clone()),
         ..Default::default()
     };
-    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
+    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
         .expect("ticket mints");
     let login = auth
-        .exchange_ticket(ticket_from_pairing_url(&ticket.url), false)
+        .exchange_ticket(ticket_from_pairing_url(&ticket.url), auth.audience(), false)
         .expect("login works");
     let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
     let view = auth
@@ -7833,7 +7886,9 @@ fn uniform_auth_errors_no_enumeration_oracle() {
     );
 
     let dir = dashboard_test_dir("uniform-auth");
-    let auth = Arc::new(DashboardAuth::new(dir.clone()));
+    let auth = Arc::new(
+        DashboardAuth::new(dir.clone(), "http://127.0.0.1").expect("dashboard auth builds"),
+    );
     let dashboard_cfg = HttpTransportConfig {
         dashboard_auth: Some(Arc::clone(&auth)),
         ..Default::default()
@@ -7869,10 +7924,10 @@ fn uniform_auth_errors_no_enumeration_oracle() {
         serde_json::json!("dashboard_pairing_required")
     );
 
-    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
+    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
         .expect("ticket mints");
     let login = auth
-        .exchange_ticket(ticket_from_pairing_url(&ticket.url), false)
+        .exchange_ticket(ticket_from_pairing_url(&ticket.url), auth.audience(), false)
         .expect("login works");
     let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
     let view = auth

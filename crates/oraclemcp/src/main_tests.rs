@@ -182,6 +182,138 @@ fn runtime_connection_bundle_uses_one_resolved_secret_epoch() {
 }
 
 #[test]
+fn optional_pool_failure_retains_the_authoritative_primary_session() {
+    let session_calls = AtomicUsize::new(0);
+    let pool_calls = AtomicUsize::new(0);
+    let connections = block_on_connect(|_cx| async {
+        try_open_runtime_connections_with(
+            || async {
+                session_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(stub::StubConnection::new(DbError::Query(
+                    "primary-session-marker".to_owned(),
+                ))) as Box<dyn OracleConnection>)
+            },
+            || async {
+                pool_calls.fetch_add(1, Ordering::SeqCst);
+                Err(DbError::Pool(
+                    "secret-bearing pool detail must never be logged".to_owned(),
+                ))
+            },
+        )
+        .await
+        .expect("a pool-only failure must preserve the primary")
+    });
+
+    assert_eq!(session_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(pool_calls.load(Ordering::SeqCst), 1);
+    assert!(connections.stateless.is_none());
+    assert_eq!(
+        runtime_connection_strategy(true, &connections),
+        "hybrid_pool_degraded"
+    );
+    let error = block_on_connect(|cx| async move {
+        connections
+            .session
+            .ping(&cx)
+            .await
+            .expect_err("marker connection intentionally returns its identity")
+    });
+    assert!(error.to_string().contains("primary-session-marker"));
+}
+
+#[test]
+fn healthy_optional_pool_is_installed_and_reported() {
+    let connections = block_on_connect(|_cx| async {
+        try_open_runtime_connections_with(
+            || async {
+                Ok(Box::new(stub::StubConnection::new(DbError::Query(
+                    "primary".to_owned(),
+                ))) as Box<dyn OracleConnection>)
+            },
+            || async {
+                Ok(Some(
+                    Box::new(stub::StubConnection::new(DbError::Query("pool".to_owned())))
+                        as Box<dyn OracleConnection>,
+                ))
+            },
+        )
+        .await
+        .expect("primary and pool bootstrap succeed")
+    });
+
+    assert!(connections.stateless.is_some());
+    assert_eq!(
+        runtime_connection_strategy(true, &connections),
+        "hybrid_pool"
+    );
+}
+
+#[test]
+fn primary_failure_remains_fatal_and_skips_optional_pool_bootstrap() {
+    let pool_calls = AtomicUsize::new(0);
+    let error = block_on_connect(|_cx| async {
+        try_open_runtime_connections_with(
+            || async { Err(DbError::Connect("primary failed".to_owned())) },
+            || async {
+                pool_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(None)
+            },
+        )
+        .await
+        .expect_err("the authoritative primary must still gate runtime startup")
+    });
+
+    assert!(error.to_string().contains("primary failed"));
+    assert_eq!(
+        pool_calls.load(Ordering::SeqCst),
+        0,
+        "pool bootstrap must not run after primary failure"
+    );
+}
+
+#[test]
+fn a_later_bootstrap_can_install_a_pool_without_reusing_the_failed_attempt() {
+    let attempts = AtomicUsize::new(0);
+    let first = block_on_connect(|_cx| async {
+        try_open_runtime_connections_with(
+            || async {
+                Ok(Box::new(stub::StubConnection::new(DbError::Query(
+                    "generation-one-primary".to_owned(),
+                ))) as Box<dyn OracleConnection>)
+            },
+            || async {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(DbError::Pool("first generation unavailable".to_owned()))
+            },
+        )
+        .await
+        .expect("first generation degrades")
+    });
+    assert!(first.stateless.is_none());
+
+    let second = block_on_connect(|_cx| async {
+        try_open_runtime_connections_with(
+            || async {
+                Ok(Box::new(stub::StubConnection::new(DbError::Query(
+                    "generation-two-primary".to_owned(),
+                ))) as Box<dyn OracleConnection>)
+            },
+            || async {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(Box::new(stub::StubConnection::new(DbError::Query(
+                    "generation-two-pool".to_owned(),
+                ))) as Box<dyn OracleConnection>))
+            },
+        )
+        .await
+        .expect("later generation installs its own healthy pool")
+    });
+
+    assert!(second.stateless.is_some());
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[test]
 fn fresh_stateful_lane_uses_reloaded_profile_ceiling_and_timeout() {
     let lowered = OracleMcpConfig::from_toml_str(
         r#"
