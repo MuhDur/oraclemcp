@@ -5876,6 +5876,16 @@ const OPERATOR_ACTION_TOOL_POLICIES: &[OperatorActionToolPolicy] = &[
         browser_apply: BrowserApplyPolicy::Allow,
     },
     OperatorActionToolPolicy {
+        tool: "oracle_search_source",
+        routes: ACTION_EXECUTE_POLICY,
+        browser_apply: BrowserApplyPolicy::Allow,
+    },
+    OperatorActionToolPolicy {
+        tool: "oracle_capabilities",
+        routes: ACTION_EXECUTE_POLICY,
+        browser_apply: BrowserApplyPolicy::Allow,
+    },
+    OperatorActionToolPolicy {
         tool: "oracle_get_ddl",
         routes: ACTION_EXECUTE_POLICY,
         browser_apply: BrowserApplyPolicy::Allow,

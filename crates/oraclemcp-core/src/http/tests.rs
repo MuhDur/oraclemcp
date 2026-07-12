@@ -3373,6 +3373,31 @@ fn non_browser_operator_keeps_structured_ddl_dispatch_path() {
 }
 
 #[test]
+fn restored_dashboard_read_only_actions_are_allowed_on_execute() {
+    // QA100 .22: the dashboard's capabilities view and global source search were
+    // dropped from the operator allowlist, so those read-only actions failed
+    // closed. Both are now explicitly allowed on the execute route (and only
+    // there), while default-deny still holds for tools never exposed.
+    for tool in ["oracle_capabilities", "oracle_search_source"] {
+        let policy = operator_action_tool_policy(tool)
+            .unwrap_or_else(|| panic!("{tool} must be an allowed operator action"));
+        assert_eq!(policy.browser_apply, BrowserApplyPolicy::Allow, "{tool}");
+        assert!(
+            policy.allows(OperatorRouteKind::ActionExecute),
+            "{tool} must be allowed on the execute route"
+        );
+        assert!(
+            !policy.allows(OperatorRouteKind::ActionConfirm),
+            "{tool} is read-only and must not be a mutating confirm action"
+        );
+    }
+    assert!(
+        operator_action_tool_policy("oracle_totally_unlisted_tool").is_none(),
+        "default-deny still holds for tools not deliberately exposed"
+    );
+}
+
+#[test]
 fn every_browser_action_tool_has_an_explicit_release_policy() {
     let mut names = std::collections::BTreeSet::new();
     for policy in OPERATOR_ACTION_TOOL_POLICIES {
