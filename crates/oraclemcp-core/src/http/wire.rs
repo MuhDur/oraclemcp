@@ -14,6 +14,27 @@ pub(super) trait DeadlineRead: Read {
     fn set_ingress_read_timeout(&mut self, timeout: Duration) -> std::io::Result<()>;
 }
 
+#[derive(Debug)]
+struct HttpParseError {
+    status: u16,
+    message: &'static str,
+}
+
+impl std::fmt::Display for HttpParseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message)
+    }
+}
+
+impl std::error::Error for HttpParseError {}
+
+pub(super) fn parse_error_status(error: &std::io::Error) -> Option<u16> {
+    error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<HttpParseError>())
+        .map(|error| error.status)
+}
+
 pub(super) fn read_http_request(
     stream: &mut impl DeadlineRead,
     header_timeout: Duration,
@@ -36,12 +57,18 @@ pub(super) fn read_http_request(
                 .checked_add(4)
                 .is_none_or(|header_bytes| header_bytes > MAX_HEADER_BYTES)
             {
-                return Err(invalid_data("HTTP headers exceed native transport limit"));
+                return Err(parse_error(
+                    431,
+                    "HTTP headers exceed native transport limit",
+                ));
             }
             break end;
         }
         if buf.len() > MAX_HEADER_BYTES {
-            return Err(invalid_data("HTTP headers exceed native transport limit"));
+            return Err(parse_error(
+                431,
+                "HTTP headers exceed native transport limit",
+            ));
         }
     };
 
@@ -80,7 +107,7 @@ pub(super) fn read_http_request(
         .map_err(|_| invalid_data("invalid Content-Length"))?
         .unwrap_or(0);
     if content_length > MAX_BODY_BYTES {
-        return Err(invalid_data("HTTP body exceeds native transport limit"));
+        return Err(parse_error(413, "HTTP body exceeds native transport limit"));
     }
     let body_start = header_end + 4;
     request.body.extend_from_slice(&buf[body_start..]);
@@ -131,7 +158,14 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 }
 
 fn invalid_data(message: &'static str) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+    parse_error(400, message)
+}
+
+fn parse_error(status: u16, message: &'static str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        HttpParseError { status, message },
+    )
 }
 
 pub(super) fn write_http_response(
@@ -278,7 +312,31 @@ mod tests {
         let error = read_http_request(&mut reader, Duration::from_secs(1), Duration::from_secs(1))
             .expect_err("header bytes beyond the cap must be rejected");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(parse_error_status(&error), Some(431));
         assert!(error.to_string().contains("headers exceed"));
+    }
+
+    #[test]
+    fn declared_body_over_limit_is_typed_without_reading_body() {
+        let request = format!(
+            "POST / HTTP/1.1\r\ncontent-length: {}\r\n\r\n",
+            MAX_BODY_BYTES + 1
+        );
+        let mut reader = ScheduledReader::new([(Duration::ZERO, request.into_bytes())]);
+        let error = read_http_request(&mut reader, Duration::from_secs(1), Duration::from_secs(1))
+            .expect_err("declared oversized body must fail from headers alone");
+        assert_eq!(parse_error_status(&error), Some(413));
+    }
+
+    #[test]
+    fn malformed_content_length_remains_bad_request() {
+        let mut reader = ScheduledReader::new([(
+            Duration::ZERO,
+            b"POST / HTTP/1.1\r\ncontent-length: nope\r\n\r\n".to_vec(),
+        )]);
+        let error = read_http_request(&mut reader, Duration::from_secs(1), Duration::from_secs(1))
+            .expect_err("malformed content length must fail");
+        assert_eq!(parse_error_status(&error), Some(400));
     }
 
     #[test]

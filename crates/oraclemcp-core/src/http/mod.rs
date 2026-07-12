@@ -1681,7 +1681,7 @@ use sse_writer::{
     write_chunked_sse_comment, write_chunked_sse_event, write_final_chunk, write_sse_event,
     write_streaming_sse_headers,
 };
-use wire::{DeadlineRead, read_http_request, write_http_response};
+use wire::{DeadlineRead, parse_error_status, read_http_request, write_http_response};
 
 #[cfg(test)]
 mod tests;
@@ -7937,9 +7937,16 @@ fn handle_stream(
         ),
         Ok(None) => return Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            let status = parse_error_status(&e).unwrap_or(400);
             HttpExchange::Buffered(HttpResponse {
-                status: 400,
-                headers: vec![],
+                status,
+                headers: vec![
+                    ("cache-control".to_owned(), "no-store".to_owned()),
+                    (
+                        "content-type".to_owned(),
+                        "text/plain; charset=utf-8".to_owned(),
+                    ),
+                ],
                 body: e.to_string().into_bytes(),
             })
         }
@@ -7977,6 +7984,7 @@ fn reason_phrase(status: u16) -> &'static str {
         413 => "Payload Too Large",
         415 => "Unsupported Media Type",
         429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
         499 => "Client Closed Request",
         500 => "Internal Server Error",
         503 => "Service Unavailable",

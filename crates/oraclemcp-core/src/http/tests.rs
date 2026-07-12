@@ -7108,6 +7108,68 @@ fn oversized_request_is_rejected_before_oauth() {
 }
 
 #[test]
+fn native_parser_preserves_413_431_and_400_statuses() {
+    fn exchange(addr: std::net::SocketAddr, request: &[u8]) -> String {
+        let mut stream = TcpStream::connect(addr).expect("connect native parser listener");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set response timeout");
+        stream.write_all(request).expect("write raw request");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("finish raw request");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("read raw response");
+        response
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind native parser listener");
+    let addr = listener.local_addr().expect("native parser address");
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = Arc::clone(&shutdown);
+    let handle = std::thread::spawn(move || {
+        serve_http_until(
+            listener,
+            test_server(),
+            &obs_config(HealthState::new("0.1.0"), None, None),
+            server_shutdown,
+        )
+        .expect("native parser listener exits cleanly")
+    });
+
+    let oversized_body = format!(
+        "POST /mcp HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: {}\r\n\r\n",
+        MAX_BODY_BYTES + 1
+    );
+    let response = exchange(addr, oversized_body.as_bytes());
+    assert!(response.starts_with("HTTP/1.1 413 Payload Too Large\r\n"));
+    assert!(response.contains("cache-control: no-store\r\n"));
+
+    let mut oversized_header = b"GET /healthz HTTP/1.1\r\nhost: 127.0.0.1\r\nx-fill: ".to_vec();
+    oversized_header.resize(MAX_HEADER_BYTES - 3, b'x');
+    oversized_header.extend_from_slice(b"\r\n\r\n");
+    assert_eq!(oversized_header.len(), MAX_HEADER_BYTES + 1);
+    let response = exchange(addr, &oversized_header);
+    assert!(response.starts_with("HTTP/1.1 431 Request Header Fields Too Large\r\n"));
+
+    let malformed = b"POST /mcp HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: nope\r\n\r\n";
+    let response = exchange(addr, malformed);
+    assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+
+    let mut exact_header = b"GET /healthz HTTP/1.1\r\nhost: 127.0.0.1\r\nx-fill: ".to_vec();
+    exact_header.resize(MAX_HEADER_BYTES - 4, b'x');
+    exact_header.extend_from_slice(b"\r\n\r\n");
+    assert_eq!(exact_header.len(), MAX_HEADER_BYTES);
+    let response = exchange(addr, &exact_header);
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+
+    shutdown.store(true, Ordering::SeqCst);
+    handle.join().expect("native parser listener joins");
+}
+
+#[test]
 fn serve_http_until_stops_accepting_and_drains_worker() {
     #[derive(Debug)]
     struct ShutdownLifecycle {
