@@ -43,6 +43,14 @@ pub(super) fn write_sse_event(
     body.push(b'\n');
 }
 
+#[cfg(test)]
+pub(super) fn write_query_stream_chunks(body: &mut Vec<u8>, chunks: &[Value]) -> usize {
+    for chunk in chunks {
+        write_sse_event(body, Some("chunk"), None, None, Some(chunk));
+    }
+    chunks.len()
+}
+
 pub(super) fn write_streaming_sse_headers(stream: &mut impl Write) -> std::io::Result<()> {
     write!(
         stream,

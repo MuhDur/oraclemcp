@@ -8,6 +8,7 @@ use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{Classifier, OperatingLevel};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use std::io::Read;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 struct NoopDispatch;
@@ -4548,7 +4549,7 @@ fn stateful_get_replays_buffered_lane_results_by_cursor() {
 
     let after = HttpRequest::new(
         "GET",
-        &format!("/mcp?cursor={response_event_id}"),
+        format!("/mcp?cursor={response_event_id}"),
         [
             ("host", "127.0.0.1"),
             ("accept", "text/event-stream"),
@@ -6710,6 +6711,87 @@ fn serve_https_accepts_tls_handshake() {
 }
 
 #[test]
+fn stalled_tls_peer_cannot_reset_the_absolute_handshake_deadline() {
+    let (cert, key) = self_signed_cert();
+    let tls = crate::tls::build_server_config(&crate::tls::TlsMaterial {
+        cert_chain_pem: cert,
+        private_key_pem: key,
+        client_ca_pem: None,
+    })
+    .expect("server-only TLS config builds");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stalled TLS listener");
+    let client = TcpStream::connect(listener.local_addr().expect("listener address"))
+        .expect("connect stalled TLS peer");
+    let (mut server_stream, _) = listener.accept().expect("accept stalled TLS peer");
+    let mut connection = ServerConnection::new(tls).expect("TLS server connection");
+    let started = Instant::now();
+    let error = complete_tls_handshake(
+        &mut server_stream,
+        &mut connection,
+        Duration::from_millis(25),
+    )
+    .expect_err("silent TLS peer must hit the absolute handshake deadline");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(error.to_string().contains("TLS handshake"));
+    assert!(started.elapsed() < Duration::from_millis(500));
+    drop(client);
+}
+
+#[test]
+fn trickled_tls_client_hello_cannot_reset_the_absolute_handshake_deadline() {
+    let (cert, key) = self_signed_cert();
+    let tls = crate::tls::build_server_config(&crate::tls::TlsMaterial {
+        cert_chain_pem: cert.clone(),
+        private_key_pem: key,
+        client_ca_pem: None,
+    })
+    .expect("server-only TLS config builds");
+    let client_config = tls_client_config(&cert, None);
+    let mut client_connection = rustls::ClientConnection::new(
+        client_config,
+        ServerName::try_from("localhost").expect("server name"),
+    )
+    .expect("TLS client connection");
+    let mut client_hello = Vec::new();
+    while client_connection.wants_write() {
+        client_connection
+            .write_tls(&mut client_hello)
+            .expect("serialize client hello");
+    }
+    assert!(
+        client_hello.len() > 16,
+        "client hello must span the deadline"
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind trickled TLS listener");
+    let mut client = TcpStream::connect(listener.local_addr().expect("listener address"))
+        .expect("connect trickled TLS peer");
+    let (mut server_stream, _) = listener.accept().expect("accept trickled TLS peer");
+    let writer = std::thread::spawn(move || {
+        for byte in client_hello {
+            std::thread::sleep(Duration::from_millis(4));
+            if client.write_all(&[byte]).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut server_connection = ServerConnection::new(tls).expect("TLS server connection");
+    let started = Instant::now();
+    let error = complete_tls_handshake(
+        &mut server_stream,
+        &mut server_connection,
+        Duration::from_millis(25),
+    )
+    .expect_err("a trickled client hello must hit the absolute handshake deadline");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(error.to_string().contains("TLS handshake"));
+    assert!(started.elapsed() < Duration::from_millis(500));
+    drop(server_stream);
+    writer.join().expect("trickle writer joins");
+}
+
+#[test]
 fn native_https_forces_secure_stateful_session_cookie() {
     let (cert, key) = self_signed_cert();
     let tls = crate::tls::build_server_config(&crate::tls::TlsMaterial {
@@ -7849,6 +7931,9 @@ fn write_query_stream_chunks_frames_each_chunk_as_an_sse_event() {
 
 #[test]
 fn tool_stream_response_frames_each_row_before_final_result() {
+    let result_store = Arc::new(HttpResultStore::new());
+    result_store.ensure_session("session-test");
+    result_store.ensure_session("other-session");
     let (frames_tx, frames_rx) = mpsc::channel(4);
     let permit = frames_tx.try_reserve().expect("reserve first row frame");
     permit
@@ -7876,13 +7961,10 @@ fn tool_stream_response_frames_each_row_before_final_result() {
             "truncated": false,
             "next_cursor": Value::Null
         })))
-    let result_store = Arc::new(HttpResultStore::new());
-    result_store.ensure_session("session-test");
-    result_store.ensure_session("other-session");
         .expect("send final streaming outcome");
     let response = HttpToolStream::new(
         test_server(),
-        None,
+        Some(Arc::clone(&result_store)),
         "session-test".to_owned(),
         "principal-test".to_owned(),
         json!(7),
@@ -7898,6 +7980,34 @@ fn tool_stream_response_frames_each_row_before_final_result() {
         "one row SSE frame per produced row"
     );
     assert!(text.contains("\"streaming_mode\":\"rows\""));
+
+    let retained = result_store
+        .events_after("session-test", None, false)
+        .expect("stream replay remains available");
+    assert_eq!(retained.len(), 3, "two rows and one final response");
+    assert_eq!(retained[0].event, Some("row"));
+    assert_eq!(retained[1].event, Some("row"));
+    assert_eq!(retained[2].event, None);
+    assert!(retained[0].id.starts_with("1/"));
+    assert!(retained[1].id.starts_with("2/"));
+    assert!(retained[2].id.starts_with("3/"));
+    for event in &retained {
+        assert!(text.contains(&format!("id: {}\n", event.id)));
+    }
+
+    let resumed = result_store
+        .events_after("session-test", Some(&retained[0].id), false)
+        .expect("the exact emitted row id is resumable");
+    assert_eq!(resumed, retained[1..]);
+    let wrong_session = result_store
+        .events_after("other-session", Some(&retained[0].id), false)
+        .expect_err("an emitted id cannot cross MCP session scope");
+    assert_eq!(wrong_session.status, 400);
+    let body: Value = serde_json::from_slice(&wrong_session.body).expect("scope error JSON");
+    assert_eq!(
+        body["error"],
+        serde_json::json!("stream_cursor_scope_mismatch")
+    );
 
     let first_row = text.find("event: row\n").expect("row frame present");
     let final_response = text
@@ -7928,38 +8038,10 @@ fn sse_response_emits_chunk_frames_before_the_authoritative_result() {
         &request,
         Some("tools/call"),
         streaming_query_response(),
-        Some(Arc::clone(&result_store)),
+        Some("chunk-session".to_owned()),
         "principal-test",
-        Some("1/0"),
+        None,
     );
-    let retained = result_store
-        .events_after("session-test", None, false)
-        .expect("stream replay remains available");
-    assert_eq!(retained.len(), 3, "two rows and one final response");
-    assert_eq!(retained[0].event, Some("row"));
-    assert_eq!(retained[1].event, Some("row"));
-    assert_eq!(retained[2].event, None);
-    assert!(retained[0].id.starts_with("1/"));
-    assert!(retained[1].id.starts_with("2/"));
-    assert!(retained[2].id.starts_with("3/"));
-    for event in &retained {
-        assert!(text.contains(&format!("id: {}\n", event.id)));
-    }
-
-    let resumed = result_store
-        .events_after("session-test", Some(&retained[0].id), false)
-        .expect("the exact emitted row id is resumable");
-    assert_eq!(resumed, retained[1..]);
-    let wrong_session = result_store
-        .events_after("other-session", Some(&retained[0].id), false)
-        .expect_err("an emitted id cannot cross MCP session scope");
-    assert_eq!(wrong_session.status, 400);
-    let body: Value = serde_json::from_slice(&wrong_session.body).expect("scope error JSON");
-    assert_eq!(
-        body["error"],
-        serde_json::json!("stream_cursor_scope_mismatch")
-    );
-
     assert_eq!(response.status, 200);
     let text = String::from_utf8(response.body).expect("utf8 SSE body");
     assert_eq!(
@@ -7995,9 +8077,9 @@ fn sse_response_emits_chunk_frames_before_the_authoritative_result() {
         &request,
         Some("tools/call"),
         inline,
-        Some("chunk-session".to_owned()),
-        "principal-test",
         None,
+        "principal-test",
+        Some("1/0"),
     );
     let plain_text = String::from_utf8(plain.body).expect("utf8");
     assert!(

@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -1611,7 +1611,7 @@ use sse_writer::{
     write_chunked_sse_comment, write_chunked_sse_event, write_final_chunk, write_sse_event,
     write_streaming_sse_headers,
 };
-use wire::{read_http_request, write_http_response};
+use wire::{DeadlineRead, read_http_request, write_http_response};
 
 #[cfg(test)]
 mod tests;
@@ -7446,6 +7446,18 @@ fn handle_connection(
     )
 }
 
+impl DeadlineRead for TcpStream {
+    fn set_ingress_read_timeout(&mut self, timeout: Duration) -> std::io::Result<()> {
+        self.set_read_timeout(Some(timeout))
+    }
+}
+
+impl DeadlineRead for StreamOwned<ServerConnection, TcpStream> {
+    fn set_ingress_read_timeout(&mut self, timeout: Duration) -> std::io::Result<()> {
+        self.sock.set_read_timeout(Some(timeout))
+    }
+}
+
 fn handle_tls_connection(
     mut stream: TcpStream,
     server: &OracleMcpServer,
@@ -7459,15 +7471,9 @@ fn handle_tls_connection(
     })?;
     let peer_addr = stream.peer_addr().ok();
     let peer_is_loopback = peer_addr.is_some_and(|addr| addr.ip().is_loopback());
-    while connection.is_handshaking() {
-        let (read, written) = connection.complete_io(&mut stream)?;
-        if read == 0 && written == 0 && connection.is_handshaking() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "TLS handshake did not complete",
-            ));
-        }
-    }
+    complete_tls_handshake(&mut stream, &mut connection, TLS_HANDSHAKE_TIMEOUT)?;
+    stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT))?;
     let peer_cert_fingerprint_sha256 = connection
         .peer_certificates()
         .and_then(|certs| certs.first())
@@ -7486,15 +7492,101 @@ fn handle_tls_connection(
     result
 }
 
+fn complete_tls_handshake(
+    stream: &mut TcpStream,
+    connection: &mut ServerConnection,
+    timeout: Duration,
+) -> std::io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    while connection.is_handshaking() {
+        let mut progressed = false;
+        while connection.wants_write() {
+            stream.set_write_timeout(Some(tls_handshake_remaining(deadline)?))?;
+            let written = connection
+                .write_tls(stream)
+                .map_err(map_tls_handshake_io_error)?;
+            if written == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "TLS peer closed while handshake output was pending",
+                ));
+            }
+            progressed = true;
+        }
+        if connection.wants_read() {
+            stream.set_read_timeout(Some(tls_handshake_remaining(deadline)?))?;
+            let read = connection
+                .read_tls(stream)
+                .map_err(map_tls_handshake_io_error)?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "TLS peer closed before the handshake completed",
+                ));
+            }
+            progressed = true;
+            connection
+                .process_new_packets()
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        }
+        if !progressed && connection.is_handshaking() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "TLS handshake cannot make progress",
+            ));
+        }
+    }
+    while connection.wants_write() {
+        stream.set_write_timeout(Some(tls_handshake_remaining(deadline)?))?;
+        let written = connection
+            .write_tls(stream)
+            .map_err(map_tls_handshake_io_error)?;
+        if written == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "TLS peer closed while final handshake output was pending",
+            ));
+        }
+    }
+    stream.set_write_timeout(Some(tls_handshake_remaining(deadline)?))?;
+    stream.flush().map_err(map_tls_handshake_io_error)?;
+    Ok(())
+}
+
+fn tls_handshake_remaining(deadline: Instant) -> std::io::Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(tls_handshake_timed_out)
+}
+
+fn map_tls_handshake_io_error(error: std::io::Error) -> std::io::Error {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) {
+        tls_handshake_timed_out()
+    } else {
+        error
+    }
+}
+
+fn tls_handshake_timed_out() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "TLS handshake absolute deadline exceeded",
+    )
+}
+
 fn handle_stream(
-    stream: &mut (impl Read + Write),
+    stream: &mut (impl DeadlineRead + Write),
     server: &OracleMcpServer,
     config: &HttpTransportConfig,
     peer_is_loopback: bool,
     peer_addr: Option<String>,
     peer_cert_fingerprint_sha256: Option<String>,
 ) -> std::io::Result<()> {
-    let exchange = match read_http_request(stream) {
+    let exchange = match read_http_request(stream, REQUEST_HEADER_TIMEOUT, REQUEST_BODY_TIMEOUT) {
         Ok(Some(request)) => handle_http_exchange(
             server,
             config,
@@ -7524,6 +7616,9 @@ fn handle_stream(
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(30);
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn reason_phrase(status: u16) -> &'static str {
     match status {

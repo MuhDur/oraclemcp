@@ -6,14 +6,24 @@
 //! verbatim from the transport surface (behavior-identical).
 
 use std::io::{Read, Write};
+use std::time::{Duration, Instant};
 
 use super::{HttpRequest, HttpResponse, MAX_BODY_BYTES, MAX_HEADER_BYTES, reason_phrase};
 
-pub(super) fn read_http_request(stream: &mut impl Read) -> std::io::Result<Option<HttpRequest>> {
+pub(super) trait DeadlineRead: Read {
+    fn set_ingress_read_timeout(&mut self, timeout: Duration) -> std::io::Result<()>;
+}
+
+pub(super) fn read_http_request(
+    stream: &mut impl DeadlineRead,
+    header_timeout: Duration,
+    body_timeout: Duration,
+) -> std::io::Result<Option<HttpRequest>> {
     let mut buf = Vec::new();
     let mut chunk = [0_u8; 8192];
+    let header_deadline = Instant::now() + header_timeout;
     let header_end = loop {
-        let n = stream.read(&mut chunk)?;
+        let n = read_before_deadline(stream, &mut chunk, header_deadline, "HTTP header")?;
         if n == 0 {
             if buf.is_empty() {
                 return Ok(None);
@@ -22,6 +32,12 @@ pub(super) fn read_http_request(stream: &mut impl Read) -> std::io::Result<Optio
         }
         buf.extend_from_slice(&chunk[..n]);
         if let Some(end) = find_header_end(&buf) {
+            if end
+                .checked_add(4)
+                .is_none_or(|header_bytes| header_bytes > MAX_HEADER_BYTES)
+            {
+                return Err(invalid_data("HTTP headers exceed native transport limit"));
+            }
             break end;
         }
         if buf.len() > MAX_HEADER_BYTES {
@@ -68,8 +84,9 @@ pub(super) fn read_http_request(stream: &mut impl Read) -> std::io::Result<Optio
     }
     let body_start = header_end + 4;
     request.body.extend_from_slice(&buf[body_start..]);
+    let body_deadline = Instant::now() + body_timeout;
     while request.body.len() < content_length {
-        let n = stream.read(&mut chunk)?;
+        let n = read_before_deadline(stream, &mut chunk, body_deadline, "HTTP body")?;
         if n == 0 {
             return Err(invalid_data("incomplete HTTP body"));
         }
@@ -77,6 +94,36 @@ pub(super) fn read_http_request(stream: &mut impl Read) -> std::io::Result<Optio
     }
     request.body.truncate(content_length);
     Ok(Some(request))
+}
+
+fn read_before_deadline(
+    stream: &mut impl DeadlineRead,
+    buf: &mut [u8],
+    deadline: Instant,
+    phase: &'static str,
+) -> std::io::Result<usize> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| phase_timed_out(phase))?;
+    stream.set_ingress_read_timeout(remaining)?;
+    stream.read(buf).map_err(|error| {
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ) {
+            phase_timed_out(phase)
+        } else {
+            error
+        }
+    })
+}
+
+fn phase_timed_out(phase: &'static str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("{phase} absolute deadline exceeded"),
+    )
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
@@ -117,4 +164,133 @@ pub(super) fn write_http_response(
     stream.write_all(b"\r\n")?;
     stream.write_all(&response.body)?;
     stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    struct ScheduledReader {
+        chunks: VecDeque<(Duration, Vec<u8>)>,
+        timeout: Option<Duration>,
+    }
+
+    impl ScheduledReader {
+        fn new(chunks: impl IntoIterator<Item = (Duration, Vec<u8>)>) -> Self {
+            Self {
+                chunks: chunks.into_iter().collect(),
+                timeout: None,
+            }
+        }
+    }
+
+    impl Read for ScheduledReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let Some((delay, bytes)) = self.chunks.pop_front() else {
+                return Ok(0);
+            };
+            if let Some(timeout) = self.timeout
+                && delay >= timeout
+            {
+                std::thread::sleep(timeout);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "scheduled read exceeded timeout",
+                ));
+            }
+            std::thread::sleep(delay);
+            let count = bytes.len().min(buf.len());
+            buf[..count].copy_from_slice(&bytes[..count]);
+            if count < bytes.len() {
+                self.chunks
+                    .push_front((Duration::ZERO, bytes[count..].to_vec()));
+            }
+            Ok(count)
+        }
+    }
+
+    impl DeadlineRead for ScheduledReader {
+        fn set_ingress_read_timeout(&mut self, timeout: Duration) -> std::io::Result<()> {
+            self.timeout = Some(timeout);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn trickled_header_cannot_reset_the_absolute_deadline() {
+        let chunks = b"GET / HTTP/1.1\r\n"
+            .iter()
+            .map(|byte| (Duration::from_millis(4), vec![*byte]));
+        let mut reader = ScheduledReader::new(chunks);
+        let started = Instant::now();
+        let error = read_http_request(
+            &mut reader,
+            Duration::from_millis(15),
+            Duration::from_secs(1),
+        )
+        .expect_err("an incomplete trickled header must time out absolutely");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn trickled_body_gets_a_separate_absolute_deadline() {
+        let mut chunks = vec![(
+            Duration::ZERO,
+            b"POST / HTTP/1.1\r\ncontent-length: 8\r\n\r\n".to_vec(),
+        )];
+        chunks.extend(
+            b"12345678"
+                .iter()
+                .map(|byte| (Duration::from_millis(4), vec![*byte])),
+        );
+        let mut reader = ScheduledReader::new(chunks);
+        let error = read_http_request(
+            &mut reader,
+            Duration::from_secs(1),
+            Duration::from_millis(15),
+        )
+        .expect_err("an incomplete trickled body must time out absolutely");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("HTTP body"));
+    }
+
+    #[test]
+    fn complete_request_at_body_limit_succeeds_within_budgets() {
+        let body = vec![b'x'; MAX_BODY_BYTES];
+        let mut request =
+            format!("POST / HTTP/1.1\r\ncontent-length: {}\r\n\r\n", body.len()).into_bytes();
+        request.extend_from_slice(&body);
+        let mut reader = ScheduledReader::new([(Duration::ZERO, request)]);
+        let parsed = read_http_request(&mut reader, Duration::from_secs(1), Duration::from_secs(1))
+            .expect("bounded request parses")
+            .expect("request is present");
+        assert_eq!(parsed.body.len(), MAX_BODY_BYTES);
+    }
+
+    #[test]
+    fn header_terminator_cannot_bypass_the_header_byte_cap() {
+        let mut request = b"GET / HTTP/1.1\r\nx-fill: ".to_vec();
+        request.resize(MAX_HEADER_BYTES + 1, b'x');
+        request.extend_from_slice(b"\r\n\r\n");
+        let mut reader = ScheduledReader::new([(Duration::ZERO, request)]);
+        let error = read_http_request(&mut reader, Duration::from_secs(1), Duration::from_secs(1))
+            .expect_err("header bytes beyond the cap must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("headers exceed"));
+    }
+
+    #[test]
+    fn complete_header_at_the_exact_byte_cap_succeeds() {
+        let mut request = b"GET / HTTP/1.1\r\nx-fill: ".to_vec();
+        request.resize(MAX_HEADER_BYTES - 4, b'x');
+        request.extend_from_slice(b"\r\n\r\n");
+        assert_eq!(request.len(), MAX_HEADER_BYTES);
+        let mut reader = ScheduledReader::new([(Duration::ZERO, request)]);
+        let parsed = read_http_request(&mut reader, Duration::from_secs(1), Duration::from_secs(1))
+            .expect("header at exact cap parses")
+            .expect("request is present");
+        assert_eq!(parsed.method, "GET");
+    }
 }
