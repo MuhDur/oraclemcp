@@ -265,9 +265,22 @@ impl IamToken {
     }
 
     /// Whether the token should be refreshed (expires within `skew_secs`).
+    ///
+    /// An already-expired token **always** needs refresh, regardless of the skew
+    /// value — a negative or misconfigured `skew_secs` must never let an expired
+    /// token read as fresh (the historical `now_unix + skew_secs` bug, which both
+    /// reused expired tokens under a negative skew and could overflow `i64`). The
+    /// proactive window clamps the skew nonnegative (a negative skew is
+    /// meaningless — it would ask to refresh *after* expiry) and adds saturating,
+    /// so a large `now_unix`/`skew_secs` can never wrap a "needs refresh" into a
+    /// "fresh".
     #[must_use]
     pub fn needs_refresh(&self, now_unix: i64, skew_secs: i64) -> bool {
-        now_unix + skew_secs >= self.expires_at_unix
+        if self.is_expired(now_unix) {
+            return true;
+        }
+        let skew = skew_secs.max(0);
+        now_unix.saturating_add(skew) >= self.expires_at_unix
     }
 }
 
@@ -501,6 +514,56 @@ mod tests {
         assert!(tok.needs_refresh(950, 60));
         // Plenty of headroom -> no refresh.
         assert!(!tok.needs_refresh(900, 60));
+    }
+
+    #[test]
+    fn needs_refresh_expired_token_always_refreshes_regardless_of_skew_sign() {
+        let tok = IamToken {
+            token: "t".to_owned(),
+            expires_at_unix: 1000,
+        };
+        // Already expired: a negative/misconfigured skew must NOT make it read as
+        // fresh (the historical `now + skew >= expires` bug: 1500 + -1000 = 500 <
+        // 1000 wrongly reported "fresh" and reused an expired token).
+        assert!(tok.is_expired(1500));
+        assert!(
+            tok.needs_refresh(1500, -1000),
+            "an expired token needs refresh even under a negative skew"
+        );
+        assert!(
+            tok.needs_refresh(1000, -1000),
+            "at exact expiry a negative skew must not defer refresh"
+        );
+        // Not yet expired + negative skew: the skew clamps to 0, so the decision
+        // reduces to the expiry check (still valid -> no refresh).
+        assert!(!tok.needs_refresh(900, -1000));
+    }
+
+    #[test]
+    fn needs_refresh_saturates_instead_of_overflowing() {
+        let tok = IamToken {
+            token: "t".to_owned(),
+            expires_at_unix: i64::MAX,
+        };
+        // now + skew would overflow i64; saturating_add pins it at i64::MAX, which
+        // meets the ceiling -> refresh, and crucially does not panic/wrap.
+        assert!(tok.needs_refresh(i64::MAX - 1, i64::MAX));
+    }
+
+    #[test]
+    fn ensure_fresh_token_never_reuses_an_expired_token_under_negative_skew() {
+        let src = CountingSource {
+            calls: std::cell::Cell::new(0),
+        };
+        let expired = IamToken {
+            token: "old".to_owned(),
+            expires_at_unix: 1000,
+        };
+        // Expired at now=2000 with a hostile negative skew: must fetch a fresh
+        // token, never reuse the expired one.
+        let t = ensure_fresh_token(Some(&expired), &src, 2000, -5000).unwrap();
+        assert_eq!(t.token, "fresh");
+        assert_eq!(src.calls.get(), 1);
     }
 
     struct CountingSource {
