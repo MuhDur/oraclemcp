@@ -5,8 +5,22 @@
 //! The sequence is append `pending` + fsync before the database call, append a
 //! terminal `resolved` record only after a safe terminal outcome, and rebuild the
 //! unresolved set plus terminal idempotency index on restart.
+//!
+//! Growth is bounded on two axes. The in-memory `resolved` idempotency index is
+//! capped ([`DEFAULT_MAX_RESOLVED_INTENTS`]) and evicts oldest-first, so resident
+//! memory stays bounded regardless of write volume; unresolved intents are never
+//! evicted. On disk, the log is compacted crash-safely at open (unresolved plus
+//! the retained resolved window, written to a temp file, fsynced, atomically
+//! renamed, dir fsynced) when it has grown well past its compact size.
+//!
+//! FOLLOW-UP (not implemented here): periodic/runtime compaction within a single
+//! very-long-lived process is deliberately out of scope. Compaction only runs at
+//! open, so a process that never restarts still grows its on-disk log unbounded
+//! between restarts. A runtime trigger would need to hold the state lock across a
+//! full-log rewrite (blocking appends) and was judged too risky for this change;
+//! the fail-safe open-time compaction plus the hard in-memory cap were preferred.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,6 +35,23 @@ use crate::file_store::{FileStore, FileStoreError, ServiceOwner, StoreId};
 const WRITE_INTENT_COLLECTION: &str = "write-intents";
 const WRITE_INTENT_ID: &str = "intents";
 const WRITE_INTENT_SCHEMA_VERSION: u16 = 1;
+
+/// Default cap on the in-memory resolved-intent idempotency index.
+///
+/// The `resolved` map exists only to reject same-grant/same-SQL replays within a
+/// realistic retry lifetime; it is not a permanent history (the audit chain is
+/// the permanent action history). Idempotency ids derive from single-use,
+/// process-local grant material, and grants must be regenerated after restart,
+/// so an unbounded window is never required for safety. Once this cap is
+/// exceeded the oldest resolved entries are evicted; an evicted replay is simply
+/// re-admitted as a fresh intent, which is safe because its grant material is
+/// already spent. Unresolved intents are never subject to this cap — they must
+/// survive forever so restart fails closed until an operator verifies them.
+const DEFAULT_MAX_RESOLVED_INTENTS: usize = 8192;
+
+/// Minimum on-disk record count before startup compaction is even considered.
+/// Small ledgers are left untouched so ordinary operation never rewrites the log.
+const COMPACTION_MIN_RECORDS: usize = 512;
 
 /// Durable write-intent errors.
 #[derive(Debug, Error)]
@@ -189,13 +220,39 @@ struct ResolvedWriteIntent {
     outcome: WriteIntentOutcome,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct WriteIntentState {
+    /// Unresolved intents. Never evicted: these are the crash-safety poison that
+    /// forces fail-closed restart until an operator verifies them.
     unresolved: HashMap<String, WriteIntent>,
+    /// Bounded terminal idempotency index. Capped at `max_resolved`; the oldest
+    /// entries are evicted first so resident memory stays bounded.
     resolved: HashMap<String, ResolvedWriteIntent>,
+    /// Insertion order of `resolved` intent ids (oldest at the front) used to
+    /// pick eviction victims. Stays 1:1 with `resolved`.
+    resolved_order: VecDeque<String>,
+    /// Maximum retained resolved entries.
+    max_resolved: usize,
+}
+
+impl Default for WriteIntentState {
+    fn default() -> Self {
+        Self::with_max_resolved(DEFAULT_MAX_RESOLVED_INTENTS)
+    }
 }
 
 impl WriteIntentState {
+    fn with_max_resolved(max_resolved: usize) -> Self {
+        Self {
+            unresolved: HashMap::new(),
+            resolved: HashMap::new(),
+            resolved_order: VecDeque::new(),
+            // A zero cap would evict everything and defeat idempotency; keep at
+            // least one entry so the most recent resolution is always testable.
+            max_resolved: max_resolved.max(1),
+        }
+    }
+
     fn ensure_appendable(&self, intent: &WriteIntent) -> Result<(), WriteIntentError> {
         if self.unresolved.contains_key(&intent.intent_id) {
             return Err(WriteIntentError::Duplicate(intent.intent_id.clone()));
@@ -212,6 +269,23 @@ impl WriteIntentState {
             });
         }
         Ok(())
+    }
+
+    /// Record a terminal resolution and evict the oldest resolved entries beyond
+    /// the retention cap. This only ever touches the bounded `resolved` index;
+    /// `unresolved` intents are never dropped here.
+    fn record_resolved(&mut self, intent_id: String, entry: ResolvedWriteIntent) {
+        if self.resolved.insert(intent_id.clone(), entry).is_none() {
+            self.resolved_order.push_back(intent_id);
+        }
+        while self.resolved.len() > self.max_resolved {
+            match self.resolved_order.pop_front() {
+                Some(oldest) => {
+                    self.resolved.remove(&oldest);
+                }
+                None => break,
+            }
+        }
     }
 }
 
@@ -300,16 +374,42 @@ impl WriteIntentLog {
         store: FileStore,
         owner: ServiceOwner,
     ) -> Result<Self, WriteIntentError> {
+        Self::open_with_store_owner_capped(store, owner, DEFAULT_MAX_RESOLVED_INTENTS)
+    }
+
+    fn open_with_store_owner_capped(
+        store: FileStore,
+        owner: ServiceOwner,
+        max_resolved: usize,
+    ) -> Result<Self, WriteIntentError> {
         let id = StoreId::from_safe_segment(WRITE_INTENT_ID)?;
+        // `recover_jsonl` truncates any torn tail (crash-safe) and returns a byte
+        // index we do not need. `rebuild_state` then makes a single pass over the
+        // repaired file to reconstruct the unresolved set plus the bounded
+        // resolved index.
         store.recover_jsonl(&owner, WRITE_INTENT_COLLECTION, &id)?;
         let path = store.path_for(WRITE_INTENT_COLLECTION, &id, "jsonl")?;
-        let state = rebuild_state(&path)?;
-        Ok(Self {
+        let (state, stats) = rebuild_state(&path, max_resolved)?;
+        let log = Self {
             store,
             owner,
             id,
             state: Mutex::new(state),
-        })
+        };
+        // Bound on-disk growth across restarts. Best-effort and fail-safe: a
+        // compaction problem never blocks startup and never corrupts the live log
+        // (the new image is proven to rebuild before any atomic swap).
+        log.compact_on_open_if_beneficial(stats.records_read);
+        Ok(log)
+    }
+
+    /// Open with an explicit resolved-index cap. Test-only so bounded eviction and
+    /// compaction can be exercised deterministically with small ledgers.
+    #[cfg(test)]
+    fn open_capped(root: impl AsRef<Path>, max_resolved: usize) -> Result<Self, WriteIntentError> {
+        let store = FileStore::open(root)?;
+        let owner = store.acquire_service_owner("write-intents")?;
+        Self::open_with_store_owner_capped(store, owner, max_resolved)
     }
 
     /// The canonical path of the intent JSONL file.
@@ -352,7 +452,7 @@ impl WriteIntentLog {
         let record = WriteIntentRecord::resolved(&intent, outcome);
         self.append_record(&record)?;
         guard.unresolved.remove(intent_id);
-        guard.resolved.insert(
+        guard.record_resolved(
             intent_id.to_owned(),
             ResolvedWriteIntent { intent, outcome },
         );
@@ -366,12 +466,119 @@ impl WriteIntentLog {
             .append_jsonl(&self.owner, WRITE_INTENT_COLLECTION, &self.id, &bytes)?;
         Ok(())
     }
+
+    /// Rewrite the on-disk ledger down to every unresolved record plus the
+    /// bounded window of retained resolved records, discarding resolved history
+    /// that is already outside the in-memory idempotency window.
+    ///
+    /// Crash safety: the compacted image is written to a same-directory temp file,
+    /// fsynced, atomically renamed over the live log, and the directory fsynced
+    /// (all via [`FileStore::write_atomic`]). A crash therefore leaves either the
+    /// old full log or the new compacted log — never a torn state, and never a
+    /// lost unresolved intent. As an extra guard the compacted bytes are parsed
+    /// back and proven to reproduce the exact unresolved + retained-resolved state
+    /// before the swap; on any mismatch the live log is left untouched.
+    ///
+    /// Returns `true` if the log was rewritten, `false` if the self-check declined
+    /// the swap. Runtime/periodic compaction within a single long-running process
+    /// is intentionally not performed here (see the module-level follow-up note).
+    fn compact(&self) -> Result<bool, WriteIntentError> {
+        let guard = self.state.lock();
+        let compacted = compact_bytes(&guard)?;
+        // Prove the compacted image rebuilds to the identical logical state before
+        // replacing the live log. Never risk swapping in a log that will not
+        // reopen or that would drop an unresolved intent.
+        let (verify, _) = rebuild_state_from_bytes(&compacted, guard.max_resolved)?;
+        if verify.unresolved != guard.unresolved || verify.resolved != guard.resolved {
+            return Ok(false);
+        }
+        self.store.write_atomic(
+            &self.owner,
+            WRITE_INTENT_COLLECTION,
+            &self.id,
+            "jsonl",
+            &compacted,
+        )?;
+        Ok(true)
+    }
+
+    /// Compact at open when the on-disk log is meaningfully larger than its
+    /// compacted form. Best-effort: any error leaves the (valid) live log in
+    /// place and never blocks startup.
+    fn compact_on_open_if_beneficial(&self, records_read: usize) {
+        if records_read < COMPACTION_MIN_RECORDS {
+            return;
+        }
+        let compacted_records = {
+            let guard = self.state.lock();
+            // Each retained resolved intent re-serializes as a pending + resolved
+            // pair so the rebuild invariants hold; unresolved re-serialize as one
+            // pending each.
+            guard.unresolved.len() + guard.resolved.len().saturating_mul(2)
+        };
+        if records_read < compacted_records.saturating_mul(2) {
+            return;
+        }
+        let _ = self.compact();
+    }
 }
 
-fn rebuild_state(path: &Path) -> Result<WriteIntentState, WriteIntentError> {
+/// Serialize a state snapshot into a compacted JSONL image: one `pending` record
+/// per unresolved intent, then a `pending` + `resolved` pair per retained
+/// resolved intent (oldest first). The pending-before-resolved pairing and
+/// per-intent field matching preserve every rebuild invariant.
+fn compact_bytes(state: &WriteIntentState) -> Result<Vec<u8>, WriteIntentError> {
+    let mut buf = Vec::new();
+    for intent in state.unresolved.values() {
+        push_record(&mut buf, &WriteIntentRecord::pending(intent))?;
+    }
+    for id in &state.resolved_order {
+        if let Some(resolved) = state.resolved.get(id) {
+            push_record(&mut buf, &WriteIntentRecord::pending(&resolved.intent))?;
+            push_record(
+                &mut buf,
+                &WriteIntentRecord::resolved(&resolved.intent, resolved.outcome),
+            )?;
+        }
+    }
+    Ok(buf)
+}
+
+fn push_record(buf: &mut Vec<u8>, record: &WriteIntentRecord) -> Result<(), WriteIntentError> {
+    let bytes =
+        serde_json::to_vec(record).map_err(|e| WriteIntentError::Serialization(e.to_string()))?;
+    if bytes.iter().any(|b| *b == b'\n' || *b == b'\r') {
+        return Err(WriteIntentError::Serialization(
+            "compacted record contains an embedded newline".to_owned(),
+        ));
+    }
+    buf.extend_from_slice(&bytes);
+    buf.push(b'\n');
+    Ok(())
+}
+
+/// Recovery accounting used to decide whether startup compaction is worthwhile.
+struct RebuildStats {
+    /// Number of complete records parsed from the on-disk log.
+    records_read: usize,
+}
+
+/// Read and rebuild in a single pass over the (already torn-tail-repaired) file.
+fn rebuild_state(
+    path: &Path,
+    max_resolved: usize,
+) -> Result<(WriteIntentState, RebuildStats), WriteIntentError> {
     let bytes =
         fs::read(path).map_err(|e| WriteIntentError::Store(FileStoreError::Io(e.to_string())))?;
-    let mut state = WriteIntentState::default();
+    rebuild_state_from_bytes(&bytes, max_resolved)
+}
+
+fn rebuild_state_from_bytes(
+    bytes: &[u8],
+    max_resolved: usize,
+) -> Result<(WriteIntentState, RebuildStats), WriteIntentError> {
+    let mut state = WriteIntentState::with_max_resolved(max_resolved);
+    let mut records_read = 0usize;
     for (idx, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
         let line_no = idx + 1;
         let record_bytes = line.strip_suffix(b"\n").unwrap_or(line);
@@ -392,6 +599,7 @@ fn rebuild_state(path: &Path) -> Result<WriteIntentState, WriteIntentError> {
                 message: format!("unsupported schema version {}", record.schema_version),
             });
         }
+        records_read += 1;
         match record.event {
             WriteIntentEvent::Pending => {
                 if record.outcome.is_some() || record.resolved_ts.is_some() {
@@ -442,14 +650,14 @@ fn rebuild_state(path: &Path) -> Result<WriteIntentState, WriteIntentError> {
                         message: "resolved record does not match pending record".to_owned(),
                     });
                 }
-                state.resolved.insert(
-                    intent.intent_id.clone(),
-                    ResolvedWriteIntent { intent, outcome },
-                );
+                // Apply the same retention cap the live `resolve()` path uses so
+                // the post-restart idempotency window matches steady-state exactly.
+                let intent_id = intent.intent_id.clone();
+                state.record_resolved(intent_id, ResolvedWriteIntent { intent, outcome });
             }
         }
     }
-    Ok(state)
+    Ok((state, RebuildStats { records_read }))
 }
 
 fn unix_timestamp() -> String {
@@ -579,6 +787,270 @@ mod tests {
         assert!(matches!(
             log.append_pending(drift),
             Err(WriteIntentError::IdempotencyConflict { intent_id: drift_id }) if drift_id == intent_id
+        ));
+    }
+
+    /// Resolve-and-record a distinct intent by idempotency key, returning its id.
+    fn resolve_key(log: &WriteIntentLog, key: &str, outcome: WriteIntentOutcome) -> String {
+        let id = log.append_pending(intent(key)).expect("append pending");
+        log.resolve(&id, outcome).expect("resolve intent");
+        id
+    }
+
+    fn resolved_len(log: &WriteIntentLog) -> usize {
+        log.state.lock().resolved.len()
+    }
+
+    #[test]
+    fn resolved_index_is_bounded_and_evicts_oldest() {
+        // With a small cap the resident resolved index must never exceed it, and
+        // the oldest resolved entries fall out of the idempotency window.
+        let log = WriteIntentLog::open_capped(test_root("bounded-evict"), 4).expect("open capped");
+        let mut ids = Vec::new();
+        for i in 0..10 {
+            ids.push(resolve_key(
+                &log,
+                &format!("evict-{i}"),
+                WriteIntentOutcome::Succeeded,
+            ));
+        }
+        assert!(
+            resolved_len(&log) <= 4,
+            "resident resolved index stays within the cap"
+        );
+
+        // A retained (most-recent) resolution still rejects same-grant/same-SQL
+        // replay as AlreadyResolved.
+        let retained = &ids[9];
+        assert!(matches!(
+            log.append_pending(intent("evict-9")),
+            Err(WriteIntentError::AlreadyResolved { intent_id, .. }) if &intent_id == retained
+        ));
+
+        // An evicted (oldest) resolution has left the window and is re-admitted as
+        // a fresh pending intent rather than being remembered forever.
+        assert!(
+            log.append_pending(intent("evict-0")).is_ok(),
+            "evicted resolved entry is re-admitted, proving the window is bounded"
+        );
+    }
+
+    #[test]
+    fn unresolved_intents_are_never_evicted_by_resolved_cap() {
+        // Even under heavy resolved churn against a tiny cap, every unresolved
+        // intent must survive in memory and across restart: they are the
+        // fail-closed crash poison and may never be dropped.
+        let root = test_root("unresolved-preserved");
+        {
+            let log = WriteIntentLog::open_capped(&root, 2).expect("open capped");
+            for i in 0..6 {
+                log.append_pending(intent(&format!("keep-{i}")))
+                    .expect("append unresolved");
+            }
+            for i in 0..30 {
+                resolve_key(&log, &format!("churn-{i}"), WriteIntentOutcome::Succeeded);
+            }
+            assert_eq!(
+                log.unresolved().expect("unresolved").len(),
+                6,
+                "resolved eviction never touches unresolved intents"
+            );
+            assert!(resolved_len(&log) <= 2, "resolved index stays bounded");
+        }
+        let log = WriteIntentLog::open_capped(&root, 2).expect("reopen capped");
+        assert_eq!(
+            log.unresolved().expect("unresolved after reopen").len(),
+            6,
+            "every unresolved intent survives restart"
+        );
+    }
+
+    #[test]
+    fn rebuild_applies_the_resolved_cap_and_keeps_the_newest_window() {
+        // Recovery must reconstruct the same bounded window the live path would
+        // hold: the newest `cap` resolutions, not the whole history.
+        let root = test_root("rebuild-cap");
+        {
+            let log = WriteIntentLog::open_capped(&root, 3).expect("open capped");
+            for i in 0..12 {
+                resolve_key(&log, &format!("win-{i}"), WriteIntentOutcome::Succeeded);
+            }
+        }
+        // Reopen with the same cap: rebuild reads all history but retains only the
+        // newest three resolutions.
+        let log = WriteIntentLog::open_capped(&root, 3).expect("reopen capped");
+        assert!(resolved_len(&log) <= 3, "rebuild honours the resolved cap");
+        // Newest is still in-window and rejects replay.
+        assert!(matches!(
+            log.append_pending(intent("win-11")),
+            Err(WriteIntentError::AlreadyResolved { .. })
+        ));
+        // Oldest fell out of the window during rebuild and is re-admitted.
+        assert!(
+            log.append_pending(intent("win-0")).is_ok(),
+            "rebuild evicts the oldest resolutions just like steady state"
+        );
+    }
+
+    #[test]
+    fn open_time_compaction_shrinks_log_and_preserves_all_state() {
+        let root = test_root("compaction");
+        let path;
+        let size_before;
+        {
+            // Build a log well past the compaction floor: a handful of unresolved
+            // intents plus a long resolved history that vastly exceeds the cap.
+            let log = WriteIntentLog::open_capped(&root, 8).expect("open capped");
+            for i in 0..5 {
+                log.append_pending(intent(&format!("live-{i}")))
+                    .expect("append unresolved");
+            }
+            for i in 0..260 {
+                resolve_key(&log, &format!("hist-{i}"), WriteIntentOutcome::Succeeded);
+            }
+            path = log.path().expect("log path");
+            size_before = fs::metadata(&path).expect("metadata").len();
+            // Opening this log did not compact (it was empty at open); it grew to
+            // > 512 records now.
+        }
+
+        // Reopening reads the oversized log and compacts it crash-safely.
+        let size_after;
+        {
+            let log = WriteIntentLog::open_capped(&root, 8).expect("reopen + compact");
+            size_after = fs::metadata(&path).expect("metadata after").len();
+            assert!(
+                size_after < size_before,
+                "compaction shrinks the on-disk log ({size_after} !< {size_before})"
+            );
+            assert_eq!(
+                log.unresolved().expect("unresolved").len(),
+                5,
+                "compaction preserves every unresolved intent"
+            );
+            // The newest resolutions survived compaction and still reject replay.
+            assert!(matches!(
+                log.append_pending(intent("hist-259")),
+                Err(WriteIntentError::AlreadyResolved { .. })
+            ));
+        }
+
+        // The compacted log rebuilds cleanly: unresolved intact, retained window
+        // intact, never a parse failure.
+        let log = WriteIntentLog::open_capped(&root, 8).expect("reopen compacted");
+        assert_eq!(
+            log.unresolved().expect("unresolved after compaction").len(),
+            5,
+            "unresolved intents survive across the compaction swap"
+        );
+        assert!(matches!(
+            log.append_pending(intent("hist-259")),
+            Err(WriteIntentError::AlreadyResolved { .. })
+        ));
+    }
+
+    #[test]
+    fn compact_self_check_is_a_no_op_faithful_rewrite() {
+        // Directly exercising compaction on a small log must reproduce the exact
+        // logical state and leave every intent recoverable.
+        let root = test_root("compact-direct");
+        let log = WriteIntentLog::open_capped(&root, 8).expect("open capped");
+        let unresolved_id = log
+            .append_pending(intent("stay-unresolved"))
+            .expect("append unresolved");
+        resolve_key(&log, "done-1", WriteIntentOutcome::Succeeded);
+        resolve_key(&log, "done-2", WriteIntentOutcome::RolledBack);
+
+        assert!(
+            log.compact().expect("compact"),
+            "compaction rewrote the log"
+        );
+
+        let before = {
+            let guard = log.state.lock();
+            (guard.unresolved.clone(), guard.resolved.clone())
+        };
+        drop(log);
+
+        let reopened = WriteIntentLog::open_capped(&root, 8).expect("reopen after compact");
+        let after = {
+            let guard = reopened.state.lock();
+            (guard.unresolved.clone(), guard.resolved.clone())
+        };
+        assert_eq!(before, after, "compaction is a faithful, lossless rewrite");
+        assert_eq!(
+            reopened.unresolved().expect("unresolved").len(),
+            1,
+            "the unresolved intent survives compaction"
+        );
+        assert!(
+            reopened
+                .unresolved()
+                .expect("unresolved")
+                .iter()
+                .any(|i| i.intent_id == unresolved_id),
+            "the exact unresolved intent id survives compaction"
+        );
+    }
+
+    #[test]
+    fn torn_tail_after_crash_is_repaired_without_losing_unresolved() {
+        // A crash mid-append leaves an unterminated tail. Recovery must truncate
+        // only that torn record and preserve every fully-committed unresolved
+        // intent, failing closed on none of them.
+        let root = test_root("torn-tail");
+        let path;
+        {
+            let log = WriteIntentLog::open(&root).expect("open log");
+            for i in 0..4 {
+                log.append_pending(intent(&format!("committed-{i}")))
+                    .expect("append committed");
+            }
+            path = log.path().expect("path");
+        }
+        // Simulate a torn write: append a partial record with no trailing newline.
+        use std::io::Write as _;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open for torn append");
+        file.write_all(b"{\"schema_version\":1,\"event\":\"pending\",\"intent_id\":\"intent-torn")
+            .expect("write torn tail");
+        file.sync_all().expect("sync torn tail");
+        drop(file);
+
+        let log = WriteIntentLog::open(&root).expect("reopen after crash");
+        let unresolved = log.unresolved().expect("unresolved after crash");
+        assert_eq!(
+            unresolved.len(),
+            4,
+            "all committed unresolved intents survive; only the torn tail is dropped"
+        );
+    }
+
+    #[test]
+    fn corrupt_record_fails_closed_with_typed_parse_error() {
+        // A structurally complete but corrupt record must fail closed with a typed
+        // diagnostic rather than panic or silently drop state.
+        let root = test_root("corrupt-record");
+        let path;
+        {
+            let log = WriteIntentLog::open(&root).expect("open log");
+            log.append_pending(intent("ok-1")).expect("append ok");
+            path = log.path().expect("path");
+        }
+        use std::io::Write as _;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open for corrupt append");
+        file.write_all(b"not-json\n").expect("write corrupt line");
+        file.sync_all().expect("sync corrupt line");
+        drop(file);
+
+        assert!(matches!(
+            WriteIntentLog::open(&root),
+            Err(WriteIntentError::Parse { .. })
         ));
     }
 }
