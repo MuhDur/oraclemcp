@@ -22,7 +22,19 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use parking_lot::Mutex;
 
-/// Per-URI subscriber registry. Cheap, in-process; one per server.
+/// The reserved subscription-owner key for the single stdio client.
+///
+/// Stdio has no per-request principal (its `DispatchContext` carries none), so
+/// every stdio `resources/subscribe` / `resources/unsubscribe` / drain uses this
+/// one stable, server-derived key. It is intentionally distinct from any HTTP
+/// principal key (those are mTLS/OAuth-derived or `anonymous-http`), so a future
+/// multi-client transport that keys owners off its own principals can never
+/// collide with — or drain — the stdio client's subscriptions.
+pub const STDIO_SUBSCRIPTION_OWNER: &str = "stdio-local";
+
+/// Per-URI subscriber registry. Cheap, in-process; one per server. Subscribers
+/// are keyed by the SERVER-DERIVED owner (principal), never a client-supplied
+/// id, so one caller can never enumerate, cancel, or impersonate another.
 #[derive(Default)]
 pub struct SubscriptionRegistry {
     by_uri: Mutex<HashMap<String, HashSet<String>>>,
@@ -135,13 +147,19 @@ impl SubscribeSource {
 
 /// The subscription hub: the per-URI subscriber [`SubscriptionRegistry`], the
 /// confirmed change source (the capability gate), the last-seen fingerprints
-/// for the polling fallback, and a queue of pending `resources/updated`
-/// notifications the transport drains.
+/// for the polling fallback, and the pending `resources/updated` notifications
+/// the transport drains.
+///
+/// `pending` is keyed by the SERVER-DERIVED owner (principal). A change to a
+/// watched URI enqueues one copy for each subscriber (owner) of that URI, and a
+/// drain returns only the CALLING owner's queue — so on a multi-client transport
+/// one client can never drain another's updates. There is no shared global
+/// queue.
 pub struct SubscriptionHub {
     registry: SubscriptionRegistry,
     source: SubscribeSource,
     fingerprints: Mutex<HashMap<String, String>>,
-    pending: Mutex<VecDeque<String>>,
+    pending: Mutex<HashMap<String, VecDeque<String>>>,
 }
 
 impl Default for SubscriptionHub {
@@ -159,7 +177,7 @@ impl SubscriptionHub {
             registry: SubscriptionRegistry::new(),
             source: SubscribeSource::Unsupported,
             fingerprints: Mutex::new(HashMap::new()),
-            pending: Mutex::new(VecDeque::new()),
+            pending: Mutex::new(HashMap::new()),
         }
     }
 
@@ -172,7 +190,7 @@ impl SubscriptionHub {
             registry: SubscriptionRegistry::new(),
             source,
             fingerprints: Mutex::new(HashMap::new()),
-            pending: Mutex::new(VecDeque::new()),
+            pending: Mutex::new(HashMap::new()),
         }
     }
 
@@ -182,15 +200,16 @@ impl SubscriptionHub {
         self.source.is_supported()
     }
 
-    /// Subscribe `client` to `uri`. Seeds the baseline fingerprint from the
+    /// Subscribe `owner` to `uri`. `owner` MUST be the server-derived principal
+    /// (never a client-supplied id). Seeds the baseline fingerprint from the
     /// polling source so the first change (not the first poll) fires an update.
     /// Returns `false` when subscriptions are unsupported (the caller maps that
     /// to a method/feature error).
-    pub fn subscribe(&self, client: &str, uri: &str) -> bool {
+    pub fn subscribe(&self, owner: &str, uri: &str) -> bool {
         if !self.supports_subscriptions() {
             return false;
         }
-        self.registry.subscribe(client, uri);
+        self.registry.subscribe(owner, uri);
         if let SubscribeSource::Polling(source) = &self.source
             && let Some(fp) = source.poll(uri)
         {
@@ -199,19 +218,23 @@ impl SubscriptionHub {
         true
     }
 
-    /// Unsubscribe `client` from `uri`.
-    pub fn unsubscribe(&self, client: &str, uri: &str) {
-        self.registry.unsubscribe(client, uri);
+    /// Unsubscribe `owner` from `uri`. Scoped to `owner`: one principal can only
+    /// drop its own subscription, never another's.
+    pub fn unsubscribe(&self, owner: &str, uri: &str) {
+        self.registry.unsubscribe(owner, uri);
     }
 
-    /// Drop all of `client`'s subscriptions (on disconnect).
-    pub fn unsubscribe_all(&self, client: &str) {
-        self.registry.unsubscribe_all(client);
+    /// Drop all of `owner`'s subscriptions AND its pending updates (on
+    /// disconnect). Touches only `owner`; other principals are unaffected.
+    pub fn unsubscribe_all(&self, owner: &str) {
+        self.registry.unsubscribe_all(owner);
+        self.pending.lock().remove(owner);
     }
 
     /// Poll every subscribed URI through the polling source; for each whose
-    /// fingerprint changed, enqueue a `resources/updated` and return the changed
-    /// URIs. A no-op (returns empty) when the source is not polling.
+    /// fingerprint changed, enqueue a `resources/updated` for each of that URI's
+    /// subscribers and return the changed URIs. A no-op (returns empty) when the
+    /// source is not polling.
     pub fn poll_for_changes(&self) -> Vec<String> {
         let SubscribeSource::Polling(source) = &self.source else {
             return Vec::new();
@@ -234,28 +257,51 @@ impl SubscriptionHub {
             }
         }
         drop(fingerprints);
-        let mut pending = self.pending.lock();
-        for uri in &changed {
-            pending.push_back(uri.clone());
-        }
+        self.enqueue_updates(&changed);
         changed
     }
 
     /// Directly mark `uri` changed (used when an out-of-band signal — e.g. a
     /// DDL the server itself just applied — is known without polling). Enqueues
-    /// a `resources/updated` for its subscribers.
+    /// a `resources/updated` for each of its subscribers.
     pub fn mark_changed(&self, uri: &str) {
-        if self.registry.subscribers_of(uri).is_empty() {
-            return;
-        }
-        self.pending.lock().push_back(uri.to_owned());
+        self.enqueue_updates(std::slice::from_ref(&uri.to_owned()));
     }
 
-    /// Drain queued `resources/updated` URIs (the transport turns each into a
-    /// `notifications/resources/updated` JSON-RPC notification).
-    pub fn drain_pending(&self) -> Vec<String> {
+    /// Fan a set of changed URIs out to their subscribers, appending one pending
+    /// `resources/updated` to each subscribing owner's queue. Subscribers are
+    /// resolved through the registry BEFORE the `pending` lock is taken, so the
+    /// lock order is always registry→pending and never inverts. A URI with no
+    /// subscribers enqueues nothing.
+    fn enqueue_updates(&self, changed: &[String]) {
+        if changed.is_empty() {
+            return;
+        }
+        let fanned: Vec<(String, Vec<String>)> = changed
+            .iter()
+            .map(|uri| (uri.clone(), self.registry.subscribers_of(uri)))
+            .collect();
         let mut pending = self.pending.lock();
-        pending.drain(..).collect()
+        for (uri, owners) in fanned {
+            for owner in owners {
+                pending.entry(owner).or_default().push_back(uri.clone());
+            }
+        }
+    }
+
+    /// Drain `owner`'s queued `resources/updated` URIs (the transport turns each
+    /// into a `notifications/resources/updated` JSON-RPC notification). Returns
+    /// ONLY `owner`'s pending updates; another principal's queue is untouched.
+    pub fn drain_pending(&self, owner: &str) -> Vec<String> {
+        let mut pending = self.pending.lock();
+        let Some(queue) = pending.get_mut(owner) else {
+            return Vec::new();
+        };
+        let drained: Vec<String> = queue.drain(..).collect();
+        if queue.is_empty() {
+            pending.remove(owner);
+        }
+        drained
     }
 
     /// The subscriber registry (for introspection/tests).
@@ -360,15 +406,15 @@ mod tests {
         // No change yet: a poll fires nothing (the baseline was seeded on
         // subscribe).
         assert!(hub.poll_for_changes().is_empty());
-        assert!(hub.drain_pending().is_empty());
+        assert!(hub.drain_pending("agent-a").is_empty());
 
         // The resource changes: the next poll detects it and enqueues an update.
         source.set(URI, "fp-v2");
         assert_eq!(hub.poll_for_changes(), vec![URI.to_owned()]);
-        assert_eq!(hub.drain_pending(), vec![URI.to_owned()]);
+        assert_eq!(hub.drain_pending("agent-a"), vec![URI.to_owned()]);
 
         // Draining is one-shot.
-        assert!(hub.drain_pending().is_empty());
+        assert!(hub.drain_pending("agent-a").is_empty());
 
         // A second change fires again.
         source.set(URI, "fp-v3");
@@ -384,11 +430,92 @@ mod tests {
         )));
         // No subscriber yet: mark is a no-op.
         hub.mark_changed(URI);
-        assert!(hub.drain_pending().is_empty());
+        assert!(hub.drain_pending("agent-a").is_empty());
         // After subscribing, an out-of-band mark enqueues an update.
         hub.subscribe("agent-a", URI);
         hub.mark_changed(URI);
-        assert_eq!(hub.drain_pending(), vec![URI.to_owned()]);
+        assert_eq!(hub.drain_pending("agent-a"), vec![URI.to_owned()]);
+    }
+
+    /// Build a polling hub over a scripted source seeded so `subscribe` seeds a
+    /// baseline for `uri`. Returns the hub and the shared source handle.
+    fn polling_hub(uri: &str) -> (SubscriptionHub, std::sync::Arc<ScriptedSource>) {
+        let source = std::sync::Arc::new(ScriptedSource::new());
+        source.set(uri, "fp-v1");
+        let hub = SubscriptionHub::with_source(SubscribeSource::Polling(Box::new(
+            PollingSourceArc(source.clone()),
+        )));
+        (hub, source)
+    }
+
+    #[test]
+    fn one_owner_cannot_unsubscribe_another_from_the_same_uri() {
+        // .77 owner-spoof: two principals watch the SAME uri. Even with an
+        // identical (untrusted) clientId, the server keys off the principal, so
+        // B's unsubscribe removes only B — A stays subscribed and keeps its
+        // baseline/queue.
+        let (hub, _source) = polling_hub(URI);
+        assert!(hub.subscribe("principal-a", URI));
+        assert!(hub.subscribe("principal-b", URI));
+
+        hub.unsubscribe("principal-b", URI);
+
+        assert!(
+            hub.registry().is_subscribed("principal-a", URI),
+            "A must remain subscribed after B unsubscribes"
+        );
+        assert!(
+            !hub.registry().is_subscribed("principal-b", URI),
+            "B unsubscribes only itself"
+        );
+    }
+
+    #[test]
+    fn a_change_delivers_one_update_per_owner_with_no_cross_drain() {
+        // .77 per-owner drain isolation: one change to a shared uri enqueues
+        // exactly one update for EACH owner, and each owner drains only its own.
+        let (hub, source) = polling_hub(URI);
+        assert!(hub.subscribe("principal-a", URI));
+        assert!(hub.subscribe("principal-b", URI));
+
+        source.set(URI, "fp-v2");
+        assert_eq!(hub.poll_for_changes(), vec![URI.to_owned()]);
+
+        // A drains its own queue; B's is untouched by A's drain.
+        assert_eq!(hub.drain_pending("principal-a"), vec![URI.to_owned()]);
+        assert!(
+            hub.drain_pending("principal-a").is_empty(),
+            "A's drain is one-shot"
+        );
+        // B still has exactly one update — A never consumed it.
+        assert_eq!(hub.drain_pending("principal-b"), vec![URI.to_owned()]);
+        assert!(hub.drain_pending("principal-b").is_empty());
+
+        // An unrelated principal that never subscribed has nothing to drain.
+        assert!(hub.drain_pending("principal-c").is_empty());
+    }
+
+    #[test]
+    fn unsubscribe_all_clears_only_that_owners_subscriptions_and_pending() {
+        // .77 disconnect scoping: dropping one principal on disconnect wipes its
+        // subscriptions and pending queue, but never another principal's.
+        let (hub, source) = polling_hub(URI);
+        assert!(hub.subscribe("principal-a", URI));
+        assert!(hub.subscribe("principal-b", URI));
+        source.set(URI, "fp-v2");
+        assert_eq!(hub.poll_for_changes(), vec![URI.to_owned()]);
+
+        // A disconnects before draining: its subscription and queued update go.
+        hub.unsubscribe_all("principal-a");
+        assert!(
+            hub.drain_pending("principal-a").is_empty(),
+            "A's pending is cleared on disconnect"
+        );
+        assert!(!hub.registry().is_subscribed("principal-a", URI));
+
+        // B is untouched: still subscribed, still holds its update.
+        assert!(hub.registry().is_subscribed("principal-b", URI));
+        assert_eq!(hub.drain_pending("principal-b"), vec![URI.to_owned()]);
     }
 
     /// Adapter so a test can share one `ScriptedSource` between the hub and the

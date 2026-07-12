@@ -1516,9 +1516,14 @@ fn subscribe_is_advertised_and_a_polled_change_emits_resources_updated() {
         "subscribe returns a result: {sub}"
     );
 
-    // No notification queued before any change.
+    // No notification queued before any change. The subscribe above carried no
+    // transport principal (stdio), so its owner is the stable stdio key and the
+    // drain is scoped to it (.77).
+    let owner = oraclemcp_core::subscriptions::STDIO_SUBSCRIPTION_OWNER;
     assert!(
-        server.drain_resource_updated_notifications().is_empty(),
+        server
+            .drain_resource_updated_notifications(owner)
+            .is_empty(),
         "no update before a change"
     );
 
@@ -1531,7 +1536,7 @@ fn subscribe_is_advertised_and_a_polled_change_emits_resources_updated() {
     let changed = hub.poll_for_changes();
     assert_eq!(changed, vec![uri.to_owned()], "poll detects the change");
 
-    let notifications = server.drain_resource_updated_notifications();
+    let notifications = server.drain_resource_updated_notifications(owner);
     assert_eq!(notifications.len(), 1, "one resources/updated queued");
     assert_eq!(
         notifications[0]["method"],

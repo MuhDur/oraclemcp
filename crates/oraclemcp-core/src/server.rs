@@ -925,7 +925,12 @@ impl OracleMcpServer {
             // resources. The polling source is driven out-of-band (the operator
             // side calls `subscriptions().poll_for_changes()`); here we only
             // drain what is already pending so updates ride the same stdout.
-            for notification in self.drain_resource_updated_notifications() {
+            // .77: stdio is single-client — its subscriptions and pending queue
+            // are keyed by the stable `STDIO_SUBSCRIPTION_OWNER`, so this drain
+            // returns exactly this connection's updates.
+            for notification in self.drain_resource_updated_notifications(
+                crate::subscriptions::STDIO_SUBSCRIPTION_OWNER,
+            ) {
                 write_jsonrpc_response(&mut writer, &notification)?;
             }
             // E6: flush queued server-initiated notifications —
@@ -1341,12 +1346,16 @@ impl OracleMcpServer {
                 object.get("params"),
                 context,
             ))),
-            "resources/subscribe" => Outcome::Ok(Some(
-                self.handle_resource_subscribe(id, object.get("params")),
-            )),
-            "resources/unsubscribe" => Outcome::Ok(Some(
-                self.handle_resource_unsubscribe(id, object.get("params")),
-            )),
+            "resources/subscribe" => Outcome::Ok(Some(self.handle_resource_subscribe(
+                id,
+                object.get("params"),
+                context,
+            ))),
+            "resources/unsubscribe" => Outcome::Ok(Some(self.handle_resource_unsubscribe(
+                id,
+                object.get("params"),
+                context,
+            ))),
             "prompts/list" => Outcome::Ok(Some(self.handle_prompts_list(id))),
             "prompts/get" => Outcome::Ok(Some(self.handle_prompt_get(id, object.get("params")))),
             "tools/list" => Outcome::Ok(Some(self.handle_tools_list(
@@ -1575,7 +1584,16 @@ impl OracleMcpServer {
     /// Serve `resources/subscribe` (E1). Refused (method-not-found) when no
     /// change source is confirmed — we never accept a subscription the server
     /// cannot honor, matching the unadvertised capability.
-    fn handle_resource_subscribe(&self, id: Value, params: Option<&Value>) -> Value {
+    ///
+    /// The subscription owner is the SERVER-DERIVED principal from `context`
+    /// (`.77`), never a client-supplied id, so one caller cannot subscribe,
+    /// cancel, or receive updates as another on a multi-client transport.
+    fn handle_resource_subscribe(
+        &self,
+        id: Value,
+        params: Option<&Value>,
+        context: DispatchContext<'_>,
+    ) -> Value {
         if !self.subscriptions.supports_subscriptions() {
             return jsonrpc_error(
                 id,
@@ -1583,12 +1601,13 @@ impl OracleMcpServer {
                 "resources/subscribe is not supported: no resource change source is configured",
             );
         }
-        let (uri, client) = match subscribe_params(params) {
-            Ok(parsed) => parsed,
+        let uri = match subscribe_uri(params) {
+            Ok(uri) => uri,
             Err(message) => return jsonrpc_error(id, JSONRPC_INVALID_PARAMS, message),
         };
-        if self.subscriptions.subscribe(&client, &uri) {
-            tracing::info!(uri = %uri, client = %client, "resources/subscribe");
+        let owner = subscription_owner(context);
+        if self.subscriptions.subscribe(owner, &uri) {
+            tracing::info!(uri = %uri, owner = %owner, "resources/subscribe");
             jsonrpc_result(id, json!({}))
         } else {
             jsonrpc_error(
@@ -1600,23 +1619,33 @@ impl OracleMcpServer {
     }
 
     /// Serve `resources/unsubscribe` (E1). Idempotent; succeeds even when the
-    /// subscription was never present.
-    fn handle_resource_unsubscribe(&self, id: Value, params: Option<&Value>) -> Value {
-        let (uri, client) = match subscribe_params(params) {
-            Ok(parsed) => parsed,
+    /// subscription was never present. Scoped to the SERVER-DERIVED principal
+    /// from `context` (`.77`): one caller can only drop its own subscription.
+    fn handle_resource_unsubscribe(
+        &self,
+        id: Value,
+        params: Option<&Value>,
+        context: DispatchContext<'_>,
+    ) -> Value {
+        let uri = match subscribe_uri(params) {
+            Ok(uri) => uri,
             Err(message) => return jsonrpc_error(id, JSONRPC_INVALID_PARAMS, message),
         };
-        self.subscriptions.unsubscribe(&client, &uri);
-        tracing::info!(uri = %uri, client = %client, "resources/unsubscribe");
+        let owner = subscription_owner(context);
+        self.subscriptions.unsubscribe(owner, &uri);
+        tracing::info!(uri = %uri, owner = %owner, "resources/unsubscribe");
         jsonrpc_result(id, json!({}))
     }
 
-    /// Drain queued `resources/updated` notifications (E1) as JSON-RPC
-    /// notification objects, to be written to the transport after a request.
+    /// Drain `owner`'s queued `resources/updated` notifications (E1) as JSON-RPC
+    /// notification objects, to be written to the transport after a request. The
+    /// transport passes its server-derived owner (`.77`) so only that
+    /// principal's updates are returned; stdio uses the stable
+    /// [`crate::subscriptions::STDIO_SUBSCRIPTION_OWNER`].
     #[must_use]
-    pub fn drain_resource_updated_notifications(&self) -> Vec<Value> {
+    pub fn drain_resource_updated_notifications(&self, owner: &str) -> Vec<Value> {
         self.subscriptions
-            .drain_pending()
+            .drain_pending(owner)
             .into_iter()
             .map(|uri| {
                 json!({
@@ -2156,11 +2185,13 @@ fn completion_result_json(values: Vec<String>) -> Value {
     })
 }
 
-/// Parse `resources/(un)subscribe` params into `(uri, client_id)`. MCP carries
-/// the watched `uri` in params; the subscriber identity is per-connection and
-/// not on the stdio wire, so an optional `params.clientId` (or `_meta.clientId`)
-/// selects it, defaulting to a single per-connection `"client"` subscriber.
-fn subscribe_params(params: Option<&Value>) -> Result<(String, String), &'static str> {
+/// Parse the watched `uri` from `resources/(un)subscribe` params.
+///
+/// `.77`: the subscriber identity is NOT taken from the wire. A client-supplied
+/// `clientId` cannot be an authorization/routing identity, so it is ignored
+/// entirely — the owner is derived server-side by [`subscription_owner`] from
+/// the request's transport principal.
+fn subscribe_uri(params: Option<&Value>) -> Result<String, &'static str> {
     let Some(Value::Object(params)) = params else {
         return Err("resources/subscribe params must be an object with a uri");
     };
@@ -2168,17 +2199,19 @@ fn subscribe_params(params: Option<&Value>) -> Result<(String, String), &'static
         .get("uri")
         .and_then(Value::as_str)
         .ok_or("resources/subscribe uri must be a string")?;
-    let client = params
-        .get("clientId")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            params
-                .get("_meta")
-                .and_then(|meta| meta.get("clientId"))
-                .and_then(Value::as_str)
-        })
-        .unwrap_or("client");
-    Ok((uri.to_owned(), client.to_owned()))
+    Ok(uri.to_owned())
+}
+
+/// The SERVER-DERIVED subscription owner for a request (`.77`). The owner is the
+/// transport principal from `context` — never a client-supplied id. Stdio (which
+/// carries no per-request principal) maps to the stable
+/// [`crate::subscriptions::STDIO_SUBSCRIPTION_OWNER`], so its single client keeps
+/// its subscriptions across requests while staying isolated from any HTTP
+/// principal.
+fn subscription_owner(context: DispatchContext<'_>) -> &str {
+    context
+        .principal_key()
+        .unwrap_or(crate::subscriptions::STDIO_SUBSCRIPTION_OWNER)
 }
 
 /// Extract the optional opaque `params.cursor` from a list request. MCP places
@@ -3628,6 +3661,188 @@ mod tests {
         assert_eq!(
             shapes[0], shapes[1],
             "refusal envelope must be byte-identical regardless of the negotiated revision"
+        );
+    }
+
+    /// A scripted polling source whose fingerprint advances on demand, so a
+    /// server-level test can model "the watched resource changed" without a DB.
+    struct ScriptedFingerprints {
+        fingerprints: parking_lot::Mutex<std::collections::HashMap<String, String>>,
+    }
+    impl ScriptedFingerprints {
+        fn seeded(uri: &str) -> std::sync::Arc<Self> {
+            let source = std::sync::Arc::new(Self {
+                fingerprints: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            });
+            source.set(uri, "fp-v1");
+            source
+        }
+        fn set(&self, uri: &str, fp: &str) {
+            self.fingerprints
+                .lock()
+                .insert(uri.to_owned(), fp.to_owned());
+        }
+    }
+    impl crate::subscriptions::PollingSource for ScriptedFingerprints {
+        fn poll(&self, uri: &str) -> Option<String> {
+            self.fingerprints.lock().get(uri).cloned()
+        }
+    }
+
+    /// Adapter so a test can share one scripted source between the hub (which
+    /// owns a `Box<dyn PollingSource>`) and the test body.
+    struct SharedPollingSource(std::sync::Arc<ScriptedFingerprints>);
+    impl crate::subscriptions::PollingSource for SharedPollingSource {
+        fn poll(&self, uri: &str) -> Option<String> {
+            self.0.poll(uri)
+        }
+    }
+
+    fn server_with_polling_subscriptions(
+        source: std::sync::Arc<ScriptedFingerprints>,
+    ) -> OracleMcpServer {
+        use crate::subscriptions::{SubscribeSource, SubscriptionHub};
+        let hub = Arc::new(SubscriptionHub::with_source(SubscribeSource::Polling(
+            Box::new(SharedPollingSource(source)),
+        )));
+        server_with_tools(&["oracle_query"]).with_subscriptions(hub)
+    }
+
+    fn subscribe_request(id: u64, uri: &str, forged_client_id: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "resources/subscribe",
+            // A hostile caller forges an identical clientId to try to alias
+            // another principal's subscription; the server must ignore it.
+            "params": { "uri": uri, "clientId": forged_client_id },
+        })
+    }
+
+    /// `.77`: the subscription owner is the SERVER-DERIVED principal, never the
+    /// client-supplied `clientId`. Two principals subscribing the same URI with
+    /// an identical forged `clientId` stay isolated: one cannot cancel the
+    /// other, and each drains only its own `resources/updated`.
+    #[test]
+    fn subscriptions_bind_to_the_transport_principal_not_a_forged_client_id() {
+        const URI: &str = "oracle://object/HR/PACKAGE/EMP_API";
+        let source = ScriptedFingerprints::seeded(URI);
+        let server = server_with_polling_subscriptions(Arc::clone(&source));
+
+        let ctx_a = DispatchContext::default().with_principal_key("principal-a");
+        let ctx_b = DispatchContext::default().with_principal_key("principal-b");
+
+        // Both principals subscribe the SAME uri with the SAME forged clientId.
+        let sub_a = server
+            .handle_jsonrpc_request_with_context(
+                subscribe_request(1, URI, "shared-forged-id"),
+                None,
+                ctx_a,
+            )
+            .expect("A subscribe reply");
+        assert!(sub_a["result"].is_object(), "A subscribe succeeds: {sub_a}");
+        let sub_b = server
+            .handle_jsonrpc_request_with_context(
+                subscribe_request(2, URI, "shared-forged-id"),
+                None,
+                ctx_b,
+            )
+            .expect("B subscribe reply");
+        assert!(sub_b["result"].is_object(), "B subscribe succeeds: {sub_b}");
+
+        // The registry keyed both off their principals, NOT the forged clientId.
+        let registry = server.subscriptions();
+        let registry = registry.registry();
+        assert!(registry.is_subscribed("principal-a", URI));
+        assert!(registry.is_subscribed("principal-b", URI));
+        assert!(
+            !registry.is_subscribed("shared-forged-id", URI),
+            "the client-supplied id is never an owner key"
+        );
+
+        // B unsubscribes (again forging A's clientId). It removes ONLY B.
+        let unsub_b = server
+            .handle_jsonrpc_request_with_context(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "resources/unsubscribe",
+                    "params": { "uri": URI, "clientId": "shared-forged-id" },
+                }),
+                None,
+                ctx_b,
+            )
+            .expect("B unsubscribe reply");
+        assert!(unsub_b["result"].is_object());
+        assert!(
+            registry.is_subscribed("principal-a", URI),
+            "B cannot cancel A's subscription"
+        );
+        assert!(!registry.is_subscribed("principal-b", URI));
+
+        // A change fans out per owner: A (still subscribed) gets exactly one
+        // update; B (unsubscribed) gets none; neither can drain the other's.
+        source.set(URI, "fp-v2");
+        assert_eq!(
+            server.subscriptions().poll_for_changes(),
+            vec![URI.to_owned()]
+        );
+
+        let a_updates = server.drain_resource_updated_notifications("principal-a");
+        assert_eq!(a_updates.len(), 1, "A receives its one update");
+        assert_eq!(a_updates[0]["params"]["uri"], json!(URI));
+        assert!(
+            server
+                .drain_resource_updated_notifications("principal-a")
+                .is_empty(),
+            "A's drain is one-shot"
+        );
+        assert!(
+            server
+                .drain_resource_updated_notifications("principal-b")
+                .is_empty(),
+            "B unsubscribed before the change, so it has nothing to drain"
+        );
+    }
+
+    /// `.77`: with two live subscribers, one change delivers exactly one update
+    /// to EACH owner and neither owner's drain consumes the other's.
+    #[test]
+    fn a_change_delivers_one_update_per_principal_with_no_cross_drain() {
+        const URI: &str = "oracle://object/HR/PACKAGE/EMP_API";
+        let source = ScriptedFingerprints::seeded(URI);
+        let server = server_with_polling_subscriptions(Arc::clone(&source));
+
+        for (id, principal) in [(1u64, "principal-a"), (2, "principal-b")] {
+            let ctx = DispatchContext::default().with_principal_key(principal);
+            server
+                .handle_jsonrpc_request_with_context(
+                    subscribe_request(id, URI, "irrelevant"),
+                    None,
+                    ctx,
+                )
+                .expect("subscribe reply");
+        }
+
+        source.set(URI, "fp-v2");
+        assert_eq!(
+            server.subscriptions().poll_for_changes(),
+            vec![URI.to_owned()]
+        );
+
+        // A drains first; B's queue is untouched by A's drain.
+        assert_eq!(
+            server
+                .drain_resource_updated_notifications("principal-a")
+                .len(),
+            1
+        );
+        assert_eq!(
+            server
+                .drain_resource_updated_notifications("principal-b")
+                .len(),
+            1,
+            "B still has its own update after A drained"
         );
     }
 }
