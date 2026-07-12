@@ -1121,6 +1121,157 @@ fn post_init_requests_require_the_protocol_version_header_per_negotiated_revisio
     assert!(fresh.header("mcp-session-id").is_some());
 }
 
+#[test]
+fn rejected_initialize_does_not_allocate_stateful_session_state() {
+    let sessions = Arc::new(HttpSessionStore::default());
+    let results = Arc::new(HttpResultStore::new());
+    let cfg = HttpTransportConfig {
+        stateful: true,
+        session_store: Some(Arc::clone(&sessions)),
+        result_store: Some(Arc::clone(&results)),
+        ..Default::default()
+    };
+    for rejected in [
+        serde_json::json!({
+            "jsonrpc": "1.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "protocolVersion": "2025-11-25" }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "initialize",
+            "params": []
+        }),
+    ] {
+        let response = handle_http_request(&test_server(), &cfg, post(&rejected));
+
+        assert!(
+            String::from_utf8_lossy(&response.body).contains("\"error\""),
+            "rejected initialize response must retain its JSON-RPC error"
+        );
+        assert_eq!(response.header("mcp-session-id"), None);
+        assert_eq!(response.header("set-cookie"), None);
+        assert_eq!(sessions.len(), 0);
+        assert_eq!(results.session_count(), 0);
+    }
+
+    let parse_error = HttpRequest::new(
+        "POST",
+        MCP_PATH,
+        [
+            ("host", "127.0.0.1"),
+            ("content-type", "application/json"),
+            ("accept", "application/json, text/event-stream"),
+        ],
+        b"{".to_vec(),
+    );
+    let response = handle_http_request(&test_server(), &cfg, parse_error);
+    assert_eq!(response.header("mcp-session-id"), None);
+    assert_eq!(response.header("set-cookie"), None);
+    assert_eq!(sessions.len(), 0);
+    assert_eq!(results.session_count(), 0);
+}
+
+#[test]
+fn stateful_session_caps_are_atomic_per_principal_and_global_and_release_on_delete() {
+    let sessions = Arc::new(HttpSessionStore::with_limits_for_test(2, 1));
+    let results = Arc::new(HttpResultStore::new());
+    let cfg = HttpTransportConfig {
+        stateful: true,
+        session_store: Some(Arc::clone(&sessions)),
+        result_store: Some(Arc::clone(&results)),
+        ..Default::default()
+    };
+    let initialize = |principal: &str| {
+        handle_mcp_post(
+            &test_server(),
+            &cfg,
+            &post(&init_body()),
+            None,
+            Some(principal),
+        )
+    };
+
+    let alice = initialize("oauth:alice@example.invalid");
+    let alice_session = alice
+        .header("mcp-session-id")
+        .expect("first principal admitted")
+        .to_owned();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(results.session_count(), 1);
+
+    let same_principal = initialize("oauth:alice@example.invalid");
+    assert_eq!(same_principal.status, 429);
+    assert_eq!(same_principal.header("mcp-session-id"), None);
+    assert_eq!(same_principal.header("set-cookie"), None);
+    let same_body = String::from_utf8_lossy(&same_principal.body);
+    assert!(same_body.contains("AT_CAPACITY"));
+    assert!(same_body.contains("stateful_sessions_principal"));
+    assert!(!same_body.contains("alice@example.invalid"));
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(results.session_count(), 1);
+
+    let bob = initialize("oauth:bob@example.invalid");
+    assert!(bob.header("mcp-session-id").is_some());
+    let global = initialize("oauth:carol@example.invalid");
+    assert_eq!(global.status, 429);
+    assert!(String::from_utf8_lossy(&global.body).contains("stateful_sessions_global"));
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(results.session_count(), 2);
+
+    let delete = HttpRequest::new(
+        "DELETE",
+        MCP_PATH,
+        [
+            ("host", "127.0.0.1"),
+            ("mcp-session-id", alice_session.as_str()),
+        ],
+        Vec::new(),
+    );
+    assert_eq!(
+        handle_mcp_delete(&cfg, &delete, "oauth:alice@example.invalid").status,
+        202
+    );
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(results.session_count(), 1);
+    assert!(
+        initialize("oauth:alice@example.invalid")
+            .header("mcp-session-id")
+            .is_some(),
+        "DELETE releases both per-principal and global capacity"
+    );
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(results.session_count(), 2);
+}
+
+#[test]
+fn stateful_initialize_storm_cannot_exceed_registry_cardinality() {
+    let sessions = Arc::new(HttpSessionStore::with_limits_for_test(4, 2));
+    let results = Arc::new(HttpResultStore::new());
+    let cfg = HttpTransportConfig {
+        stateful: true,
+        session_store: Some(Arc::clone(&sessions)),
+        result_store: Some(Arc::clone(&results)),
+        ..Default::default()
+    };
+
+    for index in 0..100 {
+        let principal = format!("oauth:storm-{index}@example.invalid");
+        let _ = handle_mcp_post(
+            &test_server(),
+            &cfg,
+            &post(&init_body()),
+            None,
+            Some(&principal),
+        );
+    }
+
+    assert_eq!(sessions.len(), 4);
+    assert_eq!(results.session_count(), 4);
+}
+
 struct StaticReadinessProbe(bool);
 
 impl ReadinessProbe for StaticReadinessProbe {
@@ -4682,15 +4833,19 @@ fn stateful_idle_reaper_closes_by_timeout_and_clears_buffers() {
         }
     }
 
-    let session_store = Arc::new(HttpSessionStore::default());
+    let session_store = Arc::new(HttpSessionStore::with_limits_for_test(1, 1));
     let result_store = Arc::new(HttpResultStore::new());
     let lifecycle = Arc::new(RecordingLifecycle::default());
     let session_id = "idle-session";
-    session_store.insert(
-        session_id.to_owned(),
-        "principal-a".to_owned(),
-        "2025-03-26".to_owned(),
-    );
+    session_store
+        .insert_with_result_store(
+            session_id.to_owned(),
+            "principal-a".to_owned(),
+            "2025-03-26".to_owned(),
+            Duration::from_secs(900),
+            Some(result_store.as_ref()),
+        )
+        .expect("seed bounded session");
     result_store.append_response(session_id, serde_json::json!({ "stale": true }));
     session_store.force_idle_for_test(session_id, Duration::from_secs(901));
     let cfg = HttpTransportConfig {
@@ -4727,6 +4882,17 @@ fn stateful_idle_reaper_closes_by_timeout_and_clears_buffers() {
         0,
         "reaping the same idle session is idempotent"
     );
+    session_store
+        .insert_with_result_store(
+            "replacement-session".to_owned(),
+            "principal-a".to_owned(),
+            "2025-03-26".to_owned(),
+            Duration::from_secs(900),
+            Some(result_store.as_ref()),
+        )
+        .expect("idle expiry releases global and per-principal capacity");
+    assert_eq!(session_store.len(), 1);
+    assert_eq!(result_store.session_count(), 1);
 }
 
 #[test]
@@ -6145,6 +6311,51 @@ fn serve_http_until_stops_accepting_and_drains_worker() {
         1,
         "stateful listener shutdown closes all lane sessions after worker drain"
     );
+}
+
+#[test]
+fn stateful_shutdown_clears_both_registries_and_releases_capacity() {
+    let sessions = Arc::new(HttpSessionStore::with_limits_for_test(1, 1));
+    let results = Arc::new(HttpResultStore::new());
+    sessions
+        .insert_with_result_store(
+            "before-shutdown".to_owned(),
+            "principal-a".to_owned(),
+            "2025-03-26".to_owned(),
+            Duration::from_secs(900),
+            Some(results.as_ref()),
+        )
+        .expect("initial session");
+    let cfg = HttpTransportConfig {
+        stateful: true,
+        session_store: Some(Arc::clone(&sessions)),
+        result_store: Some(Arc::clone(&results)),
+        ..Default::default()
+    };
+
+    close_stateful_sessions_for_shutdown(&cfg);
+
+    assert_eq!(sessions.len(), 0);
+    assert_eq!(results.session_count(), 0);
+    assert!(
+        results
+            .append_response_if_session(
+                "before-shutdown",
+                serde_json::json!({ "late": "completion" }),
+            )
+            .is_none(),
+        "a late completion must not recreate an orphan replay session"
+    );
+    assert_eq!(results.session_count(), 0);
+    sessions
+        .insert_with_result_store(
+            "after-shutdown".to_owned(),
+            "principal-a".to_owned(),
+            "2025-03-26".to_owned(),
+            Duration::from_secs(900),
+            Some(results.as_ref()),
+        )
+        .expect("shutdown releases global and per-principal capacity");
 }
 
 #[test]

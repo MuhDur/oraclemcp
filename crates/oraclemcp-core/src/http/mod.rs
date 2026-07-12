@@ -7,7 +7,7 @@
 //! validation. It deliberately does not depend on a web framework or ambient
 //! async runtime.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -921,62 +921,202 @@ impl std::fmt::Debug for OAuthEnforcement {
     }
 }
 
+const DEFAULT_MAX_STATEFUL_SESSIONS_GLOBAL: usize = 1_024;
+const DEFAULT_MAX_STATEFUL_SESSIONS_PER_PRINCIPAL: usize = 32;
+const STATEFUL_SESSION_RETRY_AFTER_MS: u64 = 1_000;
+
+#[derive(Clone, Copy, Debug)]
+struct HttpSessionLimits {
+    max_global: usize,
+    max_per_principal: usize,
+}
+
+impl Default for HttpSessionLimits {
+    fn default() -> Self {
+        Self {
+            max_global: DEFAULT_MAX_STATEFUL_SESSIONS_GLOBAL,
+            max_per_principal: DEFAULT_MAX_STATEFUL_SESSIONS_PER_PRINCIPAL,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct HttpSessionCapacityRejection {
+    scope: &'static str,
+    active_global: usize,
+    active_for_principal: usize,
+    limits: HttpSessionLimits,
+}
+
 /// Shared stateful Streamable HTTP session-id registry.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct HttpSessionStore {
-    owners: Mutex<HashMap<String, HttpSessionEntry>>,
+    state: Mutex<HttpSessionStoreState>,
+    limits: HttpSessionLimits,
+}
+
+#[derive(Debug, Default)]
+struct HttpSessionStoreState {
+    owners: HashMap<String, HttpSessionEntry>,
+    principal_counts: HashMap<String, usize>,
+    expirations: BTreeMap<Instant, HashSet<String>>,
 }
 
 #[derive(Debug)]
 struct HttpSessionEntry {
     principal_key: String,
-    last_seen: Instant,
+    idle_ttl: Duration,
+    expires_at: Option<Instant>,
     /// The protocol revision negotiated by this session's `initialize` (bead
     /// oraclemcp-s693). Drives the post-init `MCP-Protocol-Version` header
     /// requirement for sessions that negotiated >= 2025-06-18.
     protocol_version: String,
 }
 
+impl Default for HttpSessionStore {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(HttpSessionStoreState::default()),
+            limits: HttpSessionLimits::default(),
+        }
+    }
+}
+
 impl HttpSessionStore {
+    #[cfg(test)]
+    fn with_limits_for_test(max_global: usize, max_per_principal: usize) -> Self {
+        Self {
+            state: Mutex::new(HttpSessionStoreState::default()),
+            limits: HttpSessionLimits {
+                max_global,
+                max_per_principal,
+            },
+        }
+    }
+
+    #[cfg(test)]
     fn insert(&self, id: String, principal_key: String, protocol_version: String) {
-        self.owners.lock().insert(
+        self.insert_with_result_store(
             id,
+            principal_key,
+            protocol_version,
+            Duration::from_secs(DEFAULT_STATEFUL_IDLE_TTL_SECONDS),
+            None,
+        )
+        .expect("test session insert stays within default capacity");
+    }
+
+    fn insert_with_result_store(
+        &self,
+        id: String,
+        principal_key: String,
+        protocol_version: String,
+        idle_ttl: Duration,
+        result_store: Option<&HttpResultStore>,
+    ) -> Result<(), HttpSessionCapacityRejection> {
+        let mut state = self.state.lock();
+        let active_global = state.owners.len();
+        let active_for_principal = state
+            .principal_counts
+            .get(&principal_key)
+            .copied()
+            .unwrap_or(0);
+        if state.owners.contains_key(&id) {
+            return Err(HttpSessionCapacityRejection {
+                scope: "stateful_session_id_collision",
+                active_global,
+                active_for_principal,
+                limits: self.limits,
+            });
+        }
+        if active_global >= self.limits.max_global {
+            return Err(HttpSessionCapacityRejection {
+                scope: "stateful_sessions_global",
+                active_global,
+                active_for_principal,
+                limits: self.limits,
+            });
+        }
+        if active_for_principal >= self.limits.max_per_principal {
+            return Err(HttpSessionCapacityRejection {
+                scope: "stateful_sessions_principal",
+                active_global,
+                active_for_principal,
+                limits: self.limits,
+            });
+        }
+
+        // Lock ordering is session registry, then result registry everywhere a
+        // coordinated operation needs both. Neither entry becomes observable
+        // until both maps contain it.
+        let mut result_state = result_store.map(|store| store.state.lock());
+        if let Some(result_state) = result_state.as_mut() {
+            result_state.sessions.entry(id.clone()).or_default();
+        }
+        let now = Instant::now();
+        let expires_at = (!idle_ttl.is_zero()).then(|| now.checked_add(idle_ttl).unwrap_or(now));
+        state.owners.insert(
+            id.clone(),
             HttpSessionEntry {
-                principal_key,
-                last_seen: Instant::now(),
+                principal_key: principal_key.clone(),
+                idle_ttl,
+                expires_at,
                 protocol_version,
             },
         );
+        *state.principal_counts.entry(principal_key).or_default() += 1;
+        if let Some(expires_at) = expires_at {
+            state.expirations.entry(expires_at).or_default().insert(id);
+        }
+        Ok(())
     }
 
     fn principal_for(&self, id: &str) -> Option<String> {
-        let mut owners = self.owners.lock();
-        let entry = owners.get_mut(id)?;
-        entry.last_seen = Instant::now();
-        Some(entry.principal_key.clone())
+        let mut state = self.state.lock();
+        let (principal_key, old_expiry, new_expiry) = {
+            let entry = state.owners.get_mut(id)?;
+            let now = Instant::now();
+            let old_expiry = entry.expires_at;
+            let new_expiry =
+                (!entry.idle_ttl.is_zero()).then(|| now.checked_add(entry.idle_ttl).unwrap_or(now));
+            entry.expires_at = new_expiry;
+            (entry.principal_key.clone(), old_expiry, new_expiry)
+        };
+        unschedule_session_expiry(&mut state, id, old_expiry);
+        if let Some(new_expiry) = new_expiry {
+            state
+                .expirations
+                .entry(new_expiry)
+                .or_default()
+                .insert(id.to_owned());
+        }
+        Some(principal_key)
     }
 
     /// The protocol revision the session negotiated at `initialize`.
     fn protocol_version_for(&self, id: &str) -> Option<String> {
-        self.owners
+        self.state
             .lock()
+            .owners
             .get(id)
             .map(|entry| entry.protocol_version.clone())
     }
 
     fn remove(&self, id: &str) -> bool {
-        self.owners.lock().remove(id).is_some()
+        let mut state = self.state.lock();
+        remove_session_entry(&mut state, id).is_some()
     }
 
     fn remove_principal(&self, principal_key: &str) -> Vec<String> {
-        let mut owners = self.owners.lock();
-        let session_ids = owners
+        let mut state = self.state.lock();
+        let session_ids = state
+            .owners
             .iter()
             .filter(|(_, entry)| entry.principal_key == principal_key)
             .map(|(session_id, _)| session_id.clone())
             .collect::<Vec<_>>();
         for session_id in &session_ids {
-            owners.remove(session_id);
+            remove_session_entry(&mut state, session_id);
         }
         session_ids
     }
@@ -988,31 +1128,94 @@ impl HttpSessionStore {
         self.reap_idle_at(idle_ttl, Instant::now())
     }
 
-    fn reap_idle_at(&self, idle_ttl: Duration, now: Instant) -> Vec<(String, String)> {
-        let mut owners = self.owners.lock();
-        let expired: Vec<String> = owners
-            .iter()
-            .filter(|(_, entry)| now.duration_since(entry.last_seen) >= idle_ttl)
-            .map(|(session_id, _)| session_id.clone())
-            .collect();
+    fn reap_idle_at(&self, _idle_ttl: Duration, now: Instant) -> Vec<(String, String)> {
+        let mut state = self.state.lock();
+        let mut expired = Vec::new();
+        while state
+            .expirations
+            .first_key_value()
+            .is_some_and(|(deadline, _)| *deadline <= now)
+        {
+            let Some((deadline, session_ids)) = state.expirations.pop_first() else {
+                break;
+            };
+            for session_id in session_ids {
+                if state
+                    .owners
+                    .get(&session_id)
+                    .is_some_and(|entry| entry.expires_at == Some(deadline))
+                    && let Some(entry) = remove_session_entry(&mut state, &session_id)
+                {
+                    expired.push((session_id, entry.principal_key));
+                }
+            }
+        }
         expired
-            .into_iter()
-            .filter_map(|session_id| {
-                owners
-                    .remove(&session_id)
-                    .map(|entry| (session_id, entry.principal_key))
-            })
-            .collect()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.state.lock().owners.len()
+    }
+
+    fn close_all(&self) {
+        let mut state = self.state.lock();
+        state.owners.clear();
+        state.principal_counts.clear();
+        state.expirations.clear();
     }
 
     #[cfg(test)]
     fn force_idle_for_test(&self, id: &str, idle_for: Duration) {
-        let mut owners = self.owners.lock();
-        if let Some(entry) = owners.get_mut(id) {
+        let mut state = self.state.lock();
+        let old_expiry = state.owners.get(id).and_then(|entry| entry.expires_at);
+        unschedule_session_expiry(&mut state, id, old_expiry);
+        if let Some(entry) = state.owners.get_mut(id) {
             let now = Instant::now();
-            entry.last_seen = now.checked_sub(idle_for).unwrap_or(now);
+            let last_seen = now.checked_sub(idle_for).unwrap_or(now);
+            entry.expires_at = (!entry.idle_ttl.is_zero())
+                .then(|| last_seen.checked_add(entry.idle_ttl).unwrap_or(last_seen));
+            if let Some(expires_at) = entry.expires_at {
+                state
+                    .expirations
+                    .entry(expires_at)
+                    .or_default()
+                    .insert(id.to_owned());
+            }
         }
     }
+}
+
+fn unschedule_session_expiry(
+    state: &mut HttpSessionStoreState,
+    id: &str,
+    expires_at: Option<Instant>,
+) {
+    let Some(expires_at) = expires_at else {
+        return;
+    };
+    let remove_bucket = state
+        .expirations
+        .get_mut(&expires_at)
+        .is_some_and(|session_ids| {
+            session_ids.remove(id);
+            session_ids.is_empty()
+        });
+    if remove_bucket {
+        state.expirations.remove(&expires_at);
+    }
+}
+
+fn remove_session_entry(state: &mut HttpSessionStoreState, id: &str) -> Option<HttpSessionEntry> {
+    let entry = state.owners.remove(id)?;
+    unschedule_session_expiry(state, id, entry.expires_at);
+    if let Some(count) = state.principal_counts.get_mut(&entry.principal_key) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            state.principal_counts.remove(&entry.principal_key);
+        }
+    }
+    Some(entry)
 }
 
 const MAX_BUFFERED_MCP_EVENTS_PER_SESSION: usize = 128;
@@ -1167,6 +1370,7 @@ impl HttpResultStore {
         }
     }
 
+    #[cfg(test)]
     fn ensure_session(&self, session_id: &str) {
         self.state
             .lock()
@@ -1175,12 +1379,23 @@ impl HttpResultStore {
             .or_default();
     }
 
-    fn append_response(&self, session_id: &str, data: Value) -> String {
+    #[cfg(test)]
+    fn session_count(&self) -> usize {
+        self.state.lock().sessions.len()
+    }
+
+    fn append_response_if_session(&self, session_id: &str, data: Value) -> Option<String> {
         let mut state = self.state.lock();
+        if !state.sessions.contains_key(session_id) {
+            return None;
+        }
         let completion_ordinal = state.next_completion_ordinal;
         state.next_completion_ordinal = state.next_completion_ordinal.saturating_add(1);
         let next_seq = {
-            let session = state.sessions.entry(session_id.to_owned()).or_default();
+            let session = state
+                .sessions
+                .get_mut(session_id)
+                .expect("session presence was checked under the same store lock");
             session.next_sequence = session.next_sequence.saturating_add(1);
             session.next_sequence
         };
@@ -1246,7 +1461,14 @@ impl HttpResultStore {
         }
         drop(state);
         self.changed.notify_all();
-        id
+        Some(id)
+    }
+
+    #[cfg(test)]
+    fn append_response(&self, session_id: &str, data: Value) -> String {
+        self.ensure_session(session_id);
+        self.append_response_if_session(session_id, data)
+            .expect("test replay session was ensured")
     }
 
     fn events_after(
@@ -5768,7 +5990,6 @@ fn handle_mcp_get(
     let Some(store) = config.result_store.as_ref() else {
         return HttpExchange::Buffered(buffered_sse_response(&[]));
     };
-    store.ensure_session(session_id);
     let events = match store.events_after(session_id, cursor, gap_on_expired_cursor) {
         Ok(events) => events,
         Err(response) => return HttpExchange::Buffered(response),
@@ -5920,7 +6141,10 @@ fn handle_mcp_post_exchange(
                     }),
                 ));
             }
-            Some(new_session_id())
+            // The transport does not allocate or expose a session id until
+            // dispatch has returned a successful initialize result and the
+            // bounded registries admit it atomically.
+            None
         } else {
             match validate_stateful_session(config, request, Some(session_principal_key), false) {
                 Ok(session) => {
@@ -5980,10 +6204,9 @@ fn handle_mcp_post_exchange(
             Outcome::Err(envelope) => {
                 let response =
                     server.jsonrpc_tool_response_from_outcome(request_id, Outcome::Err(envelope));
-                let response_event_id = config
-                    .result_store
-                    .as_ref()
-                    .map(|store| store.append_response(&session_id, response.clone()));
+                let response_event_id = config.result_store.as_ref().and_then(|store| {
+                    store.append_response_if_session(&session_id, response.clone())
+                });
                 return HttpExchange::Buffered(sse_response(
                     config,
                     request,
@@ -6025,10 +6248,9 @@ fn handle_mcp_post_exchange(
             None
         } else {
             http_session_id.as_deref().and_then(|session_id| {
-                config
-                    .result_store
-                    .as_ref()
-                    .map(|store| store.append_response(session_id, response.clone()))
+                config.result_store.as_ref().and_then(|store| {
+                    store.append_response_if_session(session_id, response.clone())
+                })
             })
         };
         return HttpExchange::Buffered(sse_response(
@@ -6532,7 +6754,7 @@ impl HttpToolStream {
     fn append_final_response(&self, response: &Value) -> Option<String> {
         self.result_store
             .as_ref()
-            .map(|store| store.append_response(&self.session_id, response.clone()))
+            .and_then(|store| store.append_response_if_session(&self.session_id, response.clone()))
     }
 }
 
@@ -6620,19 +6842,24 @@ fn sse_response(
     response_event_id: Option<&str>,
 ) -> HttpResponse {
     let mut body = Vec::new();
-    // The negotiated revision rides in the initialize result; store it with the
-    // session (bead oraclemcp-s693) so post-init requests can be held to the
-    // 2025-06-18 MCP-Protocol-Version header requirement when applicable.
-    let negotiated_version = response
-        .get("result")
-        .and_then(|result| result.get("protocolVersion"))
-        .and_then(Value::as_str)
-        .unwrap_or(PROTOCOL_VERSION)
-        .to_owned();
+    // A method string alone does not establish an MCP session. The negotiated
+    // revision must come from a successful JSON-RPC initialize result; parse,
+    // validation, lifecycle, and dispatch errors never allocate state.
+    let negotiated_version = if method == Some("initialize") && response.get("error").is_none() {
+        response
+            .get("result")
+            .and_then(|result| result.get("protocolVersion"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    } else {
+        None
+    };
     let session_id = if method == Some("initialize") {
         write_sse_event(&mut body, None, Some("0"), Some(3000), Some(&Value::Null));
         write_sse_event(&mut body, None, None, None, Some(&response));
-        initialized_session_id.or_else(|| Some(new_session_id()))
+        negotiated_version
+            .as_ref()
+            .map(|_| initialized_session_id.unwrap_or_else(new_session_id))
     } else {
         write_sse_event(&mut body, None, Some("0/0"), Some(3000), Some(&Value::Null));
         // K10: a streaming `oracle_query` result carries an ordered page
@@ -6658,14 +6885,18 @@ fn sse_response(
     ];
     if let Some(session_id) = session_id {
         if let Some(store) = &config.session_store {
-            store.insert(
+            let negotiated_version = negotiated_version
+                .as_deref()
+                .expect("session id is minted only for a negotiated initialize result");
+            if let Err(rejection) = store.insert_with_result_store(
                 session_id.clone(),
                 principal_key.to_owned(),
-                negotiated_version,
-            );
-        }
-        if let Some(store) = &config.result_store {
-            store.ensure_session(&session_id);
+                negotiated_version.to_owned(),
+                config.stateful_idle_ttl,
+                config.result_store.as_deref(),
+            ) {
+                return stateful_session_capacity_response(rejection, principal_key);
+            }
         }
         headers.push(("mcp-session-id".to_owned(), session_id.clone()));
         let cookie_policy = PrivilegedCookiePolicy::for_request(config, request);
@@ -6681,6 +6912,43 @@ fn sse_response(
         headers,
         body,
     }
+}
+
+fn stateful_session_capacity_response(
+    rejection: HttpSessionCapacityRejection,
+    principal_key: &str,
+) -> HttpResponse {
+    let snapshot = json!({
+        "scope": rejection.scope,
+        "subject_id_hash": operator_subject_id_hash(principal_key),
+        "active_global": rejection.active_global,
+        "active_for_principal": rejection.active_for_principal,
+        "max_global": rejection.limits.max_global,
+        "max_per_principal": rejection.limits.max_per_principal,
+        "retry_after_ms": STATEFUL_SESSION_RETRY_AFTER_MS,
+    });
+    let envelope = ErrorEnvelope::new(
+        ErrorClass::AtCapacity,
+        format!(
+            "stateful session capacity exhausted; session_capacity_snapshot={}",
+            serde_json::to_string(&snapshot).unwrap_or_else(|_| {
+                json!({
+                    "scope": "stateful_sessions",
+                    "subject": "redacted",
+                    "retry_after_ms": STATEFUL_SESSION_RETRY_AFTER_MS,
+                })
+                .to_string()
+            })
+        ),
+    )
+    .with_retry_after_ms(STATEFUL_SESSION_RETRY_AFTER_MS)
+    .with_next_step(
+        "close an existing MCP session with DELETE or wait for idle expiry, then retry initialize",
+    );
+    json_response(429, &envelope.to_json()).with_header(
+        "retry-after",
+        &retry_after_header_seconds(STATEFUL_SESSION_RETRY_AFTER_MS),
+    )
 }
 
 fn new_session_id() -> String {
@@ -6900,6 +7168,9 @@ fn listener_config(
 fn close_stateful_sessions_for_shutdown(config: &HttpTransportConfig) {
     if let Some(lifecycle) = &config.session_lifecycle {
         lifecycle.close_all_sessions();
+    }
+    if let Some(session_store) = &config.session_store {
+        session_store.close_all();
     }
     if let Some(result_store) = &config.result_store {
         result_store.close_all();

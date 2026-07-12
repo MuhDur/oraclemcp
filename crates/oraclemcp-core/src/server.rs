@@ -1340,9 +1340,21 @@ impl OracleMcpServer {
                 return jsonrpc_error(id, JSONRPC_INVALID_REQUEST, e.to_string());
             }
         }
-        let client_protocol_version = params
-            .and_then(|params| params.get("protocolVersion"))
-            .and_then(Value::as_str);
+        let Some(params) = params.and_then(Value::as_object) else {
+            return jsonrpc_error(
+                id,
+                JSONRPC_INVALID_REQUEST,
+                "initialize params must be a JSON object",
+            );
+        };
+        let Some(client_protocol_version) = params.get("protocolVersion").and_then(Value::as_str)
+        else {
+            return jsonrpc_error(
+                id,
+                JSONRPC_INVALID_REQUEST,
+                "initialize params must include a string protocolVersion",
+            );
+        };
         // Per-session lifecycle (bead oraclemcp-s693): stdio (auth is Some)
         // serves exactly one MCP session per process, so a second successful
         // `initialize` is a lifecycle violation — reject it and keep the
@@ -1364,10 +1376,14 @@ impl OracleMcpServer {
                 );
             }
             *negotiated_slot = Some(
-                crate::capabilities::negotiate_protocol_version(client_protocol_version).to_owned(),
+                crate::capabilities::negotiate_protocol_version(Some(client_protocol_version))
+                    .to_owned(),
             );
         }
-        jsonrpc_result(id, self.initialize_result_json(client_protocol_version))
+        jsonrpc_result(
+            id,
+            self.initialize_result_json(Some(client_protocol_version)),
+        )
     }
 
     fn handle_prompts_list(&self, id: Value) -> Value {
