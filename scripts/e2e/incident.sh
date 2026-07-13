@@ -45,19 +45,20 @@ else
   if ! e2e_run_command "setup" omcpb build -p oraclemcp --bin oraclemcp; then
     e2e_finish_fail "building the oraclemcp binary through omcpb failed"
   fi
-  if [ "$E2E_DRY_RUN" = "1" ]; then
-    e2e_log_event "scenario_assert" "assert" "pass" 0 "dry-run: incident wiring validated; no artifact was created"
-    e2e_finish_pass
-    exit 0
+  if [ "$E2E_DRY_RUN" != "1" ]; then
+    build_output="$(e2e_artifact_dir)/output.txt"
+    build_target="$(sed -n 's/^omcpb: lane [0-9][0-9]*  target=\([^ ]*\)  jobs=.*/\1/p' "$build_output" | tail -n 1)"
+    [ -n "$build_target" ] || e2e_finish_fail "omcpb completed without reporting its selected target directory"
+    BINARY="$build_target/debug/oraclemcp"
   fi
-  build_output="$(e2e_artifact_dir)/output.txt"
-  build_target="$(sed -n 's/^omcpb: lane [0-9][0-9]*  target=\([^ ]*\)  jobs=.*/\1/p' "$build_output" | tail -n 1)"
-  [ -n "$build_target" ] || e2e_finish_fail "omcpb completed without reporting its selected target directory"
-  BINARY="$build_target/debug/oraclemcp"
 fi
 
 if [ "$E2E_DRY_RUN" = "1" ]; then
-  e2e_log_event "scenario_assert" "assert" "pass" 0 "dry-run: incident wiring validated; no artifact was created"
+  e2e_log_event "incident_fault_repro" "act" "running" 0 "dry-run schedules seeded fault reproduction"
+  if ! e2e_run_command "act" omcpb test -p oraclemcp-core --test seeded_fault_injection -- --nocapture; then
+    e2e_finish_fail "dry-run could not schedule the seeded fault harness"
+  fi
+  e2e_log_event "incident_fault_repro" "assert" "pass" 0 "dry-run: incident plus fault wiring validated; no artifact was created"
   e2e_finish_pass
   exit 0
 fi
@@ -81,4 +82,21 @@ if [ "$status" -ne 0 ]; then
 fi
 
 e2e_log_event "incident_replay" "assert" "pass" 0 "bundle redaction gate and deterministic replay passed"
+
+# E3 is part of the incident acceptance contract, not a neighbouring test that
+# may quietly stop running.  Keep the recorded failure witness in the command
+# output only; it contains its fixed seed, target, action, and synthetic event
+# labels, never a DB target or captured incident material.
+e2e_log_event "incident_fault_repro" "act" "running" 0 "run seeded permit-leak and lost-wakeup reproductions"
+if ! e2e_run_command "act" omcpb test -p oraclemcp-core --test seeded_fault_injection -- --nocapture; then
+  e2e_finish_fail "seeded incident fault reproduction failed"
+fi
+fault_output="$(e2e_artifact_dir)/output.txt"
+if ! grep -Fq "ARC_E_FAULT_REPRO seed=" "$fault_output"; then
+  e2e_finish_fail "seeded fault harness passed without emitting a reproduction witness"
+fi
+if ! grep -Fq "ARC_E_DPOR base_seed=" "$fault_output"; then
+  e2e_finish_fail "seeded fault harness passed without recording its bounded DPOR search"
+fi
+e2e_log_event "incident_fault_repro" "assert" "pass" 0 "seeded planted faults were reproduced with a bounded DPOR witness"
 e2e_finish_pass

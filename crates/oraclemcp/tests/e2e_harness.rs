@@ -573,12 +573,25 @@ fn incident_e2e_dry_run_is_registered_and_schedules_omcpb() {
         "incident dry-run did not schedule the omcpb package build: {command_messages:?}"
     );
     assert!(
+        command_messages.iter().any(|message| message
+            .contains("omcpb test -p oraclemcp-core --test seeded_fault_injection -- --nocapture")),
+        "incident dry-run did not schedule its seeded fault reproduction: {command_messages:?}"
+    );
+    assert!(
         events
             .iter()
             .any(|event| event["event"] == "scenario_complete"
                 && event["outcome"] == "pass"
                 && event["scenario"] == "incident"),
         "missing passing incident completion: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "incident_fault_repro"
+                && event["phase"] == "assert"
+                && event["outcome"] == "pass"),
+        "incident dry-run did not account for the seeded fault assertion: {events:?}"
     );
     let runner =
         std::fs::read_to_string(root.join("scripts/e2e/run_all.sh")).expect("read run_all.sh");
