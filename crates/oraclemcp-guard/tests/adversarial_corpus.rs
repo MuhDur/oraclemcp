@@ -536,6 +536,81 @@ fn policy_composition_corpus_level_floor_never_lowers_a_write_requirement() {
 }
 
 #[test]
+fn policy_composition_corpus_read_only_floor_never_demotes_a_ddl_statement() {
+    // Arc N N4 representative, and the exact counterexample the monotonicity
+    // property produces the moment the composer's `max` becomes a `min`: an
+    // operator adds a catch-all `require_level: read_only` rule meaning "keep the
+    // fleet read-only". A level rule is a FLOOR, not a ceiling. It must never pull
+    // an already-classified `DROP TABLE` down from DDL to READ_ONLY — that would
+    // hand a destructive statement a read-only clearance and let it run wherever
+    // read-only is permitted. Adding a second, stricter rule may only raise it.
+    let base = Classifier::default().classify("DROP TABLE app.orders");
+    assert_eq!(
+        base.required_level,
+        Some(oraclemcp_guard::OperatingLevel::Ddl)
+    );
+
+    let catch_all_floor = SqlPolicyRuleConfig {
+        id: "fleet-read-only-floor".to_owned(),
+        match_clause: SqlPolicyMatchConfig::default(),
+        effect: SqlPolicyEffectConfig::RequireLevel {
+            level: oraclemcp_guard::OperatingLevel::ReadOnly,
+        },
+    };
+    let context = SqlPolicyEvaluationContext::new(
+        Some("APP".to_owned()),
+        Some("ORDERS".to_owned()),
+        SqlPolicyVerb::Ddl,
+        None,
+    );
+
+    let alone = SqlPolicyConfig {
+        version: SQL_POLICY_VERSION,
+        rules: vec![catch_all_floor.clone()],
+    };
+    let PolicyTightening::Narrow(alone) = alone.evaluate(&base, &context) else {
+        panic!("a level-floor rule must narrow the base decision, never deny it");
+    };
+    assert_eq!(
+        alone.required_level,
+        oraclemcp_guard::OperatingLevel::Ddl,
+        "a READ_ONLY floor must not demote a DDL statement's clearance"
+    );
+
+    // The same rule with a stricter rule added: composition only ever tightens.
+    let composed = SqlPolicyConfig {
+        version: SQL_POLICY_VERSION,
+        rules: vec![
+            catch_all_floor,
+            SqlPolicyRuleConfig {
+                id: "orders-admin-floor".to_owned(),
+                match_clause: SqlPolicyMatchConfig {
+                    schema: Some("APP".to_owned()),
+                    object: Some("ORDERS".to_owned()),
+                    verb: Some(SqlPolicyVerb::Ddl),
+                    principal: None,
+                },
+                effect: SqlPolicyEffectConfig::RequireLevel {
+                    level: oraclemcp_guard::OperatingLevel::Admin,
+                },
+            },
+        ],
+    };
+    let PolicyTightening::Narrow(composed) = composed.evaluate(&base, &context) else {
+        panic!("two level-floor rules must narrow the base decision, never deny it");
+    };
+    assert_eq!(
+        composed.required_level,
+        oraclemcp_guard::OperatingLevel::Admin,
+        "the strictest matching floor wins"
+    );
+    assert!(
+        composed.required_level >= alone.required_level,
+        "adding a rule must never loosen an existing result"
+    );
+}
+
+#[test]
 fn derived_subquery_smuggled_dml_is_never_read_only() {
     // The fail-closed-net hole (oracle-derived-dml-body): a DML SetExpr hidden in
     // a derived / JOIN / UNION-branch / Expr subquery escaped the top-level-only
