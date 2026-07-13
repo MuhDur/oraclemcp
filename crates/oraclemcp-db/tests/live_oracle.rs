@@ -31,8 +31,8 @@ use oraclemcp_db::{
     OracleBind, OracleConnectOptions, OracleConnection, OracleIdentifier, OracleSessionIdentity,
     QueryCaps, RustOracleConnection, SchemaObject, SchemaObjectType, SchemaSnapshot,
     SearchDetailLevel, SessionPurity, compare_schemas, explain_plan, extract_catalog_rowsets,
-    migration_plan, orient_fks, orient_hot_objects, orient_schema, plan_cost_estimate,
-    probe_dependents, search_objects,
+    migration_plan, orient_fks, orient_hot_objects, orient_recent_ddl, orient_schema,
+    plan_cost_estimate, probe_dependents, search_objects,
 };
 use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use serde_json::json;
@@ -2131,6 +2131,101 @@ fn live_orient_hot_objects_reports_synthetic_dml_freshness() {
         let _ = conn
             .execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
             .await;
+    });
+}
+
+/// C2.3 (live): two synthetic tables created in distinct Oracle timestamp
+/// seconds must appear in newest-first `LAST_DDL_TIME` order. The unit test
+/// pins the SQL and bindings; this checks the actual `ALL_OBJECTS` dictionary
+/// value and ordering against live XE.
+#[test]
+fn live_orient_recent_ddl_orders_synthetic_objects_by_recency() {
+    run_with_cx(|cx| async move {
+        let test_name = "live_orient_recent_ddl_orders_synthetic_objects_by_recency";
+        let Some(conn) = connect_or_skip(&cx, test_name, test_opts()).await else {
+            return;
+        };
+        conn.set_call_timeout(Some(Duration::from_secs(30))).ok();
+
+        let older = "ORACLEMCP_C2_DDL_OLD_T";
+        let newer = "ORACLEMCP_C2_DDL_NEW_T";
+        for table in [older, newer] {
+            let _ = conn
+                .execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
+                .await;
+        }
+        if let Err(e) = conn
+            .execute(
+                &cx,
+                &format!("CREATE TABLE {older} (id NUMBER PRIMARY KEY)"),
+                &[],
+            )
+            .await
+        {
+            eprintln!("[live-xe] SKIP {test_name}: cannot create older fixture ({e})");
+            return;
+        }
+        if let Err(e) = conn
+            .execute(&cx, "BEGIN DBMS_LOCK.SLEEP(2); END;", &[])
+            .await
+        {
+            eprintln!("[live-xe] SKIP {test_name}: cannot separate DDL timestamps ({e})");
+            let _ = conn
+                .execute(&cx, &format!("DROP TABLE {older} PURGE"), &[])
+                .await;
+            return;
+        }
+        if let Err(e) = conn
+            .execute(
+                &cx,
+                &format!("CREATE TABLE {newer} (id NUMBER PRIMARY KEY)"),
+                &[],
+            )
+            .await
+        {
+            eprintln!("[live-xe] SKIP {test_name}: cannot create newer fixture ({e})");
+            let _ = conn
+                .execute(&cx, &format!("DROP TABLE {older} PURGE"), &[])
+                .await;
+            return;
+        }
+
+        let owner = conn
+            .describe(&cx)
+            .await
+            .ok()
+            .and_then(|info| info.current_schema)
+            .or_else(|| std::env::var("ORACLEMCP_TEST_USER").ok())
+            .unwrap_or_else(|| "SYSTEM".to_owned())
+            .to_ascii_uppercase();
+        let objects = orient_recent_ddl(&cx, &conn, Some(&owner), 10_000)
+            .await
+            .expect("read recent DDL feed");
+        let older_position = objects
+            .iter()
+            .position(|object| object.owner == owner && object.object_name == older)
+            .expect("older synthetic object has dictionary DDL evidence");
+        let newer_position = objects
+            .iter()
+            .position(|object| object.owner == owner && object.object_name == newer)
+            .expect("newer synthetic object has dictionary DDL evidence");
+        assert!(
+            newer_position < older_position,
+            "newer DDL must precede older DDL in the orient feed"
+        );
+        for object in [&objects[newer_position], &objects[older_position]] {
+            assert_eq!(object.object_type, "TABLE");
+            assert!(
+                object.last_ddl_time.is_some(),
+                "synthetic table carries its Oracle LAST_DDL_TIME"
+            );
+        }
+
+        for table in [newer, older] {
+            let _ = conn
+                .execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
+                .await;
+        }
     });
 }
 

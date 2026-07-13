@@ -846,6 +846,63 @@ pub async fn orient_hot_objects(
         .collect())
 }
 
+/// One object with recent DDL evidence for `oracle_orient`.
+///
+/// `LAST_DDL_TIME` comes from the Oracle dictionary rather than table data, so
+/// it captures structural freshness for every object type visible to the
+/// current session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrientRecentDdlObject {
+    /// Schema owner as stored in `ALL_OBJECTS`.
+    pub owner: String,
+    /// Object name as stored in `ALL_OBJECTS`.
+    pub object_name: String,
+    /// Oracle object kind from `ALL_OBJECTS.OBJECT_TYPE`.
+    pub object_type: String,
+    /// Most recent DDL timestamp, when Oracle supplies one.
+    pub last_ddl_time: Option<String>,
+}
+
+/// Read a bounded, newest-first DDL feed for `oracle_orient`.
+///
+/// The optional owner is upper-cased and bound positionally; `None` covers all
+/// objects visible to the session. A deterministic tie-break prevents cache
+/// churn when several objects share the same Oracle timestamp, and the outer
+/// `ROWNUM` cap bounds the dictionary response before it enters a snapshot.
+pub async fn orient_recent_ddl(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: Option<&str>,
+    max_rows: usize,
+) -> Result<Vec<OrientRecentDdlObject>, DbError> {
+    let sql = r"SELECT * FROM (
+                   WITH args AS (
+                       SELECT :1 owner_filter FROM dual
+                   )
+                   SELECT o.owner, o.object_name, o.object_type, o.last_ddl_time
+                   FROM all_objects o CROSS JOIN args
+                   WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter)
+                     AND o.last_ddl_time IS NOT NULL
+                   ORDER BY o.last_ddl_time DESC, o.owner, o.object_type, o.object_name
+               ) WHERE ROWNUM <= :2";
+    let owner_bind = owner.map_or(OracleBind::Null, |value| {
+        OracleBind::from(value.to_ascii_uppercase())
+    });
+    let rows = conn
+        .query_rows(cx, sql, &[owner_bind, OracleBind::from(max_rows as i64)])
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| OrientRecentDdlObject {
+            owner: row.text("OWNER").unwrap_or_default().to_owned(),
+            object_name: row.text("OBJECT_NAME").unwrap_or_default().to_owned(),
+            object_type: row.text("OBJECT_TYPE").unwrap_or_default().to_owned(),
+            last_ddl_time: row.text("LAST_DDL_TIME").map(str::to_owned),
+        })
+        .collect())
+}
+
 /// List schemas that own objects visible to this session, optionally filtered
 /// by a SQL `LIKE` pattern.
 pub async fn list_schemas(
@@ -2681,6 +2738,23 @@ mod tests {
                 .expect("orient mock lock")
                 .push((sql.to_owned(), binds.to_vec()));
 
+            if sql.contains("o.last_ddl_time DESC") {
+                return Ok(vec![
+                    cell_row(&[
+                        ("OWNER", "HR"),
+                        ("OBJECT_NAME", "ORDER_REPORT"),
+                        ("OBJECT_TYPE", "VIEW"),
+                        ("LAST_DDL_TIME", "2026-07-13T12:05:00"),
+                    ]),
+                    cell_row(&[
+                        ("OWNER", "HR"),
+                        ("OBJECT_NAME", "ORDERS"),
+                        ("OBJECT_TYPE", "TABLE"),
+                        ("LAST_DDL_TIME", "2026-07-13T12:00:00"),
+                    ]),
+                ]);
+            }
+
             if sql.contains("FROM all_objects") {
                 return Ok(vec![
                     cell_row(&[
@@ -2910,6 +2984,42 @@ mod tests {
         );
         assert_eq!(
             activity_call.1,
+            vec![OracleBind::String("HR".to_owned()), OracleBind::I64(10)],
+            "owner and cap are normalized positional binds"
+        );
+    }
+
+    #[test]
+    fn orient_recent_ddl_is_bounded_parameterized_and_newest_first() {
+        let mock = OrientMock::default();
+        let conn = &mock;
+        let objects = run_with_cx(|cx| async move {
+            orient_recent_ddl(&cx, conn, Some("hr"), 10)
+                .await
+                .expect("recent DDL feed")
+        });
+
+        assert_eq!(objects.len(), 2);
+        assert_eq!(objects[0].owner, "HR");
+        assert_eq!(objects[0].object_name, "ORDER_REPORT");
+        assert_eq!(objects[0].object_type, "VIEW");
+        assert_eq!(
+            objects[0].last_ddl_time.as_deref(),
+            Some("2026-07-13T12:05:00"),
+            "newest dictionary DDL evidence is retained"
+        );
+        assert_eq!(objects[1].object_name, "ORDERS");
+
+        let calls = mock.calls.lock().expect("orient mock lock");
+        let recent_ddl_call = calls
+            .iter()
+            .find(|(sql, _)| sql.contains("o.last_ddl_time DESC"))
+            .expect("ALL_OBJECTS recent-DDL read");
+        assert!(recent_ddl_call.0.contains("FROM all_objects"));
+        assert!(recent_ddl_call.0.contains("o.last_ddl_time DESC"));
+        assert!(recent_ddl_call.0.contains("ROWNUM <= :2"));
+        assert_eq!(
+            recent_ddl_call.1,
             vec![OracleBind::String("HR".to_owned()), OracleBind::I64(10)],
             "owner and cap are normalized positional binds"
         );

@@ -115,14 +115,14 @@ pub use health::{
 };
 pub use intelligence::{
     DependentObject, DependentsProbe, IndexDescription, LobText, OrientForeignKey,
-    OrientForeignKeyColumn, OrientHotObject, OrientSchemaObject, PLAN_COST_ESTIMATE_NOTE,
-    PlanCostEstimate, PlanCostRow, PlanCostSummary, QueryDiff, QueryDiffChange, QueryDiffError,
-    QueryDiffSource, SearchColumn, SearchDetailLevel, SearchIndex, SearchObject, SourceText,
-    TriggerDescription, ViewDescription, assemble_cost_estimate, compile_errors,
-    dependent_from_row, describe_columns, describe_constraints, describe_index, describe_trigger,
-    describe_view, diff_query_responses, explain_plan, get_ddl, get_source, get_sources_by_name,
-    is_ddl_object_type, list_objects, list_schemas, list_source_types,
-    normalize_source_object_type, orient_fks, orient_hot_objects, orient_schema,
+    OrientForeignKeyColumn, OrientHotObject, OrientRecentDdlObject, OrientSchemaObject,
+    PLAN_COST_ESTIMATE_NOTE, PlanCostEstimate, PlanCostRow, PlanCostSummary, QueryDiff,
+    QueryDiffChange, QueryDiffError, QueryDiffSource, SearchColumn, SearchDetailLevel, SearchIndex,
+    SearchObject, SourceText, TriggerDescription, ViewDescription, assemble_cost_estimate,
+    compile_errors, dependent_from_row, describe_columns, describe_constraints, describe_index,
+    describe_trigger, describe_view, diff_query_responses, explain_plan, get_ddl, get_source,
+    get_sources_by_name, is_ddl_object_type, list_objects, list_schemas, list_source_types,
+    normalize_source_object_type, orient_fks, orient_hot_objects, orient_recent_ddl, orient_schema,
     plan_cost_estimate, primary_key_columns, probe_dependents, read_lob, sample_rows,
     search_objects, search_source,
 };
