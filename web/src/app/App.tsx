@@ -897,7 +897,11 @@ function SessionLaneTable({
         tone={pending ? "info" : rows.length > 0 ? "ok" : "off"}
       />
       {cancelNotice ? (
-        <p className="border-b border-[var(--om-border)] px-4 py-2 font-mono text-xs text-[var(--om-text-muted)]">
+        <p
+          className="border-b border-[var(--om-border)] px-4 py-2 font-mono text-xs text-[var(--om-text-muted)]"
+          role="status"
+          aria-live="polite"
+        >
           {cancelNotice}
         </p>
       ) : null}
@@ -1917,7 +1921,7 @@ function ConfigPage(): React.ReactElement {
                 </Button>
               ) : null}
               {lastError ? (
-                <Badge tone="warn" className="max-w-full whitespace-normal break-all">
+                <Badge tone="warn" role="alert" className="max-w-full whitespace-normal break-all">
                   {lastError}
                 </Badge>
               ) : null}
@@ -2206,7 +2210,7 @@ function ClientsPage(): React.ReactElement {
         />
         {lastNotice ? <Badge tone="ok">{lastNotice}</Badge> : null}
         {lastError || clients.isError ? (
-          <Badge tone="warn" className="max-w-full whitespace-normal break-all">
+          <Badge tone="warn" role="alert" className="max-w-full whitespace-normal break-all">
             {lastError ?? (clients.error instanceof Error ? clients.error.message : "client credentials unavailable")}
           </Badge>
         ) : null}
@@ -3177,7 +3181,12 @@ function OperatorEventLogPanel({
           ))}
         </div>
       </div>
-      <div className="max-h-[460px] divide-y divide-[var(--om-border)] overflow-auto">
+      <div
+        className="max-h-[460px] divide-y divide-[var(--om-border)] overflow-auto"
+        role="log"
+        aria-live="polite"
+        aria-label="classifier verdict feed"
+      >
         {verdicts.length > 0 ? (
           verdicts.map((verdict) => (
             <div
@@ -6364,7 +6373,7 @@ function SchemaDiffPanel({
             Draft
           </Button>
           {lastError ? (
-            <Badge tone="warn" className="max-w-full whitespace-normal break-all">
+            <Badge tone="warn" role="alert" className="max-w-full whitespace-normal break-all">
               {lastError}
             </Badge>
           ) : null}
