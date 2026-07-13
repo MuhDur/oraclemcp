@@ -10,8 +10,14 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sqlparser::ast::{
+    BinaryOperator, Expr, FromTable, ObjectName, SetExpr, Statement, TableFactor, TableWithJoins,
+};
+use sqlparser::dialect::OracleDialect;
+use sqlparser::parser::Parser;
+use sqlparser::tokenizer::Token;
 
-use crate::classifier::GuardDecision;
+use crate::classifier::{Classifier, GuardDecision};
 use crate::levels::{DangerLevel, OperatingLevel};
 
 /// The only SQL-policy grammar version accepted by this build.
@@ -480,6 +486,357 @@ fn unquote_policy_identifier(selector: &str) -> Option<String> {
         .map(|inner| inner.replace("\"\"", "\""))
 }
 
+/// Why an attempted `RequirePredicate` AST rewrite was refused.
+///
+/// Every variant is fail-closed. In particular, an unsupported statement shape
+/// is a denial rather than a best-effort textual rewrite.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PolicyRewriteDenialReason {
+    /// The caller tried to rewrite a base statement the classifier refused.
+    BaseClassifierRefused,
+    /// The narrowing did not carry the same base level as the supplied verdict.
+    InconsistentBaseDecision,
+    /// No predicate exists to place in the candidate AST.
+    NoPredicates,
+    /// Predicate rules did not retain one common exact target.
+    PredicateTargetConflict,
+    /// The server-derived context disagreed with the predicate target.
+    TargetContextMismatch,
+    /// The original statement could not be parsed as exactly one statement.
+    OriginalParseFailed,
+    /// The statement was not the deliberately small rewritable v1 subset.
+    UnsupportedStatementShape,
+    /// A configured predicate could not be parsed as exactly one expression.
+    PredicateParseFailed,
+    /// The rendered candidate classifier returned `Forbidden`.
+    CandidateClassifierRefused,
+    /// A read-only base became a non-read-only candidate after rendering.
+    CandidateNotReadOnly,
+    /// A non-forbidden candidate lacked an operating-level requirement.
+    IncompleteCandidateDecision,
+}
+
+/// Proof retained when the mandatory rewrite/reclassification stage denies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyRewriteDenial {
+    /// Stable reason category; no raw SQL or operator text is retained here.
+    pub reason: PolicyRewriteDenialReason,
+    /// The narrowing rule ids that led to this attempted rewrite.
+    pub matched_rule_ids: Vec<String>,
+}
+
+/// A rendered policy candidate that has passed mandatory reclassification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyReclassifiedStatement {
+    /// AST-rendered candidate SQL. It is a new statement, not an authorization
+    /// for the original bytes.
+    pub sql: String,
+    /// Decision produced by classifying the rendered candidate with the same
+    /// classifier configuration as the original statement.
+    pub candidate: GuardDecision,
+    /// Maximum danger of the original and rendered statements.
+    pub final_danger: DangerLevel,
+    /// Maximum of base, policy-floor, and candidate required levels.
+    pub final_required_level: OperatingLevel,
+}
+
+/// Outcome of applying `RequirePredicate` rules after a successful N2 narrow.
+///
+/// There is no success-by-default or `Allow` form: callers can either receive
+/// a reclassified candidate or a typed refusal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicyPredicateRewrite {
+    /// Rewriting or candidate classification failed closed.
+    Deny(PolicyRewriteDenial),
+    /// A newly rendered candidate passed mandatory reclassification.
+    Reclassified(PolicyReclassifiedStatement),
+}
+
+/// Add the policy predicates to a parsed AST and immediately re-classify the
+/// rendered candidate (SEC-1).
+///
+/// Version one intentionally accepts only one exact, unaliased target relation
+/// in a plain `SELECT`, `UPDATE`, or `DELETE`. Joins, CTEs, derived relations,
+/// aliases, and every unrecognised shape are denied rather than rewritten by
+/// text manipulation. The returned final level is the maximum of the original
+/// classification, N2's policy floor, and the candidate classification.
+#[must_use]
+pub fn rewrite_predicates_and_reclassify(
+    classifier: &Classifier,
+    base: &GuardDecision,
+    original_sql: &str,
+    context: &SqlPolicyEvaluationContext,
+    narrowing: &PolicyNarrowing,
+) -> PolicyPredicateRewrite {
+    if base.danger == DangerLevel::Forbidden {
+        return rewrite_deny(PolicyRewriteDenialReason::BaseClassifierRefused, narrowing);
+    }
+    let Some(base_required_level) = base.required_level else {
+        return rewrite_deny(
+            PolicyRewriteDenialReason::InconsistentBaseDecision,
+            narrowing,
+        );
+    };
+    if base_required_level != narrowing.base_required_level
+        || narrowing.required_level < narrowing.base_required_level
+    {
+        return rewrite_deny(
+            PolicyRewriteDenialReason::InconsistentBaseDecision,
+            narrowing,
+        );
+    }
+
+    let Some(first_predicate) = narrowing.predicates.first() else {
+        return rewrite_deny(PolicyRewriteDenialReason::NoPredicates, narrowing);
+    };
+    let target = &first_predicate.target;
+    if !predicate_target_matches_context(target, context) {
+        return rewrite_deny(PolicyRewriteDenialReason::TargetContextMismatch, narrowing);
+    }
+    if narrowing
+        .predicates
+        .iter()
+        .any(|predicate| predicate.target != *target)
+    {
+        return rewrite_deny(
+            PolicyRewriteDenialReason::PredicateTargetConflict,
+            narrowing,
+        );
+    }
+
+    let predicate = match combined_policy_predicate(&narrowing.predicates) {
+        Ok(predicate) => predicate,
+        Err(reason) => return rewrite_deny(reason, narrowing),
+    };
+    let dialect = OracleDialect {};
+    let mut statements = match Parser::parse_sql(&dialect, original_sql) {
+        Ok(statements) if statements.len() == 1 => statements,
+        _ => return rewrite_deny(PolicyRewriteDenialReason::OriginalParseFailed, narrowing),
+    };
+    let Some(statement) = statements.pop() else {
+        return rewrite_deny(PolicyRewriteDenialReason::OriginalParseFailed, narrowing);
+    };
+    let mut statement = statement;
+    if rewrite_statement_ast(&mut statement, target, predicate).is_err() {
+        return rewrite_deny(
+            PolicyRewriteDenialReason::UnsupportedStatementShape,
+            narrowing,
+        );
+    }
+
+    let sql = statement.to_string();
+    let candidate = classifier.classify(&sql);
+    finalize_reclassified_candidate(base, narrowing, sql, candidate)
+}
+
+fn rewrite_deny(
+    reason: PolicyRewriteDenialReason,
+    narrowing: &PolicyNarrowing,
+) -> PolicyPredicateRewrite {
+    PolicyPredicateRewrite::Deny(PolicyRewriteDenial {
+        reason,
+        matched_rule_ids: narrowing.matched_rule_ids.clone(),
+    })
+}
+
+fn predicate_target_matches_context(
+    target: &SqlPolicyPredicateTarget,
+    context: &SqlPolicyEvaluationContext,
+) -> bool {
+    target.verb == context.verb
+        && context.schema.as_deref() == Some(target.schema.as_str())
+        && context.object.as_deref() == Some(target.object.as_str())
+}
+
+fn combined_policy_predicate(
+    predicates: &[SqlPolicyPredicate],
+) -> Result<Expr, PolicyRewriteDenialReason> {
+    let mut expressions = predicates
+        .iter()
+        .map(|predicate| parse_policy_predicate(&predicate.sql_fragment));
+    let Some(first) = expressions.next() else {
+        return Err(PolicyRewriteDenialReason::NoPredicates);
+    };
+    expressions.try_fold(first?, |current, next| {
+        Ok(Expr::BinaryOp {
+            left: Box::new(Expr::Nested(Box::new(current))),
+            op: BinaryOperator::And,
+            right: Box::new(Expr::Nested(Box::new(next?))),
+        })
+    })
+}
+
+fn parse_policy_predicate(sql_fragment: &str) -> Result<Expr, PolicyRewriteDenialReason> {
+    let dialect = OracleDialect {};
+    let mut parser = Parser::new(&dialect)
+        .try_with_sql(sql_fragment)
+        .map_err(|_| PolicyRewriteDenialReason::PredicateParseFailed)?;
+    let expression = parser
+        .parse_expr()
+        .map_err(|_| PolicyRewriteDenialReason::PredicateParseFailed)?;
+    parser
+        .expect_token(&Token::EOF)
+        .map_err(|_| PolicyRewriteDenialReason::PredicateParseFailed)?;
+    Ok(expression)
+}
+
+fn rewrite_statement_ast(
+    statement: &mut Statement,
+    target: &SqlPolicyPredicateTarget,
+    predicate: Expr,
+) -> Result<(), ()> {
+    match statement {
+        Statement::Query(query) if target.verb == SqlPolicyVerb::Select => {
+            if query.with.is_some()
+                || !query.locks.is_empty()
+                || !matches!(query.body.as_ref(), SetExpr::Select(_))
+            {
+                return Err(());
+            }
+            let SetExpr::Select(select) = query.body.as_mut() else {
+                return Err(());
+            };
+            if select.from.len() != 1 || !exact_target_table(&select.from[0], target) {
+                return Err(());
+            }
+            append_policy_predicate(&mut select.selection, predicate);
+            Ok(())
+        }
+        Statement::Update(update) if target.verb == SqlPolicyVerb::Update => {
+            if update.from.is_some() || !exact_target_table(&update.table, target) {
+                return Err(());
+            }
+            append_policy_predicate(&mut update.selection, predicate);
+            Ok(())
+        }
+        Statement::Delete(delete) if target.verb == SqlPolicyVerb::Delete => {
+            if delete.using.is_some() || !delete.tables.is_empty() {
+                return Err(());
+            }
+            let tables = match &delete.from {
+                FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => tables,
+            };
+            if tables.len() != 1 || !exact_target_table(&tables[0], target) {
+                return Err(());
+            }
+            append_policy_predicate(&mut delete.selection, predicate);
+            Ok(())
+        }
+        _ => Err(()),
+    }
+}
+
+fn exact_target_table(table: &TableWithJoins, target: &SqlPolicyPredicateTarget) -> bool {
+    if !table.joins.is_empty() {
+        return false;
+    }
+    let TableFactor::Table {
+        name,
+        alias,
+        args,
+        with_hints,
+        version,
+        with_ordinality,
+        partitions,
+        json_path,
+        sample,
+        index_hints,
+    } = &table.relation
+    else {
+        return false;
+    };
+    alias.is_none()
+        && args.is_none()
+        && with_hints.is_empty()
+        && version.is_none()
+        && !with_ordinality
+        && partitions.is_empty()
+        && json_path.is_none()
+        && sample.is_none()
+        && index_hints.is_empty()
+        && exact_target_name(name, target)
+}
+
+fn exact_target_name(name: &ObjectName, target: &SqlPolicyPredicateTarget) -> bool {
+    let parts = &name.0;
+    let Some(object) = parts
+        .last()
+        .and_then(sqlparser::ast::ObjectNamePart::as_ident)
+    else {
+        return false;
+    };
+    if !oracle_identifier_matches_target(object.value.as_str(), object.quote_style, &target.object)
+    {
+        return false;
+    }
+    match parts.len() {
+        // The caller's semantic context already proved the current schema; an
+        // unqualified direct table name is therefore exact enough for v1.
+        1 => true,
+        2 => parts[0].as_ident().is_some_and(|schema| {
+            oracle_identifier_matches_target(
+                schema.value.as_str(),
+                schema.quote_style,
+                &target.schema,
+            )
+        }),
+        _ => false,
+    }
+}
+
+fn oracle_identifier_matches_target(actual: &str, quote_style: Option<char>, target: &str) -> bool {
+    if quote_style.is_some() {
+        actual == target
+    } else {
+        actual.eq_ignore_ascii_case(target)
+    }
+}
+
+fn append_policy_predicate(selection: &mut Option<Expr>, predicate: Expr) {
+    let predicate = Expr::Nested(Box::new(predicate));
+    *selection = Some(match selection.take() {
+        Some(existing) => Expr::BinaryOp {
+            left: Box::new(Expr::Nested(Box::new(existing))),
+            op: BinaryOperator::And,
+            right: Box::new(predicate),
+        },
+        None => predicate,
+    });
+}
+
+fn finalize_reclassified_candidate(
+    base: &GuardDecision,
+    narrowing: &PolicyNarrowing,
+    sql: String,
+    candidate: GuardDecision,
+) -> PolicyPredicateRewrite {
+    if candidate.danger == DangerLevel::Forbidden {
+        return rewrite_deny(
+            PolicyRewriteDenialReason::CandidateClassifierRefused,
+            narrowing,
+        );
+    }
+    let Some(candidate_required_level) = candidate.required_level else {
+        return rewrite_deny(
+            PolicyRewriteDenialReason::IncompleteCandidateDecision,
+            narrowing,
+        );
+    };
+    if base.required_level == Some(OperatingLevel::ReadOnly)
+        && (candidate.danger != DangerLevel::Safe
+            || candidate_required_level != OperatingLevel::ReadOnly)
+    {
+        return rewrite_deny(PolicyRewriteDenialReason::CandidateNotReadOnly, narrowing);
+    }
+
+    PolicyPredicateRewrite::Reclassified(PolicyReclassifiedStatement {
+        sql,
+        final_danger: base.danger.max(candidate.danger),
+        final_required_level: narrowing.required_level.max(candidate_required_level),
+        candidate,
+    })
+}
+
 /// A load-time SQL-policy grammar failure with the policy-relative field and a
 /// non-secret, actionable reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -925,6 +1282,91 @@ mod tests {
                 "operator-tenant-filter",
                 "operator-deny",
             ]
+        ));
+    }
+
+    fn predicate_narrowing(sql_fragment: &str) -> PolicyNarrowing {
+        PolicyNarrowing {
+            base_required_level: OperatingLevel::ReadOnly,
+            required_level: OperatingLevel::ReadOnly,
+            predicates: vec![SqlPolicyPredicate {
+                rule_id: "tenant-filter".to_owned(),
+                target: SqlPolicyPredicateTarget {
+                    schema: "APP".to_owned(),
+                    object: "ORDERS".to_owned(),
+                    verb: SqlPolicyVerb::Select,
+                },
+                sql_fragment: sql_fragment.to_owned(),
+            }],
+            matched_rule_ids: vec!["tenant-filter".to_owned()],
+        }
+    }
+
+    #[test]
+    fn policy_predicate_rewrite_uses_ast_placement_then_reclassifies() {
+        let classifier = Classifier::default();
+        let original = "SELECT id FROM app.orders WHERE status = 'OPEN'";
+        let base = classifier.classify(original);
+        let rewritten = rewrite_predicates_and_reclassify(
+            &classifier,
+            &base,
+            original,
+            &operator_context(),
+            &predicate_narrowing("tenant_id = 7"),
+        );
+
+        let PolicyPredicateRewrite::Reclassified(rewritten) = rewritten else {
+            panic!("a simple one-table SELECT predicate must be rewritable");
+        };
+        assert!(
+            rewritten
+                .sql
+                .contains("WHERE (status = 'OPEN') AND (tenant_id = 7)")
+        );
+        assert_eq!(rewritten.candidate.danger, DangerLevel::Safe);
+        assert_eq!(rewritten.final_required_level, OperatingLevel::ReadOnly);
+    }
+
+    #[test]
+    fn policy_predicate_rewrite_refuses_a_candidate_that_becomes_non_read_only() {
+        // N1 rejects this fragment at load time. Constructing the narrowing
+        // directly exercises the SEC-1 recovery check: even an implementation
+        // discrepancy that got this far cannot upgrade a safe base read.
+        let classifier = Classifier::default();
+        let original = "SELECT id FROM app.orders";
+        let base = classifier.classify(original);
+        assert!(matches!(
+            rewrite_predicates_and_reclassify(
+                &classifier,
+                &base,
+                original,
+                &operator_context(),
+                &predicate_narrowing("billing.side_effect() = 1"),
+            ),
+            PolicyPredicateRewrite::Deny(PolicyRewriteDenial {
+                reason: PolicyRewriteDenialReason::CandidateNotReadOnly,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn policy_predicate_rewrite_refuses_aliases_instead_of_guessing_target_placement() {
+        let classifier = Classifier::default();
+        let original = "SELECT id FROM app.orders o";
+        let base = classifier.classify(original);
+        assert!(matches!(
+            rewrite_predicates_and_reclassify(
+                &classifier,
+                &base,
+                original,
+                &operator_context(),
+                &predicate_narrowing("tenant_id = 7"),
+            ),
+            PolicyPredicateRewrite::Deny(PolicyRewriteDenial {
+                reason: PolicyRewriteDenialReason::UnsupportedStatementShape,
+                ..
+            })
         ));
     }
 

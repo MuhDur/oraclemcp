@@ -201,6 +201,13 @@ const CORPUS: &[(&str, DangerLevel)] = &[
         "SELECT id, app.recalc(id) FROM orders",
         DangerLevel::Guarded,
     ),
+    // Arc N N3: this is the hypothetical AST-rendered predicate candidate if
+    // an implementation/parser discrepancy ever admitted a callable policy
+    // fragment. Reclassification must keep it non-read-only and refuse it.
+    (
+        "SELECT id FROM app.orders WHERE (billing.side_effect() = 1)",
+        DangerLevel::Guarded,
+    ),
     // A UDF whose name collides with a non-reserved keyword (oracle-ajm2.1) must
     // not fail-open: it is still a side-effect-capable routine call -> Guarded.
     ("SELECT billing.purge() FROM dual", DangerLevel::Guarded),
