@@ -34,6 +34,7 @@ pub mod fence;
 pub mod file_store;
 pub mod http;
 pub mod iam_token;
+pub mod incident;
 pub mod init_token;
 pub mod lane;
 pub mod notifications;
