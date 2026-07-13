@@ -14,6 +14,7 @@
 
 pub mod classifier;
 pub mod clock;
+pub mod corpus;
 pub mod enforcement;
 pub mod exec_grant;
 pub mod levels;
