@@ -382,9 +382,9 @@ extracting: SHA-256 checks transport integrity, while the cosign blob signature
 and attestation are the authenticity and provenance checks. Service-manager
 mutation and scoped HTTP client registration are explicit opt-in actions, not
 postinstall side effects. Containers should be pinned to immutable tags/digests.
-The npm/npx wrapper channel is excluded from the 0.6.x line and is not shipped;
-the same verify-before-run, no-postinstall-mutation rule still governs the
-release installer and container image.
+The npm/npx wrapper channel is retired and is not shipped; the same
+verify-before-run, no-postinstall-mutation rule still governs the release
+installer and container image.
 
 *Evidence (green; CI):*
 - `install.sh` and `scripts/installer_lint_and_offline_smoke.sh` — dry-run,

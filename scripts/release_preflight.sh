@@ -103,10 +103,6 @@ dashboard_lock_package_version="$(jq -r '.packages[""].version' web/package-lock
 [ "$dashboard_lock_package_version" = "$version" ] ||
   fail "web/package-lock.json root package version '$dashboard_lock_package_version' does not match workspace version '$version'"
 
-npm_wrapper_version="$(jq -r '.version' npm/oraclemcp/package.json)"
-[ "$npm_wrapper_version" = "$version" ] ||
-  fail "npm/oraclemcp/package.json version '$npm_wrapper_version' does not match workspace version '$version'"
-
 if ! grep -F "## [$version]" CHANGELOG.md >/dev/null; then
   fail "CHANGELOG.md does not contain an entry for $version"
 fi

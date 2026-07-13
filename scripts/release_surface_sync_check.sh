@@ -226,10 +226,6 @@ dashboard_lock_root="$(jq -r '.packages[""].version' web/package-lock.json)"
 [ "$dashboard_lock_root" = "$version" ] ||
   fail "web/package-lock.json root package version '$dashboard_lock_root' != workspace '$version'"
 
-npm_version="$(jq -r '.version' npm/oraclemcp/package.json)"
-[ "$npm_version" = "$version" ] ||
-  fail "npm/oraclemcp/package.json version '$npm_version' != workspace '$version'"
-
 if ! grep -F "## [$version]" CHANGELOG.md >/dev/null; then
   fail "CHANGELOG.md missing ## [$version] entry"
 fi

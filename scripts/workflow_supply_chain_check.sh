@@ -42,7 +42,6 @@ for workflow in .github/workflows/*.yml; do
         .github/workflows/docker.yml:promote:id-token | \
           .github/workflows/docker.yml:promote:packages | \
           .github/workflows/publish-mcp.yml:publish:id-token | \
-          .github/workflows/publish-npm.yml:publish:id-token | \
           .github/workflows/release.yml:release:id-token | \
           .github/workflows/release.yml:docker:id-token | \
           .github/workflows/release.yml:docker:packages | \

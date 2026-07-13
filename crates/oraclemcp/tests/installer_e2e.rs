@@ -522,264 +522,64 @@ fn release_sbom_merge_script_includes_rust_and_dashboard_components() {
 }
 
 #[test]
-fn npx_verifies_binary_no_postinstall_side_effects() {
+fn npm_release_channel_is_retired() {
     let root = repo_root();
-    let package_json = root.join("npm/oraclemcp/package.json");
-    let wrapper = root.join("npm/oraclemcp/bin/oraclemcp.js");
-    let release_workflow =
-        fs::read_to_string(root.join(".github/workflows/release.yml")).expect("read release.yml");
-    let npm_workflow = fs::read_to_string(root.join(".github/workflows/publish-npm.yml"))
-        .expect("read publish-npm.yml");
-    let package: Value =
-        serde_json::from_str(&fs::read_to_string(&package_json).expect("read npm package.json"))
-            .expect("npm package.json parses");
-    let wrapper_text = fs::read_to_string(&wrapper).expect("read npm wrapper");
-    let cargo_toml =
-        fs::read_to_string(root.join("crates/oraclemcp/Cargo.toml")).expect("read Cargo.toml");
-    let crate_version = cargo_toml
-        .lines()
-        .find_map(|line| line.strip_prefix("version = \""))
-        .and_then(|tail| tail.strip_suffix('"'))
-        .expect("oraclemcp crate version");
+    let read = |path: &str| fs::read_to_string(root.join(path)).expect(path);
+    let readme = read("README.md");
+    let release_checklist = read("docs/release-checklist.md");
+    let release_workflow = read(".github/workflows/release.yml");
+    let npm_workflow = read(".github/workflows/publish-npm.yml");
+    let release_surfaces = read("docs/release-surfaces.md");
+    let surface_sync = read("scripts/release_surface_sync_check.sh");
+    let preflight = read("scripts/release_preflight.sh");
+    let publish_input_validator = read("scripts/validate_npm_publish_input.sh");
 
-    assert_eq!(package["name"], "oraclemcp");
-    assert_eq!(package["version"], crate_version);
-    assert_eq!(package["publishConfig"]["provenance"], true);
-    assert_eq!(package["bin"]["oraclemcp"], "bin/oraclemcp.js");
-    assert_eq!(package["bin"]["om"], "bin/oraclemcp.js");
+    assert!(readme.contains("An npm/npx channel is not offered"));
+    assert!(release_checklist.contains("There is no npm/npx release channel."));
     assert!(
-        release_workflow.contains("name: validate npm wrapper package"),
-        "release workflow must validate the npm wrapper without requiring npm registry auth"
-    );
-    assert!(
-        release_workflow.contains("npm --prefix npm/oraclemcp test"),
-        "release workflow must smoke-test the npm wrapper"
-    );
-    assert!(
-        release_workflow.contains("npm pack ./npm/oraclemcp --dry-run"),
-        "release workflow must validate the npm package contents"
-    );
-    assert!(
-        !release_workflow.contains("npm publish"),
-        "release workflow must not fail the signed release on externally gated npm publishing"
-    );
-    assert!(
-        npm_workflow.contains("npm publish ./npm/oraclemcp --provenance"),
-        "manual npm workflow must publish the local npm wrapper directory explicitly"
-    );
-    assert!(
-        !release_workflow.contains("npm publish npm/oraclemcp "),
-        "bare npm/oraclemcp is parsed as a package spec, not a local publish path"
-    );
-    assert!(
-        !npm_workflow.contains("npm publish npm/oraclemcp "),
-        "bare npm/oraclemcp is parsed as a package spec, not a local publish path"
-    );
-    assert!(
-        npm_workflow.contains("npm install -g npm@11.5.1"),
-        "npm publish workflow must use an npm CLI new enough for OIDC publishing"
-    );
-    assert!(
-        !npm_workflow.contains("checkout_ref:"),
-        "npm publishing must never accept an arbitrary source ref"
-    );
-    assert!(
-        npm_workflow.contains("ref: ${{ steps.inputs.outputs.tag }}")
-            && npm_workflow.contains("ref: ${{ needs.validate.outputs.tag }}")
-            && npm_workflow.contains("VALIDATED_COMMIT: ${{ needs.validate.outputs.tag_commit }}"),
-        "validation and publication must bind to the exact validated release tag commit"
+        npm_workflow.contains("npm/npx release channel is retired"),
+        "manual workflow must explain that npm publication is retired"
     );
 
-    let lines = npm_workflow.lines().collect::<Vec<_>>();
-    for (index, line) in lines.iter().enumerate() {
-        if line.trim_start().starts_with("run:") {
-            assert!(
-                !line.contains("${{ inputs."),
-                "workflow-dispatch inputs must not be interpolated into a run directive: {line}"
-            );
-        }
-        if line.trim() != "run: |" {
-            continue;
-        }
-        let indentation = line.len() - line.trim_start().len();
-        for body_line in &lines[index + 1..] {
-            if !body_line.trim().is_empty()
-                && body_line.len() - body_line.trim_start().len() <= indentation
-            {
-                break;
-            }
-            assert!(
-                !body_line.contains("${{ inputs."),
-                "workflow-dispatch inputs must enter shell through env, never source: {body_line}"
-            );
-        }
-    }
-    assert!(
-        npm_workflow.contains("NODE_VERSION: 22.17.0"),
-        "npm publish workflow must use a Node version new enough for trusted publishing"
-    );
-    assert!(
-        npm_workflow.contains("id-token: write"),
-        "npm publish workflow must request OIDC id-token permission"
-    );
-    assert!(
-        npm_workflow.contains("auth_mode:"),
-        "manual npm publish workflow must expose explicit auth mode selection"
-    );
-    for mode in ["auto", "token", "oidc"] {
-        assert!(
-            npm_workflow.contains(&format!("- {mode}")),
-            "manual npm publish workflow must support auth_mode={mode}"
-        );
-    }
-    assert!(
-        npm_workflow.contains("auth_mode=token requires the npm environment NPM_TOKEN secret"),
-        "token mode must fail before publish when the npm token is absent"
-    );
-    assert!(
-        npm_workflow.contains("trusted publishing/OIDC; npm must trust MuhDur/oraclemcp, workflow publish-npm.yml, environment npm"),
-        "OIDC mode must name the exact trusted-publisher tuple operators need to configure"
-    );
-    assert!(
-        npm_workflow.contains("unset NODE_AUTH_TOKEN NPM_CONFIG_USERCONFIG"),
-        "OIDC mode must ignore a present NPM_TOKEN and setup-node npmrc"
-    );
-    assert!(
-        npm_workflow.contains("npm whoami --registry=https://registry.npmjs.org/"),
-        "token mode must preflight token authentication without treating whoami as an OIDC proof"
-    );
-    assert!(
-        npm_workflow.contains("npm publish returned E403"),
-        "npm publish workflow must explain npm permission failures"
-    );
-    assert!(
-        npm_workflow.contains("unset NODE_AUTH_TOKEN NPM_CONFIG_USERCONFIG"),
-        "npm publish workflow must fall back to OIDC when NPM_TOKEN is absent"
-    );
-
-    let scripts = package["scripts"].as_object().expect("scripts object");
-    for lifecycle in ["preinstall", "install", "postinstall", "prepare"] {
-        assert!(
-            !scripts.contains_key(lifecycle),
-            "npm wrapper must not run {lifecycle} on user machines"
-        );
-    }
-
-    for needle in [
-        ".sha256",
-        ".sig",
-        ".crt",
-        ".attestation.sigstore.json",
-        "verify-blob",
-        "verify-blob-attestation",
-        "sha256",
-        "ORACLEMCP_NPM_VERIFY",
-        "DEFAULT_VERIFY_POSTURE = 'prefer'",
-        "cosign:${verifyPosture}",
-        "checksum-only",
-        "authenticity unverified: cosign not installed",
-        "ORACLEMCP_NPM_DRY_RUN",
+    for forbidden in [
+        "npm publish",
+        "NPM_TOKEN",
+        "id-token: write",
+        "registry-url: https://registry.npmjs.org",
+        "npm install -g npm",
+        "npm whoami",
     ] {
         assert!(
-            wrapper_text.contains(needle),
-            "npm wrapper must contain verification path {needle}"
+            !npm_workflow.contains(forbidden),
+            "retired npm workflow must not retain publication authority or auth path: {forbidden}"
         );
     }
-    for forbidden in ["service install", "clients issue"] {
-        assert!(
-            !wrapper_text.contains(forbidden),
-            "npm wrapper must not mutate service/client state via {forbidden}"
-        );
-    }
-}
-
-#[test]
-fn npm_publish_dispatch_validator_rejects_injection_and_maps_dist_tags() {
-    let root = repo_root();
-    let validator = root.join("scripts/validate_npm_publish_input.sh");
-
-    for (version, expected_tag) in [
-        ("0.8.0", "latest"),
-        ("0.9.0-rc.1", "next"),
-        ("1.2.3+build-meta", "latest"),
+    for forbidden in [
+        "name: validate npm wrapper package",
+        "npm --prefix npm/oraclemcp test",
+        "npm pack ./npm/oraclemcp --dry-run",
+        "npm publish",
     ] {
-        let output = Command::new("bash")
-            .arg(&validator)
-            .env("REQUESTED_VERSION", version)
-            .env("REQUESTED_AUTH_MODE", "oidc")
-            .env_remove("GITHUB_OUTPUT")
-            .output()
-            .expect("run npm dispatch validator");
         assert!(
-            output.status.success(),
-            "valid version rejected: {}",
-            String::from_utf8_lossy(&output.stderr)
+            !release_workflow.contains(forbidden),
+            "tag release workflow must not validate or publish a retired npm wrapper: {forbidden}"
         );
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains(&format!("version={version}\n")));
-        assert!(stdout.contains(&format!("tag=v{version}\n")));
-        assert!(stdout.contains(&format!("dist_tag={expected_tag}\n")));
     }
-
-    let output = Command::new("bash")
-        .arg(&validator)
-        .env("REQUESTED_VERSION", "0.9.0-rc.1")
-        .env("REQUESTED_AUTH_MODE", "token")
-        // /dev/stderr lets the test observe the append-only Actions output
-        // channel without leaving a temporary file behind.
-        .env("GITHUB_OUTPUT", "/dev/stderr")
-        .output()
-        .expect("run npm dispatch validator with Actions output channel");
+    for text in [release_surfaces, surface_sync, preflight] {
+        assert!(
+            !text.contains("npm/oraclemcp/package.json"),
+            "retired npm wrapper package must not be a release-version surface"
+        );
+    }
     assert!(
-        output.status.success(),
-        "valid Actions input rejected: {}",
-        String::from_utf8_lossy(&output.stderr)
+        publish_input_validator.contains("npm/npx release channel is retired"),
+        "legacy npm input validator must reject instead of accepting publication inputs"
     );
-    let expected_outputs = "version=0.9.0-rc.1\ntag=v0.9.0-rc.1\ndist_tag=next\nauth_mode=token\n";
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        expected_outputs,
-        "validator must retain its stdout contract inside GitHub Actions"
+    assert!(
+        !publish_input_validator.contains("auth_mode")
+            && !publish_input_validator.contains("dist_tag="),
+        "legacy npm input validator must not retain publish-mode outputs"
     );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        expected_outputs,
-        "validator must append the same payload to GITHUB_OUTPUT"
-    );
-
-    let marker = root.join("target/qa39-input-injection-marker");
-    assert!(!marker.exists(), "QA39 marker unexpectedly pre-exists");
-    for version in [
-        "v0.8.0",
-        "01.2.3",
-        "1.2.3-01",
-        "1.2",
-        "1.2.3; touch target/qa39-input-injection-marker",
-        "1.2.3$(touch target/qa39-input-injection-marker)",
-        "1.2.3\n0.0.0",
-        "1.2.3'",
-    ] {
-        let output = Command::new("bash")
-            .arg(&validator)
-            .env("REQUESTED_VERSION", version)
-            .env("REQUESTED_AUTH_MODE", "auto")
-            .env("GITHUB_OUTPUT", "/dev/stderr")
-            .current_dir(&root)
-            .output()
-            .expect("run npm dispatch validator");
-        assert!(
-            !output.status.success(),
-            "malicious version passed: {version:?}"
-        );
-        assert!(
-            !marker.exists(),
-            "version executed shell syntax: {version:?}"
-        );
-        assert!(
-            !String::from_utf8_lossy(&output.stderr).contains("dist_tag="),
-            "rejected version emitted workflow outputs: {version:?}"
-        );
-    }
 }
 
 #[test]

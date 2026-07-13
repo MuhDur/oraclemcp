@@ -41,7 +41,6 @@ jobs:
         working-directory: web
       - run: npm run check
         working-directory: web
-      - run: npm --prefix npm/oraclemcp test
       - run: bash scripts/dashboard_bundle_check.sh
       - uses: actions/upload-artifact@v7
         with:
@@ -623,40 +622,6 @@ jobs:
             grep -q "\"version\": \"$EXPECTED_VERSION\"" /tmp/oraclemcp-info.json
             oraclemcp capabilities | head -c 1200 >/dev/null
           '
-
-  # npm PUBLICATION is excluded from the 0.6.x line (operator decision
-  # 2026-07-02): publish-npm.yml stays dormant (manual-dispatch only) and is
-  # never dispatched. The wrapper package is still lint-validated below so it
-  # stays well-formed while dormant; nothing here publishes to npm.
-  validate-npm-wrapper:
-    name: validate npm wrapper package
-    needs: release
-    if: ${{ startsWith(github.ref, 'refs/tags/') && needs.release.result == 'success' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          registry-url: https://registry.npmjs.org
-      - name: Validate npm wrapper
-        run: npm --prefix npm/oraclemcp test
-      - name: Check npm package metadata and pack list
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          package_version="$(node -p "require('./npm/oraclemcp/package.json').version")"
-          if [ "$package_version" != "$version" ]; then
-            echo "npm package version $package_version does not match release tag $version" >&2
-            exit 1
-          fi
-          npm pack ./npm/oraclemcp --dry-run
 
   publish-mcp-registry:
     name: publish MCP registry entry
