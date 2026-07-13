@@ -3318,6 +3318,32 @@ mod tests {
         Classifier::default().classify(sql)
     }
 
+    fn classify_one_statement(sql: &str) -> StatementClass {
+        classify_statement(sql, &UnknownOracle, StrictModes::default())
+    }
+
+    fn oracle_tokens(sql: &str) -> Vec<Token> {
+        Tokenizer::new(&OracleDialect {}, sql)
+            .tokenize()
+            .expect("test SQL should tokenize")
+    }
+
+    fn token_refs(tokens: &[Token]) -> Vec<&Token> {
+        tokens.iter().collect()
+    }
+
+    fn nth_unquoted_word(tokens: &[Token], value: &str, nth: usize) -> usize {
+        tokens
+            .iter()
+            .enumerate()
+            .filter(|(_, token)| {
+                matches!(token, Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(value))
+            })
+            .nth(nth)
+            .map(|(idx, _)| idx)
+            .unwrap_or_else(|| panic!("missing unquoted word {value:?} at occurrence {nth}"))
+    }
+
     #[test]
     fn plain_select_is_safe() {
         let d = classify("SELECT id, name FROM employees WHERE id = 42");
@@ -3451,6 +3477,46 @@ mod tests {
             assert!(d.non_transactional_effect, "{sql:?}");
             assert!(d.query_effect_requires_fetch, "{sql:?}");
         }
+    }
+
+    #[test]
+    fn sequence_nextval_helpers_preserve_owner_and_fetch_semantics() {
+        let refs = sequence_nextval_refs("SELECT x, app.seq.NEXTVAL FROM dual");
+        assert!(
+            refs.iter().any(|reference| {
+                reference.schema.as_deref() == Some("app")
+                    && reference.name.eq_ignore_ascii_case("seq")
+            }),
+            "schema-qualified NEXTVAL should preserve the sequence owner: {refs:?}"
+        );
+
+        let unqualified_later = sequence_nextval_refs("SELECT x, seq.NEXTVAL FROM dual");
+        assert!(
+            unqualified_later.iter().any(|reference| {
+                reference.schema.is_none() && reference.name.eq_ignore_ascii_case("seq")
+            }),
+            "later unqualified NEXTVAL must not borrow a preceding SELECT-list word as schema: {unqualified_later:?}"
+        );
+
+        assert!(
+            sequence_nextval_query_requires_fetch(
+                "SELECT app.seq.NEXTVAL@prod.example.com FROM dual"
+            ),
+            "a SELECT containing NEXTVAL behind Oracle dblink syntax still needs fetch"
+        );
+        let malformed_select = "SELECT seq.NEXTVAL FROM dual WHERE";
+        assert!(
+            Parser::parse_sql(&OracleDialect {}, malformed_select).is_err(),
+            "test precondition: malformed SELECT should force the fail-closed lexical path"
+        );
+        assert!(
+            sequence_nextval_query_requires_fetch(malformed_select),
+            "a tokenizable SELECT containing NEXTVAL still needs fetch even when sqlparser cannot parse it"
+        );
+        assert!(
+            !sequence_nextval_query_requires_fetch("UPDATE t SET id = app.seq.NEXTVAL"),
+            "non-query NEXTVAL effects are not result-fetch driven"
+        );
     }
 
     #[test]
@@ -3930,6 +3996,31 @@ mod tests {
     }
 
     #[test]
+    fn config_served_strict_enables_qualified_callable_guard_only() {
+        let strict_config = Classifier::new(ClassifierConfig::served_strict());
+
+        let callable = strict_config.classify("SELECT app_admin.run_ddl FROM dual");
+        assert_eq!(callable.danger, DangerLevel::Guarded);
+        assert_eq!(callable.required_level, Some(OperatingLevel::ReadWrite));
+        assert!(
+            callable
+                .objects_affected
+                .iter()
+                .any(|object| object.eq_ignore_ascii_case("app_admin.run_ddl")),
+            "served-strict config must surface the paren-less callable"
+        );
+
+        let ordinary_read = strict_config.classify("SELECT * FROM orders");
+        assert_eq!(
+            ordinary_read.danger,
+            DangerLevel::Safe,
+            "ClassifierConfig::served_strict only enables the .102 callable guard; \
+             Classifier::served_strict owns statement-Unknown tightening"
+        );
+        assert_eq!(ordinary_read.required_level, Some(OperatingLevel::ReadOnly));
+    }
+
+    #[test]
     fn parenless_qualified_guard_is_surgical_and_spares_real_column_refs() {
         // Regression guard for the .102 tightening: an in-scope `alias.column` /
         // `schema.table.column` / CTE-qualified / correlated column reference is
@@ -3969,6 +4060,7 @@ mod tests {
             "SELECT employees.name FROM hr.employees@prod.example.com",
             "SELECT employees.name FROM employees@prod.example.com",
             "SELECT \"run@ddl\" FROM (SELECT 1 \"run@ddl\" FROM dual)",
+            "WITH c AS (SELECT 1 id FROM dual) SELECT c.id FROM c ORDER BY c.id",
         ] {
             assert_eq!(
                 strict.classify(sql).danger,
@@ -4047,6 +4139,76 @@ mod tests {
         // Set operations on both arms.
         let e = parse("SELECT id FROM a UNION SELECT id FROM b");
         assert_eq!(names(&e), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn relation_scope_helpers_keep_distinct_ids_and_minimal_qualifiers() {
+        use sqlparser::ast::{SetExpr, Statement, TableFactor};
+
+        let stmts = Parser::parse_sql(&OracleDialect {}, "SELECT employees.name FROM employees")
+            .expect("parse single-table query");
+        let Statement::Query(query) = &stmts[0] else {
+            panic!("expected query");
+        };
+        let SetExpr::Select(select) = query.body.as_ref() else {
+            panic!("expected select body");
+        };
+        let TableFactor::Table { name, .. } = &select.from[0].relation else {
+            panic!("expected table factor");
+        };
+        let qualifiers = object_name_qualifiers(name);
+        assert_eq!(
+            qualifiers.len(),
+            1,
+            "a single-part table name should expose one qualifier, not a duplicate full path"
+        );
+
+        let stmts = Parser::parse_sql(&OracleDialect {}, "SELECT * FROM a JOIN b ON a.id = b.id")
+            .expect("parse join query");
+        let Statement::Query(query) = &stmts[0] else {
+            panic!("expected query");
+        };
+        let SetExpr::Select(select) = query.body.as_ref() else {
+            panic!("expected select body");
+        };
+        let left_id = table_factor_id(&select.from[0].relation);
+        let right_id = table_factor_id(&select.from[0].joins[0].relation);
+        assert_ne!(
+            left_id, right_id,
+            "different table factors must retain distinct identities"
+        );
+
+        let stmts = Parser::parse_sql(
+            &OracleDialect {},
+            "SELECT id FROM a UNION ALL SELECT id FROM b",
+        )
+        .expect("parse set operation");
+        let Statement::Query(query) = &stmts[0] else {
+            panic!("expected query");
+        };
+        let SetExpr::SetOperation { left, right, .. } = query.body.as_ref() else {
+            panic!("expected set operation");
+        };
+        let SetExpr::Select(left_select) = left.as_ref() else {
+            panic!("expected left select");
+        };
+        let SetExpr::Select(right_select) = right.as_ref() else {
+            panic!("expected right select");
+        };
+        assert_ne!(
+            select_id(left_select),
+            select_id(right_select),
+            "different SELECT nodes must retain distinct identities"
+        );
+        let mut ids = HashSet::new();
+        collect_body_select_ids(query.body.as_ref(), &mut ids);
+        assert_eq!(
+            ids.len(),
+            2,
+            "set-operation query bodies must register both arm SELECT ids"
+        );
+        assert!(ids.contains(&select_id(left_select)), "{ids:?}");
+        assert!(ids.contains(&select_id(right_select)), "{ids:?}");
     }
 
     #[test]
@@ -4178,6 +4340,27 @@ mod tests {
         let noop = classify("BEGIN NULL; END;");
         assert_eq!(noop.danger, DangerLevel::Guarded);
         assert_eq!(noop.required_level, Some(OperatingLevel::ReadWrite));
+    }
+
+    #[test]
+    fn block_interior_floor_reports_the_max_parsed_statement_tier() {
+        let floor = block_interior_floor(
+            "BEGIN UPDATE orders SET status = 'X'; INSERT INTO audit_log(msg) VALUES ('x'); END;",
+            &UnknownOracle,
+            StrictModes::default(),
+        )
+        .expect("parseable block body statements should contribute a floor");
+        assert_eq!(floor, (DangerLevel::Destructive, OperatingLevel::ReadWrite));
+
+        assert_eq!(
+            block_interior_floor(
+                "BEGIN IF flag = 1 THEN UPDATE orders SET status = 'X'; END IF; END;",
+                &UnknownOracle,
+                StrictModes::default(),
+            ),
+            None,
+            "control-flow segments are intentionally not flattened into bare SQL"
+        );
     }
 
     #[test]
@@ -4888,6 +5071,40 @@ mod tests {
     }
 
     #[test]
+    fn parsed_statement_classifier_arms_keep_their_internal_floors() {
+        for sql in [
+            "EXPLAIN PLAN FOR SELECT * FROM employees",
+            "COMMIT",
+            "ROLLBACK",
+            "SAVEPOINT before_change",
+            "CALL app_admin.run_ddl(:target)",
+            "SET TRANSACTION READ ONLY",
+        ] {
+            let class = classify_one_statement(sql);
+            assert_eq!(class.danger, DangerLevel::Guarded, "{sql:?} -> {class:?}");
+            assert_eq!(
+                class.required,
+                Some(OperatingLevel::ReadWrite),
+                "{sql:?} -> {class:?}"
+            );
+        }
+
+        for sql in ["DROP ROLE app_role", "SET ROLE app_admin"] {
+            let class = classify_one_statement(sql);
+            assert_eq!(
+                class.danger,
+                DangerLevel::Destructive,
+                "{sql:?} -> {class:?}"
+            );
+            assert_eq!(
+                class.required,
+                Some(OperatingLevel::Admin),
+                "{sql:?} -> {class:?}"
+            );
+        }
+    }
+
+    #[test]
     fn plsql_block_is_at_least_guarded() {
         let d = classify("BEGIN UPDATE t SET x = 1 WHERE id = 2; END;");
         assert!(d.danger >= DangerLevel::Guarded);
@@ -5123,6 +5340,43 @@ mod tests {
     }
 
     #[test]
+    fn package_body_final_end_matching_tracks_nested_and_quoted_keywords() {
+        let control_flow =
+            "CREATE OR REPLACE PACKAGE BODY p AS BEGIN IF TRUE THEN NULL; END IF; END p;";
+        let tokens = oracle_tokens(control_flow);
+        let unit = stored_unit_create(control_flow).expect("package body should be recognized");
+        let final_end = stored_unit_final_end(&tokens, &unit).expect("final END should be found");
+        let init_begin = nth_unquoted_word(&tokens, "BEGIN", 0);
+        assert!(
+            begin_matches_final_end(&tokens, init_begin, final_end),
+            "package initialization BEGIN must match the unit-final END despite nested END IF"
+        );
+
+        let member_then_init = "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q IS BEGIN NULL; END q; BEGIN NULL; END p;";
+        let tokens = oracle_tokens(member_then_init);
+        let unit = stored_unit_create(member_then_init).expect("package body should be recognized");
+        let final_end = stored_unit_final_end(&tokens, &unit).expect("final END should be found");
+        let member_begin = nth_unquoted_word(&tokens, "BEGIN", 0);
+        let init_begin = nth_unquoted_word(&tokens, "BEGIN", 1);
+        assert!(
+            !begin_matches_final_end(&tokens, member_begin, final_end),
+            "a member subprogram BEGIN must not be mistaken for package initialization"
+        );
+        assert!(
+            begin_matches_final_end(&tokens, init_begin, final_end),
+            "the later package initialization BEGIN owns the final END"
+        );
+
+        let quoted_keyword = oracle_tokens(r#"BEGIN "IF" END"#);
+        let begin = nth_unquoted_word(&quoted_keyword, "BEGIN", 0);
+        let end = nth_unquoted_word(&quoted_keyword, "END", 0);
+        assert!(
+            begin_matches_final_end(&quoted_keyword, begin, end),
+            "quoted identifiers that spell control-flow keywords are not structural"
+        );
+    }
+
+    #[test]
     fn stored_package_and_type_bodies_are_single_ddl_units() {
         for sql in [
             // Initialization sections: the terminal END closes both the
@@ -5222,6 +5476,83 @@ mod tests {
     }
 
     #[test]
+    fn analyze_batch_distinguishes_package_body_header_states() {
+        let initialization = analyze_batch(
+            "CREATE OR REPLACE PACKAGE BODY p AS BEGIN IF TRUE THEN NULL; END IF; END p;",
+        );
+        assert!(initialization.balanced, "{initialization:?}");
+        assert_eq!(initialization.statement_count, 1, "{initialization:?}");
+        assert!(
+            !initialization.saw_top_level_after_block_close,
+            "{initialization:?}"
+        );
+
+        let member_body = analyze_batch(
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q IS BEGIN NULL; END q; BEGIN NULL; END p;",
+        );
+        assert!(member_body.balanced, "{member_body:?}");
+        assert_eq!(member_body.statement_count, 1, "{member_body:?}");
+        assert!(
+            !member_body.saw_top_level_after_block_close,
+            "{member_body:?}"
+        );
+
+        let declaration_and_callspec = analyze_batch(
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE declared_only; PROCEDURE j AS LANGUAGE JAVA NAME 'X.y()'; END p;",
+        );
+        assert!(
+            declaration_and_callspec.balanced,
+            "{declaration_and_callspec:?}"
+        );
+        assert_eq!(
+            declaration_and_callspec.statement_count, 1,
+            "{declaration_and_callspec:?}"
+        );
+
+        for sql in [
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q AS AS LANGUAGE JAVA NAME 'X.y()'; END p;",
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q AS JAVA NAME 'X.y()'; END p;",
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q AS LANGUAGE LANGUAGE JAVA NAME 'X.y()'; END p;",
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q AS LANGUAGE EXTERNAL NAME 'X.y()'; END p;",
+        ] {
+            let shape = analyze_batch(sql);
+            assert!(
+                !shape.balanced,
+                "malformed call-spec header sequence must remain fail-closed: {sql:?} -> {shape:?}"
+            );
+        }
+
+        let mismatched_unit_name =
+            analyze_batch("CREATE OR REPLACE PACKAGE BODY p AS BEGIN NULL; END other;");
+        assert!(
+            !mismatched_unit_name.balanced,
+            "the optional final END name must match the created unit: {mismatched_unit_name:?}"
+        );
+        assert!(
+            mismatched_unit_name.saw_buried_semicolon,
+            "the mismatched final name leaves the unit scope unclosed: {mismatched_unit_name:?}"
+        );
+
+        for sql in [
+            "CREATE OR REPLACE PACKAGE p AS END other;",
+            "CREATE OR REPLACE PACKAGE p AS END p /;",
+            "CREATE OR REPLACE PACKAGE p AS END p 1;",
+        ] {
+            let shape = analyze_batch(sql);
+            assert!(
+                shape.saw_top_level_after_block_close,
+                "unexpected tokens after a stored-unit END must be surfaced: {sql:?} -> {shape:?}"
+            );
+        }
+
+        let declare_only = analyze_batch("DECLARE x NUMBER;");
+        assert!(
+            declare_only.has_plsql_block,
+            "DECLARE must mark the batch as PL/SQL even before BEGIN: {declare_only:?}"
+        );
+    }
+
+    #[test]
     fn stored_body_call_specifications_are_single_ddl_units() {
         for sql in [
             "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q AS LANGUAGE JAVA NAME 'X.y()'; END p;",
@@ -5286,6 +5617,39 @@ mod tests {
                 "{sql:?}"
             );
         }
+    }
+
+    #[test]
+    fn plsql_invocation_keyword_skips_all_leading_labels() {
+        assert_eq!(
+            plsql_invocation_keyword("<<outer_block>> <<inner_step>> BEGIN NULL; END;"),
+            Some("BEGIN")
+        );
+        assert_eq!(
+            plsql_invocation_keyword("<<one>> <<two>> <<three>> BEGIN NULL; END;"),
+            Some("BEGIN")
+        );
+        assert_eq!(
+            plsql_invocation_keyword("<<one>> <<two>> <<three>> <<four>> BEGIN NULL; END;"),
+            Some("BEGIN")
+        );
+        assert_eq!(
+            plsql_invocation_keyword("<<declare_label>> DECLARE x NUMBER; BEGIN NULL; END;"),
+            Some("DECLARE")
+        );
+        assert_eq!(
+            plsql_invocation_keyword("<<call_label>> CALL app_admin.run_ddl(:target)"),
+            Some("CALL")
+        );
+        assert_eq!(
+            plsql_invocation_keyword("<<not_plsql>> SELECT 1 FROM dual"),
+            None
+        );
+        assert_eq!(
+            plsql_invocation_keyword("<<complete>> <<dangling"),
+            None,
+            "malformed trailing label syntax must not panic or skip beyond the token stream"
+        );
     }
 
     #[test]
@@ -5463,6 +5827,53 @@ mod tests {
                 decision.reason_category,
                 Some(ReasonCategory::UnprovenSideEffect),
                 "{sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reviewed_dbms_output_arguments_are_literals_binds_and_balanced_parens_only() {
+        for segment in [
+            "SYS.DBMS_OUTPUT.PUT_LINE(NULL)",
+            "SYS.DBMS_OUTPUT.PUT_LINE(TRUE || ':' || FALSE)",
+            "SYS.DBMS_OUTPUT.PUT_LINE(('hello' || :suffix) || 42)",
+        ] {
+            assert!(
+                is_reviewed_dbms_output_statement(segment),
+                "safe reviewed DBMS_OUTPUT segment should be admitted: {segment}"
+            );
+        }
+
+        for expression in [
+            "\"NULL\"",
+            "('missing-close'",
+            "'extra-close')",
+            ":",
+            ": suffix",
+            ")(",
+            "local_value",
+            "app_admin.message",
+            "app_admin.message()",
+        ] {
+            let tokens = oracle_tokens(expression);
+            let refs = token_refs(&tokens);
+            assert!(
+                !tokens_are_literal_or_bind_expression(&refs),
+                "unsafe expression must not be accepted as literal/bind-only: {expression}"
+            );
+        }
+
+        for segment in [
+            "SYS.WRONG_OUTPUT.PUT_LINE('x')",
+            "SYS.DBMS_OUTPUT.GET_LINE('x')",
+            "SYS.DBMS_OUTPUT.PUT_LINE",
+            "SYS.DBMS_OUTPUT.PUT_LINE()",
+            "SYS.DBMS_OUTPUT.PUT_LINE('x'",
+            "SYS.DBMS_OUTPUT.PUT_LINE('x' || 'y'",
+        ] {
+            assert!(
+                !is_reviewed_dbms_output_statement(segment),
+                "near-miss DBMS_OUTPUT shape must fail closed: {segment}"
             );
         }
     }
@@ -5840,6 +6251,19 @@ mod tests {
     }
 
     #[test]
+    fn unanalyzable_plsql_construct_keeps_shape_and_declare_refusals_distinct() {
+        assert_eq!(
+            unanalyzable_plsql_construct("BEGIN NULL;"),
+            None,
+            "unbalanced PL/SQL shape is handled by the stronger structural refusal"
+        );
+        assert_eq!(
+            unanalyzable_plsql_construct("DECLARE x NUMBER; BEGIN NULL; END;"),
+            Some("DECLARE section without complete semantic analysis")
+        );
+    }
+
+    #[test]
     fn block_list_regex_forbids() {
         let cfg = ClassifierConfig::new().with_block_pattern("(?i)drop\\s+table");
         let d = Classifier::new(cfg).classify("DROP TABLE orders");
@@ -5940,6 +6364,16 @@ mod tests {
                     && call.name.eq_ignore_ascii_case("purge_old_rows")
             }),
             "schema-qualified UDF should preserve schema and routine name: {calls:?}"
+        );
+        let later_calls =
+            user_defined_calls("SELECT id, status, billing.purge_old_rows(x) FROM dual");
+        assert!(
+            later_calls.iter().any(|call| {
+                call.schema.as_deref() == Some("billing")
+                    && call.name.eq_ignore_ascii_case("purge_old_rows")
+            }),
+            "schema extraction must look three tokens behind the call paren, not at an \
+             index-derived earlier token: {later_calls:?}"
         );
         assert!(
             !calls
