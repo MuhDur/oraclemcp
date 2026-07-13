@@ -61,6 +61,7 @@ import {
   DASHBOARD_GRAMMAR,
   clampActivity,
   toCostBadgeViewModel,
+  toMaskBadgeViewModel,
   toScnScrubberViewModel,
   toUndoTreeViewModel,
   toVerdictProofViewModel,
@@ -87,6 +88,7 @@ import {
   parseClassifierLadder,
   parseCostEstimate,
   parseQueryCostRefusal,
+  parseMaskCertificate,
   parseQueryAsOf,
   parseUndoOutcome,
   fetchQueryAsOf,
@@ -7966,6 +7968,14 @@ function WorkbenchResultPanel({
   const confirm = successfulResponse ? confirmationFromResponse(successfulResponse) : null;
   const facts = successfulResponse ? factsFromResponse(successfulResponse) : [];
   const verdict = successfulResponse ? workbenchVerdictFromResponse(successfulResponse) : null;
+  // Arc M: only a row-returning read has an egress decision to certify. On any
+  // other tool there is nothing to say, so the badge is not rendered at all
+  // rather than reporting a misleading "no certificate".
+  const MaskBadge = OMCP_SKIN.renderers.MaskBadge;
+  const maskBadge =
+    successfulResponse?.data.mcp_tool === "oracle_query"
+      ? toMaskBadgeViewModel(parseMaskCertificate(successfulResponse.data))
+      : null;
   return (
     <ConsolePanel className="min-h-[520px]">
       <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
@@ -7984,6 +7994,7 @@ function WorkbenchResultPanel({
       </div>
       <div className="space-y-4 p-4">
         {verdict ? <WorkbenchVerdictBlock verdict={verdict} /> : null}
+        {maskBadge ? <MaskBadge model={maskBadge} /> : null}
         {facts.length > 0 ? (
           <div className="grid gap-2 sm:grid-cols-2">
             {facts.map((fact) => (

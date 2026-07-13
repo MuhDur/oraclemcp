@@ -2,6 +2,9 @@ import {
   isRegisteredDerivationStep,
   type CostPlanRowViewModel,
   type CostRefusalInput,
+  type MaskAction,
+  type MaskCertificateInput,
+  type MaskSource,
   type VerdictKind,
   type VerdictProofCheckView,
   type VerdictProofInput
@@ -1636,6 +1639,58 @@ export async function fetchAuditTail(
     throw new Error(errorMessage(parsed, response.status));
   }
   return parsed as OperatorResponse<AuditTailData>;
+}
+
+// ── Egress masking (Arc M) ───────────────────────────────────────────────────
+// The mask certificate rides on the query page it governs, and only when the
+// policy transformed at least one column. The console reports its absence as an
+// absence of proof — never as "nothing was masked".
+
+const MASK_ACTIONS: readonly MaskAction[] = ["pass", "mask", "tokenize", "null"];
+const MASK_SOURCES: readonly MaskSource[] = ["rule", "mask_unknown_default", "pass"];
+
+/** Read `mask_certificate` off a query page, or null when the page carries none. */
+export function parseMaskCertificate(
+  data: WorkbenchActionData | null
+): MaskCertificateInput | null {
+  const certificate = recordValue(mcpPayload(data)?.["mask_certificate"]);
+  const policyId = stringValue(certificate?.["policy_id"]);
+  if (!certificate || !policyId || !Array.isArray(certificate["decisions"])) {
+    return null;
+  }
+  const decisions = certificate["decisions"].flatMap((raw) => {
+    const decision = recordValue(raw);
+    const column = stringValue(decision?.["column"]);
+    const action = stringValue(decision?.["action"]);
+    const source = stringValue(decision?.["source"]);
+    // An unknown action or source is not decodable, and the console must not
+    // guess: an undecodable decision would otherwise render as "passed".
+    if (
+      !decision ||
+      !column ||
+      !MASK_ACTIONS.includes(action as MaskAction) ||
+      !MASK_SOURCES.includes(source as MaskSource)
+    ) {
+      return [];
+    }
+    return [
+      {
+        column,
+        oracleType: stringValue(decision["oracle_type"]) ?? "UNKNOWN",
+        action: action as MaskAction,
+        source: source as MaskSource,
+        ruleIndex: numberValue(decision["rule_index"]),
+        ruleTag: stringValue(decision["rule_tag"]),
+        saltId: stringValue(decision["salt_id"])
+      }
+    ];
+  });
+  return {
+    policyId,
+    profile: stringValue(certificate["profile"]),
+    auditHash: stringValue(certificate["audit_entry_hash"]),
+    decisions
+  };
 }
 
 // ── SCN time-travel (Arc A) ──────────────────────────────────────────────────

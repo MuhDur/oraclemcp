@@ -27,6 +27,7 @@ import {
   type GroundControlViewModel,
   type HealthPosture,
   type CostBadgeViewModel,
+  type MaskBadgeViewModel,
   type ScnScrubberViewModel,
   type SignatureId,
   type SkinCapability,
@@ -70,6 +71,7 @@ export type DashboardSkin = {
     GroundControl: React.ComponentType<{ model: GroundControlViewModel }>;
     VerdictProof: React.ComponentType<{ model: VerdictProofViewModel }>;
     CostBadge: React.ComponentType<{ model: CostBadgeViewModel }>;
+    MaskBadge: React.ComponentType<{ model: MaskBadgeViewModel }>;
     ScnScrubber: React.ComponentType<{
       model: ScnScrubberViewModel;
       onScrub?: (scn: number) => void;
@@ -162,7 +164,8 @@ export const OMCP_SKIN: DashboardSkin = {
     VerdictProof: VerdictProofInspector,
     UndoTree: UndoTreeRenderer,
     CostBadge: CostBadgeRenderer,
-    ScnScrubber: ScnScrubberRenderer
+    ScnScrubber: ScnScrubberRenderer,
+    MaskBadge: MaskBadgeRenderer
   },
   layout: {
     appShell: "min-h-screen bg-[var(--om-bg)] text-[var(--om-text)]",
@@ -381,6 +384,77 @@ function VerdictProofFact({ label, value }: { label: string; value: string }): R
         {value}
       </dd>
     </div>
+  );
+}
+
+/**
+ * The egress mask badge (Arc M).
+ *
+ * Per column: was it transformed on the way out, and which policy rule said so.
+ * With no certificate the badge renders `no_certificate` — the server only
+ * emits one when it transformed something, so silence proves nothing and the
+ * badge refuses to render a reassuring "unmasked" row it cannot back.
+ */
+export function MaskBadgeRenderer({ model }: { model: MaskBadgeViewModel }): React.ReactElement {
+  return (
+    <section
+      className="flex flex-col gap-3 rounded-lg border border-[var(--om-border)] bg-[var(--om-surface)] p-4 shadow-sm"
+      aria-label="egress mask certificate"
+      data-grammar-version={model.grammarVersion}
+      data-mask-status={model.status}
+      data-mask-policy-id={model.policyId ?? ""}
+      data-mask-audit-hash={model.auditHash ?? ""}
+      data-masked-columns={model.maskedColumns}
+    >
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="size-4 text-[var(--om-gold)]" aria-hidden="true" />
+          <span className="text-sm font-bold text-[var(--om-text-bright)]">Egress Mask</span>
+          <Badge tone={model.tone}>{model.status}</Badge>
+        </div>
+        <span className="truncate font-mono text-2xs text-[var(--om-text-muted)]">
+          {model.policyId ? `policy ${model.policyId}` : "no policy certificate"}
+          {model.profile ? ` · ${model.profile}` : ""}
+        </span>
+      </header>
+
+      <p className="text-sm font-semibold text-[var(--om-text-bright)]">{model.headline}</p>
+      <p className="text-xs text-[var(--om-text-muted)]">{model.detail}</p>
+
+      {model.columns.length > 0 ? (
+        <ul className="flex flex-col gap-1">
+          {model.columns.map((column) => (
+            <li
+              key={column.column}
+              className={cn(
+                "flex flex-wrap items-center gap-2 rounded-md border px-2 py-1",
+                column.masked
+                  ? "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)]"
+                  : "border-[var(--om-border)]"
+              )}
+              data-column={column.column}
+              data-masked={column.masked ? "true" : "false"}
+              data-mask-action={column.action}
+              data-mask-source={column.source}
+              data-mask-policy-id={model.policyId ?? ""}
+              data-mask-rule-index={column.ruleIndex ?? ""}
+            >
+              <Badge tone={column.tone}>{column.action}</Badge>
+              <span className="font-mono text-xs text-[var(--om-text)]">{column.column}</span>
+              <span className="font-mono text-2xs text-[var(--om-text-muted)]">
+                {column.oracleType}
+              </span>
+              <span className="text-2xs text-[var(--om-text-muted)]">{column.detail}</span>
+              {column.saltId ? (
+                <span className="font-mono text-2xs text-[var(--om-gold)]">
+                  salt {column.saltId}
+                </span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
   );
 }
 
@@ -679,6 +753,18 @@ export function assertDashboardSkinConformance(skin: DashboardSkin): void {
   }
   if (typeof skin.renderers.ScnScrubber !== "function") {
     throw new Error(`skin ${skin.name} must provide an SCN-scrubber renderer`);
+  }
+  if (typeof skin.renderers.MaskBadge !== "function") {
+    throw new Error(`skin ${skin.name} must provide an egress-mask renderer`);
+  }
+  // A certified page must name the policy that made every decision, and a
+  // transformed column must never render as passed-through.
+  const mask = fixture.maskBadge;
+  if (mask.status !== "certified" || !mask.policyId || mask.maskedColumns === 0) {
+    throw new Error("mask-badge fixture must be a certified page with a transformed column");
+  }
+  if (mask.columns.some((column) => column.masked !== (column.action !== "pass"))) {
+    throw new Error("a mask decision's action and masked flag disagree");
   }
   // The scrubbed SCN must always sit inside the confirmed range, and the range
   // must be built only from snapshots the server actually served.

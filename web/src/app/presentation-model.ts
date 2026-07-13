@@ -235,6 +235,173 @@ export function toVerdictProofViewModel(proof: VerdictProofInput): VerdictProofV
   };
 }
 
+// ── Egress mask badge (Arc M) ────────────────────────────────────────────────
+// A result page carries a `mask_certificate` ONLY when the active policy
+// actually transformed a column. So an absent certificate is not proof that
+// nothing was masked — it is the absence of proof, and the badge says exactly
+// that. When the certificate is there it lists every column in select-list
+// order, including the ones that passed through, and each decision names the
+// rule that made it.
+
+export type MaskAction = "pass" | "mask" | "tokenize" | "null";
+
+export type MaskSource = "rule" | "mask_unknown_default" | "pass";
+
+export type MaskColumnViewModel = {
+  column: string;
+  oracleType: string;
+  masked: boolean;
+  action: MaskAction;
+  source: MaskSource;
+  ruleIndex: number | null;
+  ruleTag: string | null;
+  saltId: string | null;
+  detail: string;
+  tone: DashboardTone;
+};
+
+export type MaskBadgeViewModel = {
+  grammarVersion: 1;
+  status: "certified" | "no_certificate";
+  policyId: string | null;
+  profile: string | null;
+  // The audit entry the certificate was durably committed against.
+  auditHash: string | null;
+  maskedColumns: number;
+  passedColumns: number;
+  headline: string;
+  detail: string;
+  columns: readonly MaskColumnViewModel[];
+  tone: DashboardTone;
+};
+
+export type MaskCertificateInput = {
+  policyId: string;
+  profile: string | null;
+  auditHash: string | null;
+  decisions: readonly {
+    column: string;
+    oracleType: string;
+    action: MaskAction;
+    source: MaskSource;
+    ruleIndex: number | null;
+    ruleTag: string | null;
+    saltId: string | null;
+  }[];
+};
+
+function maskColumnDetail(decision: MaskCertificateInput["decisions"][number]): string {
+  switch (decision.source) {
+    case "rule":
+      return decision.ruleTag
+        ? `rule ${decision.ruleIndex ?? "?"} (${decision.ruleTag})`
+        : `rule ${decision.ruleIndex ?? "?"}`;
+    case "mask_unknown_default":
+      return "no rule matched — masked by the fail-closed mask_unknown_default";
+    case "pass":
+      return "no rule matched — the policy passed this column through";
+  }
+}
+
+export function toMaskBadgeViewModel(
+  certificate: MaskCertificateInput | null
+): MaskBadgeViewModel {
+  if (!certificate) {
+    return {
+      grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+      status: "no_certificate",
+      policyId: null,
+      profile: null,
+      auditHash: null,
+      maskedColumns: 0,
+      passedColumns: 0,
+      headline: "No mask certificate",
+      detail:
+        "The server emits a mask certificate only when the policy transformed a column, so this page carries no proof either way — absence of a certificate is not proof that nothing was masked.",
+      columns: [],
+      tone: "off"
+    };
+  }
+  const columns = certificate.decisions.map((decision): MaskColumnViewModel => {
+    const masked = decision.action !== "pass";
+    return {
+      column: decision.column,
+      oracleType: decision.oracleType,
+      masked,
+      action: decision.action,
+      source: decision.source,
+      ruleIndex: decision.ruleIndex,
+      ruleTag: decision.ruleTag,
+      saltId: decision.saltId,
+      detail: maskColumnDetail(decision),
+      tone: masked ? "warn" : "ok"
+    };
+  });
+  const maskedColumns = columns.filter((column) => column.masked).length;
+  return {
+    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+    status: "certified",
+    policyId: certificate.policyId,
+    profile: certificate.profile,
+    auditHash: certificate.auditHash,
+    maskedColumns,
+    passedColumns: columns.length - maskedColumns,
+    headline: `${maskedColumns} of ${columns.length} column(s) transformed on egress`,
+    detail: certificate.auditHash
+      ? "Every decision below was committed to the audit chain before the page was released."
+      : "The certificate is not yet bound to an audit entry.",
+    columns,
+    tone: maskedColumns > 0 ? "warn" : "ok"
+  };
+}
+
+/** A policy that tokenizes one column, nulls another, and passes a third. */
+export function maskBadgeFixture(): MaskBadgeViewModel {
+  return toMaskBadgeViewModel({
+    policyId: "sha256:pol".padEnd(71, "0"),
+    profile: "prod_read",
+    auditHash: "sha256:aud".padEnd(71, "0"),
+    decisions: [
+      {
+        column: "EMPLOYEE_ID",
+        oracleType: "NUMBER",
+        action: "pass",
+        source: "pass",
+        ruleIndex: null,
+        ruleTag: null,
+        saltId: null
+      },
+      {
+        column: "EMAIL",
+        oracleType: "VARCHAR2",
+        action: "tokenize",
+        source: "rule",
+        ruleIndex: 0,
+        ruleTag: "pii:email",
+        saltId: "salt-2026-07"
+      },
+      {
+        column: "SALARY",
+        oracleType: "NUMBER",
+        action: "null",
+        source: "rule",
+        ruleIndex: 1,
+        ruleTag: "pii:compensation",
+        saltId: null
+      },
+      {
+        column: "NOTES",
+        oracleType: "CLOB",
+        action: "mask",
+        source: "mask_unknown_default",
+        ruleIndex: null,
+        ruleTag: null,
+        saltId: null
+      }
+    ]
+  });
+}
+
 // ── SCN time-scrubber (Arc A) ────────────────────────────────────────────────
 // `oracle_query as_of {scn|timestamp}` replays a proven-read-only SELECT against
 // a past committed snapshot. That is the only time-travel the server offers the
@@ -894,12 +1061,14 @@ export function skinContractFixture(): {
   undoTree: UndoTreeViewModel;
   costBadge: CostBadgeViewModel;
   scnScrubber: ScnScrubberViewModel;
+  maskBadge: MaskBadgeViewModel;
 } {
   return {
     verdictProof: verdictProofFixture(),
     undoTree: undoTreeFixture(),
     costBadge: costBadgeFixture(),
     scnScrubber: scnScrubberFixture(),
+    maskBadge: maskBadgeFixture(),
     groundControl: {
       grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
       verdict: "GO",

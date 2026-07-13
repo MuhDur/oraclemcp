@@ -10,9 +10,11 @@ import {
   costBadgeFixture,
   defaultSkinCapabilities,
   isRegisteredDerivationStep,
+  maskBadgeFixture,
   scnScrubberFixture,
   skinContractFixture,
   toCostBadgeViewModel,
+  toMaskBadgeViewModel,
   toScnScrubberViewModel,
   toUndoTreeViewModel,
   toVerdictProofViewModel,
@@ -186,6 +188,48 @@ describe("OMCP skin conformance", () => {
     });
     expect(brokenBinding.proofStatus).toBe("unverified");
     expect(brokenBinding.tone).toBe("warn");
+  });
+
+  it("renders the egress mask badge with a policy id and a per-column decision", () => {
+    const MaskBadge = OMCP_SKIN.renderers.MaskBadge;
+    const model = maskBadgeFixture();
+    const markup = renderToStaticMarkup(<MaskBadge model={model} />);
+
+    expect(markup).toContain('data-grammar-version="1"');
+    expect(markup).toContain('data-mask-status="certified"');
+    expect(markup).toContain(`data-mask-policy-id="${model.policyId}"`);
+
+    // A transformed column is masked, and says which rule transformed it.
+    const email = model.columns.find((column) => column.column === "EMAIL");
+    expect(email?.masked).toBe(true);
+    expect(email?.action).toBe("tokenize");
+    expect(markup).toContain('data-masked="true"');
+    expect(markup).toContain('data-mask-action="tokenize"');
+    expect(markup).toContain('data-mask-rule-index="0"');
+
+    // An unmasked column carries data-masked="false" — the pass-through decision
+    // is itself certified, not an absence of information.
+    const id = model.columns.find((column) => column.column === "EMPLOYEE_ID");
+    expect(id?.masked).toBe(false);
+    expect(id?.action).toBe("pass");
+    expect(markup).toContain('data-masked="false"');
+
+    // The fail-closed default is visible as its own source.
+    expect(markup).toContain('data-mask-source="mask_unknown_default"');
+  });
+
+  it("treats a missing certificate as absence of proof, not as 'nothing was masked'", () => {
+    const MaskBadge = OMCP_SKIN.renderers.MaskBadge;
+    const none = toMaskBadgeViewModel(null);
+    expect(none.status).toBe("no_certificate");
+    expect(none.maskedColumns).toBe(0);
+    expect(none.columns).toHaveLength(0);
+    expect(none.detail).toContain("not proof that nothing was masked");
+    const markup = renderToStaticMarkup(<MaskBadge model={none} />);
+    expect(markup).toContain('data-mask-status="no_certificate"');
+    expect(markup).toContain('data-mask-policy-id=""');
+    // Crucially it does NOT claim any column passed through unmasked.
+    expect(markup).not.toContain('data-masked="false"');
   });
 
   it("renders the SCN scrubber with the current SCN clamped inside the confirmed range", () => {
