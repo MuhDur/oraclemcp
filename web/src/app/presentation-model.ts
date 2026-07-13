@@ -235,6 +235,170 @@ export function toVerdictProofViewModel(proof: VerdictProofInput): VerdictProofV
   };
 }
 
+// ── Cost/gas badge (Arc G) ───────────────────────────────────────────────────
+// The cost gate prices a statement with the optimizer before it runs. Two facts
+// reach the console, and only these two:
+//   • a refusal carries `query_cost_refusal` — the estimate AND the ceiling it
+//     broke, plus the plan rows and predicate hints that explain the price;
+//   • `oracle_explain_plan` carries `cost_estimate.summary.total_cost`.
+// The server never publishes `max_query_cost` on the happy path, so a statement
+// that merely passed the gate has NO ceiling to show. The badge says that in as
+// many words instead of implying an unlimited budget.
+
+export type CostVerdict =
+  | "refused" // priced above the ceiling; the gate refused it before execution
+  | "within_ceiling" // estimate and a server-disclosed ceiling, and it fits
+  | "estimated" // estimate known, ceiling not disclosed by the server
+  | "unavailable" // the optimizer could not price it — the gate fails closed
+  | "unknown"; // nothing priced this statement yet
+
+export type CostPlanRowViewModel = {
+  id: number;
+  operation: string;
+  objectName: string | null;
+  cost: number | null;
+  cardinality: number | null;
+};
+
+export type CostBadgeViewModel = {
+  grammarVersion: 1;
+  verdict: CostVerdict;
+  estimate: number | null;
+  ceiling: number | null;
+  // estimate / ceiling, clamped to [0, 1] for the meter. Null when either is.
+  ratio: number | null;
+  headline: string;
+  detail: string;
+  // The server's own reminder that optimizer costs are relative estimates.
+  note: string | null;
+  hints: readonly string[];
+  planRows: readonly CostPlanRowViewModel[];
+  tone: DashboardTone;
+};
+
+export type CostRefusalInput = {
+  estimatedCost: number;
+  maxQueryCost: number;
+  predicateHints: readonly string[];
+  planRows: readonly CostPlanRowViewModel[];
+  note: string | null;
+};
+
+export type CostBadgeInput = {
+  // The `query_cost_refusal` payload of a refused statement, when there is one.
+  refusal: CostRefusalInput | null;
+  // `cost_estimate.summary.total_cost` from an explain-plan run, when there is one.
+  estimate: number | null;
+  // The reason the optimizer could not price the statement, verbatim.
+  estimateUnavailable: string | null;
+  note: string | null;
+  planRows: readonly CostPlanRowViewModel[];
+  // A ceiling is only ever known because the server disclosed it in a refusal.
+  ceiling: number | null;
+};
+
+export function toCostBadgeViewModel(input: CostBadgeInput): CostBadgeViewModel {
+  if (input.refusal) {
+    const { estimatedCost, maxQueryCost } = input.refusal;
+    return {
+      grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+      verdict: "refused",
+      estimate: estimatedCost,
+      ceiling: maxQueryCost,
+      ratio: maxQueryCost > 0 ? Math.min(1, estimatedCost / maxQueryCost) : 1,
+      headline: `Refused — estimated cost ${estimatedCost} exceeds the ceiling ${maxQueryCost}`,
+      detail: "The cost gate priced this statement before execution and refused it. Nothing ran.",
+      note: input.refusal.note,
+      hints: input.refusal.predicateHints,
+      planRows: input.refusal.planRows,
+      tone: "warn"
+    };
+  }
+  if (input.estimateUnavailable) {
+    return {
+      grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+      verdict: "unavailable",
+      estimate: null,
+      ceiling: input.ceiling,
+      ratio: null,
+      headline: "Cost unavailable",
+      detail: input.estimateUnavailable,
+      note: input.note,
+      hints: [],
+      planRows: [],
+      tone: "warn"
+    };
+  }
+  if (input.estimate !== null) {
+    const ceiling = input.ceiling;
+    const fits = ceiling !== null && input.estimate <= ceiling;
+    return {
+      grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+      verdict: fits ? "within_ceiling" : "estimated",
+      estimate: input.estimate,
+      ceiling,
+      ratio: ceiling !== null && ceiling > 0 ? Math.min(1, input.estimate / ceiling) : null,
+      headline: fits
+        ? `Estimated cost ${input.estimate} of ceiling ${ceiling}`
+        : `Estimated cost ${input.estimate}`,
+      detail: fits
+        ? "The optimizer priced this statement under the ceiling the server last disclosed."
+        : "The server discloses max_query_cost only when the gate refuses, so no ceiling is shown here.",
+      note: input.note,
+      hints: [],
+      planRows: input.planRows,
+      tone: fits ? "ok" : "info"
+    };
+  }
+  return {
+    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+    verdict: "unknown",
+    estimate: null,
+    ceiling: input.ceiling,
+    ratio: null,
+    headline: "Not priced",
+    detail:
+      "Nothing has priced this statement. Run an EXPLAIN PLAN estimate, or read the ceiling off a cost refusal.",
+    note: null,
+    hints: [],
+    planRows: [],
+    tone: "off"
+  };
+}
+
+/** The refusal case: over the ceiling, with the plan rows that explain why. */
+export function costBadgeFixture(): CostBadgeViewModel {
+  return toCostBadgeViewModel({
+    refusal: {
+      estimatedCost: 190_000,
+      maxQueryCost: 50_000,
+      predicateHints: ["line 2 TABLE ACCESS FULL: filter \"SALARY\">:B1"],
+      planRows: [
+        {
+          id: 0,
+          operation: "SELECT STATEMENT",
+          objectName: null,
+          cost: 190_000,
+          cardinality: 4_200_000
+        },
+        {
+          id: 2,
+          operation: "TABLE ACCESS FULL",
+          objectName: "EMPLOYEES",
+          cost: 189_800,
+          cardinality: 4_200_000
+        }
+      ],
+      note: "optimizer costs are relative estimates, not runtime measurements"
+    },
+    estimate: null,
+    estimateUnavailable: null,
+    note: null,
+    planRows: [],
+    ceiling: null
+  });
+}
+
 // ── Reversible undo-tree (Arc I) ─────────────────────────────────────────────
 // The workspace is a labeled-linear savepoint stack: named checkpoints, with
 // statements held (uncommitted) above them. The console must never offer a
@@ -575,10 +739,12 @@ export function skinContractFixture(): {
   fleet: FleetViewModel;
   verdictProof: VerdictProofViewModel;
   undoTree: UndoTreeViewModel;
+  costBadge: CostBadgeViewModel;
 } {
   return {
     verdictProof: verdictProofFixture(),
     undoTree: undoTreeFixture(),
+    costBadge: costBadgeFixture(),
     groundControl: {
       grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
       verdict: "GO",

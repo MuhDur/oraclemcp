@@ -26,6 +26,7 @@ import {
   type GroundControlChain,
   type GroundControlViewModel,
   type HealthPosture,
+  type CostBadgeViewModel,
   type SignatureId,
   type SkinCapability,
   type UndoTreeViewModel,
@@ -67,6 +68,7 @@ export type DashboardSkin = {
   renderers: {
     GroundControl: React.ComponentType<{ model: GroundControlViewModel }>;
     VerdictProof: React.ComponentType<{ model: VerdictProofViewModel }>;
+    CostBadge: React.ComponentType<{ model: CostBadgeViewModel }>;
     UndoTree: React.ComponentType<{
       model: UndoTreeViewModel;
       // Offered only for a plainly reversible checkpoint; a partial rollback is a
@@ -153,7 +155,8 @@ export const OMCP_SKIN: DashboardSkin = {
   renderers: {
     GroundControl: GroundControl2DRenderer,
     VerdictProof: VerdictProofInspector,
-    UndoTree: UndoTreeRenderer
+    UndoTree: UndoTreeRenderer,
+    CostBadge: CostBadgeRenderer
   },
   layout: {
     appShell: "min-h-screen bg-[var(--om-bg)] text-[var(--om-text)]",
@@ -376,6 +379,107 @@ function VerdictProofFact({ label, value }: { label: string; value: string }): R
 }
 
 /**
+ * The cost/gas badge (Arc G).
+ *
+ * A meter only when the server disclosed both numbers; otherwise the badge says
+ * which one it does not have. `unknown` and `estimated` are not failures to
+ * hide — they are the honest shape of a gate that prices on refusal.
+ */
+export function CostBadgeRenderer({ model }: { model: CostBadgeViewModel }): React.ReactElement {
+  return (
+    <section
+      className={cn(
+        "flex flex-col gap-2 rounded-lg border bg-[var(--om-surface)] p-4 shadow-sm",
+        model.verdict === "refused"
+          ? "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)]"
+          : "border-[var(--om-border)]"
+      )}
+      aria-label="query cost gate"
+      data-grammar-version={model.grammarVersion}
+      data-cost-verdict={model.verdict}
+      data-cost-estimate={model.estimate === null ? "unknown" : model.estimate}
+      data-cost-ceiling={model.ceiling === null ? "undisclosed" : model.ceiling}
+      data-cost-ratio={model.ratio === null ? "" : model.ratio.toFixed(3)}
+      data-hint-count={model.hints.length}
+    >
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Gauge className="size-4 text-[var(--om-gold)]" aria-hidden="true" />
+          <span className="text-sm font-bold text-[var(--om-text-bright)]">Cost Gate</span>
+          <Badge tone={model.tone}>{model.verdict}</Badge>
+        </div>
+        <span className="font-mono text-2xs tabular-nums text-[var(--om-text-muted)]">
+          {model.estimate === null ? "cost —" : `cost ${model.estimate}`}
+          {" / "}
+          {model.ceiling === null ? "ceiling undisclosed" : `ceiling ${model.ceiling}`}
+        </span>
+      </header>
+
+      <p className="text-sm font-semibold text-[var(--om-text-bright)]">{model.headline}</p>
+      <p className="text-xs text-[var(--om-text-muted)]">{model.detail}</p>
+
+      {model.ratio !== null ? (
+        <div
+          className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--om-surface-muted)]"
+          role="presentation"
+        >
+          <div
+            className={cn(
+              "h-full rounded-full",
+              model.verdict === "refused" ? "bg-[var(--om-copper)]" : "bg-[var(--om-sage)]"
+            )}
+            style={{ width: `${Math.round(model.ratio * 100)}%` }}
+          />
+        </div>
+      ) : null}
+
+      {model.hints.length > 0 ? (
+        <ul className="flex flex-col gap-1">
+          {model.hints.map((hint) => (
+            <li key={hint} className="font-mono text-2xs text-[var(--om-text)]" data-cost-hint="">
+              {hint}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {model.planRows.length > 0 ? (
+        <table className="w-full text-2xs" data-testid="cost-plan-rows">
+          <thead>
+            <tr className="text-left text-[var(--om-text-muted)]">
+              <th className="py-1 font-semibold">#</th>
+              <th className="py-1 font-semibold">Operation</th>
+              <th className="py-1 font-semibold">Object</th>
+              <th className="py-1 text-right font-semibold">Cost</th>
+              <th className="py-1 text-right font-semibold">Rows</th>
+            </tr>
+          </thead>
+          <tbody className="font-mono">
+            {model.planRows.map((row) => (
+              <tr key={row.id} data-plan-row-id={row.id} data-plan-row-cost={row.cost ?? ""}>
+                <td className="py-1 text-[var(--om-text-muted)]">{row.id}</td>
+                <td className="py-1 text-[var(--om-text)]">{row.operation}</td>
+                <td className="py-1 text-[var(--om-text-muted)]">{row.objectName ?? "—"}</td>
+                <td className="py-1 text-right tabular-nums text-[var(--om-text)]">
+                  {row.cost ?? "—"}
+                </td>
+                <td className="py-1 text-right tabular-nums text-[var(--om-text-muted)]">
+                  {row.cardinality ?? "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : null}
+
+      {model.note ? (
+        <p className="text-2xs italic text-[var(--om-text-muted)]">{model.note}</p>
+      ) : null}
+    </section>
+  );
+}
+
+/**
  * The reversible undo-tree (Arc I).
  *
  * Walkable checkpoints, the work held above them, and — prominently — what a
@@ -494,6 +598,18 @@ export function UndoTreeRenderer({
 
 export function assertDashboardSkinConformance(skin: DashboardSkin): void {
   const fixture = skinContractFixture();
+  if (typeof skin.renderers.CostBadge !== "function") {
+    throw new Error(`skin ${skin.name} must provide a cost-badge renderer`);
+  }
+  // A refused statement must carry BOTH numbers the server disclosed; a badge
+  // that shows a verdict without its evidence is the failure mode here.
+  if (
+    fixture.costBadge.verdict !== "refused" ||
+    fixture.costBadge.estimate === null ||
+    fixture.costBadge.ceiling === null
+  ) {
+    throw new Error("cost-badge fixture must be a refusal carrying its estimate and ceiling");
+  }
   if (typeof skin.renderers.UndoTree !== "function") {
     throw new Error(`skin ${skin.name} must provide an undo-tree renderer`);
   }

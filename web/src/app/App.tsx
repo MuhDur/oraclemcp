@@ -60,6 +60,7 @@ import {
   CLEARANCE_LADDER,
   DASHBOARD_GRAMMAR,
   clampActivity,
+  toCostBadgeViewModel,
   toUndoTreeViewModel,
   toVerdictProofViewModel,
   type UndoTreeEntry,
@@ -82,7 +83,10 @@ import {
   cancelLane,
   coalesceAuditTimelineRecords,
   parseClassifierLadder,
+  parseCostEstimate,
+  parseQueryCostRefusal,
   parseUndoOutcome,
+  fetchQueryCostEstimate,
   fetchVerdictProofs,
   fetchWorkspaceHistory,
   establishCheckpoint,
@@ -6708,11 +6712,95 @@ function WorkbenchPage(): React.ReactElement {
           setTarget={setPlsqlTarget}
         />
 
+        <CostGatePanel session={session.data ?? null} laneId={laneId} sql={sql} />
+
         <UndoTreePanel session={session.data ?? null} laneId={laneId} sql={sql} />
 
         <WorkbenchResultPanel result={lastResult} pending={action.isPending} />
       </div>
     </PageFrame>
+  );
+}
+
+/**
+ * The cost/gas badge (Arc G).
+ *
+ * `oracle_explain_plan` is the only pre-execution price the server will give,
+ * and it is itself governed (it writes PLAN_TABLE, so it needs READ_WRITE plus
+ * allow_plan_table_write). The ceiling is disclosed only by a cost refusal, so
+ * this panel shows a ceiling exactly when the server has stated one — never a
+ * default, never an inferred budget.
+ */
+function CostGatePanel({
+  session,
+  laneId,
+  sql
+}: {
+  session: DashboardSession | null;
+  laneId: string;
+  sql: string;
+}): React.ReactElement {
+  const CostBadge = OMCP_SKIN.renderers.CostBadge;
+  // A ceiling learned from a refusal on this lane. Cleared on a profile switch,
+  // because a different profile may carry a different max_query_cost.
+  const [disclosedCeiling, setDisclosedCeiling] = React.useState<number | null>(null);
+
+  const estimate = useQuery({
+    queryKey: ["query-cost-estimate", laneId, sql],
+    queryFn: async () => {
+      if (!session) {
+        throw new Error("dashboard session is not ready");
+      }
+      return fetchQueryCostEstimate(session, { laneId, sql: sql.trim() });
+    },
+    enabled: false,
+    retry: false
+  });
+
+  const refusal = React.useMemo(
+    () => parseQueryCostRefusal(estimate.error ?? estimate.data ?? null),
+    [estimate.data, estimate.error]
+  );
+  React.useEffect(() => {
+    if (refusal) {
+      setDisclosedCeiling(refusal.maxQueryCost);
+    }
+  }, [refusal]);
+
+  const read = estimate.data ? parseCostEstimate(estimate.data.data) : null;
+  const outcome = estimate.error
+    ? operatorOutcomeFromError(estimate.error, "cost estimate failed")
+    : null;
+  const model = toCostBadgeViewModel({
+    refusal,
+    estimate: read?.totalCost ?? null,
+    // A refused explain-plan (for example READ_ONLY, where PLAN_TABLE may not be
+    // written) is a truthful "cost unavailable", not a missing badge.
+    estimateUnavailable: read?.unavailable ?? (outcome && !refusal ? outcome.message : null),
+    note: read?.note ?? null,
+    planRows: read?.planRows ?? [],
+    ceiling: disclosedCeiling
+  });
+
+  return (
+    <Surface className="space-y-3 p-4" data-testid="cost-gate-panel">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-[var(--om-text-muted)]">
+          Price this statement with the optimizer before it runs. EXPLAIN PLAN writes PLAN_TABLE, so
+          the estimate itself is governed.
+        </p>
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={!session || estimate.isFetching || sql.trim().length === 0}
+          onClick={() => void estimate.refetch()}
+        >
+          <Gauge className="size-4" aria-hidden="true" />
+          Estimate cost
+        </Button>
+      </div>
+      <CostBadge model={model} />
+    </Surface>
   );
 }
 

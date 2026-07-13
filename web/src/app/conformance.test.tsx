@@ -7,9 +7,11 @@ import {
   REQUIRED_BIG_BOARD_RENDERERS,
   REQUIRED_THEME_MODES,
   VERDICT_RULE_REGISTRY,
+  costBadgeFixture,
   defaultSkinCapabilities,
   isRegisteredDerivationStep,
   skinContractFixture,
+  toCostBadgeViewModel,
   toUndoTreeViewModel,
   toVerdictProofViewModel,
   undoTreeFixture,
@@ -182,6 +184,59 @@ describe("OMCP skin conformance", () => {
     });
     expect(brokenBinding.proofStatus).toBe("unverified");
     expect(brokenBinding.tone).toBe("warn");
+  });
+
+  it("renders the cost badge with the estimate and the ceiling the refusal disclosed", () => {
+    const CostBadge = OMCP_SKIN.renderers.CostBadge;
+    const model = costBadgeFixture();
+    const markup = renderToStaticMarkup(<CostBadge model={model} />);
+
+    expect(markup).toContain('data-grammar-version="1"');
+    expect(markup).toContain('data-cost-verdict="refused"');
+    expect(markup).toContain('data-cost-estimate="190000"');
+    expect(markup).toContain('data-cost-ceiling="50000"');
+    expect(model.estimate).toBe(190_000);
+    expect(model.ceiling).toBe(50_000);
+    expect(model.ratio).toBe(1);
+    // The plan rows and predicate hints that explain the price ride along.
+    expect(markup).toContain('data-plan-row-cost="189800"');
+    expect(markup).toContain("TABLE ACCESS FULL");
+    expect(markup).toContain('data-hint-count="1"');
+  });
+
+  it("never invents a ceiling the server did not disclose", () => {
+    const CostBadge = OMCP_SKIN.renderers.CostBadge;
+    // A priced statement with no refusal: the gate discloses max_query_cost only
+    // when it refuses, so the badge must say the ceiling is undisclosed.
+    const priced = toCostBadgeViewModel({
+      refusal: null,
+      estimate: 1_200,
+      estimateUnavailable: null,
+      note: "optimizer costs are relative estimates",
+      planRows: [],
+      ceiling: null
+    });
+    expect(priced.verdict).toBe("estimated");
+    expect(priced.ceiling).toBeNull();
+    expect(priced.ratio).toBeNull();
+    const markup = renderToStaticMarkup(<CostBadge model={priced} />);
+    expect(markup).toContain('data-cost-verdict="estimated"');
+    expect(markup).toContain('data-cost-estimate="1200"');
+    expect(markup).toContain('data-cost-ceiling="undisclosed"');
+
+    // Nothing priced at all: "unknown", not a zero cost and not a green light.
+    const unpriced = toCostBadgeViewModel({
+      refusal: null,
+      estimate: null,
+      estimateUnavailable: null,
+      note: null,
+      planRows: [],
+      ceiling: null
+    });
+    expect(unpriced.verdict).toBe("unknown");
+    expect(renderToStaticMarkup(<CostBadge model={unpriced} />)).toContain(
+      'data-cost-estimate="unknown"'
+    );
   });
 
   it("renders the undo tree and refuses a plain Undo for effects that escape rollback", () => {

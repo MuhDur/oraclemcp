@@ -1,5 +1,7 @@
 import {
   isRegisteredDerivationStep,
+  type CostPlanRowViewModel,
+  type CostRefusalInput,
   type VerdictKind,
   type VerdictProofCheckView,
   type VerdictProofInput
@@ -1634,6 +1636,143 @@ export async function fetchAuditTail(
     throw new Error(errorMessage(parsed, response.status));
   }
   return parsed as OperatorResponse<AuditTailData>;
+}
+
+// ── Cost/gas gate (Arc G) ────────────────────────────────────────────────────
+// Two real sources, and nothing else: the `query_cost_refusal` block a cost
+// refusal carries (estimate + the ceiling it broke), and the `cost_estimate`
+// block `oracle_explain_plan` returns. The console never guesses a ceiling.
+
+export type QueryCostRefusalWire = {
+  estimated_cost: number;
+  max_query_cost: number;
+  plan_rows?: unknown[];
+  predicate_hints?: unknown[];
+  note?: string | null;
+};
+
+export type CostEstimateRead = {
+  totalCost: number | null;
+  unavailable: string | null;
+  note: string | null;
+  planRows: CostPlanRowViewModel[];
+};
+
+function planRowsFrom(rows: unknown): CostPlanRowViewModel[] {
+  if (!Array.isArray(rows)) {
+    return [];
+  }
+  return rows.flatMap((raw) => {
+    const row = recordValue(raw);
+    if (!row || typeof row["id"] !== "number") {
+      return [];
+    }
+    const operation = [stringValue(row["operation"]), stringValue(row["options"])]
+      .filter((part): part is string => Boolean(part))
+      .join(" ");
+    return [
+      {
+        id: row["id"],
+        operation: operation || "(unnamed operation)",
+        objectName: stringValue(row["object_name"]),
+        cost: numberValue(row["cost"]),
+        cardinality: numberValue(row["cardinality"])
+      }
+    ];
+  });
+}
+
+function structuredReasonOf(payload: unknown): Record<string, unknown> | null {
+  const envelope = recordValue(payload);
+  const data = recordValue(envelope?.["data"]) ?? envelope;
+  if (!data) {
+    return null;
+  }
+  // An MCP tool refusal rides HTTP 200 as result.isError with the error envelope
+  // in structuredContent; a JSON-RPC error carries it under error.data; an
+  // operator-domain refusal puts it straight on `error`.
+  const mcp = recordValue(data["mcp_response"]);
+  const candidates = [
+    recordValue(recordValue(mcp?.["result"])?.["structuredContent"]),
+    recordValue(mcp?.["result"]),
+    recordValue(recordValue(mcp?.["error"])?.["data"]),
+    recordValue(data["error"]),
+    data
+  ];
+  for (const candidate of candidates) {
+    const reason = recordValue(candidate?.["structured_reason"]);
+    if (reason) {
+      return reason;
+    }
+  }
+  return null;
+}
+
+/**
+ * Pull the `query_cost_refusal` block out of whatever refused.
+ *
+ * Accepts an operator response or an `OperatorOutcomeError` — a cost refusal is
+ * a `POLICY_DENIED` outcome, so React Query sees it as an error, not data.
+ */
+export function parseQueryCostRefusal(source: unknown): CostRefusalInput | null {
+  const payload = source instanceof OperatorOutcomeError ? source.response : source;
+  const refusal = recordValue(structuredReasonOf(payload)?.["query_cost_refusal"]);
+  if (
+    !refusal ||
+    typeof refusal["estimated_cost"] !== "number" ||
+    typeof refusal["max_query_cost"] !== "number"
+  ) {
+    return null;
+  }
+  return {
+    estimatedCost: refusal["estimated_cost"],
+    maxQueryCost: refusal["max_query_cost"],
+    predicateHints: Array.isArray(refusal["predicate_hints"])
+      ? refusal["predicate_hints"].filter((hint): hint is string => typeof hint === "string")
+      : [],
+    planRows: planRowsFrom(refusal["plan_rows"]),
+    note: stringValue(refusal["note"])
+  };
+}
+
+/** Read `cost_estimate` / `cost_estimate_unavailable` off an explain-plan run. */
+export function parseCostEstimate(data: WorkbenchActionData | null): CostEstimateRead {
+  const payload = mcpPayload(data);
+  const unavailable = stringValue(payload?.["cost_estimate_unavailable"]);
+  const estimate = recordValue(payload?.["cost_estimate"]);
+  const summary = recordValue(estimate?.["summary"]);
+  return {
+    totalCost: numberValue(summary?.["total_cost"]),
+    unavailable,
+    note: stringValue(estimate?.["note"]),
+    planRows: planRowsFrom(estimate?.["rows"])
+  };
+}
+
+export type QueryCostEstimateRequest = {
+  laneId?: string;
+  sql: string;
+};
+
+/**
+ * `oracle_explain_plan` — the only way the console can price a statement before
+ * running it. It is a governed diagnostic *write* (it writes PLAN_TABLE), so it
+ * needs READ_WRITE plus `allow_plan_table_write`; at READ_ONLY the server
+ * refuses, and the badge reports that refusal rather than pretending to a price.
+ */
+export async function fetchQueryCostEstimate(
+  session: DashboardSession,
+  request: QueryCostEstimateRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("query-cost-estimate"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_explain_plan",
+    arguments: {
+      sql: request.sql,
+      allow_plan_table_write: true
+    }
+  });
 }
 
 // ── Reversible undo-tree (Arc I) ─────────────────────────────────────────────
