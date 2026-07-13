@@ -1,0 +1,18 @@
+[package]
+name = "oraclemcp-verifier"
+version = "0.9.0"
+description = "Standalone external verifier for redacted oraclemcp verdict certificates"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.9.0" }
+oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.9.0" }
+thiserror.workspace = true
+
+[lints]
+workspace = true

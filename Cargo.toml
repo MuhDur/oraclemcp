@@ -4,6 +4,7 @@ members = [
     "crates/oraclemcp-telemetry",
     "crates/oraclemcp-audit",
     "crates/oraclemcp-guard",
+    "crates/oraclemcp-verifier",
     "crates/oraclemcp-config",
     "crates/oraclemcp-db",
     "crates/oraclemcp-auth",

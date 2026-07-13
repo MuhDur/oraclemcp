@@ -2131,6 +2131,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oraclemcp-verifier"
+version = "0.9.0"
+dependencies = [
+ "oraclemcp-audit",
+ "oraclemcp-guard",
+ "thiserror",
+]
+
+[[package]]
 name = "owo-colors"
 version = "4.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
