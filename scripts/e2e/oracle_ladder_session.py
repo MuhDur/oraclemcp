@@ -596,9 +596,13 @@ class Ladder:
                 return {"skipped": "VECTOR smoke is specific to the FREE 23ai lane"}
 
             vector_table = self.vector_table
+            # The local FREE 23ai system account defaults to SYSTEM, whose
+            # segment-space management is MANUAL. VECTOR columns require an
+            # automatic tablespace; USERS is the standard automatic lab
+            # tablespace and keeps this synthetic fixture out of SYSTEM.
             self.governed_execute(
                 f"CREATE TABLE {vector_table} "
-                "(id NUMBER PRIMARY KEY, embedding VECTOR(3, FLOAT32))",
+                "(id NUMBER PRIMARY KEY, embedding VECTOR(3, FLOAT32)) TABLESPACE USERS",
                 commit=True,
                 expect={"committed": True},
             )
@@ -610,8 +614,8 @@ class Ladder:
                 expect={"committed": True, "rolled_back": False, "rows_affected": 1},
             )
             rows = self.query_rows(
-                f"SELECT VECTOR_DISTANCE(embedding, '[1,0,0]', COSINE) AS distance "
-                f"FROM {vector_table} WHERE id = 1"
+                f"SELECT VECTOR_DISTANCE(v.embedding, '[1,0,0]', COSINE) AS distance "
+                f"FROM {vector_table} v WHERE v.id = 1"
             )
             require(len(rows) == 1, "VECTOR_DISTANCE returns one synthetic row", rows)
             try:

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use asupersync::Cx;
+use oraclemcp_error::parse_ora_code;
 
 // Cancellation checkpoints route through the single crate-wide
 // `connection::db_checkpoint`, which is generic over the `Cx` capability row:
@@ -169,9 +170,14 @@ pub enum AsOf {
 }
 
 const CURRENT_SCN_SQL: &str =
-    "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER() AS OBSERVED_SCN FROM DUAL";
+    "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER AS OBSERVED_SCN FROM DUAL";
+const LEGACY_CURRENT_SCN_SQL: &str = "SELECT CURRENT_SCN AS OBSERVED_SCN FROM V$DATABASE";
 const TIMESTAMP_TO_SCN_SQL: &str =
     "SELECT TIMESTAMP_TO_SCN(TO_TIMESTAMP(:1, 'YYYY-MM-DD HH24:MI:SS')) AS OBSERVED_SCN FROM DUAL";
+
+fn current_scn_expression_is_unavailable(error: &DbError) -> bool {
+    matches!(error, DbError::Query(message) if parse_ora_code(message) == Some(904))
+}
 
 fn parse_observed_scn(rows: &[crate::types::OracleRow], source: &str) -> Result<u64, DbError> {
     let value = rows
@@ -197,7 +203,18 @@ impl AsOf {
         cx: &Cx,
         conn: &dyn OracleConnection,
     ) -> Result<u64, DbError> {
-        let rows = conn.query_rows(cx, CURRENT_SCN_SQL, &[]).await?;
+        let rows = match conn.query_rows(cx, CURRENT_SCN_SQL, &[]).await {
+            Ok(rows) => rows,
+            // 23ai accepts the package expression above only without
+            // parentheses. XE 18c/21c do not expose that expression at all,
+            // but expose the same server-owned SCN through V$DATABASE. Keep
+            // the fallback narrow: a privilege, connection, or any other
+            // error stays fail-closed instead of becoming a second attempt.
+            Err(error) if current_scn_expression_is_unavailable(&error) => {
+                conn.query_rows(cx, LEGACY_CURRENT_SCN_SQL, &[]).await?
+            }
+            Err(error) => return Err(error),
+        };
         parse_observed_scn(&rows, "current system change number")
     }
 
@@ -1192,6 +1209,7 @@ mod tests {
         events: std::sync::Mutex<Vec<String>>,
         fail_read: bool,
         fail_read_message: Option<String>,
+        current_scn_error: Option<String>,
         fail_enable_message: Option<String>,
         fail_disable_call: Option<usize>,
         fail_rollback_call: Option<usize>,
@@ -1215,12 +1233,20 @@ mod tests {
             sql: &str,
             binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
-            let event = if sql == CURRENT_SCN_SQL || sql == TIMESTAMP_TO_SCN_SQL {
+            let event = if sql == CURRENT_SCN_SQL
+                || sql == LEGACY_CURRENT_SCN_SQL
+                || sql == TIMESTAMP_TO_SCN_SQL
+            {
                 format!("query[{}]:{sql}", binds.len())
             } else {
                 "query".to_owned()
             };
             self.events.lock().expect("events").push(event);
+            if sql == CURRENT_SCN_SQL
+                && let Some(message) = &self.current_scn_error
+            {
+                return Err(DbError::Query(message.clone()));
+            }
             if self.fail_read {
                 return Err(DbError::Query(
                     self.fail_read_message
@@ -1229,7 +1255,10 @@ mod tests {
                 ));
             }
             Ok(vec![OracleRow {
-                columns: if sql == CURRENT_SCN_SQL || sql == TIMESTAMP_TO_SCN_SQL {
+                columns: if sql == CURRENT_SCN_SQL
+                    || sql == LEGACY_CURRENT_SCN_SQL
+                    || sql == TIMESTAMP_TO_SCN_SQL
+                {
                     vec![(
                         "OBSERVED_SCN".to_owned(),
                         OracleCell::new("NUMBER", Some("4242".to_owned())),
@@ -1316,8 +1345,12 @@ mod tests {
     fn observed_scn_helpers_use_server_owned_bound_queries() {
         assert_eq!(
             CURRENT_SCN_SQL,
-            "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER() AS OBSERVED_SCN FROM DUAL",
-            "the Oracle package function must be invoked, not referenced as an identifier"
+            "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER AS OBSERVED_SCN FROM DUAL",
+            "Oracle requires the server-owned SCN expression without parentheses"
+        );
+        assert_eq!(
+            LEGACY_CURRENT_SCN_SQL, "SELECT CURRENT_SCN AS OBSERVED_SCN FROM V$DATABASE",
+            "the legacy fallback stays a fixed server-owned query"
         );
         let conn = FlashbackRecorder::default();
         let (current, timestamp_target, events) = run_with_cx(|cx| async move {
@@ -1344,6 +1377,48 @@ mod tests {
                 format!("query[1]:{TIMESTAMP_TO_SCN_SQL}"),
             ]
         );
+    }
+
+    #[test]
+    fn observed_scn_uses_the_legacy_query_only_when_oracle_rejects_the_23ai_expression() {
+        let conn = FlashbackRecorder {
+            current_scn_error: Some(
+                "ORA-00904: \"SYS\".\"DBMS_FLASHBACK\": invalid identifier".to_owned(),
+            ),
+            ..Default::default()
+        };
+        let (current, events) = run_with_cx(|cx| async move {
+            let current = AsOf::current_system_change_number(&cx, &conn)
+                .await
+                .expect("legacy current SCN");
+            (current, conn.events.into_inner().expect("events"))
+        });
+
+        assert_eq!(current, 4242);
+        assert_eq!(
+            events,
+            vec![
+                format!("query[0]:{CURRENT_SCN_SQL}"),
+                format!("query[0]:{LEGACY_CURRENT_SCN_SQL}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn observed_scn_does_not_fallback_after_any_other_primary_error() {
+        let conn = FlashbackRecorder {
+            current_scn_error: Some("ORA-01031: insufficient privileges".to_owned()),
+            ..Default::default()
+        };
+        let (error, events) = run_with_cx(|cx| async move {
+            let error = AsOf::current_system_change_number(&cx, &conn)
+                .await
+                .expect_err("permission failure must propagate");
+            (error, conn.events.into_inner().expect("events"))
+        });
+
+        assert!(matches!(error, DbError::Query(message) if message.contains("ORA-01031")));
+        assert_eq!(events, vec![format!("query[0]:{CURRENT_SCN_SQL}")]);
     }
 
     #[test]
