@@ -491,24 +491,11 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo test --workspace --all-targets --features plsql-intelligence
       - name: Assert all eight PL/SQL tools are registered
-        run: |
-          cargo build -p oraclemcp --features plsql-intelligence
-          target/debug/oraclemcp --json info | jq -e '
-            .engine == true
-            and (
-              [.tools[] | select(startswith("oracle_plsql_"))] | sort
-              == [
-                "oracle_plsql_analyze",
-                "oracle_plsql_blast_radius",
-                "oracle_plsql_doc",
-                "oracle_plsql_lineage",
-                "oracle_plsql_live_snapshot",
-                "oracle_plsql_parse",
-                "oracle_plsql_sast",
-                "oracle_plsql_what_breaks"
-              ]
-            )
-          '
+        # Single source of truth for the advertised tool surface, runnable
+        # offline (`bash scripts/plsql_feature_lane_check.sh`) so the lane is
+        # provable without pushing to CI. It rebuilds with the feature and
+        # asserts engine=true plus exactly the eight oracle_plsql_* tools.
+        run: bash scripts/plsql_feature_lane_check.sh
 
   # Real Oracle FREE 23ai proves the current thin-driver line and the 23ai
   # VECTOR SQL surface. All connection values below are synthetic disposable

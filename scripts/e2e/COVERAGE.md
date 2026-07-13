@@ -22,6 +22,7 @@ their own rows or generated reports instead of replacing this base contract.
 | Scenario | Release bead | Covered by | Status |
 |----------|--------------|------------|--------|
 | Curated feature-powerset CI | `oraclemcp-epic-060-f4xo.12.10` | `scripts/oraclemcp_feature_powerset.sh`, `.github/workflows/ci.yml` | PASS |
+| PL/SQL-intelligence feature lane (a `--features plsql-intelligence` build is in the CI matrix; `cargo test --workspace --all-targets` runs under the feature; the binary advertises `engine=true` and exactly the eight `oracle_plsql_*` tools) | `oraclemcp-epic-09x-alien-6sj8.9.1` | `.github/workflows/ci.yml` (`plsql-intelligence` job), `scripts/plsql_feature_lane_check.sh`, `crates/oraclemcp/src/main.rs::run_info` | PASS (feature build + tool-registration assertion verified locally in an isolated target dir) |
 | Architecture fitness dependency lint | `oraclemcp-epic-060-f4xo.12.11` | `scripts/oraclemcp_arch_fitness_lint.sh`, `.github/workflows/ci.yml` | PASS |
 | Doctor fixture/accounting gate | `oraclemcp-epic-060-f4xo.12.12` | `scripts/e2e/doctor_fixtures.sh`, `crates/oraclemcp-core/src/doctor.rs::tests::doctor_fix_fixture_gate_current_repairs_are_fixture_accounted` | PASS |
 | Agent ergonomics drift guard | `oraclemcp-epic-060-f4xo.12.9` | `scripts/oraclemcp_ergonomics_lint.sh`, `.github/workflows/ci.yml`, `crates/oraclemcp/src/main.rs::tests::agent_ergonomics_drift_guard_*` | PASS |
