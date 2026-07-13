@@ -19,6 +19,7 @@ each driver pin against the driver's own version, not the workspace version.
 | Crate manifests | `crates/oraclemcp-*/Cargo.toml` (`version =`) |
 | Lockfile | `Cargo.lock` (workspace crates + `oracledb` + `oracledb-protocol`) |
 | Driver seam pin test | `crates/oraclemcp-db/src/connection.rs` (`pin_is_0_8_2_and_seam_intact` asserts the `=version`) |
+| Dependency provenance docs/comments | `AGENTS.md`, `README.md`, `.github/workflows/ci.yml`, `docs/operations.md`, `docs/TOOLCHAIN.md`, `docs/adr/0001-pinned-nightly-toolchain.md`, `docs/behavior-inventory.md`, `Cargo.toml`, `crates/oraclemcp-core/src/capability.rs`, `crates/oraclemcp-db/src/tns.rs`, `crates/oraclemcp-core/tests/fixtures/wallet/PROVENANCE.md` |
 | MCP registry | `server.json` (`version`, OCI `ghcr.io/muhdur/oraclemcp:version`) |
 | Dashboard npm | `web/package.json`, `web/package-lock.json` (root + `packages[""]`) |
 | npm wrapper | `npm/oraclemcp/package.json` |

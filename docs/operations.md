@@ -25,7 +25,7 @@ incapable of writing.
 `oraclemcp` builds on a pinned Rust toolchain (`nightly-2026-05-11`, recorded in
 `rust-toolchain.toml`). The thin-native line has no stable MSRV because
 **asupersync 0.3.5** uses nightly-only language features (`try_trait_v2` +
-`try_trait_v2_residual`); the pinned `oracledb` 0.5.1 driver is stable-clean.
+`try_trait_v2_residual`); the pinned `oracledb` 0.8.2 driver is stable-clean.
 
 **This is invisible at runtime.** Once compiled, `oraclemcp` is an ordinary
 native binary. The toolchain pin matters only when you build the binary or image
@@ -587,7 +587,7 @@ own reactor and Oracle connection. The local pool's operating posture:
   string; on a dead connection the pool discards dirty and the next checkout
   opens a fresh session against the (failed-over) listener. A read-only standby
   forces the session ceiling to `READ_ONLY` (§3.5, §5.8).
-- **Upstream `EXPIRE_TIME` status.** The pinned `oracledb` 0.5.1 stack parses
+- **Upstream `EXPIRE_TIME` status.** The pinned `oracledb` 0.8.2 stack parses
   `EXPIRE_TIME` into `Description::expire_time`, and `TRANSPORT_CONNECT_TIMEOUT`
   is honored for bounded connect handshakes, but rust-oracledb#14 still tracks
   applying `EXPIRE_TIME` as TCP keepalive on established sockets. `oraclemcp`

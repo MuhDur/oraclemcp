@@ -78,7 +78,7 @@ end to end through `oracledb_protocol::tls::sso::parse_cwallet_sso`, which is
 exactly the usability condition the driver's wallet loader requires before it
 will fall through to auto-login.
 
-## Driver API exercised (from `oracledb-protocol =0.7.4`)
+## Driver API exercised (from the pinned `oracledb-protocol` API)
 
 * `oracledb_protocol::tls::wallet::{resolve_wallet_dir, pem_wallet_path,
   p12_wallet_path, sso_wallet_path, parse_ewallet_pem, parse_ewallet_p12,

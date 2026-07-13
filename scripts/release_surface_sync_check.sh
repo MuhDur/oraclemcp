@@ -13,6 +13,14 @@ fail() {
   exit 1
 }
 
+require_contains() {
+  local file="$1"
+  local needle="$2"
+  local description="$3"
+  grep -Fq "$needle" "$file" ||
+    fail "$file must contain current $description: $needle"
+}
+
 need() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
@@ -78,6 +86,12 @@ driver_version="$(
 )"
 [ -n "$driver_version" ] || fail "Cargo.toml must pin oracledb at an exact =X.Y.Z version"
 
+asupersync_version="$(
+  grep -E '^asupersync = \{ version = "[0-9]' "$workspace_toml" |
+    head -1 | sed -E 's/.*version = "([0-9][0-9.]*)".*/\1/'
+)"
+[ -n "$asupersync_version" ] || fail "Cargo.toml must pin asupersync at X.Y.Z"
+
 grep -Fq "oracledb = { version = \"=$driver_version\", default-features = false }" "$workspace_toml" ||
   fail "Cargo.toml must pin oracledb exactly at =$driver_version"
 grep -Fq "oracledb-protocol = { version = \"=$driver_version\", default-features = false }" "$workspace_toml" ||
@@ -106,6 +120,91 @@ driver_seam_fn="pin_is_$(printf '%s' "$driver_version" | tr '.' '_')_and_seam_in
 if ! grep -Fq "fn $driver_seam_fn" "$connection_rs"; then
   fail "connection.rs must define fn $driver_seam_fn driver seam regression test"
 fi
+
+require_contains \
+  "AGENTS.md" \
+  "$driver_version driver is stable-clean" \
+  "driver provenance"
+require_contains \
+  "README.md" \
+  "$driver_version driver itself is stable-clean" \
+  "driver provenance"
+require_contains \
+  "docs/operations.md" \
+  "pinned \`oracledb\` $driver_version driver is stable-clean" \
+  "driver provenance"
+require_contains \
+  "docs/operations.md" \
+  "pinned \`oracledb\` $driver_version stack parses" \
+  "EXPIRE_TIME driver provenance"
+require_contains \
+  "docs/TOOLCHAIN.md" \
+  "pinned \`oracledb\` $driver_version driver is **stable-clean**" \
+  "toolchain driver provenance"
+require_contains \
+  "docs/adr/0001-pinned-nightly-toolchain.md" \
+  "pinned \`oracledb\`"$'\n'"$driver_version driver itself is **stable-clean**" \
+  "ADR driver provenance"
+require_contains \
+  "docs/behavior-inventory.md" \
+  "driver/protocol pins are exact at $driver_version" \
+  "behavior-inventory driver provenance"
+require_contains \
+  "docs/behavior-inventory.md" \
+  "\`oracledb = $driver_version\` and" \
+  "behavior-inventory oracledb pin"
+require_contains \
+  "docs/behavior-inventory.md" \
+  "\`oracledb-protocol = $driver_version\` crates from crates.io" \
+  "behavior-inventory protocol pin"
+require_contains \
+  "Cargo.toml" \
+  "The oracledb $driver_version driver is stable-clean" \
+  "workspace driver provenance"
+require_contains \
+  "Cargo.toml" \
+  "version \`oracledb $driver_version\`" \
+  "workspace protocol provenance"
+require_contains \
+  ".github/workflows/ci.yml" \
+  "oracledb $driver_version is stable-clean" \
+  "CI driver provenance"
+require_contains \
+  ".github/workflows/ci.yml" \
+  "Asupersync depends on specific nightly-only language features" \
+  "CI nightly provenance"
+require_contains \
+  "AGENTS.md" \
+  "asupersync $asupersync_version" \
+  "asupersync provenance"
+require_contains \
+  "README.md" \
+  "asupersync $asupersync_version" \
+  "asupersync provenance"
+require_contains \
+  "docs/operations.md" \
+  "asupersync $asupersync_version" \
+  "operations asupersync provenance"
+require_contains \
+  "docs/TOOLCHAIN.md" \
+  "asupersync $asupersync_version" \
+  "toolchain asupersync provenance"
+require_contains \
+  "docs/adr/0001-pinned-nightly-toolchain.md" \
+  "asupersync $asupersync_version" \
+  "ADR asupersync provenance"
+require_contains \
+  "crates/oraclemcp-core/src/capability.rs" \
+  "pinned asupersync $asupersync_version" \
+  "capability asupersync provenance"
+require_contains \
+  "crates/oraclemcp-db/src/tns.rs" \
+  "\`oracledb-protocol\` is pinned to \`=$driver_version\`, the exact version \`oracledb $driver_version\`" \
+  "TNS adapter driver provenance"
+require_contains \
+  "crates/oraclemcp-core/tests/fixtures/wallet/PROVENANCE.md" \
+  "Driver API exercised (from the pinned \`oracledb-protocol\` API)" \
+  "wallet fixture driver provenance"
 
 server_version="$(jq -r '.version' server.json)"
 [ "$server_version" = "$version" ] ||

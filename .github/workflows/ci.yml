@@ -272,7 +272,7 @@ jobs:
       - run: bash scripts/release_acceptance_ci_suite.sh --skip-feature-powerset
 
   # The thin-native line is pinned to nightly because asupersync requires
-  # nightly-only language features (oracledb 0.5.1 is stable-clean). This is a
+  # nightly-only language features (oracledb 0.8.2 is stable-clean). This is a
   # build-only ratchet separate from the test job so toolchain installation
   # failures stay obvious.
   pinned-nightly:
@@ -297,9 +297,9 @@ jobs:
   # Multi-nightly early-warning (bead D4 / WP-D). ADVISORY ONLY — NOT a required
   # gate. The pinned nightly above is the gate; this job builds and tests against
   # an *additional, more recent* nightly so an upcoming toolchain that will break
-  # the Asupersync/oracledb stack is surfaced early, before we deliberately re-pin
+  # the Asupersync stack is surfaced early, before we deliberately re-pin
   # (see docs/TOOLCHAIN.md + ADR-0001). The line has no stable MSRV — both
-  # Asupersync and oracledb depend on specific nightly-only language features — so
+  # Asupersync depends on specific nightly-only language features — so
   # a red square here is an early warning to investigate, never a release blocker.
   # continue-on-error keeps it from reddening required CI. The matrix carries the
   # pinned date (so the comparison is apples-to-apples) plus the floating
