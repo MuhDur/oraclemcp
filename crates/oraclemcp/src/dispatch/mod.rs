@@ -688,12 +688,15 @@ impl OracleDispatcher {
 /// forces a `SELECT` carrying a qualified identifier in value position whose
 /// qualifier is not an exact relation/alias in the current or correlated scope to
 /// `≥ Guarded` (so this READ_ONLY-ceilinged gate refuses it). It is surgical —
-/// an in-scope `alias.column` reference is never flagged. This does **not**
-/// close bead .82 (a read whose base object hides autonomous writes behind a
-/// view / VPD policy function): that needs a live-catalog semantic resolver, or
-/// the operator opting the whole gate into `Classifier::served_strict()` (which
-/// refuses every unproven base-object read). Allow/block-list configs are not
-/// used on this served surface.
+/// an in-scope `alias.column` reference is never flagged.
+///
+/// This shared classifier is only the first, text-local phase of the served raw
+/// read gate. Bead .82 is closed by the follow-up `ensure_resolved_read_only`
+/// phase: served `oracle_query`, `oracle_explain_plan`, and custom read-only
+/// tools must resolve live catalog dependencies and refuse views, SELECT VPD
+/// policies, virtual columns, remote objects, ambiguous values, and every other
+/// unproven relation before caller SQL reaches Oracle. Allow/block-list configs
+/// are not used on this served surface.
 static DEFAULT_CLASSIFIER: LazyLock<Classifier> = LazyLock::new(|| {
     Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded())
 });
