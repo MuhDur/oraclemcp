@@ -31,15 +31,14 @@
 //!    [`rewrite_predicates_and_reclassify`]; the previewed verdict is never
 //!    carried over. The candidate's SQL — not the original bytes — is what runs.
 //!
-//! ## Fail-closed on an unprovable target
+//! ## Fail-closed on unprovable policy facts
 //!
-//! A rule selects a schema/object. If the statement's target cannot be resolved
-//! to exactly one relation the gate can prove, evaluating the policy against it
-//! would be guesswork — and a *deny* rule that quietly fails to match is a policy
-//! that silently did not apply. So an unprovable statement shape is refused
-//! whenever a loaded policy selects on schema or object, rather than admitted
-//! against an unresolved context. Denying is the tightening direction; guessing
-//! is not.
+//! A rule that selects a schema/object needs one relation the gate can prove.
+//! If that target is absent, the gate evaluates the still-known verb/principal
+//! facts for target-free rules, then refuses before a target-selecting policy
+//! could silently fail to match. If even the policy verb cannot be derived, the
+//! active policy is refused outright. Denying is the tightening direction;
+//! guessing or skipping a rule is not.
 //!
 //! ## The response proof
 //!
@@ -96,8 +95,9 @@ pub enum PolicyGateDenialReason {
     MatchingDenyRule,
     /// Matching predicate rules did not name one identical target relation.
     PredicateTargetConflict,
-    /// The policy selects on schema/object but the statement's target could not
-    /// be proven, so the policy could not be applied to it.
+    /// Required policy facts could not be proven. This includes a
+    /// schema/object selector without one exact target relation and any
+    /// statement whose policy verb is unknown.
     UnresolvedPolicyTarget,
     /// The mandatory predicate rewrite or its re-classification failed closed.
     PredicateRewriteRefused,
@@ -232,22 +232,17 @@ pub fn enforce_sql_policy(request: &PolicyGateRequest<'_>) -> PolicyGate {
         return deny(PolicyGateDenialReason::InvalidPolicy, Vec::new());
     }
 
-    // (2) Build the evaluation context from server-derived facts only. If the
-    //     policy selects a schema/object and we cannot prove this statement's
-    //     target, refuse: a deny rule that silently fails to match is a policy
-    //     that silently did not apply.
+    // (2) Build the evaluation context from server-derived facts only. A
+    //     statement without a policy verb cannot be evaluated safely, so an
+    //     active policy refuses rather than silently not applying. Query shapes
+    //     such as WITH/CTE and JOIN still provide a proven SELECT verb even
+    //     when they do not have one exact target relation; that lets global,
+    //     verb-only, and principal-only tightening rules apply normally.
     let Some(facts) = StatementPolicyFacts::derive(request.sql, request.current_schema) else {
-        if policy_selects_a_target(policy) {
-            return deny(PolicyGateDenialReason::UnresolvedPolicyTarget, Vec::new());
-        }
-        return PolicyGate::Admitted(Box::new(PolicyGateAdmission {
-            effective_sql: None,
-            effective_decision: base.clone(),
-            required_level: base_required_level,
-            danger: base.danger,
-            attachment: Some(identity_attachment(base_required_level)),
-        }));
+        return deny(PolicyGateDenialReason::UnresolvedPolicyTarget, Vec::new());
     };
+    let target_is_unresolved =
+        policy_selects_a_target(policy) && (facts.schema.is_none() || facts.object.is_none());
     let context = SqlPolicyEvaluationContext::new(
         facts.schema.clone(),
         facts.object.clone(),
@@ -264,6 +259,13 @@ pub fn enforce_sql_policy(request: &PolicyGateRequest<'_>) -> PolicyGate {
         }
         PolicyTightening::Narrow(narrowing) => narrowing,
     };
+
+    // Preserve an explicit global/verb/principal deny above, but never admit a
+    // statement when any schema/object rule could have been skipped solely
+    // because this version cannot prove one exact target relation.
+    if target_is_unresolved {
+        return deny(PolicyGateDenialReason::UnresolvedPolicyTarget, Vec::new());
+    }
 
     // (3) Predicates re-enter the classifier (SEC-1): the rendered candidate is
     //     classified afresh, and the candidate — not the original — is what runs.
@@ -351,10 +353,12 @@ fn policy_selects_a_target(policy: &SqlPolicyConfig) -> bool {
 
 /// The server-derived facts a policy is matched against.
 ///
-/// Derived from the parsed statement — never from a tool argument. Only the
-/// deliberately small v1 shape (one exact, unaliased target relation in a plain
-/// SELECT / UPDATE / DELETE) is provable; anything else yields `None`, and the
-/// gate refuses rather than evaluating a policy against a guess.
+/// Derived from the parsed statement — never from a tool argument. A query's
+/// `SELECT` verb remains a usable policy fact for every parsed query shape. The
+/// schema/object pair is present only for the deliberately small v1 shape (one
+/// exact, unaliased target relation in a plain SELECT / UPDATE / DELETE). A
+/// statement whose policy verb cannot be derived yields `None`, and an active
+/// policy refuses rather than evaluating against a guess.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatementPolicyFacts {
     /// The top-level verb, established by parsing.
@@ -378,24 +382,7 @@ impl StatementPolicyFacts {
         }
         let statement = statements.pop()?;
         let (verb, name) = match statement {
-            Statement::Query(query) => {
-                if query.with.is_some() {
-                    return None;
-                }
-                let SetExpr::Select(select) = query.body.as_ref() else {
-                    return None;
-                };
-                if select.from.len() != 1 || !select.from[0].joins.is_empty() {
-                    return None;
-                }
-                let TableFactor::Table { name, alias, .. } = &select.from[0].relation else {
-                    return None;
-                };
-                if alias.is_some() {
-                    return None;
-                }
-                (SqlPolicyVerb::Select, name.clone())
-            }
+            Statement::Query(query) => (SqlPolicyVerb::Select, exact_query_target(&query)),
             Statement::Update(update) => {
                 if update.from.is_some() || !update.table.joins.is_empty() {
                     return None;
@@ -406,7 +393,7 @@ impl StatementPolicyFacts {
                 if alias.is_some() {
                     return None;
                 }
-                (SqlPolicyVerb::Update, name.clone())
+                (SqlPolicyVerb::Update, Some(name.clone()))
             }
             Statement::Delete(delete) => {
                 if delete.using.is_some() || !delete.tables.is_empty() {
@@ -423,17 +410,40 @@ impl StatementPolicyFacts {
                 if alias.is_some() {
                     return None;
                 }
-                (SqlPolicyVerb::Delete, name.clone())
+                (SqlPolicyVerb::Delete, Some(name.clone()))
             }
             _ => return None,
         };
-        let (schema, object) = split_qualified(&name, current_schema)?;
+        let (schema, object) = name
+            .as_ref()
+            .and_then(|name| split_qualified(name, current_schema))
+            .unwrap_or((None, None));
         Some(Self {
             verb,
             schema,
             object,
         })
     }
+}
+
+/// Return the one exact target that v1 may use for a schema/object policy
+/// selector. Query shapes outside this narrow subset still retain their
+/// `SELECT` verb in [`StatementPolicyFacts::derive`]; they never acquire a
+/// guessed target relation.
+fn exact_query_target(query: &sqlparser::ast::Query) -> Option<ObjectName> {
+    if query.with.is_some() {
+        return None;
+    }
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return None;
+    };
+    if select.from.len() != 1 || !select.from[0].joins.is_empty() {
+        return None;
+    }
+    let TableFactor::Table { name, alias, .. } = &select.from[0].relation else {
+        return None;
+    };
+    alias.is_none().then(|| name.clone())
 }
 
 /// Split `owner.object` (or qualify a bare `object` with the session schema).
@@ -617,6 +627,138 @@ mod tests {
         assert_eq!(denial.matched_rule_ids, vec!["no-prod-deletes".to_owned()]);
     }
 
+    #[test]
+    fn principal_and_verb_deny_cannot_be_bypassed_by_a_cte_read() {
+        let classifier = classifier();
+        let sql = "WITH x AS (SELECT 1 FROM dual) SELECT * FROM x";
+        let base = classifier.classify(sql);
+        assert_eq!(base.danger, DangerLevel::Safe, "the base read is admitted");
+        let configured = policy(vec![rule(
+            "deny-principal-reads",
+            SqlPolicyMatchConfig {
+                schema: None,
+                object: None,
+                verb: Some(SqlPolicyVerb::Select),
+                principal: Some("oauth:subject-1".to_owned()),
+            },
+            SqlPolicyEffectConfig::Deny,
+        )]);
+        let PolicyGate::Denied(denial) = gate(&classifier, Some(&configured), &base, sql) else {
+            panic!("a principal+verb deny must apply to a CTE-led SELECT");
+        };
+        assert_eq!(denial.reason, PolicyGateDenialReason::MatchingDenyRule);
+        assert_eq!(denial.matched_rule_ids, vec!["deny-principal-reads"]);
+    }
+
+    /// A rule with no target selector must apply to every read shape the base
+    /// classifier admits. Target resolution is deliberately narrower than
+    /// classification, so it is not an authorization escape hatch.
+    #[test]
+    fn global_deny_applies_to_each_classifier_admitted_read_shape() {
+        let classifier = classifier();
+        let configured = policy(vec![rule(
+            "deny-all-reads",
+            SqlPolicyMatchConfig {
+                schema: None,
+                object: None,
+                verb: Some(SqlPolicyVerb::Select),
+                principal: None,
+            },
+            SqlPolicyEffectConfig::Deny,
+        )]);
+        let reads = [
+            "SELECT 1 FROM dual",
+            "WITH x AS (SELECT 1 FROM dual) SELECT * FROM x",
+            "SELECT e.id FROM hr.employees e JOIN hr.departments d ON e.id = d.id",
+            "SELECT * FROM (SELECT 1 FROM dual)",
+            "SELECT 1 FROM dual UNION ALL SELECT 2 FROM dual",
+        ];
+
+        for sql in reads {
+            let base = classifier.classify(sql);
+            assert_eq!(
+                base.danger,
+                DangerLevel::Safe,
+                "base classifier accepts: {sql}"
+            );
+            let PolicyGate::Denied(denial) = gate(&classifier, Some(&configured), &base, sql)
+            else {
+                panic!("a global SELECT deny must apply: {sql}");
+            };
+            assert_eq!(
+                denial.reason,
+                PolicyGateDenialReason::MatchingDenyRule,
+                "{sql}"
+            );
+            assert_eq!(denial.matched_rule_ids, vec!["deny-all-reads"], "{sql}");
+        }
+    }
+
+    #[test]
+    fn global_deny_keeps_its_proof_when_another_rule_has_an_unresolved_target() {
+        let classifier = classifier();
+        let sql = "WITH x AS (SELECT 1 FROM dual) SELECT * FROM x";
+        let base = classifier.classify(sql);
+        let configured = policy(vec![
+            rule(
+                "deny-all-reads",
+                SqlPolicyMatchConfig {
+                    schema: None,
+                    object: None,
+                    verb: Some(SqlPolicyVerb::Select),
+                    principal: None,
+                },
+                SqlPolicyEffectConfig::Deny,
+            ),
+            rule(
+                "targeted-level-floor",
+                hr_employees(SqlPolicyVerb::Select),
+                SqlPolicyEffectConfig::RequireLevel {
+                    level: OperatingLevel::ReadWrite,
+                },
+            ),
+        ]);
+        let PolicyGate::Denied(denial) = gate(&classifier, Some(&configured), &base, sql) else {
+            panic!("the known global deny must win over an unresolved target");
+        };
+        assert_eq!(denial.reason, PolicyGateDenialReason::MatchingDenyRule);
+        assert_eq!(denial.matched_rule_ids, vec!["deny-all-reads"]);
+    }
+
+    /// Unknown targets must not discard the proven SELECT fact. Non-denying
+    /// global rules still tighten CTE-led reads exactly as they tighten plain
+    /// reads.
+    #[test]
+    fn verb_and_principal_level_rule_applies_to_a_cte_read_without_a_target() {
+        let classifier = classifier();
+        let sql = "WITH x AS (SELECT 1 FROM dual) SELECT * FROM x";
+        let base = classifier.classify(sql);
+        let configured = policy(vec![rule(
+            "elevate-subject-reads",
+            SqlPolicyMatchConfig {
+                schema: None,
+                object: None,
+                verb: Some(SqlPolicyVerb::Select),
+                principal: Some("oauth:subject-1".to_owned()),
+            },
+            SqlPolicyEffectConfig::RequireLevel {
+                level: OperatingLevel::ReadWrite,
+            },
+        )]);
+        let PolicyGate::Admitted(admission) = gate(&classifier, Some(&configured), &base, sql)
+        else {
+            panic!("a target-free level rule must evaluate against the CTE SELECT verb");
+        };
+        assert_eq!(admission.required_level, OperatingLevel::ReadWrite);
+        assert_eq!(
+            admission
+                .attachment
+                .as_ref()
+                .expect("the narrowing is proved")["Narrow"]["matched_rule_ids"],
+            json!(["elevate-subject-reads"])
+        );
+    }
+
     /// A predicate rule rewrites the statement and RE-CLASSIFIES the candidate
     /// (SEC-1). What runs is the candidate, not the original bytes.
     #[test]
@@ -777,17 +919,32 @@ mod tests {
         assert_eq!(qualified.schema.as_deref(), Some("APP"));
         assert_eq!(qualified.object.as_deref(), Some("ORDERS"));
 
-        // Shapes this version will not guess at.
-        for unprovable in [
+        // These query shapes retain their proven SELECT verb but never claim a
+        // schema/object target. A target-free rule can evaluate against them;
+        // a target-selecting policy will fail closed in `enforce_sql_policy`.
+        for query_without_exact_target in [
             "SELECT a.id FROM hr.employees a",
             "SELECT id FROM hr.employees JOIN x ON 1 = 1",
             "WITH c AS (SELECT 1 AS n FROM dual) SELECT n FROM c",
-            "MERGE INTO hr.employees t USING x s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.n = 1",
         ] {
-            assert!(
-                StatementPolicyFacts::derive(unprovable, Some("HR")).is_none(),
-                "must not claim to have resolved: {unprovable}"
+            let facts = StatementPolicyFacts::derive(query_without_exact_target, Some("HR"))
+                .expect("a parsed query always has a SELECT policy verb");
+            assert_eq!(
+                facts.verb,
+                SqlPolicyVerb::Select,
+                "{query_without_exact_target}"
             );
+            assert_eq!(facts.schema, None, "{query_without_exact_target}");
+            assert_eq!(facts.object, None, "{query_without_exact_target}");
         }
+
+        assert!(
+            StatementPolicyFacts::derive(
+                "MERGE INTO hr.employees t USING x s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.n = 1",
+                Some("HR"),
+            )
+            .is_none(),
+            "a non-query statement without a policy verb remains unprovable"
+        );
     }
 }
