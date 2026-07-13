@@ -15,6 +15,7 @@
 pub mod classifier;
 pub mod clock;
 pub mod corpus;
+pub mod edition_lifecycle;
 pub mod enforcement;
 pub mod exec_grant;
 pub mod incident;
@@ -27,6 +28,9 @@ pub mod rewrite;
 pub mod stepup;
 pub mod token;
 
+pub use edition_lifecycle::{
+    EditionIdentifier, EditionLifecycleParse, EditionLifecycleSql, parse_edition_lifecycle_sql,
+};
 pub use enforcement::{
     SET_TRANSACTION_READ_ONLY, is_allowed_alter_session, read_only_setup_statements,
 };

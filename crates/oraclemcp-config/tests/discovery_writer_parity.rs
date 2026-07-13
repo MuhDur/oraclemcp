@@ -15,9 +15,9 @@ use std::path::PathBuf;
 use oraclemcp_config::discovery::synth::{DiscoveredNetService, SynthOptions, synthesize_profiles};
 use oraclemcp_config::discovery::{DiscoverySynthesis, render_annotated_config};
 use oraclemcp_config::{
-    AppContextConfig, ConnectionProfile, DrcpRoutingConfig, HttpConfig, OciConfig, OperatingLevel,
-    OracleMcpConfig, PoolConfig, ProxyAuthConfig, ResultMaskingConfig, SessionIdentityConfig,
-    SqlPolicyConfig,
+    AppContextConfig, ConnectionProfile, CumulativeQueryCostBudgetConfig, DrcpRoutingConfig,
+    HttpConfig, OciConfig, OperatingLevel, OracleMcpConfig, PoolConfig, ProxyAuthConfig,
+    ResultMaskingConfig, SessionIdentityConfig, SqlPolicyConfig,
 };
 
 /// A two-net-service synthesis: a plain alias and a TCPS + wallet target (so the
@@ -59,6 +59,10 @@ fn fully_populated_profile() -> ConnectionProfile {
         trusted_session_statements: Some(vec!["BEGIN NULL; END;".to_owned()]),
         call_timeout_seconds: Some(30),
         max_query_cost: Some(1_000),
+        cumulative_query_cost_budget: Some(CumulativeQueryCostBudgetConfig {
+            max_cost: 5_000,
+            window_seconds: 300,
+        }),
         connect_timeout_seconds: Some(20),
         inactivity_timeout_seconds: Some(300),
         keepalive_minutes: Some(10),

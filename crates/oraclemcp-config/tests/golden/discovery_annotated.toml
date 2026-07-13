@@ -74,6 +74,10 @@ default_level = "READ_ONLY"
 # dashboard_ddl_workbench = false
 # Name of a profile to inherit unset fields from (shallow-merge).
 # base = "another_profile"
+# [profiles.cumulative_query_cost_budget] durable per-principal optimizer-cost window; agents cannot reset or select its accounting key.
+# [profiles.cumulative_query_cost_budget]
+# max_cost = 500000
+# window_seconds = 3600
 # [profiles.session_identity] end-to-end Oracle session identity (program/machine/module/action/client_identifier/…).
 # [profiles.session_identity]
 # program = "oraclemcp"
@@ -159,6 +163,10 @@ default_level = "READ_ONLY"
 # dashboard_ddl_workbench = false
 # Name of a profile to inherit unset fields from (shallow-merge).
 # base = "another_profile"
+# [profiles.cumulative_query_cost_budget] durable per-principal optimizer-cost window; agents cannot reset or select its accounting key.
+# [profiles.cumulative_query_cost_budget]
+# max_cost = 500000
+# window_seconds = 3600
 # [profiles.session_identity] end-to-end Oracle session identity (program/machine/module/action/client_identifier/…).
 # [profiles.session_identity]
 # program = "oraclemcp"

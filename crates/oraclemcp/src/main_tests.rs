@@ -324,6 +324,18 @@ fn fresh_stateful_lane_uses_reloaded_profile_ceiling_and_timeout() {
             max_level = "READ_ONLY"
             call_timeout_seconds = 7
             max_query_cost = 11
+
+            [profiles.cumulative_query_cost_budget]
+            max_cost = 77
+            window_seconds = 90
+
+            [profiles.sql_policy]
+            version = 1
+
+            [[profiles.sql_policy.rules]]
+            id = "stateful-policy"
+            match = { schema = "APP", object = "ORDERS", verb = "select" }
+            effect = { kind = "require_level", level = "DDL" }
             "#,
     )
     .expect("lowered config");
@@ -335,7 +347,10 @@ fn fresh_stateful_lane_uses_reloaded_profile_ceiling_and_timeout() {
         level: SessionLevelState::new(OperatingLevel::Admin, false),
         request_timeout: Some(std::time::Duration::from_secs(30)),
         max_query_cost: None,
+        cumulative_query_cost_budget: None,
+        query_cost_budgets: None,
         result_masking: None,
+        sql_policy: None,
         secret_resolver: Arc::new(SystemSecretResolver),
         custom_catalog: CustomToolCatalog::default(),
         exposure: McpExposurePolicy::AllowAll,
@@ -354,6 +369,21 @@ fn fresh_stateful_lane_uses_reloaded_profile_ceiling_and_timeout() {
         Some(std::time::Duration::from_secs(7))
     );
     assert_eq!(wiring.max_query_cost, Some(11));
+    assert_eq!(
+        wiring.cumulative_query_cost_budget,
+        Some(CumulativeQueryCostBudgetConfig {
+            max_cost: 77,
+            window_seconds: 90,
+        })
+    );
+    assert_eq!(
+        wiring.sql_policy,
+        lowered
+            .profile("prod")
+            .expect("profile remains present")
+            .sql_policy
+            .clone()
+    );
 }
 
 #[test]
@@ -3658,7 +3688,10 @@ fn build_server_advertises_the_active_custom_catalog_plus_capabilities() {
             secret_resolver: Arc::new(SystemSecretResolver),
             request_timeout: OracleConnectOptions::default().call_timeout,
             max_query_cost: None,
+            cumulative_query_cost_budget: None,
+            query_cost_budgets: None,
             result_masking: None,
+            sql_policy: None,
             metrics: None,
             profile_drain: ProfileDrainState::default(),
         },

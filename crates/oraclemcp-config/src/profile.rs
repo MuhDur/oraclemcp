@@ -593,6 +593,41 @@ pub struct ResultMaskingConfig {
     pub rules: Vec<ResultMaskingRuleConfig>,
 }
 
+/// Per-principal cumulative optimizer-cost budget for one profile.
+///
+/// The dispatcher charges the optimizer's pre-execution estimate to a durable,
+/// server-owned counter. A window starts when the first cost is admitted and
+/// rolls only after `window_seconds`; callers cannot select a principal, reset
+/// the counter, or bypass this policy with per-call arguments.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CumulativeQueryCostBudgetConfig {
+    /// Total estimated optimizer cost a principal may consume in one window.
+    pub max_cost: u64,
+    /// Duration of one accounting window, in seconds.
+    pub window_seconds: u64,
+}
+
+impl CumulativeQueryCostBudgetConfig {
+    fn validate(&self, profile: &str) -> Result<(), ConfigError> {
+        if self.max_cost == 0 {
+            return Err(ConfigError::InvalidCumulativeQueryCostBudget {
+                profile: profile.to_owned(),
+                field: "max_cost",
+                reason: "must be at least 1",
+            });
+        }
+        if self.window_seconds == 0 {
+            return Err(ConfigError::InvalidCumulativeQueryCostBudget {
+                profile: profile.to_owned(),
+                field: "window_seconds",
+                reason: "must be at least 1",
+            });
+        }
+        Ok(())
+    }
+}
+
 impl Default for ResultMaskingConfig {
     fn default() -> Self {
         Self {
@@ -686,6 +721,11 @@ pub struct ConnectionProfile {
     /// Optional per-query cooperative cost ceiling for `oracle_query`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_query_cost: Option<u64>,
+    /// Optional per-principal cumulative optimizer-cost budget for
+    /// `oracle_query`. The counter is durable and rolls on this configured
+    /// window; no caller-controlled reset exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cumulative_query_cost_budget: Option<CumulativeQueryCostBudgetConfig>,
     /// Optional Oracle Net transport connect timeout, in seconds. This bounds
     /// TCP/TLS/TNS connect and authentication reads before a session exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -788,6 +828,10 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("trusted_statement_count", &trusted_statement_count)
             .field("call_timeout_seconds", &self.call_timeout_seconds)
             .field("max_query_cost", &self.max_query_cost)
+            .field(
+                "cumulative_query_cost_budget",
+                &self.cumulative_query_cost_budget,
+            )
             .field("connect_timeout_seconds", &self.connect_timeout_seconds)
             .field(
                 "inactivity_timeout_seconds",
@@ -886,6 +930,7 @@ impl ConnectionProfile {
             trusted_session_statements,
             call_timeout_seconds,
             max_query_cost,
+            cumulative_query_cost_budget,
             connect_timeout_seconds,
             inactivity_timeout_seconds,
             keepalive_minutes,
@@ -920,6 +965,7 @@ impl ConnectionProfile {
             is_default: false,
             call_timeout_seconds: self.call_timeout_seconds,
             max_query_cost: self.max_query_cost,
+            cumulative_query_cost_budget: self.cumulative_query_cost_budget.clone(),
             connect_timeout_seconds: self.connect_timeout_seconds,
             inactivity_timeout_seconds: self.inactivity_timeout_seconds,
             keepalive_minutes: self.keepalive_minutes,
@@ -950,6 +996,9 @@ impl ConnectionProfile {
         }
         if let Some(pool) = &self.pool {
             pool.validate(&self.name)?;
+        }
+        if let Some(budget) = &self.cumulative_query_cost_budget {
+            budget.validate(&self.name)?;
         }
         Ok(())
     }
@@ -996,6 +1045,8 @@ pub struct ProfileMetadata {
     pub call_timeout_seconds: Option<u64>,
     /// Optional per-query cooperative cost ceiling for `oracle_query`.
     pub max_query_cost: Option<u64>,
+    /// Optional cumulative optimizer-cost budget enforced per principal.
+    pub cumulative_query_cost_budget: Option<CumulativeQueryCostBudgetConfig>,
     /// Optional Oracle Net transport connect timeout, in seconds.
     pub connect_timeout_seconds: Option<u64>,
     /// Optional per-read inactivity deadline on an established session, in seconds.
@@ -1088,6 +1139,7 @@ mod tests {
             trusted_session_statements: None,
             call_timeout_seconds: None,
             max_query_cost: None,
+            cumulative_query_cost_budget: None,
             connect_timeout_seconds: None,
             inactivity_timeout_seconds: None,
             keepalive_minutes: None,
@@ -1809,6 +1861,10 @@ mod tests {
         base.max_level = Some(OperatingLevel::ReadWrite);
         base.call_timeout_seconds = Some(30);
         base.max_query_cost = Some(1_000);
+        base.cumulative_query_cost_budget = Some(CumulativeQueryCostBudgetConfig {
+            max_cost: 5_000,
+            window_seconds: 300,
+        });
         base.connect_timeout_seconds = Some(20);
         let mut child = p("dev");
         child.base = Some("shared".to_owned());
@@ -1819,6 +1875,13 @@ mod tests {
         assert_eq!(dev.max_level(), OperatingLevel::ReadWrite);
         assert_eq!(dev.call_timeout_seconds, Some(30));
         assert_eq!(dev.max_query_cost, Some(1_000));
+        assert_eq!(
+            dev.cumulative_query_cost_budget,
+            Some(CumulativeQueryCostBudgetConfig {
+                max_cost: 5_000,
+                window_seconds: 300,
+            })
+        );
         assert_eq!(dev.connect_timeout_seconds, Some(20));
     }
 
@@ -1838,6 +1901,53 @@ mod tests {
         assert_eq!(profile.max_query_cost, Some(42));
         assert_eq!(profile.metadata().max_query_cost, Some(42));
         assert_eq!(cfg.list_profiles()[0].max_query_cost, Some(42));
+    }
+
+    #[test]
+    fn cumulative_query_cost_budget_parses_inherits_and_rejects_zero_values() {
+        let cfg = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "base"
+            connect_string = "synthetic:1521/service"
+
+            [profiles.cumulative_query_cost_budget]
+            max_cost = 42
+            window_seconds = 300
+
+            [[profiles]]
+            name = "child"
+            connect_string = "synthetic:1521/service"
+            base = "base"
+            "#,
+        )
+        .expect("valid cumulative budget config parses");
+        let expected = CumulativeQueryCostBudgetConfig {
+            max_cost: 42,
+            window_seconds: 300,
+        };
+        assert_eq!(
+            cfg.profiles[1].cumulative_query_cost_budget,
+            Some(expected.clone())
+        );
+        assert_eq!(
+            cfg.list_profiles()[1].cumulative_query_cost_budget,
+            Some(expected)
+        );
+
+        for invalid in [
+            "max_cost = 0\nwindow_seconds = 300",
+            "max_cost = 42\nwindow_seconds = 0",
+        ] {
+            let error = crate::OracleMcpConfig::from_toml_str(&format!(
+                "[[profiles]]\nname = \"costed\"\nconnect_string = \"synthetic:1521/service\"\n\n[profiles.cumulative_query_cost_budget]\n{invalid}\n"
+            ))
+            .expect_err("zero cumulative-budget values must fail closed");
+            assert!(matches!(
+                error,
+                ConfigError::InvalidCumulativeQueryCostBudget { .. }
+            ));
+        }
     }
 
     #[test]

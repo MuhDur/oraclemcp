@@ -12,6 +12,7 @@
 //! Exposing these here (rather than as `bin`-private modules) lets the
 //! integration suite drive the real server surface.
 
+pub mod cost_budget;
 pub mod dispatch;
 #[cfg(feature = "plsql-intelligence")]
 pub mod plsql_tools;

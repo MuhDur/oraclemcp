@@ -48,6 +48,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 use oraclemcp_error::ReasonCategory;
 
+use crate::edition_lifecycle::{EditionLifecycleParse, parse_edition_lifecycle_sql};
 use crate::enforcement::alter_session_policy;
 use crate::levels::{DangerLevel, LevelDecision, OperatingLevel, SessionLevelState};
 use crate::purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
@@ -3320,6 +3321,25 @@ impl Classifier {
             };
         }
 
+        // The dispatcher can prove Oracle's one-child edition rule only for
+        // the exact lifecycle grammar below. Refuse every alternate
+        // CREATE/DROP EDITION spelling here, before operator allow-lists and
+        // before a database call, so no variant can dodge the preflight by
+        // falling through generic CREATE/DROP DDL classification.
+        let edition_lifecycle = parse_edition_lifecycle_sql(sql);
+        if matches!(edition_lifecycle, EditionLifecycleParse::Invalid) {
+            let mut decision = forbidden_decision(
+                "edition lifecycle SQL must be exactly CREATE EDITION <child> AS CHILD OF <parent> or DROP EDITION <edition> [CASCADE]"
+                    .to_owned(),
+            );
+            decision.safe_alternative = Some(
+                "create one linear child with CREATE EDITION <child> AS CHILD OF <parent>, or retire an old edition with DROP EDITION <edition> [CASCADE]"
+                    .to_owned(),
+            );
+            return decision
+                .categorized(ReasonCategory::Other, Some("EDITION lifecycle".to_owned()));
+        }
+
         // The dispatcher owns the transaction boundary. If caller SQL can
         // commit, roll back, create a savepoint, or change transaction mode,
         // the rollback-default response and audit outcome cease to be true.
@@ -3364,7 +3384,12 @@ impl Classifier {
         let has_sequence_nextval = !sequence_nextval_refs(sql).is_empty();
 
         match stage_a(sql, &self.config) {
-            StageA::AllowListed => {
+            // A human's exact-statement allow-list can never turn a governed
+            // edition create/drop into a READ_ONLY statement. These operations
+            // must retain their normal DDL floor and dispatcher preflight.
+            StageA::AllowListed
+                if !matches!(edition_lifecycle, EditionLifecycleParse::Parsed(_)) =>
+            {
                 return GuardDecision {
                     danger: DangerLevel::Safe,
                     required_level: Some(OperatingLevel::ReadOnly),
@@ -3379,6 +3404,7 @@ impl Classifier {
                     certificate_derivation: Vec::new(),
                 };
             }
+            StageA::AllowListed => {}
             StageA::BlockListed(pat) => {
                 return forbidden_decision(format!("matched block-list pattern: {pat}"))
                     .categorized(ReasonCategory::BlockListed, Some(pat));
@@ -5405,6 +5431,49 @@ mod tests {
                 blessed.danger,
                 DangerLevel::Forbidden,
                 "an exact operator allow-list entry must not bypass session policy: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn edition_lifecycle_is_exact_ddl_and_cannot_be_allow_listed_downward() {
+        for sql in [
+            "CREATE EDITION app_release_v2 AS CHILD OF app_release_v1",
+            "DROP EDITION app_release_v1 CASCADE",
+        ] {
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Destructive, "{sql:?}");
+            assert_eq!(
+                decision.required_level,
+                Some(OperatingLevel::Ddl),
+                "{sql:?}"
+            );
+
+            let allow_listed =
+                Classifier::new(ClassifierConfig::new().with_allow(sql)).classify(sql);
+            assert_eq!(
+                allow_listed.danger,
+                DangerLevel::Destructive,
+                "an exact operator allow-list must not turn edition DDL into a read: {sql:?}"
+            );
+            assert_eq!(
+                allow_listed.required_level,
+                Some(OperatingLevel::Ddl),
+                "{sql:?}"
+            );
+        }
+
+        for sql in [
+            "CREATE EDITION app_release_v2",
+            "CREATE EDITION app_release_v2 AS CHILD OF app_release_v1 EXTRA",
+            "DROP EDITION app_release_v1 PURGE",
+        ] {
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert_eq!(decision.required_level, None, "{sql:?}");
+            assert_eq!(
+                decision.offending_construct.as_deref(),
+                Some("EDITION lifecycle")
             );
         }
     }

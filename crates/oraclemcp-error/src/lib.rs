@@ -154,6 +154,11 @@ pub enum ReasonCategory {
     /// A profile's Arc N SQL policy denied the statement (ADR 0009). The policy
     /// can only ever restrict: this is never the reason a statement was allowed.
     PolicyDenied,
+    /// Oracle Edition-Based Redefinition permits at most one child per parent.
+    /// The server detected an existing or in-flight child before issuing a
+    /// second `CREATE EDITION … AS CHILD OF …`, the condition Oracle reports as
+    /// ORA-38807. The wire value is `ONE_CHILD_EDITION`.
+    OneChildEdition,
     /// A refusal that does not fit the categories above.
     Other,
 }

@@ -153,6 +153,11 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         help: "Per-query cooperative cost ceiling for oracle_query; per-call overrides may only lower it.",
     },
     FieldDisposition {
+        field: "cumulative_query_cost_budget",
+        disposition: Disposition::Commented,
+        help: "[profiles.cumulative_query_cost_budget] durable per-principal optimizer-cost window; agents cannot reset or select its accounting key.",
+    },
+    FieldDisposition {
         field: "connect_timeout_seconds",
         disposition: Disposition::Commented,
         help: "Oracle Net transport connect timeout, in seconds (default: the thin driver's 20s).",
@@ -276,9 +281,9 @@ pub fn connection_profile_field_names() -> Vec<&'static str> {
 mod tests {
     use super::*;
     use crate::{
-        AppContextConfig, AuditConfig, ConnectionProfile, DrcpRoutingConfig, HttpConfig, OciConfig,
-        OperatingLevel, OracleMcpConfig, PoolConfig, ProxyAuthConfig, ResultMaskingConfig,
-        SessionIdentityConfig, SqlPolicyConfig,
+        AppContextConfig, AuditConfig, ConnectionProfile, CumulativeQueryCostBudgetConfig,
+        DrcpRoutingConfig, HttpConfig, OciConfig, OperatingLevel, OracleMcpConfig, PoolConfig,
+        ProxyAuthConfig, ResultMaskingConfig, SessionIdentityConfig, SqlPolicyConfig,
     };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
@@ -311,6 +316,10 @@ mod tests {
             trusted_session_statements: Some(vec!["BEGIN NULL; END;".to_owned()]),
             call_timeout_seconds: Some(30),
             max_query_cost: Some(1_000),
+            cumulative_query_cost_budget: Some(CumulativeQueryCostBudgetConfig {
+                max_cost: 5_000,
+                window_seconds: 300,
+            }),
             connect_timeout_seconds: Some(20),
             inactivity_timeout_seconds: Some(300),
             keepalive_minutes: Some(10),
@@ -366,11 +375,11 @@ mod tests {
             actual.difference(&documented).collect::<Vec<_>>(),
             documented.difference(&actual).collect::<Vec<_>>(),
         );
-        // The spec fixes the count at 30.
+        // The spec fixes the count at 31.
         assert_eq!(
             CONNECTION_PROFILE_FIELD_DISPOSITIONS.len(),
-            30,
-            "the design spec fixes ConnectionProfile at 30 serde fields"
+            31,
+            "the design spec fixes ConnectionProfile at 31 serde fields"
         );
     }
 

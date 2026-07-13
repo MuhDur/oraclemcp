@@ -28,10 +28,10 @@ pub use oraclemcp_guard::{
     SqlPolicyMatchConfig, SqlPolicyRuleConfig, SqlPolicyValidationError, SqlPolicyVerb,
 };
 pub use profile::{
-    AppContextConfig, ConnectionProfile, DrcpRoutingConfig, DrcpSessionPurity,
-    MAX_POOL_ACQUIRE_TIMEOUT_SECS, OciConfig, PoolConfig, PoolMetadata, ProfileMetadata,
-    ProxyAuthConfig, ResultColumnMatchConfig, ResultMaskingActionConfig, ResultMaskingConfig,
-    ResultMaskingRuleConfig, SessionIdentityConfig, resolve_inheritance,
+    AppContextConfig, ConnectionProfile, CumulativeQueryCostBudgetConfig, DrcpRoutingConfig,
+    DrcpSessionPurity, MAX_POOL_ACQUIRE_TIMEOUT_SECS, OciConfig, PoolConfig, PoolMetadata,
+    ProfileMetadata, ProxyAuthConfig, ResultColumnMatchConfig, ResultMaskingActionConfig,
+    ResultMaskingConfig, ResultMaskingRuleConfig, SessionIdentityConfig, resolve_inheritance,
 };
 
 /// The config schema version this build understands. A config declaring a
@@ -1395,6 +1395,7 @@ fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionP
         && before.trusted_session_statements == after.trusted_session_statements
         && before.call_timeout_seconds == after.call_timeout_seconds
         && before.max_query_cost == after.max_query_cost
+        && before.cumulative_query_cost_budget == after.cumulative_query_cost_budget
         && before.connect_timeout_seconds == after.connect_timeout_seconds
         && before.inactivity_timeout_seconds == after.inactivity_timeout_seconds
         && before.keepalive_minutes == after.keepalive_minutes
@@ -1511,6 +1512,18 @@ pub enum ConfigError {
         /// Field name.
         field: &'static str,
         /// Static validation reason.
+        reason: &'static str,
+    },
+    /// A profile declared an invalid cumulative per-principal query-cost budget.
+    #[error(
+        "connection profile `{profile}` has invalid cumulative_query_cost_budget.{field}: {reason}"
+    )]
+    InvalidCumulativeQueryCostBudget {
+        /// Profile name.
+        profile: String,
+        /// Invalid budget field.
+        field: &'static str,
+        /// Why the field was rejected.
         reason: &'static str,
     },
     /// Driver-level app-context entry is malformed.
@@ -3045,6 +3058,16 @@ mod tests {
                 |p| p.call_timeout_seconds = Some(7),
             ),
             ("max_query_cost", |_| {}, |p| p.max_query_cost = Some(42)),
+            (
+                "cumulative_query_cost_budget",
+                |_| {},
+                |p| {
+                    p.cumulative_query_cost_budget = Some(CumulativeQueryCostBudgetConfig {
+                        max_cost: 42,
+                        window_seconds: 60,
+                    });
+                },
+            ),
             (
                 "connect_timeout_seconds",
                 |_| {},

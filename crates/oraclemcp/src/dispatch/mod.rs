@@ -20,6 +20,9 @@ use std::time::{Duration, Instant};
 #[path = "../refusal_corpus.rs"]
 mod refusal_corpus;
 
+use crate::cost_budget::{
+    QueryCostBudgetAdmission, QueryCostBudgetStore, QueryCostBudgetStoreError,
+};
 use refusal_corpus::RefusalCorpusWriter;
 
 use asupersync::combinator::try_commit_section;
@@ -32,8 +35,8 @@ use oraclemcp_audit::{
 };
 use oraclemcp_auth::apply_oauth_scopes;
 use oraclemcp_config::{
-    ConfigReloadPlan, ConnectionProfile, OracleMcpConfig, ProfileMetadata, ReloadProfileAction,
-    ReloadProfileReason,
+    ConfigReloadPlan, ConnectionProfile, CumulativeQueryCostBudgetConfig, OracleMcpConfig,
+    ProfileMetadata, ReloadProfileAction, ReloadProfileReason,
 };
 use oraclemcp_core::{
     CLEANUP_POLL_QUOTA, ConnectionStatus, CustomToolCatalog, CustomToolExecutor,
@@ -66,11 +69,12 @@ use oraclemcp_error::{
     ErrorClass, ErrorEnvelope, OptimizerPlanRow, QueryCostRefusal, ReasonCategory, StructuredReason,
 };
 use oraclemcp_guard::{
-    CatalogObjectKind, CatalogResolver, Classifier, ClassifierConfig, DangerLevel, EscalationError,
+    CatalogObjectKind, CatalogResolver, Classifier, ClassifierConfig, DangerLevel,
+    EditionIdentifier, EditionLifecycleParse, EditionLifecycleSql, EscalationError,
     ExecGrantBinding, ExecGrantError, ExecGrantStore, GuardDecision, LevelDecision, ObjectRef,
     OperatingLevel, PolicyGate, PolicyGateAdmission, PolicyGateDenial, PolicyGateRequest, Purity,
     Resolution, ResolvedObject, SessionLevelState, SideEffectOracle, SqlPolicyConfig,
-    VerdictCertificate, enforce_sql_policy, semantic_read_plan,
+    VerdictCertificate, enforce_sql_policy, parse_edition_lifecycle_sql, semantic_read_plan,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -155,6 +159,18 @@ const EXECUTE_APPROVED_TOKEN_TTL_SECONDS: u64 = 300;
 const MAX_EXECUTE_APPROVED_TOKENS: usize = 128;
 /// Tamper-token scope for signed execution grant references.
 const EXECUTE_GRANT_TOKEN_SCOPE: &str = "grant:execute";
+/// Bound dictionary preflight for Oracle's one-child edition rule. The parent
+/// name is positional-bind-only; caller text is never interpolated into this
+/// generated SQL.
+const EDITION_CHILDREN_SQL: &str =
+    "SELECT edition_name FROM all_editions WHERE parent_edition_name = :1";
+
+/// Parents currently being created in this process. The dictionary is the
+/// durable source of truth after a successful DDL call; this reservation closes
+/// the check-then-create race between two active lanes before either second
+/// create can reach Oracle.
+static EDITION_CREATION_RESERVATIONS: LazyLock<SyncMutex<HashSet<String>>> =
+    LazyLock::new(|| SyncMutex::new(HashSet::new()));
 
 /// State-file location for the served refusal corpus. It deliberately follows
 /// the same XDG-first layout as the audit log, but remains a separate artifact:
@@ -249,6 +265,7 @@ struct ProfileDispatchPolicy {
     level: SessionLevelState,
     request_timeout: Option<Duration>,
     max_query_cost: Option<u64>,
+    cumulative_query_cost_budget: Option<CumulativeQueryCostBudgetConfig>,
     result_masking: Option<ResultMaskingPolicy>,
     /// Arc N: the profile's tightening-only SQL policy, if it carries one.
     sql_policy: Option<SqlPolicyConfig>,
@@ -262,6 +279,7 @@ struct PreparedProfileSwitch {
     level: SessionLevelState,
     request_timeout: Option<Duration>,
     max_query_cost: Option<u64>,
+    cumulative_query_cost_budget: Option<CumulativeQueryCostBudgetConfig>,
     result_masking: Option<ResultMaskingPolicy>,
     sql_policy: Option<SqlPolicyConfig>,
     custom_catalog: CustomToolCatalog,
@@ -281,6 +299,7 @@ fn standalone_read_only_policy() -> ProfileDispatchPolicy {
         level: default_read_only_level(),
         request_timeout: Some(DEFAULT_REQUEST_TIMEOUT),
         max_query_cost: None,
+        cumulative_query_cost_budget: None,
         result_masking: None,
         sql_policy: None,
     }
@@ -361,6 +380,7 @@ fn profile_dispatch_policy(
         level: oraclemcp_core::session_level_state(profile, false),
         request_timeout: profile_request_timeout(profile.call_timeout_seconds),
         max_query_cost: profile.max_query_cost,
+        cumulative_query_cost_budget: profile.cumulative_query_cost_budget.clone(),
         result_masking: result_masking_policy_from_profile(profile),
         // Arc N: a configured policy now GOVERNS this profile's dispatch path.
         // It is validated at config load and can only ever restrict.
@@ -861,6 +881,10 @@ pub struct OracleDispatcher {
     state: AsyncMutex<DispatcherState>,
     request_timeout: SyncMutex<Option<Duration>>,
     max_query_cost: SyncMutex<Option<u64>>,
+    cumulative_query_cost_budget: SyncMutex<Option<CumulativeQueryCostBudgetConfig>>,
+    /// Shared, service-owned durable state. A missing store for an enabled
+    /// policy is a refusal, never an unmetered fallback.
+    query_cost_budget_store: Option<Arc<QueryCostBudgetStore>>,
     result_masking: SyncMutex<Option<ResultMaskingPolicy>>,
     /// Arc N: the active profile's tightening-only SQL policy. Read on every
     /// guarded statement; a policy that is configured is a policy that governs.
@@ -981,6 +1005,8 @@ impl OracleDispatcher {
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
+            cumulative_query_cost_budget: SyncMutex::new(None),
+            query_cost_budget_store: None,
             result_masking: SyncMutex::new(None),
             sql_policy: SyncMutex::new(None),
             quarantine: SyncMutex::new(None),
@@ -1068,6 +1094,8 @@ impl OracleDispatcher {
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
+            cumulative_query_cost_budget: SyncMutex::new(None),
+            query_cost_budget_store: None,
             result_masking: SyncMutex::new(None),
             sql_policy: SyncMutex::new(None),
             quarantine: SyncMutex::new(None),
@@ -1211,6 +1239,26 @@ impl OracleDispatcher {
         self
     }
 
+    /// Install the active profile's cumulative, per-principal query-cost
+    /// budget. This can only add a refusal after the regular read guard and
+    /// per-statement ceiling already admit the query.
+    #[must_use]
+    pub fn with_cumulative_query_cost_budget(
+        self,
+        cumulative_query_cost_budget: Option<CumulativeQueryCostBudgetConfig>,
+    ) -> Self {
+        self.set_cumulative_query_cost_budget(cumulative_query_cost_budget)
+            .expect("cumulative-query-cost-budget mutex is healthy during construction");
+        self
+    }
+
+    /// Attach the shared, service-owned durable accounting store.
+    #[must_use]
+    pub fn with_query_cost_budget_store(mut self, store: Arc<QueryCostBudgetStore>) -> Self {
+        self.query_cost_budget_store = Some(store);
+        self
+    }
+
     /// Install the active profile's result masking policy.
     #[must_use]
     pub fn with_result_masking_policy(self, result_masking: Option<ResultMaskingPolicy>) -> Self {
@@ -1262,6 +1310,34 @@ impl OracleDispatcher {
             )
         })?;
         *guard = max_query_cost;
+        Ok(())
+    }
+
+    fn cumulative_query_cost_budget(
+        &self,
+    ) -> Result<Option<CumulativeQueryCostBudgetConfig>, ErrorEnvelope> {
+        self.cumulative_query_cost_budget
+            .lock()
+            .map(|guard| guard.clone())
+            .map_err(|err| {
+                ErrorEnvelope::new(
+                    ErrorClass::Internal,
+                    format!("cumulative-query-cost-budget mutex lock failed: {err}"),
+                )
+            })
+    }
+
+    fn set_cumulative_query_cost_budget(
+        &self,
+        cumulative_query_cost_budget: Option<CumulativeQueryCostBudgetConfig>,
+    ) -> Result<(), ErrorEnvelope> {
+        let mut guard = self.cumulative_query_cost_budget.lock().map_err(|err| {
+            ErrorEnvelope::new(
+                ErrorClass::Internal,
+                format!("cumulative-query-cost-budget mutex lock failed: {err}"),
+            )
+        })?;
+        *guard = cumulative_query_cost_budget;
         Ok(())
     }
 
@@ -3147,6 +3223,34 @@ fn query_cost_exceeded(
     .with_next_step("tighten the WHERE clause, add a narrower predicate, or ask for a lower-cardinality page")
 }
 
+fn cumulative_query_cost_budget_exhausted(
+    observed_cost: u64,
+    consumed_cost: u64,
+    max_cost: u64,
+) -> ErrorEnvelope {
+    let reason = StructuredReason::new(ReasonCategory::CostBudgetExceeded).with_minimal_rewrite(
+        "tighten the WHERE clause, add a narrower predicate, or wait for the configured budget window to roll",
+    );
+    ErrorEnvelope::new(
+        ErrorClass::PolicyDenied,
+        format!(
+            "oracle_query cumulative cost budget refused before execution: cumulative_query_cost_budget_exhausted (estimated cost {observed_cost}; window consumed {consumed_cost} of {max_cost})"
+        ),
+    )
+    .with_suggested_tool("oracle_explain_plan")
+    .with_structured_reason(reason)
+    .with_next_step("tighten the query or retry after the configured cumulative cost window rolls")
+}
+
+fn cumulative_query_cost_budget_unavailable() -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::PolicyDenied,
+        "oracle_query cumulative cost budget refused before execution: cumulative_query_cost_budget_unavailable",
+    )
+    .with_structured_reason(StructuredReason::new(ReasonCategory::CostBudgetExceeded))
+    .with_next_step("ask an operator to restore durable budget state before retrying")
+}
+
 fn query_cost_refusal_detail(
     estimate: &PlanCostEstimate,
     observed_cost: u64,
@@ -3279,15 +3383,31 @@ struct QueryCostGateCtx<'a> {
     quarantine: &'a SyncMutex<Option<ConnectionQuarantine>>,
 }
 
+/// Server-derived cumulative accounting inputs. Profile/principal are copied
+/// from dispatcher state and transport context, never from query arguments.
+struct CumulativeQueryCostGate<'a> {
+    profile: &'a str,
+    principal: &'a str,
+    policy: Option<&'a CumulativeQueryCostBudgetConfig>,
+    store: Option<&'a QueryCostBudgetStore>,
+}
+
 async fn enforce_query_cost_gate(
     ctx: QueryCostGateCtx<'_>,
     args: &QueryArgs,
     executed_sql: &str,
     max_query_cost: Option<u64>,
+    cumulative: CumulativeQueryCostGate<'_>,
 ) -> Result<(), ErrorEnvelope> {
-    let Some(max_query_cost) = max_query_cost else {
+    if max_query_cost.is_none() && cumulative.policy.is_none() {
         return Ok(());
-    };
+    }
+    // A configured cumulative policy without its durable store must refuse
+    // before any database I/O. Falling back to an unmetered query would widen
+    // the guard surface.
+    if cumulative.policy.is_some() && cumulative.store.is_none() {
+        return Err(cumulative_query_cost_budget_unavailable());
+    }
     ensure_query_cost_plan_write_allowed(args, ctx.session)?;
     // The cost estimate writes PLAN_TABLE and rolls the transaction back to
     // clean it up — which would erase the reversible workspace's savepoints and
@@ -3341,8 +3461,14 @@ async fn enforce_query_cost_gate(
     let decision = match plan_cost_estimate(ctx.cx, ctx.conn).await {
         Ok(Some(estimate)) => match estimate.summary.total_cost {
             Some(total_cost) => match u64::try_from(total_cost) {
-                Ok(observed) if observed <= max_query_cost => Ok(()),
-                Ok(observed) => Err(query_cost_exceeded(&estimate, observed, max_query_cost)),
+                Ok(observed) if max_query_cost.is_none_or(|limit| observed <= limit) => {
+                    Ok(observed)
+                }
+                Ok(observed) => Err(query_cost_exceeded(
+                    &estimate,
+                    observed,
+                    max_query_cost.expect("checked above"),
+                )),
                 Err(_) => Err(query_cost_unavailable(format!(
                     "PLAN_TABLE root total_cost was negative: {total_cost}"
                 ))),
@@ -3375,7 +3501,36 @@ async fn enforce_query_cost_gate(
     ctx.request_budget
         .enforce(ctx.cx)
         .map_err(DbError::into_envelope)?;
-    decision
+    let observed_cost = decision?;
+
+    if let (Some(policy), Some(store)) = (cumulative.policy, cumulative.store) {
+        match store.reserve(
+            cumulative.profile,
+            cumulative.principal,
+            policy,
+            observed_cost,
+        ) {
+            Ok(QueryCostBudgetAdmission::Admitted { .. }) => {}
+            Ok(QueryCostBudgetAdmission::Exhausted {
+                consumed_cost,
+                max_cost,
+            }) => {
+                return Err(cumulative_query_cost_budget_exhausted(
+                    observed_cost,
+                    consumed_cost,
+                    max_cost,
+                ));
+            }
+            Err(
+                QueryCostBudgetStoreError::StateUnavailable
+                | QueryCostBudgetStoreError::InvalidState
+                | QueryCostBudgetStoreError::ClockUnavailable
+                | QueryCostBudgetStoreError::ClockRegression
+                | QueryCostBudgetStoreError::CounterOverflow,
+            ) => return Err(cumulative_query_cost_budget_unavailable()),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -6118,6 +6273,91 @@ struct DbToolCtx<'a> {
     quarantine: &'a SyncMutex<Option<ConnectionQuarantine>>,
 }
 
+/// In-process reservation held from the one-child dictionary preflight through
+/// the terminal CREATE call. It never holds the underlying mutex across an
+/// await, so it cannot block unrelated database I/O or cancellation cleanup.
+struct EditionCreationReservation {
+    key: String,
+}
+
+impl Drop for EditionCreationReservation {
+    fn drop(&mut self) {
+        if let Ok(mut reservations) = EDITION_CREATION_RESERVATIONS.lock() {
+            reservations.remove(&self.key);
+        }
+    }
+}
+
+fn one_child_edition_error() -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::ForbiddenStatement,
+        "edition proposal refused: this parent already has (or is currently creating) its one permitted child; Oracle editions are a linear chain, not a branch graph (ORA-38807)",
+    )
+    // The server checked the documented ORA-38807 condition before issuing the
+    // DDL. Exposing its code lets clients correlate the proactive refusal with
+    // Oracle's native constraint without leaking a raw backend message.
+    .with_ora_code(38_807)
+    .with_structured_reason(
+        StructuredReason::new(ReasonCategory::OneChildEdition)
+            .with_offending_construct("CREATE EDITION … AS CHILD OF …")
+            .with_minimal_rewrite(
+                "retire or merge the existing child before proposing the next linear edition",
+            ),
+    )
+    .with_next_step(
+        "Oracle allows at most one child per edition (ORA-38807); inspect the current edition timeline, then retire or merge its existing child before creating another",
+    )
+}
+
+fn reserve_edition_child_slot(
+    parent: &EditionIdentifier,
+    active_profile: Option<&str>,
+) -> Result<EditionCreationReservation, ErrorEnvelope> {
+    // Profile is the least surprising server-side DB partition available at
+    // this layer. A direct dispatcher without a named profile remains
+    // conservatively shared rather than risking a second local CREATE.
+    let key = format!(
+        "{}\0{}",
+        active_profile.unwrap_or("<unnamed-profile>"),
+        parent.as_str()
+    );
+    let mut reservations = EDITION_CREATION_RESERVATIONS.lock().map_err(|_| {
+        ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "edition lifecycle reservation lock is poisoned; refusing CREATE EDITION",
+        )
+    })?;
+    if !reservations.insert(key.clone()) {
+        return Err(one_child_edition_error());
+    }
+    Ok(EditionCreationReservation { key })
+}
+
+async fn reserve_checked_edition_child_slot(
+    ctx: &DbToolCtx<'_>,
+    parent: &EditionIdentifier,
+) -> Result<EditionCreationReservation, ErrorEnvelope> {
+    let reservation = reserve_edition_child_slot(parent, ctx.active_profile)?;
+    let rows = ctx
+        .conn
+        .query_rows(
+            ctx.cx,
+            EDITION_CHILDREN_SQL,
+            &[OracleBind::String(parent.as_str().to_owned())],
+        )
+        .await
+        .map_err(DbError::into_envelope)?;
+    if !rows.is_empty() {
+        return Err(one_child_edition_error());
+    }
+    // The preflight is a database round trip of its own. Re-check the request
+    // budget before consuming an approval or starting the irreversible DDL.
+    ctx.request_budget
+        .enforce(ctx.cx)
+        .map_err(DbError::into_envelope)?;
+    Ok(reservation)
+}
+
 /// End the real Oracle read-only transaction before the first governed write.
 ///
 /// `ReadOnlyBackstop::disarm` alone cannot change Oracle transaction state. A
@@ -7937,6 +8177,26 @@ async fn execute_sql_inner(
             },
         )?;
     }
+
+    // D2: CREATE EDITION has a database-enforced one-child constraint
+    // (ORA-38807). This preflight follows classification, policy composition,
+    // level gating, commit intent, and workspace safety, but precedes
+    // confirmation consumption, audit, and the CREATE itself. A refused second
+    // proposal therefore reaches neither the DDL executor nor the audit/write
+    // intent path, and it does not burn a valid confirmation token.
+    let policy_sql = policy.effective_sql.as_deref().unwrap_or(args.sql.as_str());
+    let edition_create_parent = match parse_edition_lifecycle_sql(policy_sql) {
+        EditionLifecycleParse::Parsed(EditionLifecycleSql::CreateChild { parent, .. }) => {
+            Some(parent)
+        }
+        EditionLifecycleParse::Parsed(EditionLifecycleSql::Retire { .. })
+        | EditionLifecycleParse::NotEdition
+        | EditionLifecycleParse::Invalid => None,
+    };
+    let _edition_creation_reservation = match edition_create_parent.as_ref() {
+        Some(parent) => Some(reserve_checked_edition_child_slot(&ctx, parent).await?),
+        None => None,
+    };
     // A rollback-preview normally needs no per-statement confirmation because
     // Oracle can undo its effects. Sequence NEXTVAL is the exception: it
     // advances independently of transaction rollback, so it must consume the
@@ -7974,7 +8234,6 @@ async fn execute_sql_inner(
     // and what the audit records. The grant above stayed bound to the statement
     // the AGENT previewed and submitted; the narrowing is a server-side
     // tightening applied after it, and the caller never saw the rewritten text.
-    let policy_sql = policy.effective_sql.as_deref().unwrap_or(args.sql.as_str());
     let executed_sql = with_audit_marker(policy_sql, active_profile, audit_tool);
     if DEFAULT_CLASSIFIER.classify(&executed_sql) != decision {
         return Err(ErrorEnvelope::new(
@@ -10847,6 +11106,7 @@ impl OracleDispatcher {
                 level: new_level,
                 request_timeout: new_policy.request_timeout,
                 max_query_cost: new_policy.max_query_cost,
+                cumulative_query_cost_budget: new_policy.cumulative_query_cost_budget,
                 result_masking: new_policy.result_masking,
                 sql_policy: new_policy.sql_policy,
                 custom_catalog: new_custom_catalog,
@@ -10863,6 +11123,7 @@ impl OracleDispatcher {
             request_budget.enforce(cx).map_err(DbError::into_envelope)?;
             let old_request_timeout = self.request_timeout()?;
             let old_max_query_cost = self.max_query_cost()?;
+            let old_cumulative_query_cost_budget = self.cumulative_query_cost_budget()?;
             let old_result_masking = self.result_masking_policy()?;
             let old_sql_policy = self.sql_policy()?;
             let PreparedProfileSwitch {
@@ -10873,6 +11134,7 @@ impl OracleDispatcher {
                 level,
                 request_timeout,
                 max_query_cost,
+                cumulative_query_cost_budget,
                 result_masking,
                 sql_policy,
                 custom_catalog,
@@ -10899,9 +11161,18 @@ impl OracleDispatcher {
                         let _ = self.set_request_timeout(old_request_timeout);
                         return Err(err);
                     }
+                    if let Err(err) =
+                        self.set_cumulative_query_cost_budget(cumulative_query_cost_budget)
+                    {
+                        let _ = self.set_request_timeout(old_request_timeout);
+                        let _ = self.set_max_query_cost(old_max_query_cost);
+                        return Err(err);
+                    }
                     if let Err(err) = self.set_result_masking_policy(result_masking) {
                         let _ = self.set_request_timeout(old_request_timeout);
                         let _ = self.set_max_query_cost(old_max_query_cost);
+                        let _ =
+                            self.set_cumulative_query_cost_budget(old_cumulative_query_cost_budget);
                         return Err(err);
                     }
                     // Arc N: the new profile's policy is installed inside the same
@@ -10911,12 +11182,17 @@ impl OracleDispatcher {
                     if let Err(err) = self.set_sql_policy(sql_policy) {
                         let _ = self.set_request_timeout(old_request_timeout);
                         let _ = self.set_max_query_cost(old_max_query_cost);
+                        let _ = self.set_cumulative_query_cost_budget(
+                            old_cumulative_query_cost_budget.clone(),
+                        );
                         let _ = self.set_result_masking_policy(old_result_masking);
                         return Err(err);
                     }
                     if let Err(err) = self.clear_connection_quarantine() {
                         let _ = self.set_request_timeout(old_request_timeout);
                         let _ = self.set_max_query_cost(old_max_query_cost);
+                        let _ =
+                            self.set_cumulative_query_cost_budget(old_cumulative_query_cost_budget);
                         let _ = self.set_result_masking_policy(old_result_masking);
                         let _ = self.set_sql_policy(old_sql_policy);
                         return Err(err);
@@ -11304,6 +11580,15 @@ impl OracleDispatcher {
                     self.max_query_cost()?,
                     prepared.args.max_query_cost,
                 );
+                let cumulative_policy = self.cumulative_query_cost_budget()?;
+                let budget_profile = state
+                    .active_profile
+                    .clone()
+                    .unwrap_or_else(|| "standalone".to_owned());
+                let budget_principal = context
+                    .principal_key()
+                    .unwrap_or(oraclemcp_core::STDIO_EXPORT_PRINCIPAL)
+                    .to_owned();
                 let DispatcherState {
                     conn,
                     read_only_backstop,
@@ -11323,6 +11608,12 @@ impl OracleDispatcher {
                     &prepared.args,
                     &prepared.executed_sql,
                     cost_limit,
+                    CumulativeQueryCostGate {
+                        profile: &budget_profile,
+                        principal: &budget_principal,
+                        policy: cumulative_policy.as_ref(),
+                        store: self.query_cost_budget_store.as_deref(),
+                    },
                 )
                 .await?;
                 if prepared.as_of.is_some() {
@@ -13235,6 +13526,15 @@ impl OracleDispatcher {
                     self.max_query_cost()?,
                     prepared.args.max_query_cost,
                 );
+                let cumulative_policy = self.cumulative_query_cost_budget()?;
+                let budget_profile = state
+                    .active_profile
+                    .clone()
+                    .unwrap_or_else(|| "standalone".to_owned());
+                let budget_principal = context
+                    .principal_key()
+                    .unwrap_or(oraclemcp_core::STDIO_EXPORT_PRINCIPAL)
+                    .to_owned();
                 let DispatcherState {
                     conn,
                     read_only_backstop,
@@ -13254,6 +13554,12 @@ impl OracleDispatcher {
                     &prepared.args,
                     &prepared.executed_sql,
                     cost_limit,
+                    CumulativeQueryCostGate {
+                        profile: &budget_profile,
+                        principal: &budget_principal,
+                        policy: cumulative_policy.as_ref(),
+                        store: self.query_cost_budget_store.as_deref(),
+                    },
                 )
                 .await?;
                 if prepared.as_of.is_some() {

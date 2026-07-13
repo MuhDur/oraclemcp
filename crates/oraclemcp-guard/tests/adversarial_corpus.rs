@@ -424,6 +424,22 @@ const CORPUS: &[(&str, DangerLevel)] = &[
         "ALTER SESSION SET EDITION = app_release_v2 SQL_TRACE = TRUE",
         DangerLevel::Forbidden,
     ),
+    // --- D2: edition lifecycle is linear, never a branch graph. ---
+    // Exact create/retire forms are DDL; malformed alternate forms are refused
+    // before they can bypass the dispatcher's one-child preflight.
+    (
+        "CREATE EDITION app_release_v2 AS CHILD OF app_release_v1",
+        DangerLevel::Destructive,
+    ),
+    (
+        "DROP EDITION app_release_v1 CASCADE",
+        DangerLevel::Destructive,
+    ),
+    ("CREATE EDITION app_release_v2", DangerLevel::Forbidden),
+    (
+        "CREATE EDITION app_release_v2 AS CHILD OF app_release_v1 EXTRA",
+        DangerLevel::Forbidden,
+    ),
     // Raw non-allowlisted ALTER SESSION must be Forbidden before
     // the operator allow-list, never fall through parse-failure to READ_WRITE.
     // Session state (container, trace, events, hidden params) persists across
@@ -487,6 +503,28 @@ fn edition_allowlist_corpus_pins_exact_guard_and_refusal() {
             classifier.classify(sql).danger,
             expected,
             "D1 must widen exactly EDITION, never a mixed ALTER SESSION statement: {sql:?}"
+        );
+    }
+}
+
+#[test]
+fn edition_lifecycle_corpus_pins_exact_ddl_and_refusal() {
+    let classifier = Classifier::default();
+    for (sql, expected) in [
+        (
+            "CREATE EDITION app_release_v2 AS CHILD OF app_release_v1",
+            DangerLevel::Destructive,
+        ),
+        (
+            "DROP EDITION app_release_v1 CASCADE",
+            DangerLevel::Destructive,
+        ),
+        ("CREATE EDITION app_release_v2", DangerLevel::Forbidden),
+    ] {
+        assert_eq!(
+            classifier.classify(sql).danger,
+            expected,
+            "D2 must admit only exact linear lifecycle grammar: {sql:?}"
         );
     }
 }

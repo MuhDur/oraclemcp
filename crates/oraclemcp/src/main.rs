@@ -45,6 +45,7 @@ use std::time::Instant;
 
 use asupersync::Cx;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use oraclemcp::cost_budget::QueryCostBudgetStore;
 use oraclemcp::dispatch::{
     McpExposurePolicy, OracleDispatcher, ProfileConnectionBundle, ProfileConnector,
     ProfileDrainState, ProfileGenerationAdmission, StatelessReadStrategy, profile_draining_error,
@@ -60,8 +61,8 @@ use oraclemcp_auth::{
     resolve_secret_with,
 };
 use oraclemcp_config::{
-    AuditConfig, CONFIG_PATH_ENV, ConnectionProfile, HttpConfig, HttpControlConfig, HttpTlsConfig,
-    OracleMcpConfig,
+    AuditConfig, CONFIG_PATH_ENV, ConnectionProfile, CumulativeQueryCostBudgetConfig, HttpConfig,
+    HttpControlConfig, HttpTlsConfig, OracleMcpConfig,
 };
 use oraclemcp_core::admission::DEFAULT_READ_PER_PROFILE_CAP;
 use oraclemcp_core::http::SinglePrincipalGuard;
@@ -90,7 +91,9 @@ use oraclemcp_db::{
     RustOracleConnection,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
-use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel, SessionLevelState};
+use oraclemcp_guard::{
+    Classifier, ClassifierConfig, OperatingLevel, SessionLevelState, SqlPolicyConfig,
+};
 use oraclemcp_telemetry::{HealthState, Metrics, OtlpConfig};
 use service_lifecycle::{
     ServiceBackupOptions, ServiceCommand as ServiceLifecycleCommand, ServiceInstallOptions,
@@ -690,7 +693,9 @@ struct SelectedRuntimeProfile {
     level: SessionLevelState,
     request_timeout: Option<std::time::Duration>,
     max_query_cost: Option<u64>,
+    cumulative_query_cost_budget: Option<CumulativeQueryCostBudgetConfig>,
     result_masking: Option<ResultMaskingPolicy>,
+    sql_policy: Option<SqlPolicyConfig>,
     require_signed_tools: bool,
 }
 
@@ -701,6 +706,7 @@ struct ResolvedProfile {
     level: SessionLevelState,
     require_signed_tools: bool,
     max_query_cost: Option<u64>,
+    cumulative_query_cost_budget: Option<CumulativeQueryCostBudgetConfig>,
     pool_settings: Option<PoolSettings>,
     doctor_caps: DoctorProfileCaps,
     connect_timeout_seconds: Option<u64>,
@@ -742,7 +748,9 @@ fn select_runtime_profile_from_config(
         level: ctx.level_state,
         request_timeout: ctx.options.call_timeout,
         max_query_cost: chosen.max_query_cost,
+        cumulative_query_cost_budget: chosen.cumulative_query_cost_budget.clone(),
         result_masking: result_masking_policy_from_profile(chosen),
+        sql_policy: chosen.sql_policy.clone(),
         require_signed_tools: chosen.require_signed_tools(),
     }))
 }
@@ -804,6 +812,7 @@ fn resolve_profile_options_from_config_with(
         level: ctx.level_state,
         require_signed_tools: chosen.require_signed_tools(),
         max_query_cost: chosen.max_query_cost,
+        cumulative_query_cost_budget: chosen.cumulative_query_cost_budget.clone(),
         pool_settings: ctx.pool_settings,
         doctor_caps,
         connect_timeout_seconds: chosen.connect_timeout_seconds,
@@ -1728,6 +1737,35 @@ fn build_write_intent_log(
     finish_write_intent_log_build(log)
 }
 
+fn has_cumulative_query_cost_budget(config: &OracleMcpConfig) -> bool {
+    config
+        .profiles
+        .iter()
+        .any(|profile| profile.cumulative_query_cost_budget.is_some())
+}
+
+fn build_query_cost_budget_store(
+    enabled: bool,
+    owner: Option<&ServiceOwner>,
+) -> Result<Option<Arc<QueryCostBudgetStore>>, (&'static str, String)> {
+    if !enabled {
+        return Ok(None);
+    }
+    let owner = owner.ok_or_else(|| {
+        (
+            "ORACLEMCP_QUERY_COST_BUDGET_UNAVAILABLE",
+            "durable service state owner was not initialized".to_owned(),
+        )
+    })?;
+    let store = QueryCostBudgetStore::open_with_owner(owner.clone()).map_err(|_| {
+        (
+            "ORACLEMCP_QUERY_COST_BUDGET_UNAVAILABLE",
+            "failed to open durable cumulative query-cost budget state".to_owned(),
+        )
+    })?;
+    Ok(Some(Arc::new(store)))
+}
+
 #[cfg(test)]
 fn build_write_intent_log_at(
     root: &Path,
@@ -1997,7 +2035,10 @@ struct DispatcherWiring {
     level: SessionLevelState,
     request_timeout: Option<std::time::Duration>,
     max_query_cost: Option<u64>,
+    cumulative_query_cost_budget: Option<CumulativeQueryCostBudgetConfig>,
+    query_cost_budgets: Option<Arc<QueryCostBudgetStore>>,
     result_masking: Option<ResultMaskingPolicy>,
+    sql_policy: Option<SqlPolicyConfig>,
     secret_resolver: Arc<dyn SecretResolver>,
     custom_catalog: CustomToolCatalog,
     exposure: McpExposurePolicy,
@@ -2022,7 +2063,9 @@ fn apply_selected_profile_to_wiring(
     wiring.level = selected.level;
     wiring.request_timeout = selected.request_timeout;
     wiring.max_query_cost = selected.max_query_cost;
+    wiring.cumulative_query_cost_budget = selected.cumulative_query_cost_budget;
     wiring.result_masking = selected.result_masking;
+    wiring.sql_policy = selected.sql_policy;
 }
 
 fn build_oracle_dispatcher(
@@ -2041,10 +2084,19 @@ fn build_oracle_dispatcher(
     )
     .with_request_timeout(wiring.request_timeout)
     .with_max_query_cost(wiring.max_query_cost)
+    .with_cumulative_query_cost_budget(wiring.cumulative_query_cost_budget.clone())
     .with_result_masking_policy(wiring.result_masking.clone())
+    // SQL policy is part of the profile's startup snapshot, just like the
+    // operating level and response masking. Without this installation, only a
+    // later profile switch would govern the lane, which would fail open for the
+    // initially served profile.
+    .with_sql_policy(wiring.sql_policy.clone())
     .with_mcp_exposure(wiring.exposure.clone())
     .with_profile_drain_state(wiring.profile_drain.clone())
     .with_exports(Arc::clone(&wiring.exports));
+    if let Some(query_cost_budgets) = &wiring.query_cost_budgets {
+        dispatcher = dispatcher.with_query_cost_budget_store(Arc::clone(query_cost_budgets));
+    }
     if let Some(auditor) = &wiring.auditor {
         dispatcher = dispatcher.with_auditor(Arc::clone(auditor));
     }
@@ -2096,9 +2148,13 @@ async fn open_lane_runtime_connections(
                 level: resolved.level.clone(),
                 request_timeout: resolved.opts.call_timeout,
                 max_query_cost: resolved.max_query_cost,
+                cumulative_query_cost_budget: resolved.cumulative_query_cost_budget.clone(),
                 result_masking: config
                     .profile(&resolved.name)
                     .and_then(result_masking_policy_from_profile),
+                sql_policy: config
+                    .profile(&resolved.name)
+                    .and_then(|profile| profile.sql_policy.clone()),
                 require_signed_tools: resolved.require_signed_tools,
             };
             match try_open_runtime_connections(cx, resolved).await {
@@ -2782,7 +2838,10 @@ struct ServerBuildOptions {
     secret_resolver: Arc<dyn SecretResolver>,
     request_timeout: Option<std::time::Duration>,
     max_query_cost: Option<u64>,
+    cumulative_query_cost_budget: Option<CumulativeQueryCostBudgetConfig>,
+    query_cost_budgets: Option<Arc<QueryCostBudgetStore>>,
     result_masking: Option<ResultMaskingPolicy>,
+    sql_policy: Option<SqlPolicyConfig>,
     metrics: Option<Arc<Metrics>>,
     profile_drain: ProfileDrainState,
 }
@@ -2845,7 +2904,10 @@ fn build_server_with_lifecycle(
         level,
         request_timeout: options.request_timeout,
         max_query_cost: options.max_query_cost,
+        cumulative_query_cost_budget: options.cumulative_query_cost_budget,
+        query_cost_budgets: options.query_cost_budgets,
         result_masking: options.result_masking,
+        sql_policy: options.sql_policy,
         secret_resolver: options.secret_resolver,
         custom_catalog: options.custom_catalog,
         exposure,
@@ -3281,47 +3343,61 @@ fn run_serve(
     // as `credential_ref` / `wallet_password_ref` until the actual connection
     // opener runs (stdio/stateless startup connect, readiness probe connect, or
     // stateful per-lane connect).
-    let (connection_plan, active_profile, level, request_timeout, max_query_cost, result_masking) =
-        match select_runtime_profile_from_config(&full_config, profile.as_deref()) {
-            Ok(Some(selected)) => {
-                let active_profile = Some(selected.name.clone());
-                (
-                    RuntimeConnectionPlan::Profile(selected.name),
-                    active_profile,
-                    selected.level,
-                    selected.request_timeout,
-                    selected.max_query_cost,
-                    selected.result_masking,
-                )
-            }
-            Ok(None) => (
-                RuntimeConnectionPlan::Default,
+    let (
+        connection_plan,
+        active_profile,
+        level,
+        request_timeout,
+        max_query_cost,
+        cumulative_query_cost_budget,
+        result_masking,
+        sql_policy,
+    ) = match select_runtime_profile_from_config(&full_config, profile.as_deref()) {
+        Ok(Some(selected)) => {
+            let active_profile = Some(selected.name.clone());
+            (
+                RuntimeConnectionPlan::Profile(selected.name),
+                active_profile,
+                selected.level,
+                selected.request_timeout,
+                selected.max_query_cost,
+                selected.cumulative_query_cost_budget,
+                selected.result_masking,
+                selected.sql_policy,
+            )
+        }
+        Ok(None) => (
+            RuntimeConnectionPlan::Default,
+            None,
+            default_read_only_level(),
+            OracleConnectOptions::default().call_timeout,
+            None,
+            None,
+            None,
+            None,
+        ),
+        Err(e) if profile.is_some() => {
+            emit_status_error(
+                robot_json,
+                "ORACLEMCP_CONFIG_INVALID",
+                &format!("failed to resolve connection profile: {e}"),
+            );
+            return ExitCode::from(2);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
+            (
+                RuntimeConnectionPlan::Stub(e),
                 None,
                 default_read_only_level(),
                 OracleConnectOptions::default().call_timeout,
                 None,
                 None,
-            ),
-            Err(e) if profile.is_some() => {
-                emit_status_error(
-                    robot_json,
-                    "ORACLEMCP_CONFIG_INVALID",
-                    &format!("failed to resolve connection profile: {e}"),
-                );
-                return ExitCode::from(2);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
-                (
-                    RuntimeConnectionPlan::Stub(e),
-                    None,
-                    default_read_only_level(),
-                    OracleConnectOptions::default().call_timeout,
-                    None,
-                    None,
-                )
-            }
-        };
+                None,
+                None,
+            )
+        }
+    };
 
     let custom_catalog =
         match load_custom_catalog_for_snapshot(&full_config, active_profile.as_deref(), &level) {
@@ -3360,15 +3436,18 @@ fn run_serve(
             return ExitCode::from(2);
         }
     };
-    let service_owner =
-        match build_service_owner(listen.is_some() || reachable_ceiling > OperatingLevel::ReadOnly)
-        {
-            Ok(owner) => owner,
-            Err((code, message)) => {
-                emit_status_error(robot_json, code, &message);
-                return ExitCode::from(2);
-            }
-        };
+    let query_cost_budget_enabled = has_cumulative_query_cost_budget(&full_config);
+    let service_owner = match build_service_owner(
+        listen.is_some()
+            || reachable_ceiling > OperatingLevel::ReadOnly
+            || query_cost_budget_enabled,
+    ) {
+        Ok(owner) => owner,
+        Err((code, message)) => {
+            emit_status_error(robot_json, code, &message);
+            return ExitCode::from(2);
+        }
+    };
     let write_intents = match build_write_intent_log(reachable_ceiling, service_owner.as_ref()) {
         Ok(write_intents) => write_intents,
         Err((code, message)) => {
@@ -3376,6 +3455,14 @@ fn run_serve(
             return ExitCode::from(2);
         }
     };
+    let query_cost_budgets =
+        match build_query_cost_budget_store(query_cost_budget_enabled, service_owner.as_ref()) {
+            Ok(store) => store,
+            Err((code, message)) => {
+                emit_status_error(robot_json, code, &message);
+                return ExitCode::from(2);
+            }
+        };
 
     match listen {
         // ── stdio transport (default) ──────────────────────────────────────
@@ -3409,7 +3496,10 @@ fn run_serve(
                     secret_resolver: Arc::clone(&secret_resolver),
                     request_timeout,
                     max_query_cost,
+                    cumulative_query_cost_budget: cumulative_query_cost_budget.clone(),
+                    query_cost_budgets: query_cost_budgets.clone(),
                     result_masking: result_masking.clone(),
+                    sql_policy: sql_policy.clone(),
                     metrics: None,
                     profile_drain: ProfileDrainState::from_config(full_config.clone()),
                 },
@@ -3563,7 +3653,10 @@ fn run_serve(
                     secret_resolver: Arc::clone(&secret_resolver),
                     request_timeout,
                     max_query_cost,
+                    cumulative_query_cost_budget: cumulative_query_cost_budget.clone(),
+                    query_cost_budgets: query_cost_budgets.clone(),
                     result_masking: result_masking.clone(),
+                    sql_policy: sql_policy.clone(),
                     metrics: Some(Arc::clone(&metrics)),
                     profile_drain: profile_drain.clone(),
                 },

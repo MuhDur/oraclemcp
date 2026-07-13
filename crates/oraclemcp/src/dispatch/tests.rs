@@ -3,11 +3,13 @@
 //! every raw-string fixture byte-identical.
 
 use super::*;
+use crate::cost_budget::QueryCostBudgetStore;
 use crate::registry::tool_names;
 use asupersync::Cx;
 use asupersync::channel::mpsc;
 use asupersync::runtime::RuntimeBuilder;
-use oraclemcp_core::{DispatchCloseReason, DispatchContext, ScopeGrant};
+use oraclemcp_config::CumulativeQueryCostBudgetConfig;
+use oraclemcp_core::{DispatchCloseReason, DispatchContext, FileStore, ScopeGrant};
 use oraclemcp_db::{OracleBackend, OracleCell, OracleRow, QueryRowStream, QueryRowStreamStart};
 use oraclemcp_guard::SET_TRANSACTION_READ_ONLY;
 use oraclemcp_guard::corpus::{CorpusRecord, ReasonCategory};
@@ -937,6 +939,20 @@ struct ExecRecordingMock {
     rows_affected: u64,
 }
 
+/// D2's narrow live-model: the dictionary answers the one-child probe and the
+/// executor records whether a CREATE/DROP could ever reach Oracle.
+#[derive(Default)]
+struct EditionLifecycleState {
+    child_already_exists: AtomicBool,
+    queries: Mutex<Vec<(String, Vec<OracleBind>)>>,
+    executed: Mutex<Vec<String>>,
+    commits: AtomicUsize,
+}
+
+struct EditionLifecycleMock {
+    state: Arc<EditionLifecycleState>,
+}
+
 struct CancelAfterExecuteMock {
     state: Arc<ExecState>,
 }
@@ -1020,6 +1036,83 @@ impl ExecRecordingMock {
             rows_affected: 3,
         }
     }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for EditionLifecycleMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        self.state
+            .queries
+            .lock()
+            .expect("edition query mutex")
+            .push((sql.to_owned(), binds.to_vec()));
+        if sql.to_ascii_lowercase().contains("from all_editions")
+            && self.state.child_already_exists.load(Ordering::SeqCst)
+        {
+            return Ok(vec![semantic_row(&[(
+                "EDITION_NAME",
+                Some("APP_RELEASE_CURRENT"),
+            )])]);
+        }
+        Ok(Vec::new())
+    }
+
+    async fn execute(&self, _cx: &Cx, sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        self.state
+            .executed
+            .lock()
+            .expect("edition execute mutex")
+            .push(sql.to_owned());
+        Ok(0)
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.state.commits.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+fn edition_lifecycle_dispatcher(state: Arc<EditionLifecycleState>) -> OracleDispatcher {
+    OracleDispatcher::new_with_profile_level(
+        Box::new(EditionLifecycleMock { state }),
+        Some("d2-edition-test".to_owned()),
+        ddl_level(),
+    )
+}
+
+fn execute_confirmed_edition_sql(
+    dispatcher: &OracleDispatcher,
+    sql: &str,
+) -> Result<Value, ErrorEnvelope> {
+    let confirm = preview_confirm(dispatcher, sql);
+    dispatcher.dispatch(
+        "oracle_execute",
+        json!({ "sql": sql, "commit": true, "confirm": confirm }),
+    )
 }
 
 #[async_trait::async_trait(?Send)]
@@ -4738,6 +4831,129 @@ fn writes_ddl_and_dcl_are_refused_before_touching_the_db() {
 }
 
 #[test]
+fn edition_lifecycle_executes_a_legal_linear_child_and_retires_it_through_ddl_gates() {
+    let state = Arc::new(EditionLifecycleState::default());
+    let dispatcher = edition_lifecycle_dispatcher(Arc::clone(&state));
+    let create = "CREATE EDITION legal_child AS CHILD OF legal_parent";
+
+    let created = execute_confirmed_edition_sql(&dispatcher, create)
+        .expect("the sole child of an edition is a governed DDL operation");
+    assert_eq!(created["executed"], json!(true));
+    assert_eq!(created["committed"], json!(true));
+    assert_eq!(created["required_level"], json!("DDL"));
+    assert_eq!(created["danger"], json!("DESTRUCTIVE"));
+    let queries = state.queries.lock().expect("edition query mutex");
+    assert_eq!(queries.len(), 1, "one-child check must run before CREATE");
+    assert!(
+        queries[0]
+            .0
+            .to_ascii_lowercase()
+            .contains("from all_editions")
+    );
+    assert_eq!(
+        queries[0].1,
+        vec![OracleBind::String("LEGAL_PARENT".to_owned())],
+        "the parent is a positional bind, never SQL interpolation"
+    );
+    drop(queries);
+
+    let retired = execute_confirmed_edition_sql(&dispatcher, "DROP EDITION legal_parent CASCADE")
+        .expect("retiring an old edition uses the same DDL confirmation path");
+    assert_eq!(retired["executed"], json!(true));
+    assert_eq!(retired["required_level"], json!("DDL"));
+    let executed = state.executed.lock().expect("edition execute mutex");
+    assert_eq!(executed.len(), 2);
+    assert!(executed[0].ends_with(create));
+    assert!(executed[1].ends_with("DROP EDITION legal_parent CASCADE"));
+    drop(executed);
+    assert_eq!(state.commits.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn edition_second_child_is_refused_before_oracle_with_a_typed_one_child_envelope() {
+    let state = Arc::new(EditionLifecycleState::default());
+    state.child_already_exists.store(true, Ordering::SeqCst);
+    let dispatcher = edition_lifecycle_dispatcher(Arc::clone(&state));
+    let create = "CREATE EDITION rejected_child AS CHILD OF occupied_parent";
+
+    let error = execute_confirmed_edition_sql(&dispatcher, create)
+        .expect_err("a parent that already has a child must never issue a second CREATE");
+    assert_eq!(error.error_class, ErrorClass::ForbiddenStatement);
+    assert_eq!(error.ora_code, Some(38_807));
+    let reason = error
+        .structured_reason
+        .as_ref()
+        .expect("one-child refusal must be machine-readable");
+    assert_eq!(reason.category, ReasonCategory::OneChildEdition);
+    assert_eq!(
+        reason.offending_construct.as_deref(),
+        Some("CREATE EDITION … AS CHILD OF …")
+    );
+    assert!(
+        reason
+            .minimal_rewrite
+            .as_deref()
+            .is_some_and(|step| step.contains("retire or merge"))
+    );
+    assert!(
+        error
+            .next_steps
+            .iter()
+            .any(|step| step.contains("ORA-38807")),
+        "the remediation must honestly name Oracle's one-child rule: {error:?}"
+    );
+    assert_eq!(state.queries.lock().expect("edition query mutex").len(), 1);
+    assert!(
+        state
+            .executed
+            .lock()
+            .expect("edition execute mutex")
+            .is_empty(),
+        "the conflict must be refused before CREATE EDITION reaches Oracle"
+    );
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn edition_inflight_child_reservation_refuses_a_second_proposal_before_dictionary_oracle_io() {
+    let create = "CREATE EDITION competing_child AS CHILD OF inflight_parent";
+    let parent = match parse_edition_lifecycle_sql(create) {
+        EditionLifecycleParse::Parsed(EditionLifecycleSql::CreateChild { parent, .. }) => parent,
+        other => panic!("test fixture must be an exact edition create: {other:?}"),
+    };
+    let _first_proposal = reserve_edition_child_slot(&parent, Some("d2-edition-test"))
+        .expect("first proposal reserves the parent's only child slot");
+
+    let state = Arc::new(EditionLifecycleState::default());
+    let dispatcher = edition_lifecycle_dispatcher(Arc::clone(&state));
+    let error = execute_confirmed_edition_sql(&dispatcher, create)
+        .expect_err("an in-flight first proposal owns the only child slot");
+    assert_eq!(
+        error
+            .structured_reason
+            .as_ref()
+            .map(|reason| reason.category),
+        Some(ReasonCategory::OneChildEdition)
+    );
+    assert!(
+        state
+            .queries
+            .lock()
+            .expect("edition query mutex")
+            .is_empty(),
+        "the local reservation resolves the concurrent conflict before any dictionary round trip"
+    );
+    assert!(
+        state
+            .executed
+            .lock()
+            .expect("edition execute mutex")
+            .is_empty(),
+        "the second CREATE must never reach Oracle"
+    );
+}
+
+#[test]
 fn malformed_and_unauthorized_sql_are_refused_before_any_db_io() {
     let counts = Arc::new(TouchCounts::default());
     let dispatcher = OracleDispatcher::new(Box::new(TouchCountingMock {
@@ -6809,6 +7025,34 @@ fn query_cost_dispatcher(
     (dispatcher, state)
 }
 
+fn cumulative_query_cost_dispatcher(
+    root: PlanCostFixture,
+    max_cost: u64,
+) -> (OracleDispatcher, Arc<QueryCostGateState>, tempfile::TempDir) {
+    let state = Arc::new(QueryCostGateState::new(root));
+    let root = tempfile::tempdir().expect("temporary durable budget root");
+    let file_store = FileStore::open(root.path()).expect("open durable budget root");
+    let owner = file_store
+        .acquire_service_owner("cumulative-query-cost-test")
+        .expect("acquire durable budget owner");
+    let store = Arc::new(
+        QueryCostBudgetStore::open_with_owner(owner).expect("open cumulative budget store"),
+    );
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(QueryCostGateMock {
+            state: Arc::clone(&state),
+        }),
+        Some("dev".to_owned()),
+        read_write_level(),
+    )
+    .with_cumulative_query_cost_budget(Some(CumulativeQueryCostBudgetConfig {
+        max_cost,
+        window_seconds: 60,
+    }))
+    .with_query_cost_budget_store(store);
+    (dispatcher, state, root)
+}
+
 #[test]
 fn query_cost_gate_requires_explicit_plan_table_opt_in_before_db() {
     let (dispatcher, state) = query_cost_dispatcher(PlanCostFixture::Root(Some(2)), 50_000);
@@ -6924,6 +7168,101 @@ fn query_cost_gate_allows_under_ceiling_then_selects() {
     assert_eq!(state.plan_cost_reads.load(Ordering::SeqCst), 1);
     assert_eq!(state.actual_reads.load(Ordering::SeqCst), 1);
     assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn cumulative_query_cost_budget_refuses_at_limit_and_ignores_agent_reset_fields() {
+    let (dispatcher, state, _state_root) =
+        cumulative_query_cost_dispatcher(PlanCostFixture::Root(Some(2)), 2);
+    let context = DispatchContext::default().with_principal_key("oauth:principal-a");
+
+    let first = dispatcher
+        .dispatch_with_context(
+            "oracle_query",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "allow_plan_table_write": true,
+            }),
+            context,
+        )
+        .expect("first query exhausts the principal budget");
+    assert_eq!(first["row_count"], json!(1));
+    assert_eq!(state.actual_reads.load(Ordering::SeqCst), 1);
+
+    // QueryArgs deliberately has no principal or reset control. Even unknown
+    // request fields must not influence the server-derived accounting key or
+    // turn an exhausted principal into an unmetered request.
+    let err = dispatcher
+        .dispatch_with_context(
+            "oracle_query",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "allow_plan_table_write": true,
+                "principal": "oauth:another-principal",
+                "reset_budget": true,
+            }),
+            context,
+        )
+        .expect_err("at-budget principal remains refused despite forged reset fields");
+
+    assert_eq!(err.error_class, ErrorClass::PolicyDenied);
+    assert!(
+        err.message
+            .contains("cumulative_query_cost_budget_exhausted"),
+        "{err:?}"
+    );
+    assert_eq!(
+        err.structured_reason
+            .as_ref()
+            .expect("budget refusal is typed")
+            .category,
+        ReasonCategory::CostBudgetExceeded
+    );
+    assert_eq!(
+        state.actual_reads.load(Ordering::SeqCst),
+        1,
+        "an exhausted cumulative budget must refuse before target execution"
+    );
+    assert_eq!(state.explain_writes.load(Ordering::SeqCst), 2);
+    assert_eq!(state.plan_cost_reads.load(Ordering::SeqCst), 2);
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn cumulative_query_cost_budget_only_tightens_existing_query_refusals() {
+    let (dispatcher, state, _state_root) =
+        cumulative_query_cost_dispatcher(PlanCostFixture::Root(Some(190_000)), 250_000);
+    let dispatcher = dispatcher.with_max_query_cost(Some(50_000));
+
+    let ceiling_err = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "allow_plan_table_write": true,
+            }),
+        )
+        .expect_err("the per-statement ceiling still wins before cumulative admission");
+    assert!(ceiling_err.message.contains("query_cost_exceeded"));
+    assert_eq!(state.actual_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(state.explain_writes.load(Ordering::SeqCst), 1);
+
+    let classifier_err = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({
+                "sql": "DELETE FROM app_orders",
+                "allow_plan_table_write": true,
+            }),
+        )
+        .expect_err("the read guard refusal precedes every cumulative-budget action");
+    assert_eq!(classifier_err.error_class, ErrorClass::OperatingLevelTooLow);
+    assert_eq!(
+        state.explain_writes.load(Ordering::SeqCst),
+        1,
+        "a read-guard refusal never reaches the PLAN_TABLE budget estimate"
+    );
+    assert_eq!(state.actual_reads.load(Ordering::SeqCst), 0);
 }
 
 #[test]

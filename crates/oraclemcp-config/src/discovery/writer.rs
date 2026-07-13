@@ -226,6 +226,12 @@ fn render_profile_block(synth_profile: &SynthesizedProfile) -> String {
             // with the scalars even though it is last in the disposition table.
             "base" => push_commented_scalar(&mut scalars, fd, "\"another_profile\""),
             // ── COMMENTED sections ──────────────────────────────────────────
+            "cumulative_query_cost_budget" => {
+                push_help(&mut sections, fd.help);
+                sections.push_str("# [profiles.cumulative_query_cost_budget]\n");
+                sections.push_str("# max_cost = 500000\n");
+                sections.push_str("# window_seconds = 3600\n");
+            }
             "session_identity" => {
                 push_help(&mut sections, fd.help);
                 sections.push_str("# [profiles.session_identity]\n");
