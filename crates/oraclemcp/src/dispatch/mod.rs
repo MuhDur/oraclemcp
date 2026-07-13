@@ -1481,6 +1481,7 @@ impl OracleDispatcher {
                 truncated: objects.len() == max_rows,
                 next_cursor: None,
                 total_bytes: 0,
+                observed_scn: None,
                 mask_certificate: source_row.as_ref().and_then(|row| {
                     policy
                         .result_masking
@@ -12967,26 +12968,19 @@ impl OracleDispatcher {
                     ));
                 }
 
-                // Arc A3: when an audit sink is configured, capture the SCN
-                // before the data query and persist a Pending record before
-                // the query itself runs. On the normal path this is the first
-                // SELECT in the already-armed read-only transaction, so later
-                // reads share its consistent snapshot. For a structured
-                // timestamp target, resolve Oracle's timestamp mapping once
-                // and execute at that exact SCN instead of recording a lossy
-                // wall-clock hint.
-                let replay_target = if auditor.is_some() {
-                    match as_of.as_ref() {
-                        Some(as_of) => Some(AsOf::Scn(
-                            as_of
-                                .resolve_to_scn(cx, &read_conn)
-                                .await
-                                .map_err(DbError::into_envelope)?,
-                        )),
-                        None => None,
-                    }
-                } else {
-                    None
+                // Resolve every structured flashback target before execution,
+                // regardless of whether audit is configured. Timestamp input
+                // becomes the exact SCN Oracle selected, which the response
+                // echoes as a replay handle; the guard still sees only the
+                // unchanged base SQL.
+                let replay_target = match as_of.as_ref() {
+                    Some(as_of) => Some(AsOf::Scn(
+                        as_of
+                            .resolve_to_scn(cx, &read_conn)
+                            .await
+                            .map_err(DbError::into_envelope)?,
+                    )),
+                    None => None,
                 };
                 let observed_scn = match (auditor, replay_target.as_ref()) {
                     (Some(_), Some(AsOf::Scn(scn))) => Some(*scn),
@@ -13037,8 +13031,7 @@ impl OracleDispatcher {
                     )?;
                 }
 
-                let effective_as_of = replay_target.as_ref().or(as_of.as_ref());
-                let read = match effective_as_of {
+                let read = match replay_target.as_ref() {
                     Some(as_of) => {
                         read_query_as_of(
                             cx,

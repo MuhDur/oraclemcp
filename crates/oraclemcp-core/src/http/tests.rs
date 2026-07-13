@@ -2383,6 +2383,11 @@ fn audit_tail_projects_a_bound_redacted_verdict_certificate() {
     let body = response_json(&response);
     let record = &body["data"]["records"][0];
     let certificate = &record["verdict_certificate"];
+    assert_eq!(
+        record["observed_scn"],
+        serde_json::json!(42_000_001_u64),
+        "the audit tail exposes the exact SCN recorded for replay"
+    );
     // The four client-side checks from the verdict-proof inspector all hold.
     assert_eq!(
         certificate["bound_audit_hash"], record["proof"]["entry_hash"],

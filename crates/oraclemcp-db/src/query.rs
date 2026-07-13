@@ -60,6 +60,11 @@ pub struct QueryResponse {
     /// Compact serialized bytes across the row objects in this page. Column
     /// metadata, pagination fields, and outer MCP response framing are excluded.
     pub total_bytes: usize,
+    /// Exact database snapshot used for a flashback (`as_of`) read. A timestamp
+    /// target is resolved by Oracle before the read and echoed here as its SCN,
+    /// so callers can replay the same snapshot without a lossy wall-clock hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_scn: Option<u64>,
     /// Proof-carrying egress certificate for result masking, present only when
     /// the page's active masking policy transformed one or more columns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -271,6 +276,11 @@ pub async fn read_query_as_of(
     serialize_opts: &SerializeOptions,
     as_of: &AsOf,
 ) -> Result<QueryResponse, DbError> {
+    // Resolve a timestamp before opening the flashback window. The fixed,
+    // server-owned conversion preserves the exact SCN Oracle chose and lets the
+    // response carry a deterministic replay handle for either input form.
+    let observed_scn = as_of.resolve_to_scn(cx, conn).await?;
+    let resolved_as_of = AsOf::Scn(observed_scn);
     // ORA-08183: ENABLE must not run inside a transaction. Clear any open
     // (startup / metadata / read-only-backstop) transaction first.
     conn.rollback(cx).await?;
@@ -278,7 +288,7 @@ pub async fn read_query_as_of(
     // ENABLE cannot hit ORA-08184 ("re-enable while in Flashback mode").
     conn.flashback_disable(cx).await?;
 
-    let (enable_sql, bind) = as_of.enable_call();
+    let (enable_sql, bind) = resolved_as_of.enable_call();
     // Set the session read snapshot. A failure here (e.g. ORA-01031 missing
     // FLASHBACK privilege, ORA-08180 no snapshot at that SCN) is surfaced
     // fail-closed; flashback was NOT enabled, so no window is left open.
@@ -290,6 +300,10 @@ pub async fn read_query_as_of(
     // outcome. Capture the result WITHOUT `?` so the window is always closed.
     let read = read_query(cx, conn, sql, binds, caps, offset, serialize_opts)
         .await
+        .map(|mut response| {
+            response.observed_scn = Some(observed_scn);
+            response
+        })
         .map_err(map_flashback_refusal);
     let disable = conn.flashback_disable(cx).await;
     // End the flashback read transaction so the next statement starts clean.
@@ -443,6 +457,7 @@ impl QueryPageBuilder {
             truncated,
             next_cursor,
             total_bytes: self.total_bytes,
+            observed_scn: None,
             mask_certificate: self.mask_certificate,
         })
     }
@@ -1334,8 +1349,8 @@ mod tests {
     #[test]
     fn read_query_as_of_brackets_the_proven_read_with_enable_disable() {
         let conn = FlashbackRecorder::default();
-        let events = run_with_cx(|cx| async move {
-            read_query_as_of(
+        let (response, events) = run_with_cx(|cx| async move {
+            let response = read_query_as_of(
                 &cx,
                 &conn,
                 "SELECT count(*) AS c FROM t",
@@ -1347,8 +1362,9 @@ mod tests {
             )
             .await
             .expect("flashback read");
-            conn.events.into_inner().expect("events")
+            (response, conn.events.into_inner().expect("events"))
         });
+        assert_eq!(response.observed_scn, Some(4242));
         // rollback(pre) → defensive DISABLE → ENABLE(:1) → query → DISABLE → rollback
         assert_eq!(
             events,
@@ -1360,6 +1376,41 @@ mod tests {
                 "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
                 "rollback".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn read_query_as_of_timestamp_echoes_oracles_resolved_scn() {
+        let conn = FlashbackRecorder::default();
+        let (response, events) = run_with_cx(|cx| async move {
+            let response = read_query_as_of(
+                &cx,
+                &conn,
+                "SELECT count(*) AS c FROM t",
+                &[],
+                QueryCaps::default(),
+                0,
+                &SerializeOptions::default(),
+                &AsOf::Timestamp("2026-07-13 12:00:00".to_owned()),
+            )
+            .await
+            .expect("timestamp flashback read");
+            (response, conn.events.into_inner().expect("events"))
+        });
+
+        assert_eq!(response.observed_scn, Some(4242));
+        assert_eq!(
+            events,
+            vec![
+                format!("query[1]:{TIMESTAMP_TO_SCN_SQL}"),
+                "rollback".to_owned(),
+                "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
+                "exec[1]:BEGIN DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;".to_owned(),
+                "query".to_owned(),
+                "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
+                "rollback".to_owned(),
+            ],
+            "timestamp conversion is fixed and bound, then the resolved SCN drives flashback"
         );
     }
 
@@ -1717,7 +1768,7 @@ mod tests {
                 QueryCaps::default(),
                 0,
                 &SerializeOptions::default(),
-                &AsOf::Timestamp("2026-01-01 00:00:00".to_owned()),
+                &AsOf::Scn(42),
             )
             .await
             .expect_err("read fails");

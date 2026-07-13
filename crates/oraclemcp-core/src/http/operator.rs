@@ -2913,6 +2913,7 @@ pub(super) fn redacted_audit_record(
         "outcome": record.outcome,
         "correlation": record.correlation,
         "rows_affected": record.rows_affected,
+        "observed_scn": record.observed_scn,
         "sql_sha256": record.sql_sha256,
         "sql_normalized_sha256": record.sql_normalized_sha256,
         "verdict_certificate": certificate,

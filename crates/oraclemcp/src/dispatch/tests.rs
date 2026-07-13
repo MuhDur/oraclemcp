@@ -5122,6 +5122,30 @@ fn read_base_with_as_of_dispatches_through_the_flashback_wrapper() {
         out.get("rows").is_some(),
         "returns a normal, inline query response"
     );
+    assert_eq!(
+        out["observed_scn"],
+        json!(9_000_000_u64),
+        "the client receives the exact SCN used for the flashback read"
+    );
+}
+
+#[test]
+fn timestamp_as_of_echoes_oracles_resolved_scn_to_the_client() {
+    // The timestamp stays out of the classifier input, but Oracle resolves it
+    // to an exact SCN before the flashback window opens. The driver-free mock
+    // returns 424242 for TIMESTAMP_TO_SCN, so this asserts the client sees the
+    // resolved replay handle rather than the caller's lossy timestamp string.
+    let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+    let out = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({
+                "sql": "SELECT count(*) AS c FROM app.t",
+                "as_of": { "timestamp": "2026-07-13 12:00:00" }
+            }),
+        )
+        .expect("a timestamp flashback read resolves and returns its SCN");
+    assert_eq!(out["observed_scn"], json!(424_242_u64));
 }
 
 #[test]

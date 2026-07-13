@@ -1357,6 +1357,76 @@ mod live {
     }
 
     #[test]
+    fn live_flashback_timestamp_echoes_oracles_resolved_scn() {
+        // A timestamp is intentionally only a user-facing convenience input:
+        // Oracle resolves it to the replayable SCN, and the response must give
+        // that exact value back to the client.
+        use oraclemcp_db::{AsOf, QueryCaps, read_query_as_of};
+        run_with_cx(|cx| async move {
+            let Some(conn) =
+                connect_or_skip(&cx, "live_flashback_timestamp_echoes_oracles_resolved_scn").await
+            else {
+                return;
+            };
+
+            let timestamp_rows = match conn
+                .query_rows(
+                    &cx,
+                    "SELECT TO_CHAR(SYSTIMESTAMP - INTERVAL '10' SECOND, \
+                     'YYYY-MM-DD HH24:MI:SS') AS FLASHBACK_TIMESTAMP FROM DUAL",
+                    &[],
+                )
+                .await
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    eprintln!(
+                        "[live-xe] SKIP timestamp flashback: cannot read server time ({error})"
+                    );
+                    return;
+                }
+            };
+            let Some(timestamp) = timestamp_rows
+                .first()
+                .and_then(|row| row.text("FLASHBACK_TIMESTAMP"))
+                .map(str::to_owned)
+            else {
+                panic!("Oracle returned no timestamp for timestamp-to-SCN flashback test");
+            };
+            let as_of = AsOf::Timestamp(timestamp);
+            let expected_scn = match as_of.resolve_to_scn(&cx, &conn).await {
+                Ok(scn) => scn,
+                Err(error) if error.to_string().contains("ORA-01031") => {
+                    eprintln!("[live-xe] SKIP timestamp-to-SCN: missing privilege ({error})");
+                    return;
+                }
+                Err(error) => panic!("timestamp-to-SCN resolution failed: {error}"),
+            };
+            let response = match read_query_as_of(
+                &cx,
+                &conn,
+                "SELECT count(*) AS c FROM dual",
+                &[],
+                QueryCaps::default(),
+                0,
+                &SerializeOptions::default(),
+                &as_of,
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(error) if error.to_string().contains("ORA-01031") => {
+                    eprintln!("[live-xe] SKIP timestamp flashback: missing privilege ({error})");
+                    return;
+                }
+                Err(error) => panic!("timestamp flashback read failed: {error}"),
+            };
+            assert_eq!(response.row_count, 1);
+            assert_eq!(response.observed_scn, Some(expected_scn));
+        });
+    }
+
+    #[test]
     fn live_flashback_old_timestamp_returns_typed_retention_refusal() {
         use oraclemcp_db::{AsOf, FlashbackRefusalKind, QueryCaps, read_query_as_of};
         run_with_cx(|cx| async move {
