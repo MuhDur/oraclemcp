@@ -247,6 +247,60 @@ fn time_diff_e2e_dry_run_uses_omcpb_and_reports_a_pass() {
     );
 }
 
+/// Arc N's policy proof must exercise the served MCP process, and registration
+/// is part of the contract: an unregistered scenario is not release evidence.
+#[test]
+fn sql_policy_e2e_dry_run_is_registered_and_schedules_omcpb() {
+    let root = repo_root();
+    let output = Command::new("bash")
+        .arg(root.join("scripts/e2e/sql_policy.sh"))
+        .args(["--log", "--dry-run"])
+        .current_dir(&root)
+        .env("ORACLEMCP_E2E_SEED", "4242")
+        .env(
+            "ORACLEMCP_E2E_ARTIFACT_DIR",
+            root.join("target/e2e-contract"),
+        )
+        .env("ORACLEMCP_LIVE_XE", "1")
+        .env("ORACLEMCP_TEST_DSN", "localhost:1522/FREEPDB1")
+        .env("ORACLEMCP_TEST_USER", "E2E_TEST")
+        .env("ORACLEMCP_TEST_PASSWORD", "not-used-in-dry-run")
+        .output()
+        .expect("run sql_policy dry-run");
+    assert!(
+        output.status.success(),
+        "sql_policy dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    let command_messages = events
+        .iter()
+        .filter(|event| event["event"] == "command_start")
+        .filter_map(|event| event["message"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        command_messages
+            .iter()
+            .any(|message| message.contains("omcpb build -p oraclemcp --bin oraclemcp")),
+        "SQL-policy dry-run did not schedule the omcpb package build: {command_messages:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "sql_policy"),
+        "missing passing SQL-policy completion: {events:?}"
+    );
+    let runner =
+        std::fs::read_to_string(root.join("scripts/e2e/run_all.sh")).expect("read run_all.sh");
+    assert!(
+        runner.contains("scripts/e2e/sql_policy.sh"),
+        "served SQL-policy proof must be dispatched by run_all.sh"
+    );
+}
+
 /// Arc J's corpus proof must drive the served binary, and registration is part
 /// of the contract: a script absent from `run_all.sh` is not e2e coverage.
 #[test]
@@ -294,6 +348,61 @@ fn refusal_corpus_e2e_dry_run_is_registered_and_schedules_omcpb() {
     assert!(
         runner.contains("scripts/e2e/refusal_corpus.sh"),
         "served refusal-corpus proof must be dispatched by run_all.sh"
+    );
+}
+
+/// Arc M must prove masking at the actual served MCP boundary. Keeping the
+/// scenario in the ordinary runner prevents the real-wire proof from becoming
+/// an uncalled script beside the direct DB-layer egress tests.
+#[test]
+fn served_egress_e2e_dry_run_is_registered_and_schedules_omcpb() {
+    let root = repo_root();
+    let output = Command::new("bash")
+        .arg(root.join("scripts/e2e/served_egress.sh"))
+        .args(["--log", "--dry-run"])
+        .current_dir(&root)
+        .env("ORACLEMCP_E2E_SEED", "4242")
+        .env(
+            "ORACLEMCP_E2E_ARTIFACT_DIR",
+            root.join("target/e2e-contract"),
+        )
+        .env("ORACLEMCP_LIVE_XE", "1")
+        .env("ORACLEMCP_SERVED_EGRESS_DSN", "localhost:1522/FREEPDB1")
+        .env("ORACLEMCP_SERVED_EGRESS_USER", "e2e_test")
+        .env("ORACLEMCP_SERVED_EGRESS_PASSWORD", "not-used-in-dry-run")
+        .output()
+        .expect("run served_egress dry-run");
+    assert!(
+        output.status.success(),
+        "served_egress dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    let command_messages = events
+        .iter()
+        .filter(|event| event["event"] == "command_start")
+        .filter_map(|event| event["message"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        command_messages
+            .iter()
+            .any(|message| message.contains("omcpb build -p oraclemcp --bin oraclemcp")),
+        "served-egress dry-run did not schedule the omcpb package build: {command_messages:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "served_egress"),
+        "missing passing served-egress completion: {events:?}"
+    );
+    let runner =
+        std::fs::read_to_string(root.join("scripts/e2e/run_all.sh")).expect("read run_all.sh");
+    assert!(
+        runner.contains("scripts/e2e/served_egress.sh"),
+        "served governed-egress proof must be dispatched by run_all.sh"
     );
 }
 

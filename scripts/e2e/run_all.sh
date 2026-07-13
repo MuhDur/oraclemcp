@@ -40,10 +40,12 @@ scenarios=(
   scripts/e2e/audit_append.sh
   scripts/e2e/live_oracle.sh
   scripts/e2e/egress.sh
+  scripts/e2e/served_egress.sh
   scripts/e2e/load_soak.sh
   scripts/e2e/live_xe_headline.sh
   scripts/e2e/oracle_version_matrix.sh
   scripts/e2e/time_diff.sh
+  scripts/e2e/sql_policy.sh
   scripts/e2e/refusal_corpus.sh
   scripts/e2e/fleet.sh
   scripts/e2e/reversible.sh
