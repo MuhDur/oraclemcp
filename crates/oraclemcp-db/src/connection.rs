@@ -50,6 +50,7 @@ use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{Budget, Cx, Time};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 #[cfg(feature = "test-utils")]
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -61,6 +62,58 @@ use std::time::Duration;
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const CLEANUP_MASKED_POLLS: u32 = 100;
+/// A CQN registration created before the notification-owner bead takes over
+/// must expire promptly if its caller cannot retain and clean it up. C1.3 owns
+/// the durable subscription lifetime and ceiling accounting.
+const CQN_TRANSIENT_TIMEOUT_SECONDS: u32 = 60;
+
+/// Opaque Oracle identity for one QUERY-level CQN registration.
+///
+/// This type contains no callback payload, rowids, or query rows. The adapter
+/// retains the driver callback identity separately so only adapter cleanup can
+/// use it; client-facing code must route a later event through a governed
+/// re-read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CqnQueryRegistration {
+    registration_id: u64,
+    query_id: u64,
+}
+
+impl CqnQueryRegistration {
+    /// Build opaque QUERY-registration metadata for an alternate backend.
+    ///
+    /// This constructor is not an authorization decision. Server code obtains
+    /// a usable source only after the CQN gate has re-classified and audited
+    /// the query immediately before the driver effect.
+    #[must_use]
+    pub const fn new(registration_id: u64, query_id: u64) -> Self {
+        CqnQueryRegistration {
+            registration_id,
+            query_id,
+        }
+    }
+
+    /// Oracle's opaque subscription registration id.
+    #[must_use]
+    pub const fn registration_id(self) -> u64 {
+        self.registration_id
+    }
+
+    /// Oracle's opaque registered-query id.
+    #[must_use]
+    pub const fn query_id(self) -> u64 {
+        self.query_id
+    }
+}
+
+impl std::fmt::Debug for CqnQueryRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CqnQueryRegistration")
+            .field("registration_id", &self.registration_id)
+            .field("query_id", &self.query_id)
+            .finish()
+    }
+}
 
 /// The pinned thin `oracledb` driver's own version string, read from the driver
 /// crate's [`oracledb::VERSION`] const (its `CARGO_PKG_VERSION`, resolved at the
@@ -930,6 +983,40 @@ pub trait OracleConnection: Send + Sync {
     /// must treat the session as dirty and run cleanup rollback/discard logic.
     async fn execute(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError>;
 
+    /// Create an Oracle CQN registration for exactly one already-proven query.
+    ///
+    /// This adapter issues only query-result-change registration and never
+    /// requests object-wide events or rowids. It is deliberately not an
+    /// agent-facing admission surface: callers must have just re-run their
+    /// profile, classifier, step-up, and audit gate before calling it.
+    async fn register_cqn_query(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<CqnQueryRegistration, DbError> {
+        let _ = (cx, sql, binds);
+        Err(DbError::UnsupportedFeature(
+            "query-level CQN registration is not supported by this Oracle backend".to_owned(),
+        ))
+    }
+
+    /// Deregister a query-level CQN subscription previously returned by
+    /// [`OracleConnection::register_cqn_query`].
+    ///
+    /// This is adapter cleanup, not a client-controlled action. Backends that
+    /// cannot retain the driver-owned callback identity fail explicitly.
+    async fn unregister_cqn_query(
+        &self,
+        cx: &Cx,
+        registration: CqnQueryRegistration,
+    ) -> Result<(), DbError> {
+        let _ = (cx, registration);
+        Err(DbError::UnsupportedFeature(
+            "query-level CQN deregistration is not supported by this Oracle backend".to_owned(),
+        ))
+    }
+
     /// Execute an adapter-internal PL/SQL routine block with positional OUT,
     /// IN-OUT, or return bind slots.
     ///
@@ -1098,6 +1185,9 @@ pub struct RustOracleConnection {
     /// cannot deadlock the cooperative scheduler. Keeping both limits behind
     /// one lock also makes each wire-call snapshot internally coherent.
     wire_limits: Mutex<WireLimits>,
+    /// Driver callback identities, keyed by registration id, kept private so
+    /// only adapter cleanup can use them. No CQN payload crosses this boundary.
+    cqn_client_ids: Mutex<HashMap<u64, Vec<u8>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1335,12 +1425,13 @@ mod driver {
             ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_ROWID,
             ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ,
             ORA_TYPE_NUM_UROWID, ORA_TYPE_NUM_VARCHAR, ORA_TYPE_NUM_VECTOR, QueryResult,
-            QueryValue, decode_lob_text,
+            QueryValue, SUBSCR_QOS_QUERY, TNS_SUBSCR_NAMESPACE_DBCHANGE, decode_lob_text,
         },
         vector::{Vector, VectorValues},
     };
     use oraclemcp_error::parse_ora_code;
     use serde_json::{Number, Value, json};
+    use std::collections::HashMap;
     use std::fmt::Display;
     use std::future::{Future, poll_fn};
     use std::num::NonZeroU32;
@@ -1398,6 +1489,7 @@ mod driver {
                 request_deadline: None,
                 request_quota: None,
             }),
+            cqn_client_ids: SyncMutex::new(HashMap::new()),
         })
     }
 
@@ -5441,6 +5533,145 @@ mod driver {
             Ok(result.row_count)
         }
 
+        async fn register_cqn_query(
+            &self,
+            cx: &Cx,
+            sql: &str,
+            binds: &[OracleBind],
+        ) -> Result<super::CqnQueryRegistration, DbError> {
+            super::db_checkpoint(cx, "oracle_db.cqn_register_query.before")?;
+            let binds: Vec<BindValue> = binds.iter().map(to_bind).collect();
+            let limits = self.wire_limits()?;
+            // `subscribe_register` / `register_query` receive the request Cx
+            // directly. Sampling the effective limit here preserves the shared
+            // quota/deadline accounting even though this driver API does not
+            // expose a separate per-call timeout argument.
+            let _driver_call_timeout =
+                limits.effective_timeout_ms(cx, "oracle_db.cqn_register_query.subscribe")?;
+            let mut inner = self.lock_inner(cx).await?;
+            let subscription = inner
+                .subscribe_register(
+                    cx,
+                    TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                    None,
+                    SUBSCR_QOS_QUERY,
+                    0,
+                    super::CQN_TRANSIENT_TIMEOUT_SECONDS,
+                    0,
+                    0,
+                    0,
+                )
+                .await
+                .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?;
+            let Some(client_id) = subscription.client_id else {
+                // Modern (21c+) QUERY CQN returns the callback identity. The
+                // transient server timeout bounds this legacy fallback rather
+                // than leaving an unmanageable standing registration behind.
+                return Err(DbError::UnsupportedFeature(
+                    "CQN registration did not return the callback identity required for safe cleanup"
+                        .to_owned(),
+                ));
+            };
+            let registration_id = subscription.registration_id;
+            let registered = inner
+                .register_query(
+                    cx,
+                    oracledb::Registration::new(sql, registration_id).bind(binds.as_slice()),
+                )
+                .await
+                .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)));
+            let query_id = match registered {
+                Ok(registered) => registered.query_id().ok_or_else(|| {
+                    DbError::UnsupportedFeature(
+                        "CQN QUERY registration did not return a query identity".to_owned(),
+                    )
+                }),
+                Err(error) => Err(error),
+            };
+            let query_id = match query_id {
+                Ok(query_id) => query_id,
+                Err(error) => {
+                    let cleanup = inner
+                        .subscribe_unregister(
+                            cx,
+                            registration_id,
+                            &client_id,
+                            TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                            None,
+                            SUBSCR_QOS_QUERY,
+                            0,
+                            super::CQN_TRANSIENT_TIMEOUT_SECONDS,
+                            0,
+                            0,
+                            0,
+                        )
+                        .await;
+                    if let Err(cleanup_error) = cleanup {
+                        tracing::warn!(
+                            error = %sanitize_driver_error(cleanup_error, &self.opts),
+                            "CQN query registration failed and cleanup could not be confirmed"
+                        );
+                    }
+                    return Err(error);
+                }
+            };
+            drop(inner);
+            super::db_checkpoint(cx, "oracle_db.cqn_register_query.after")?;
+            self.cqn_client_ids
+                .lock()
+                .map_err(|err| DbError::Internal(format!("CQN registration lock poisoned: {err}")))?
+                .insert(registration_id, client_id);
+            Ok(super::CqnQueryRegistration::new(registration_id, query_id))
+        }
+
+        async fn unregister_cqn_query(
+            &self,
+            cx: &Cx,
+            registration: super::CqnQueryRegistration,
+        ) -> Result<(), DbError> {
+            super::db_checkpoint(cx, "oracle_db.cqn_unregister_query.before")?;
+            let registration_id = registration.registration_id();
+            let client_id = self
+                .cqn_client_ids
+                .lock()
+                .map_err(|err| DbError::Internal(format!("CQN registration lock poisoned: {err}")))?
+                .get(&registration_id)
+                .cloned()
+                .ok_or_else(|| {
+                    DbError::UnsupportedFeature(
+                        "CQN registration has no driver-owned callback identity for cleanup"
+                            .to_owned(),
+                    )
+                })?;
+            let limits = self.wire_limits()?;
+            let _driver_call_timeout =
+                limits.effective_timeout_ms(cx, "oracle_db.cqn_unregister_query")?;
+            let mut inner = self.lock_inner(cx).await?;
+            inner
+                .subscribe_unregister(
+                    cx,
+                    registration_id,
+                    &client_id,
+                    TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                    None,
+                    SUBSCR_QOS_QUERY,
+                    0,
+                    super::CQN_TRANSIENT_TIMEOUT_SECONDS,
+                    0,
+                    0,
+                    0,
+                )
+                .await
+                .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?;
+            drop(inner);
+            super::db_checkpoint(cx, "oracle_db.cqn_unregister_query.after")?;
+            self.cqn_client_ids
+                .lock()
+                .map_err(|err| DbError::Internal(format!("CQN registration lock poisoned: {err}")))?
+                .remove(&registration_id);
+            Ok(())
+        }
+
         async fn call_routine(
             &self,
             cx: &Cx,
@@ -5839,6 +6070,7 @@ mod tests {
                 quarantine_reason: Some("flashback teardown failed".to_owned()),
             })),
             wire_limits: Mutex::new(WireLimits::default()),
+            cqn_client_ids: Mutex::new(HashMap::new()),
         };
         let runtime = RuntimeBuilder::current_thread()
             .build()

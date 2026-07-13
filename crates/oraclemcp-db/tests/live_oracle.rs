@@ -599,6 +599,80 @@ fn live_connect_ping_query_bind_describe() {
     });
 }
 
+#[test]
+fn live_cqn_query_registration_is_predicate_bound_and_cleanupable() {
+    run_with_cx(|cx| async move {
+        let test_name = "live_cqn_query_registration_is_predicate_bound_and_cleanupable";
+        let Some(conn) = connect_or_skip(&cx, test_name, test_opts()).await else {
+            return;
+        };
+        // Synthetic, throwaway fixture only. CQN registration is a standing
+        // server-side effect, so the test proves both QUERY registration and
+        // explicit adapter cleanup against a real 23ai service.
+        const TABLE: &str = "ORACLEMCP_CQN_C1_2_FIXTURE";
+        let _ = conn
+            .execute(&cx, &format!("DROP TABLE {TABLE} PURGE"), &[])
+            .await;
+        conn.execute(
+            &cx,
+            &format!("CREATE TABLE {TABLE} (id NUMBER PRIMARY KEY, label VARCHAR2(30))"),
+            &[],
+        )
+        .await
+        .expect("create synthetic CQN fixture");
+        conn.execute(
+            &cx,
+            &format!("INSERT INTO {TABLE} (id, label) VALUES (:1, :2)"),
+            &[
+                OracleBind::I64(1),
+                OracleBind::String("in-scope".to_owned()),
+            ],
+        )
+        .await
+        .expect("insert in-scope fixture row");
+        conn.execute(
+            &cx,
+            &format!("INSERT INTO {TABLE} (id, label) VALUES (:1, :2)"),
+            &[
+                OracleBind::I64(2),
+                OracleBind::String("out-of-scope".to_owned()),
+            ],
+        )
+        .await
+        .expect("insert out-of-scope fixture row");
+        conn.commit(&cx).await.expect("commit fixture rows");
+
+        let query = format!("SELECT id FROM {TABLE} WHERE id = :1");
+        let registration = match conn
+            .register_cqn_query(&cx, &query, &[OracleBind::I64(1)])
+            .await
+        {
+            Ok(registration) => registration,
+            Err(DbError::Query(message)) if message.contains("ORA-29972") => {
+                eprintln!(
+                    "[live-xe] SKIP {test_name}: the configured test account lacks Oracle CHANGE NOTIFICATION privilege"
+                );
+                let _ = conn
+                    .execute(&cx, &format!("DROP TABLE {TABLE} PURGE"), &[])
+                    .await;
+                return;
+            }
+            Err(error) => panic!("23ai accepts query-level CQN registration: {error}"),
+        };
+        assert!(registration.registration_id() > 0);
+        assert!(registration.query_id() > 0);
+        // The adapter returns opaque registration identifiers only; it never
+        // materializes either the matching row or the id=2 out-of-scope row.
+
+        conn.unregister_cqn_query(&cx, registration)
+            .await
+            .expect("CQN registration cleanup");
+        conn.execute(&cx, &format!("DROP TABLE {TABLE} PURGE"), &[])
+            .await
+            .expect("drop synthetic CQN fixture");
+    });
+}
+
 /// K2: the live `server_features` probe must match the server generation.
 ///
 /// Self-adapting: it reads the negotiated version tuple and asserts the derived

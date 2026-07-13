@@ -8,7 +8,7 @@
 //! privilege and an open callback port. The Rust thin driver already supports
 //! CQN registration; this module makes that registration an explicitly-gated
 //! privileged operation. The served source remains a **polling fallback** until
-//! the query-registration and callback fan-out beads wire the driver path.
+//! the callback fan-out bead owns the driver's registered-query notifications.
 //!
 //! **Capability gating (E1, hard requirement).** `resources.subscribe` is
 //! advertised in the `initialize` capabilities **only** when a working change
@@ -22,10 +22,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use asupersync::Cx;
 use oraclemcp_audit::{
     AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor, sha256_hex,
 };
 use oraclemcp_config::ConnectionProfile;
+use oraclemcp_db::{CqnQueryRegistration, OracleBind, OracleConnection};
 use oraclemcp_guard::{
     Classifier, DangerLevel, LevelDecision, OperatingLevel, SessionLevelState, semantic_read_plan,
 };
@@ -76,6 +78,10 @@ pub enum CqnRegistrationError {
     /// The audit append failed, so no registration permit was issued.
     #[error("CQN registration is refused because its audit append failed")]
     AuditAppendFailed,
+    /// Oracle rejected the query registration after the fail-closed admission
+    /// proof was recorded, so no CQN source became available.
+    #[error("CQN QUERY registration was not accepted by the Oracle backend")]
+    DriverRegistrationFailed,
 }
 
 /// Opaque proof that one CQN registration crossed the profile, classifier,
@@ -89,6 +95,80 @@ pub enum CqnRegistrationError {
 pub struct CqnRegistrationPermit {
     profile_name: String,
     query_sha256: String,
+}
+
+/// A live, QUERY-level CQN registration bound to the exact audited query.
+///
+/// The private permit prevents a caller from constructing a notification
+/// source from a raw driver handle. The handle contains only Oracle registration
+/// metadata; neither it nor any future callback carries result rows, values, or
+/// rowids across this boundary.
+#[derive(Debug)]
+pub struct CqnRegisteredQuery {
+    permit: CqnRegistrationPermit,
+    registration: CqnQueryRegistration,
+}
+
+impl CqnRegisteredQuery {
+    /// Whether the underlying admission evidence is bound to this profile and
+    /// exact query text. This is evidence, never a future authorization input.
+    #[must_use]
+    pub fn is_bound_to(&self, profile_name: &str, query: &str) -> bool {
+        self.permit.is_bound_to(profile_name, query)
+    }
+
+    /// The opaque driver registration id for callback ownership and eventual
+    /// adapter cleanup. It contains no query result data.
+    #[must_use]
+    pub const fn registration_id(&self) -> u64 {
+        self.registration.registration_id()
+    }
+
+    /// The opaque registered-query id. It is metadata only, not a row value.
+    #[must_use]
+    pub const fn query_id(&self) -> u64 {
+        self.registration.query_id()
+    }
+}
+
+/// All server-derived inputs required to admit one QUERY-level CQN
+/// registration at its effect point.
+///
+/// This request has no certificate or permit field by design: the gate creates
+/// new admission evidence from these current inputs immediately before asking
+/// Oracle to register the query.
+pub struct CqnQueryRegistrationRequest<'a> {
+    scope: CqnRegistrationScope,
+    query: &'a str,
+    binds: &'a [OracleBind],
+    classifier: &'a Classifier,
+    session: &'a SessionLevelState,
+    auditor: Option<&'a Auditor>,
+    subject: AuditSubject,
+}
+
+impl<'a> CqnQueryRegistrationRequest<'a> {
+    /// Build the current, server-derived CQN registration inputs.
+    #[must_use]
+    pub fn new(
+        scope: CqnRegistrationScope,
+        query: &'a str,
+        binds: &'a [OracleBind],
+        classifier: &'a Classifier,
+        session: &'a SessionLevelState,
+        auditor: Option<&'a Auditor>,
+        subject: AuditSubject,
+    ) -> Self {
+        CqnQueryRegistrationRequest {
+            scope,
+            query,
+            binds,
+            classifier,
+            session,
+            auditor,
+            subject,
+        }
+    }
 }
 
 impl CqnRegistrationPermit {
@@ -188,6 +268,39 @@ impl CqnRegistrationGate {
         Ok(CqnRegistrationPermit {
             profile_name: self.profile_name.clone(),
             query_sha256: sha256_hex(query.as_bytes()),
+        })
+    }
+
+    /// Re-classify, step-up-check, and durably audit the exact query, then
+    /// issue Oracle's QUERY-level registration immediately at that effect
+    /// point.
+    ///
+    /// The permit is intentionally created and consumed inside this method;
+    /// callers cannot replay an earlier certificate or stored verdict to widen
+    /// registration after configuration or session state changed (SEC-1).
+    pub async fn register_query(
+        &self,
+        cx: &Cx,
+        connection: &dyn OracleConnection,
+        request: CqnQueryRegistrationRequest<'_>,
+    ) -> Result<CqnRegisteredQuery, CqnRegistrationError> {
+        let CqnQueryRegistrationRequest {
+            scope,
+            query,
+            binds,
+            classifier,
+            session,
+            auditor,
+            subject,
+        } = request;
+        let permit = self.authorize(scope, query, classifier, session, auditor, subject)?;
+        let registration = connection
+            .register_cqn_query(cx, query, binds)
+            .await
+            .map_err(|_| CqnRegistrationError::DriverRegistrationFailed)?;
+        Ok(CqnRegisteredQuery {
+            permit,
+            registration,
         })
     }
 }
@@ -333,10 +446,12 @@ pub enum SubscribeSource {
     Unsupported,
     /// The polling fallback: re-read resource fingerprints on a cadence.
     Polling(Box<dyn PollingSource>),
-    /// Oracle CQN source. Constructing it requires a non-forgeable permit from
-    /// [`CqnRegistrationGate`], so a caller cannot enable the standing channel
-    /// without profile opt-in, classifier proof, active step-up, and audit.
-    ChangeNotification(CqnRegistrationPermit),
+    /// Oracle CQN source. Constructing it requires an actual QUERY-level
+    /// Oracle registration from [`CqnRegistrationGate::register_query`], so a
+    /// caller cannot enable the standing channel with a replayed certificate
+    /// or without profile opt-in, classifier proof, active step-up, durable
+    /// audit, and the driver accepting the exact query.
+    ChangeNotification(CqnRegisteredQuery),
 }
 
 impl SubscribeSource {
@@ -533,6 +648,7 @@ mod tests {
 
     use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink, SigningKey};
     use oraclemcp_config::OracleMcpConfig;
+    use oraclemcp_db::{DbError, OracleBackend, OracleConnectionInfo, OracleRow};
 
     const URI: &str = "oracle://object/HR/PACKAGE/EMP_API";
 
@@ -621,6 +737,64 @@ mod tests {
 
     const PROVEN_QUERY: &str = "SELECT employee_id FROM hr.employees WHERE department_id = 10";
 
+    #[derive(Default)]
+    struct RecordingCqnConnection {
+        registrations: Mutex<Vec<(String, Vec<OracleBind>)>>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for RecordingCqnConnection {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            Ok(Vec::new())
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn register_cqn_query(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            binds: &[OracleBind],
+        ) -> Result<CqnQueryRegistration, DbError> {
+            self.registrations
+                .lock()
+                .push((sql.to_owned(), binds.to_vec()));
+            Ok(CqnQueryRegistration::new(101, 202))
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn cqn_is_disabled_until_the_profile_explicitly_permits_it() {
         let profile = cqn_profile(false);
@@ -665,6 +839,42 @@ mod tests {
             result,
             Err(CqnRegistrationError::ObjectLevelRefused)
         ));
+        assert!(sink.records().is_empty());
+    }
+
+    #[test]
+    fn cqn_effect_point_refuses_object_scope_before_the_db_adapter() {
+        let profile = cqn_profile(true);
+        let gate = CqnRegistrationGate::from_profile(&profile);
+        let (auditor, sink) = cqn_auditor();
+        let connection = RecordingCqnConnection::default();
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+
+        let result = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a current Cx");
+            gate.register_query(
+                &cx,
+                &connection,
+                CqnQueryRegistrationRequest::new(
+                    CqnRegistrationScope::Object,
+                    PROVEN_QUERY,
+                    &[],
+                    &Classifier::default(),
+                    &stepped_up_session(),
+                    Some(&auditor),
+                    subject(),
+                ),
+            )
+            .await
+        });
+
+        assert!(matches!(
+            result,
+            Err(CqnRegistrationError::ObjectLevelRefused)
+        ));
+        assert!(connection.registrations.lock().is_empty());
         assert!(sink.records().is_empty());
     }
 
@@ -764,23 +974,48 @@ mod tests {
     }
 
     #[test]
-    fn cqn_callbacks_are_event_only_and_never_carry_rows_or_columns() {
+    fn cqn_registers_the_exact_proven_predicate_and_callbacks_never_surface_rows() {
         let profile = cqn_profile(true);
         let gate = CqnRegistrationGate::from_profile(&profile);
         let (auditor, _sink) = cqn_auditor();
-        let permit = gate
-            .authorize(
-                CqnRegistrationScope::Query,
-                PROVEN_QUERY,
-                &Classifier::default(),
-                &stepped_up_session(),
-                Some(&auditor),
-                subject(),
+        let connection = RecordingCqnConnection::default();
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let registered = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a current Cx");
+            gate.register_query(
+                &cx,
+                &connection,
+                CqnQueryRegistrationRequest::new(
+                    CqnRegistrationScope::Query,
+                    PROVEN_QUERY,
+                    &[],
+                    &Classifier::default(),
+                    &stepped_up_session(),
+                    Some(&auditor),
+                    subject(),
+                ),
             )
-            .expect("permit");
-        let hub = SubscriptionHub::with_source(SubscribeSource::ChangeNotification(permit));
+            .await
+            .expect("the exact classifier-proven query is registered")
+        });
+        assert!(registered.is_bound_to("cqn", PROVEN_QUERY));
+        assert_eq!(registered.registration_id(), 101);
+        assert_eq!(registered.query_id(), 202);
+        assert_eq!(
+            connection.registrations.lock().as_slice(),
+            [(PROVEN_QUERY.to_owned(), Vec::new())],
+            "the DB adapter receives exactly the predicate-bearing query, not an object scope"
+        );
+
+        let hub = SubscriptionHub::with_source(SubscribeSource::ChangeNotification(registered));
         assert!(hub.subscribe("principal-a", URI));
 
+        // A mutation to any other base-table row has no place in the event
+        // type. The only possible notification is this already-bound resource
+        // URI; a client must governed-re-read the original predicate to observe
+        // data, so out-of-predicate values cannot surface through CQN.
         hub.mark_cqn_changed(CqnChangeEvent::for_resource(URI));
 
         assert_eq!(hub.drain_pending("principal-a"), vec![URI.to_owned()]);
