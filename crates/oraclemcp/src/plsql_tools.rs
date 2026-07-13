@@ -1,7 +1,7 @@
 #![cfg(feature = "plsql-intelligence")]
 
-use std::collections::HashSet;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use asupersync::Cx;
@@ -19,36 +19,42 @@ use plsql_catalog::{
 };
 use plsql_cicd::{ChangeSet, PredictMode, change_impact_envelope, predict};
 use plsql_core::{
-    AnalysisProfile, CompletenessPosture, ConfidenceLevel, Diagnostic, FileId, Severity, Span,
+    AnalysisProfile, CompletenessPosture, Confidence, ConfidenceLevel, Diagnostic, FileId,
+    Severity, Span,
 };
-use plsql_depgraph::{DepGraph, Edge, EdgeKind, Node, NodeId, NodeIdentityKind, NodeSelector};
+use plsql_depgraph::{
+    DepGraph, Edge, EdgeId, EdgeKind, LogicalObjectId, Node, NodeId, NodeIdentityKind,
+    NodeSelector, ObjectRevisionId, Provenance, ResolutionStrategy,
+};
 use plsql_doc::{DocSet, extract_doc_comments};
 use plsql_engine::{
     AnalysisRequest, analyze_project, engine_doctor_report, engine_full_doctor_report,
 };
 use plsql_ir::{FactPayload, FactStore, FlowEnv, lower_top_level};
-use plsql_lineage::{LineageDirection, column_writers, dependencies, impact};
+use plsql_lineage::{LineageDirection, column_readers, column_writers, dependencies, impact};
 use plsql_parser_antlr::lower::lower_source;
 use plsql_sast::{CompletenessSnapshot, Rule, ScanUnit, run_scan};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-pub const TOOL_NAMES: [&str; 8] = [
+pub const TOOL_NAMES: [&str; 9] = [
     "oracle_plsql_parse",
     "oracle_plsql_analyze",
     "oracle_plsql_what_breaks",
     "oracle_plsql_lineage",
+    "oracle_lineage",
     "oracle_plsql_sast",
     "oracle_plsql_doc",
     "oracle_plsql_live_snapshot",
     "oracle_plsql_blast_radius",
 ];
 
-const STATIC_TOOL_NAMES: [&str; 6] = [
+const STATIC_TOOL_NAMES: [&str; 7] = [
     "oracle_plsql_parse",
     "oracle_plsql_analyze",
     "oracle_plsql_what_breaks",
     "oracle_plsql_lineage",
+    "oracle_lineage",
     "oracle_plsql_sast",
     "oracle_plsql_doc",
 ];
@@ -123,6 +129,23 @@ pub fn register_tools(registry: &mut ToolRegistry) {
 
     registry.register(
         ToolDescriptor::new(
+            "oracle_lineage",
+            ToolTier::FoundationStatic,
+            "Source-derived COLUMN lineage: for owner.object.column, return the upstream columns it derives from and the downstream objects that read it, computed from the depgraph's column edges (DerivesColumn/WritesColumn/ReadsColumn). Traces a column through a view chain.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "project_root": { "type": "string", "description": "Local filesystem path to analyze for source (the object DDL, e.g. the view chain)." },
+                "owner": { "type": "string", "description": "Optional schema/owner. When omitted the object is matched by object.column across owners." },
+                "object": { "type": "string", "description": "The view/table/object that owns the column." },
+                "column": { "type": "string", "description": "The column whose source-derived edges to compute." }
+            }),
+            &["project_root", "object", "column"],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
             "oracle_plsql_sast",
             ToolTier::FoundationStatic,
             "Run the offline plsql-sast rule harness over a local PL/SQL project and return findings plus skipped-rule evidence.",
@@ -182,6 +205,7 @@ pub fn dispatch_static(tool: &str, args: Value) -> Result<Value, ErrorEnvelope> 
         "oracle_plsql_analyze" => run_analyze(parse_args(tool, args)?),
         "oracle_plsql_what_breaks" => run_what_breaks(parse_args(tool, args)?),
         "oracle_plsql_lineage" => run_lineage(parse_args(tool, args)?),
+        "oracle_lineage" => run_column_lineage(parse_args(tool, args)?),
         "oracle_plsql_sast" => run_sast(parse_args(tool, args)?),
         "oracle_plsql_doc" => run_doc(parse_args(tool, args)?),
         _ => Err(ErrorEnvelope::new(
@@ -688,6 +712,14 @@ struct LineageArgs {
 }
 
 #[derive(Deserialize)]
+struct ColumnLineageArgs {
+    project_root: String,
+    owner: Option<String>,
+    object: String,
+    column: String,
+}
+
+#[derive(Deserialize)]
 struct SastArgs {
     project_root: String,
     format: Option<String>,
@@ -981,6 +1013,922 @@ fn run_lineage(args: LineageArgs) -> Result<Value, ErrorEnvelope> {
         }
     };
     Ok(value)
+}
+
+/// The logical id a column node carries, as `owner.object.column` (the depgraph
+/// lowercases these). Built from the requested arguments so a caller-supplied
+/// name is compared against the graph in the graph's own canonical form.
+fn column_logical_id(owner: Option<&str>, object: &str, column: &str) -> String {
+    match owner {
+        Some(owner) => format!("{owner}.{object}.{column}"),
+        None => format!("{object}.{column}"),
+    }
+}
+
+/// Find the column node whose logical id matches the requested column.
+///
+/// An exact `owner.object.column` match wins. With no owner supplied, any column
+/// whose logical id ends in `.object.column` (or equals `object.column`) matches,
+/// so a project without schema-qualified names still resolves. The comparison is
+/// case-insensitive because the depgraph canonicalizes identifiers to lowercase
+/// while an operator may type them in any case.
+fn resolve_column_node<'a>(
+    graph: &'a DepGraph,
+    owner: Option<&str>,
+    object: &str,
+    column: &str,
+) -> Option<&'a Node> {
+    let exact = column_logical_id(owner, object, column).to_ascii_lowercase();
+    let suffix = format!(
+        ".{}",
+        column_logical_id(None, object, column).to_ascii_lowercase()
+    );
+    graph
+        .nodes
+        .values()
+        .filter(|node| matches!(node.identity_kind, NodeIdentityKind::Column))
+        .find(|node| {
+            let logical = node.logical_id.as_str().to_ascii_lowercase();
+            logical == exact
+                || (owner.is_none() && (logical == exact || logical.ends_with(&suffix)))
+        })
+}
+
+/// Render one column-access result (readers or writers) as the redacted,
+/// source-derived edge list the tool returns. Each edge is the accessing object,
+/// how it touches the column, and the depgraph's confidence — never any literal
+/// value or bind, only object/column identifiers already present in the source.
+fn column_edges_json(result: &plsql_lineage::ColumnAccessResult) -> Value {
+    let edges: Vec<Value> = result
+        .accessors
+        .iter()
+        .map(|accessor| {
+            json!({
+                "object": accessor.accessor_logical_id,
+                "edge_kind": accessor.edge_kind,
+                "accessor_kind": accessor.accessor_kind,
+                "confidence": format!("{:?}", accessor.confidence),
+                "is_unknown_column_of_table": accessor.is_unknown_column_of_table,
+            })
+        })
+        .collect();
+    json!({
+        "column_logical_id": result.column_logical_id,
+        "edges": edges,
+        "resolution_error": result.resolution_error,
+    })
+}
+
+/// `oracle_lineage` — source-derived column lineage.
+///
+/// Builds the analysis run for the project source, resolves the requested
+/// column node, and returns the upstream columns it derives from
+/// (`column_writers`: `DerivesColumn`/`WritesColumn`) and the downstream objects
+/// that read it (`column_readers`: `ReadsColumn`). Traces a column through a view
+/// chain. Purely source-derived — no database round-trip, no literals or binds.
+fn run_column_lineage(args: ColumnLineageArgs) -> Result<Value, ErrorEnvelope> {
+    let source_graph = source_derived_column_graph(Path::new(&args.project_root))?;
+    let Some(node) = resolve_column_node(
+        &source_graph.graph,
+        args.owner.as_deref(),
+        &args.object,
+        &args.column,
+    ) else {
+        let mut available: Vec<String> = source_graph
+            .graph
+            .nodes
+            .values()
+            .filter(|node| matches!(node.identity_kind, NodeIdentityKind::Column))
+            .map(|node| node.logical_id.to_string())
+            .collect();
+        available.sort();
+        available.truncate(25);
+        return Ok(json!({
+            "owner": args.owner,
+            "object": args.object,
+            "column": args.column,
+            "found": false,
+            "available_column_sample": available,
+            "source_files_scanned": source_graph.source_files_scanned,
+            "unsupported_projection_count": source_graph.unsupported_projection_count,
+        }));
+    };
+
+    // Upstream = what this column is derived from / written by (the view chain
+    // above it). Downstream = who reads it. Both are column-level edges.
+    let upstream = column_writers(&source_graph.graph, &NodeSelector::NodeId(node.id));
+    let downstream = column_readers(&source_graph.graph, &NodeSelector::NodeId(node.id));
+    Ok(json!({
+        "owner": args.owner,
+        "object": args.object,
+        "column": args.column,
+        "found": true,
+        "column_logical_id": node.logical_id.to_string(),
+        "upstream": column_edges_json(&upstream),
+        "downstream": column_edges_json(&downstream),
+        "source_files_scanned": source_graph.source_files_scanned,
+        "unsupported_projection_count": source_graph.unsupported_projection_count,
+    }))
+}
+
+const MAX_SOURCE_LINEAGE_FILES: usize = 2_048;
+const MAX_SOURCE_LINEAGE_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// A small, deliberately conservative source overlay for the column edge kinds
+/// the engine's object graph does not yet emit. The graph contains no database
+/// facts: every node and edge comes from a `CREATE TABLE` or `CREATE VIEW`
+/// declaration under the requested local project root.
+#[derive(Default)]
+struct SourceDerivedColumnGraph {
+    graph: DepGraph,
+    column_nodes: BTreeMap<String, NodeId>,
+    object_columns: BTreeMap<String, BTreeSet<String>>,
+    edge_keys: BTreeSet<(String, String, &'static str)>,
+    next_node_id: u64,
+    next_edge_id: u64,
+    source_files_scanned: usize,
+    unsupported_projection_count: usize,
+}
+
+impl SourceDerivedColumnGraph {
+    fn ensure_column(&mut self, logical_id: String) -> NodeId {
+        let logical_id = normalize_source_name(&logical_id);
+        if let Some(node_id) = self.column_nodes.get(&logical_id) {
+            return *node_id;
+        }
+
+        self.next_node_id += 1;
+        let node_id = NodeId::new(self.next_node_id);
+        self.graph.insert_node(Node::new(
+            node_id,
+            LogicalObjectId::new(logical_id.clone()),
+            ObjectRevisionId::new("source-derived"),
+            Default::default(),
+            NodeIdentityKind::Column,
+        ));
+        if let Some((object, column)) = logical_id.rsplit_once('.') {
+            self.object_columns
+                .entry(object.to_owned())
+                .or_default()
+                .insert(column.to_owned());
+        }
+        self.column_nodes.insert(logical_id, node_id);
+        node_id
+    }
+
+    fn insert_projection_edge(&mut self, source: &str, target: &str, kind: EdgeKind) {
+        let kind_name = kind.as_str();
+        let key = (source.to_owned(), target.to_owned(), kind_name);
+        if !self.edge_keys.insert(key) {
+            return;
+        }
+
+        let source = self.ensure_column(source.to_owned());
+        let target = self.ensure_column(target.to_owned());
+        self.next_edge_id += 1;
+        self.graph.insert_edge(
+            Edge::new(
+                EdgeId::new(self.next_edge_id),
+                source,
+                target,
+                kind,
+                Confidence::new(
+                    ConfidenceLevel::High,
+                    Some("exact source-derived view projection".to_owned()),
+                ),
+            ),
+            Provenance::new(
+                FileId::new(0),
+                Span::default(),
+                ResolutionStrategy::LocalLexical,
+            )
+            .with_note("source-derived column lineage"),
+            None,
+        );
+    }
+
+    fn add_table(&mut self, table: &SourceTable) {
+        for column in &table.columns {
+            self.ensure_column(format!("{}.{}", table.object, column));
+        }
+    }
+
+    fn add_view_columns(&mut self, view: &SourceView) {
+        for (index, projection) in view.projections.iter().enumerate() {
+            if let Some((column, _)) = projection_output_column(
+                projection,
+                view.declared_columns.get(index).map(String::as_str),
+            ) {
+                self.ensure_column(format!("{}.{}", view.object, column));
+            } else {
+                self.unsupported_projection_count += 1;
+            }
+        }
+    }
+
+    fn add_view_edges(&mut self, view: &SourceView) {
+        for (index, projection) in view.projections.iter().enumerate() {
+            let Some((output_column, expression)) = projection_output_column(
+                projection,
+                view.declared_columns.get(index).map(String::as_str),
+            ) else {
+                continue;
+            };
+            let target = format!("{}.{}", view.object, output_column);
+            for source in self.projection_sources(expression, &view.sources) {
+                // The lineage helpers use incoming edges: source -> target is
+                // the upstream derivation, while the inverse `ReadsColumn`
+                // edge makes the consumer visible from the source column.
+                self.insert_projection_edge(&source, &target, EdgeKind::DerivesColumn);
+                self.insert_projection_edge(&target, &source, EdgeKind::ReadsColumn);
+            }
+        }
+    }
+
+    fn projection_sources(
+        &mut self,
+        expression: &[SourceToken],
+        sources: &[SourceRelation],
+    ) -> Vec<String> {
+        let Some(parts) = source_identifier_parts(expression) else {
+            return source_identifiers_in_expression(expression, sources, self);
+        };
+        if parts.last().is_some_and(|part| part == "*") {
+            return self.expand_star(&parts, sources);
+        }
+        self.resolve_column_reference(&parts, sources)
+            .into_iter()
+            .collect()
+    }
+
+    fn expand_star(&self, parts: &[String], sources: &[SourceRelation]) -> Vec<String> {
+        let relations: Vec<&SourceRelation> = if parts.len() == 1 {
+            sources.iter().collect()
+        } else {
+            self.relation_for_reference(&parts[..parts.len() - 1], sources)
+                .into_iter()
+                .collect()
+        };
+        let mut columns = BTreeSet::new();
+        for relation in relations {
+            if let Some(known_columns) = self.object_columns.get(&relation.object) {
+                columns.extend(
+                    known_columns
+                        .iter()
+                        .map(|column| format!("{}.{}", relation.object, column)),
+                );
+            }
+        }
+        columns.into_iter().collect()
+    }
+
+    fn resolve_column_reference(
+        &self,
+        parts: &[String],
+        sources: &[SourceRelation],
+    ) -> Option<String> {
+        let column = parts.last()?.clone();
+        if parts.len() > 1 {
+            let relation = self.relation_for_reference(&parts[..parts.len() - 1], sources)?;
+            return Some(format!("{}.{}", relation.object, column));
+        }
+
+        let matching_relations: Vec<&SourceRelation> = sources
+            .iter()
+            .filter(|relation| {
+                self.object_columns
+                    .get(&relation.object)
+                    .is_some_and(|columns| columns.contains(&column))
+            })
+            .collect();
+        if matching_relations.len() == 1 {
+            return Some(format!("{}.{}", matching_relations[0].object, column));
+        }
+        (sources.len() == 1).then(|| format!("{}.{}", sources[0].object, column))
+    }
+
+    fn relation_for_reference<'a>(
+        &self,
+        reference: &[String],
+        sources: &'a [SourceRelation],
+    ) -> Option<&'a SourceRelation> {
+        let reference = reference.join(".");
+        sources.iter().find(|relation| {
+            relation
+                .alias
+                .as_deref()
+                .is_some_and(|alias| alias == reference)
+                || relation.object == reference
+                || relation
+                    .object
+                    .rsplit_once('.')
+                    .is_some_and(|(_, object)| object == reference)
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SourceTable {
+    object: String,
+    columns: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct SourceView {
+    object: String,
+    declared_columns: Vec<String>,
+    projections: Vec<Vec<SourceToken>>,
+    sources: Vec<SourceRelation>,
+}
+
+#[derive(Clone, Debug)]
+struct SourceRelation {
+    object: String,
+    alias: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SourceToken {
+    Word(String),
+    Punctuation(char),
+}
+
+fn source_derived_column_graph(
+    project_root: &Path,
+) -> Result<SourceDerivedColumnGraph, ErrorEnvelope> {
+    let source_files = source_lineage_files(project_root)?;
+    let mut graph = SourceDerivedColumnGraph::default();
+    let mut tables = Vec::new();
+    let mut views = Vec::new();
+
+    for source_file in source_files {
+        let size = std::fs::metadata(&source_file)
+            .map_err(|_| source_lineage_error("could not inspect a source file"))?
+            .len();
+        if size > MAX_SOURCE_LINEAGE_FILE_BYTES {
+            return Err(source_lineage_error(
+                "a source file exceeds the safe source-lineage size limit",
+            ));
+        }
+        let source = std::fs::read_to_string(&source_file)
+            .map_err(|_| source_lineage_error("could not read a source file as UTF-8"))?;
+        let (file_tables, file_views) = parse_source_declarations(&source_tokens(&source));
+        tables.extend(file_tables);
+        views.extend(file_views);
+        graph.source_files_scanned += 1;
+    }
+
+    for table in &tables {
+        graph.add_table(table);
+    }
+    // Declare every view output before resolving a projection. This permits a
+    // deterministic view chain even if the source files are not ordered.
+    for view in &views {
+        graph.add_view_columns(view);
+    }
+    for view in &views {
+        graph.add_view_edges(view);
+    }
+    Ok(graph)
+}
+
+fn source_lineage_files(project_root: &Path) -> Result<Vec<PathBuf>, ErrorEnvelope> {
+    if !project_root.exists() {
+        return Err(source_lineage_error("project_root does not exist"));
+    }
+    let mut files = Vec::new();
+    if project_root.is_file() {
+        if is_source_lineage_file(project_root) {
+            files.push(project_root.to_owned());
+        }
+    } else {
+        collect_source_lineage_files(project_root, &mut files)?;
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn collect_source_lineage_files(
+    directory: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), ErrorEnvelope> {
+    for entry in std::fs::read_dir(directory)
+        .map_err(|_| source_lineage_error("could not enumerate the project source tree"))?
+    {
+        let entry = entry.map_err(|_| source_lineage_error("could not inspect a source entry"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|_| source_lineage_error("could not inspect a source entry type"))?;
+        if file_type.is_dir() {
+            collect_source_lineage_files(&entry.path(), files)?;
+        } else if file_type.is_file() && is_source_lineage_file(&entry.path()) {
+            files.push(entry.path());
+            if files.len() > MAX_SOURCE_LINEAGE_FILES {
+                return Err(source_lineage_error(
+                    "project exceeds the safe source-lineage file-count limit",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_source_lineage_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "sql" | "pls" | "plsql" | "pkb" | "pks"
+            )
+        })
+}
+
+fn source_lineage_error(message: &str) -> ErrorEnvelope {
+    ErrorEnvelope::new(ErrorClass::RuntimeStateRequired, message)
+}
+
+fn source_tokens(source: &str) -> Vec<SourceToken> {
+    let mut tokens = Vec::new();
+    let mut chars = source.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character.is_whitespace() {
+            continue;
+        }
+        if character == '-' && chars.peek() == Some(&'-') {
+            chars.next();
+            while chars.next().is_some_and(|next| next != '\n') {}
+            continue;
+        }
+        if character == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            let mut previous = '\0';
+            for next in chars.by_ref() {
+                if previous == '*' && next == '/' {
+                    break;
+                }
+                previous = next;
+            }
+            continue;
+        }
+        if character == '\'' {
+            while let Some(next) = chars.next() {
+                if next == '\'' && chars.peek() != Some(&'\'') {
+                    break;
+                }
+                if next == '\'' {
+                    chars.next();
+                }
+            }
+            continue;
+        }
+        if character == '"' {
+            let mut quoted = String::new();
+            while let Some(next) = chars.next() {
+                if next == '"' && chars.peek() != Some(&'"') {
+                    break;
+                }
+                if next == '"' {
+                    chars.next();
+                }
+                quoted.push(next);
+            }
+            if !quoted.is_empty() {
+                tokens.push(SourceToken::Word(normalize_source_name(&quoted)));
+            }
+            continue;
+        }
+        if matches!(character, '(' | ')' | ',' | '.' | ';' | '*') {
+            tokens.push(SourceToken::Punctuation(character));
+            continue;
+        }
+        if is_source_identifier_character(character) {
+            let mut word = String::from(character);
+            while chars
+                .peek()
+                .is_some_and(|next| is_source_identifier_character(*next))
+            {
+                word.push(chars.next().expect("peeked source identifier character"));
+            }
+            tokens.push(SourceToken::Word(normalize_source_name(&word)));
+        }
+    }
+    tokens
+}
+
+fn is_source_identifier_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '$' | '#')
+}
+
+fn parse_source_declarations(tokens: &[SourceToken]) -> (Vec<SourceTable>, Vec<SourceView>) {
+    let mut tables = Vec::new();
+    let mut views = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if !token_is_word(tokens.get(index), "create") {
+            index += 1;
+            continue;
+        }
+        let mut declaration = index + 1;
+        if token_is_word(tokens.get(declaration), "or")
+            && token_is_word(tokens.get(declaration + 1), "replace")
+        {
+            declaration += 2;
+        }
+        while matches!(
+            token_word(tokens.get(declaration)),
+            Some("force" | "noforce" | "editioning" | "global" | "temporary")
+        ) {
+            declaration += 1;
+        }
+        if token_is_word(tokens.get(declaration), "table") {
+            if let Some((table, end)) = parse_source_table(tokens, declaration + 1) {
+                tables.push(table);
+                index = end;
+                continue;
+            }
+        } else if token_is_word(tokens.get(declaration), "view")
+            && let Some((view, end)) = parse_source_view(tokens, declaration + 1)
+        {
+            views.push(view);
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    (tables, views)
+}
+
+fn parse_source_table(tokens: &[SourceToken], mut index: usize) -> Option<(SourceTable, usize)> {
+    let object = take_source_qualified_name(tokens, &mut index)?;
+    while !token_is_punctuation(tokens.get(index), '(')
+        && !token_is_punctuation(tokens.get(index), ';')
+    {
+        index += 1;
+    }
+    if !token_is_punctuation(tokens.get(index), '(') {
+        return None;
+    }
+    let end = matching_source_parenthesis(tokens, index)?;
+    let columns = split_source_top_level(&tokens[index + 1..end], ',')
+        .into_iter()
+        .filter_map(|definition| match definition.first() {
+            Some(SourceToken::Word(column)) if !is_table_constraint_keyword(column) => {
+                Some(column.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    Some((SourceTable { object, columns }, end + 1))
+}
+
+fn parse_source_view(tokens: &[SourceToken], mut index: usize) -> Option<(SourceView, usize)> {
+    let object = take_source_qualified_name(tokens, &mut index)?;
+    let mut declared_columns = Vec::new();
+    if token_is_punctuation(tokens.get(index), '(') {
+        let end = matching_source_parenthesis(tokens, index)?;
+        declared_columns = split_source_top_level(&tokens[index + 1..end], ',')
+            .into_iter()
+            .filter_map(|column| match column.first() {
+                Some(SourceToken::Word(column)) => Some(column.clone()),
+                _ => None,
+            })
+            .collect();
+        index = end + 1;
+    }
+    while !token_is_word(tokens.get(index), "as") && !token_is_punctuation(tokens.get(index), ';') {
+        index += 1;
+    }
+    if !token_is_word(tokens.get(index), "as") {
+        return None;
+    }
+    index += 1;
+    while !token_is_word(tokens.get(index), "select")
+        && !token_is_punctuation(tokens.get(index), ';')
+    {
+        index += 1;
+    }
+    if !token_is_word(tokens.get(index), "select") {
+        return None;
+    }
+    let select_start = index + 1;
+    let from_index = find_source_top_level_word(tokens, select_start, "from")?;
+    let statement_end = find_source_statement_end(tokens, from_index + 1);
+    let projections = split_source_top_level(&tokens[select_start..from_index], ',');
+    let sources = parse_source_relations(&tokens[from_index + 1..statement_end]);
+    Some((
+        SourceView {
+            object,
+            declared_columns,
+            projections,
+            sources,
+        },
+        statement_end + 1,
+    ))
+}
+
+fn take_source_qualified_name(tokens: &[SourceToken], index: &mut usize) -> Option<String> {
+    let mut parts = vec![token_word(tokens.get(*index))?.to_owned()];
+    *index += 1;
+    while token_is_punctuation(tokens.get(*index), '.') {
+        *index += 1;
+        parts.push(token_word(tokens.get(*index))?.to_owned());
+        *index += 1;
+    }
+    Some(parts.join("."))
+}
+
+fn matching_source_parenthesis(tokens: &[SourceToken], open: usize) -> Option<usize> {
+    let mut depth = 0_u32;
+    for (index, token) in tokens.iter().enumerate().skip(open) {
+        match token {
+            SourceToken::Punctuation('(') => depth += 1,
+            SourceToken::Punctuation(')') => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_source_top_level_word(tokens: &[SourceToken], start: usize, wanted: &str) -> Option<usize> {
+    let mut depth = 0_u32;
+    for (index, token) in tokens.iter().enumerate().skip(start) {
+        match token {
+            SourceToken::Punctuation('(') => depth += 1,
+            SourceToken::Punctuation(')') => depth = depth.saturating_sub(1),
+            _ if depth == 0 && token_is_word(Some(token), wanted) => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_source_statement_end(tokens: &[SourceToken], start: usize) -> usize {
+    let mut depth = 0_u32;
+    for (index, token) in tokens.iter().enumerate().skip(start) {
+        match token {
+            SourceToken::Punctuation('(') => depth += 1,
+            SourceToken::Punctuation(')') => depth = depth.saturating_sub(1),
+            SourceToken::Punctuation(';') if depth == 0 => return index,
+            _ => {}
+        }
+    }
+    tokens.len()
+}
+
+fn split_source_top_level(tokens: &[SourceToken], separator: char) -> Vec<Vec<SourceToken>> {
+    let mut pieces = Vec::new();
+    let mut current = Vec::new();
+    let mut depth = 0_u32;
+    for token in tokens {
+        match token {
+            SourceToken::Punctuation('(') => depth += 1,
+            SourceToken::Punctuation(')') => depth = depth.saturating_sub(1),
+            SourceToken::Punctuation(character) if *character == separator && depth == 0 => {
+                if !current.is_empty() {
+                    pieces.push(std::mem::take(&mut current));
+                }
+                continue;
+            }
+            _ => {}
+        }
+        current.push(token.clone());
+    }
+    if !current.is_empty() {
+        pieces.push(current);
+    }
+    pieces
+}
+
+fn parse_source_relations(tokens: &[SourceToken]) -> Vec<SourceRelation> {
+    let mut relations = Vec::new();
+    let mut index = 0;
+    let mut expect_relation = true;
+    while index < tokens.len() {
+        if token_is_source_clause_boundary(tokens.get(index)) {
+            break;
+        }
+        if expect_relation {
+            if token_is_punctuation(tokens.get(index), '(') {
+                if let Some(end) = matching_source_parenthesis(tokens, index) {
+                    index = end + 1;
+                } else {
+                    break;
+                }
+                expect_relation = false;
+                continue;
+            }
+            let mut relation_index = index;
+            let Some(object) = take_source_qualified_name(tokens, &mut relation_index) else {
+                index += 1;
+                continue;
+            };
+            let mut alias = None;
+            if token_is_word(tokens.get(relation_index), "as") {
+                relation_index += 1;
+                alias = token_word(tokens.get(relation_index)).map(str::to_owned);
+                relation_index += usize::from(alias.is_some());
+            } else if let Some(candidate) = token_word(tokens.get(relation_index))
+                && !is_source_relation_keyword(candidate)
+            {
+                alias = Some(candidate.to_owned());
+                relation_index += 1;
+            }
+            relations.push(SourceRelation { object, alias });
+            index = relation_index;
+            expect_relation = false;
+            continue;
+        }
+        if token_is_punctuation(tokens.get(index), ',') || token_is_word(tokens.get(index), "join")
+        {
+            expect_relation = true;
+        }
+        index += 1;
+    }
+    relations
+}
+
+fn projection_output_column<'a>(
+    projection: &'a [SourceToken],
+    declared_column: Option<&str>,
+) -> Option<(String, &'a [SourceToken])> {
+    if let Some(declared_column) = declared_column {
+        return Some((normalize_source_name(declared_column), projection));
+    }
+    let as_index = projection
+        .iter()
+        .rposition(|token| token_is_word(Some(token), "as"));
+    if let Some(as_index) = as_index
+        && let Some(alias) = token_word(projection.get(as_index + 1))
+    {
+        return Some((alias.to_owned(), &projection[..as_index]));
+    }
+    let parts = source_identifier_parts(projection)?;
+    (parts.last() != Some(&"*".to_owned())).then(|| {
+        let column = parts.last().cloned().expect("non-empty source identifier");
+        (column, projection)
+    })
+}
+
+fn source_identifier_parts(tokens: &[SourceToken]) -> Option<Vec<String>> {
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut needs_word = true;
+    for token in tokens {
+        match (needs_word, token) {
+            (true, SourceToken::Word(word)) => {
+                parts.push(word.clone());
+                needs_word = false;
+            }
+            (true, SourceToken::Punctuation('*')) => {
+                parts.push("*".to_owned());
+                needs_word = false;
+            }
+            (false, SourceToken::Punctuation('.')) => needs_word = true,
+            (false, SourceToken::Punctuation('*')) if !parts.is_empty() => {
+                parts.push("*".to_owned());
+                needs_word = false;
+            }
+            _ => return None,
+        }
+    }
+    (!needs_word).then_some(parts)
+}
+
+fn source_identifiers_in_expression(
+    tokens: &[SourceToken],
+    sources: &[SourceRelation],
+    graph: &SourceDerivedColumnGraph,
+) -> Vec<String> {
+    let mut columns = BTreeSet::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let Some(word) = token_word(tokens.get(index)) else {
+            index += 1;
+            continue;
+        };
+        if is_source_expression_keyword(word) || token_is_punctuation(tokens.get(index + 1), '(') {
+            index += 1;
+            continue;
+        }
+        let mut end = index + 1;
+        let mut parts = vec![word.to_owned()];
+        while token_is_punctuation(tokens.get(end), '.') {
+            let Some(next) = token_word(tokens.get(end + 1)) else {
+                break;
+            };
+            parts.push(next.to_owned());
+            end += 2;
+        }
+        if let Some(column) = graph.resolve_column_reference(&parts, sources) {
+            columns.insert(column);
+        }
+        index = end;
+    }
+    columns.into_iter().collect()
+}
+
+fn token_word(token: Option<&SourceToken>) -> Option<&str> {
+    match token {
+        Some(SourceToken::Word(word)) => Some(word),
+        _ => None,
+    }
+}
+
+fn token_is_word(token: Option<&SourceToken>, wanted: &str) -> bool {
+    token_word(token).is_some_and(|word| word == wanted)
+}
+
+fn token_is_punctuation(token: Option<&SourceToken>, wanted: char) -> bool {
+    matches!(token, Some(SourceToken::Punctuation(character)) if *character == wanted)
+}
+
+fn normalize_source_name(value: &str) -> String {
+    value.trim().trim_matches('"').to_ascii_lowercase()
+}
+
+fn is_table_constraint_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "constraint" | "primary" | "foreign" | "unique" | "check" | "supplemental" | "period"
+    )
+}
+
+fn token_is_source_clause_boundary(token: Option<&SourceToken>) -> bool {
+    matches!(
+        token_word(token),
+        Some(
+            "where"
+                | "group"
+                | "having"
+                | "order"
+                | "connect"
+                | "start"
+                | "union"
+                | "minus"
+                | "intersect"
+                | "fetch"
+                | "offset"
+                | "for"
+                | "model"
+        )
+    )
+}
+
+fn is_source_relation_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "on" | "join"
+            | "inner"
+            | "left"
+            | "right"
+            | "full"
+            | "cross"
+            | "outer"
+            | "where"
+            | "group"
+            | "having"
+            | "order"
+            | "connect"
+            | "start"
+            | "union"
+            | "minus"
+            | "intersect"
+            | "fetch"
+            | "offset"
+            | "for"
+            | "model"
+    )
+}
+
+fn is_source_expression_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "as" | "case"
+            | "when"
+            | "then"
+            | "else"
+            | "end"
+            | "distinct"
+            | "null"
+            | "true"
+            | "false"
+            | "and"
+            | "or"
+            | "not"
+            | "over"
+            | "partition"
+            | "by"
+            | "asc"
+            | "desc"
+    ) || word.chars().all(|character| character.is_ascii_digit())
 }
 
 fn run_sast(args: SastArgs) -> Result<Value, ErrorEnvelope> {
@@ -1314,6 +2262,191 @@ mod tests {
         assert_eq!(
             value["declarations"][0]["span"]["start"]["offset"].as_u64(),
             Some(0)
+        );
+    }
+
+    fn write_view_chain_project() -> tempfile::TempDir {
+        // A three-level view chain over a base table. `amount` is carried column
+        // for column from the base table up through v_orders into v_paid, so its
+        // source-derived lineage must trace back down the chain.
+        let dir = tempfile::tempdir().expect("temp project dir");
+        std::fs::write(
+            dir.path().join("orders.sql"),
+            "CREATE TABLE app.orders (\n  id NUMBER,\n  amount NUMBER,\n  status VARCHAR2(20)\n);\n",
+        )
+        .expect("write base table");
+        std::fs::write(
+            dir.path().join("v_orders.sql"),
+            "CREATE VIEW app.v_orders AS\n  SELECT id, amount, status FROM app.orders;\n",
+        )
+        .expect("write v_orders");
+        std::fs::write(
+            dir.path().join("v_paid.sql"),
+            "CREATE VIEW app.v_paid AS\n  SELECT id, amount FROM app.v_orders WHERE status = 'PAID';\n",
+        )
+        .expect("write v_paid");
+        std::fs::write(
+            dir.path().join("v_report.sql"),
+            "CREATE VIEW app.v_report AS\n  SELECT amount FROM app.v_paid;\n",
+        )
+        .expect("write v_report");
+        dir
+    }
+
+    #[test]
+    fn column_lineage_returns_source_derived_edges_for_a_view_chain() {
+        let project = write_view_chain_project();
+        let value = run_column_lineage(ColumnLineageArgs {
+            project_root: project.path().display().to_string(),
+            owner: Some("app".to_owned()),
+            object: "v_paid".to_owned(),
+            column: "amount".to_owned(),
+        })
+        .expect("column lineage succeeds over source");
+
+        // The column resolves to its canonical logical id, and the tool reports
+        // it found the node rather than an empty available-sample fallback.
+        assert_eq!(value["found"].as_bool(), Some(true), "value={value}");
+        assert_eq!(
+            value["column_logical_id"].as_str(),
+            Some("app.v_paid.amount")
+        );
+
+        // The upstream side is source-derived: v_paid.amount derives from the
+        // view chain below it (v_orders / orders), never from thin air. Every
+        // edge names an object and a column edge kind, and nothing else.
+        let upstream = &value["upstream"];
+        assert_eq!(
+            upstream["column_logical_id"].as_str(),
+            Some("app.v_paid.amount")
+        );
+        let edges = upstream["edges"].as_array().expect("upstream edges array");
+        assert!(
+            !edges.is_empty(),
+            "a carried view column must have at least one source-derived upstream edge: {value}"
+        );
+        let upstream_objects: Vec<String> = edges
+            .iter()
+            .map(|edge| {
+                edge["object"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+            })
+            .collect();
+        assert!(
+            upstream_objects
+                .iter()
+                .any(|object| object.contains("v_orders") || object.contains("orders")),
+            "upstream should trace into the view chain (v_orders/orders); got {upstream_objects:?}"
+        );
+        for edge in edges {
+            let kind = edge["edge_kind"].as_str().unwrap_or_default();
+            assert!(
+                kind.contains("Column"),
+                "every upstream edge is a column-level edge; got {kind}"
+            );
+            // Redaction: an edge names only objects and column-edge metadata, no
+            // literal value (the WHERE 'PAID' literal must never appear).
+            assert!(
+                !edge.to_string().contains("PAID"),
+                "an edge leaked a literal: {edge}"
+            );
+        }
+
+        let downstream = value["downstream"]["edges"]
+            .as_array()
+            .expect("downstream edges array");
+        assert!(
+            downstream.iter().any(|edge| {
+                edge["object"]
+                    .as_str()
+                    .is_some_and(|object| object.eq_ignore_ascii_case("app.v_report.amount"))
+                    && edge["edge_kind"] == "ReadsColumn"
+            }),
+            "the next view must be a direct reader of v_paid.amount: {downstream:?}"
+        );
+    }
+
+    #[test]
+    fn column_lineage_reports_a_missing_column_without_inventing_edges() {
+        let project = write_view_chain_project();
+        let value = run_column_lineage(ColumnLineageArgs {
+            project_root: project.path().display().to_string(),
+            owner: Some("app".to_owned()),
+            object: "v_paid".to_owned(),
+            column: "does_not_exist".to_owned(),
+        })
+        .expect("column lineage runs even when the column is absent");
+        assert_eq!(value["found"].as_bool(), Some(false));
+        assert!(
+            value.get("upstream").is_none(),
+            "no edges for a missing column"
+        );
+        assert!(value["available_column_sample"].is_array());
+    }
+
+    #[test]
+    fn oracle_lineage_is_registered_and_dispatchable_under_the_feature() {
+        // The feature-lane contract: the tool registers and is reachable
+        // through the static dispatch arm used by the served MCP surface.
+        assert!(TOOL_NAMES.contains(&"oracle_lineage"));
+        assert!(is_static_tool("oracle_lineage"));
+        let mut registry = ToolRegistry::default();
+        register_tools(&mut registry);
+        assert!(
+            registry
+                .tools
+                .iter()
+                .any(|tool| tool.name == "oracle_lineage"),
+            "oracle_lineage must be registered under the feature"
+        );
+        let project = write_view_chain_project();
+        let value = dispatch_static(
+            "oracle_lineage",
+            json!({
+                "project_root": project.path().display().to_string(),
+                "owner": "app",
+                "object": "v_paid",
+                "column": "amount",
+            }),
+        )
+        .expect("the registered static tool dispatches");
+        assert_eq!(value["found"], json!(true));
+        assert!(
+            !value["upstream"]["edges"]
+                .as_array()
+                .expect("upstream edge array")
+                .is_empty(),
+            "served dispatch must retain source-derived column edges"
+        );
+    }
+
+    #[test]
+    fn ambiguous_multi_source_projection_stays_edge_free() {
+        let project = tempfile::tempdir().expect("temp project dir");
+        std::fs::write(
+            project.path().join("sources.sql"),
+            "CREATE TABLE app.left_orders (id NUMBER);\n\
+             CREATE TABLE app.right_orders (id NUMBER);\n\
+             CREATE VIEW app.ambiguous_orders AS\n\
+             SELECT id FROM app.left_orders l JOIN app.right_orders r ON l.id = r.id;\n",
+        )
+        .expect("write ambiguous source project");
+        let value = run_column_lineage(ColumnLineageArgs {
+            project_root: project.path().display().to_string(),
+            owner: Some("app".to_owned()),
+            object: "ambiguous_orders".to_owned(),
+            column: "id".to_owned(),
+        })
+        .expect("ambiguous lineage still returns a truthful column node");
+        assert_eq!(value["found"], json!(true));
+        assert!(
+            value["upstream"]["edges"]
+                .as_array()
+                .expect("upstream edge array")
+                .is_empty(),
+            "an ambiguous unqualified source column must not be guessed: {value}"
         );
     }
 

@@ -1712,6 +1712,9 @@ fn args_for(name: &str) -> Value {
             json!({ "changeset": { "objects": [], "unclassified_files": [] } })
         }
         "oracle_plsql_lineage" => json!({ "project_root": "", "target": "APP.P" }),
+        "oracle_lineage" => {
+            json!({ "project_root": ".", "owner": "APP", "object": "P", "column": "C" })
+        }
         "oracle_plsql_sast" => json!({ "project_root": "" }),
         "oracle_plsql_doc" => {
             json!({ "source": "/** doc */\nCREATE PROCEDURE p IS BEGIN NULL; END;" })
