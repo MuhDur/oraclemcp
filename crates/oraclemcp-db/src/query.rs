@@ -293,6 +293,15 @@ pub async fn read_query_as_of(
     serialize_opts: &SerializeOptions,
     as_of: &AsOf,
 ) -> Result<QueryResponse, DbError> {
+    // The thin cleanup path conservatively discards its connection before it
+    // returns a DBMS_FLASHBACK failure. Capture version metadata while the
+    // session is still healthy so a later typed refusal can name the actual
+    // Oracle version even when that conservative discard occurs.
+    let flashback_server_version = conn
+        .describe(cx)
+        .await
+        .ok()
+        .and_then(|info| info.server_version);
     // Resolve a timestamp before opening the flashback window. The fixed,
     // server-owned conversion preserves the exact SCN Oracle chose and lets the
     // response carry a deterministic replay handle for either input form.
@@ -303,15 +312,26 @@ pub async fn read_query_as_of(
     conn.rollback(cx).await?;
     // Defensive: clear any flashback window leaked by a prior aborted call so
     // ENABLE cannot hit ORA-08184 ("re-enable while in Flashback mode").
-    conn.flashback_disable(cx).await?;
+    if let Err(error) = conn.flashback_disable(cx).await {
+        return Err(map_flashback_refusal_with_server_version(
+            error,
+            flashback_server_version.as_deref(),
+        ));
+    }
 
     let (enable_sql, bind) = resolved_as_of.enable_call();
     // Set the session read snapshot. A failure here (e.g. ORA-01031 missing
     // FLASHBACK privilege, ORA-08180 no snapshot at that SCN) is surfaced
     // fail-closed; flashback was NOT enabled, so no window is left open.
-    conn.execute(cx, enable_sql, std::slice::from_ref(&bind))
+    if let Err(error) = conn
+        .execute(cx, enable_sql, std::slice::from_ref(&bind))
         .await
-        .map_err(map_flashback_refusal)?;
+    {
+        return Err(map_flashback_refusal_with_server_version(
+            error,
+            flashback_server_version.as_deref(),
+        ));
+    }
 
     // Flashback is now active: guarantee teardown regardless of the read
     // outcome. Capture the result WITHOUT `?` so the window is always closed.
@@ -375,7 +395,47 @@ fn map_flashback_refusal(error: DbError) -> DbError {
                 DbError::Execute(message)
             }
         }
+        DbError::Quarantined { outcome, message } => {
+            if let Some((kind, ora_code)) = classify_flashback_refusal_message(&message) {
+                DbError::FlashbackRefusal {
+                    kind,
+                    message,
+                    ora_code,
+                }
+            } else {
+                DbError::Quarantined { outcome, message }
+            }
+        }
         other => other,
+    }
+}
+
+/// Preserve the actual Oracle version in a capability refusal when it was
+/// observable before the flashback cleanup boundary. A failed
+/// `DBMS_FLASHBACK` call is already terminal; this best-effort metadata can
+/// never turn that refusal into a current read or another database operation.
+fn map_flashback_refusal_with_server_version(
+    error: DbError,
+    server_version: Option<&str>,
+) -> DbError {
+    let refusal = map_flashback_refusal(error);
+    let DbError::FlashbackRefusal {
+        kind: crate::FlashbackRefusalKind::CapabilityUnavailable,
+        mut message,
+        ora_code,
+    } = refusal
+    else {
+        return refusal;
+    };
+
+    if let Some(version) = server_version {
+        message.push_str("; database version ");
+        message.push_str(version);
+    }
+    DbError::FlashbackRefusal {
+        kind: crate::FlashbackRefusalKind::CapabilityUnavailable,
+        message,
+        ora_code,
     }
 }
 
@@ -1212,7 +1272,9 @@ mod tests {
         current_scn_error: Option<String>,
         fail_enable_message: Option<String>,
         fail_disable_call: Option<usize>,
+        fail_disable_message: Option<String>,
         fail_rollback_call: Option<usize>,
+        connection_info: OracleConnectionInfo,
         disable_calls: std::sync::atomic::AtomicUsize,
         rollback_calls: std::sync::atomic::AtomicUsize,
     }
@@ -1225,7 +1287,7 @@ mod tests {
             Ok(())
         }
         async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
-            Ok(OracleConnectionInfo::default())
+            Ok(self.connection_info.clone())
         }
         async fn query_rows(
             &self,
@@ -1287,7 +1349,11 @@ mod tests {
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                     + 1;
                 if self.fail_disable_call == Some(call) {
-                    return Err(DbError::Execute(format!("disable failure on call {call}")));
+                    return Err(DbError::Execute(
+                        self.fail_disable_message
+                            .clone()
+                            .unwrap_or_else(|| format!("disable failure on call {call}")),
+                    ));
                 }
             }
             Ok(0)
@@ -1537,6 +1603,64 @@ mod tests {
     }
 
     #[test]
+    fn read_query_as_of_refuses_missing_dbms_flashback_before_opening_a_window() {
+        let conn = FlashbackRecorder {
+            fail_disable_call: Some(1),
+            fail_disable_message: Some(
+                "ORA-06550: line 1, column 7:\nPLS-00201: identifier 'DBMS_FLASHBACK' must be declared"
+                    .to_owned(),
+            ),
+            connection_info: OracleConnectionInfo {
+                server_version: Some("18.4.0.0.0".to_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (error, events) = run_with_cx(|cx| async move {
+            let error = read_query_as_of(
+                &cx,
+                &conn,
+                "SELECT 1 FROM t",
+                &[],
+                QueryCaps::default(),
+                0,
+                &SerializeOptions::default(),
+                &AsOf::Scn(1),
+            )
+            .await
+            .expect_err("missing DBMS_FLASHBACK must fail closed");
+            (error, conn.events.into_inner().expect("events"))
+        });
+
+        let env = error.clone().into_envelope();
+        match error {
+            DbError::FlashbackRefusal {
+                kind,
+                message,
+                ora_code,
+            } => {
+                assert_eq!(kind, crate::FlashbackRefusalKind::CapabilityUnavailable);
+                assert_eq!(ora_code, None, "the PLS wrapper is not the root cause");
+                assert!(message.contains("DBMS_FLASHBACK"), "{message}");
+                assert!(message.contains("18.4.0.0.0"), "{message}");
+            }
+            other => panic!("expected typed capability refusal, got {other:?}"),
+        }
+        assert_eq!(
+            env.error_class,
+            oraclemcp_error::ErrorClass::FlashbackCapabilityUnavailable
+        );
+        assert_eq!(
+            events,
+            vec![
+                "rollback".to_owned(),
+                "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
+            ],
+            "the unsupported capability must be refused before ENABLE or the caller read"
+        );
+    }
+
+    #[test]
     fn read_query_as_of_maps_snapshot_too_old_read_error_to_typed_retention_refusal() {
         let conn = FlashbackRecorder {
             fail_read: true,
@@ -1658,6 +1782,31 @@ mod tests {
             matches!(error, DbError::Cancelled(_)),
             "only Oracle Query/Execute errors from the flashback path are typed"
         );
+    }
+
+    #[test]
+    fn flashback_refusal_mapper_recovers_the_known_capability_from_cleanup_quarantine() {
+        let error = map_flashback_refusal_with_server_version(
+            DbError::Quarantined {
+                outcome: QuarantineOutcome::UnknownDiscarded,
+                message: "DBMS_FLASHBACK.DISABLE cleanup failed; the thin connection was discarded: ORA-06550: line 1, column 7: PLS-00201: identifier 'DBMS_FLASHBACK' must be declared"
+                    .to_owned(),
+            },
+            Some("21.3.0.0.0"),
+        );
+
+        match error {
+            DbError::FlashbackRefusal {
+                kind,
+                message,
+                ora_code,
+            } => {
+                assert_eq!(kind, crate::FlashbackRefusalKind::CapabilityUnavailable);
+                assert_eq!(ora_code, None);
+                assert!(message.contains("21.3.0.0.0"), "{message}");
+            }
+            other => panic!("expected recovered capability refusal, got {other:?}"),
+        }
     }
 
     // ===================================================================

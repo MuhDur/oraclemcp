@@ -81,6 +81,11 @@ pub enum ErrorClass {
     /// serve through flashback query (for example a remote table through a
     /// database link).
     FlashbackNotFlashbackable,
+    /// The connected Oracle database does not expose the required
+    /// `DBMS_FLASHBACK` capability for a time-travel/SCN-diff request. This is
+    /// terminal for the selected profile and version; the server must never
+    /// silently substitute a current read.
+    FlashbackCapabilityUnavailable,
     /// An unexpected internal error; the agent cannot fix it by changing input.
     Internal,
 }
@@ -698,6 +703,10 @@ mod tests {
             (
                 ErrorClass::FlashbackNotFlashbackable,
                 "FLASHBACK_NOT_FLASHBACKABLE",
+            ),
+            (
+                ErrorClass::FlashbackCapabilityUnavailable,
+                "FLASHBACK_CAPABILITY_UNAVAILABLE",
             ),
         ] {
             let env = ErrorEnvelope::new(class, "flashback refused");

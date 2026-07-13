@@ -30,6 +30,10 @@ pub enum QuarantineOutcome {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum FlashbackRefusalKind {
+    /// The selected database/version does not expose `DBMS_FLASHBACK` to this
+    /// profile (`PLS-00201`). Time-travel and SCN-diff requests must refuse;
+    /// they must never silently become current reads.
+    CapabilityUnavailable,
     /// Oracle no longer has enough undo/SCN mapping data for the requested
     /// target (`ORA-01555`, `ORA-08180`, `ORA-08186`).
     RetentionExceeded,
@@ -45,6 +49,7 @@ impl FlashbackRefusalKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            FlashbackRefusalKind::CapabilityUnavailable => "capability_unavailable",
             FlashbackRefusalKind::RetentionExceeded => "retention_exceeded",
             FlashbackRefusalKind::DefinitionChanged => "definition_changed",
             FlashbackRefusalKind::NotFlashbackable => "not_flashbackable",
@@ -55,6 +60,9 @@ impl FlashbackRefusalKind {
     #[must_use]
     pub(crate) const fn error_class(self) -> ErrorClass {
         match self {
+            FlashbackRefusalKind::CapabilityUnavailable => {
+                ErrorClass::FlashbackCapabilityUnavailable
+            }
             FlashbackRefusalKind::RetentionExceeded => ErrorClass::FlashbackRetentionExceeded,
             FlashbackRefusalKind::DefinitionChanged => ErrorClass::FlashbackDefinitionChanged,
             FlashbackRefusalKind::NotFlashbackable => ErrorClass::FlashbackNotFlashbackable,
@@ -65,6 +73,9 @@ impl FlashbackRefusalKind {
     #[must_use]
     pub(crate) const fn summary(self) -> &'static str {
         match self {
+            FlashbackRefusalKind::CapabilityUnavailable => {
+                "the selected Oracle server version/profile does not expose the required DBMS_FLASHBACK capability"
+            }
             FlashbackRefusalKind::RetentionExceeded => {
                 "the requested flashback target is outside available retention"
             }
@@ -81,6 +92,10 @@ impl FlashbackRefusalKind {
     #[must_use]
     pub(crate) const fn next_steps(self) -> &'static [&'static str] {
         match self {
+            FlashbackRefusalKind::CapabilityUnavailable => &[
+                "use a profile whose Oracle server version exposes DBMS_FLASHBACK before retrying this time-travel or SCN-diff request",
+                "retry without as_of/oracle_diff only if a current read is explicitly acceptable; this request was not silently degraded",
+            ],
             FlashbackRefusalKind::RetentionExceeded => &[
                 "retry with a newer SCN/timestamp inside the database undo/flashback retention window",
                 "for future comparisons, record the current SCN before the change and use that observed_scn",
@@ -486,6 +501,13 @@ pub(crate) fn classify_flashback_refusal_message(
     message: &str,
 ) -> Option<(FlashbackRefusalKind, Option<i32>)> {
     let ora_code = parse_ora_code(message);
+    let lower = message.to_ascii_lowercase();
+    // PLS-00201 is reported beneath an ORA-06550 wrapper, so presenting that
+    // wrapper as the root cause would be misleading. The missing
+    // DBMS_FLASHBACK capability is the useful, version/profile-specific fact.
+    if lower.contains("pls-00201") && lower.contains("dbms_flashback") {
+        return Some((FlashbackRefusalKind::CapabilityUnavailable, None));
+    }
     match ora_code {
         // Oracle returns ORA-08186 when `TIMESTAMP_TO_SCN` cannot map an
         // otherwise valid AS OF timestamp into retained history. This only
@@ -499,7 +521,6 @@ pub(crate) fn classify_flashback_refusal_message(
             Some((FlashbackRefusalKind::NotFlashbackable, ora_code))
         }
         _ => {
-            let lower = message.to_ascii_lowercase();
             if lower.contains("cannot perform a flashback query")
                 || lower.contains("not flashbackable")
                 || lower.contains("non-flashbackable")
@@ -669,6 +690,33 @@ mod tests {
     }
 
     #[test]
+    fn missing_dbms_flashback_is_a_typed_non_degrading_capability_refusal() {
+        let env = DbError::FlashbackRefusal {
+            kind: FlashbackRefusalKind::CapabilityUnavailable,
+            message: "ORA-06550: line 1, column 7:\nPLS-00201: identifier 'DBMS_FLASHBACK' must be declared; database version 18.4.0.0.0"
+                .to_owned(),
+            ora_code: None,
+        }
+        .into_envelope();
+
+        assert_eq!(env.error_class, ErrorClass::FlashbackCapabilityUnavailable);
+        assert_eq!(env.ora_code, None, "ORA-06550 is only the PLS wrapper");
+        assert!(env.message.contains("DBMS_FLASHBACK"), "{}", env.message);
+        assert!(
+            env.message.contains("18.4.0.0.0"),
+            "the envelope retains the detected database version: {}",
+            env.message
+        );
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("not silently degraded")),
+            "{:?}",
+            env.next_steps
+        );
+    }
+
+    #[test]
     fn flashback_definition_change_refusal_has_typed_class_and_next_steps() {
         let env = DbError::FlashbackRefusal {
             kind: FlashbackRefusalKind::DefinitionChanged,
@@ -713,6 +761,13 @@ mod tests {
 
     #[test]
     fn flashback_refusal_classifier_is_contextual_and_conservative() {
+        assert_eq!(
+            classify_flashback_refusal_message(
+                "ORA-06550: line 1, column 7:\nPLS-00201: identifier 'DBMS_FLASHBACK' must be declared"
+            ),
+            Some((FlashbackRefusalKind::CapabilityUnavailable, None)),
+            "the PLS wrapper must not erase the missing DBMS_FLASHBACK capability"
+        );
         assert_eq!(
             classify_flashback_refusal_message("ORA-01555: snapshot too old"),
             Some((FlashbackRefusalKind::RetentionExceeded, Some(1555)))

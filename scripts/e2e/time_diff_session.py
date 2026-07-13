@@ -234,11 +234,18 @@ class TimeDiff:
             f"refusal error_class is {expected_class}",
             content,
         )
-        require(
-            content.get("ora_code") in expected_oras,
-            f"refusal ora_code is one of {sorted(expected_oras)}",
-            content,
-        )
+        if expected_oras is None:
+            require(
+                content.get("ora_code") is None,
+                "PLS-00201 capability refusal does not misreport its ORA-06550 wrapper as the root cause",
+                content,
+            )
+        else:
+            require(
+                content.get("ora_code") in expected_oras,
+                f"refusal ora_code is one of {sorted(expected_oras)}",
+                content,
+            )
         return content
 
     def diff(self, sql, scn_a, scn_b, key=None):
@@ -261,11 +268,18 @@ class TimeDiff:
             f"oracle_diff refusal error_class is {expected_class}",
             content,
         )
-        require(
-            content.get("ora_code") in expected_oras,
-            f"oracle_diff refusal ora_code is one of {sorted(expected_oras)}",
-            content,
-        )
+        if expected_oras is None:
+            require(
+                content.get("ora_code") is None,
+                "oracle_diff capability refusal does not misreport its ORA-06550 wrapper as the root cause",
+                content,
+            )
+        else:
+            require(
+                content.get("ora_code") in expected_oras,
+                f"oracle_diff refusal ora_code is one of {sorted(expected_oras)}",
+                content,
+            )
         return content
 
     def elevate(self):
@@ -341,6 +355,43 @@ class TimeDiff:
             return {"server_version": server.get("version")}
 
         self.step("initialize", initialize)
+
+        if self.args.flashback_capability == "unavailable":
+            def unavailable_capability_refusals():
+                row_sql = "SELECT 1 AS ID FROM DUAL"
+                as_of = self.query_refused(
+                    row_sql,
+                    {"scn": 1},
+                    "FLASHBACK_CAPABILITY_UNAVAILABLE",
+                    None,
+                )
+                diff = self.diff_refused(
+                    row_sql,
+                    1,
+                    2,
+                    "FLASHBACK_CAPABILITY_UNAVAILABLE",
+                    None,
+                )
+                for tool, refusal in (("oracle_query as_of", as_of), ("oracle_diff", diff)):
+                    message = str(refusal.get("message", ""))
+                    require(
+                        "DBMS_FLASHBACK" in message,
+                        f"{tool} names the missing DBMS_FLASHBACK capability",
+                        refusal,
+                    )
+                    require(
+                        "database version" in message,
+                        f"{tool} names the detected database version",
+                        refusal,
+                    )
+                return {
+                    "as_of_error_class": as_of.get("error_class"),
+                    "diff_error_class": diff.get("error_class"),
+                }
+
+            self.step("flashback_capability_refusals", unavailable_capability_refusals)
+            return
+
         self.step("elevate_ddl", self.elevate)
 
         def create_table():
@@ -525,6 +576,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True)
     parser.add_argument("--profile", required=True)
+    parser.add_argument(
+        "--flashback-capability",
+        choices=("supported", "unavailable"),
+        required=True,
+    )
     parser.add_argument("--table", required=True)
     parser.add_argument("--audit-file", required=True)
     parser.add_argument("--evidence", required=True)

@@ -65,7 +65,7 @@ fn default_triplet() -> Option<(String, String, String)> {
     ))
 }
 
-fn fingerprint(info: &OracleConnectionInfo) -> String {
+fn database_identity_fingerprint(info: &OracleConnectionInfo) -> String {
     format!(
         "{}|{}|{}|{}",
         info.db_unique_name.as_deref().unwrap_or("unknown-db"),
@@ -73,6 +73,14 @@ fn fingerprint(info: &OracleConnectionInfo) -> String {
         info.instance_name.as_deref().unwrap_or("unknown-instance"),
         info.session_user.as_deref().unwrap_or("unknown-user")
     )
+}
+
+fn session_identity(info: &OracleConnectionInfo) -> Option<String> {
+    Some(format!(
+        "{}|{}",
+        info.sid.as_deref()?,
+        info.serial_number.as_deref()?
+    ))
 }
 
 fn describe_lane(
@@ -94,8 +102,8 @@ fn describe_lane(
 }
 
 #[test]
-#[ignore = "live-xe: set ORACLEMCP_MULTI_DB_LIVE_XE=1 and ORACLEMCP_TEST_*_A/B to prove two real DB lanes"]
-fn live_xe_two_database_lanes_keep_db_identity_isolated() {
+#[ignore = "live-xe: set ORACLEMCP_MULTI_DB_LIVE_XE=1 and ORACLEMCP_TEST_*_A/B to prove two configured live lanes"]
+fn live_xe_two_configured_lanes_keep_session_isolation() {
     if std::env::var("ORACLEMCP_MULTI_DB_LIVE_XE").is_err() {
         eprintln!(
             "{}",
@@ -139,11 +147,44 @@ fn live_xe_two_database_lanes_keep_db_identity_isolated() {
             return;
         }
     };
-    assert_ne!(
-        fingerprint(&info_a),
-        fingerprint(&info_b),
-        "the two live lane profiles must point at distinct database identities"
+    assert_eq!(
+        info_a.action.as_deref(),
+        Some("db-a"),
+        "lane A must retain its server-observed action rather than borrowing lane B state"
     );
+    assert_eq!(
+        info_b.action.as_deref(),
+        Some("db-b"),
+        "lane B must retain its server-observed action rather than borrowing lane A state"
+    );
+    assert_eq!(
+        info_a.client_identifier.as_deref(),
+        Some("oraclemcp-n9-db-a"),
+        "lane A must retain its configured client identity"
+    );
+    assert_eq!(
+        info_b.client_identifier.as_deref(),
+        Some("oraclemcp-n9-db-b"),
+        "lane B must retain its configured client identity"
+    );
+
+    // Profile lanes can intentionally share a database, and cloned XE labs can
+    // legitimately report the same DB_UNIQUE_NAME/service/instance values.
+    // That metadata is therefore not a database-uniqueness oracle. When the
+    // database identity is shared, prove the thing multi-lane dispatch actually
+    // promises: each profile owns a distinct Oracle session and its state.
+    let database_identity_a = database_identity_fingerprint(&info_a);
+    let database_identity_b = database_identity_fingerprint(&info_b);
+    let database_identity_relation = if database_identity_a == database_identity_b {
+        assert_ne!(
+            session_identity(&info_a).expect("same-database lane A exposes SID and serial"),
+            session_identity(&info_b).expect("same-database lane B exposes SID and serial"),
+            "profiles sharing a database identity must still use distinct Oracle sessions"
+        );
+        "shared"
+    } else {
+        "distinct"
+    };
     eprintln!(
         "{}",
         json!({
@@ -159,9 +200,14 @@ fn live_xe_two_database_lanes_keep_db_identity_isolated() {
             "level": "READ_ONLY",
             "grant": "none",
             "outcome": "pass",
-            "db_fingerprint": {
-                "a": fingerprint(&info_a),
-                "b": fingerprint(&info_b)
+            "database_identity": {
+                "a": database_identity_a,
+                "b": database_identity_b,
+                "relation": database_identity_relation
+            },
+            "session_isolation": {
+                "a": session_identity(&info_a),
+                "b": session_identity(&info_b)
             }
         })
     );

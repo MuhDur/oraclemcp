@@ -88,6 +88,18 @@ lane_password() {
   esac
 }
 
+# The XE 18c/21c lab images do not expose DBMS_FLASHBACK to the test profile.
+# That is a supported-but-unavailable capability outcome, not a reason to
+# pretend that time-travel or SCN-diff succeeded. Free 23ai is the positive
+# control and runs the complete diff/replay matrix below.
+lane_flashback_capability() {
+  case "$1" in
+    xe18 | xe21) printf '%s\n' "unavailable" ;;
+    free23) printf '%s\n' "supported" ;;
+    *) return 1 ;;
+  esac
+}
+
 require_time_diff_env() {
   if [ "${ORACLEMCP_LIVE_XE:-}" != "1" ]; then
     e2e_finish_skip "set ORACLEMCP_LIVE_XE=1 plus ORACLE_MATRIX_*_USER/_PASSWORD to run the time-diff matrix"
@@ -162,10 +174,15 @@ fi
 run_lane() {
   set -e
   local lane="$1"
-  local dsn user password lane_dir state_dir profiles_file table evidence audit_file audit_json
+  local dsn user password flashback_capability min_audit_records lane_dir state_dir profiles_file table evidence audit_file audit_json
   dsn="$(lane_dsn "$lane")"
   user="$(lane_user "$lane")"
   password="$(lane_password "$lane")"
+  flashback_capability="$(lane_flashback_capability "$lane")"
+  min_audit_records=12
+  if [ "$flashback_capability" = "unavailable" ]; then
+    min_audit_records=2
+  fi
   lane_dir="$matrix_dir/$lane"
   state_dir="$lane_dir/state"
   mkdir -p "$lane_dir" "$state_dir"
@@ -204,6 +221,7 @@ PROFILES
   timeout -k 15 "$lane_timeout_secs" python3 "$ROOT/scripts/e2e/time_diff_session.py" \
     --binary "$BINARY" \
     --profile "$lane" \
+    --flashback-capability "$flashback_capability" \
     --table "$table" \
     --audit-file "$audit_file" \
     --evidence "$evidence" \
@@ -230,21 +248,26 @@ PROFILES
     e2e_log_event "audit_verify" "assert" "fail" 0 "lane $lane: audit verify failed (see $audit_json)"
     return 1
   fi
-  if ! python3 - "$audit_json" <<'PY'
+  if ! python3 - "$audit_json" "$min_audit_records" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     report = json.load(handle)
-if report.get("ok") is not True or int(report.get("records", 0)) < 12:
+if report.get("ok") is not True or int(report.get("records", 0)) < int(sys.argv[2]):
     raise SystemExit(1)
 PY
   then
     e2e_log_event "audit_verify" "assert" "fail" 0 "lane $lane: audit chain is not valid or too short (see $audit_json)"
     return 1
   fi
-  e2e_log_event "audit_verify" "assert" "pass" 0 "lane $lane: signed audit chain verifies after SCN replay"
-  e2e_log_event "time_diff_lane" "assert" "pass" 0 "lane $lane: keyed/keyless diff, typed refusals, and replay green"
+  if [ "$flashback_capability" = "unavailable" ]; then
+    e2e_log_event "audit_verify" "assert" "pass" 0 "lane $lane: signed audit chain records typed DBMS_FLASHBACK refusals"
+    e2e_log_event "time_diff_lane" "assert" "pass" 0 "lane $lane: as-of and SCN-diff refuse with the version-aware DBMS_FLASHBACK capability envelope"
+  else
+    e2e_log_event "audit_verify" "assert" "pass" 0 "lane $lane: signed audit chain verifies after SCN replay"
+    e2e_log_event "time_diff_lane" "assert" "pass" 0 "lane $lane: keyed/keyless diff, typed refusals, and replay green"
+  fi
 }
 
 overall_fail=0

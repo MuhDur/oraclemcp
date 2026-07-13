@@ -80,8 +80,20 @@ for script in "${scenarios[@]}"; do
   # a process-substitution child before the grep below, so a `> >(tee …)` skip
   # line could still be unflushed and miscounted as a pass. Capture to files,
   # then replay to the terminal after the exit code is known.
+  # Served-egress credentials are deliberately environment-only. They are
+  # `ORACLEMCP_*` names for the harness, while child servers reject unknown
+  # `ORACLEMCP_*` configuration keys. Scope them to their one scenario so they
+  # cannot leak into another served process or change an unrelated result.
   set +e
-  bash "$script" "${args[@]}" >"$out" 2>"$err"
+  if [ "$name" = "served_egress" ]; then
+    bash "$script" "${args[@]}" >"$out" 2>"$err"
+  else
+    env \
+      -u ORACLEMCP_SERVED_EGRESS_DSN \
+      -u ORACLEMCP_SERVED_EGRESS_USER \
+      -u ORACLEMCP_SERVED_EGRESS_PASSWORD \
+      bash "$script" "${args[@]}" >"$out" 2>"$err"
+  fi
   status=$?
   set -e
   cat "$out"
