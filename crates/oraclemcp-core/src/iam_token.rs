@@ -52,6 +52,15 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use std::{
+    cell::Cell,
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+
 use command_group::{CommandGroup, GroupChild};
 use oraclemcp_config::{ConnectionProfile, OciConfig};
 use oraclemcp_db::OracleConnectOptions;
@@ -376,6 +385,76 @@ fn drop_reader<T>(reader: JoinHandle<T>) {
     drop(reader);
 }
 
+#[cfg(test)]
+static ACTIVE_TOKEN_EXEC_READER_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+static TOKEN_EXEC_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+thread_local! {
+    static TOKEN_EXEC_TEST_LOCK_HELD: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+struct TokenExecTestLockFlag<'a>(&'a Cell<bool>);
+
+#[cfg(test)]
+impl Drop for TokenExecTestLockFlag<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
+#[cfg(test)]
+fn with_token_exec_test_lock<R>(f: impl FnOnce() -> R) -> R {
+    TOKEN_EXEC_TEST_LOCK_HELD.with(|held| {
+        if held.get() {
+            return f();
+        }
+        let _guard = TOKEN_EXEC_TEST_LOCK
+            .lock()
+            .expect("token_exec test lock poisoned");
+        held.set(true);
+        let _flag = TokenExecTestLockFlag(held);
+        f()
+    })
+}
+
+#[cfg(test)]
+fn active_token_exec_reader_workers() -> usize {
+    ACTIVE_TOKEN_EXEC_READER_WORKERS.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+struct ActiveTokenExecReaderGuard;
+
+#[cfg(test)]
+impl Drop for ActiveTokenExecReaderGuard {
+    fn drop(&mut self) {
+        ACTIVE_TOKEN_EXEC_READER_WORKERS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn spawn_token_exec_reader<F>(f: F) -> JoinHandle<()>
+where
+    F: FnOnce() + Send + 'static,
+{
+    #[cfg(test)]
+    {
+        ACTIVE_TOKEN_EXEC_READER_WORKERS.fetch_add(1, Ordering::SeqCst);
+        std::thread::spawn(move || {
+            let _active_reader = ActiveTokenExecReaderGuard;
+            f();
+        })
+    }
+
+    #[cfg(not(test))]
+    {
+        std::thread::spawn(f)
+    }
+}
+
 /// Run a `token_exec` arg-array and return the fetched token, fully hardened.
 ///
 /// The command is spawned **directly** — `Command::new(argv[0]).args(argv[1..])`,
@@ -401,6 +480,21 @@ fn run_token_exec_with_timeout(
     argv: &[String],
     timeout: Duration,
 ) -> Result<String, IamTokenError> {
+    #[cfg(test)]
+    {
+        with_token_exec_test_lock(|| run_token_exec_with_timeout_inner(argv, timeout))
+    }
+
+    #[cfg(not(test))]
+    {
+        run_token_exec_with_timeout_inner(argv, timeout)
+    }
+}
+
+fn run_token_exec_with_timeout_inner(
+    argv: &[String],
+    timeout: Duration,
+) -> Result<String, IamTokenError> {
     let (program, args) = argv.split_first().ok_or(IamTokenError::ExecEmptyCommand)?;
     let started = Instant::now();
 
@@ -419,7 +513,7 @@ fn run_token_exec_with_timeout(
     // (discarded, capped) so neither pipe can fill and wedge us while we wait.
     let stdout = child.take_stdout();
     let (stdout_tx, stdout_rx) = mpsc::sync_channel(1);
-    let stdout_reader = std::thread::spawn(move || {
+    let stdout_reader = spawn_token_exec_reader(move || {
         let output = stdout
             .map(read_capped)
             .unwrap_or_else(|| (Vec::new(), false));
@@ -427,7 +521,7 @@ fn run_token_exec_with_timeout(
     });
     let stderr = child.take_stderr();
     let (stderr_tx, stderr_rx) = mpsc::sync_channel(1);
-    let stderr_reader = std::thread::spawn(move || {
+    let stderr_reader = spawn_token_exec_reader(move || {
         if let Some(err) = stderr {
             // Bounded discard: keep draining until the child closes the pipe.
             let _ = read_capped(err);
@@ -1159,48 +1253,48 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn exec_direct_timeouts_cleanup_descendant_trees_and_reader_workers() {
-        let threads_before = std::fs::read_dir("/proc/self/task")
-            .expect("read tasks")
-            .count();
-        for iteration in 0..10 {
-            let marker = format!("qa9-timeout-tree-{}-{iteration}", std::process::id());
-            let script = format!("sh -c 'sleep 30' {marker} & wait");
-            let argv = vec![coreutil("sh"), "-c".to_owned(), script];
-            let start = Instant::now();
-            let error = run_token_exec_with_timeout(&argv, Duration::from_millis(100))
-                .expect_err("waiting parent must time out");
-            assert_eq!(error, IamTokenError::ExecTimedOut(0));
-            assert!(
-                start.elapsed() < Duration::from_secs(2),
-                "short test deadline was not end-to-end bounded"
-            );
-            let cleanup_deadline = Instant::now() + Duration::from_secs(2);
-            while process_with_marker_exists(&marker) && Instant::now() < cleanup_deadline {
-                std::thread::sleep(Duration::from_millis(10));
+        with_token_exec_test_lock(|| {
+            let readers_before = active_token_exec_reader_workers();
+            for iteration in 0..10 {
+                let marker = format!("qa9-timeout-tree-{}-{iteration}", std::process::id());
+                let script = format!("sh -c 'sleep 30' {marker} & wait");
+                let argv = vec![coreutil("sh"), "-c".to_owned(), script];
+                let start = Instant::now();
+                let error = run_token_exec_with_timeout(&argv, Duration::from_millis(100))
+                    .expect_err("waiting parent must time out");
+                assert_eq!(error, IamTokenError::ExecTimedOut(0));
+                assert!(
+                    start.elapsed() < Duration::from_secs(2),
+                    "short test deadline was not end-to-end bounded"
+                );
+                let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+                while process_with_marker_exists(&marker) && Instant::now() < cleanup_deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                assert!(
+                    !process_with_marker_exists(&marker),
+                    "descendant process tree survived timeout: {marker}"
+                );
             }
-            assert!(
-                !process_with_marker_exists(&marker),
-                "descendant process tree survived timeout: {marker}"
-            );
-        }
 
-        // Reader handles are detached only after the tree is killed; give those
-        // already-unblocked threads a scheduling turn, then prove retries did not
-        // accumulate one stdout/stderr worker pair per attempt.
-        let settle_deadline = Instant::now() + Duration::from_secs(2);
-        let threads_after = loop {
-            let count = std::fs::read_dir("/proc/self/task")
-                .expect("read tasks")
-                .count();
-            if count <= threads_before || Instant::now() >= settle_deadline {
-                break count;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        assert!(
-            threads_after <= threads_before,
-            "reader workers leaked (before={threads_before}, after={threads_after})"
-        );
+            // Reader handles are detached only after the tree is killed; give those
+            // already-unblocked threads a scheduling turn, then prove retries did not
+            // accumulate one stdout/stderr worker pair per attempt. Scope the proof
+            // to token_exec reader workers: libtest's shared process may run other
+            // tests that spawn unrelated helper threads while this assertion samples.
+            let settle_deadline = Instant::now() + Duration::from_secs(2);
+            let readers_after = loop {
+                let count = active_token_exec_reader_workers();
+                if count <= readers_before || Instant::now() >= settle_deadline {
+                    break count;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert!(
+                readers_after <= readers_before,
+                "token_exec reader workers accumulated across timeout retries (before={readers_before}, after={readers_after})"
+            );
+        });
     }
 
     #[test]
