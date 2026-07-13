@@ -19,6 +19,7 @@ pub mod enforcement;
 pub mod exec_grant;
 pub mod levels;
 pub mod policy;
+pub mod policy_gate;
 pub mod purity;
 pub mod resolver;
 pub mod rewrite;
@@ -44,6 +45,10 @@ pub use policy::{
     DefaultMode, PolicyDecision, SQL_POLICY_VERSION, SchemaPolicy, SchemaPolicyRaw,
     SchemaPolicySet, SqlPolicyConfig, SqlPolicyEffectConfig, SqlPolicyMatchConfig,
     SqlPolicyRuleConfig, SqlPolicyValidationError, SqlPolicyVerb,
+};
+pub use policy_gate::{
+    PolicyGate, PolicyGateAdmission, PolicyGateDenial, PolicyGateDenialReason, PolicyGateRequest,
+    StatementPolicyFacts, enforce_sql_policy,
 };
 pub use purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
 pub use resolver::{

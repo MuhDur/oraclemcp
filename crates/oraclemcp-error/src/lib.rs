@@ -151,6 +151,9 @@ pub enum ReasonCategory {
     /// A `SELECT` (or a base object it reads) the engine could not prove
     /// side-effect-free.
     UnprovenSideEffect,
+    /// A profile's Arc N SQL policy denied the statement (ADR 0009). The policy
+    /// can only ever restrict: this is never the reason a statement was allowed.
+    PolicyDenied,
     /// A refusal that does not fit the categories above.
     Other,
 }
@@ -233,6 +236,14 @@ pub struct StructuredReason {
     /// Structured optimizer-plan context for a query cost refusal.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub query_cost_refusal: Option<QueryCostRefusal>,
+    /// The Arc N policy outcome (ADR 0009) when a profile policy was evaluated:
+    /// `{"Deny": {reason, matched_rule_ids}}`. Carried opaquely so this crate
+    /// stays free of a guard dependency, and shaped exactly as the guard emits
+    /// it — which is the shape the operator console already parses, so the policy
+    /// badge lights up with no client change. Absent means no policy was
+    /// evaluated, which is NOT the claim that no policy applied.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub policy_tightening: Option<serde_json::Value>,
 }
 
 impl StructuredReason {
@@ -245,7 +256,15 @@ impl StructuredReason {
             minimal_rewrite: None,
             required_level: None,
             query_cost_refusal: None,
+            policy_tightening: None,
         }
+    }
+
+    /// Attach the Arc N policy outcome (ADR 0009) this refusal carries.
+    #[must_use]
+    pub fn with_policy_tightening(mut self, tightening: serde_json::Value) -> Self {
+        self.policy_tightening = Some(tightening);
+        self
     }
 
     /// Name the offending construct.
