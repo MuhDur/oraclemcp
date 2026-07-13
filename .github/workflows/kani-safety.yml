@@ -9,7 +9,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_BUILD_JOBS: "16"
+  # Kani compiles whole harness crates before invoking CBMC. On GitHub's
+  # ubuntu-latest runners, high Cargo fan-out can SIGTERM the job before the
+  # proof starts; keep this lane intentionally conservative.
+  CARGO_BUILD_JOBS: "2"
   CARGO_TARGET_DIR: /home/runner/work/_cargo-target-server
   RUST_TOOLCHAIN: nightly-2026-05-11
 
