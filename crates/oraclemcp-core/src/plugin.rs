@@ -4,8 +4,9 @@
 //! **never with direct process/DB/secret access**. It communicates only over a
 //! JSON line protocol on stdin/stdout, and every database-touching request it
 //! makes is mediated by the host — so a plugin **cannot bypass the classifier,
-//! RBAC, the operating-level ceiling, or the audit trail** (R1/R7): it has no
-//! handle to the DB, only the host's capability API.
+//! RBAC, the operating-level ceiling, or the audit trail** (R1/R7): the host
+//! does not hand it a DB handle, and the subprocess starts with a sterile
+//! environment so parent-process secrets are not inherited.
 //!
 //! This module owns the boundary contract: the capability set, the host-side
 //! capability gate ([`check_capability`]), and a crash-isolated subprocess
@@ -208,6 +209,11 @@ impl PluginProcessTree {
         let mut command = Command::new(program);
         command
             .args(args)
+            // A subprocess plugin is operator-authored code, not a trusted child
+            // of the server. Do not inherit ORACLE_*/ORACLEMCP_* credentials,
+            // OAuth/audit keys, live-test passwords, or launcher secrets from the
+            // host process environment.
+            .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -353,7 +359,8 @@ impl PluginWorkers {
 
 /// An out-of-process subprocess plugin. The host spawns it, sends one JSON
 /// request on stdin, and reads one JSON response on stdout. The plugin has **no**
-/// DB/secret/process handle — only what the host passes in the request.
+/// DB handle or inherited environment secrets — only what the host passes in the
+/// request.
 #[derive(Clone, Debug)]
 pub struct SubprocessPlugin {
     /// The command + args to spawn (e.g. `["/usr/bin/my-plugin"]`).
@@ -578,6 +585,38 @@ mod tests {
             args: Value::Null,
         };
         assert!(matches!(plugin.run(&req), Err(PluginError::Protocol(_))));
+    }
+
+    #[test]
+    fn subprocess_plugin_does_not_inherit_parent_environment() {
+        // A plugin must not receive the server's environment. In real deployments
+        // that environment commonly holds ORACLE_*/ORACLEMCP_* secret refs and
+        // bearer/audit/OAuth material. HOME is used as a deterministic stand-in:
+        // it is present in normal cargo/CI runs, but must be absent in the child.
+        if std::env::var_os("HOME").is_none() {
+            return;
+        }
+        let plugin = SubprocessPlugin::new(vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "IFS= read -r _; \
+             if printenv HOME >/dev/null; then \
+               printf '{\"ok\":true,\"data\":{\"inherited_home\":true}}'; \
+             else \
+               printf '{\"ok\":true,\"data\":{\"inherited_home\":false}}'; \
+             fi"
+            .to_owned(),
+        ]);
+        let req = PluginRequest {
+            capability: PluginCapability::ReadQuery,
+            args: Value::Null,
+        };
+        let response = plugin.run(&req).expect("environment probe runs");
+        assert_eq!(
+            response.data["inherited_home"],
+            serde_json::json!(false),
+            "subprocess plugin inherited the parent environment"
+        );
     }
 
     #[test]
