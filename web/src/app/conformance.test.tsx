@@ -14,6 +14,7 @@ import {
   maskBadgeFixture,
   vectorClusterFixture,
   editionTimelineFixture,
+  cqnChangeFeedFixture,
   policyBadgeFixture,
   scnScrubberFixture,
   skinContractFixture,
@@ -21,6 +22,7 @@ import {
   toMaskBadgeViewModel,
   toVectorClusterViewModel,
   toEditionTimelineViewModel,
+  toCqnChangeFeedViewModel,
   toPolicyBadgeViewModel,
   toScnScrubberViewModel,
   toUndoTreeViewModel,
@@ -268,6 +270,40 @@ describe("OMCP skin conformance", () => {
     const drifted = model.nodes.find((node) => node.dbId === "staging");
     expect(drifted?.drift?.changedSections).toContain("schema");
     expect(markup).toContain('data-db-drift="drifted"');
+  });
+
+  it("renders the CQN change feed with resource-scoped, coalesced events", () => {
+    const CqnChangeFeed = OMCP_SKIN.renderers.CqnChangeFeed;
+    const model = cqnChangeFeedFixture();
+    const markup = renderToStaticMarkup(<CqnChangeFeed model={model} />);
+
+    expect(markup).toContain('data-grammar-version="1"');
+    expect(markup).toContain('data-feed-status="streaming"');
+
+    // Each event has an id and a scope; the scope is the proven query's resource
+    // URI, NEVER a bare object name.
+    const scopes = [...markup.matchAll(/data-change-scope="([^"]+)"/g)].map((m) => m[1]);
+    expect(scopes.length).toBeGreaterThan(0);
+    for (const scope of scopes) {
+      expect(scope).toMatch(/^[a-z][a-z0-9+.-]*:\/\//i);
+      expect(scope).not.toMatch(/^[A-Z_]+\.[A-Z_]+$/); // not OWNER.OBJECT
+    }
+    expect(markup).toContain("data-change-event-id=");
+
+    // The two events for one scope folded into a single coalesced entry.
+    const coalesced = model.events.find((event) => event.coalesced);
+    expect(coalesced?.count).toBe(2);
+    expect(markup).toContain('data-coalesced="true"');
+  });
+
+  it("reports 'not reported' when the operator surface projects no change feed", () => {
+    const CqnChangeFeed = OMCP_SKIN.renderers.CqnChangeFeed;
+    const none = toCqnChangeFeedViewModel({ events: null });
+    expect(none.status).toBe("not_reported");
+    expect(none.detail).toContain("not a claim that nothing changed");
+    const markup = renderToStaticMarkup(<CqnChangeFeed model={none} />);
+    expect(markup).toContain('data-feed-status="not_reported"');
+    expect(markup).not.toContain("data-change-scope");
   });
 
   it("renders the edition timeline as a single-child LINEAR chain", () => {

@@ -31,6 +31,7 @@ import {
   type MaskBadgeViewModel,
   type VectorClusterViewModel,
   type EditionTimelineViewModel,
+  type CqnChangeFeedViewModel,
   type PolicyBadgeViewModel,
   type ScnScrubberViewModel,
   type SignatureId,
@@ -80,6 +81,7 @@ export type DashboardSkin = {
     PolicyBadge: React.ComponentType<{ model: PolicyBadgeViewModel }>;
     VectorCluster: React.ComponentType<{ model: VectorClusterViewModel }>;
     EditionTimeline: React.ComponentType<{ model: EditionTimelineViewModel }>;
+    CqnChangeFeed: React.ComponentType<{ model: CqnChangeFeedViewModel }>;
     ScnScrubber: React.ComponentType<{
       model: ScnScrubberViewModel;
       onScrub?: (scn: number) => void;
@@ -177,6 +179,7 @@ export const OMCP_SKIN: DashboardSkin = {
     FleetMap: FleetMapRenderer,
     VectorCluster: VectorClusterRenderer,
     EditionTimeline: EditionTimelineRenderer,
+    CqnChangeFeed: CqnChangeFeedRenderer,
     PolicyBadge: PolicyBadgeRenderer
   },
   layout: {
@@ -731,6 +734,73 @@ export function EditionTimelineRenderer({
   );
 }
 
+/**
+ * The live CQN change feed (Arc C1).
+ *
+ * Each entry is a changed resource SCOPE — the proven query's resource URI, the
+ * only thing a CQN callback is allowed to forward. Never row data, never an
+ * object name, never a value. Repeat callbacks for one scope coalesce. When the
+ * operator surface projects no feed, the panel says so rather than showing a
+ * quiet, healthy stream.
+ */
+export function CqnChangeFeedRenderer({
+  model
+}: {
+  model: CqnChangeFeedViewModel;
+}): React.ReactElement {
+  return (
+    <section
+      className="flex flex-col gap-3 rounded-lg border border-[var(--om-border)] bg-[var(--om-surface)] p-4 shadow-sm"
+      aria-label="cqn change feed"
+      data-grammar-version={model.grammarVersion}
+      data-feed-status={model.status}
+      data-event-count={model.events.length}
+    >
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Activity className="size-4 text-[var(--om-gold)]" aria-hidden="true" />
+          <span className="text-sm font-bold text-[var(--om-text-bright)]">Change Feed</span>
+          <Badge tone={model.tone}>{model.status}</Badge>
+        </div>
+        <span className="font-mono text-2xs text-[var(--om-text-muted)]">{model.headline}</span>
+      </header>
+      <p className="text-xs text-[var(--om-text-muted)]">{model.detail}</p>
+
+      {model.events.length > 0 ? (
+        <ul className="flex flex-col gap-1">
+          {model.events.map((event) => (
+            <li
+              key={event.eventId}
+              className={cn(
+                "flex flex-wrap items-center gap-2 rounded-md border px-3 py-2",
+                event.scopeIsResource
+                  ? "border-[var(--om-border)]"
+                  : "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)]"
+              )}
+              data-change-event-id={event.eventId}
+              data-change-scope={event.scope}
+              data-coalesced={event.coalesced ? "true" : "false"}
+              data-scope-is-resource={event.scopeIsResource ? "true" : "false"}
+            >
+              <Badge tone={event.coalesced ? "info" : "off"}>
+                {event.coalesced ? `coalesced ×${event.count}` : "single"}
+              </Badge>
+              <span className="truncate font-mono text-2xs text-[var(--om-text)]" title={event.scope}>
+                {event.scope}
+              </span>
+              {!event.scopeIsResource ? (
+                <span className="font-mono text-2xs text-[var(--om-copper)]">
+                  not a resource scope
+                </span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
+  );
+}
+
 export function MaskBadgeRenderer({ model }: { model: MaskBadgeViewModel }): React.ReactElement {
   return (
     <section
@@ -1109,6 +1179,18 @@ export function assertDashboardSkinConformance(skin: DashboardSkin): void {
   }
   if (typeof skin.renderers.EditionTimeline !== "function") {
     throw new Error(`skin ${skin.name} must provide an edition-timeline renderer`);
+  }
+  if (typeof skin.renderers.CqnChangeFeed !== "function") {
+    throw new Error(`skin ${skin.name} must provide a CQN change-feed renderer`);
+  }
+  // A change scope is always a resource URI (the proven query), never an
+  // object-level scope, and repeat callbacks for one scope must coalesce.
+  const feed = fixture.cqnChangeFeed;
+  if (feed.events.some((event) => !event.scopeIsResource)) {
+    throw new Error("a CQN change scope must be a resource URI, never object-level");
+  }
+  if (!feed.events.some((event) => event.coalesced)) {
+    throw new Error("the change-feed fixture must show a coalesced batch");
   }
   // A linear chain: every stage after the root names its single parent, and the
   // linear order is a strict 0..n sequence — never a branch/graph node.

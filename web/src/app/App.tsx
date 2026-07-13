@@ -66,6 +66,7 @@ import {
   toPolicyBadgeViewModel,
   toVectorClusterViewModel,
   toEditionTimelineViewModel,
+  toCqnChangeFeedViewModel,
   toScnScrubberViewModel,
   toUndoTreeViewModel,
   toVerdictProofViewModel,
@@ -100,6 +101,7 @@ import {
   parsePolicyTightening,
   parseVectorCluster,
   parseEditionProposals,
+  parseCqnChangeFeed,
   parseQueryAsOf,
   parseUndoOutcome,
   fetchFleetMap,
@@ -533,6 +535,7 @@ function OverviewPage(): React.ReactElement {
           <LaneMetricsPanel snapshot={snapshot} lanes={lanes} />
           <OperatorEventLogPanel status={eventLog.status} events={eventLog.events} />
         </div>
+        <CqnChangeFeedPanel events={eventLog.events} />
         <div className="grid gap-4 xl:grid-cols-[minmax(0,0.85fr)_minmax(360px,1.15fr)]">
           <ToolMetricsPanel snapshot={snapshot} />
           <OverviewReviewsPanel
@@ -5914,6 +5917,25 @@ function ReviewsPage(): React.ReactElement {
         </div>
       </div>
     </PageFrame>
+  );
+}
+
+/**
+ * The live CQN change feed (Arc C1).
+ *
+ * CQN change events ride the operator event stream carrying only the bound
+ * resource scope (the proven query) — never row data. This panel coalesces the
+ * latest event's change feed into changed scopes; when the operator surface
+ * projects no feed it reports "not reported", not a quiet healthy stream.
+ */
+function CqnChangeFeedPanel({ events }: { events: OperatorEventEnvelope[] }): React.ReactElement {
+  const CqnChangeFeed = OMCP_SKIN.renderers.CqnChangeFeed;
+  const latest = events.length > 0 ? events[events.length - 1] : null;
+  const model = toCqnChangeFeedViewModel(parseCqnChangeFeed(latest));
+  return (
+    <Surface className="space-y-3 p-4" data-testid="cqn-change-feed-panel">
+      <CqnChangeFeed model={model} />
+    </Surface>
   );
 }
 

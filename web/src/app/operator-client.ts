@@ -5,6 +5,7 @@ import {
   type VectorMetric,
   type EditionProposalInput,
   type EditionStatus,
+  type CqnChangeFeedInput,
   type CostPlanRowViewModel,
   type ClearanceLevel,
   type CostCeilingSource,
@@ -640,6 +641,35 @@ export type ClassifierLadderData = {
   reason?: string;
   verdicts: ClassifierVerdict[];
 };
+
+// ── CQN change feed (Arc C1) ─────────────────────────────────────────────────
+// A change event carries only the bound resource URI (the proven query scope);
+// the backend never forwards row data or values. The feed rides the operator
+// event stream under `data.change_feed`; absent that key, the console reports it
+// was not projected rather than showing a quiet, healthy stream.
+
+export function parseCqnChangeFeed(
+  event: OperatorEventEnvelope | null
+): CqnChangeFeedInput {
+  const feed = event?.data["change_feed"];
+  if (!feed || typeof feed !== "object") {
+    return { events: null };
+  }
+  const raw = (feed as Record<string, unknown>)["events"];
+  if (!Array.isArray(raw)) {
+    return { events: null };
+  }
+  const events = raw.flatMap((item) => {
+    const record = recordValue(item);
+    const scope = stringValue(record?.["scope"]) ?? stringValue(record?.["resource_uri"]);
+    const eventId = stringValue(record?.["event_id"]) ?? stringValue(record?.["id"]);
+    if (!scope || !eventId) {
+      return [];
+    }
+    return [{ eventId, scope, count: numberValue(record?.["count"]) ?? 1 }];
+  });
+  return { events };
+}
 
 export function parseClassifierLadder(
   event: OperatorEventEnvelope

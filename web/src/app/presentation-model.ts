@@ -1599,6 +1599,108 @@ export function editionTimelineFixture(): EditionTimelineViewModel {
   ]);
 }
 
+// ── Live CQN change feed (Arc C1) ────────────────────────────────────────────
+// A CQN change event's ONLY payload is the bound MCP resource URI — the backend
+// contract forbids forwarding row data, column values, or rowids. So the feed
+// shows the CHANGED SCOPE (the resource URI of the proven query), never an
+// object name and never a value; the agent re-reads through the guarded path.
+// Delivery is best-effort and coalesced, so repeat callbacks for one scope fold
+// into a single coalesced entry. When the operator surface does not project the
+// feed the panel says so — it does not fabricate a quiet, healthy stream.
+
+export type CqnChangeEventViewModel = {
+  eventId: string;
+  // The bound resource URI — a query/resource scope, never a bare object name.
+  scope: string;
+  // True when this entry folds more than one callback for the same scope.
+  coalesced: boolean;
+  count: number;
+  // False when `scope` does not look like a resource URI (an object-level scope
+  // would violate the backend contract; the panel flags it rather than trusting).
+  scopeIsResource: boolean;
+};
+
+export type CqnChangeFeedViewModel = {
+  grammarVersion: 1;
+  status: "streaming" | "idle" | "not_reported";
+  events: readonly CqnChangeEventViewModel[];
+  headline: string;
+  detail: string;
+  tone: DashboardTone;
+};
+
+export type CqnChangeEventInput = {
+  eventId: string;
+  scope: string;
+  count?: number;
+};
+
+export type CqnChangeFeedInput = {
+  // Null when the operator surface did not project a change feed at all.
+  events: readonly CqnChangeEventInput[] | null;
+};
+
+/** A resource URI is `scheme://…`; an object-level scope (`HR.EMP`) is not. */
+export function isResourceScope(scope: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(scope);
+}
+
+export function toCqnChangeFeedViewModel(input: CqnChangeFeedInput): CqnChangeFeedViewModel {
+  if (input.events === null) {
+    return {
+      grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+      status: "not_reported",
+      events: [],
+      headline: "Change feed not reported",
+      detail:
+        "The operator surface did not project a CQN change feed. That is not a claim that nothing changed — the console shows only what the server emits.",
+      tone: "off"
+    };
+  }
+  // Coalesce by scope: repeat callbacks for one bound resource fold together, and
+  // the count carries how many folded in (best-effort, coalesced-by-default).
+  const byScope = new Map<string, CqnChangeEventViewModel>();
+  for (const event of input.events) {
+    const existing = byScope.get(event.scope);
+    const add = event.count ?? 1;
+    if (existing) {
+      existing.count += add;
+      existing.coalesced = true;
+    } else {
+      byScope.set(event.scope, {
+        eventId: event.eventId,
+        scope: event.scope,
+        coalesced: add > 1,
+        count: add,
+        scopeIsResource: isResourceScope(event.scope)
+      });
+    }
+  }
+  const events = [...byScope.values()];
+  const status = events.length > 0 ? "streaming" : "idle";
+  return {
+    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+    status,
+    events,
+    headline:
+      status === "idle" ? "No changes in this window" : `${events.length} changed scope(s)`,
+    detail:
+      "Each entry is a changed resource scope (the proven query), not row data — re-read through the guarded path.",
+    tone: status === "idle" ? "off" : "info"
+  };
+}
+
+/** Two events for one scope (coalesced) plus one distinct scope. */
+export function cqnChangeFeedFixture(): CqnChangeFeedViewModel {
+  return toCqnChangeFeedViewModel({
+    events: [
+      { eventId: "evt-1", scope: "oracle-mcp://query/sha256:aa11", count: 1 },
+      { eventId: "evt-2", scope: "oracle-mcp://query/sha256:aa11", count: 1 },
+      { eventId: "evt-3", scope: "oracle-mcp://query/sha256:bb22", count: 1 }
+    ]
+  });
+}
+
 export const DASHBOARD_GRAMMAR = {
   grammarVersion: 1,
   meanings: {
@@ -1772,6 +1874,7 @@ export function skinContractFixture(): {
   policyBadge: PolicyBadgeViewModel;
   vectorCluster: VectorClusterViewModel;
   editionTimeline: EditionTimelineViewModel;
+  cqnChangeFeed: CqnChangeFeedViewModel;
 } {
   return {
     policyBadge: policyBadgeFixture(),
@@ -1783,6 +1886,7 @@ export function skinContractFixture(): {
     fleetMap: fleetMapFixture(),
     vectorCluster: vectorClusterFixture(),
     editionTimeline: editionTimelineFixture(),
+    cqnChangeFeed: cqnChangeFeedFixture(),
     groundControl: {
       grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
       verdict: "GO",
