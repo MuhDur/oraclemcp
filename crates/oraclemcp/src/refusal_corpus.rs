@@ -3,7 +3,7 @@
 //! Corpus records are public-bound data, not a policy cache. In particular, a
 //! redacted record is never executable SQL and carries no guard verdict. A
 //! caller that wants to apply a suggested rewrite must present its raw SQL and
-//! run [`reclassify_rewrite_at_apply`] again against the classifier and current
+//! run `reclassify_rewrite_at_apply` again against the classifier and current
 //! operating-level gate.
 
 use std::error::Error;
@@ -14,10 +14,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use oraclemcp_guard::corpus::{
-    CorpusRecord, CorpusRedactionError, ReasonCategory, classifier_proves_rewrite,
-    reclassify_rewrite_at_apply,
+    CorpusRecord, CorpusRedactionError, ReasonCategory, classifier_proves_rewrite, dedup_by_content,
 };
 use oraclemcp_guard::{Classifier, suggest_parameterized_form};
+use tempfile::NamedTempFile;
+
+#[cfg(test)]
+use oraclemcp_guard::corpus::reclassify_rewrite_at_apply;
 
 /// A process-shared, append-only writer for redacted refusal records.
 ///
@@ -98,10 +101,50 @@ impl RefusalCorpusWriter {
         Ok(())
     }
 
+    /// Export the accumulated corpus as deterministic, shippable JSONL.
+    ///
+    /// Every source line is re-validated before it is included, even though it
+    /// was produced by this writer. The export deduplicates by redacted content
+    /// hash and sorts by that hash, so the same valid state always yields the
+    /// same bytes. A malformed or tampered source record aborts the export
+    /// without producing a best-effort dataset.
+    pub(crate) fn export_dataset(
+        &self,
+        destination: &Path,
+    ) -> Result<CorpusExport, RefusalCorpusError> {
+        if self.path.as_ref() == destination {
+            return Err(RefusalCorpusError::ExportPathAliasesState);
+        }
+        let _guard = self
+            .append_lock
+            .lock()
+            .map_err(|_| RefusalCorpusError::LockPoisoned)?;
+        let mut records = read_validated_records(&self.path)?;
+        records = dedup_by_content(records);
+        records.sort_by(|left, right| left.id.cmp(&right.id));
+
+        let mut rendered = String::new();
+        for record in &records {
+            rendered.push_str(&record.to_jsonl_line());
+            rendered.push('\n');
+        }
+        write_public_export(destination, rendered.as_bytes())?;
+        Ok(CorpusExport {
+            record_count: records.len(),
+        })
+    }
+
     #[cfg(test)]
     fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// Stable metadata returned by a completed corpus export.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CorpusExport {
+    /// Number of unique, validated redacted records written to the dataset.
+    pub(crate) record_count: usize,
 }
 
 #[derive(Debug)]
@@ -109,6 +152,7 @@ pub(crate) enum RefusalCorpusError {
     Redaction(CorpusRedactionError),
     Io(io::Error),
     LockPoisoned,
+    ExportPathAliasesState,
 }
 
 impl fmt::Display for RefusalCorpusError {
@@ -117,6 +161,9 @@ impl fmt::Display for RefusalCorpusError {
             Self::Redaction(error) => write!(f, "refusal corpus redaction failed: {error}"),
             Self::Io(error) => write!(f, "refusal corpus I/O failed: {error}"),
             Self::LockPoisoned => f.write_str("refusal corpus append lock is poisoned"),
+            Self::ExportPathAliasesState => {
+                f.write_str("refusal corpus export path must differ from state path")
+            }
         }
     }
 }
@@ -126,7 +173,7 @@ impl Error for RefusalCorpusError {
         match self {
             Self::Redaction(error) => Some(error),
             Self::Io(error) => Some(error),
-            Self::LockPoisoned => None,
+            Self::LockPoisoned | Self::ExportPathAliasesState => None,
         }
     }
 }
@@ -219,6 +266,60 @@ fn open_private_append_file(path: &Path) -> io::Result<File> {
         }
     }
     Ok(file)
+}
+
+fn read_validated_records(path: &Path) -> Result<Vec<CorpusRecord>, RefusalCorpusError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(io::Error::other("refusal corpus state is not a regular file").into());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    }
+    let state = match fs::read_to_string(path) {
+        Ok(state) => state,
+        Err(error) => return Err(error.into()),
+    };
+    state
+        .lines()
+        .map(CorpusRecord::from_jsonl_line)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn write_public_export(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let parent_metadata = fs::symlink_metadata(parent)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(io::Error::other(
+            "refusal corpus export parent is not a directory",
+        ));
+    }
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && (metadata.file_type().is_symlink() || !metadata.is_file())
+    {
+        return Err(io::Error::other(
+            "refusal corpus export path is not a regular file",
+        ));
+    }
+    let mut staged = NamedTempFile::new_in(parent)?;
+    staged.write_all(contents)?;
+    staged.as_file().sync_data()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = staged.as_file().metadata()?.permissions();
+        permissions.set_mode(0o644);
+        staged.as_file().set_permissions(permissions)?;
+    }
+    staged.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -398,6 +499,86 @@ mod tests {
         assert!(
             !persisted.contains("/*"),
             "comments are not retained in the corpus"
+        );
+    }
+
+    #[test]
+    fn export_is_reproducible_and_contains_zero_raw_identifiers_or_binds() {
+        let (dir, writer) = writer();
+        let classifier = Classifier::default();
+        writer
+            .append_refusal(
+                &classifier,
+                "UPDATE acme_corp.customers SET token = :hunter2 WHERE email = 'alice@example.test'",
+                ReasonCategory::RequiresHigherLevel,
+            )
+            .expect("first refusal is redacted into state");
+        writer
+            .append_refusal(
+                &classifier,
+                "UPDATE acme_corp.customers SET token = :s3cr3t WHERE email = 'alice@example.test'",
+                ReasonCategory::RequiresHigherLevel,
+            )
+            .expect("equivalent refusal is redacted into state");
+
+        let first_path = dir.path().join("release/refusal-corpus.jsonl");
+        let second_path = dir.path().join("release/refusal-corpus-again.jsonl");
+        let first = writer
+            .export_dataset(&first_path)
+            .expect("valid state exports");
+        let second = writer
+            .export_dataset(&second_path)
+            .expect("same state exports again");
+        assert_eq!(first, second);
+        assert_eq!(
+            first.record_count, 1,
+            "redaction-level duplicates collapse to one shipped record"
+        );
+
+        let exported = fs::read_to_string(&first_path).expect("read shipped dataset");
+        assert_eq!(
+            exported,
+            fs::read_to_string(&second_path).expect("read repeat dataset"),
+            "export bytes are reproducible"
+        );
+        for line in exported.lines() {
+            CorpusRecord::from_jsonl_line(line)
+                .expect("every shipped line re-validates as a redacted corpus record");
+        }
+        for raw in [
+            "acme_corp",
+            "customers",
+            "hunter2",
+            "s3cr3t",
+            "alice@example.test",
+            ":hunter2",
+            ":s3cr3t",
+        ] {
+            assert!(
+                !exported.to_ascii_lowercase().contains(raw),
+                "shipped corpus contains raw identifier, literal, or bind {raw:?}: {exported}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_refuses_tampered_state_instead_of_shipping_a_best_effort_dataset() {
+        let (dir, writer) = writer();
+        fs::create_dir_all(writer.path().parent().expect("state parent")).expect("state parent");
+        fs::write(
+            writer.path(),
+            "{\"id\":\"sha256:tampered\",\"refused_sql_redacted\":\"SELECT * FROM acme_corp.customers WHERE token = 'hunter2'\",\"refusal_class\":\"DynamicSql\",\"why\":\"dynamic SQL\"}\n",
+        )
+        .expect("write synthetic tampered state");
+        let destination = dir.path().join("release/refusal-corpus.jsonl");
+
+        assert!(
+            writer.export_dataset(&destination).is_err(),
+            "an invalid state line cannot cross the public export boundary"
+        );
+        assert!(
+            !destination.exists(),
+            "the exporter must not ship a partial or best-effort dataset"
         );
     }
 }
