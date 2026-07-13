@@ -1474,10 +1474,14 @@ expression: rendered
       "name": "oracle_orient",
       "title": "Oracle Orient",
       "tier": "foundation_live_db",
-      "summary": "Return one bounded, cacheable orientation snapshot for a visible schema: object map, complete foreign-key topology, hot-object/freshness evidence, and recent DDL. Dictionary reads are parameterized and read-only; include selects schema, fks, hot, freshness, and/or ddl (all by default).",
+      "summary": "Return bounded orientation evidence: by default one cacheable snapshot for the active profile; fleet=true maps every MCP-visible profile independently with schema, version, freshness, drift, and typed UNREACHABLE/FAIL_CLOSED lane status. Dictionary reads are parameterized and read-only; include selects schema, fks, hot, freshness, and/or ddl (all by default).",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "fleet": {
+            "description": "When true, orient every MCP-visible configured profile independently. Each profile is returned with REACHABLE, UNREACHABLE, or FAIL_CLOSED status; one unavailable lane never omits or fails the other lanes.",
+            "type": "boolean"
+          },
           "include": {
             "description": "Optional sections to return. Defaults to every section; ddl selects the recent_ddl field.",
             "items": {

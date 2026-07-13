@@ -8,10 +8,16 @@
 
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::{Cx, Outcome};
-use oraclemcp::dispatch::OracleDispatcher;
+use oraclemcp::dispatch::{
+    McpExposurePolicy, OracleDispatcher, ProfileConnectionBundle, ProfileDrainState,
+    ProfileGenerationLease,
+};
+use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::{DispatchContext, ToolDispatch};
 use oraclemcp_db::{OracleBind, OracleConnectOptions, OracleConnection, RustOracleConnection};
+use oraclemcp_guard::{OperatingLevel, SessionLevelState};
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
 
 const PARENT: &str = "ORACLEMCP_C2_ORIENT_LIVE_PARENT";
@@ -71,6 +77,32 @@ async fn drop_fixture(cx: &Cx, conn: &RustOracleConnection) {
                 &[] as &[OracleBind],
             )
             .await;
+    }
+}
+
+fn fleet_test_config() -> OracleMcpConfig {
+    OracleMcpConfig::from_toml_str(
+        r#"
+        default_profile = "live"
+
+        [[profiles]]
+        name = "live"
+        connect_string = "live-test"
+
+        [[profiles]]
+        name = "offline"
+        connect_string = "offline-test"
+        "#,
+    )
+    .expect("live fleet test config is valid")
+}
+
+fn unreachable_test_opts() -> OracleConnectOptions {
+    OracleConnectOptions {
+        connect_string: "//127.0.0.1:1/UNAVAILABLE".to_owned(),
+        connect_timeout: Some(Duration::from_secs(1)),
+        call_timeout: Some(Duration::from_secs(2)),
+        ..test_opts()
     }
 }
 
@@ -242,5 +274,75 @@ fn oracle_orient_assembles_live_schema_fk_hot_freshness_and_ddl() {
         assert!(selected["recent_ddl"].is_array());
 
         drop_fixture(&cx, &setup).await;
+    });
+}
+
+/// H1 exercises the public fleet path against one real profile and one
+/// deliberately unreachable profile. The live lane proves the transient
+/// connector path uses the configured profile's own session; the offline lane
+/// must remain present as a typed status instead of failing or truncating the
+/// whole call.
+#[test]
+fn oracle_orient_fleet_preserves_a_live_lane_when_another_is_unreachable() {
+    run_with_cx(|cx| async move {
+        let test_name = "oracle_orient_fleet_preserves_a_live_lane_when_another_is_unreachable";
+        let Some(served) = connect_or_skip(&cx, test_name).await else {
+            return;
+        };
+        let owner = served
+            .describe(&cx)
+            .await
+            .ok()
+            .and_then(|info| info.current_schema)
+            .or_else(|| std::env::var("ORACLEMCP_TEST_USER").ok())
+            .unwrap_or_else(|| "SYSTEM".to_owned())
+            .to_ascii_uppercase();
+        let config = fleet_test_config();
+        let exposure = McpExposurePolicy::from_config(&config);
+        let drain = ProfileDrainState::from_config(config);
+        let connector = Arc::new(|cx: &Cx, lease: &ProfileGenerationLease| {
+            let opts = if lease.profile() == "live" {
+                test_opts()
+            } else {
+                unreachable_test_opts()
+            };
+            Box::pin(async move {
+                RustOracleConnection::connect(cx, opts)
+                    .await
+                    .map(|conn| ProfileConnectionBundle::new(Box::new(conn), None))
+            })
+        });
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(served),
+            Some("live".to_owned()),
+            SessionLevelState::new(OperatingLevel::ReadOnly, false),
+            connector,
+        )
+        .with_mcp_exposure(exposure)
+        .with_profile_drain_state(drain);
+
+        let out = match ToolDispatch::dispatch(
+            &dispatcher,
+            &cx,
+            DispatchContext::default(),
+            "oracle_orient",
+            json!({ "fleet": true, "owner": owner, "include": ["schema", "freshness"] }),
+        )
+        .await
+        {
+            Outcome::Ok(value) => value,
+            other => panic!("fleet orientation must retain its live lane: {other:?}"),
+        };
+
+        assert_eq!(out["summary"]["profile_count"], json!(2));
+        assert_eq!(out["summary"]["reachable_count"], json!(1));
+        assert_eq!(out["summary"]["unreachable_count"], json!(1));
+        let profiles = out["profiles"].as_array().expect("fleet profile array");
+        assert_eq!(profiles[0]["profile"], json!("live"));
+        assert_eq!(profiles[0]["status"], json!("REACHABLE"));
+        assert!(profiles[0]["orient"]["schema"].is_array());
+        assert_eq!(profiles[1]["profile"], json!("offline"));
+        assert_eq!(profiles[1]["status"], json!("UNREACHABLE"));
+        assert!(profiles[1].get("orient").is_none());
     });
 }

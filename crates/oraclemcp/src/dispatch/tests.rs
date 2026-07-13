@@ -12505,6 +12505,20 @@ impl FleetMock {
             counts,
         }
     }
+
+    fn orient_row(pairs: &[(&str, &str)]) -> OracleRow {
+        OracleRow {
+            columns: pairs
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        (*name).to_owned(),
+                        OracleCell::new("VARCHAR2", Some((*value).to_owned())),
+                    )
+                })
+                .collect(),
+        }
+    }
 }
 
 #[async_trait::async_trait(?Send)]
@@ -12522,6 +12536,7 @@ impl OracleConnection for FleetMock {
             backend: Some(OracleBackend::RustOracle),
             current_schema: Some("APP".to_owned()),
             session_user: Some("APP".to_owned()),
+            server_version: Some("Oracle Database 23ai".to_owned()),
             ..Default::default()
         })
     }
@@ -12533,6 +12548,11 @@ impl OracleConnection for FleetMock {
         binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
         let normalized = sql.to_ascii_lowercase();
+        let orient_object = self
+            .rows
+            .first()
+            .map(|(_, object)| *object)
+            .unwrap_or("ORDERS");
         if !self.resolves
             && normalized.contains("from all_objects")
             && normalized.contains("object_id, status, edition_name")
@@ -12543,6 +12563,45 @@ impl OracleConnection for FleetMock {
         }
         if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
             return Ok(rows);
+        }
+        if normalized.contains("from all_tab_modifications") {
+            return Ok(vec![Self::orient_row(&[
+                ("OWNER", "APP"),
+                ("OBJECT_NAME", orient_object),
+                ("INSERTS", "3"),
+                ("UPDATES", "1"),
+                ("DELETES", "0"),
+                ("LAST_MODIFIED", "2026-07-13T12:00:00"),
+                ("TRUNCATED", "NO"),
+                ("DROP_SEGMENTS", "0"),
+            ])]);
+        }
+        if normalized.contains("o.last_ddl_time desc") {
+            return Ok(vec![Self::orient_row(&[
+                ("OWNER", "APP"),
+                ("OBJECT_NAME", orient_object),
+                ("OBJECT_TYPE", "TABLE"),
+                ("LAST_DDL_TIME", "2026-07-13T12:05:00"),
+            ])]);
+        }
+        if normalized.contains("from all_constraints child") {
+            return Ok(vec![Self::orient_row(&[
+                ("CHILD_OWNER", "APP"),
+                ("CHILD_TABLE", "ORDER_LINES"),
+                ("CONSTRAINT_NAME", "ORDER_LINES_ORDER_FK"),
+                ("PARENT_OWNER", "APP"),
+                ("PARENT_TABLE", "ORDERS"),
+                ("CHILD_COLUMN", "ORDER_ID"),
+                ("PARENT_COLUMN", "ID"),
+                ("COLUMN_POSITION", "1"),
+            ])]);
+        }
+        if normalized.contains("from all_objects") {
+            return Ok(vec![Self::orient_row(&[
+                ("OWNER", "APP"),
+                ("OBJECT_NAME", orient_object),
+                ("OBJECT_TYPE", "TABLE"),
+            ])]);
         }
         self.counts.query.fetch_add(1, Ordering::SeqCst);
         Ok(self
@@ -12692,6 +12751,98 @@ fn cross_db_args() -> Value {
         "profile_b": "staging",
         "key": ["ID"],
     })
+}
+
+#[test]
+fn fleet_orient_returns_every_visible_profile_when_one_lane_is_unreachable() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let dispatcher = fleet_dispatcher(
+        FLEET_CONFIG,
+        McpExposurePolicy::AllowAll,
+        vec![
+            ("prod", FleetLane::Rows(vec![("1", "ORDERS")])),
+            ("staging", FleetLane::Unreachable),
+        ],
+        Arc::clone(&calls),
+    );
+
+    let out = dispatcher
+        .dispatch(
+            "oracle_orient",
+            json!({
+                "fleet": true,
+                "owner": "app",
+                "include": ["schema", "freshness"],
+            }),
+        )
+        .expect("a single unreachable lane must not fail fleet orientation");
+
+    let invalid = dispatcher
+        .dispatch("oracle_orient", json!({ "fleet": "yes" }))
+        .expect_err("fleet must be a JSON boolean");
+    assert_eq!(invalid.error_class, ErrorClass::InvalidArguments);
+
+    assert_eq!(out["summary"]["profile_count"], json!(2));
+    assert_eq!(out["summary"]["reachable_count"], json!(1));
+    assert_eq!(out["summary"]["unreachable_count"], json!(1));
+    let profiles = out["profiles"]
+        .as_array()
+        .expect("per-profile result array");
+    assert_eq!(profiles.len(), 2, "the unavailable profile is not omitted");
+
+    let prod = &profiles[0];
+    assert_eq!(prod["profile"], json!("prod"));
+    assert_eq!(prod["status"], json!("REACHABLE"));
+    assert_eq!(
+        prod["connection"]["server_version"],
+        json!("Oracle Database 23ai")
+    );
+    assert_eq!(prod["orient"]["owner"], json!("APP"));
+    assert_eq!(prod["orient"]["schema"][0]["object_name"], json!("ORDERS"));
+    assert!(prod["orient"].get("fks").is_none());
+    assert!(prod["orient"].get("recent_ddl").is_none());
+    assert_eq!(prod["drift"]["baseline_profile"], json!("prod"));
+    assert_eq!(prod["drift"]["schema_changed"], json!(false));
+
+    let staging = &profiles[1];
+    assert_eq!(staging["profile"], json!("staging"));
+    assert_eq!(staging["status"], json!("UNREACHABLE"));
+    assert_eq!(staging["error"]["code"], json!("UNREACHABLE"));
+    assert!(staging.get("orient").is_none());
+    assert!(
+        !out.to_string().contains("ORA-12541"),
+        "fleet output must not expose raw connection diagnostics"
+    );
+    assert_eq!(
+        &*calls.lock().expect("connector calls"),
+        &["prod".to_owned(), "staging".to_owned()],
+        "every visible configured profile is attempted independently"
+    );
+}
+
+#[test]
+fn fleet_orient_compares_each_reachable_profile_to_a_stable_baseline() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let dispatcher = fleet_dispatcher(
+        FLEET_CONFIG,
+        McpExposurePolicy::AllowAll,
+        vec![
+            ("prod", FleetLane::Rows(vec![("1", "ORDERS")])),
+            ("staging", FleetLane::Rows(vec![("1", "INVOICES")])),
+        ],
+        calls,
+    );
+
+    let out = dispatcher
+        .dispatch("oracle_orient", json!({ "fleet": true, "owner": "APP" }))
+        .expect("two reachable lanes orient successfully");
+    let profiles = out["profiles"].as_array().expect("fleet profile array");
+    assert_eq!(profiles[0]["drift"]["baseline_profile"], json!("prod"));
+    assert_eq!(profiles[0]["drift"]["schema_changed"], json!(false));
+    assert_eq!(profiles[1]["drift"]["baseline_profile"], json!("prod"));
+    assert_eq!(profiles[1]["drift"]["schema_changed"], json!(true));
+    assert_eq!(profiles[1]["drift"]["recent_ddl_changed"], json!(true));
+    assert_eq!(profiles[1]["drift"]["server_version_changed"], json!(false));
 }
 
 #[test]

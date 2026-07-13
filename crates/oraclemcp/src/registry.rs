@@ -814,12 +814,13 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_orient",
             ToolTier::FoundationLiveDb,
-            "Return one bounded, cacheable orientation snapshot for a visible schema: object map, complete foreign-key topology, hot-object/freshness evidence, and recent DDL. Dictionary reads are parameterized and read-only; include selects schema, fks, hot, freshness, and/or ddl (all by default).",
+            "Return bounded orientation evidence: by default one cacheable snapshot for the active profile; fleet=true maps every MCP-visible profile independently with schema, version, freshness, drift, and typed UNREACHABLE/FAIL_CLOSED lane status. Dictionary reads are parameterized and read-only; include selects schema, fks, hot, freshness, and/or ddl (all by default).",
         )
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Omit or use * for all visible schemas." },
-                "include": { "type": "array", "items": { "type": "string", "enum": ["schema", "fks", "hot", "freshness", "ddl"] }, "description": "Optional sections to return. Defaults to every section; ddl selects the recent_ddl field." }
+                "include": { "type": "array", "items": { "type": "string", "enum": ["schema", "fks", "hot", "freshness", "ddl"] }, "description": "Optional sections to return. Defaults to every section; ddl selects the recent_ddl field." },
+                "fleet": { "type": "boolean", "description": "When true, orient every MCP-visible configured profile independently. Each profile is returned with REACHABLE, UNREACHABLE, or FAIL_CLOSED status; one unavailable lane never omits or fails the other lanes." }
             }),
             &[],
         )),
@@ -2161,7 +2162,7 @@ mod tests {
                 "oracle_schema_inspect",
                 &["owner", "object_type", "name_like", "max_rows", "limit"],
             ),
-            ("oracle_orient", &["owner", "include"]),
+            ("oracle_orient", &["owner", "include", "fleet"]),
             ("oracle_list_schemas", &["name_like", "max_rows", "limit"]),
             ("oracle_describe", &["owner", "table", "table_name", "name"]),
             ("describe_table", &["owner", "table", "table_name", "name"]),

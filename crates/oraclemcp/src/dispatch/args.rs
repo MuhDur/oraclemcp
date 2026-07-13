@@ -348,13 +348,16 @@ pub(super) struct SearchObjectsArgs {
     pub(super) max_rows: Option<usize>,
 }
 
-/// C2: select stable sections of the bounded `oracle_orient` snapshot.
+/// C2/H1: select stable sections of the bounded `oracle_orient` snapshot and,
+/// when requested, lift it across every MCP-visible profile.
 #[derive(Deserialize)]
 pub(super) struct OrientArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
     #[serde(default)]
     pub(super) include: Vec<String>,
+    #[serde(default)]
+    pub(super) fleet: bool,
 }
 
 #[derive(Deserialize)]

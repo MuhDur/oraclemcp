@@ -445,6 +445,34 @@ struct OrientSnapshot {
     recent_ddl: Vec<OrientRecentDdlObject>,
 }
 
+/// One profile's result while assembling a federated orientation snapshot.
+///
+/// This deliberately keeps successful evidence separate from terminal lane
+/// status until every agent-visible profile has been attempted. A fleet call
+/// must never turn one unavailable database into either a whole-call failure
+/// or an absent profile that looks like a clean result.
+#[derive(Clone, Debug)]
+struct FleetOrientEvidence {
+    connection: OracleConnectionInfo,
+    snapshot: OrientSnapshot,
+}
+
+/// Terminal result for one profile while assembling fleet orientation.
+#[derive(Clone, Debug)]
+enum FleetOrientLane {
+    Reachable {
+        profile: String,
+        evidence: Box<FleetOrientEvidence>,
+    },
+    Unreachable {
+        profile: String,
+    },
+    FailClosed {
+        profile: String,
+        reason: &'static str,
+    },
+}
+
 /// Deterministic freshness summary derived from the bounded dictionary reads.
 #[derive(Clone, Debug, Serialize)]
 struct OrientFreshness {
@@ -571,6 +599,108 @@ fn orient_snapshot_response(snapshot: &OrientSnapshot, include: &OrientInclude) 
         response.insert("recent_ddl".to_owned(), json!(&snapshot.recent_ddl));
     }
     Value::Object(response)
+}
+
+fn fleet_orient_component_matches<T: Serialize>(left: &T, right: &T) -> bool {
+    serde_json::to_value(left).ok() == serde_json::to_value(right).ok()
+}
+
+fn fleet_orient_drift(
+    profile: &str,
+    snapshot: &OrientSnapshot,
+    connection: &OracleConnectionInfo,
+    baseline: Option<(&str, &OrientSnapshot, &OracleConnectionInfo)>,
+) -> Value {
+    let Some((baseline_profile, baseline_snapshot, baseline_connection)) = baseline else {
+        return json!({
+            "baseline_profile": profile,
+            "schema_changed": false,
+            "foreign_keys_changed": false,
+            "freshness_changed": false,
+            "recent_ddl_changed": false,
+            "server_version_changed": false,
+        });
+    };
+
+    json!({
+        "baseline_profile": baseline_profile,
+        "schema_changed": !fleet_orient_component_matches(&snapshot.schema, &baseline_snapshot.schema),
+        "foreign_keys_changed": !fleet_orient_component_matches(&snapshot.fks, &baseline_snapshot.fks),
+        "freshness_changed": !fleet_orient_component_matches(&snapshot.freshness, &baseline_snapshot.freshness),
+        "recent_ddl_changed": !fleet_orient_component_matches(&snapshot.recent_ddl, &baseline_snapshot.recent_ddl),
+        "server_version_changed": connection.server_version != baseline_connection.server_version,
+    })
+}
+
+fn fleet_orient_response(lanes: Vec<FleetOrientLane>, include: &OrientInclude) -> Value {
+    let total_profiles = lanes.len();
+    let mut reachable = 0_usize;
+    let mut unreachable = 0_usize;
+    let mut fail_closed = 0_usize;
+    let mut baseline: Option<(String, OrientSnapshot, OracleConnectionInfo)> = None;
+    let mut profiles = Vec::with_capacity(total_profiles);
+
+    for lane in lanes {
+        match lane {
+            FleetOrientLane::Reachable { profile, evidence } => {
+                let FleetOrientEvidence {
+                    connection,
+                    snapshot,
+                } = *evidence;
+                let drift = fleet_orient_drift(
+                    &profile,
+                    &snapshot,
+                    &connection,
+                    baseline
+                        .as_ref()
+                        .map(|(name, snapshot, connection)| (name.as_str(), snapshot, connection)),
+                );
+                if baseline.is_none() {
+                    baseline = Some((profile.clone(), snapshot.clone(), connection.clone()));
+                }
+                reachable = reachable.saturating_add(1);
+                profiles.push(json!({
+                    "profile": profile,
+                    "status": "REACHABLE",
+                    "connection": connection.redacted(),
+                    "orient": orient_snapshot_response(&snapshot, include),
+                    "drift": drift,
+                }));
+            }
+            FleetOrientLane::Unreachable { profile } => {
+                unreachable = unreachable.saturating_add(1);
+                profiles.push(json!({
+                    "profile": profile,
+                    "status": "UNREACHABLE",
+                    "error": {
+                        "code": "UNREACHABLE",
+                        "message": "profile connection or orientation metadata is unavailable",
+                    },
+                }));
+            }
+            FleetOrientLane::FailClosed { profile, reason } => {
+                fail_closed = fail_closed.saturating_add(1);
+                profiles.push(json!({
+                    "profile": profile,
+                    "status": "FAIL_CLOSED",
+                    "error": {
+                        "code": "FAIL_CLOSED",
+                        "message": reason,
+                    },
+                }));
+            }
+        }
+    }
+
+    json!({
+        "profiles": profiles,
+        "summary": {
+            "profile_count": total_profiles,
+            "reachable_count": reachable,
+            "unreachable_count": unreachable,
+            "fail_closed_count": fail_closed,
+        },
+    })
 }
 
 /// The dispatcher: owns the live connection behind an Asupersync [`AsyncMutex`]
@@ -947,6 +1077,95 @@ impl OracleDispatcher {
         })?;
         *guard = result_masking;
         Ok(())
+    }
+
+    /// Read one C2 orientation snapshot from an MCP-visible profile without
+    /// installing that profile into the caller's session lane.
+    ///
+    /// Fleet orientation adds only independent reach. It repeats the profile
+    /// admission and per-connection limit installation used by profile switches
+    /// and cross-database diff, while preserving the caller's pinned session,
+    /// transaction, catalog cache, and quarantine state. Every failure stays
+    /// attached to this one profile in the returned lane status.
+    async fn read_orient_lane_from_profile(
+        &self,
+        cx: &Cx,
+        profile: String,
+        owner: Option<&str>,
+        request_budget: &RequestBudget,
+    ) -> FleetOrientLane {
+        let lease = match self
+            .profile_drain
+            .admit_mcp_profile(&profile, self.mcp_exposure.is_exposed(&profile))
+        {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            ProfileGenerationAdmission::NotExposed => {
+                return FleetOrientLane::FailClosed {
+                    profile,
+                    reason: "profile is no longer exposed to this MCP caller",
+                };
+            }
+            ProfileGenerationAdmission::Draining => {
+                return FleetOrientLane::FailClosed {
+                    profile,
+                    reason: "profile is draining and cannot accept a fleet read",
+                };
+            }
+        };
+        let Some(connector) = &self.connector else {
+            return FleetOrientLane::FailClosed {
+                profile,
+                reason: "fleet orientation is unavailable in this server instance",
+            };
+        };
+        let policy = match profile_dispatch_policy(&lease) {
+            Ok(policy) => policy,
+            Err(_) => {
+                return FleetOrientLane::FailClosed {
+                    profile,
+                    reason: "accepted profile policy is unavailable",
+                };
+            }
+        };
+        let (conn, _stateless) = match connector(cx, &lease).await {
+            Ok(bundle) => bundle.into_parts(),
+            Err(_) => return FleetOrientLane::Unreachable { profile },
+        };
+        let limits = match ConnectionLimitGuard::install(
+            cx,
+            conn.as_ref(),
+            None,
+            policy.request_timeout,
+            request_budget.deadline(),
+            Some(request_budget.db_quota()),
+        ) {
+            Ok(limits) => limits,
+            Err(_) => return FleetOrientLane::Unreachable { profile },
+        };
+
+        let orient = async {
+            let observed = ReadUncertaintyConn {
+                inner: conn.as_ref(),
+                quarantine: None,
+            };
+            let connection = describe_conn(cx, &observed).await?;
+            let catalog_revision = OracleCatalogResolverCache::new().generation().0;
+            let snapshot = load_orient_snapshot(cx, &observed, owner, catalog_revision).await?;
+            Ok::<_, DbError>((connection, snapshot))
+        }
+        .await;
+        let restore = limits.restore();
+
+        match (orient, restore) {
+            (Ok((connection, snapshot)), Ok(())) => FleetOrientLane::Reachable {
+                profile,
+                evidence: Box::new(FleetOrientEvidence {
+                    connection,
+                    snapshot,
+                }),
+            },
+            _ => FleetOrientLane::Unreachable { profile },
+        }
     }
 
     /// Read one side of a cross-database `oracle_diff` from a named profile, on
@@ -1459,6 +1678,35 @@ impl ProfileDrainState {
                     };
                     lifecycle.mcp_exposed.unwrap_or(startup_exposed)
                         && !lifecycle.current_is_draining()
+                })
+                .collect(),
+        )
+    }
+
+    /// Return every agent-visible configured profile for a fleet operation.
+    ///
+    /// Unlike [`Self::mcp_profiles_snapshot`], this retains a profile that is
+    /// currently draining. The caller still has to admit each lane below, but
+    /// retaining it here lets a fleet response report `FAIL_CLOSED` rather than
+    /// silently omit a database the caller was just permitted to observe.
+    #[must_use]
+    pub fn mcp_fleet_profiles_snapshot(
+        &self,
+        exposure: &McpExposurePolicy,
+    ) -> Option<Vec<ProfileMetadata>> {
+        let guard = self.inner.lock().ok()?;
+        let config = guard.accepted_config.as_deref()?;
+        Some(
+            config
+                .list_profiles()
+                .into_iter()
+                .filter(|metadata| {
+                    let startup_exposed = exposure.is_exposed(&metadata.name);
+                    guard
+                        .profiles
+                        .get(&metadata.name)
+                        .and_then(|lifecycle| lifecycle.mcp_exposed)
+                        .unwrap_or(startup_exposed)
                 })
                 .collect(),
         )
@@ -11173,6 +11421,30 @@ impl OracleDispatcher {
                 let a: OrientArgs = parse_args(name, args)?;
                 let owner = orient_owner_arg(a.owner)?;
                 let include = OrientInclude::parse(&a.include)?;
+                if a.fleet {
+                    let profiles = self
+                        .profile_drain
+                        .mcp_fleet_profiles_snapshot(&self.mcp_exposure)
+                        .ok_or_else(|| {
+                            ErrorEnvelope::new(
+                                ErrorClass::RuntimeStateRequired,
+                                "accepted runtime config snapshot is unavailable",
+                            )
+                        })?;
+                    let mut lanes = Vec::with_capacity(profiles.len());
+                    for profile in profiles {
+                        lanes.push(
+                            self.read_orient_lane_from_profile(
+                                cx,
+                                profile.name,
+                                owner.as_deref(),
+                                &request_budget,
+                            )
+                            .await,
+                        );
+                    }
+                    return Ok(fleet_orient_response(lanes, &include));
+                }
                 let catalog_revision = state.catalog_cache.generation().0;
                 let cache_key = OrientSnapshotCacheKey {
                     profile: state.active_profile.clone(),
