@@ -50,6 +50,7 @@ scenarios=(
   scripts/e2e/sql_policy.sh
   scripts/e2e/refusal_corpus.sh
   scripts/e2e/incident.sh
+  scripts/e2e/seeded_fault_injection.sh
   scripts/e2e/fleet.sh
   scripts/e2e/reversible.sh
   scripts/e2e/cost_gate.sh

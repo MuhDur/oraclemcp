@@ -588,6 +588,61 @@ fn incident_e2e_dry_run_is_registered_and_schedules_omcpb() {
     );
 }
 
+/// Arc E3 must stay reachable from the ordinary e2e sweep. Unlike live lanes,
+/// this LabRuntime scenario has no database prerequisite: its dry-run schedules
+/// the exact scoped `omcpb` test and a real run must fail rather than skip.
+#[test]
+fn seeded_fault_injection_e2e_is_registered_and_never_database_gated() {
+    let root = repo_root();
+    let output = Command::new("bash")
+        .arg(root.join("scripts/e2e/seeded_fault_injection.sh"))
+        .args(["--log", "--dry-run"])
+        .current_dir(&root)
+        .env("ORACLEMCP_E2E_SEED", "4242")
+        .env(
+            "ORACLEMCP_E2E_ARTIFACT_DIR",
+            root.join("target/e2e-contract"),
+        )
+        .output()
+        .expect("run seeded-fault-injection dry-run");
+    assert!(
+        output.status.success(),
+        "seeded fault-injection dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    let command_messages = events
+        .iter()
+        .filter_map(|event| event["message"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        command_messages.iter().any(|message| message
+            .contains("omcpb test -p oraclemcp-core --test seeded_fault_injection -- --nocapture")),
+        "seeded fault-injection dry-run did not schedule its scoped omcpb test: {command_messages:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "seeded_fault_injection"),
+        "missing passing seeded fault-injection completion: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete" && event["outcome"] == "skipped"),
+        "offline fault harness must not database-gate itself: {events:?}"
+    );
+    let runner =
+        std::fs::read_to_string(root.join("scripts/e2e/run_all.sh")).expect("read run_all.sh");
+    assert!(
+        runner.contains("scripts/e2e/seeded_fault_injection.sh"),
+        "seeded fault-injection proof must be dispatched by run_all.sh"
+    );
+}
+
 /// Arc M must prove masking at the actual served MCP boundary. Keeping the
 /// scenario in the ordinary runner prevents the real-wire proof from becoming
 /// an uncalled script beside the direct DB-layer egress tests.
