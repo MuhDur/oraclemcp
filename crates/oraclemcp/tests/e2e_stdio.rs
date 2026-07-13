@@ -224,6 +224,11 @@ fn elevated_ddl_level() -> SessionLevelState {
 fn read_only_hidden_tools() -> &'static [&'static str] {
     &[
         "oracle_execute",
+        // Arc I: the reversible workspace is a write surface (a checkpoint only
+        // exists to make DML undoable), so a READ_ONLY lane never sees it.
+        "oracle_checkpoint",
+        "oracle_undo_to",
+        "oracle_preview_dml",
         "oracle_compile_object",
         "oracle_create_or_replace",
         "oracle_patch_source",

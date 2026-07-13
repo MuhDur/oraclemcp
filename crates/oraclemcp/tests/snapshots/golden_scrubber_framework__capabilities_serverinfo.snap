@@ -360,7 +360,7 @@ expression: rendered
       "name": "oracle_diff",
       "title": "Oracle Diff",
       "tier": "foundation_live_db",
-      "summary": "Diff one proven read-only SELECT across two Oracle SCNs.",
+      "summary": "Diff one proven read-only SELECT across two Oracle SCNs, or across two databases.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -368,6 +368,14 @@ expression: rendered
             "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
             "items": {},
             "type": "array"
+          },
+          "db_a": {
+            "description": "Alias for profile_a.",
+            "type": "string"
+          },
+          "db_b": {
+            "description": "Alias for profile_b.",
+            "type": "string"
           },
           "key": {
             "description": "Optional result-column names used to align rows and report changed[]. If omitted, oracle_diff infers a primary key only for a single resolved local table; otherwise it falls back to keyless add/remove.",
@@ -409,13 +417,13 @@ expression: rendered
             "type": "integer"
           },
           "max_result_bytes": {
-            "description": "Maximum compact JSON bytes per SCN page (default 10485760, hard cap 26214400).",
+            "description": "Maximum compact JSON bytes per compared side (default 10485760, hard cap 26214400).",
             "maximum": 26214400,
             "minimum": 1,
             "type": "integer"
           },
           "max_rows": {
-            "description": "Maximum rows compared from each SCN page (default 200, hard cap 5000).",
+            "description": "Maximum rows compared from each side (default 200, hard cap 5000).",
             "maximum": 5000,
             "minimum": 1,
             "type": "integer"
@@ -424,18 +432,26 @@ expression: rendered
             "description": "Emit numeric values as JSON numbers where possible. Default false preserves Oracle NUMBER losslessly as strings.",
             "type": "boolean"
           },
+          "profile_a": {
+            "description": "Connection profile for side A. Supplying profile_a and profile_b selects cross-database mode: the same proven read runs against two databases (e.g. prod vs staging), each classified against its own catalog and masked under its own egress policy. Only profiles this server exposes can be named.",
+            "type": "string"
+          },
+          "profile_b": {
+            "description": "Connection profile for side B. See profile_a.",
+            "type": "string"
+          },
           "scn_a": {
-            "description": "Earlier or baseline system change number.",
+            "description": "System change number for side A. Required with scn_b when comparing one database at two points in time; optional in cross-database mode, where it pins side A to a flashback read instead of the current committed state.",
             "minimum": 1,
             "type": "integer"
           },
           "scn_b": {
-            "description": "Later or comparison system change number.",
+            "description": "System change number for side B. See scn_a.",
             "minimum": 1,
             "type": "integer"
           },
           "sql": {
-            "description": "A single read-only SELECT/WITH. The same proven SQL is run twice through DBMS_FLASHBACK at scn_a and scn_b.",
+            "description": "A single read-only SELECT/WITH. The same proven SQL is run on both compared sides; it is classified as a read against each database it runs on.",
             "type": "string"
           },
           "timeout_seconds": {
@@ -446,9 +462,7 @@ expression: rendered
           }
         },
         "required": [
-          "sql",
-          "scn_a",
-          "scn_b"
+          "sql"
         ],
         "type": "object"
       },
@@ -456,7 +470,7 @@ expression: rendered
         "additionalProperties": false,
         "properties": {
           "added": {
-            "description": "Rows present at scn_b but not at scn_a.",
+            "description": "Rows present on side B but not on side A.",
             "items": {
               "additionalProperties": {
                 "description": "Serialized Oracle cell value. Oracle NUMBER values are strings by default for lossless precision; JSON numbers are used only for binary float/double or numbers_as_float=true.",
@@ -610,7 +624,7 @@ expression: rendered
             "type": "object"
           },
           "removed": {
-            "description": "Rows present at scn_a but not at scn_b.",
+            "description": "Rows present on side A but not on side B.",
             "items": {
               "additionalProperties": {
                 "description": "Serialized Oracle cell value. Oracle NUMBER values are strings by default for lossless precision; JSON numbers are used only for binary float/double or numbers_as_float=true.",
@@ -649,8 +663,40 @@ expression: rendered
             "minimum": 0,
             "type": "integer"
           },
+          "source_a": {
+            "additionalProperties": false,
+            "description": "Where side A was read from.",
+            "properties": {
+              "profile": {
+                "description": "Connection profile this side was read from, for a cross-database diff.",
+                "type": "string"
+              },
+              "scn": {
+                "description": "System change number this side was read as of, when it was a flashback read.",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "source_b": {
+            "additionalProperties": false,
+            "description": "Where side B was read from.",
+            "properties": {
+              "profile": {
+                "description": "Connection profile this side was read from, for a cross-database diff.",
+                "type": "string"
+              },
+              "scn": {
+                "description": "System change number this side was read as of, when it was a flashback read.",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
           "truncated": {
-            "description": "True when either flashback page hit a row/byte cap before all rows were compared.",
+            "description": "True when either compared page hit a row/byte cap before all rows were compared.",
             "type": "boolean"
           }
         },
@@ -746,6 +792,10 @@ expression: rendered
             "minimum": 1,
             "type": "integer"
           },
+          "hold": {
+            "description": "Default false. Set true to leave this statement's effect pending inside the open reversible workspace instead of rolling it back, so oracle_undo_to can walk it back to a checkpoint. Requires a live oracle_checkpoint, refuses DDL/Admin (Oracle commits those implicitly), and is mutually exclusive with commit. Held work is uncommitted and can only be undone: while the workspace is open every committing operation is refused.",
+            "type": "boolean"
+          },
           "max_dbms_output_chars": {
             "description": "Alias for dbms_output_max_chars.",
             "maximum": 1000000,
@@ -775,6 +825,286 @@ expression: rendered
         },
         "required": [
           "sql"
+        ],
+        "type": "object"
+      },
+      "destructive": true,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "oracle_checkpoint",
+      "title": "Oracle Checkpoint",
+      "tier": "foundation_live_db",
+      "summary": "Establish a named checkpoint (a native Oracle SAVEPOINT) on this session, opening the reversible workspace: oracle_execute with hold=true then leaves DML pending instead of rolling it back, and oracle_undo_to walks it back. Requires READ_WRITE. While the workspace is open the server refuses every operation that would end the transaction — commits, implicitly-committing DDL/Admin, EXPLAIN PLAN cost estimation, and flashback reads — so held work can only ever be undone, never committed by another statement.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "description": "Checkpoint name: a bare Oracle identifier (a letter followed by letters, digits, or underscores, at most 30 characters). Case-insensitive. Must not already be live on this session.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "output_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint": {
+            "description": "The established checkpoint, upper-cased.",
+            "type": "string"
+          },
+          "statement": {
+            "description": "The exact SAVEPOINT statement the server issued.",
+            "type": "string"
+          },
+          "workspace": {
+            "additionalProperties": false,
+            "description": "The pinned session's reversible workspace after this call.",
+            "properties": {
+              "checkpoints": {
+                "description": "Live checkpoints, oldest first.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "held_statements": {
+                "description": "Uncommitted statements held in the workspace.",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "open": {
+                "description": "True while checkpoints are live. Commits, DDL/Admin, EXPLAIN PLAN cost estimation, and flashback reads are refused until the workspace is closed.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "open",
+              "checkpoints",
+              "held_statements"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "workspace",
+          "checkpoint",
+          "statement"
+        ],
+        "type": "object"
+      },
+      "destructive": true,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "oracle_undo_to",
+      "title": "Oracle Undo To",
+      "tier": "foundation_live_db",
+      "summary": "Undo the reversible workspace: ROLLBACK TO SAVEPOINT <name> discards every held statement executed after that checkpoint and releases the checkpoints stacked above it, leaving the transaction open. Omit name to discard the whole workspace with a full rollback. Undo never commits anything.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint": {
+            "description": "Alias for name.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Checkpoint to undo to, from oracle_checkpoint. Omit to discard the entire workspace (a full ROLLBACK that undoes every held statement and releases every checkpoint).",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "output_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "discarded_statements": {
+            "description": "Held statements whose effects this undo discarded.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "released_checkpoints": {
+            "description": "Checkpoints Oracle erased because they were established after the target.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "statement": {
+            "description": "The exact ROLLBACK statement the server issued.",
+            "type": "string"
+          },
+          "undone_to": {
+            "description": "The checkpoint rolled back to, or null when the whole workspace was discarded.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspace": {
+            "additionalProperties": false,
+            "description": "The pinned session's reversible workspace after this call.",
+            "properties": {
+              "checkpoints": {
+                "description": "Live checkpoints, oldest first.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "held_statements": {
+                "description": "Uncommitted statements held in the workspace.",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "open": {
+                "description": "True while checkpoints are live. Commits, DDL/Admin, EXPLAIN PLAN cost estimation, and flashback reads are refused until the workspace is closed.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "open",
+              "checkpoints",
+              "held_statements"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "workspace",
+          "undone_to",
+          "statement",
+          "discarded_statements",
+          "released_checkpoints"
+        ],
+        "type": "object"
+      },
+      "destructive": true,
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "oracle_preview_dml",
+      "title": "Oracle Preview DML",
+      "tier": "foundation_live_db",
+      "summary": "Dry-run one DML statement: the server brackets it in its own savepoint, executes it, reads the rows it touched, then rolls back to that savepoint and presents the result — nothing is committed and nothing is left behind. Supply witness to see the affected rows before and after (it is proven read-only like any other read). A statement whose effect ESCAPES rollback (sequence NEXTVAL, and by nature autonomous transactions or triggers) is refused rather than dry-run, and returned labeled cannot_undo: a dry run must not cause an effect it cannot take back. Committing the previewed change afterwards still re-classifies and re-gates the exact statement — the preview grants nothing.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "binds": {
+            "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
+            "items": {},
+            "type": "array"
+          },
+          "max_rows": {
+            "description": "Row cap for each witness read (default: the profile page size).",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "sql": {
+            "description": "A single reversible DML statement (INSERT/UPDATE/DELETE/MERGE). Use :1, :2 … for binds. DDL cannot be dry-run: Oracle commits it implicitly.",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "description": "Tightens the profile's total request deadline and each Oracle round-trip cap for this tool call. It cannot widen the profile ceiling.",
+            "maximum": 3600,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "witness": {
+            "description": "Optional read-only SELECT run inside the sandbox before and after the DML, so the response can show the rows it changed. Proven read-only by the same classifier as oracle_query.",
+            "type": "string"
+          },
+          "witness_binds": {
+            "description": "Positional bind values for the witness SELECT.",
+            "items": {},
+            "type": "array"
+          },
+          "witness_sql": {
+            "description": "Alias for witness.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "type": "object"
+      },
+      "output_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "after": {
+            "additionalProperties": true,
+            "description": "Witness rows read inside the sandbox after the DML, before the rollback.",
+            "type": "object"
+          },
+          "before": {
+            "additionalProperties": true,
+            "description": "Witness rows read inside the sandbox before the DML.",
+            "type": "object"
+          },
+          "cannot_undo": {
+            "description": "Effects that would escape the rollback. Non-empty means the statement was NOT run.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "committed": {
+            "enum": [
+              false
+            ],
+            "type": "boolean"
+          },
+          "danger": {
+            "type": "string"
+          },
+          "next_step": {
+            "type": "string"
+          },
+          "previewed": {
+            "description": "True when the statement was executed in the sandbox and rolled back.",
+            "type": "boolean"
+          },
+          "required_level": {
+            "type": "string"
+          },
+          "reversible": {
+            "description": "False when the statement has an effect the sandbox cannot take back; it is then refused, not run.",
+            "type": "boolean"
+          },
+          "rolled_back": {
+            "type": "boolean"
+          },
+          "rows_affected": {
+            "description": "Rows the DML changed inside the sandbox.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "previewed",
+          "reversible",
+          "rolled_back",
+          "committed"
         ],
         "type": "object"
       },

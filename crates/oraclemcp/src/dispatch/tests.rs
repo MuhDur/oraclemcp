@@ -1319,6 +1319,7 @@ fn args_for(name: &str) -> Value {
         "oracle_list_schemas" => json!({ "name_like": "APP%", "limit": 10 }),
         "oracle_schema_inspect" => json!({ "owner": "HR" }),
         "oracle_search_objects" => json!({ "owner": "HR", "detail_level": "names" }),
+        "oracle_orient" => json!({ "owner": "HR" }),
         "oracle_describe" => json!({ "owner": "HR", "table": "EMPLOYEES" }),
         "oracle_describe_index" => json!({ "owner": "HR", "name": "EMP_NAME_IX" }),
         "oracle_describe_trigger" => json!({ "owner": "HR", "name": "EMP_BIU" }),
@@ -2661,6 +2662,205 @@ fn search_objects_detail_levels_and_truncation_through_dispatch() {
         )
         .expect_err("unknown detail level rejected");
     assert_eq!(bad.error_class, ErrorClass::InvalidArguments);
+}
+
+#[derive(Default)]
+struct OrientDispatchState {
+    dictionary_reads: AtomicUsize,
+}
+
+struct OrientDispatchMock {
+    state: Arc<OrientDispatchState>,
+}
+
+impl OrientDispatchMock {
+    fn row(pairs: &[(&str, &str)]) -> OracleRow {
+        OracleRow {
+            columns: pairs
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        (*name).to_owned(),
+                        OracleCell::new("VARCHAR2", Some((*value).to_owned())),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for OrientDispatchMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        if sql.contains("FROM all_tab_modifications") {
+            self.state.dictionary_reads.fetch_add(1, Ordering::SeqCst);
+            return Ok(vec![Self::row(&[
+                ("OWNER", "APP"),
+                ("OBJECT_NAME", "ORDERS"),
+                ("INSERTS", "3"),
+                ("UPDATES", "1"),
+                ("DELETES", "1"),
+                ("LAST_MODIFIED", "2026-07-13T12:00:00"),
+                ("TRUNCATED", "NO"),
+                ("DROP_SEGMENTS", "0"),
+            ])]);
+        }
+        if sql.contains("o.last_ddl_time DESC") {
+            self.state.dictionary_reads.fetch_add(1, Ordering::SeqCst);
+            return Ok(vec![Self::row(&[
+                ("OWNER", "APP"),
+                ("OBJECT_NAME", "ORDERS"),
+                ("OBJECT_TYPE", "TABLE"),
+                ("LAST_DDL_TIME", "2026-07-13T12:05:00"),
+            ])]);
+        }
+        if sql.contains("FROM all_constraints child") {
+            self.state.dictionary_reads.fetch_add(1, Ordering::SeqCst);
+            return Ok(vec![Self::row(&[
+                ("CHILD_OWNER", "APP"),
+                ("CHILD_TABLE", "ORDER_LINES"),
+                ("CONSTRAINT_NAME", "ORDER_LINES_ORDER_FK"),
+                ("PARENT_OWNER", "APP"),
+                ("PARENT_TABLE", "ORDERS"),
+                ("CHILD_COLUMN", "ORDER_ID"),
+                ("PARENT_COLUMN", "ID"),
+                ("COLUMN_POSITION", "1"),
+            ])]);
+        }
+        if sql.contains("FROM all_objects") {
+            self.state.dictionary_reads.fetch_add(1, Ordering::SeqCst);
+            return Ok(vec![Self::row(&[
+                ("OWNER", "APP"),
+                ("OBJECT_NAME", "ORDERS"),
+                ("OBJECT_TYPE", "TABLE"),
+            ])]);
+        }
+        Ok(Vec::new())
+    }
+
+    async fn execute(&self, _cx: &Cx, sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        if sql == SET_TRANSACTION_READ_ONLY {
+            return Ok(0);
+        }
+        panic!("oracle_orient must not execute non-backstop SQL: {sql}");
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        panic!("oracle_orient is read-only and never commits");
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+fn invalidate_orient_catalog(dispatcher: &OracleDispatcher) {
+    RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds")
+        .block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            let state = dispatcher
+                .state
+                .lock(&cx)
+                .await
+                .unwrap_or_else(|_| panic!("dispatcher state lock failed"));
+            state.catalog_cache.invalidate(CatalogInvalidation::Ddl);
+        });
+}
+
+#[test]
+fn orient_assembles_selector_stable_snapshot_and_reloads_on_catalog_revision() {
+    let state = Arc::new(OrientDispatchState::default());
+    let dispatcher = OracleDispatcher::new_with_profile(
+        Box::new(OrientDispatchMock {
+            state: Arc::clone(&state),
+        }),
+        Some("app_ro".to_owned()),
+    );
+
+    let full = dispatcher
+        .dispatch("oracle_orient", json!({ "owner": "app" }))
+        .expect("full orient snapshot");
+    assert_eq!(full["owner"], json!("APP"));
+    assert_eq!(full["catalog_revision"], json!(1));
+    assert_eq!(full["schema"][0]["object_name"], json!("ORDERS"));
+    assert_eq!(
+        full["fks"][0]["columns"][0]["child_column"],
+        json!("ORDER_ID")
+    );
+    assert_eq!(full["hot_objects"][0]["changes_since_last_stats"], json!(5));
+    assert_eq!(
+        full["freshness"]["latest_dml_time"],
+        json!("2026-07-13T12:00:00")
+    );
+    assert_eq!(
+        full["freshness"]["latest_ddl_time"],
+        json!("2026-07-13T12:05:00")
+    );
+    assert_eq!(full["recent_ddl"][0]["object_name"], json!("ORDERS"));
+    assert_eq!(
+        state.dictionary_reads.load(Ordering::SeqCst),
+        4,
+        "one cache miss invokes each bounded dictionary reader once"
+    );
+
+    let selected = dispatcher
+        .dispatch(
+            "oracle_orient",
+            json!({ "owner": "APP", "include": ["freshness", "hot"] }),
+        )
+        .expect("selector projects the cached full snapshot");
+    assert!(selected.get("schema").is_none());
+    assert!(selected.get("fks").is_none());
+    assert!(selected.get("recent_ddl").is_none());
+    assert!(selected["hot_objects"].is_array());
+    assert!(selected["freshness"].is_object());
+    assert_eq!(
+        state.dictionary_reads.load(Ordering::SeqCst),
+        4,
+        "include selectors must not create stale independent cache fragments"
+    );
+
+    let invalid = dispatcher
+        .dispatch("oracle_orient", json!({ "include": ["unknown"] }))
+        .expect_err("unknown orient section is refused before dictionary I/O");
+    assert_eq!(invalid.error_class, ErrorClass::InvalidArguments);
+    assert_eq!(state.dictionary_reads.load(Ordering::SeqCst), 4);
+
+    invalidate_orient_catalog(&dispatcher);
+    let refreshed = dispatcher
+        .dispatch(
+            "oracle_orient",
+            json!({ "owner": "APP", "include": ["schema"] }),
+        )
+        .expect("catalog revision causes an orient cache miss");
+    assert_eq!(refreshed["catalog_revision"], json!(2));
+    assert_eq!(
+        state.dictionary_reads.load(Ordering::SeqCst),
+        8,
+        "the new catalog generation never reuses prior snapshot evidence"
+    );
 }
 
 #[test]
@@ -12879,4 +13079,173 @@ fn the_witness_read_is_classifier_proven() {
         executed_statements(&state).is_empty(),
         "the refusal happens before the sandbox is even opened"
     );
+}
+
+// --- Arc I / bead .11.3 — commit re-classifies; cannot-undo is labeled --------
+
+/// SEC-1: the commit path never trusts the previewed verdict. It re-classifies
+/// the exact statement it is about to run and gates on THAT verdict, and the
+/// grant is digest-bound to the previewed text — so a statement that changed
+/// since the preview cannot ride the old confirmation in.
+#[test]
+fn commit_re_classifies_and_refuses_a_statement_that_changed_since_preview() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+
+    let previewed = "UPDATE employees SET salary = 1 WHERE employee_id = 100";
+    let confirm = preview_confirm(&dispatcher, previewed);
+
+    // Same confirmation, a different statement: refused. The grant is bound to
+    // the digest of what was reviewed, not to "the last preview".
+    let tampered = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({
+                "sql": "DELETE FROM employees WHERE employee_id = 100",
+                "commit": true,
+                "confirm": confirm.clone(),
+            }),
+        )
+        .expect_err("a confirmation cannot be moved onto another statement");
+    assert_eq!(tampered.error_class, ErrorClass::ChallengeRequired);
+    assert_eq!(
+        state.commits.load(Ordering::SeqCst),
+        0,
+        "the swapped statement never reached a commit"
+    );
+    assert!(
+        executed_statements(&state).is_empty(),
+        "and never reached the database at all"
+    );
+
+    // Even a whitespace-different rendering of the same intent is a different
+    // statement: the digest is over the exact text that was reviewed.
+    let respaced = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({
+                "sql": "UPDATE employees SET salary = 1 WHERE employee_id  =  100",
+                "commit": true,
+                "confirm": confirm.clone(),
+            }),
+        )
+        .expect_err("the grant is digest-bound to the exact previewed text");
+    assert_eq!(respaced.error_class, ErrorClass::ChallengeRequired);
+
+    // The exact previewed statement still commits — the refusals above consumed
+    // nothing, because a mismatched digest is not a spent grant.
+    let ok = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": previewed, "commit": true, "confirm": confirm }),
+        )
+        .expect("the exact reviewed statement commits");
+    assert_eq!(ok["committed"], json!(true));
+    assert_eq!(state.commits.load(Ordering::SeqCst), 1);
+}
+
+/// The confirmation is single-use: a replay of the same token, for the same
+/// statement, is refused — a commit cannot be repeated by resending the call.
+#[test]
+fn the_commit_grant_is_consumed_exactly_once() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+    let sql = "UPDATE employees SET salary = 1 WHERE employee_id = 100";
+    let confirm = preview_confirm(&dispatcher, sql);
+
+    let first = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": sql, "commit": true, "confirm": confirm.clone() }),
+        )
+        .expect("first commit");
+    assert_eq!(first["committed"], json!(true));
+
+    let replay = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": sql, "commit": true, "confirm": confirm }),
+        )
+        .expect_err("a spent confirmation cannot commit again");
+    assert_eq!(replay.error_class, ErrorClass::ChallengeRequired);
+    assert_eq!(
+        state.commits.load(Ordering::SeqCst),
+        1,
+        "exactly one commit reached Oracle"
+    );
+}
+
+/// SEC-1, the other direction: a session that has dropped back below the level
+/// the statement needs is refused at apply time, even holding a confirmation
+/// that was valid when it was minted. The gate is re-evaluated, never replayed.
+#[test]
+fn commit_re_evaluates_the_level_gate_and_never_replays_the_previewed_one() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+    let sql = "UPDATE employees SET salary = 1 WHERE employee_id = 100";
+    let confirm = preview_confirm(&dispatcher, sql);
+
+    dispatcher
+        .dispatch("disable_writes", json!({}))
+        .expect("drop back to READ_ONLY");
+
+    let refused = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": sql, "commit": true, "confirm": confirm }),
+        )
+        .expect_err("the level is re-checked at apply, not taken from the preview");
+    assert_eq!(refused.error_class, ErrorClass::OperatingLevelTooLow);
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+    assert!(
+        executed_statements(&state)
+            .iter()
+            .all(|sql| !sql.contains("UPDATE employees")),
+        "the refused statement never ran"
+    );
+}
+
+/// A rolled-back statement whose effect ESCAPES the rollback must not be able to
+/// read as "nothing happened". `rolled_back` describes the transaction; when a
+/// sequence advanced anyway, the response says so in the same words the dry run
+/// uses.
+#[test]
+fn a_rolled_back_statement_that_escapes_rollback_is_labeled_cannot_undo() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+    let sql = "INSERT INTO orders (id) VALUES (app_seq.NEXTVAL)";
+    let confirm = preview_confirm(&dispatcher, sql);
+
+    let out = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": sql, "commit": false, "confirm": confirm }),
+        )
+        .expect("a NEXTVAL statement runs with its grant even at commit=false");
+    assert_eq!(out["rolled_back"], json!(true), "the transaction went back");
+    assert_eq!(
+        out["fully_reverted"],
+        json!(false),
+        "but the statement did not: the sequence advanced anyway"
+    );
+    let cannot_undo = out["cannot_undo"].as_array().expect("cannot_undo list");
+    assert_eq!(cannot_undo.len(), 1);
+    assert!(
+        cannot_undo[0]
+            .as_str()
+            .is_some_and(|reason| reason.contains("rollback")),
+        "the label must say why: {cannot_undo:?}"
+    );
+
+    // A plainly reversible statement carries no such label — the honesty is
+    // targeted, not blanket noise.
+    let plain = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": "UPDATE employees SET salary = 1 WHERE employee_id = 100" }),
+        )
+        .expect("an ordinary rollback preview");
+    assert_eq!(plain["rolled_back"], json!(true));
+    assert!(plain.get("cannot_undo").is_none());
+    assert!(plain.get("fully_reverted").is_none());
 }

@@ -42,16 +42,18 @@ use oraclemcp_db::{
     AsOf, CatalogInvalidation, DbError, DbRequestQuota, DbmsOutput, DependentObject,
     DependentsProbe, IncomparableMaskedColumn, MaskComparabilityBreak, OracleBackend, OracleBind,
     OracleCatalogResolverCache, OracleConnection, OracleConnectionInfo, OracleRow,
-    PlanCostEstimate, QuarantineOutcome, QueryCaps, QueryDiffSource, QueryResponse, QueryRowStream,
+    OrientForeignKey, OrientHotObject, OrientRecentDdlObject, OrientSchemaObject, PlanCostEstimate,
+    QuarantineOutcome, QueryCaps, QueryDiffSource, QueryResponse, QueryRowStream,
     QueryRowStreamStart, ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate,
     ResultMaskingDecisionAction, ResultMaskingDecisionSource, ResultMaskingPolicy,
     ResultMaskingRule, SerializeOptions, StructuredDecodeCaps, compile_errors,
     compile_object_statements, describe_columns, describe_constraints, describe_index,
     describe_trigger, describe_view, diff_query_responses, execute_immediate_audit, explain_plan,
     find_unused_declarations, get_ddl, get_source, get_sources_by_name,
-    incomparable_masked_columns, list_objects, list_schemas, paginated_sql, plan_cost_estimate,
-    plscope_identifiers, plscope_statements, primary_key_columns, probe_dependents, read_lob,
-    read_query, read_query_as_of, read_query_named, resolved_relations_read_purity, sample_rows,
+    incomparable_masked_columns, list_objects, list_schemas, orient_fks, orient_hot_objects,
+    orient_recent_ddl, orient_schema, paginated_sql, plan_cost_estimate, plscope_identifiers,
+    plscope_statements, primary_key_columns, probe_dependents, read_lob, read_query,
+    read_query_as_of, read_query_named, resolved_relations_read_purity, sample_rows,
     search_objects, search_source, serialize_row,
 };
 use oraclemcp_error::{
@@ -63,7 +65,7 @@ use oraclemcp_guard::{
     OperatingLevel, Purity, Resolution, ResolvedObject, SessionLevelState, SideEffectOracle,
     semantic_read_plan,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// Default cap on `oracle_search_source` result rows when the caller omits it.
@@ -143,6 +145,13 @@ const MAX_EXECUTE_APPROVED_TOKENS: usize = 128;
 const EXECUTE_GRANT_TOKEN_SCOPE: &str = "grant:execute";
 /// Hard cap on remembered source patch previews in one server process.
 const MAX_PATCH_PREVIEWS: usize = 128;
+/// Each orient snapshot is four bounded dictionary reads; cap retained profiles,
+/// catalog revisions, and owner scopes so an agent cannot turn selector caching
+/// into an unbounded in-process store.
+const MAX_ORIENT_SNAPSHOT_CACHE_ENTRIES: usize = 32;
+/// Each component of an orient snapshot is independently bounded in the DB
+/// layer. This fixed tool-level cap makes a cache entry stable across callers.
+const ORIENT_SNAPSHOT_MAX_ROWS: usize = 500;
 /// Hard cap on per-call Oracle round-trip timeout overrides.
 const MAX_CALL_TIMEOUT_SECONDS: u64 = 3_600;
 
@@ -368,6 +377,11 @@ struct DispatcherState {
     /// Profile switches advance rather than replace it, so an old context can
     /// never become current again after reconnecting to another session.
     catalog_cache: OracleCatalogResolverCache,
+    /// C2: complete orient snapshots partitioned by the profile, catalog
+    /// generation, and normalized requested owner. The generation is advanced
+    /// before every uncertain DDL/session-context mutation, so stale snapshots
+    /// are never reused as current catalog evidence.
+    orient_snapshots: SyncMutex<HashMap<OrientSnapshotCacheKey, OrientSnapshot>>,
     /// A1: lazy read-only transaction backstop for the pinned/primary session.
     /// Scoped to `conn` only (the stateless metadata pool relies on the
     /// least-privilege DB user, A2). Re-asserted at the start of every read
@@ -402,6 +416,159 @@ struct PatchPreviewEntry {
     patched_ddl: String,
     tool_name: String,
     created_at: Instant,
+}
+
+/// The cache identity for one C2 orientation snapshot.
+///
+/// `catalog_revision` is the resolver cache's monotonic generation. It advances
+/// before DDL, session context changes, and reconnects, so it is impossible to
+/// retrieve a snapshot from an older catalog as though it were current.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct OrientSnapshotCacheKey {
+    profile: Option<String>,
+    catalog_revision: u64,
+    owner: Option<String>,
+}
+
+/// The complete internal orientation snapshot. Selectors project this single
+/// value after it is cached; they never create independently stale fragments.
+#[derive(Clone, Debug)]
+struct OrientSnapshot {
+    owner: Option<String>,
+    catalog_revision: u64,
+    schema: Vec<OrientSchemaObject>,
+    fks: Vec<OrientForeignKey>,
+    hot_objects: Vec<OrientHotObject>,
+    freshness: OrientFreshness,
+    recent_ddl: Vec<OrientRecentDdlObject>,
+}
+
+/// Deterministic freshness summary derived from the bounded dictionary reads.
+#[derive(Clone, Debug, Serialize)]
+struct OrientFreshness {
+    catalog_revision: u64,
+    latest_dml_time: Option<String>,
+    latest_ddl_time: Option<String>,
+    hot_object_count: usize,
+}
+
+/// C2 output selector. The default is intentionally the complete snapshot.
+#[derive(Clone, Copy, Debug)]
+struct OrientInclude {
+    schema: bool,
+    fks: bool,
+    hot: bool,
+    freshness: bool,
+    ddl: bool,
+}
+
+impl OrientInclude {
+    const fn all() -> Self {
+        Self {
+            schema: true,
+            fks: true,
+            hot: true,
+            freshness: true,
+            ddl: true,
+        }
+    }
+
+    fn parse(include: &[String]) -> Result<Self, ErrorEnvelope> {
+        if include.is_empty() {
+            return Ok(Self::all());
+        }
+        let mut selected = Self {
+            schema: false,
+            fks: false,
+            hot: false,
+            freshness: false,
+            ddl: false,
+        };
+        for section in include {
+            match section.to_ascii_lowercase().as_str() {
+                "schema" => selected.schema = true,
+                "fks" => selected.fks = true,
+                "hot" => selected.hot = true,
+                "freshness" => selected.freshness = true,
+                "ddl" => selected.ddl = true,
+                _ => {
+                    return Err(invalid_args(
+                        "include entries must be one of: schema, fks, hot, freshness, ddl",
+                    ));
+                }
+            }
+        }
+        Ok(selected)
+    }
+}
+
+fn orient_owner_arg(owner: Option<String>) -> Result<Option<String>, ErrorEnvelope> {
+    match non_empty_arg(owner).as_deref() {
+        None | Some("*") => Ok(None),
+        Some(owner) => Ok(Some(owner.to_ascii_uppercase())),
+    }
+}
+
+async fn load_orient_snapshot(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: Option<&str>,
+    catalog_revision: u64,
+) -> Result<OrientSnapshot, DbError> {
+    let schema = orient_schema(cx, conn, owner, ORIENT_SNAPSHOT_MAX_ROWS).await?;
+    let fks = orient_fks(cx, conn, owner, ORIENT_SNAPSHOT_MAX_ROWS).await?;
+    let hot_objects = orient_hot_objects(cx, conn, owner, ORIENT_SNAPSHOT_MAX_ROWS).await?;
+    let recent_ddl = orient_recent_ddl(cx, conn, owner, ORIENT_SNAPSHOT_MAX_ROWS).await?;
+    let freshness = OrientFreshness {
+        catalog_revision,
+        latest_dml_time: hot_objects
+            .iter()
+            .filter_map(|object| object.last_modified.clone())
+            .max(),
+        latest_ddl_time: recent_ddl
+            .iter()
+            .filter_map(|object| object.last_ddl_time.clone())
+            .max(),
+        hot_object_count: hot_objects.len(),
+    };
+    Ok(OrientSnapshot {
+        owner: owner.map(str::to_owned),
+        catalog_revision,
+        schema,
+        fks,
+        hot_objects,
+        freshness,
+        recent_ddl,
+    })
+}
+
+fn orient_snapshot_response(snapshot: &OrientSnapshot, include: &OrientInclude) -> Value {
+    let mut response = serde_json::Map::from_iter([
+        (
+            "owner".to_owned(),
+            json!(snapshot.owner.as_deref().unwrap_or("*")),
+        ),
+        (
+            "catalog_revision".to_owned(),
+            json!(snapshot.catalog_revision),
+        ),
+    ]);
+    if include.schema {
+        response.insert("schema".to_owned(), json!(&snapshot.schema));
+    }
+    if include.fks {
+        response.insert("fks".to_owned(), json!(&snapshot.fks));
+    }
+    if include.hot {
+        response.insert("hot_objects".to_owned(), json!(&snapshot.hot_objects));
+    }
+    if include.freshness {
+        response.insert("freshness".to_owned(), json!(&snapshot.freshness));
+    }
+    if include.ddl {
+        response.insert("recent_ddl".to_owned(), json!(&snapshot.recent_ddl));
+    }
+    Value::Object(response)
 }
 
 /// The dispatcher: owns the live connection behind an Asupersync [`AsyncMutex`]
@@ -482,6 +649,7 @@ impl OracleDispatcher {
                 execute_approved_tokens: HashMap::new(),
                 patch_previews: HashMap::new(),
                 catalog_cache: OracleCatalogResolverCache::new(),
+                orient_snapshots: SyncMutex::new(HashMap::new()),
                 read_only_backstop: ReadOnlyBackstop::new(),
                 checkpoints: CheckpointWorkspace::new(),
             }),
@@ -565,6 +733,7 @@ impl OracleDispatcher {
                 execute_approved_tokens: HashMap::new(),
                 patch_previews: HashMap::new(),
                 catalog_cache: OracleCatalogResolverCache::new(),
+                orient_snapshots: SyncMutex::new(HashMap::new()),
                 read_only_backstop: ReadOnlyBackstop::new(),
                 checkpoints: CheckpointWorkspace::new(),
             }),
@@ -5788,6 +5957,7 @@ fn generated_read_tool(tool: &str) -> bool {
         tool,
         "oracle_schema_inspect"
             | "oracle_search_objects"
+            | "oracle_orient"
             | "oracle_list_schemas"
             | "oracle_describe"
             | "oracle_describe_index"
@@ -7411,6 +7581,20 @@ async fn execute_sql_inner(
         "objects_affected": decision.objects_affected,
         "reason": decision.reason,
     });
+    // Arc I honesty (bead .11.3): `rolled_back: true` reports the TRANSACTION,
+    // and on its own it reads as "nothing happened". For a statement whose effect
+    // escapes rollback — a sequence NEXTVAL the classifier can prove, and by
+    // nature an autonomous transaction or trigger it cannot — that reading is
+    // false: the transaction went back, the effect did not. Say so in the same
+    // words the dry run uses, so an agent never has to infer permanence from a
+    // flag named after the transaction.
+    if decision.non_transactional_effect && !args.commit {
+        response["cannot_undo"] = json!([decision.reason]);
+        response["fully_reverted"] = json!(false);
+        response["next_step"] = json!(
+            "the transaction was rolled back, but this statement's effect persists anyway — treat it as applied, not undone"
+        );
+    }
     if args.hold {
         response["held"] = json!(true);
         response["workspace"] = ctx.checkpoints.view();
@@ -10982,6 +11166,54 @@ impl OracleDispatcher {
                     "max_rows": max_rows,
                     "truncated": results.len() == max_rows,
                 }))
+            }
+            "oracle_orient" => {
+                let a: OrientArgs = parse_args(name, args)?;
+                let owner = orient_owner_arg(a.owner)?;
+                let include = OrientInclude::parse(&a.include)?;
+                let catalog_revision = state.catalog_cache.generation().0;
+                let cache_key = OrientSnapshotCacheKey {
+                    profile: state.active_profile.clone(),
+                    catalog_revision,
+                    owner: owner.clone(),
+                };
+                let cached_snapshot = state
+                    .orient_snapshots
+                    .lock()
+                    .map_err(|_| {
+                        ErrorEnvelope::new(
+                            ErrorClass::Internal,
+                            "oracle_orient snapshot cache lock is poisoned",
+                        )
+                    })?
+                    .get(&cache_key)
+                    .cloned();
+                let snapshot = if let Some(snapshot) = cached_snapshot {
+                    snapshot.clone()
+                } else {
+                    dispatch_checkpoint(cx, "oraclemcp.dispatch.orient.before")?;
+                    let snapshot = load_orient_snapshot(
+                        cx,
+                        &guarded_metadata_conn,
+                        owner.as_deref(),
+                        catalog_revision,
+                    )
+                    .await
+                    .map_err(DbError::into_envelope)?;
+                    dispatch_checkpoint(cx, "oraclemcp.dispatch.orient.after")?;
+                    let mut snapshots = state.orient_snapshots.lock().map_err(|_| {
+                        ErrorEnvelope::new(
+                            ErrorClass::Internal,
+                            "oracle_orient snapshot cache lock is poisoned",
+                        )
+                    })?;
+                    if snapshots.len() >= MAX_ORIENT_SNAPSHOT_CACHE_ENTRIES {
+                        snapshots.clear();
+                    }
+                    snapshots.insert(cache_key, snapshot.clone());
+                    snapshot
+                };
+                Ok(orient_snapshot_response(&snapshot, &include))
             }
             "oracle_list_schemas" => {
                 let a: ListSchemasArgs = parse_args(name, args)?;

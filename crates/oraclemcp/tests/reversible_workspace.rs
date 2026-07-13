@@ -490,3 +490,90 @@ fn preview_dml_will_not_advance_a_sequence_to_show_you_what_would_happen() {
         drop_table(&cx, &setup).await;
     });
 }
+
+/// I3 (bead .11.3), live: committing re-classifies and re-gates the exact
+/// statement rather than trusting the preview. A confirmation moved onto a
+/// different statement is refused, the grant is single-use, and — the point of
+/// the whole arc — the committed table only ever reflects the reviewed change.
+#[test]
+fn commit_re_classifies_the_exact_statement_and_spends_its_grant_once() {
+    run_with_cx(|cx| async move {
+        let Some(setup) = connect_or_skip(&cx, "commit_reclassify/setup").await else {
+            return;
+        };
+        seed(&cx, &setup).await;
+
+        let Some(served) = connect_or_skip(&cx, "commit_reclassify/served").await else {
+            return;
+        };
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(served),
+            Some("live".to_owned()),
+            read_write(),
+        );
+
+        let reviewed = format!("UPDATE {TABLE} SET V = 'reviewed' WHERE ID = 1");
+        let preview = call(
+            &dispatcher,
+            &cx,
+            "oracle_preview_sql",
+            json!({ "sql": reviewed }),
+        )
+        .await;
+        let confirm = preview["execute_confirmation"]["confirm"]
+            .as_str()
+            .expect("preview minted a confirmation")
+            .to_owned();
+
+        // The confirmation cannot be carried onto a different statement.
+        let smuggled = call_err(
+            &dispatcher,
+            &cx,
+            "oracle_execute",
+            json!({
+                "sql": format!("DELETE FROM {TABLE} WHERE ID = 1"),
+                "commit": true,
+                "confirm": confirm.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(smuggled.error_class, ErrorClass::ChallengeRequired);
+        assert_eq!(
+            read_v(&cx, &setup).await.as_deref(),
+            Some("baseline"),
+            "the smuggled DELETE never ran"
+        );
+
+        // The reviewed statement commits, exactly once.
+        let committed = call(
+            &dispatcher,
+            &cx,
+            "oracle_execute",
+            json!({ "sql": reviewed, "commit": true, "confirm": confirm.clone() }),
+        )
+        .await;
+        assert_eq!(committed["committed"], json!(true));
+        assert_eq!(committed["rows_affected"], json!(1));
+
+        let replay = call_err(
+            &dispatcher,
+            &cx,
+            "oracle_execute",
+            json!({ "sql": reviewed, "commit": true, "confirm": confirm }),
+        )
+        .await;
+        assert_eq!(
+            replay.error_class,
+            ErrorClass::ChallengeRequired,
+            "the grant is single-use: a replay cannot commit the same change twice"
+        );
+        drop(dispatcher);
+
+        assert_eq!(
+            read_v(&cx, &setup).await.as_deref(),
+            Some("reviewed"),
+            "the committed table reflects exactly the reviewed statement"
+        );
+        drop_table(&cx, &setup).await;
+    });
+}
