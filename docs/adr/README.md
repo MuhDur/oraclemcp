@@ -18,6 +18,7 @@ than treating it as permanent.
 | [0008](0008-result-masking-policy.md) | Result masking policy and per-profile tokenization | Accepted |
 | [0009](0009-policy-as-code-grammar.md) | Policy-as-code grammar and monotone decisions | Accepted |
 | [0010](0010-verdict-certificate-schema.md) | Verdict-certificate schema and classifier rule registry | Accepted |
+| [0011](0011-incident-artifact-manifest.md) | Incident-artifact manifest and bundle layout | Accepted |
 
 These records describe *why*, not *how*. For the runtime behavior they govern,
 see the [`README.md`](../../README.md) safety model and

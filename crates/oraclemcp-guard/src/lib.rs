@@ -17,6 +17,7 @@ pub mod clock;
 pub mod corpus;
 pub mod enforcement;
 pub mod exec_grant;
+pub mod incident;
 pub mod levels;
 pub mod policy;
 pub mod policy_gate;
@@ -38,6 +39,11 @@ pub use classifier::{
 };
 pub use clock::MonotonicDeadline;
 pub use exec_grant::{ExecGrantBinding, ExecGrantError, ExecGrantStore};
+pub use incident::{
+    BuildIdentity, BundleEntry, BundleEntryKind, CapturedLane, CapturedVerdict,
+    INCIDENT_MANIFEST_VERSION, IncidentCapture, IncidentManifest, IncidentManifestError,
+    IncidentTrigger, reclassify_at_replay,
+};
 pub use levels::{
     BlockReason, DangerLevel, EscalationError, LevelDecision, OperatingLevel, SessionLevelState,
 };
