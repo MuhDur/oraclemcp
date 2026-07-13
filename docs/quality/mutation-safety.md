@@ -1,6 +1,6 @@
 # Mutation Safety Gate
 
-<!-- MUTATION-GATE guard=91.5 audit=95.7 threshold=90 status=enforcing -->
+<!-- MUTATION-GATE guard=95.0 audit=90.7 threshold=90 status=enforcing -->
 
 D6.4 validates the safety-critical server crates with `cargo-mutants` through
 `scripts/mutation_safety_gate.sh`. The gate covers:
@@ -12,29 +12,36 @@ D6.4 validates the safety-critical server crates with `cargo-mutants` through
 
 ## Current Proof
 
-Run date: 2026-07-08
+Run date: 2026-07-13
 
 Command shape:
 
 ```bash
-export CARGO_TARGET_DIR=/home/durakovic/.cache/cargo-target-server
-export CARGO_BUILD_JOBS=16
-bash scripts/mutation_safety_gate.sh run --advisory --jobs 1 --crate oraclemcp-audit
-bash scripts/mutation_safety_gate.sh run --advisory --jobs 1 --crate oraclemcp-guard
+TMPDIR=/var/tmp \
+MUTATION_OUTPUT=/var/tmp/oraclemcp-mutation-bgec2-20260712T234242Z \
+scripts/mutation_safety_gate.sh run --crate oraclemcp-guard --jobs 1
+
+TMPDIR=/var/tmp \
+MUTATION_JOBS=2 \
+MUTATION_TIMEOUT=45 \
+MUTATION_OUTPUT=/var/tmp/oraclemcp-mutation-audit-final-j2t45-20260713T014539Z \
+scripts/mutation_safety_gate.sh run --crate oraclemcp-audit --jobs 2
 ```
 
 Results:
 
 | Crate | Kill rate | Caught | Missed | Timeout | Unviable |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `oraclemcp-guard` | 91.5% | 173 | 16 | 0 | 13 |
-| `oraclemcp-audit` | 95.7% | 201 | 9 | 0 | 19 |
+| `oraclemcp-guard` | 95.0% | 470 | 25 | 1 | 64 |
+| `oraclemcp-audit` | 90.7% | 374 | 40 | 18 | 52 |
 
-The validated safe default is one mutant build at a time. An initial capped
-`-j4` guard attempt was killed inside the MemoryMax cgroup before producing a
-complete outcome set; `-j1` completed both crates cleanly and is now the script
-default. Operators may opt into higher concurrency with `--jobs` on larger
-runners, but release gating should use the default.
+The validated safe default remains one mutant build at a time. The guard proof
+used the default `-j1`. The audit proof used `-j2` plus a 45-second mutant test
+timeout because the unmutated audit baseline completed in roughly four seconds
+and several killed mutants otherwise spent the full default timeout in
+panic-path worker waits. Operators may opt into higher concurrency with
+`--jobs` on larger runners, but guard runs should stay conservative unless the
+runner is known to tolerate the extra build pressure.
 
 ## Survivor Triage
 
@@ -49,10 +56,12 @@ classes:
 - Guard process-generation bit-mixing alternatives that still produce a stable,
   nontrivial per-process nonce; expiry semantics stay pinned by stale-generation
   tests.
-- Audit platform-observability edges where success-only `fsync`/unlock paths do
-  not expose a deterministic behavior difference without fault-injection hooks.
-- Audit v2 legacy hash helper coverage where v3/v4/v5 production verification
-  is fully pinned and v2 compatibility still has direct valid-record tests.
+- Audit platform-observability edges where success-only `fsync`, flush, unlock,
+  worker-drop, and directory-sync paths do not expose a deterministic behavior
+  difference without fault-injection hooks.
+- Audit proof/diagnostic-only surfaces (`cfg(kani)`, display formatting, and
+  line-number diagnostics) where normal unit tests do not execute the proof
+  harness or where the mutation is equivalent for the production byte stream.
 
 No survivor required weakening guard or audit production logic. The added tests
 pin the missing safety contracts directly: allow-list specificity, marker
