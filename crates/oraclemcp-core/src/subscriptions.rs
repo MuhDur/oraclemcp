@@ -20,6 +20,7 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -68,6 +69,10 @@ pub enum CqnRegistrationError {
     /// callback to be bound safely.
     #[error("CQN registration requires a query with an exactly representable semantic read scope")]
     QueryScopeNotRepresentable,
+    /// The registration cannot be linked to a server-derived MCP resource URI,
+    /// so its receiver and callback fan-out cannot be cap-governed.
+    #[error("CQN registration requires a server-derived resource URI")]
+    ResourceUriRequired,
     /// The operation needs a confirmed, active `READ_WRITE` elevation.
     #[error("CQN registration requires an active confirmed READ_WRITE step-up")]
     StepUpRequired,
@@ -86,6 +91,27 @@ pub enum CqnRegistrationError {
     /// proof was recorded, so no CQN source became available.
     #[error("CQN QUERY registration was not accepted by the Oracle backend")]
     DriverRegistrationFailed,
+}
+
+/// Fail-closed errors from opening CQN's separately authenticated EMON
+/// receiver.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CqnEmonOpenError {
+    /// The server-derived owner does not currently hold the registered URI's
+    /// subscription reservation.
+    #[error(
+        "CQN EMON receiver requires an admitted subscription for its server-derived owner and URI"
+    )]
+    SubscriptionNotAdmitted,
+    /// A receiver is already open for this owner/URI reservation.
+    #[error("CQN EMON receiver is already open for this server-derived owner and URI")]
+    ReceiverAlreadyOpen,
+    /// The database adapter refused the authenticated EMON connection after
+    /// the registry reservation was acquired. The reservation is released
+    /// before this error is returned.
+    #[error("CQN EMON receiver could not be opened: {0}")]
+    Driver(#[from] oraclemcp_db::DbError),
 }
 
 /// Opaque proof that one CQN registration crossed the profile, classifier,
@@ -111,6 +137,7 @@ pub struct CqnRegistrationPermit {
 pub struct CqnRegisteredQuery {
     permit: CqnRegistrationPermit,
     registration: CqnQueryRegistration,
+    resource_uri: String,
 }
 
 impl CqnRegisteredQuery {
@@ -142,24 +169,41 @@ impl CqnRegisteredQuery {
     /// registration admission still happened at the driver effect point, and a
     /// later client re-read remains classifier/masking/egress governed.
     #[must_use]
-    pub fn callback_fanout(&self, resource_uri: impl Into<String>) -> CqnCallbackFanout {
+    pub fn callback_fanout(&self) -> CqnCallbackFanout {
         CqnCallbackFanout {
             registration_id: self.registration.registration_id(),
-            resource_uri: resource_uri.into(),
+            resource_uri: self.resource_uri.clone(),
         }
     }
 
     /// Open the separately authenticated EMON receiver for this existing
-    /// QUERY-level registration. The caller must admit the subscription in the
-    /// C1.3 registry before opening this second database connection.
+    /// QUERY-level registration.
+    ///
+    /// `owner` MUST be the server-derived principal. The registry atomically
+    /// re-checks its admission and returns a non-reusable receiver reservation
+    /// before the database effect. The returned receiver owns that reservation,
+    /// releasing it exactly once when it is dropped; a driver-open failure
+    /// releases it before this method returns the error. This method has no
+    /// registry-free path.
     pub async fn open_emon_receiver(
         &self,
         cx: &Cx,
         connection: &dyn OracleConnection,
-    ) -> Result<Box<dyn CqnNotificationReceiver>, oraclemcp_db::DbError> {
-        connection
+        registry: &SubscriptionRegistry,
+        owner: &str,
+    ) -> Result<Box<dyn CqnNotificationReceiver>, CqnEmonOpenError> {
+        let reservation = registry.reserve_emon_receiver(
+            owner,
+            &self.resource_uri,
+            self.registration.registration_id(),
+        )?;
+        let receiver = connection
             .open_cqn_notification_receiver(cx, self.registration)
-            .await
+            .await?;
+        Ok(Box::new(ReservedCqnNotificationReceiver {
+            receiver,
+            _reservation: reservation,
+        }))
     }
 }
 
@@ -172,6 +216,7 @@ impl CqnRegisteredQuery {
 pub struct CqnQueryRegistrationRequest<'a> {
     scope: CqnRegistrationScope,
     query: &'a str,
+    resource_uri: Option<&'a str>,
     binds: &'a [OracleBind],
     classifier: &'a Classifier,
     session: &'a SessionLevelState,
@@ -181,6 +226,9 @@ pub struct CqnQueryRegistrationRequest<'a> {
 
 impl<'a> CqnQueryRegistrationRequest<'a> {
     /// Build the current, server-derived CQN registration inputs.
+    ///
+    /// `resource_uri` is bound to the successful registration and cannot be
+    /// swapped when opening its EMON receiver or projecting callbacks.
     #[must_use]
     pub fn new(
         scope: CqnRegistrationScope,
@@ -194,12 +242,22 @@ impl<'a> CqnQueryRegistrationRequest<'a> {
         CqnQueryRegistrationRequest {
             scope,
             query,
+            resource_uri: None,
             binds,
             classifier,
             session,
             auditor,
             subject,
         }
+    }
+
+    /// Bind the request to the server-derived MCP resource URI before the
+    /// registration effect point. Omitting this binding is refused rather than
+    /// leaving an EMON receiver or callback fan-out without a cap-governed URI.
+    #[must_use]
+    pub fn with_resource_uri(mut self, resource_uri: &'a str) -> Self {
+        self.resource_uri = Some(resource_uri);
+        self
     }
 }
 
@@ -319,12 +377,14 @@ impl CqnRegistrationGate {
         let CqnQueryRegistrationRequest {
             scope,
             query,
+            resource_uri,
             binds,
             classifier,
             session,
             auditor,
             subject,
         } = request;
+        let resource_uri = resource_uri.ok_or(CqnRegistrationError::ResourceUriRequired)?;
         let permit = self.authorize(scope, query, classifier, session, auditor, subject)?;
         let registration = connection
             .register_cqn_query(cx, query, binds)
@@ -333,6 +393,7 @@ impl CqnRegistrationGate {
         Ok(CqnRegisteredQuery {
             permit,
             registration,
+            resource_uri: resource_uri.to_owned(),
         })
     }
 }
@@ -425,7 +486,53 @@ pub struct SubscriptionRegistry {
     /// connection, so the total active count must never exceed this per-DB
     /// ceiling.
     emon_connection_ceiling: u32,
-    by_uri: Mutex<HashMap<String, HashSet<String>>>,
+    state: Arc<Mutex<SubscriptionState>>,
+}
+
+#[derive(Default)]
+struct SubscriptionState {
+    by_uri: HashMap<String, HashSet<String>>,
+    active_emon_receivers: HashSet<EmonReceiverKey>,
+}
+
+/// A single active receiver is bound to the server-derived owner, registered
+/// resource URI, and opaque CQN registration identity. The registry never
+/// exposes or accepts this key from clients.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct EmonReceiverKey {
+    owner: String,
+    resource_uri: String,
+    registration_id: u64,
+}
+
+/// Non-cloneable ownership of one active EMON receiver slot. Dropping this
+/// reservation releases precisely the slot acquired before the driver effect.
+struct EmonReceiverReservation {
+    state: Arc<Mutex<SubscriptionState>>,
+    key: EmonReceiverKey,
+}
+
+impl Drop for EmonReceiverReservation {
+    fn drop(&mut self) {
+        self.state.lock().active_emon_receivers.remove(&self.key);
+    }
+}
+
+/// Receiver wrapper that retains the registry reservation for exactly the
+/// driver's receiver lifetime. There is no caller-controlled release path.
+struct ReservedCqnNotificationReceiver {
+    receiver: Box<dyn CqnNotificationReceiver>,
+    _reservation: EmonReceiverReservation,
+}
+
+#[async_trait::async_trait(?Send)]
+impl CqnNotificationReceiver for ReservedCqnNotificationReceiver {
+    async fn next_notification(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<CqnNotificationOutcome, oraclemcp_db::DbError> {
+        self.receiver.next_notification(cx).await
+    }
 }
 
 /// Result of one atomic subscription admission attempt.
@@ -485,7 +592,7 @@ impl SubscriptionRegistry {
         SubscriptionRegistry {
             max_subscriptions_per_principal,
             emon_connection_ceiling,
-            by_uri: Mutex::new(HashMap::new()),
+            state: Arc::new(Mutex::new(SubscriptionState::default())),
         }
     }
 
@@ -495,26 +602,36 @@ impl SubscriptionRegistry {
     /// The rejection happens before the registry changes, so it cannot leave a
     /// subscription visible without an accounted EMON connection.
     pub fn subscribe(&self, client: &str, uri: &str) -> SubscriptionAdmission {
-        let mut map = self.by_uri.lock();
-        if map
+        let mut state = self.state.lock();
+        if state
+            .by_uri
             .get(uri)
             .is_some_and(|subscribers| subscribers.contains(client))
         {
             return SubscriptionAdmission::Accepted;
         }
 
-        let active_for_client = map
+        let active_for_client = state
+            .by_uri
             .values()
             .filter(|subscribers| subscribers.contains(client))
             .count();
         if active_for_client >= self.max_subscriptions_per_principal as usize {
             return SubscriptionAdmission::PerPrincipalCapReached;
         }
-        if Self::active_subscription_count_locked(&map) >= self.emon_connection_ceiling as usize {
+        let receiver_already_owns_pair = state
+            .active_emon_receivers
+            .iter()
+            .any(|receiver| receiver.owner == client && receiver.resource_uri == uri);
+        if !receiver_already_owns_pair
+            && Self::emon_connection_count_locked(&state) >= self.emon_connection_ceiling as usize
+        {
             return SubscriptionAdmission::EmonConnectionCeilingReached;
         }
 
-        map.entry(uri.to_owned())
+        state
+            .by_uri
+            .entry(uri.to_owned())
             .or_default()
             .insert(client.to_owned());
         SubscriptionAdmission::Accepted
@@ -523,19 +640,19 @@ impl SubscriptionRegistry {
     /// Unsubscribe `client` from `uri`. Idempotent; drops the URI entry when its
     /// last subscriber leaves.
     pub fn unsubscribe(&self, client: &str, uri: &str) {
-        let mut map = self.by_uri.lock();
-        if let Some(set) = map.get_mut(uri) {
+        let mut state = self.state.lock();
+        if let Some(set) = state.by_uri.get_mut(uri) {
             set.remove(client);
             if set.is_empty() {
-                map.remove(uri);
+                state.by_uri.remove(uri);
             }
         }
     }
 
     /// Drop all of `client`'s subscriptions (on disconnect).
     pub fn unsubscribe_all(&self, client: &str) {
-        let mut map = self.by_uri.lock();
-        map.retain(|_, set| {
+        let mut state = self.state.lock();
+        state.by_uri.retain(|_, set| {
             set.remove(client);
             !set.is_empty()
         });
@@ -545,8 +662,8 @@ impl SubscriptionRegistry {
     /// hub to know which resources to fingerprint.
     #[must_use]
     pub fn subscribed_uris(&self) -> Vec<String> {
-        let map = self.by_uri.lock();
-        let mut out: Vec<String> = map.keys().cloned().collect();
+        let state = self.state.lock();
+        let mut out: Vec<String> = state.by_uri.keys().cloned().collect();
         out.sort();
         out
     }
@@ -554,8 +671,9 @@ impl SubscriptionRegistry {
     /// The clients to notify for `uri` (sorted, deduped).
     #[must_use]
     pub fn subscribers_of(&self, uri: &str) -> Vec<String> {
-        let map = self.by_uri.lock();
-        let mut out: Vec<String> = map
+        let state = self.state.lock();
+        let mut out: Vec<String> = state
+            .by_uri
             .get(uri)
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_default();
@@ -566,17 +684,18 @@ impl SubscriptionRegistry {
     /// Whether `client` is subscribed to `uri`.
     #[must_use]
     pub fn is_subscribed(&self, client: &str, uri: &str) -> bool {
-        self.by_uri
+        self.state
             .lock()
+            .by_uri
             .get(uri)
             .is_some_and(|s| s.contains(client))
     }
 
-    /// Active client/URI subscriptions. Every item has one accounted EMON
-    /// notification connection.
+    /// Active client/URI subscriptions plus receiver slots which outlived an
+    /// unsubscribe. Every item has one accounted EMON notification connection.
     #[must_use]
     pub fn emon_connection_count(&self) -> usize {
-        Self::active_subscription_count_locked(&self.by_uri.lock())
+        Self::emon_connection_count_locked(&self.state.lock())
     }
 
     /// The server-derived ceiling that caps [`Self::emon_connection_count`].
@@ -585,8 +704,62 @@ impl SubscriptionRegistry {
         self.emon_connection_ceiling
     }
 
-    fn active_subscription_count_locked(map: &HashMap<String, HashSet<String>>) -> usize {
-        map.values().map(HashSet::len).sum()
+    /// Atomically reserve the receiver slot at the actual EMON effect point.
+    ///
+    /// This is intentionally private: only [`CqnRegisteredQuery`] can present
+    /// the registered query id, and its public receiver-opening method always
+    /// supplies the registry and server-derived owner.
+    fn reserve_emon_receiver(
+        &self,
+        owner: &str,
+        resource_uri: &str,
+        registration_id: u64,
+    ) -> Result<EmonReceiverReservation, CqnEmonOpenError> {
+        let mut state = self.state.lock();
+        if !Self::is_subscribed_locked(&state.by_uri, owner, resource_uri) {
+            return Err(CqnEmonOpenError::SubscriptionNotAdmitted);
+        }
+        if state
+            .active_emon_receivers
+            .iter()
+            .any(|receiver| receiver.owner == owner && receiver.resource_uri == resource_uri)
+        {
+            return Err(CqnEmonOpenError::ReceiverAlreadyOpen);
+        }
+
+        let key = EmonReceiverKey {
+            owner: owner.to_owned(),
+            resource_uri: resource_uri.to_owned(),
+            registration_id,
+        };
+        let inserted = state.active_emon_receivers.insert(key.clone());
+        debug_assert!(inserted, "receiver reservation was already present");
+        Ok(EmonReceiverReservation {
+            state: Arc::clone(&self.state),
+            key,
+        })
+    }
+
+    fn is_subscribed_locked(
+        by_uri: &HashMap<String, HashSet<String>>,
+        owner: &str,
+        resource_uri: &str,
+    ) -> bool {
+        by_uri
+            .get(resource_uri)
+            .is_some_and(|subscribers| subscribers.contains(owner))
+    }
+
+    fn emon_connection_count_locked(state: &SubscriptionState) -> usize {
+        let admitted = state.by_uri.values().map(HashSet::len).sum::<usize>();
+        let receivers_without_admission = state
+            .active_emon_receivers
+            .iter()
+            .filter(|receiver| {
+                !Self::is_subscribed_locked(&state.by_uri, &receiver.owner, &receiver.resource_uri)
+            })
+            .count();
+        admitted + receivers_without_admission
     }
 }
 
@@ -861,7 +1034,13 @@ impl SubscriptionHub {
 mod tests {
     use super::*;
 
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
 
     use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink, SigningKey};
     use oraclemcp_config::OracleMcpConfig;
@@ -957,6 +1136,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingCqnConnection {
         registrations: Mutex<Vec<(String, Vec<OracleBind>)>>,
+        emon_open_attempts: Mutex<Vec<CqnQueryRegistration>>,
+        reject_emon_open: AtomicBool,
     }
 
     /// A deterministic EMON seam that exposes only the DB adapter's reduced
@@ -1010,10 +1191,24 @@ mod tests {
             sql: &str,
             binds: &[OracleBind],
         ) -> Result<CqnQueryRegistration, DbError> {
-            self.registrations
-                .lock()
-                .push((sql.to_owned(), binds.to_vec()));
-            Ok(CqnQueryRegistration::new(101, 202))
+            let mut registrations = self.registrations.lock();
+            let sequence = registrations.len() as u64 + 1;
+            registrations.push((sql.to_owned(), binds.to_vec()));
+            Ok(CqnQueryRegistration::new(100 + sequence, 201 + sequence))
+        }
+
+        async fn open_cqn_notification_receiver(
+            &self,
+            _cx: &Cx,
+            registration: CqnQueryRegistration,
+        ) -> Result<Box<dyn CqnNotificationReceiver>, DbError> {
+            self.emon_open_attempts.lock().push(registration);
+            if self.reject_emon_open.load(Ordering::Relaxed) {
+                return Err(DbError::Query("synthetic EMON open failure".to_owned()));
+            }
+            Ok(Box::new(ScriptedCqnReceiver {
+                outcome: CqnNotificationOutcome::Closed,
+            }))
         }
 
         async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -1023,6 +1218,31 @@ mod tests {
         async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
+    }
+
+    async fn register_cqn_for_uri(
+        cx: &Cx,
+        gate: &CqnRegistrationGate,
+        connection: &dyn OracleConnection,
+        auditor: &Auditor,
+        resource_uri: &str,
+    ) -> CqnRegisteredQuery {
+        gate.register_query(
+            cx,
+            connection,
+            CqnQueryRegistrationRequest::new(
+                CqnRegistrationScope::Query,
+                PROVEN_QUERY,
+                &[],
+                &Classifier::default(),
+                &stepped_up_session(),
+                Some(auditor),
+                subject(),
+            )
+            .with_resource_uri(resource_uri),
+        )
+        .await
+        .expect("the exact classifier-proven query is registered")
     }
 
     #[test]
@@ -1095,7 +1315,8 @@ mod tests {
                     &stepped_up_session(),
                     Some(&auditor),
                     subject(),
-                ),
+                )
+                .with_resource_uri(URI),
             )
             .await
         });
@@ -1103,6 +1324,42 @@ mod tests {
         assert!(matches!(
             result,
             Err(CqnRegistrationError::ObjectLevelRefused)
+        ));
+        assert!(connection.registrations.lock().is_empty());
+        assert!(sink.records().is_empty());
+    }
+
+    #[test]
+    fn cqn_effect_point_refuses_an_unbound_resource_uri_before_the_db_adapter() {
+        let profile = cqn_profile(true);
+        let gate = CqnRegistrationGate::from_profile(&profile);
+        let (auditor, sink) = cqn_auditor();
+        let connection = RecordingCqnConnection::default();
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+
+        let result = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a current Cx");
+            gate.register_query(
+                &cx,
+                &connection,
+                CqnQueryRegistrationRequest::new(
+                    CqnRegistrationScope::Query,
+                    PROVEN_QUERY,
+                    &[],
+                    &Classifier::default(),
+                    &stepped_up_session(),
+                    Some(&auditor),
+                    subject(),
+                ),
+            )
+            .await
+        });
+
+        assert!(matches!(
+            result,
+            Err(CqnRegistrationError::ResourceUriRequired)
         ));
         assert!(connection.registrations.lock().is_empty());
         assert!(sink.records().is_empty());
@@ -1204,6 +1461,145 @@ mod tests {
     }
 
     #[test]
+    fn cqn_emon_open_requires_an_owner_bound_reservation_for_every_receiver() {
+        const SECOND_URI: &str = "oracle://object/HR/PACKAGE/SECOND_API";
+        const THIRD_URI: &str = "oracle://object/HR/PACKAGE/THIRD_API";
+
+        let profile = cqn_profile(true);
+        let gate = CqnRegistrationGate::from_profile(&profile);
+        let (auditor, _sink) = cqn_auditor();
+        let connection = RecordingCqnConnection::default();
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let (registered, principal_capped, database_capped) = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a current Cx");
+            (
+                register_cqn_for_uri(&cx, &gate, &connection, &auditor, URI).await,
+                register_cqn_for_uri(&cx, &gate, &connection, &auditor, SECOND_URI).await,
+                register_cqn_for_uri(&cx, &gate, &connection, &auditor, THIRD_URI).await,
+            )
+        });
+        let registry = SubscriptionRegistry::with_limits(1, 1);
+
+        let unadmitted = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a current Cx");
+            registered
+                .open_emon_receiver(&cx, &connection, &registry, "principal-a")
+                .await
+        });
+        assert!(matches!(
+            unadmitted,
+            Err(CqnEmonOpenError::SubscriptionNotAdmitted)
+        ));
+        assert!(
+            connection.emon_open_attempts.lock().is_empty(),
+            "opening without registry admission must not reach the driver"
+        );
+
+        assert_eq!(
+            registry.subscribe("principal-a", URI),
+            SubscriptionAdmission::Accepted
+        );
+        assert_eq!(
+            registry.subscribe("principal-a", SECOND_URI),
+            SubscriptionAdmission::PerPrincipalCapReached
+        );
+        let principal_cap = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a current Cx");
+            principal_capped
+                .open_emon_receiver(&cx, &connection, &registry, "principal-a")
+                .await
+        });
+        assert!(matches!(
+            principal_cap,
+            Err(CqnEmonOpenError::SubscriptionNotAdmitted)
+        ));
+
+        assert_eq!(
+            registry.subscribe("principal-b", THIRD_URI),
+            SubscriptionAdmission::EmonConnectionCeilingReached
+        );
+        let database_cap = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a current Cx");
+            database_capped
+                .open_emon_receiver(&cx, &connection, &registry, "principal-b")
+                .await
+        });
+        assert!(matches!(
+            database_cap,
+            Err(CqnEmonOpenError::SubscriptionNotAdmitted)
+        ));
+        assert!(
+            connection.emon_open_attempts.lock().is_empty(),
+            "cap-refused admissions must not create a driver receiver"
+        );
+
+        let receiver = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime installs a current Cx");
+                registered
+                    .open_emon_receiver(&cx, &connection, &registry, "principal-a")
+                    .await
+            })
+            .expect("the admitted owner may open exactly one receiver");
+        assert_eq!(connection.emon_open_attempts.lock().len(), 1);
+
+        let repeated = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a current Cx");
+            registered
+                .open_emon_receiver(&cx, &connection, &registry, "principal-a")
+                .await
+        });
+        assert!(matches!(
+            repeated,
+            Err(CqnEmonOpenError::ReceiverAlreadyOpen)
+        ));
+        assert_eq!(
+            connection.emon_open_attempts.lock().len(),
+            1,
+            "the N+1th open is refused before it reaches the driver"
+        );
+
+        registry.unsubscribe("principal-a", URI);
+        assert_eq!(
+            registry.emon_connection_count(),
+            1,
+            "an active receiver remains accounted after its subscription is removed"
+        );
+        drop(receiver);
+        assert_eq!(
+            registry.emon_connection_count(),
+            0,
+            "receiver teardown releases its reservation exactly once"
+        );
+
+        assert_eq!(
+            registry.subscribe("principal-a", URI),
+            SubscriptionAdmission::Accepted
+        );
+        connection.reject_emon_open.store(true, Ordering::Relaxed);
+        let driver_failure = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a current Cx");
+            registered
+                .open_emon_receiver(&cx, &connection, &registry, "principal-a")
+                .await
+        });
+        assert!(matches!(driver_failure, Err(CqnEmonOpenError::Driver(_))));
+        connection.reject_emon_open.store(false, Ordering::Relaxed);
+        let retry_after_failure = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime installs a current Cx");
+                registered
+                    .open_emon_receiver(&cx, &connection, &registry, "principal-a")
+                    .await
+            })
+            .expect("a failed driver open releases the reservation for one retry");
+        assert_eq!(connection.emon_open_attempts.lock().len(), 3);
+        drop(retry_after_failure);
+    }
+
+    #[test]
     fn cqn_emon_callback_relay_is_uri_only_and_coalesced() {
         let profile = cqn_profile(true);
         let gate = CqnRegistrationGate::from_profile(&profile);
@@ -1225,7 +1621,8 @@ mod tests {
                     &stepped_up_session(),
                     Some(&auditor),
                     subject(),
-                ),
+                )
+                .with_resource_uri(URI),
             )
             .await
             .expect("the exact classifier-proven query is registered")
@@ -1240,7 +1637,7 @@ mod tests {
         );
 
         let hub = SubscriptionHub::with_source(SubscribeSource::ChangeNotification(
-            registered.callback_fanout(URI),
+            registered.callback_fanout(),
         ));
         assert!(hub.subscribe("principal-a", URI));
 
