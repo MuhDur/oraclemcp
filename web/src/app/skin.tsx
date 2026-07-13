@@ -29,6 +29,7 @@ import {
   type CostBadgeViewModel,
   type FleetMapViewModel,
   type MaskBadgeViewModel,
+  type PolicyBadgeViewModel,
   type ScnScrubberViewModel,
   type SignatureId,
   type SkinCapability,
@@ -74,6 +75,7 @@ export type DashboardSkin = {
     CostBadge: React.ComponentType<{ model: CostBadgeViewModel }>;
     MaskBadge: React.ComponentType<{ model: MaskBadgeViewModel }>;
     FleetMap: React.ComponentType<{ model: FleetMapViewModel }>;
+    PolicyBadge: React.ComponentType<{ model: PolicyBadgeViewModel }>;
     ScnScrubber: React.ComponentType<{
       model: ScnScrubberViewModel;
       onScrub?: (scn: number) => void;
@@ -168,7 +170,8 @@ export const OMCP_SKIN: DashboardSkin = {
     CostBadge: CostBadgeRenderer,
     ScnScrubber: ScnScrubberRenderer,
     MaskBadge: MaskBadgeRenderer,
-    FleetMap: FleetMapRenderer
+    FleetMap: FleetMapRenderer,
+    PolicyBadge: PolicyBadgeRenderer
   },
   layout: {
     appShell: "min-h-screen bg-[var(--om-bg)] text-[var(--om-text)]",
@@ -387,6 +390,91 @@ function VerdictProofFact({ label, value }: { label: string; value: string }): R
         {value}
       </dd>
     </div>
+  );
+}
+
+/**
+ * The policy-narrowing badge (Arc N).
+ *
+ * Policy is monotone — Deny or Narrow, never Allow — so the badge reads as
+ * "what the policy took away": the level it narrowed FROM, the level it
+ * narrowed TO, the rules that fired, and the predicates it bolted on. With no
+ * policy verdict on the response the badge says `not_reported`, which is not a
+ * claim that no policy applied.
+ */
+export function PolicyBadgeRenderer({
+  model
+}: {
+  model: PolicyBadgeViewModel;
+}): React.ReactElement {
+  return (
+    <section
+      className={cn(
+        "flex flex-col gap-2 rounded-lg border bg-[var(--om-surface)] p-4 shadow-sm",
+        model.effect === "Deny"
+          ? "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)]"
+          : "border-[var(--om-border)]"
+      )}
+      aria-label="policy narrowing"
+      data-grammar-version={model.grammarVersion}
+      data-policy-status={model.status}
+      data-policy-effect={model.effect ?? "not_reported"}
+      data-narrowed-from={model.narrowedFrom ?? ""}
+      data-narrowed-to={model.narrowedTo ?? ""}
+      data-policy-narrowed={model.narrowed ? "true" : "false"}
+      data-matched-rules={model.matchedRuleIds.length}
+    >
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="size-4 text-[var(--om-gold)]" aria-hidden="true" />
+          <span className="text-sm font-bold text-[var(--om-text-bright)]">Policy</span>
+          <Badge tone={model.tone}>{model.effect ?? "not reported"}</Badge>
+        </div>
+        {model.narrowedFrom && model.narrowedTo ? (
+          <span
+            className="font-mono text-2xs uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]"
+            data-testid="policy-level-transition"
+          >
+            {model.narrowedFrom} → {model.narrowedTo}
+          </span>
+        ) : null}
+      </header>
+
+      <p className="text-sm font-semibold text-[var(--om-text-bright)]">{model.headline}</p>
+      <p className="text-xs text-[var(--om-text-muted)]">{model.detail}</p>
+
+      {model.matchedRuleIds.length > 0 ? (
+        <ul className="flex flex-wrap gap-1">
+          {model.matchedRuleIds.map((ruleId) => (
+            <li
+              key={ruleId}
+              className="rounded-md border border-[var(--om-border)] px-2 py-1 font-mono text-2xs text-[var(--om-text)]"
+              data-policy-rule-id={ruleId}
+            >
+              {ruleId}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {model.predicates.length > 0 ? (
+        <ul className="flex flex-col gap-1">
+          {model.predicates.map((predicate) => (
+            <li
+              key={`${predicate.ruleId}:${predicate.target}`}
+              className="rounded-md border border-dashed border-[var(--om-border)] px-2 py-1"
+              data-policy-predicate-rule={predicate.ruleId}
+              data-policy-predicate-target={predicate.target}
+            >
+              <span className="font-mono text-2xs text-[var(--om-gold)]">{predicate.target}</span>{" "}
+              <span className="font-mono text-2xs text-[var(--om-text)]">
+                AND {predicate.sqlFragment}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
   );
 }
 
@@ -841,6 +929,20 @@ export function assertDashboardSkinConformance(skin: DashboardSkin): void {
   }
   if (typeof skin.renderers.FleetMap !== "function") {
     throw new Error(`skin ${skin.name} must provide a fleet-map renderer`);
+  }
+  if (typeof skin.renderers.PolicyBadge !== "function") {
+    throw new Error(`skin ${skin.name} must provide a policy-narrowing renderer`);
+  }
+  // Policy is monotone: a narrowing may only raise the level it started from.
+  const policy = fixture.policyBadge;
+  if (policy.effect !== "Narrow" || !policy.narrowedFrom || !policy.narrowedTo) {
+    throw new Error("policy-badge fixture must be a narrowing that names both levels");
+  }
+  if (
+    CLEARANCE_LADDER.findIndex((step) => step.level === policy.narrowedTo) <
+    CLEARANCE_LADDER.findIndex((step) => step.level === policy.narrowedFrom)
+  ) {
+    throw new Error("a policy narrowing must never lower the required level");
   }
   // The fleet map must render every lane the server typed, including the ones it
   // could not read, and must never claim drift for a lane it never compared.

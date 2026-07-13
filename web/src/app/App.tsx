@@ -63,6 +63,7 @@ import {
   toCostBadgeViewModel,
   toFleetMapViewModel,
   toMaskBadgeViewModel,
+  toPolicyBadgeViewModel,
   toScnScrubberViewModel,
   toUndoTreeViewModel,
   toVerdictProofViewModel,
@@ -91,6 +92,7 @@ import {
   parseQueryCostRefusal,
   parseFleetMap,
   parseMaskCertificate,
+  parsePolicyTightening,
   parseQueryAsOf,
   parseUndoOutcome,
   fetchFleetMap,
@@ -8044,6 +8046,13 @@ function WorkbenchResultPanel({
     successfulResponse?.data.mcp_tool === "oracle_query"
       ? toMaskBadgeViewModel(parseMaskCertificate(successfulResponse.data))
       : null;
+  // Arc N: the policy verdict rides on whatever the server answered — the page
+  // itself, or the refusal envelope. When no verdict is attached the badge says
+  // "not reported"; it never reports the absence of a verdict as "no policy".
+  const PolicyBadge = OMCP_SKIN.renderers.PolicyBadge;
+  const policyBadge = result
+    ? toPolicyBadgeViewModel(parsePolicyTightening(result.response))
+    : null;
   return (
     <ConsolePanel className="min-h-[520px]">
       <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
@@ -8062,6 +8071,7 @@ function WorkbenchResultPanel({
       </div>
       <div className="space-y-4 p-4">
         {verdict ? <WorkbenchVerdictBlock verdict={verdict} /> : null}
+        {policyBadge ? <PolicyBadge model={policyBadge} /> : null}
         {maskBadge ? <MaskBadge model={maskBadge} /> : null}
         {facts.length > 0 ? (
           <div className="grid gap-2 sm:grid-cols-2">

@@ -2,12 +2,14 @@ import {
   driftSections,
   isRegisteredDerivationStep,
   type CostPlanRowViewModel,
+  type ClearanceLevel,
   type CostRefusalInput,
   type FleetDbStatus,
   type FleetMapInput,
   type MaskAction,
   type MaskCertificateInput,
   type MaskSource,
+  type PolicyTighteningInput,
   type VerdictKind,
   type VerdictProofCheckView,
   type VerdictProofInput
@@ -1642,6 +1644,98 @@ export async function fetchAuditTail(
     throw new Error(errorMessage(parsed, response.status));
   }
   return parsed as OperatorResponse<AuditTailData>;
+}
+
+// ── Policy narrowing (Arc N) ─────────────────────────────────────────────────
+// ADR 0009: the policy outcome is `Deny` or `Narrow` — there is deliberately no
+// `Allow`. A narrowing carries the base (pre-policy) required level, the final
+// level floor, the matched rule ids and any conjunctive predicates.
+//
+// NOTE: as of this commit the guard evaluates policies but dispatch does not yet
+// attach the outcome to a tool response, so this parser returns null on today's
+// responses and the badge reports "not reported" — never "no policy applied".
+// The wire gap is tracked as its own bead.
+
+const CLEARANCE_LEVELS: readonly ClearanceLevel[] = [
+  "READ_ONLY",
+  "READ_WRITE",
+  "DDL",
+  "ADMIN"
+];
+
+function clearanceLevel(value: unknown): ClearanceLevel | null {
+  const level = typeof value === "string" ? value.toUpperCase() : "";
+  return CLEARANCE_LEVELS.includes(level as ClearanceLevel) ? (level as ClearanceLevel) : null;
+}
+
+/** Find the policy outcome on a tool response or on a refusal envelope. */
+export function parsePolicyTightening(source: unknown): PolicyTighteningInput | null {
+  const payload = source instanceof OperatorOutcomeError ? source.response : source;
+  const envelope = recordValue(payload);
+  const data = recordValue(envelope?.["data"]) ?? envelope;
+  const mcp = recordValue(data?.["mcp_response"]);
+  const result = recordValue(mcp?.["result"]);
+  const structured = structuredReasonOf(payload);
+  const candidates = [
+    recordValue(result?.["policy"]),
+    recordValue(recordValue(result?.["structuredContent"])?.["policy"]),
+    recordValue(structured?.["policy_tightening"]),
+    recordValue(data?.["policy"])
+  ];
+  const policy = candidates.find((candidate) => candidate !== null) ?? null;
+  if (!policy) {
+    return null;
+  }
+
+  const denial = recordValue(policy["Deny"]) ?? recordValue(policy["deny"]);
+  const matchedRuleIds = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
+  if (denial) {
+    return {
+      effect: "Deny",
+      reason: stringValue(denial["reason"]) ?? "policy denied the statement",
+      matchedRuleIds: matchedRuleIds(denial["matched_rule_ids"])
+    };
+  }
+
+  const narrowing = recordValue(policy["Narrow"]) ?? recordValue(policy["narrow"]);
+  if (!narrowing) {
+    return null;
+  }
+  const baseRequiredLevel = clearanceLevel(narrowing["base_required_level"]);
+  const requiredLevel = clearanceLevel(narrowing["required_level"]);
+  // A narrowing with no levels is not decodable, and the console will not guess
+  // one: an invented base level would misreport what the policy took away.
+  if (!baseRequiredLevel || !requiredLevel) {
+    return null;
+  }
+  const predicates = Array.isArray(narrowing["predicates"])
+    ? narrowing["predicates"].flatMap((raw) => {
+        const predicate = recordValue(raw);
+        const target = recordValue(predicate?.["target"]);
+        const ruleId = stringValue(predicate?.["rule_id"]);
+        const sqlFragment = stringValue(predicate?.["sql_fragment"]);
+        if (!ruleId || !sqlFragment) {
+          return [];
+        }
+        const schema = stringValue(target?.["schema"]);
+        const object = stringValue(target?.["object"]);
+        return [
+          {
+            ruleId,
+            target: schema && object ? `${schema}.${object}` : (object ?? schema ?? "unspecified"),
+            sqlFragment
+          }
+        ];
+      })
+    : [];
+  return {
+    effect: "Narrow",
+    baseRequiredLevel,
+    requiredLevel,
+    matchedRuleIds: matchedRuleIds(narrowing["matched_rule_ids"]),
+    predicates
+  };
 }
 
 // ── Fleet map (Arc H) ────────────────────────────────────────────────────────

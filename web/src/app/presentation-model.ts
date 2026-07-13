@@ -235,6 +235,143 @@ export function toVerdictProofViewModel(proof: VerdictProofInput): VerdictProofV
   };
 }
 
+// ── Policy-narrowing badge (Arc N) ───────────────────────────────────────────
+// The policy evaluator is monotone: it composes as `base AND policy` and has no
+// Allow outcome. It can only Deny a statement or Narrow it — raise the required
+// level (never lower it) and add conjunctive row predicates. So the badge's job
+// is to show what the policy TOOK AWAY: the level it narrowed from, the level it
+// narrowed to, and every rule id that fired.
+//
+// When a response carries no policy evaluation the badge says "not reported" —
+// which is NOT the same claim as "no policy applied", and it must never be
+// rendered as a clean bill of health.
+
+export type PolicyEffect = "Deny" | "Narrow";
+
+export type PolicyPredicateViewModel = {
+  ruleId: string;
+  target: string;
+  sqlFragment: string;
+};
+
+export type PolicyBadgeViewModel = {
+  grammarVersion: 1;
+  status: "evaluated" | "not_reported";
+  effect: PolicyEffect | null;
+  // The classifier's level BEFORE the policy narrowed it. Policy never lowers it.
+  narrowedFrom: ClearanceLevel | null;
+  narrowedTo: ClearanceLevel | null;
+  narrowed: boolean;
+  denialReason: string | null;
+  matchedRuleIds: readonly string[];
+  predicates: readonly PolicyPredicateViewModel[];
+  headline: string;
+  detail: string;
+  tone: DashboardTone;
+};
+
+export type PolicyTighteningInput =
+  | {
+      effect: "Deny";
+      reason: string;
+      matchedRuleIds: readonly string[];
+    }
+  | {
+      effect: "Narrow";
+      baseRequiredLevel: ClearanceLevel;
+      requiredLevel: ClearanceLevel;
+      matchedRuleIds: readonly string[];
+      predicates: readonly PolicyPredicateViewModel[];
+    };
+
+const CLEARANCE_ORDINAL: Readonly<Record<ClearanceLevel, number>> = {
+  READ_ONLY: 0,
+  READ_WRITE: 1,
+  DDL: 2,
+  ADMIN: 3
+};
+
+export function toPolicyBadgeViewModel(
+  tightening: PolicyTighteningInput | null
+): PolicyBadgeViewModel {
+  if (!tightening) {
+    return {
+      grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+      status: "not_reported",
+      effect: null,
+      narrowedFrom: null,
+      narrowedTo: null,
+      narrowed: false,
+      denialReason: null,
+      matchedRuleIds: [],
+      predicates: [],
+      headline: "No policy evaluation reported",
+      detail:
+        "This response carried no policy verdict. That is not a statement that no policy applied — the console reports only what the server proves.",
+      tone: "off"
+    };
+  }
+  if (tightening.effect === "Deny") {
+    return {
+      grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+      status: "evaluated",
+      effect: "Deny",
+      narrowedFrom: null,
+      narrowedTo: null,
+      narrowed: false,
+      denialReason: tightening.reason,
+      matchedRuleIds: tightening.matchedRuleIds,
+      predicates: [],
+      headline: "Denied by policy",
+      detail: `The policy refused this statement before dispatch (${tightening.reason}).`,
+      tone: "warn"
+    };
+  }
+  const narrowed =
+    CLEARANCE_ORDINAL[tightening.requiredLevel] > CLEARANCE_ORDINAL[tightening.baseRequiredLevel] ||
+    tightening.predicates.length > 0 ||
+    tightening.matchedRuleIds.length > 0;
+  const levelRaised =
+    CLEARANCE_ORDINAL[tightening.requiredLevel] > CLEARANCE_ORDINAL[tightening.baseRequiredLevel];
+  return {
+    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+    status: "evaluated",
+    effect: "Narrow",
+    narrowedFrom: tightening.baseRequiredLevel,
+    narrowedTo: tightening.requiredLevel,
+    narrowed,
+    denialReason: null,
+    matchedRuleIds: tightening.matchedRuleIds,
+    predicates: tightening.predicates,
+    headline: levelRaised
+      ? `Level raised ${tightening.baseRequiredLevel} → ${tightening.requiredLevel}`
+      : narrowed
+        ? `Narrowed at ${tightening.requiredLevel}`
+        : `No policy constraint added at ${tightening.requiredLevel}`,
+    detail: narrowed
+      ? "Policy is monotone: it can only raise the required level and add row predicates, never grant authority."
+      : "Every matched rule was the identity; the classifier's own decision still gates this statement.",
+    tone: narrowed ? "info" : "ok"
+  };
+}
+
+/** A narrowing that raises READ_ONLY to READ_WRITE and adds a row predicate. */
+export function policyBadgeFixture(): PolicyBadgeViewModel {
+  return toPolicyBadgeViewModel({
+    effect: "Narrow",
+    baseRequiredLevel: "READ_ONLY",
+    requiredLevel: "READ_WRITE",
+    matchedRuleIds: ["hr-salary-guard", "tenant-scope"],
+    predicates: [
+      {
+        ruleId: "tenant-scope",
+        target: "HR.EMPLOYEES",
+        sqlFragment: "TENANT_ID = SYS_CONTEXT('OMCP', 'TENANT')"
+      }
+    ]
+  });
+}
+
 // ── Fleet map (Arc H) ────────────────────────────────────────────────────────
 // `oracle_orient fleet=true` maps every MCP-visible profile independently and
 // returns a typed lane status per profile: REACHABLE, UNREACHABLE, FAIL_CLOSED.
@@ -1313,8 +1450,10 @@ export function skinContractFixture(): {
   scnScrubber: ScnScrubberViewModel;
   maskBadge: MaskBadgeViewModel;
   fleetMap: FleetMapViewModel;
+  policyBadge: PolicyBadgeViewModel;
 } {
   return {
+    policyBadge: policyBadgeFixture(),
     verdictProof: verdictProofFixture(),
     undoTree: undoTreeFixture(),
     costBadge: costBadgeFixture(),

@@ -12,10 +12,12 @@ import {
   fleetMapFixture,
   isRegisteredDerivationStep,
   maskBadgeFixture,
+  policyBadgeFixture,
   scnScrubberFixture,
   skinContractFixture,
   toCostBadgeViewModel,
   toMaskBadgeViewModel,
+  toPolicyBadgeViewModel,
   toScnScrubberViewModel,
   toUndoTreeViewModel,
   toVerdictProofViewModel,
@@ -189,6 +191,51 @@ describe("OMCP skin conformance", () => {
     });
     expect(brokenBinding.proofStatus).toBe("unverified");
     expect(brokenBinding.tone).toBe("warn");
+  });
+
+  it("renders a policy narrowing with the level it narrowed from", () => {
+    const PolicyBadge = OMCP_SKIN.renderers.PolicyBadge;
+    const model = policyBadgeFixture();
+    const markup = renderToStaticMarkup(<PolicyBadge model={model} />);
+
+    expect(markup).toContain('data-grammar-version="1"');
+    expect(markup).toContain('data-policy-effect="Narrow"');
+    // The pre-narrow level is what makes the narrowing legible: the policy took
+    // this statement from READ_ONLY up to READ_WRITE.
+    expect(markup).toContain('data-narrowed-from="READ_ONLY"');
+    expect(markup).toContain('data-narrowed-to="READ_WRITE"');
+    expect(model.narrowedFrom).toBe("READ_ONLY");
+    expect(model.narrowedTo).toBe("READ_WRITE");
+    expect(markup).toContain("READ_ONLY → READ_WRITE");
+
+    // Every rule that fired, and the predicate the policy bolted on.
+    expect(markup).toContain('data-policy-rule-id="hr-salary-guard"');
+    expect(markup).toContain('data-policy-rule-id="tenant-scope"');
+    expect(markup).toContain('data-policy-predicate-target="HR.EMPLOYEES"');
+  });
+
+  it("renders a policy denial, and reports a missing verdict as not-reported", () => {
+    const PolicyBadge = OMCP_SKIN.renderers.PolicyBadge;
+    const denied = toPolicyBadgeViewModel({
+      effect: "Deny",
+      reason: "matching_deny_rule",
+      matchedRuleIds: ["no-prod-deletes"]
+    });
+    const deniedMarkup = renderToStaticMarkup(<PolicyBadge model={denied} />);
+    expect(deniedMarkup).toContain('data-policy-effect="Deny"');
+    expect(deniedMarkup).toContain('data-policy-rule-id="no-prod-deletes"');
+    // A denial has no narrowed-from: nothing was narrowed, it was refused.
+    expect(denied.narrowedFrom).toBeNull();
+    expect(deniedMarkup).toContain('data-narrowed-from=""');
+
+    // No verdict on the response: "not reported" — NOT "no policy applied".
+    const silent = toPolicyBadgeViewModel(null);
+    expect(silent.status).toBe("not_reported");
+    expect(silent.effect).toBeNull();
+    expect(silent.detail).toContain("not a statement that no policy applied");
+    const silentMarkup = renderToStaticMarkup(<PolicyBadge model={silent} />);
+    expect(silentMarkup).toContain('data-policy-effect="not_reported"');
+    expect(silentMarkup).toContain('data-policy-narrowed="false"');
   });
 
   it("renders every database on the fleet map, including an unreachable one", () => {
