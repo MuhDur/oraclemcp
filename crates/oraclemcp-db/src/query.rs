@@ -305,11 +305,15 @@ pub async fn read_query_as_of(
     // Resolve a timestamp before opening the flashback window. The fixed,
     // server-owned conversion preserves the exact SCN Oracle chose and lets the
     // response carry a deterministic replay handle for either input form.
-    let observed_scn = as_of.resolve_to_scn(cx, conn).await?;
+    let observed_scn = as_of.resolve_to_scn(cx, conn).await.map_err(|error| {
+        map_flashback_refusal_with_server_version(error, flashback_server_version.as_deref())
+    })?;
     let resolved_as_of = AsOf::Scn(observed_scn);
     // ORA-08183: ENABLE must not run inside a transaction. Clear any open
     // (startup / metadata / read-only-backstop) transaction first.
-    conn.rollback(cx).await?;
+    conn.rollback(cx).await.map_err(|error| {
+        map_flashback_refusal_with_server_version(error, flashback_server_version.as_deref())
+    })?;
     // Defensive: clear any flashback window leaked by a prior aborted call so
     // ENABLE cannot hit ORA-08184 ("re-enable while in Flashback mode").
     if let Err(error) = conn.flashback_disable(cx).await {
@@ -1274,6 +1278,7 @@ mod tests {
         fail_disable_call: Option<usize>,
         fail_disable_message: Option<String>,
         fail_rollback_call: Option<usize>,
+        fail_rollback_message: Option<String>,
         connection_info: OracleConnectionInfo,
         disable_calls: std::sync::atomic::AtomicUsize,
         rollback_calls: std::sync::atomic::AtomicUsize,
@@ -1371,7 +1376,11 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 + 1;
             if self.fail_rollback_call == Some(call) {
-                return Err(DbError::Execute(format!("rollback failure on call {call}")));
+                return Err(DbError::Execute(
+                    self.fail_rollback_message
+                        .clone()
+                        .unwrap_or_else(|| format!("rollback failure on call {call}")),
+                ));
             }
             Ok(())
         }
@@ -1657,6 +1666,60 @@ mod tests {
                 "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
             ],
             "the unsupported capability must be refused before ENABLE or the caller read"
+        );
+    }
+
+    #[test]
+    fn read_query_as_of_keeps_missing_flashback_capability_typed_after_quarantine() {
+        let conn = FlashbackRecorder {
+            fail_rollback_call: Some(1),
+            fail_rollback_message: Some(
+                "database session quarantined (unknown_discarded): DBMS_FLASHBACK.DISABLE cleanup failed; \
+                 the thin connection was discarded: server returned Oracle error: ORA-06550: line 1, column 7:\n\
+                 PLS-00201: identifier 'DBMS_FLASHBACK' must be declared"
+                    .to_owned(),
+            ),
+            connection_info: OracleConnectionInfo {
+                server_version: Some("21.3.0.0.0".to_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (error, events) = run_with_cx(|cx| async move {
+            let error = read_query_as_of(
+                &cx,
+                &conn,
+                "SELECT 1 FROM t",
+                &[],
+                QueryCaps::default(),
+                0,
+                &SerializeOptions::default(),
+                &AsOf::Scn(1),
+            )
+            .await
+            .expect_err("a quarantined follow-up must preserve the typed refusal");
+            (error, conn.events.into_inner().expect("events"))
+        });
+
+        let envelope = error.clone().into_envelope();
+        assert!(matches!(
+            error,
+            DbError::FlashbackRefusal {
+                kind: crate::FlashbackRefusalKind::CapabilityUnavailable,
+                ora_code: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            envelope.error_class,
+            oraclemcp_error::ErrorClass::FlashbackCapabilityUnavailable
+        );
+        assert!(envelope.message.contains("DBMS_FLASHBACK"));
+        assert!(envelope.message.contains("21.3.0.0.0"));
+        assert_eq!(
+            events,
+            vec!["rollback".to_owned()],
+            "the inherited quarantine is refused before a new window is opened"
         );
     }
 
