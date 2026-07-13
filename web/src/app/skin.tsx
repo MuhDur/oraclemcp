@@ -28,6 +28,7 @@ import {
   type HealthPosture,
   type SignatureId,
   type SkinCapability,
+  type UndoTreeViewModel,
   type VerdictProofViewModel,
   defaultSkinCapabilities,
   normalizeRendererChoice,
@@ -66,6 +67,13 @@ export type DashboardSkin = {
   renderers: {
     GroundControl: React.ComponentType<{ model: GroundControlViewModel }>;
     VerdictProof: React.ComponentType<{ model: VerdictProofViewModel }>;
+    UndoTree: React.ComponentType<{
+      model: UndoTreeViewModel;
+      // Offered only for a plainly reversible checkpoint; a partial rollback is a
+      // separate, explicitly-labeled action, never a plain Undo.
+      onUndo?: (checkpoint: string) => void;
+      onPartialRollback?: (checkpoint: string) => void;
+    }>;
   };
   layout: {
     appShell: string;
@@ -144,7 +152,8 @@ export const OMCP_SKIN: DashboardSkin = {
   },
   renderers: {
     GroundControl: GroundControl2DRenderer,
-    VerdictProof: VerdictProofInspector
+    VerdictProof: VerdictProofInspector,
+    UndoTree: UndoTreeRenderer
   },
   layout: {
     appShell: "min-h-screen bg-[var(--om-bg)] text-[var(--om-text)]",
@@ -366,8 +375,138 @@ function VerdictProofFact({ label, value }: { label: string; value: string }): R
   );
 }
 
+/**
+ * The reversible undo-tree (Arc I).
+ *
+ * Walkable checkpoints, the work held above them, and — prominently — what a
+ * rollback cannot take back. A node whose effect escapes the transaction gets
+ * its server-issued reason and no Undo button; a checkpoint with escaped work
+ * above it offers an explicitly-labeled *partial* rollback, never a plain Undo.
+ */
+export function UndoTreeRenderer({
+  model,
+  onUndo,
+  onPartialRollback
+}: {
+  model: UndoTreeViewModel;
+  onUndo?: (checkpoint: string) => void;
+  onPartialRollback?: (checkpoint: string) => void;
+}): React.ReactElement {
+  return (
+    <section
+      className="flex flex-col gap-3 rounded-lg border border-[var(--om-border)] bg-[var(--om-surface)] p-4 shadow-sm"
+      aria-label="reversible undo tree"
+      data-grammar-version={model.grammarVersion}
+      data-workspace-open={model.open ? "true" : "false"}
+      data-held-statements={model.heldStatements}
+      data-escaped-effects={model.escapedEffects}
+    >
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <FileClock className="size-4 text-[var(--om-gold)]" aria-hidden="true" />
+          <span className="text-sm font-bold text-[var(--om-text-bright)]">Undo Tree</span>
+          <Badge tone={model.open ? "ok" : "off"}>{model.open ? "workspace open" : "closed"}</Badge>
+        </div>
+        <span className="font-mono text-2xs uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+          {model.heldStatements} held · {model.liveCheckpoints.length} checkpoint(s)
+        </span>
+      </header>
+
+      {model.escapedEffects > 0 ? (
+        <p
+          className="flex items-start gap-2 rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_10%,transparent)] px-3 py-2 text-xs text-[var(--om-copper)]"
+          data-testid="undo-tree-escape-banner"
+        >
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          <span>
+            <strong className="font-bold">
+              {model.escapedEffects} effect(s) cannot be undone.
+            </strong>{" "}
+            An undo restores the transaction, not these. Treat them as applied.
+          </span>
+        </p>
+      ) : null}
+
+      <ol className="flex flex-col gap-2">
+        {model.nodes.map((node) => (
+          <li
+            key={node.id}
+            className={cn(
+              "flex flex-col gap-1 rounded-md border px-3 py-2",
+              node.kind === "statement" ? "ml-4 border-dashed" : "border-solid",
+              node.status === "escaped"
+                ? "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)]"
+                : "border-[var(--om-border)]"
+            )}
+            data-node-kind={node.kind}
+            data-checkpoint-name={node.checkpointName ?? ""}
+            data-node-status={node.status}
+            data-undoable={node.undoable ? "true" : "false"}
+            data-partial-undo={node.partialUndo ? "true" : "false"}
+            data-cannot-undo-reason={node.cannotUndoReason ?? ""}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-2">
+                <Badge tone={node.tone}>{node.status}</Badge>
+                <span className="truncate font-mono text-xs text-[var(--om-text)]" title={node.label}>
+                  {node.label}
+                </span>
+              </div>
+              {node.kind === "checkpoint" && node.undoable ? (
+                <button
+                  type="button"
+                  className="inline-flex min-h-8 items-center rounded-md border border-[var(--om-border)] px-2 py-1 text-2xs font-semibold text-[var(--om-text-bright)] hover:bg-[var(--om-surface-muted)]"
+                  onClick={() => onUndo?.(node.checkpointName ?? node.label)}
+                >
+                  Undo to checkpoint
+                </button>
+              ) : null}
+              {node.kind === "checkpoint" && node.partialUndo ? (
+                <button
+                  type="button"
+                  className="inline-flex min-h-8 items-center rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] px-2 py-1 text-2xs font-semibold text-[var(--om-copper)] hover:bg-[color-mix(in_srgb,var(--om-copper)_10%,transparent)]"
+                  onClick={() => onPartialRollback?.(node.checkpointName ?? node.label)}
+                  data-testid="undo-tree-partial-rollback"
+                >
+                  Partial rollback — cannot undo {model.escapedEffects} effect(s)
+                </button>
+              ) : null}
+            </div>
+            {node.cannotUndoReason ? (
+              <p
+                className={cn(
+                  "text-2xs",
+                  node.status === "escaped" || node.partialUndo
+                    ? "font-semibold text-[var(--om-copper)]"
+                    : "text-[var(--om-text-muted)]"
+                )}
+              >
+                {node.status === "escaped" ? "CANNOT UNDO — " : ""}
+                {node.cannotUndoReason}
+              </p>
+            ) : null}
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
 export function assertDashboardSkinConformance(skin: DashboardSkin): void {
   const fixture = skinContractFixture();
+  if (typeof skin.renderers.UndoTree !== "function") {
+    throw new Error(`skin ${skin.name} must provide an undo-tree renderer`);
+  }
+  // The undo-tree fixture pins the Arc I honesty rule: the sequence-touching
+  // node is not undoable and says why, and the checkpoint above it degrades to
+  // a partial rollback rather than promising a plain Undo.
+  const escaped = fixture.undoTree.nodes.filter((node) => node.status === "escaped");
+  if (escaped.length === 0 || escaped.some((node) => node.undoable || !node.cannotUndoReason)) {
+    throw new Error("undo-tree fixture must carry a non-undoable node with a stated reason");
+  }
+  if (fixture.undoTree.nodes.some((node) => node.undoable && node.cannotUndoReason)) {
+    throw new Error("an undoable node must not also carry a cannot-undo reason");
+  }
   if (typeof skin.renderers.VerdictProof !== "function") {
     throw new Error(`skin ${skin.name} must provide a verdict-proof renderer`);
   }

@@ -1636,6 +1636,216 @@ export async function fetchAuditTail(
   return parsed as OperatorResponse<AuditTailData>;
 }
 
+// ── Reversible undo-tree (Arc I) ─────────────────────────────────────────────
+// The workspace lives on the pinned lane session, so its truth arrives on the
+// tool responses that open, hold into, and unwind it. The console reads the
+// server's own `workspace` view and its `cannot_undo` labels verbatim; it never
+// infers reversibility from a flag named after the transaction.
+
+export type WorkspaceView = {
+  open: boolean;
+  checkpoints: string[];
+  heldStatements: number;
+};
+
+export type UndoOutcome = {
+  workspace: WorkspaceView | null;
+  // Verbatim `cannot_undo` reasons: the effect outlives the rollback.
+  cannotUndo: string[];
+  // `fully_reverted` from the response; null when the response never claimed it.
+  fullyReverted: boolean | null;
+  held: boolean;
+  checkpoint: string | null;
+  undoneTo: string | null;
+  discardedStatements: number | null;
+};
+
+/** The MCP tool payload an operator action wraps. */
+function mcpPayload(data: WorkbenchActionData | null | undefined): Record<string, unknown> | null {
+  const response = data?.mcp_response;
+  return response && typeof response === "object" ? (response as Record<string, unknown>) : null;
+}
+
+export function parseWorkspaceView(data: WorkbenchActionData | null): WorkspaceView | null {
+  const workspace = mcpPayload(data)?.["workspace"];
+  if (!workspace || typeof workspace !== "object") {
+    return null;
+  }
+  const view = workspace as Record<string, unknown>;
+  const checkpoints = Array.isArray(view["checkpoints"])
+    ? (view["checkpoints"] as unknown[]).filter(
+        (name): name is string => typeof name === "string"
+      )
+    : [];
+  return {
+    open: view["open"] === true,
+    checkpoints,
+    heldStatements: typeof view["held_statements"] === "number" ? view["held_statements"] : 0
+  };
+}
+
+/**
+ * Read the server's reversibility verdict for one action.
+ *
+ * `cannot_undo` is taken verbatim — it is the only place that says an effect
+ * escapes the rollback (a sequence NEXTVAL, an autonomous transaction, a
+ * trigger, non-source-replaceable DDL). An absent `fully_reverted` stays null:
+ * the console must not read silence as "reverted".
+ */
+export function parseUndoOutcome(data: WorkbenchActionData | null): UndoOutcome {
+  const payload = mcpPayload(data);
+  const cannotUndo = Array.isArray(payload?.["cannot_undo"])
+    ? (payload["cannot_undo"] as unknown[]).filter(
+        (reason): reason is string => typeof reason === "string"
+      )
+    : [];
+  const fullyReverted =
+    typeof payload?.["fully_reverted"] === "boolean"
+      ? (payload["fully_reverted"] as boolean)
+      : payload === null
+        ? null
+        : cannotUndo.length > 0
+          ? false
+          : payload["rolled_back"] === true || payload["held"] === true
+            ? true
+            : null;
+  return {
+    workspace: parseWorkspaceView(data),
+    cannotUndo,
+    fullyReverted,
+    held: payload?.["held"] === true,
+    checkpoint: typeof payload?.["checkpoint"] === "string" ? payload["checkpoint"] : null,
+    undoneTo: typeof payload?.["undone_to"] === "string" ? payload["undone_to"] : null,
+    discardedStatements:
+      typeof payload?.["discarded_statements"] === "number"
+        ? (payload["discarded_statements"] as number)
+        : null
+  };
+}
+
+export type WorkspaceCheckpointRequest = {
+  laneId?: string;
+  name: string;
+};
+
+export type WorkspaceUndoRequest = {
+  laneId?: string;
+  // Omit to discard the whole workspace (a full ROLLBACK).
+  name?: string;
+};
+
+export type WorkspaceHoldRequest = WorkbenchSqlRequest & {
+  confirm?: string;
+};
+
+/** `oracle_checkpoint` — establish a named savepoint, opening the workspace. */
+export async function establishCheckpoint(
+  session: DashboardSession,
+  request: WorkspaceCheckpointRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("workspace-checkpoint"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_checkpoint",
+    arguments: { name: request.name.trim() }
+  });
+}
+
+/** `oracle_execute` with `hold=true` — leave the DML pending and undoable. */
+export async function holdWorkbenchSql(
+  session: DashboardSession,
+  request: WorkspaceHoldRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("workspace-hold"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_execute",
+    arguments: {
+      sql: request.sql,
+      binds: [],
+      hold: true,
+      commit: false,
+      confirm: request.confirm?.trim() || undefined
+    }
+  });
+}
+
+/** `oracle_undo_to` — roll back to a checkpoint, or discard the workspace. */
+export async function undoToCheckpoint(
+  session: DashboardSession,
+  request: WorkspaceUndoRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("workspace-undo"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_undo_to",
+    arguments: request.name ? { name: request.name.trim() } : {}
+  });
+}
+
+/** Audit outcomes the workspace produces. `HELD_UNCOMMITTED` is Arc I's own. */
+export const WORKSPACE_TOOLS = ["oracle_checkpoint", "oracle_undo_to", "oracle_execute"] as const;
+
+export type WorkspaceHistoryEntry = {
+  seq: number;
+  timestamp: string;
+  tool: string;
+  outcome: string;
+  dangerLevel: string;
+  sqlSha256: string;
+};
+
+export type WorkspaceHistoryData = {
+  source: "self_lane" | "unavailable";
+  reason?: string;
+  entries: WorkspaceHistoryEntry[];
+};
+
+/**
+ * Server-side evidence for the undo tree: the hash-chained audit records of the
+ * workspace tools. `HELD_UNCOMMITTED` is durable proof that a statement is
+ * pending and undoable; it is the audit chain, not the console, that says so.
+ */
+export async function fetchWorkspaceHistory(
+  limit = 25
+): Promise<OperatorResponse<WorkspaceHistoryData>> {
+  const response = await fetchAuditTail({
+    limit,
+    subjectIdHash: "",
+    tool: "",
+    dangerLevel: "",
+    exportProofBundle: false
+  });
+  const tail = response.data;
+  if (tail.source !== "self_lane") {
+    return {
+      ...response,
+      data: {
+        source: "unavailable",
+        reason: tail.reason ?? "audit tail provider is not available",
+        entries: []
+      }
+    };
+  }
+  const workspaceTools = new Set<string>(WORKSPACE_TOOLS);
+  const entries = tail.records
+    .filter(
+      (record) =>
+        workspaceTools.has(record.tool) ||
+        record.outcome === "HELD_UNCOMMITTED" ||
+        record.outcome === "DISCARDED_UNCOMMITTED"
+    )
+    .map((record) => ({
+      seq: record.seq,
+      timestamp: record.timestamp,
+      tool: record.tool,
+      outcome: record.outcome,
+      dangerLevel: record.danger_level,
+      sqlSha256: record.sql_sha256
+    }));
+  return { ...response, data: { source: "self_lane", entries } };
+}
+
 // ── Verdict-proof inspector (Arc B1) ─────────────────────────────────────────
 // The certificate (ADR 0010) rides on the audit record it is bound to, so the
 // inspector reads the same redacted, hash-chained tail the Audit page reads —

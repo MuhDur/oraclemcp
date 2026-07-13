@@ -235,6 +235,180 @@ export function toVerdictProofViewModel(proof: VerdictProofInput): VerdictProofV
   };
 }
 
+// ── Reversible undo-tree (Arc I) ─────────────────────────────────────────────
+// The workspace is a labeled-linear savepoint stack: named checkpoints, with
+// statements held (uncommitted) above them. The console must never offer a
+// plain Undo for work a ROLLBACK TO SAVEPOINT cannot take back — a sequence
+// NEXTVAL, an autonomous transaction, a trigger, non-source-replaceable DDL.
+// The server already labels those (`cannot_undo`, `fully_reverted: false`); the
+// tree surfaces that label instead of an Undo button.
+
+export type UndoNodeKind = "checkpoint" | "statement";
+
+export type UndoNodeStatus =
+  | "live" // checkpoint Oracle still holds; a valid undo target
+  | "released" // checkpoint Oracle has erased (undone past, or a txn boundary)
+  | "held" // statement pending above a live checkpoint; a rollback takes it back
+  | "escaped" // statement whose effect outlives the rollback — NOT undoable
+  | "unproven"; // no reversibility evidence (not executed from this console)
+
+export type UndoTreeNodeViewModel = {
+  id: string;
+  kind: UndoNodeKind;
+  // For a checkpoint, its own savepoint name. For a statement, the checkpoint it
+  // is held above, or null when it sits outside any workspace.
+  checkpointName: string | null;
+  label: string;
+  status: UndoNodeStatus;
+  // True only when this node can be walked back with no caveat. A checkpoint
+  // with escaped work above it is deliberately NOT undoable: rolling back to it
+  // is a *partial* revert, and a plain Undo would promise more than Oracle does.
+  undoable: boolean;
+  // Verbatim server-side reason(s) an undo cannot restore this. Null when the
+  // node is plainly reversible — the honesty is targeted, not noise.
+  cannotUndoReason: string | null;
+  // A checkpoint that is still a usable rollback target, but only partially:
+  // some effect above it escapes the rollback.
+  partialUndo: boolean;
+  tone: DashboardTone;
+};
+
+export type UndoTreeViewModel = {
+  grammarVersion: 1;
+  open: boolean;
+  heldStatements: number;
+  escapedEffects: number;
+  liveCheckpoints: readonly string[];
+  nodes: readonly UndoTreeNodeViewModel[];
+};
+
+/** One observation the tree is built from (see `buildUndoTree`). */
+export type UndoTreeEntry = {
+  id: string;
+  kind: UndoNodeKind;
+  checkpointName: string | null;
+  label: string;
+  // Server-side escape labels, verbatim from `cannot_undo`. Empty = reversible.
+  cannotUndo: readonly string[];
+  // `fully_reverted` from the tool response; null when this console never saw a
+  // response for the statement (for example, an audit record from another lane
+  // participant). Null is not evidence of reversibility.
+  fullyReverted: boolean | null;
+};
+
+export type UndoTreeInput = {
+  // The authoritative live workspace, straight from the lane's tool response.
+  workspace: { open: boolean; checkpoints: readonly string[]; heldStatements: number } | null;
+  entries: readonly UndoTreeEntry[];
+};
+
+function escapeReason(entry: UndoTreeEntry): string | null {
+  if (entry.cannotUndo.length > 0) {
+    return entry.cannotUndo.join(" · ");
+  }
+  if (entry.fullyReverted === false) {
+    return "the server reported this statement was not fully reverted";
+  }
+  return null;
+}
+
+/**
+ * Reconcile the console's observations against the live workspace.
+ *
+ * Fail-closed in three ways: a checkpoint Oracle no longer holds is never an
+ * undo target; a statement whose effect escapes rollback is never undoable and
+ * always carries its reason; and a statement this console has no reversibility
+ * evidence for is `unproven`, not assumed reversible.
+ */
+export function toUndoTreeViewModel(input: UndoTreeInput): UndoTreeViewModel {
+  const live = new Set(input.workspace?.checkpoints ?? []);
+  const escapedByCheckpoint = new Map<string, string[]>();
+  for (const entry of input.entries) {
+    const reason = entry.kind === "statement" ? escapeReason(entry) : null;
+    if (reason && entry.checkpointName) {
+      const reasons = escapedByCheckpoint.get(entry.checkpointName) ?? [];
+      reasons.push(reason);
+      escapedByCheckpoint.set(entry.checkpointName, reasons);
+    }
+  }
+
+  const nodes = input.entries.map((entry): UndoTreeNodeViewModel => {
+    if (entry.kind === "checkpoint") {
+      const name = entry.checkpointName ?? entry.label;
+      const isLive = live.has(name);
+      const escaped = escapedByCheckpoint.get(name) ?? [];
+      const partialUndo = isLive && escaped.length > 0;
+      return {
+        id: entry.id,
+        kind: "checkpoint",
+        checkpointName: name,
+        label: name,
+        status: isLive ? "live" : "released",
+        undoable: isLive && escaped.length === 0,
+        cannotUndoReason: !isLive
+          ? "Oracle has released this savepoint; it is no longer an undo target"
+          : partialUndo
+            ? `${escaped.length} statement(s) above this checkpoint escape rollback: ${escaped.join(" · ")}`
+            : null,
+        partialUndo,
+        tone: !isLive ? "off" : partialUndo ? "warn" : "ok"
+      };
+    }
+
+    const reason = escapeReason(entry);
+    if (reason !== null) {
+      return {
+        id: entry.id,
+        kind: "statement",
+        checkpointName: entry.checkpointName,
+        label: entry.label,
+        status: "escaped",
+        undoable: false,
+        cannotUndoReason: reason,
+        partialUndo: false,
+        tone: "warn"
+      };
+    }
+    if (entry.fullyReverted === null) {
+      return {
+        id: entry.id,
+        kind: "statement",
+        checkpointName: entry.checkpointName,
+        label: entry.label,
+        status: "unproven",
+        undoable: false,
+        cannotUndoReason:
+          "no reversibility evidence for this statement — it was not executed from this console",
+        partialUndo: false,
+        tone: "info"
+      };
+    }
+    const held = entry.checkpointName !== null && live.has(entry.checkpointName);
+    return {
+      id: entry.id,
+      kind: "statement",
+      checkpointName: entry.checkpointName,
+      label: entry.label,
+      status: held ? "held" : "released",
+      undoable: held,
+      cannotUndoReason: held
+        ? null
+        : "this statement is no longer held in an open workspace; there is nothing left to undo",
+      partialUndo: false,
+      tone: held ? "ok" : "off"
+    };
+  });
+
+  return {
+    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+    open: input.workspace?.open ?? false,
+    heldStatements: input.workspace?.heldStatements ?? 0,
+    escapedEffects: nodes.filter((node) => node.status === "escaped").length,
+    liveCheckpoints: input.workspace?.checkpoints ?? [],
+    nodes
+  };
+}
+
 export const DASHBOARD_GRAMMAR = {
   grammarVersion: 1,
   meanings: {
@@ -357,13 +531,54 @@ export function verdictProofFixture(): VerdictProofViewModel {
   });
 }
 
+/**
+ * A workspace with one live checkpoint, one plainly reversible held UPDATE, and
+ * one sequence-touching statement whose effect escapes the rollback — the case
+ * the tree must never offer a plain Undo for.
+ */
+export function undoTreeFixture(): UndoTreeViewModel {
+  return toUndoTreeViewModel({
+    workspace: { open: true, checkpoints: ["SP_BEFORE_BACKFILL"], heldStatements: 2 },
+    entries: [
+      {
+        id: "cp-1",
+        kind: "checkpoint",
+        checkpointName: "SP_BEFORE_BACKFILL",
+        label: "SP_BEFORE_BACKFILL",
+        cannotUndo: [],
+        fullyReverted: null
+      },
+      {
+        id: "st-1",
+        kind: "statement",
+        checkpointName: "SP_BEFORE_BACKFILL",
+        label: "UPDATE … SET … (held)",
+        cannotUndo: [],
+        fullyReverted: true
+      },
+      {
+        id: "st-2",
+        kind: "statement",
+        checkpointName: "SP_BEFORE_BACKFILL",
+        label: "INSERT … VALUES (seq.NEXTVAL, …)",
+        cannotUndo: [
+          "sequence.NEXTVAL: the sequence is advanced outside the transaction, so a rollback does not restore it"
+        ],
+        fullyReverted: false
+      }
+    ]
+  });
+}
+
 export function skinContractFixture(): {
   groundControl: GroundControlViewModel;
   fleet: FleetViewModel;
   verdictProof: VerdictProofViewModel;
+  undoTree: UndoTreeViewModel;
 } {
   return {
     verdictProof: verdictProofFixture(),
+    undoTree: undoTreeFixture(),
     groundControl: {
       grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
       verdict: "GO",

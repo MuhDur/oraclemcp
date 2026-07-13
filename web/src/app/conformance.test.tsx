@@ -10,10 +10,17 @@ import {
   defaultSkinCapabilities,
   isRegisteredDerivationStep,
   skinContractFixture,
+  toUndoTreeViewModel,
   toVerdictProofViewModel,
+  undoTreeFixture,
   verdictProofFixture,
   type SkinCapability
 } from "./presentation-model";
+
+// React escapes attribute values in static markup; mirror that when asserting on
+// a server-issued reason string rendered into a data-* attribute.
+const escapeAttr = (value: string): string =>
+  value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 import {
   OMCP_SKIN,
   assertDashboardSkinConformance,
@@ -175,6 +182,71 @@ describe("OMCP skin conformance", () => {
     });
     expect(brokenBinding.proofStatus).toBe("unverified");
     expect(brokenBinding.tone).toBe("warn");
+  });
+
+  it("renders the undo tree and refuses a plain Undo for effects that escape rollback", () => {
+    const UndoTree = OMCP_SKIN.renderers.UndoTree;
+    const model = undoTreeFixture();
+    const markup = renderToStaticMarkup(<UndoTree model={model} />);
+
+    expect(markup).toContain('data-grammar-version="1"');
+    expect(markup).toContain('data-workspace-open="true"');
+    expect(markup).toContain('data-checkpoint-name="SP_BEFORE_BACKFILL"');
+
+    // The sequence-touching node: not undoable, and it says why, in the server's
+    // own words. This is the Arc I honesty rule — the label, not a button.
+    const sequenceNode = model.nodes.find((node) => node.label.includes("NEXTVAL"));
+    expect(sequenceNode?.undoable).toBe(false);
+    expect(sequenceNode?.status).toBe("escaped");
+    expect(sequenceNode?.cannotUndoReason).toContain("sequence.NEXTVAL");
+    expect(markup).toContain('data-node-status="escaped"');
+    expect(markup).toContain('data-undoable="false"');
+    expect(markup).toContain(`data-cannot-undo-reason="${escapeAttr(sequenceNode!.cannotUndoReason!)}"`);
+    expect(markup).toContain("CANNOT UNDO");
+
+    // A checkpoint with escaped work above it degrades to an explicitly-labeled
+    // partial rollback; the plain "Undo to checkpoint" button is not rendered.
+    const checkpoint = model.nodes.find((node) => node.kind === "checkpoint");
+    expect(checkpoint?.undoable).toBe(false);
+    expect(checkpoint?.partialUndo).toBe(true);
+    expect(markup).toContain('data-partial-undo="true"');
+    expect(markup).toContain("Partial rollback");
+    expect(markup).not.toContain("Undo to checkpoint");
+
+    // The reversible held statement keeps its plain, unqualified undo.
+    const held = model.nodes.find((node) => node.status === "held");
+    expect(held?.undoable).toBe(true);
+    expect(held?.cannotUndoReason).toBeNull();
+  });
+
+  it("renders a plain Undo only when the whole workspace is reversible", () => {
+    const UndoTree = OMCP_SKIN.renderers.UndoTree;
+    const reversible = toUndoTreeViewModel({
+      workspace: { open: true, checkpoints: ["SP_A"], heldStatements: 1 },
+      entries: [
+        {
+          id: "cp-1",
+          kind: "checkpoint",
+          checkpointName: "SP_A",
+          label: "SP_A",
+          cannotUndo: [],
+          fullyReverted: null
+        },
+        {
+          id: "st-1",
+          kind: "statement",
+          checkpointName: "SP_A",
+          label: "UPDATE hr.employees SET salary = salary * 1.03",
+          cannotUndo: [],
+          fullyReverted: true
+        }
+      ]
+    });
+    const markup = renderToStaticMarkup(<UndoTree model={reversible} />);
+    expect(reversible.escapedEffects).toBe(0);
+    expect(markup).toContain("Undo to checkpoint");
+    expect(markup).not.toContain("Partial rollback");
+    expect(markup).toContain('data-undoable="true"');
   });
 
   it("renders both the 2D board and the table fallback for the fleet view-model", () => {

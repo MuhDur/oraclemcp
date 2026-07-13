@@ -60,7 +60,9 @@ import {
   CLEARANCE_LADDER,
   DASHBOARD_GRAMMAR,
   clampActivity,
+  toUndoTreeViewModel,
   toVerdictProofViewModel,
+  type UndoTreeEntry,
   type FleetViewModel,
   type DashboardTone,
   type GoNoGoVerdict,
@@ -80,8 +82,14 @@ import {
   cancelLane,
   coalesceAuditTimelineRecords,
   parseClassifierLadder,
+  parseUndoOutcome,
   fetchVerdictProofs,
+  fetchWorkspaceHistory,
+  establishCheckpoint,
+  holdWorkbenchSql,
+  undoToCheckpoint,
   type VerdictProofData,
+  type WorkspaceView,
   fetchActiveLanes,
   fetchClientCredentials,
   fetchDashboardSession,
@@ -6700,9 +6708,178 @@ function WorkbenchPage(): React.ReactElement {
           setTarget={setPlsqlTarget}
         />
 
+        <UndoTreePanel session={session.data ?? null} laneId={laneId} sql={sql} />
+
         <WorkbenchResultPanel result={lastResult} pending={action.isPending} />
       </div>
     </PageFrame>
+  );
+}
+
+/**
+ * The reversible undo-tree (Arc I).
+ *
+ * The workspace lives on the pinned lane session, so its truth is whatever the
+ * lane's own tool responses say: the `workspace` view names the checkpoints
+ * Oracle still holds, and `cannot_undo` names the effects a rollback will not
+ * take back. This panel walks that tree and refuses to offer a plain Undo for
+ * anything the server did not call reversible. The audit query alongside is the
+ * durable, hash-chained evidence for the same statements.
+ */
+function UndoTreePanel({
+  session,
+  laneId,
+  sql
+}: {
+  session: DashboardSession | null;
+  laneId: string;
+  sql: string;
+}): React.ReactElement {
+  const UndoTree = OMCP_SKIN.renderers.UndoTree;
+  const [checkpointName, setCheckpointName] = React.useState("");
+  const [workspace, setWorkspace] = React.useState<WorkspaceView | null>(null);
+  const [entries, setEntries] = React.useState<UndoTreeEntry[]>([]);
+  const [notice, setNotice] = React.useState<string | null>(null);
+  const nextId = React.useRef(0);
+
+  const history = useQuery({
+    queryKey: ["workspace-history"],
+    queryFn: () => fetchWorkspaceHistory(25),
+    refetchInterval: 15_000
+  });
+
+  const absorb = (data: WorkbenchActionData | null, entry: Omit<UndoTreeEntry, "id"> | null) => {
+    const outcome = parseUndoOutcome(data);
+    setWorkspace(outcome.workspace);
+    if (outcome.cannotUndo.length > 0) {
+      setNotice(`Cannot undo: ${outcome.cannotUndo.join(" · ")}`);
+    } else {
+      setNotice(null);
+    }
+    if (entry) {
+      nextId.current += 1;
+      const id = `node-${nextId.current}`;
+      setEntries((current) => [
+        ...current,
+        { ...entry, id, cannotUndo: outcome.cannotUndo, fullyReverted: outcome.fullyReverted }
+      ]);
+    }
+    if (outcome.undoneTo !== null || (outcome.workspace && !outcome.workspace.open)) {
+      // Oracle released savepoints; drop every node the workspace no longer holds
+      // rather than keep rendering an undo target that no longer exists.
+      const live = new Set(outcome.workspace?.checkpoints ?? []);
+      setEntries((current) =>
+        current.filter((node) => node.checkpointName !== null && live.has(node.checkpointName))
+      );
+    }
+    void history.refetch();
+  };
+
+  const checkpoint = useMutation({
+    mutationFn: async () => {
+      if (!session) {
+        throw new Error("dashboard session is not ready");
+      }
+      return establishCheckpoint(session, { laneId, name: checkpointName });
+    },
+    onSuccess: (response) => {
+      const name = parseUndoOutcome(response.data).checkpoint ?? checkpointName.toUpperCase();
+      absorb(response.data, {
+        kind: "checkpoint",
+        checkpointName: name,
+        label: name,
+        cannotUndo: [],
+        fullyReverted: null
+      });
+    }
+  });
+
+  const hold = useMutation({
+    mutationFn: async () => {
+      if (!session) {
+        throw new Error("dashboard session is not ready");
+      }
+      return holdWorkbenchSql(session, { sql: sql.trim(), mode: "dml_preview_confirm", laneId });
+    },
+    onSuccess: (response) => {
+      absorb(response.data, {
+        kind: "statement",
+        checkpointName: workspace?.checkpoints.at(-1) ?? null,
+        label: sql.trim().slice(0, 120),
+        cannotUndo: [],
+        fullyReverted: null
+      });
+    }
+  });
+
+  const undo = useMutation({
+    mutationFn: async (name: string | undefined) => {
+      if (!session) {
+        throw new Error("dashboard session is not ready");
+      }
+      return undoToCheckpoint(session, { laneId, name });
+    },
+    onSuccess: (response) => absorb(response.data, null)
+  });
+
+  const model = toUndoTreeViewModel({ workspace, entries });
+  const pending = checkpoint.isPending || hold.isPending || undo.isPending;
+  const error = [checkpoint.error, hold.error, undo.error].find(
+    (candidate): candidate is Error => candidate instanceof Error
+  );
+
+  return (
+    <Surface className="space-y-3 p-4" data-testid="undo-tree-panel">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="block">
+          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Checkpoint</span>
+          <input
+            className="h-10 w-56 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            value={checkpointName}
+            onChange={(event) => setCheckpointName(event.target.value)}
+            placeholder="SP_BEFORE_BACKFILL"
+          />
+        </label>
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={!session || pending || checkpointName.trim().length === 0}
+          onClick={() => checkpoint.mutate()}
+        >
+          Establish checkpoint
+        </Button>
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={!session || pending || !model.open || sql.trim().length === 0}
+          onClick={() => hold.mutate()}
+        >
+          Hold statement
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={!session || pending || !model.open}
+          onClick={() => undo.mutate(undefined)}
+        >
+          Discard workspace
+        </Button>
+      </div>
+      {error ? <p className="text-xs text-[var(--om-copper)]">{error.message}</p> : null}
+      {notice ? (
+        <p className="text-xs font-semibold text-[var(--om-copper)]">{notice}</p>
+      ) : null}
+      <UndoTree
+        model={model}
+        onUndo={(name) => undo.mutate(name)}
+        onPartialRollback={(name) => undo.mutate(name)}
+      />
+      <p className="text-2xs text-[var(--om-text-muted)]">
+        {history.data?.data.source === "self_lane"
+          ? `${history.data.data.entries.filter((entry) => entry.outcome === "HELD_UNCOMMITTED").length} statement(s) recorded HELD_UNCOMMITTED in the audit chain.`
+          : (history.data?.data.reason ?? "Audit evidence unavailable.")}
+      </p>
+    </Surface>
   );
 }
 
