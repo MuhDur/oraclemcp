@@ -1341,6 +1341,7 @@ fn args_for(name: &str) -> Value {
             json!({ "sql": "SELECT 1 FROM dual", "allow_plan_table_write": true })
         }
         "oracle_top_queries" => json!({ "metric": "elapsed", "top_n": 5 }),
+        "oracle_plan_timeline" => json!({ "sql_id": "abc123def4567", "max_points": 5 }),
         "oracle_db_health" => json!({ "health_type": "all" }),
         "oracle_plsql_parse" => {
             json!({ "source": "CREATE OR REPLACE PACKAGE p AS PROCEDURE q; END;" })
@@ -1440,10 +1441,15 @@ fn every_registry_tool_routes_and_deserializes_offline() {
         } else {
             args_for(name)
         };
-        let out = dispatcher
-            .dispatch(name, args)
-            .unwrap_or_else(|e| panic!("{name} should route + succeed offline: {e:?}"));
-        assert!(out.is_object(), "{name} returns a JSON object");
+        let result = dispatcher.dispatch(name, args);
+        if name == "oracle_plan_timeline" {
+            let error = result.expect_err("offline mock cannot prove a Diagnostics Pack");
+            assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+        } else {
+            let out =
+                result.unwrap_or_else(|e| panic!("{name} should route + succeed offline: {e:?}"));
+            assert!(out.is_object(), "{name} returns a JSON object");
+        }
     }
 }
 
@@ -9518,6 +9524,124 @@ mod top_queries {
     }
 }
 
+/// A4: the plan time-machine is a served read-only tool. The database helper
+/// owns the license probe; this layer pins its JSON delivery contract.
+mod plan_timeline {
+    use super::*;
+
+    struct PlanTimelineMock;
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for PlanTimelineMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo {
+                current_schema: Some("APP".to_owned()),
+                ..Default::default()
+            })
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            let normalized = sql.to_ascii_lowercase();
+            if normalized.contains("from v$parameter") {
+                return Ok(vec![OracleRow {
+                    columns: vec![(
+                        "VALUE".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("DIAGNOSTIC+TUNING".to_owned())),
+                    )],
+                }]);
+            }
+            if normalized.contains("from dba_hist_sqlstat") {
+                return Ok(vec![OracleRow {
+                    columns: vec![
+                        (
+                            "SNAPSHOT_ID".to_owned(),
+                            OracleCell::new("NUMBER", Some("42".to_owned())),
+                        ),
+                        (
+                            "INSTANCE_NUMBER".to_owned(),
+                            OracleCell::new("NUMBER", Some("1".to_owned())),
+                        ),
+                        (
+                            "SNAPSHOT_BEGIN_TIME".to_owned(),
+                            OracleCell::new(
+                                "VARCHAR2",
+                                Some("2026-07-13T10:00:00.000000".to_owned()),
+                            ),
+                        ),
+                        (
+                            "SNAPSHOT_END_TIME".to_owned(),
+                            OracleCell::new(
+                                "VARCHAR2",
+                                Some("2026-07-13T11:00:00.000000".to_owned()),
+                            ),
+                        ),
+                        (
+                            "PLAN_HASH_VALUE".to_owned(),
+                            OracleCell::new("NUMBER", Some("7654321".to_owned())),
+                        ),
+                        (
+                            "OPTIMIZER_COST".to_owned(),
+                            OracleCell::new("NUMBER", Some("19".to_owned())),
+                        ),
+                    ],
+                }]);
+            }
+            Ok(Vec::new())
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn serves_a_snapshot_bounded_plan_cost_timeline() {
+        let dispatcher = OracleDispatcher::new(Box::new(PlanTimelineMock));
+        let out = dispatcher
+            .dispatch(
+                "oracle_plan_timeline",
+                json!({ "sql_id": "ABC123DEF4567", "max_points": 20 }),
+            )
+            .expect("licensed timeline dispatches");
+
+        assert_eq!(out["sql_id"], json!("abc123def4567"));
+        assert_eq!(out["points"][0]["snapshot_id"], json!(42));
+        assert_eq!(out["points"][0]["plan_hash_value"], json!(7_654_321));
+        assert_eq!(out["points"][0]["optimizer_cost"], json!(19));
+        assert!(
+            out["note"]
+                .as_str()
+                .is_some_and(|note| note.contains("not exact historical SCNs"))
+        );
+    }
+}
+
 /// C1–C7: the read-only `oracle_db_health` suite. The framework dispatches the
 /// requested subchecks, aggregates findings tagged with severity + source view,
 /// and — per C1's load-bearing AC — never lets a missing privilege become a raw
@@ -12668,6 +12792,52 @@ const FLEET_CONFIG_STAGING_MASKS_VAL: &str = r#"
     action = "mask"
 "#;
 
+/// H3: the staging source masks object names (and fail-closes any unlisted
+/// metadata). The merged catalog must preserve that exact source policy rather
+/// than serializing staging's identifiers under the active prod profile.
+const FLEET_CATALOG_CONFIG_STAGING_MASKS_OBJECT_NAME: &str = r#"
+    default_profile = "prod"
+
+    [[profiles]]
+    name = "prod"
+    connect_string = "prod:1521/svc"
+
+    [[profiles]]
+    name = "staging"
+    connect_string = "staging:1521/svc"
+
+    [profiles.masking]
+    mask_unknown_default = true
+
+    [[profiles.masking.rules]]
+    column_match = { column = "OBJECT_NAME" }
+    action = "mask"
+"#;
+
+/// This config deliberately differs from [`FLEET_CONFIG`] only by a private
+/// profile containing a synthetic secret object. H3 tests compare its output
+/// with the one-profile configuration below: a hidden database changes neither
+/// names, counts, nor any roster-shaped response field.
+const FLEET_CATALOG_CONFIG_WITH_HIDDEN_PROFILE: &str = r#"
+    default_profile = "prod"
+
+    [[profiles]]
+    name = "prod"
+    connect_string = "prod:1521/svc"
+
+    [[profiles]]
+    name = "private"
+    connect_string = "private:1521/svc"
+"#;
+
+const FLEET_CATALOG_CONFIG_WITHOUT_HIDDEN_PROFILE: &str = r#"
+    default_profile = "prod"
+
+    [[profiles]]
+    name = "prod"
+    connect_string = "prod:1521/svc"
+"#;
+
 /// What each profile's connector call should produce.
 #[derive(Clone)]
 enum FleetLane {
@@ -12843,6 +13013,114 @@ fn fleet_orient_compares_each_reachable_profile_to_a_stable_baseline() {
     assert_eq!(profiles[1]["drift"]["schema_changed"], json!(true));
     assert_eq!(profiles[1]["drift"]["recent_ddl_changed"], json!(true));
     assert_eq!(profiles[1]["drift"]["server_version_changed"], json!(false));
+}
+
+#[test]
+fn fleet_catalog_masks_each_profile_before_merging_results() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let dispatcher = fleet_dispatcher(
+        FLEET_CATALOG_CONFIG_STAGING_MASKS_OBJECT_NAME,
+        McpExposurePolicy::AllowAll,
+        vec![
+            ("prod", FleetLane::Rows(vec![("1", "PUBLIC_ORDERS")])),
+            ("staging", FleetLane::Rows(vec![("1", "PAYROLL_EXPORT")])),
+        ],
+        Arc::clone(&calls),
+    );
+
+    let out = dispatcher
+        .dispatch(
+            "oracle_search_objects",
+            json!({ "fleet": true, "detail_level": "names", "owner": "APP" }),
+        )
+        .expect("the egress-filtered fleet catalog succeeds");
+
+    assert_eq!(out["fleet"], json!(true));
+    assert_eq!(out["detail_level"], json!("names"));
+    assert_eq!(out["count"], json!(2));
+    let staging = out["results"]
+        .as_array()
+        .expect("catalog rows")
+        .iter()
+        .find(|row| row["profile"] == "staging")
+        .expect("staging row");
+    assert_eq!(staging["object_name"], json!("<masked>"));
+    let certificates = out["mask_certificates"].as_array().expect("certificates");
+    let staging_certificate = certificates
+        .iter()
+        .find(|entry| entry["profile"] == "staging")
+        .expect("staging masking certificate");
+    assert_eq!(
+        staging_certificate["certificate"]["decisions"][1]["column"],
+        json!("OBJECT_NAME")
+    );
+    assert_eq!(
+        staging_certificate["certificate"]["decisions"][1]["action"],
+        json!("mask")
+    );
+    assert!(
+        staging_certificate["certificate"]["audit_entry_hash"].is_string(),
+        "a transformed fleet row must be audit-bound before it leaves dispatch"
+    );
+    assert!(
+        !out.to_string().contains("PAYROLL_EXPORT"),
+        "the source object name must never reach the merged response"
+    );
+    assert!(out.get("profiles").is_none() && out.get("summary").is_none());
+    assert_eq!(
+        &*calls.lock().expect("connector calls"),
+        &["prod".to_owned(), "staging".to_owned()],
+        "the two MCP-visible profiles are independently searched"
+    );
+
+    let err = dispatcher
+        .dispatch("oracle_search_objects", json!({ "fleet": true }))
+        .expect_err("fleet catalog cannot expose an unmasked enriched shape");
+    assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+    assert!(err.message.contains("detail_level=names"));
+}
+
+#[test]
+fn fleet_catalog_hidden_profile_is_indistinguishable_from_absence() {
+    let hidden_calls = Arc::new(Mutex::new(Vec::new()));
+    let with_hidden = fleet_dispatcher(
+        FLEET_CATALOG_CONFIG_WITH_HIDDEN_PROFILE,
+        McpExposurePolicy::AllowList(["prod".to_owned()].into_iter().collect()),
+        vec![
+            ("prod", FleetLane::Rows(vec![("1", "PUBLIC_ORDERS")])),
+            ("private", FleetLane::Rows(vec![("1", "SECRET_PAYROLL")])),
+        ],
+        Arc::clone(&hidden_calls),
+    );
+    let without_hidden = fleet_dispatcher(
+        FLEET_CATALOG_CONFIG_WITHOUT_HIDDEN_PROFILE,
+        McpExposurePolicy::AllowAll,
+        vec![("prod", FleetLane::Rows(vec![("1", "PUBLIC_ORDERS")]))],
+        Arc::new(Mutex::new(Vec::new())),
+    );
+    let args = json!({ "fleet": true, "detail_level": "names", "owner": "APP" });
+
+    let hidden_out = with_hidden
+        .dispatch("oracle_search_objects", args.clone())
+        .expect("hidden profile cannot make the catalog fail");
+    let absent_out = without_hidden
+        .dispatch("oracle_search_objects", args)
+        .expect("one-profile catalog succeeds");
+
+    assert_eq!(
+        hidden_out, absent_out,
+        "adding a profile the caller cannot read must not change names, object counts, \
+         or any absence-detectable response field"
+    );
+    let rendered = hidden_out.to_string();
+    assert!(!rendered.contains("private"));
+    assert!(!rendered.contains("SECRET_PAYROLL"));
+    assert!(hidden_out.get("profiles").is_none() && hidden_out.get("summary").is_none());
+    assert_eq!(
+        &*hidden_calls.lock().expect("connector calls"),
+        &["prod".to_owned()],
+        "a hidden profile must be rejected before its connector or credentials are touched"
+    );
 }
 
 #[test]

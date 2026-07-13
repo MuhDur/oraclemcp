@@ -346,6 +346,11 @@ pub(super) struct SearchObjectsArgs {
     pub(super) detail_level: Option<String>,
     #[serde(default, alias = "limit")]
     pub(super) max_rows: Option<usize>,
+    /// H3: search the egress-filtered names-only object index across every
+    /// MCP-visible profile. The dispatcher rejects richer detail levels in
+    /// fleet mode so no nested field can bypass the source profile's policy.
+    #[serde(default)]
+    pub(super) fleet: bool,
 }
 
 /// C2/H1: select stable sections of the bounded `oracle_orient` snapshot and,
@@ -446,6 +451,17 @@ pub(super) struct TopQueriesArgs {
     /// total selected metric (the "5%-of-total" view).
     #[serde(default)]
     pub(super) min_pct_of_total: Option<u8>,
+    #[serde(default)]
+    pub(super) timeout_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct PlanTimelineArgs {
+    /// The 13-character Oracle SQL ID whose AWR plan history is requested.
+    pub(super) sql_id: String,
+    /// Bounded number of chronologically ordered AWR observations to return.
+    #[serde(default)]
+    pub(super) max_points: Option<u32>,
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
 }

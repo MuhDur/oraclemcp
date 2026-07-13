@@ -9,8 +9,8 @@
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::{Cx, Outcome};
 use oraclemcp::dispatch::{
-    McpExposurePolicy, OracleDispatcher, ProfileConnectionBundle, ProfileDrainState,
-    ProfileGenerationLease,
+    McpExposurePolicy, OracleDispatcher, ProfileConnectionBundle, ProfileConnector,
+    ProfileDrainState, ProfileGenerationLease,
 };
 use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::{DispatchContext, ToolDispatch};
@@ -300,18 +300,19 @@ fn oracle_orient_fleet_preserves_a_live_lane_when_another_is_unreachable() {
         let config = fleet_test_config();
         let exposure = McpExposurePolicy::from_config(&config);
         let drain = ProfileDrainState::from_config(config);
-        let connector = Arc::new(|cx: &Cx, lease: &ProfileGenerationLease| {
-            let opts = if lease.profile() == "live" {
-                test_opts()
-            } else {
-                unreachable_test_opts()
-            };
-            Box::pin(async move {
-                RustOracleConnection::connect(cx, opts)
-                    .await
-                    .map(|conn| ProfileConnectionBundle::new(Box::new(conn), None))
-            })
-        });
+        let connector: Arc<ProfileConnector> =
+            Arc::new(|cx: &Cx, lease: &ProfileGenerationLease| {
+                let opts = if lease.profile() == "live" {
+                    test_opts()
+                } else {
+                    unreachable_test_opts()
+                };
+                Box::pin(async move {
+                    RustOracleConnection::connect(cx, opts)
+                        .await
+                        .map(|conn| ProfileConnectionBundle::new(Box::new(conn), None))
+                })
+            });
         let dispatcher = OracleDispatcher::new_switchable(
             Box::new(served),
             Some("live".to_owned()),
@@ -344,5 +345,87 @@ fn oracle_orient_fleet_preserves_a_live_lane_when_another_is_unreachable() {
         assert_eq!(profiles[1]["profile"], json!("offline"));
         assert_eq!(profiles[1]["status"], json!("UNREACHABLE"));
         assert!(profiles[1].get("orient").is_none());
+    });
+}
+
+/// H3 covers the public merged catalog against one real profile and a
+/// deliberately unreachable companion. Unlike fleet orientation, catalog
+/// output deliberately has no profile roster or aggregate lane counts: only
+/// object rows that passed their source profile's egress policy may escape.
+#[test]
+fn oracle_search_objects_fleet_reads_the_live_catalog_without_a_profile_roster() {
+    run_with_cx(|cx| async move {
+        let test_name =
+            "oracle_search_objects_fleet_reads_the_live_catalog_without_a_profile_roster";
+        let Some(served) = connect_or_skip(&cx, test_name).await else {
+            return;
+        };
+        let owner = served
+            .describe(&cx)
+            .await
+            .ok()
+            .and_then(|info| info.current_schema)
+            .or_else(|| std::env::var("ORACLEMCP_TEST_USER").ok())
+            .unwrap_or_else(|| "SYSTEM".to_owned())
+            .to_ascii_uppercase();
+        let config = fleet_test_config();
+        let exposure = McpExposurePolicy::from_config(&config);
+        let drain = ProfileDrainState::from_config(config);
+        let connector: Arc<ProfileConnector> =
+            Arc::new(|cx: &Cx, lease: &ProfileGenerationLease| {
+                let opts = if lease.profile() == "live" {
+                    test_opts()
+                } else {
+                    unreachable_test_opts()
+                };
+                Box::pin(async move {
+                    RustOracleConnection::connect(cx, opts)
+                        .await
+                        .map(|conn| ProfileConnectionBundle::new(Box::new(conn), None))
+                })
+            });
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(served),
+            Some("live".to_owned()),
+            SessionLevelState::new(OperatingLevel::ReadOnly, false),
+            connector,
+        )
+        .with_mcp_exposure(exposure)
+        .with_profile_drain_state(drain);
+
+        let out = match ToolDispatch::dispatch(
+            &dispatcher,
+            &cx,
+            DispatchContext::default(),
+            "oracle_search_objects",
+            json!({
+                "fleet": true,
+                "detail_level": "names",
+                "owner": owner,
+                "max_rows": 5,
+            }),
+        )
+        .await
+        {
+            Outcome::Ok(value) => value,
+            other => panic!("fleet catalog must retain the live lane: {other:?}"),
+        };
+
+        assert_eq!(out["fleet"], json!(true));
+        assert_eq!(out["detail_level"], json!("names"));
+        assert!(out["results"].is_array());
+        assert!(out.get("profiles").is_none());
+        assert!(out.get("summary").is_none());
+        assert!(
+            out["results"]
+                .as_array()
+                .expect("catalog rows")
+                .iter()
+                .all(|row| row["profile"] == "live")
+        );
+        assert!(
+            !out.to_string().contains("offline"),
+            "the unreachable profile is not a roster entry or a catalog side channel"
+        );
     });
 }

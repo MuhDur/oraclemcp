@@ -41,12 +41,12 @@ use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
     AsOf, CatalogInvalidation, DbError, DbRequestQuota, DbmsOutput, DependentObject,
     DependentsProbe, IncomparableMaskedColumn, MaskComparabilityBreak, OracleBackend, OracleBind,
-    OracleCatalogResolverCache, OracleConnection, OracleConnectionInfo, OracleRow,
+    OracleCatalogResolverCache, OracleCell, OracleConnection, OracleConnectionInfo, OracleRow,
     OrientForeignKey, OrientHotObject, OrientRecentDdlObject, OrientSchemaObject, PlanCostEstimate,
     QuarantineOutcome, QueryCaps, QueryDiffSource, QueryResponse, QueryRowStream,
     QueryRowStreamStart, ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate,
     ResultMaskingDecisionAction, ResultMaskingDecisionSource, ResultMaskingPolicy,
-    ResultMaskingRule, SerializeOptions, StructuredDecodeCaps, compile_errors,
+    ResultMaskingRule, SearchObject, SerializeOptions, StructuredDecodeCaps, compile_errors,
     compile_object_statements, describe_columns, describe_constraints, describe_index,
     describe_trigger, describe_view, diff_query_responses, execute_immediate_audit, explain_plan,
     find_unused_declarations, get_ddl, get_source, get_sources_by_name,
@@ -88,6 +88,11 @@ const MAX_SCHEMA_INSPECT_MAX_ROWS: usize = 5_000;
 const DEFAULT_SEARCH_OBJECTS_MAX_ROWS: usize = 100;
 /// Hard cap on `oracle_search_objects` for a single call.
 const MAX_SEARCH_OBJECTS_MAX_ROWS: usize = 5_000;
+/// Audit description for the synthetic, merged rows emitted by the fleet
+/// catalog. The underlying dictionary reads remain parameterized `ALL_*`
+/// reads in `search_objects`; this label binds the egress certificate to the
+/// aggregate surface without recording caller filters as faux SQL.
+const FLEET_CATALOG_AUDIT_SQL: &str = "GENERATED FLEET CATALOG SEARCH";
 /// Default cap on `oracle_list_schemas` result rows when the caller omits it.
 const DEFAULT_SCHEMA_LIST_MAX_ROWS: usize = 200;
 /// Hard cap on `oracle_list_schemas` for a single call.
@@ -473,6 +478,31 @@ enum FleetOrientLane {
     },
 }
 
+/// One profile's egress-filtered contribution to the merged fleet object
+/// index. This is intentionally not a lane-status enum: a catalog response
+/// must not expose a roster, a reachable-count, or a missing-profile signal.
+/// The caller sees only object rows it is authorized to receive.
+#[derive(Clone, Debug)]
+struct FleetCatalogProfileResult {
+    profile: String,
+    results: Vec<Value>,
+    mask_certificate: Option<ResultMaskingCertificate>,
+    truncated: bool,
+}
+
+/// Inputs for one source-profile read while building the egress-safe catalog.
+/// Keeping this request together makes it harder to accidentally use an active
+/// session's filter, budget, or subject for a transient fleet connection.
+struct FleetCatalogRequest<'a> {
+    profile: String,
+    owner: Option<&'a str>,
+    object_type: Option<&'a str>,
+    name_like: Option<&'a str>,
+    max_rows: usize,
+    request_budget: &'a RequestBudget,
+    subject: &'a AuditSubject,
+}
+
 /// Deterministic freshness summary derived from the bounded dictionary reads.
 #[derive(Clone, Debug, Serialize)]
 struct OrientFreshness {
@@ -700,6 +730,92 @@ fn fleet_orient_response(lanes: Vec<FleetOrientLane>, include: &OrientInclude) -
             "unreachable_count": unreachable,
             "fail_closed_count": fail_closed,
         },
+    })
+}
+
+/// Build the fixed, names-only dictionary result shape that crosses the fleet
+/// aggregation boundary. Applying Arc M here (rather than after the JSON has
+/// been merged) keeps every source row under the policy of the profile that
+/// produced it.
+fn fleet_catalog_source_row(object: &SearchObject) -> OracleRow {
+    OracleRow {
+        columns: vec![
+            (
+                "OWNER".to_owned(),
+                OracleCell::new("VARCHAR2", Some(object.owner.clone())),
+            ),
+            (
+                "OBJECT_NAME".to_owned(),
+                OracleCell::new("VARCHAR2", Some(object.object_name.clone())),
+            ),
+            (
+                "OBJECT_TYPE".to_owned(),
+                OracleCell::new("VARCHAR2", Some(object.object_type.clone())),
+            ),
+            (
+                "STATUS".to_owned(),
+                OracleCell::new("VARCHAR2", object.status.clone()),
+            ),
+        ],
+    }
+}
+
+fn fleet_catalog_result_row(
+    profile: &str,
+    object: &SearchObject,
+    result_masking: Option<&ResultMaskingPolicy>,
+) -> Value {
+    let row = fleet_catalog_source_row(object);
+    let serialized = serialize_row(
+        &row,
+        &SerializeOptions {
+            result_masking: result_masking.cloned(),
+            ..Default::default()
+        },
+    );
+    json!({
+        "profile": profile,
+        "owner": serialized["OWNER"].clone(),
+        "object_name": serialized["OBJECT_NAME"].clone(),
+        "object_type": serialized["OBJECT_TYPE"].clone(),
+        "status": serialized["STATUS"].clone(),
+    })
+}
+
+fn fleet_catalog_response(
+    lanes: Vec<FleetCatalogProfileResult>,
+    owner: Option<&str>,
+    object_type: Option<&str>,
+    name_like: Option<&str>,
+    max_rows: usize,
+) -> Value {
+    let mut results = Vec::new();
+    let mut mask_certificates = Vec::new();
+    let mut truncated = false;
+    for lane in lanes {
+        truncated |= lane.truncated;
+        if !lane.results.is_empty() {
+            if let Some(certificate) = lane.mask_certificate {
+                mask_certificates.push(json!({
+                    "profile": lane.profile,
+                    "certificate": certificate,
+                }));
+            }
+            results.extend(lane.results);
+        }
+    }
+
+    json!({
+        "fleet": true,
+        "owner": owner.unwrap_or("*"),
+        "object_type": object_type,
+        "name_like": name_like,
+        "detail_level": "names",
+        "count": results.len(),
+        "results": results,
+        "mask_certificates": mask_certificates,
+        "max_rows": max_rows,
+        "truncated": truncated,
     })
 }
 
@@ -1165,6 +1281,119 @@ impl OracleDispatcher {
                 }),
             },
             _ => FleetOrientLane::Unreachable { profile },
+        }
+    }
+
+    /// Search one profile's names-only catalog contribution without installing
+    /// it into the caller's session lane.
+    ///
+    /// This is intentionally stricter than fleet orientation: profiles that
+    /// cannot be admitted, connected, or audit-bound are absent from the
+    /// *merged index*. Exposing a lane roster or a per-profile object count
+    /// would let a caller distinguish a forbidden profile from an absent one.
+    /// The profile is admitted before its connector is touched, and its own Arc
+    /// M policy serializes the source row before any fleet aggregation occurs.
+    async fn read_fleet_catalog_profile(
+        &self,
+        cx: &Cx,
+        request: FleetCatalogRequest<'_>,
+    ) -> Option<FleetCatalogProfileResult> {
+        let FleetCatalogRequest {
+            profile,
+            owner,
+            object_type,
+            name_like,
+            max_rows,
+            request_budget,
+            subject,
+        } = request;
+        let lease = match self
+            .profile_drain
+            .admit_mcp_profile(&profile, self.mcp_exposure.is_exposed(&profile))
+        {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            ProfileGenerationAdmission::NotExposed | ProfileGenerationAdmission::Draining => {
+                return None;
+            }
+        };
+        let connector = self.connector.as_ref()?;
+        let policy = profile_dispatch_policy(&lease).ok()?;
+        let (conn, _stateless) = connector(cx, &lease).await.ok()?.into_parts();
+        let limits = ConnectionLimitGuard::install(
+            cx,
+            conn.as_ref(),
+            None,
+            policy.request_timeout,
+            request_budget.deadline(),
+            Some(request_budget.db_quota()),
+        )
+        .ok()?;
+
+        let catalog = async {
+            let observed = ReadUncertaintyConn {
+                inner: conn.as_ref(),
+                quarantine: None,
+            };
+            let objects = search_objects(
+                cx,
+                &observed,
+                owner,
+                object_type,
+                name_like,
+                SearchDetailLevel::Names,
+                max_rows,
+            )
+            .await?;
+            let source_row = objects.first().map(fleet_catalog_source_row);
+            let mut audit_response = QueryResponse {
+                columns: source_row
+                    .as_ref()
+                    .map(|row| row.columns.iter().map(|(name, _)| name.clone()).collect())
+                    .unwrap_or_default(),
+                rows: Vec::new(),
+                row_count: objects.len(),
+                truncated: objects.len() == max_rows,
+                next_cursor: None,
+                total_bytes: 0,
+                mask_certificate: source_row.as_ref().and_then(|row| {
+                    policy
+                        .result_masking
+                        .as_ref()
+                        .and_then(|masking| masking.certificate_for_row(row))
+                }),
+            };
+            bind_result_masking_audit(
+                cx,
+                &observed,
+                self.auditor.as_deref(),
+                subject,
+                "oracle_search_objects",
+                FLEET_CATALOG_AUDIT_SQL,
+                &mut audit_response,
+            )
+            .await
+            .map_err(db_internal_from_envelope)?;
+            Ok::<_, DbError>(FleetCatalogProfileResult {
+                profile,
+                results: objects
+                    .iter()
+                    .map(|object| {
+                        fleet_catalog_result_row(
+                            lease.profile(),
+                            object,
+                            policy.result_masking.as_ref(),
+                        )
+                    })
+                    .collect(),
+                mask_certificate: audit_response.mask_certificate,
+                truncated: audit_response.truncated,
+            })
+        }
+        .await;
+        let restore = limits.restore();
+        match (catalog, restore) {
+            (Ok(result), Ok(())) => Some(result),
+            _ => None,
         }
     }
 
@@ -6217,6 +6446,7 @@ fn generated_read_tool(tool: &str) -> bool {
             | "oracle_get_source"
             | "oracle_sample_rows"
             | "oracle_top_queries"
+            | "oracle_plan_timeline"
             | "oracle_db_health"
             | "oracle_read_clob"
             | "oracle_compile_errors"
@@ -6228,7 +6458,11 @@ fn generated_read_tool(tool: &str) -> bool {
 fn generated_read_uses_primary_session(tool: &str) -> bool {
     matches!(
         tool,
-        "oracle_sample_rows" | "oracle_top_queries" | "oracle_db_health" | "oracle_read_clob"
+        "oracle_sample_rows"
+            | "oracle_top_queries"
+            | "oracle_plan_timeline"
+            | "oracle_db_health"
+            | "oracle_read_clob"
     )
 }
 
@@ -11363,6 +11597,71 @@ impl OracleDispatcher {
                     .max_rows
                     .unwrap_or(DEFAULT_SEARCH_OBJECTS_MAX_ROWS)
                     .clamp(1, MAX_SEARCH_OBJECTS_MAX_ROWS);
+                if a.fleet {
+                    if detail != SearchDetailLevel::Names {
+                        return Err(invalid_args(
+                            "fleet catalog requires detail_level=names so every merged field is \
+                             covered by its source profile's egress policy",
+                        ));
+                    }
+                    let owner_filter = owner_arg
+                        .as_deref()
+                        .filter(|owner| *owner != "*")
+                        .map(str::to_owned);
+                    let profiles = self
+                        .profile_drain
+                        .mcp_profiles_snapshot(&self.mcp_exposure)
+                        .ok_or_else(|| {
+                            ErrorEnvelope::new(
+                                ErrorClass::RuntimeStateRequired,
+                                "accepted runtime config snapshot is unavailable",
+                            )
+                        })?;
+                    if self.connector.is_none() {
+                        return Err(ErrorEnvelope::new(
+                            ErrorClass::RuntimeStateRequired,
+                            "fleet catalog is unavailable in this server instance",
+                        )
+                        .with_next_step(
+                            "restart the server with a configured profile connector",
+                        ));
+                    }
+                    let read_cx = narrow_to_read_path(cx);
+                    dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.fleet_catalog.before")?;
+                    let mut remaining = max_rows;
+                    let mut lanes = Vec::new();
+                    for profile in profiles {
+                        if remaining == 0 {
+                            break;
+                        }
+                        if let Some(lane) = self
+                            .read_fleet_catalog_profile(
+                                cx,
+                                FleetCatalogRequest {
+                                    profile: profile.name,
+                                    owner: owner_filter.as_deref(),
+                                    object_type: object_type.as_deref(),
+                                    name_like: name_like.as_deref(),
+                                    max_rows: remaining,
+                                    request_budget: &request_budget,
+                                    subject: &request_subject,
+                                },
+                            )
+                            .await
+                        {
+                            remaining = remaining.saturating_sub(lane.results.len());
+                            lanes.push(lane);
+                        }
+                    }
+                    dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.fleet_catalog.after")?;
+                    return Ok(fleet_catalog_response(
+                        lanes,
+                        owner_filter.as_deref(),
+                        object_type.as_deref(),
+                        name_like.as_deref(),
+                        max_rows,
+                    ));
+                }
                 let owner_filter: Option<String> = match owner_arg.as_deref() {
                     Some("*") => None,
                     Some(owner) => Some(owner.to_owned()),
@@ -11699,6 +11998,35 @@ impl OracleDispatcher {
                             "metric": serde_json::to_value(metric).unwrap_or(Value::Null),
                             "rows": rows_to_json(&rows),
                             "row_count": rows.len(),
+                        }))
+                    },
+                )
+                .await;
+            }
+            "oracle_plan_timeline" => {
+                let a: PlanTimelineArgs = parse_args(name, args)?;
+                let sql_id = a.sql_id;
+                let max_points = a.max_points.unwrap_or(100);
+                let timeout_seconds = a.timeout_seconds;
+                // AWR is a licensed historical source. The DB helper probes
+                // control_management_pack_access before it can issue any
+                // DBA_HIST_* statement, and returns a typed refusal when the
+                // license cannot be positively established.
+                return with_call_timeout(
+                    cx,
+                    conn,
+                    &self.quarantine,
+                    request_budget,
+                    timeout_seconds,
+                    CompletionPolicy::EnforceDeadlineAfterBody,
+                    || async {
+                        let timeline =
+                            oraclemcp_db::plan_cost_timeline(cx, &guarded_conn, &sql_id, max_points)
+                                .await?;
+                        Ok(json!({
+                            "sql_id": timeline.sql_id,
+                            "points": timeline.points,
+                            "note": timeline.note,
                         }))
                     },
                 )

@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 57] = [
+pub const TOOL_NAMES: [&str; 58] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -47,6 +47,7 @@ pub const TOOL_NAMES: [&str; 57] = [
     "oracle_plscope_inspect",
     "oracle_explain_plan",
     "oracle_top_queries",
+    "oracle_plan_timeline",
     "oracle_db_health",
     // Compatibility aliases for agents migrating from shorter Oracle MCP tool
     // names. These route to the prefixed tools in dispatch and share the same
@@ -794,7 +795,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_search_objects",
             ToolTier::FoundationLiveDb,
-            "Unified read-only object search/inspection with a detail_level. names=identifiers only; summary=+column count, comments, and the optimizer ALL_TABLES.NUM_ROWS row-count ESTIMATE (gathered statistics, never COUNT(*) — may be stale, reported via stats_stale/last_analyzed); standard (default)=+columns; full=+indexes. Returns {count, results, truncated}. Owner/type/name filters are bound; quoted/case-sensitive identifiers are matched verbatim.",
+            "Unified read-only object search/inspection with a detail_level. names=identifiers only; summary=+column count, comments, and the optimizer ALL_TABLES.NUM_ROWS row-count ESTIMATE (gathered statistics, never COUNT(*) — may be stale, reported via stats_stale/last_analyzed); standard (default)=+columns; full=+indexes. fleet=true searches the names-only index across MCP-visible profiles, applying each source profile's egress policy before merge and returning no profile roster or profile counts. Returns {count, results, truncated}. Owner/type/name filters are bound; quoted/case-sensitive identifiers are matched verbatim.",
         )
         .with_input_schema(object_schema(
             json!({
@@ -804,7 +805,8 @@ pub fn tool_registry() -> ToolRegistry {
                 "detail_level": { "type": "string", "enum": ["names", "summary", "standard", "full"], "description": "Enrichment level. names=identifiers only; summary=+column count + comments + the optimizer ALL_TABLES.NUM_ROWS estimate (NOT COUNT(*)); standard (default)=+columns; full=+indexes." },
                 "detail": { "type": "string", "description": "Alias for detail_level." },
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum objects to return (default 100, hard cap 5000)." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." }
+                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
+                "fleet": { "type": "boolean", "description": "Search the egress-safe unified fleet catalog. Fleet mode requires detail_level=names, applies each profile's own result-masking policy before aggregation, and intentionally returns no profile roster or profile-count metadata." }
             }),
             &[],
         )),
@@ -1053,6 +1055,24 @@ pub fn tool_registry() -> ToolRegistry {
                 &[timeout_seconds_prop()],
             ),
             &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_plan_timeline",
+            ToolTier::FoundationLiveDb,
+            "Read-only historical optimizer plan and relative-cost timeline from AWR snapshots for one SQL ID. Requires a licensed Oracle Diagnostics Pack; when the license probe cannot prove DIAGNOSTIC access it returns a typed refusal before touching DBA_HIST_*.",
+        )
+        .with_input_schema(object_schema(
+            props_with(
+                json!({
+                    "sql_id": { "type": "string", "minLength": 13, "maxLength": 13, "description": "The 13-character Oracle SQL ID to inspect." },
+                    "max_points": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum AWR snapshot observations to return (default 100, capped at 1000)." }
+                }),
+                &[timeout_seconds_prop()],
+            ),
+            &["sql_id"],
         )),
     );
 
@@ -2161,6 +2181,19 @@ mod tests {
             (
                 "oracle_schema_inspect",
                 &["owner", "object_type", "name_like", "max_rows", "limit"],
+            ),
+            (
+                "oracle_search_objects",
+                &[
+                    "owner",
+                    "object_type",
+                    "name_like",
+                    "detail_level",
+                    "detail",
+                    "max_rows",
+                    "limit",
+                    "fleet",
+                ],
             ),
             ("oracle_orient", &["owner", "include", "fleet"]),
             ("oracle_list_schemas", &["name_like", "max_rows", "limit"]),
