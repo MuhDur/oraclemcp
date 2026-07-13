@@ -403,6 +403,7 @@ pub(crate) fn query_response_from_rows_checked<Caps>(
 mod tests {
     use super::*;
     use crate::types::{OracleCell, OracleConnectionInfo, OracleRow};
+    use crate::{ProfileMaskingSalt, ResultMaskingAction, ResultMaskingPolicy, ResultMaskingRule};
 
     use asupersync::runtime::RuntimeBuilder;
 
@@ -791,6 +792,56 @@ mod tests {
         assert_eq!(r.columns, vec!["ID".to_owned(), "NAME".to_owned()]);
         // NUMBER fidelity preserved through the read path.
         assert_eq!(r.rows[0]["ID"], serde_json::json!("0"));
+    }
+
+    #[test]
+    fn query_response_applies_result_masking_before_rows_escape() {
+        let policy = ResultMaskingPolicy::new(
+            vec![
+                ResultMaskingRule::column("EMAIL_A", ResultMaskingAction::Tokenize),
+                ResultMaskingRule::column("EMAIL_B", ResultMaskingAction::Tokenize),
+            ],
+            true,
+        )
+        .with_token_salt(
+            ProfileMaskingSalt::new("profile:prod:masking:v1", (0_u8..32).collect::<Vec<_>>())
+                .expect("valid test salt"),
+        );
+        let opts = SerializeOptions {
+            result_masking: Some(policy),
+            ..Default::default()
+        };
+        let response = query_response_from_rows(
+            vec![OracleRow {
+                columns: vec![
+                    (
+                        "EMAIL_A".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("alice@example.com".to_owned())),
+                    ),
+                    (
+                        "EMAIL_B".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("alice@example.com".to_owned())),
+                    ),
+                    (
+                        "SSN".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("123-45-6789".to_owned())),
+                    ),
+                ],
+            }],
+            QueryCaps {
+                max_rows: 10,
+                max_result_bytes: 1_000,
+            },
+            0,
+            &opts,
+        );
+
+        assert_eq!(response.row_count, 1);
+        assert_eq!(response.rows[0]["EMAIL_A"], response.rows[0]["EMAIL_B"]);
+        assert_eq!(response.rows[0]["SSN"], serde_json::json!("<masked>"));
+        let escaped = serde_json::to_string(&response).expect("query response JSON");
+        assert!(!escaped.contains("alice@example.com"));
+        assert!(!escaped.contains("123-45-6789"));
     }
 
     #[test]

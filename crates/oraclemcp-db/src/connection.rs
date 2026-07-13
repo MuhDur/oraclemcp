@@ -2302,6 +2302,7 @@ mod driver {
                 base.structured_decode_caps.max_bytes.min(page_bytes),
                 base.structured_decode_caps.max_depth,
             ),
+            result_masking: base.result_masking.clone(),
         }
     }
 
@@ -5311,7 +5312,7 @@ mod driver {
                     stream: Some(stream),
                     metadata,
                     columns,
-                    serialize_opts: *serialize_opts,
+                    serialize_opts: serialize_opts.clone(),
                     limits,
                 },
             )))

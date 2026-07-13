@@ -69,6 +69,7 @@ mod error;
 mod health;
 mod intelligence;
 mod lease;
+mod masking;
 mod oci;
 mod plscope;
 mod privileges;
@@ -123,6 +124,10 @@ pub use intelligence::{
     primary_key_columns, probe_dependents, read_lob, sample_rows, search_objects, search_source,
 };
 pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_id};
+pub use masking::{
+    MASKED_RESULT_VALUE, MIN_PROFILE_MASKING_SALT_BYTES, MaskingPolicyError, ProfileMaskingSalt,
+    ResultColumnMatch, ResultMaskingAction, ResultMaskingPolicy, ResultMaskingRule,
+};
 pub use oci::{
     AdbConnectInfo, CloudStatus, IamToken, IamTokenSource, OciError, WalletContents, WalletMode,
     classify_wallet, discover_wallet, ensure_fresh_token, supported_wallet_modes,

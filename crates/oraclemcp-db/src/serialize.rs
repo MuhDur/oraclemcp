@@ -20,6 +20,7 @@ use std::io::{self, Write};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::masking::{ResultColumnContext, ResultMaskingPolicy};
 use crate::types::{ORACLE_CELL_STRUCTURED_CONTRACT_VERSION, OracleCell, OracleRow};
 
 /// A sink that tallies bytes without buffering, so the page byte cap can measure
@@ -158,7 +159,7 @@ impl Default for StructuredDecodeCaps {
 }
 
 /// Options governing serialization.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct SerializeOptions {
     /// Emit NUMBER as a JSON float (lossy for >15 sig digits) instead of the
     /// default lossless string.
@@ -177,12 +178,15 @@ pub struct SerializeOptions {
     /// Max compact serialized bytes across row objects in one nested REF CURSOR
     /// / implicit result. Columns and structural metadata are excluded. A first
     /// row that exceeds this budget is replaced by a typed error sentinel of at
-    /// most [`NESTED_CURSOR_ERROR_SENTINEL_MAX_BYTES`] bytes.
+    /// most 512 bytes.
     pub max_nested_cursor_bytes: usize,
     /// Max nested cursor depth. A top-level REF CURSOR cell is depth 0.
     pub max_nested_cursor_depth: usize,
     /// Decode caps for structured Oracle ARRAY/JSON/VECTOR cells.
     pub structured_decode_caps: StructuredDecodeCaps,
+    /// Optional fail-closed result masking policy applied after cell
+    /// serialization and before rows leave the DB layer.
+    pub result_masking: Option<ResultMaskingPolicy>,
 }
 
 impl Default for SerializeOptions {
@@ -197,6 +201,7 @@ impl Default for SerializeOptions {
             max_nested_cursor_bytes: 1_048_576,
             max_nested_cursor_depth: 2,
             structured_decode_caps: StructuredDecodeCaps::DEFAULT,
+            result_masking: None,
         }
     }
 }
@@ -585,9 +590,28 @@ pub fn serialize_row(row: &OracleRow, opts: &SerializeOptions) -> Value {
     let mut map = serde_json::Map::with_capacity(row.columns.len());
     for (name, cell) in &row.columns {
         let col = ColumnRepr::classify(&cell.oracle_type);
-        map.insert(name.clone(), serialize_cell_classified(cell, col, opts));
+        map.insert(
+            name.clone(),
+            serialize_cell_with_optional_mask(name, cell, col, opts),
+        );
     }
     Value::Object(map)
+}
+
+fn serialize_cell_with_optional_mask(
+    name: &str,
+    cell: &OracleCell,
+    col: ColumnRepr,
+    opts: &SerializeOptions,
+) -> Value {
+    match opts.result_masking.as_ref() {
+        Some(policy) => policy.apply_cell(
+            &ResultColumnContext::result_column(name, &cell.oracle_type),
+            cell,
+            || serialize_cell_classified(cell, col, opts),
+        ),
+        None => serialize_cell_classified(cell, col, opts),
+    }
 }
 
 /// A reusable per-column classification cache for serializing a whole page: the
@@ -619,7 +643,10 @@ impl PageColumnCache {
                 .get(idx)
                 .copied()
                 .unwrap_or_else(|| ColumnRepr::classify(&cell.oracle_type));
-            map.insert(name.clone(), serialize_cell_classified(cell, col, opts));
+            map.insert(
+                name.clone(),
+                serialize_cell_with_optional_mask(name, cell, col, opts),
+            );
         }
         Value::Object(map)
     }
@@ -652,7 +679,7 @@ impl PageColumnCache {
                 .get(idx)
                 .copied()
                 .unwrap_or_else(|| ColumnRepr::classify(&cell.oracle_type));
-            let value = serialize_cell_classified(cell, col, opts);
+            let value = serialize_cell_with_optional_mask(name, cell, col, opts);
             let value_bytes = json_byte_len(&value);
 
             let next_total = if let Some(previous_bytes) = value_sizes.get(name.as_str()).copied() {
