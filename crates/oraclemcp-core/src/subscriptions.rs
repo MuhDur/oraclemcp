@@ -7,8 +7,9 @@
 //! `DBMS_CHANGE_NOTIFICATION` (DCN), but that requires the `CHANGE NOTIFICATION`
 //! privilege and an open callback port. The Rust thin driver already supports
 //! CQN registration; this module makes that registration an explicitly-gated
-//! privileged operation. The served source remains a **polling fallback** until
-//! the callback fan-out bead owns the driver's registered-query notifications.
+//! privileged operation. A CQN callback is reduced in the DB adapter to its
+//! registration identity, then this module fans it out as a coalesced URI-only
+//! update. Clients must re-read through the ordinary guarded path for data.
 //!
 //! **Capability gating (E1, hard requirement).** `resources.subscribe` is
 //! advertised in the `initialize` capabilities **only** when a working change
@@ -27,7 +28,10 @@ use oraclemcp_audit::{
     AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor, sha256_hex,
 };
 use oraclemcp_config::{ConnectionProfile, DEFAULT_MAX_SUBSCRIPTIONS};
-use oraclemcp_db::{CqnQueryRegistration, OracleBind, OracleConnection};
+use oraclemcp_db::{
+    CqnDriverNotification, CqnNotificationOutcome, CqnNotificationReceiver, CqnQueryRegistration,
+    OracleBind, OracleConnection,
+};
 use oraclemcp_guard::{
     Classifier, DangerLevel, LevelDecision, OperatingLevel, SessionLevelState, semantic_read_plan,
 };
@@ -128,6 +132,34 @@ impl CqnRegisteredQuery {
     #[must_use]
     pub const fn query_id(&self) -> u64 {
         self.registration.query_id()
+    }
+
+    /// Bind this actual QUERY-level registration to one server-derived MCP
+    /// resource for URI-only callback fan-out.
+    ///
+    /// This proves only that the fan-out originates from a registration that
+    /// already passed the privileged gate. It is not reusable authorization:
+    /// registration admission still happened at the driver effect point, and a
+    /// later client re-read remains classifier/masking/egress governed.
+    #[must_use]
+    pub fn callback_fanout(&self, resource_uri: impl Into<String>) -> CqnCallbackFanout {
+        CqnCallbackFanout {
+            registration_id: self.registration.registration_id(),
+            resource_uri: resource_uri.into(),
+        }
+    }
+
+    /// Open the separately authenticated EMON receiver for this existing
+    /// QUERY-level registration. The caller must admit the subscription in the
+    /// C1.3 registry before opening this second database connection.
+    pub async fn open_emon_receiver(
+        &self,
+        cx: &Cx,
+        connection: &dyn OracleConnection,
+    ) -> Result<Box<dyn CqnNotificationReceiver>, oraclemcp_db::DbError> {
+        connection
+            .open_cqn_notification_receiver(cx, self.registration)
+            .await
     }
 }
 
@@ -313,28 +345,63 @@ fn cqn_audit_timestamp() -> String {
     format!("unix:{seconds}")
 }
 
-/// An event emitted from a CQN callback after it was mapped to a registered MCP
-/// resource. Its only payload is the resource URI: CQN callbacks must never
-/// forward row data, column values, rowids, or driver metadata to clients.
+/// URI-only binding for one actual QUERY-level CQN registration.
+///
+/// It has no public constructor: a callback can be routed only through
+/// [`CqnRegisteredQuery::callback_fanout`], which consumes registration
+/// evidence rather than a client-supplied certificate or raw registration id.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CqnChangeEvent {
+pub struct CqnCallbackFanout {
+    registration_id: u64,
+    resource_uri: String,
+}
+
+impl CqnCallbackFanout {
+    /// Project a driver callback to the bound URI only when its opaque
+    /// registration identity matches. The driver record itself was already
+    /// reduced to an identity in the DB adapter, so no row, rowid, table, or
+    /// query metadata can cross this seam.
+    fn project(&self, notification: CqnDriverNotification) -> Option<CqnChangeEvent> {
+        (notification.registration_id() == self.registration_id)
+            .then(|| CqnChangeEvent::from_bound_resource(self.resource_uri.clone()))
+    }
+}
+
+/// An event emitted from a CQN callback after it was matched to a registered
+/// MCP resource. Its only payload is the bound resource URI: CQN callbacks
+/// must never forward row data, column values, rowids, or driver metadata to
+/// clients.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CqnChangeEvent {
     resource_uri: String,
 }
 
 impl CqnChangeEvent {
-    /// Build an event for one already-registered MCP resource.
-    #[must_use]
-    pub fn for_resource(resource_uri: impl Into<String>) -> Self {
-        CqnChangeEvent {
-            resource_uri: resource_uri.into(),
-        }
-    }
-
     /// The changed MCP resource URI; clients re-read it through the normal
     /// guarded, masked, and egress-controlled read path.
     #[must_use]
     pub fn resource_uri(&self) -> &str {
         &self.resource_uri
+    }
+}
+
+/// Result of relaying one bounded EMON receive through a subscription hub.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CqnFanoutOutcome {
+    /// A matching CQN callback was coalesced into its bound resource update.
+    Delivered,
+    /// A callback for an unknown registration was ignored fail-closed.
+    Ignored,
+    /// No callback arrived during the bounded receive window.
+    TimedOut,
+    /// The EMON stream closed; no update was fabricated.
+    Closed,
+}
+
+impl CqnChangeEvent {
+    /// Build a bound event internally after registration-id matching.
+    fn from_bound_resource(resource_uri: String) -> Self {
+        CqnChangeEvent { resource_uri }
     }
 }
 
@@ -544,12 +611,13 @@ pub enum SubscribeSource {
     Unsupported,
     /// The polling fallback: re-read resource fingerprints on a cadence.
     Polling(Box<dyn PollingSource>),
-    /// Oracle CQN source. Constructing it requires an actual QUERY-level
-    /// Oracle registration from [`CqnRegistrationGate::register_query`], so a
-    /// caller cannot enable the standing channel with a replayed certificate
-    /// or without profile opt-in, classifier proof, active step-up, durable
-    /// audit, and the driver accepting the exact query.
-    ChangeNotification(CqnRegisteredQuery),
+    /// Oracle CQN source. Constructing its URI-bound callback fan-out requires
+    /// an actual QUERY-level registration from
+    /// [`CqnRegistrationGate::register_query`], so a caller cannot enable the
+    /// standing channel with a replayed certificate or without profile opt-in,
+    /// classifier proof, active step-up, durable audit, and the driver
+    /// accepting the exact query.
+    ChangeNotification(CqnCallbackFanout),
 }
 
 impl SubscribeSource {
@@ -703,19 +771,48 @@ impl SubscriptionHub {
         self.enqueue_updates(std::slice::from_ref(&uri.to_owned()));
     }
 
-    /// Deliver a CQN callback as an event-only MCP resource update.
+    /// Relay one bounded EMON receive as an event-only MCP resource update.
     ///
-    /// No callback payload can cross this seam: [`CqnChangeEvent`] exposes only
-    /// an already-registered resource URI, so a client must re-read through the
+    /// No callback payload can cross this seam: the database adapter emits
+    /// only an opaque registration identity, and the CQN source maps a matching
+    /// identity to its already-bound URI. A client must re-read through the
     /// ordinary classifier, masking, and egress path to see any data.
-    pub fn mark_cqn_changed(&self, event: CqnChangeEvent) {
-        if matches!(self.source, SubscribeSource::ChangeNotification(_)) {
-            self.mark_changed(event.resource_uri());
+    pub async fn relay_cqn_callback(
+        &self,
+        cx: &Cx,
+        receiver: &mut dyn CqnNotificationReceiver,
+    ) -> Result<CqnFanoutOutcome, oraclemcp_db::DbError> {
+        match receiver.next_notification(cx).await? {
+            CqnNotificationOutcome::Event(notification) => {
+                Ok(if self.forward_cqn_notification(notification) {
+                    CqnFanoutOutcome::Delivered
+                } else {
+                    CqnFanoutOutcome::Ignored
+                })
+            }
+            CqnNotificationOutcome::TimedOut => Ok(CqnFanoutOutcome::TimedOut),
+            CqnNotificationOutcome::Closed => Ok(CqnFanoutOutcome::Closed),
         }
     }
 
-    /// Fan a set of changed URIs out to their subscribers, appending one pending
-    /// `resources/updated` to each subscribing owner's queue. Subscribers are
+    /// Deliver one driver-reduced callback to the matching CQN source.
+    ///
+    /// Returns `false` when CQN is not the active source or the opaque
+    /// registration id does not match. Either case is ignored rather than
+    /// generating a client-visible event.
+    pub fn forward_cqn_notification(&self, notification: CqnDriverNotification) -> bool {
+        let SubscribeSource::ChangeNotification(fanout) = &self.source else {
+            return false;
+        };
+        let Some(event) = fanout.project(notification) else {
+            return false;
+        };
+        self.mark_changed(event.resource_uri());
+        true
+    }
+
+    /// Fan a set of changed URIs out to their subscribers, coalescing duplicate
+    /// pending `resources/updated` entries per owner and URI. Subscribers are
     /// resolved through the registry BEFORE the `pending` lock is taken, so the
     /// lock order is always registry→pending and never inverts. A URI with no
     /// subscribers enqueues nothing.
@@ -730,7 +827,10 @@ impl SubscriptionHub {
         let mut pending = self.pending.lock();
         for (uri, owners) in fanned {
             for owner in owners {
-                pending.entry(owner).or_default().push_back(uri.clone());
+                let queue = pending.entry(owner).or_default();
+                if !queue.iter().any(|queued_uri| queued_uri == &uri) {
+                    queue.push_back(uri.clone());
+                }
             }
         }
     }
@@ -857,6 +957,19 @@ mod tests {
     #[derive(Default)]
     struct RecordingCqnConnection {
         registrations: Mutex<Vec<(String, Vec<OracleBind>)>>,
+    }
+
+    /// A deterministic EMON seam that exposes only the DB adapter's reduced
+    /// notification outcome. It cannot carry table names, rowids, or values.
+    struct ScriptedCqnReceiver {
+        outcome: CqnNotificationOutcome,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl CqnNotificationReceiver for ScriptedCqnReceiver {
+        async fn next_notification(&mut self, _cx: &Cx) -> Result<CqnNotificationOutcome, DbError> {
+            Ok(self.outcome)
+        }
     }
 
     #[async_trait::async_trait(?Send)]
@@ -1091,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn cqn_registers_the_exact_proven_predicate_and_callbacks_never_surface_rows() {
+    fn cqn_emon_callback_relay_is_uri_only_and_coalesced() {
         let profile = cqn_profile(true);
         let gate = CqnRegistrationGate::from_profile(&profile);
         let (auditor, _sink) = cqn_auditor();
@@ -1126,14 +1239,31 @@ mod tests {
             "the DB adapter receives exactly the predicate-bearing query, not an object scope"
         );
 
-        let hub = SubscriptionHub::with_source(SubscribeSource::ChangeNotification(registered));
+        let hub = SubscriptionHub::with_source(SubscribeSource::ChangeNotification(
+            registered.callback_fanout(URI),
+        ));
         assert!(hub.subscribe("principal-a", URI));
 
-        // A mutation to any other base-table row has no place in the event
-        // type. The only possible notification is this already-bound resource
-        // URI; a client must governed-re-read the original predicate to observe
-        // data, so out-of-predicate values cannot surface through CQN.
-        hub.mark_cqn_changed(CqnChangeEvent::for_resource(URI));
+        // The database adapter already removed tables, rowids, and all row
+        // data. The matching opaque registration id maps only to this bound
+        // URI, and duplicate callbacks coalesce before an MCP client drains.
+        let mut receiver = ScriptedCqnReceiver {
+            outcome: CqnNotificationOutcome::Event(CqnDriverNotification::for_registration(101)),
+        };
+        let relay = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a current Cx");
+            hub.relay_cqn_callback(&cx, &mut receiver).await
+        });
+        assert_eq!(
+            relay.expect("reduced callback relays"),
+            CqnFanoutOutcome::Delivered
+        );
+
+        assert!(hub.forward_cqn_notification(CqnDriverNotification::for_registration(101)));
+        assert!(
+            !hub.forward_cqn_notification(CqnDriverNotification::for_registration(999)),
+            "a callback for another registration cannot wake this resource"
+        );
 
         assert_eq!(hub.drain_pending("principal-a"), vec![URI.to_owned()]);
     }

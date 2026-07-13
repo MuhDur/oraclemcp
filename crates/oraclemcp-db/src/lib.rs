@@ -99,10 +99,11 @@ pub use catalog_resolver::{
     read_catalog_resolve_context, resolved_relations_read_purity,
 };
 pub use connection::{
-    CqnQueryRegistration, DRIVER_VERSION, DbRequestQuota, DbmsOutput, ExecuteOutcome,
-    OracleConnection, OracleRoutineArg, QueryRowStream, QueryRowStreamStart, RustOracleConnection,
-    WalletCertValidity, WalletFileChoice, WalletResolutionReport, WalletResolveError,
-    resolve_wallet_choice, selected_endpoint_uses_tcps, wallet_certificate_validity,
+    CqnDriverNotification, CqnNotificationOutcome, CqnNotificationReceiver, CqnQueryRegistration,
+    DRIVER_VERSION, DbRequestQuota, DbmsOutput, ExecuteOutcome, OracleConnection, OracleRoutineArg,
+    QueryRowStream, QueryRowStreamStart, RustOracleConnection, WalletCertValidity,
+    WalletFileChoice, WalletResolutionReport, WalletResolveError, resolve_wallet_choice,
+    selected_endpoint_uses_tcps, wallet_certificate_validity,
 };
 pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compiled};
 pub use drcp::{DrcpConfig, SessionPurity};

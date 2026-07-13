@@ -27,12 +27,13 @@
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
-    AuthAdapter, CatalogExtractRequest, CatalogRowSetName, DbError, DependentsProbe, DrcpConfig,
-    NativeRedactionAvailability, OracleBind, OracleConnectOptions, OracleConnection,
-    OracleIdentifier, OracleSessionIdentity, QueryCaps, RustOracleConnection, SchemaObject,
-    SchemaObjectType, SchemaSnapshot, SearchDetailLevel, SessionPurity, compare_schemas,
-    explain_plan, extract_catalog_rowsets, migration_plan, orient_fks, orient_hot_objects,
-    orient_recent_ddl, orient_schema, plan_cost_estimate, probe_dependents, search_objects,
+    AuthAdapter, CatalogExtractRequest, CatalogRowSetName, CqnNotificationOutcome, DbError,
+    DependentsProbe, DrcpConfig, NativeRedactionAvailability, OracleBind, OracleConnectOptions,
+    OracleConnection, OracleIdentifier, OracleSessionIdentity, QueryCaps, RustOracleConnection,
+    SchemaObject, SchemaObjectType, SchemaSnapshot, SearchDetailLevel, SessionPurity,
+    compare_schemas, explain_plan, extract_catalog_rowsets, migration_plan, orient_fks,
+    orient_hot_objects, orient_recent_ddl, orient_schema, plan_cost_estimate, probe_dependents,
+    search_objects,
 };
 use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use serde_json::json;
@@ -670,6 +671,110 @@ fn live_cqn_query_registration_is_predicate_bound_and_cleanupable() {
         conn.execute(&cx, &format!("DROP TABLE {TABLE} PURGE"), &[])
             .await
             .expect("drop synthetic CQN fixture");
+    });
+}
+
+#[test]
+fn live_cqn_query_callback_is_event_only_within_the_ten_second_ceiling() {
+    run_with_cx(|cx| async move {
+        let test_name = "live_cqn_query_callback_is_event_only_within_the_ten_second_ceiling";
+        let Some(conn) = connect_or_skip(&cx, test_name, test_opts()).await else {
+            return;
+        };
+        // Synthetic, throwaway fixture only. The callback carries no fixture
+        // data: the adapter reduces it to the opaque registration id, while
+        // the core layer separately proves URI-only coalescing.
+        const TABLE: &str = "ORACLEMCP_CQN_C1_4_FIXTURE";
+        let _ = conn
+            .execute(&cx, &format!("DROP TABLE {TABLE} PURGE"), &[])
+            .await;
+        conn.execute(
+            &cx,
+            &format!("CREATE TABLE {TABLE} (id NUMBER PRIMARY KEY, label VARCHAR2(30))"),
+            &[],
+        )
+        .await
+        .expect("create synthetic CQN callback fixture");
+        conn.execute(
+            &cx,
+            &format!("INSERT INTO {TABLE} (id, label) VALUES (:1, :2)"),
+            &[
+                OracleBind::I64(1),
+                OracleBind::String("in-scope".to_owned()),
+            ],
+        )
+        .await
+        .expect("insert synthetic CQN callback fixture row");
+        conn.commit(&cx).await.expect("commit fixture row");
+
+        let query = format!("SELECT id FROM {TABLE} WHERE id = :1");
+        let registration = match conn
+            .register_cqn_query(&cx, &query, &[OracleBind::I64(1)])
+            .await
+        {
+            Ok(registration) => registration,
+            Err(DbError::Query(message)) if message.contains("ORA-29972") => {
+                eprintln!(
+                    "[live-xe] SKIP {test_name}: the configured test account lacks Oracle CHANGE NOTIFICATION privilege"
+                );
+                let _ = conn
+                    .execute(&cx, &format!("DROP TABLE {TABLE} PURGE"), &[])
+                    .await;
+                return;
+            }
+            Err(error) => panic!("23ai accepts query-level CQN registration: {error}"),
+        };
+        let registration_id = registration.registration_id();
+        let mut receiver = conn
+            .open_cqn_notification_receiver(&cx, registration)
+            .await
+            .expect("a registered CQN query opens its dedicated EMON receiver");
+        let writer = RustOracleConnection::connect(&cx, test_opts())
+            .await
+            .expect("open independent synthetic CQN fixture writer");
+        writer
+            .execute(
+                &cx,
+                &format!("DELETE FROM {TABLE} WHERE id = :1"),
+                &[OracleBind::I64(1)],
+            )
+            .await
+            .expect("change the proven query result");
+        writer
+            .commit(&cx)
+            .await
+            .expect("commit synthetic CQN callback change");
+
+        eprintln!("[live-xe] {test_name}: waiting at most 10s for a URI-only CQN change event");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut received_registration_id = None;
+        while Instant::now() < deadline {
+            match receiver
+                .next_notification(&cx)
+                .await
+                .expect("EMON receive stays connected")
+            {
+                CqnNotificationOutcome::Event(notification) => {
+                    received_registration_id = Some(notification.registration_id());
+                    break;
+                }
+                CqnNotificationOutcome::TimedOut => {}
+                CqnNotificationOutcome::Closed => break,
+            }
+        }
+        drop(receiver);
+        conn.unregister_cqn_query(&cx, registration)
+            .await
+            .expect("CQN registration cleanup after callback receipt");
+        conn.execute(&cx, &format!("DROP TABLE {TABLE} PURGE"), &[])
+            .await
+            .expect("drop synthetic CQN callback fixture");
+
+        assert_eq!(
+            received_registration_id,
+            Some(registration_id),
+            "the query-level registration must deliver an event within the ten-second ceiling"
+        );
     });
 }
 

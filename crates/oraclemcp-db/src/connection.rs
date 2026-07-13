@@ -62,10 +62,10 @@ use std::time::Duration;
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const CLEANUP_MASKED_POLLS: u32 = 100;
-/// A CQN registration created before the notification-owner bead takes over
-/// must expire promptly if its caller cannot retain and clean it up. C1.3 owns
-/// the durable subscription lifetime and ceiling accounting.
-const CQN_TRANSIENT_TIMEOUT_SECONDS: u32 = 60;
+/// C1.4 owns the notification receiver and explicit deregistration, so a
+/// standing query subscription has no server-side expiry. The subscription
+/// registry accounts its EMON connection before the receiver is opened.
+const CQN_SUBSCRIPTION_TIMEOUT_SECONDS: u32 = 0;
 
 /// Opaque Oracle identity for one QUERY-level CQN registration.
 ///
@@ -113,6 +113,58 @@ impl std::fmt::Debug for CqnQueryRegistration {
             .field("query_id", &self.query_id)
             .finish()
     }
+}
+
+/// A driver-delivered CQN notification reduced to its registration identity.
+///
+/// The adapter deliberately discards Oracle's notification payload (including
+/// table names, rowids, and query metadata) before it crosses into core. A
+/// registration identity can only wake the already-bound MCP resource; it is
+/// neither query data nor an authorization input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CqnDriverNotification {
+    registration_id: u64,
+}
+
+impl CqnDriverNotification {
+    /// Build a notification for one opaque registration identity.
+    ///
+    /// This is evidence of a callback, not a capability: the core fan-out
+    /// accepts it only when it matches a previously registered QUERY-level
+    /// source, and it emits only a resource-update event.
+    #[must_use]
+    pub const fn for_registration(registration_id: u64) -> Self {
+        CqnDriverNotification { registration_id }
+    }
+
+    /// Oracle's opaque registration id associated with this callback.
+    #[must_use]
+    pub const fn registration_id(self) -> u64 {
+        self.registration_id
+    }
+}
+
+/// Result of one bounded EMON receive attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CqnNotificationOutcome {
+    /// Oracle delivered a notification for a QUERY-level registration.
+    Event(CqnDriverNotification),
+    /// No notification arrived during the bounded receive window.
+    TimedOut,
+    /// The EMON stream closed and must not be treated as a successful update.
+    Closed,
+}
+
+/// A privately-owned EMON notification receiver for one registered query.
+///
+/// Receivers never expose raw Oracle notification payloads. Their caller must
+/// route an [`CqnDriverNotification`] through core's URI-only, coalescing
+/// fan-out, where clients are required to re-read through the normal guard and
+/// egress path.
+#[async_trait(?Send)]
+pub trait CqnNotificationReceiver {
+    /// Receive one bounded notification outcome.
+    async fn next_notification(&mut self, cx: &Cx) -> Result<CqnNotificationOutcome, DbError>;
 }
 
 /// The pinned thin `oracledb` driver's own version string, read from the driver
@@ -1017,6 +1069,24 @@ pub trait OracleConnection: Send + Sync {
         ))
     }
 
+    /// Open the separate EMON connection that receives callbacks for one
+    /// already-registered QUERY-level subscription.
+    ///
+    /// This is adapter plumbing, never an agent-facing admission surface. The
+    /// caller must have first obtained the registration through the CQN gate
+    /// and admitted the subscription through the per-principal/per-DB registry
+    /// before opening this second connection.
+    async fn open_cqn_notification_receiver(
+        &self,
+        cx: &Cx,
+        registration: CqnQueryRegistration,
+    ) -> Result<Box<dyn CqnNotificationReceiver>, DbError> {
+        let _ = (cx, registration);
+        Err(DbError::UnsupportedFeature(
+            "CQN EMON notification receivers are not supported by this Oracle backend".to_owned(),
+        ))
+    }
+
     /// Execute an adapter-internal PL/SQL routine block with positional OUT,
     /// IN-OUT, or return bind slots.
     ///
@@ -1397,8 +1467,9 @@ fn duration_to_millis(duration: Duration) -> u32 {
 
 mod driver {
     use super::{
-        DbmsOutput, ExecuteOutcome, OracleRoutineArg, QueryRowStream, QueryRowStreamStart,
-        RustOracleConnection, oracle_bind_to_driver,
+        CqnDriverNotification, CqnNotificationOutcome, CqnNotificationReceiver,
+        CqnQueryRegistration, DbmsOutput, ExecuteOutcome, OracleRoutineArg, QueryRowStream,
+        QueryRowStreamStart, RustOracleConnection, oracle_bind_to_driver,
     };
     use crate::auth_adapter::AuthAdapter;
     use crate::error::{ConnectFailureKind, DbError};
@@ -1462,6 +1533,43 @@ mod driver {
         data: Option<Vec<u8>>,
     }
 
+    /// One separately authenticated EMON connection. The raw notification
+    /// record stays entirely inside the driver adapter; callers receive only
+    /// the registration id needed for URI-bound core fan-out.
+    struct DriverCqnNotificationReceiver {
+        registration_id: u64,
+        opts: OracleConnectOptions,
+        connection: oracledb::Connection,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl CqnNotificationReceiver for DriverCqnNotificationReceiver {
+        async fn next_notification(&mut self, cx: &Cx) -> Result<CqnNotificationOutcome, DbError> {
+            match self
+                .connection
+                .recv_notification(
+                    cx,
+                    TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                    SUBSCR_QOS_QUERY,
+                    Duration::from_secs(1),
+                )
+                .await
+                .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?
+            {
+                // Deliberately discard every decoded record field: QUERY CQN
+                // may contain table names, rowids, or query metadata, none of
+                // which may enter the core or client-facing surfaces.
+                oracledb::NotificationOutcome::Record(_) => Ok(CqnNotificationOutcome::Event(
+                    CqnDriverNotification::for_registration(self.registration_id),
+                )),
+                oracledb::NotificationOutcome::TimedOut => Ok(CqnNotificationOutcome::TimedOut),
+                oracledb::NotificationOutcome::Closed => Ok(CqnNotificationOutcome::Closed),
+                // Future driver outcomes must never fabricate an update.
+                _ => Ok(CqnNotificationOutcome::Closed),
+            }
+        }
+    }
+
     pub(super) async fn connect(
         cx: &Cx,
         opts: OracleConnectOptions,
@@ -1491,6 +1599,37 @@ mod driver {
             }),
             cqn_client_ids: SyncMutex::new(HashMap::new()),
         })
+    }
+
+    async fn open_cqn_notification_receiver(
+        cx: &Cx,
+        adapter: &RustOracleConnection,
+        registration: CqnQueryRegistration,
+    ) -> Result<Box<dyn CqnNotificationReceiver>, DbError> {
+        let client_id = adapter
+            .cqn_client_ids
+            .lock()
+            .map_err(|err| DbError::Internal(format!("CQN registration lock poisoned: {err}")))?
+            .get(&registration.registration_id())
+            .cloned()
+            .ok_or_else(|| {
+                DbError::UnsupportedFeature(
+                    "CQN registration has no driver-owned callback identity for EMON".to_owned(),
+                )
+            })?;
+        let options = to_connect_options(&adapter.opts)?.with_server_type_emon(true);
+        let mut connection = oracledb::Connection::connect(cx, options)
+            .await
+            .map_err(|err| connect_error_to_db_error(&err, &adapter.opts))?;
+        connection
+            .notify_register(cx, &client_id)
+            .await
+            .map_err(|err| DbError::Query(sanitize_driver_error(err, &adapter.opts)))?;
+        Ok(Box::new(DriverCqnNotificationReceiver {
+            registration_id: registration.registration_id(),
+            opts: adapter.opts.clone(),
+            connection,
+        }))
     }
 
     fn format_transport_connect_timeout(timeout: Duration) -> String {
@@ -5556,7 +5695,7 @@ mod driver {
                     None,
                     SUBSCR_QOS_QUERY,
                     0,
-                    super::CQN_TRANSIENT_TIMEOUT_SECONDS,
+                    super::CQN_SUBSCRIPTION_TIMEOUT_SECONDS,
                     0,
                     0,
                     0,
@@ -5564,9 +5703,9 @@ mod driver {
                 .await
                 .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?;
             let Some(client_id) = subscription.client_id else {
-                // Modern (21c+) QUERY CQN returns the callback identity. The
-                // transient server timeout bounds this legacy fallback rather
-                // than leaving an unmanageable standing registration behind.
+                // QUERY CQN must return the EMON callback identity; without it
+                // the adapter cannot open or later cleanly tear down the
+                // second connection.
                 return Err(DbError::UnsupportedFeature(
                     "CQN registration did not return the callback identity required for safe cleanup"
                         .to_owned(),
@@ -5600,7 +5739,7 @@ mod driver {
                             None,
                             SUBSCR_QOS_QUERY,
                             0,
-                            super::CQN_TRANSIENT_TIMEOUT_SECONDS,
+                            super::CQN_SUBSCRIPTION_TIMEOUT_SECONDS,
                             0,
                             0,
                             0,
@@ -5656,7 +5795,7 @@ mod driver {
                     None,
                     SUBSCR_QOS_QUERY,
                     0,
-                    super::CQN_TRANSIENT_TIMEOUT_SECONDS,
+                    super::CQN_SUBSCRIPTION_TIMEOUT_SECONDS,
                     0,
                     0,
                     0,
@@ -5670,6 +5809,17 @@ mod driver {
                 .map_err(|err| DbError::Internal(format!("CQN registration lock poisoned: {err}")))?
                 .remove(&registration_id);
             Ok(())
+        }
+
+        async fn open_cqn_notification_receiver(
+            &self,
+            cx: &Cx,
+            registration: super::CqnQueryRegistration,
+        ) -> Result<Box<dyn super::CqnNotificationReceiver>, DbError> {
+            super::db_checkpoint(cx, "oracle_db.cqn_open_emon.before")?;
+            let receiver = open_cqn_notification_receiver(cx, self, registration).await?;
+            super::db_checkpoint(cx, "oracle_db.cqn_open_emon.after")?;
+            Ok(receiver)
         }
 
         async fn call_routine(

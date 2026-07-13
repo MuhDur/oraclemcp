@@ -188,8 +188,9 @@ pub use service_app::{
 };
 pub use session_tool::{LeaseAcquirer, SessionAction, SessionDeps, oracle_session};
 pub use subscriptions::{
-    CqnChangeEvent, CqnRegistrationError, CqnRegistrationGate, CqnRegistrationPermit,
-    CqnRegistrationScope, PollingSource, SubscribeSource, SubscriptionHub, SubscriptionRegistry,
+    CqnCallbackFanout, CqnFanoutOutcome, CqnRegistrationError, CqnRegistrationGate,
+    CqnRegistrationPermit, CqnRegistrationScope, PollingSource, SubscribeSource, SubscriptionHub,
+    SubscriptionRegistry,
 };
 pub use tamper_token::{sign_token, verify_token};
 pub use tls::{TlsError, TlsMaterial, TlsServerConfig, build_server_config, requires_mtls};
