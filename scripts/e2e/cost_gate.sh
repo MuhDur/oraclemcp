@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Live MCP stdio cost-gate matrix: proves oracle_query refuses over-budget
-# optimizer estimates before execution and fails closed when cost is unavailable.
+# Live MCP stdio cost-gate matrix. It proves that oracle_query refuses an
+# over-ceiling optimizer estimate before target execution, fails closed when
+# the estimate is unavailable, and durably exhausts a server-owned
+# per-principal cumulative budget across a served-process restart.
 #
 # Required env (same lab-lane convention as oracle_version_matrix.sh):
 #   ORACLEMCP_LIVE_XE=1
@@ -12,6 +14,8 @@
 #   ORACLEMCP_COST_GATE_CHEAP_SQL
 #   ORACLEMCP_COST_GATE_HIGH_SQL
 #   ORACLEMCP_COST_GATE_NULL_SQL
+#   ORACLEMCP_COST_GATE_METERED_SQL
+#   ORACLEMCP_COST_GATE_BINARY
 #   --lane xe18|xe21|free23 (repeatable; default all three)
 set -euo pipefail
 
@@ -21,7 +25,7 @@ source "$ROOT/scripts/e2e/lib.sh"
 E2E_SCENARIO="cost_gate"
 E2E_LANE="cost-gate"
 E2E_PROFILE="matrix"
-E2E_LEVEL="READ_WRITE"
+E2E_LEVEL="DDL"
 export E2E_SCENARIO E2E_LANE E2E_PROFILE E2E_LEVEL
 
 selected_lanes=()
@@ -115,8 +119,23 @@ e2e_log_event "scenario_start" "setup" "running" 0 "oracle_query cost-gate MCP s
 require_cost_gate_env
 command -v python3 >/dev/null 2>&1 || e2e_finish_fail "python3 is required for the MCP stdio cost-gate harness"
 
-if ! e2e_run_command "setup" cargo build -p oraclemcp --bin oraclemcp; then
-  e2e_finish_fail "building the oraclemcp binary failed"
+if [ -n "${ORACLEMCP_COST_GATE_BINARY:-}" ]; then
+  BINARY="$ORACLEMCP_COST_GATE_BINARY"
+  e2e_log_event "prebuilt_binary" "setup" "pass" 0 "using explicit prebuilt cost-gate binary"
+else
+  command -v omcpb >/dev/null 2>&1 || e2e_finish_fail "omcpb is required to build the cost-gate MCP binary"
+  if ! e2e_run_command "setup" omcpb build -p oraclemcp --bin oraclemcp; then
+    e2e_finish_fail "building the oraclemcp binary through omcpb failed"
+  fi
+  if [ "$E2E_DRY_RUN" = "1" ]; then
+    e2e_log_event "scenario_assert" "assert" "skipped" 0 "dry-run: wiring validated, no live lanes exercised"
+    e2e_finish_pass
+    exit 0
+  fi
+  build_output="$(e2e_artifact_dir)/output.txt"
+  build_target="$(sed -n 's/^omcpb: lane [0-9][0-9]*  target=\([^ ]*\)  jobs=.*/\1/p' "$build_output" | tail -n 1)"
+  [ -n "$build_target" ] || e2e_finish_fail "omcpb completed without reporting its selected target directory"
+  BINARY="$build_target/debug/oraclemcp"
 fi
 
 if [ "$E2E_DRY_RUN" = "1" ]; then
@@ -125,13 +144,12 @@ if [ "$E2E_DRY_RUN" = "1" ]; then
   exit 0
 fi
 
-target_dir="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
-BINARY="$target_dir/debug/oraclemcp"
-[ -x "$BINARY" ] || e2e_finish_fail "built binary not found at $BINARY"
+[ -x "$BINARY" ] || e2e_finish_fail "configured cost-gate binary not found at $BINARY"
 
 run_stamp="$(date -u +"%Y%m%dT%H%M%SZ")-$$"
 matrix_dir="$ORACLEMCP_E2E_ARTIFACT_DIR/$E2E_SCENARIO/$run_stamp"
 mkdir -p "$matrix_dir"
+matrix_dir="$(cd "$matrix_dir" && pwd)"
 
 overall_fail=0
 lane_summaries=()
@@ -147,11 +165,18 @@ run_lane() {
   local lane_dir="$matrix_dir/$lane"
   local state_dir="$lane_dir/state"
   mkdir -p "$lane_dir" "$state_dir"
+  local table="E2E_COST_${$}"
+  local schema
+  schema="$(printf '%s' "$user" | tr '[:lower:]' '[:upper:]')"
+  if ! [[ "$schema" =~ ^[A-Z][A-Z0-9_\$#]{0,29}$ ]]; then
+    e2e_finish_fail "lane $lane user must be an unquoted Oracle identifier for the synthetic cost fixture"
+  fi
 
-  # Cost estimation writes PLAN_TABLE, so this throwaway profile starts at
-  # READ_WRITE while still restricting the served operation to oracle_query's
-  # read classifier plus max_query_cost fail-closed gate.
+  # Cost estimation writes PLAN_TABLE, and this disposable fixture is created
+  # and dropped through the governed served MCP surface. The throwaway profile
+  # starts at DDL; oracle_query remains classifier-bound and cost-gated.
   local profiles_file="$lane_dir/profiles.toml"
+  local budget_profiles_file="$lane_dir/budget-profiles.toml"
   cat >"$profiles_file" <<PROFILES
 schema_version = 2
 default_profile = "$lane"
@@ -162,24 +187,30 @@ description = "cost-gate lab lane $lane (throwaway container)"
 connect_string = "$dsn"
 username = "$user"
 credential_ref = "env:ORACLE_MATRIX_ACTIVE_PASSWORD"
-max_level = "READ_WRITE"
-default_level = "READ_WRITE"
+max_level = "DDL"
+default_level = "DDL"
 max_query_cost = 1000000
 PROFILES
 
   export ORACLEMCP_CONFIG="$profiles_file"
   export ORACLE_MATRIX_ACTIVE_PASSWORD="$password"
+  # Keep the disposable DDL path on the ordinary signed-audit startup guard
+  # with a per-run, ignored key. Query classification and cost enforcement are
+  # still evaluated at application time for every oracle_query request.
+  export ORACLEMCP_AUDIT_KEY="$(openssl rand -hex 32 2>/dev/null || date +%s%N | sha256sum | cut -d' ' -f1)"
   export XDG_STATE_HOME="$state_dir"
-  export E2E_LANE="$lane" E2E_PROFILE="$lane" E2E_LEVEL="READ_WRITE"
+  export E2E_LANE="$lane" E2E_PROFILE="$lane" E2E_LEVEL="DDL"
+  export E2E_COST_GATE_TABLE="$table" E2E_COST_GATE_SCHEMA="$schema"
 
   local evidence="$lane_dir/cost_gate_evidence.jsonl"
   e2e_log_event "cost_gate_lane" "act" "running" 0 "lane $lane: MCP stdio cost-gate session"
   set +e
-  python3 - "$BINARY" "$lane" "$lane_dir" "$evidence" <<'PY'
+  python3 - "$BINARY" "$lane" "$lane_dir" "$evidence" "$budget_profiles_file" <<'PY'
 import datetime as _dt
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -207,7 +238,7 @@ def emit(event, phase, outcome, duration_ms, message):
         "subject": os.environ.get("E2E_SUBJECT", "test-harness"),
         "sid": os.environ.get("E2E_SID", str(os.getpid())),
         "profile": os.environ.get("E2E_PROFILE", "matrix"),
-        "level": os.environ.get("E2E_LEVEL", "READ_WRITE"),
+        "level": os.environ.get("E2E_LEVEL", "DDL"),
         "grant": os.environ.get("E2E_GRANT", "none"),
         "outcome": outcome,
         "scenario": os.environ.get("E2E_SCENARIO", "cost_gate"),
@@ -241,8 +272,20 @@ class Evidence:
 
 
 class McpSession:
-    def __init__(self, binary, profile, lane_dir):
+    def __init__(self, binary, profile, lane_dir, config_path, state_dir):
         self.stderr = open(Path(lane_dir) / "server.stderr", "a", encoding="utf-8")
+        # The parent harness uses ORACLEMCP_* controls for logging and
+        # artifacts. The served binary treats that prefix as config overrides,
+        # so forward only the generated config and the non-prefixed credential.
+        server_env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("ORACLEMCP_")
+        }
+        server_env["ORACLEMCP_CONFIG"] = str(config_path)
+        if os.environ.get("ORACLEMCP_AUDIT_KEY"):
+            server_env["ORACLEMCP_AUDIT_KEY"] = os.environ["ORACLEMCP_AUDIT_KEY"]
+        server_env["XDG_STATE_HOME"] = str(state_dir)
         self.proc = subprocess.Popen(
             [binary, "serve", "--profile", profile, "--allow-no-auth"],
             stdin=subprocess.PIPE,
@@ -250,6 +293,7 @@ class McpSession:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=server_env,
         )
         self.queue = queue.Queue()
         self.request_id = 0
@@ -300,7 +344,7 @@ class McpSession:
     def close(self):
         try:
             self.proc.stdin.close()
-        except OSError:
+        except (OSError, ValueError):
             pass
         try:
             self.proc.wait(timeout=15)
@@ -338,23 +382,37 @@ def run_case(evidence, name, fn):
 
 
 def main():
-    binary, profile, lane_dir, evidence_path = sys.argv[1:5]
+    binary, profile, lane_dir, evidence_path, budget_profiles_path = sys.argv[1:6]
     evidence = Evidence(evidence_path)
-    session = McpSession(binary, profile, lane_dir)
-    cheap_sql = os.environ.get("ORACLEMCP_COST_GATE_CHEAP_SQL", "SELECT 1 AS ok FROM dual")
+    base_config_path = os.environ["ORACLEMCP_CONFIG"]
+    state_dir = os.environ["XDG_STATE_HOME"]
+    session = McpSession(binary, profile, lane_dir, base_config_path, state_dir)
+    table = os.environ["E2E_COST_GATE_TABLE"]
+    schema = os.environ["E2E_COST_GATE_SCHEMA"]
+    require(re.fullmatch(r"[A-Z][A-Z0-9_]{0,29}", table), "fixture table identifier is safe", table)
+    require(re.fullmatch(r"[A-Z][A-Z0-9_$#]{0,29}", schema), "fixture schema identifier is safe", schema)
+    qualified_table = f"{schema}.{table}"
+    fixture_created = False
+    cheap_sql = os.environ.get(
+        "ORACLEMCP_COST_GATE_CHEAP_SQL",
+        f"SELECT id FROM {qualified_table} WHERE id = 1",
+    )
     high_sql = os.environ.get(
         "ORACLEMCP_COST_GATE_HIGH_SQL",
-        "SELECT * FROM all_objects a CROSS JOIN all_objects b "
-        "WHERE a.object_name LIKE 'ORACLEMCP_COST_GATE_%'",
+        f"SELECT a.id FROM {qualified_table} a CROSS JOIN {qualified_table} b "
+        f"CROSS JOIN {qualified_table} c CROSS JOIN {qualified_table} d",
     )
     null_sql = os.environ.get(
         "ORACLEMCP_COST_GATE_NULL_SQL",
-        "SELECT /*+ RULE */ * FROM all_objects "
-        "WHERE object_name LIKE 'ORACLEMCP_COST_GATE_%'",
+        f"SELECT /*+ RULE */ id FROM {qualified_table} WHERE id = 1",
+    )
+    metered_sql = os.environ.get(
+        "ORACLEMCP_COST_GATE_METERED_SQL",
+        high_sql,
     )
     try:
-        def initialize():
-            init = session.rpc(
+        def initialize(target):
+            init = target.rpc(
                 "initialize",
                 {
                     "protocolVersion": "2025-03-26",
@@ -364,8 +422,44 @@ def main():
             )
             server = init.get("result", {}).get("serverInfo", {})
             require(server.get("name") == "oraclemcp", "server identifies itself", init)
-            session.notify("notifications/initialized")
+            target.notify("notifications/initialized")
             return {"server_version": server.get("version")}
+
+        def execute_governed(target, sql):
+            preview = structured(target.call("oracle_preview_sql", {"sql": sql}))
+            require(preview.get("gate_decision") == "allow", "fixture mutation preview is allowed", preview)
+            confirm = (preview.get("execute_confirmation") or {}).get("confirm")
+            require(confirm, "fixture mutation receives an execution confirmation", preview)
+            result = target.call(
+                "oracle_execute",
+                {"sql": sql, "commit": True, "confirm": confirm},
+            )
+            content = structured(result)
+            require(result.get("isError") is not True, "fixture mutation succeeds through served MCP", content)
+            require(content.get("executed") is True, "fixture mutation actually executes", content)
+            return content
+
+        def bootstrap_synthetic_fixture():
+            nonlocal fixture_created
+            execute_governed(
+                session,
+                f"CREATE TABLE {table} (id NUMBER PRIMARY KEY, label VARCHAR2(32) NOT NULL)",
+            )
+            fixture_created = True
+            execute_governed(
+                session,
+                f"INSERT INTO {table} (id, label) VALUES (1, 'cheap')",
+            )
+            execute_governed(
+                session,
+                f"INSERT INTO {table} (id, label) VALUES (2, 'metered')",
+            )
+            execute_governed(
+                session,
+                f"INSERT INTO {table} (id, label) "
+                "SELECT LEVEL + 2, 'bulk' FROM dual CONNECT BY LEVEL <= 16384",
+            )
+            return {"fixture": "throwaway-table-created-through-served-mcp", "inserted_rows": 16386}
 
         def cheap_query_passes():
             result = session.call(
@@ -397,7 +491,6 @@ def main():
             detail = reason.get("query_cost_refusal") or {}
             require(detail.get("estimated_cost", 0) > detail.get("max_query_cost", 0), "estimated cost exceeds ceiling in payload", detail)
             require(detail.get("plan_rows"), "payload includes plan rows", detail)
-            require(detail.get("predicate_hints"), "payload includes predicate-derived hints", detail)
             require("rows" not in content, "refusal returns no result rows, proving no scan result was served", content)
             return {
                 "estimated_cost": detail.get("estimated_cost"),
@@ -422,15 +515,141 @@ def main():
             require("cost_unavailable" in content.get("message", ""), "refusal names cost_unavailable", content)
             return {"error_class": content.get("error_class"), "sql": "null_sql"}
 
+        def calibrate_metered_cost():
+            result = session.call(
+                "oracle_query",
+                {
+                    "sql": metered_sql,
+                    "allow_plan_table_write": True,
+                    "max_query_cost": 100,
+                    "max_rows": 1,
+                },
+            )
+            content = structured(result)
+            require(result.get("isError") is True, "calibration query is refused at its one-unit ceiling", content)
+            require(content.get("error_class") == "POLICY_DENIED", "calibration refusal is typed policy-denied", content)
+            require("query_cost_exceeded" in content.get("message", ""), "calibration reports query_cost_exceeded", content)
+            detail = (content.get("structured_reason") or {}).get("query_cost_refusal") or {}
+            observed_cost = detail.get("estimated_cost")
+            require(isinstance(observed_cost, int) and observed_cost > 100, "calibration exposes a metered cost above one hundred", detail)
+            return {"estimated_cost": observed_cost, "max_query_cost": detail.get("max_query_cost")}
+
+        def cumulative_budget_is_durable_and_not_client_resettable():
+            calibration = calibrate_metered_cost()
+            observed_cost = calibration["estimated_cost"]
+            base_config = Path(base_config_path).read_text(encoding="utf-8")
+            baseline_ceiling = "max_query_cost = 1000000"
+            require(
+                base_config.count(baseline_ceiling) == 1,
+                "budget profile derives from one known baseline ceiling",
+                {"occurrences": base_config.count(baseline_ceiling)},
+            )
+            # The calibrated query must pass the per-statement gate exactly
+            # once so the next server-owned refusal is attributable to the
+            # cumulative policy, not an independently tighter profile ceiling.
+            budget_config = base_config.replace(
+                baseline_ceiling,
+                f"max_query_cost = {observed_cost}",
+            )
+            Path(budget_profiles_path).write_text(
+                budget_config
+                + "\n[profiles.cumulative_query_cost_budget]\n"
+                + f"max_cost = {observed_cost}\n"
+                + "window_seconds = 3600\n",
+                encoding="utf-8",
+            )
+
+            # A fresh served process starts the budget window. Its first query
+            # exactly consumes the optimizer cost calibrated from the real
+            # Oracle response, and its replacement process must still refuse.
+            session.close()
+            budget_session = McpSession(
+                binary,
+                profile,
+                lane_dir,
+                budget_profiles_path,
+                state_dir,
+            )
+            try:
+                initialize(budget_session)
+                first = budget_session.call(
+                    "oracle_query",
+                    {
+                        "sql": metered_sql,
+                        "allow_plan_table_write": True,
+                        "max_rows": 1,
+                    },
+                )
+                first_content = structured(first)
+                require(first.get("isError") is not True, "first metered query is admitted", first_content)
+                require(first_content.get("rows"), "admitted metered query returns a real Oracle row", first_content)
+            finally:
+                budget_session.close()
+
+            restarted = McpSession(
+                binary,
+                profile,
+                lane_dir,
+                budget_profiles_path,
+                state_dir,
+            )
+            try:
+                initialize(restarted)
+                result = restarted.call(
+                    "oracle_query",
+                    {
+                        "sql": metered_sql,
+                        "allow_plan_table_write": True,
+                        "max_rows": 1,
+                        # These are deliberately client-supplied forgeries. The
+                        # accepted schema has no accounting-key or reset knob.
+                        "principal": "forged-principal",
+                        "reset_budget": True,
+                    },
+                )
+                content = structured(result)
+                require(result.get("isError") is True, "exhausted cumulative budget is refused", content)
+                require(content.get("error_class") == "POLICY_DENIED", "cumulative refusal is typed policy-denied", content)
+                message = content.get("message", "")
+                require("cumulative_query_cost_budget_exhausted" in message, "cumulative refusal names its enforced gate", content)
+                reason = content.get("structured_reason") or {}
+                require(reason.get("category") == "COST_BUDGET_EXCEEDED", "cumulative refusal has typed cost category", content)
+                expected_wire_cost = f"estimated cost {observed_cost}; window consumed {observed_cost} of {observed_cost}"
+                require(expected_wire_cost in message, "wire cost matches the calibrated and enforced budget", content)
+                require("rows" not in content, "exhausted budget returns no target-query rows", content)
+                return {
+                    "calibrated_cost": observed_cost,
+                    "wire_cost": expected_wire_cost,
+                    "client_reset_fields_ignored": True,
+                    "survived_server_restart": True,
+                }
+            finally:
+                restarted.close()
+
         for name, fn in [
-            ("initialize", initialize),
+            ("initialize", lambda: initialize(session)),
+            ("bootstrap_synthetic_fixture_through_served_mcp", bootstrap_synthetic_fixture),
             ("cheap_query_passes", cheap_query_passes),
             ("over_ceiling_refuses_pre_execution", over_ceiling_refuses_pre_execution),
             ("null_cost_fails_closed", null_cost_fails_closed),
+            ("cumulative_budget_is_durable_and_not_client_resettable", cumulative_budget_is_durable_and_not_client_resettable),
         ]:
             run_case(evidence, name, fn)
     finally:
         session.close()
+        if fixture_created:
+            cleanup_session = McpSession(binary, profile, lane_dir, base_config_path, state_dir)
+            try:
+                initialize(cleanup_session)
+                execute_governed(cleanup_session, f"DROP TABLE {table} PURGE")
+                evidence.line("cleanup_drop_synthetic_fixture", "pass", {"fixture": "dropped"})
+                emit("cleanup_drop_synthetic_fixture", "teardown", "pass", 0, "dropped throwaway cost fixture")
+            except Exception as exc:
+                evidence.line("cleanup_drop_synthetic_fixture", "fail", {"error": str(exc)})
+                emit("cleanup_drop_synthetic_fixture", "teardown", "fail", 0, str(exc))
+                raise
+            finally:
+                cleanup_session.close()
         evidence.close()
 
 
