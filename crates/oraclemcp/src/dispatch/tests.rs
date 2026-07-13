@@ -1785,6 +1785,12 @@ fn args_for(name: &str) -> Value {
         "oracle_preview_dml" => {
             json!({ "sql": "UPDATE employees SET salary = salary WHERE employee_id = 100" })
         }
+        "oracle_semantic_search" => {
+            // query_vector (not query_text) so the offline route does not require
+            // the live 23.4 VECTOR_EMBEDDING capability; this proves routing and
+            // deserialization against the mock, which is what this test asserts.
+            json!({ "over": { "table": "DOCS", "column": "EMBEDDING" }, "query_vector": [0.1, 0.2, 0.3], "k": 5 })
+        }
         other => panic!("no test args for {other}"),
     }
 }
