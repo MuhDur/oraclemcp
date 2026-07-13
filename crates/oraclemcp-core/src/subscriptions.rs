@@ -30,11 +30,14 @@ use oraclemcp_audit::{
 };
 use oraclemcp_config::{ConnectionProfile, DEFAULT_MAX_SUBSCRIPTIONS};
 use oraclemcp_db::{
-    CqnDriverNotification, CqnNotificationOutcome, CqnNotificationReceiver, CqnQueryRegistration,
-    OracleBind, OracleConnection,
+    CatalogInvalidation, CqnDriverNotification, CqnNotificationOutcome, CqnNotificationReceiver,
+    CqnQueryRegistration, OracleBind, OracleCatalogResolverCache, OracleConnection,
+    resolved_relations_read_purity,
 };
 use oraclemcp_guard::{
-    Classifier, DangerLevel, LevelDecision, OperatingLevel, SessionLevelState, semantic_read_plan,
+    CatalogObjectKind, CatalogResolver, Classifier, ClassifierConfig, DangerLevel, LevelDecision,
+    ObjectRef, OperatingLevel, Purity, Resolution, SessionLevelState, SideEffectOracle,
+    semantic_read_plan,
 };
 use parking_lot::Mutex;
 
@@ -69,6 +72,10 @@ pub enum CqnRegistrationError {
     /// callback to be bound safely.
     #[error("CQN registration requires a query with an exactly representable semantic read scope")]
     QueryScopeNotRepresentable,
+    /// The exact live session could not prove every query dependency is a
+    /// locally resolved, ordinary read-only relation.
+    #[error("CQN registration requires live proof that every query dependency is read-only-safe")]
+    LiveReadProofUnavailable,
     /// The registration cannot be linked to a server-derived MCP resource URI,
     /// so its receiver and callback fan-out cannot be cap-governed.
     #[error("CQN registration requires a server-derived resource URI")]
@@ -220,6 +227,7 @@ pub struct CqnQueryRegistrationRequest<'a> {
     binds: &'a [OracleBind],
     classifier: &'a Classifier,
     session: &'a SessionLevelState,
+    catalog_cache: Option<&'a OracleCatalogResolverCache>,
     auditor: Option<&'a Auditor>,
     subject: AuditSubject,
 }
@@ -246,6 +254,7 @@ impl<'a> CqnQueryRegistrationRequest<'a> {
             binds,
             classifier,
             session,
+            catalog_cache: None,
             auditor,
             subject,
         }
@@ -257,6 +266,15 @@ impl<'a> CqnQueryRegistrationRequest<'a> {
     #[must_use]
     pub fn with_resource_uri(mut self, resource_uri: &'a str) -> Self {
         self.resource_uri = Some(resource_uri);
+        self
+    }
+
+    /// Supply the exact live-session catalog cache required to prove the CQN
+    /// query remains no broader than an ordinary guarded read. Omitting this
+    /// binding is refused at the driver effect point.
+    #[must_use]
+    pub fn with_catalog_cache(mut self, catalog_cache: &'a OracleCatalogResolverCache) -> Self {
+        self.catalog_cache = Some(catalog_cache);
         self
     }
 }
@@ -294,13 +312,13 @@ impl CqnRegistrationGate {
         }
     }
 
-    /// Admit and audit a query-level CQN registration immediately before its
-    /// driver effect.
+    /// Admit and audit static CQN-registration evidence.
     ///
-    /// A caller cannot construct the returned permit. An audit append is
-    /// durable and completes before the permit exists, so an audit failure
-    /// fails closed before the caller can issue `subscribe_register` or
-    /// `register_query`.
+    /// This evidence is deliberately not sufficient for the driver effect:
+    /// [`Self::register_query`] independently obtains a fresh live
+    /// relation-purity proof immediately before registration. A stored permit
+    /// can therefore never bypass a later catalog, policy, or virtual-column
+    /// change.
     pub fn authorize(
         &self,
         scope: CqnRegistrationScope,
@@ -310,6 +328,17 @@ impl CqnRegistrationGate {
         auditor: Option<&Auditor>,
         subject: AuditSubject,
     ) -> Result<CqnRegistrationPermit, CqnRegistrationError> {
+        self.validate_static_admission(scope, query, classifier, session)?;
+        self.audit_permit(query, auditor, subject)
+    }
+
+    fn validate_static_admission(
+        &self,
+        scope: CqnRegistrationScope,
+        query: &str,
+        classifier: &Classifier,
+        session: &SessionLevelState,
+    ) -> Result<(), CqnRegistrationError> {
         if scope == CqnRegistrationScope::Object {
             return Err(CqnRegistrationError::ObjectLevelRefused);
         }
@@ -338,6 +367,15 @@ impl CqnRegistrationGate {
             _ => return Err(CqnRegistrationError::OperatingLevelBlocked),
         }
 
+        Ok(())
+    }
+
+    fn audit_permit(
+        &self,
+        query: &str,
+        auditor: Option<&Auditor>,
+        subject: AuditSubject,
+    ) -> Result<CqnRegistrationPermit, CqnRegistrationError> {
         let auditor = auditor.ok_or(CqnRegistrationError::AuditUnavailable)?;
         let draft = AuditEntryDraft {
             subject,
@@ -361,9 +399,9 @@ impl CqnRegistrationGate {
         })
     }
 
-    /// Re-classify, step-up-check, and durably audit the exact query, then
-    /// issue Oracle's QUERY-level registration immediately at that effect
-    /// point.
+    /// Re-classify, prove every live relation is read-only-safe, step-up-check,
+    /// and durably audit the exact query before issuing Oracle's QUERY-level
+    /// registration at that effect point.
     ///
     /// The permit is intentionally created and consumed inside this method;
     /// callers cannot replay an earlier certificate or stored verdict to widen
@@ -381,11 +419,15 @@ impl CqnRegistrationGate {
             binds,
             classifier,
             session,
+            catalog_cache,
             auditor,
             subject,
         } = request;
         let resource_uri = resource_uri.ok_or(CqnRegistrationError::ResourceUriRequired)?;
-        let permit = self.authorize(scope, query, classifier, session, auditor, subject)?;
+        let catalog_cache = catalog_cache.ok_or(CqnRegistrationError::LiveReadProofUnavailable)?;
+        self.validate_static_admission(scope, query, classifier, session)?;
+        prove_cqn_live_read_only(cx, connection, catalog_cache, query).await?;
+        let permit = self.audit_permit(query, auditor, subject)?;
         let registration = connection
             .register_cqn_query(cx, query, binds)
             .await
@@ -396,6 +438,77 @@ impl CqnRegistrationGate {
             resource_uri: resource_uri.to_owned(),
         })
     }
+}
+
+/// Bind the strict classifier's statement-purity question to the fresh live
+/// relation proof obtained immediately before a CQN driver registration.
+///
+/// CQN is a standing side channel: it must meet the same bar as a one-shot
+/// guarded read rather than relying on earlier syntactic admission evidence.
+struct CqnResolvedStatementPurity(Purity);
+
+impl SideEffectOracle for CqnResolvedStatementPurity {
+    fn statement_purity(&self, _base_objects: &[ObjectRef]) -> Purity {
+        self.0
+    }
+}
+
+/// Re-run the guarded read path's live semantic proof for a CQN target.
+///
+/// Every dependency is resolved through the exact driver session, then the
+/// relation set is checked for views, VPD policy functions, virtual columns,
+/// remote objects, and unknown object kinds. Any resolver or purity failure is
+/// intentionally collapsed to one fail-closed refusal before CQN audit or
+/// driver effects occur.
+async fn prove_cqn_live_read_only(
+    cx: &Cx,
+    connection: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    query: &str,
+) -> Result<(), CqnRegistrationError> {
+    let plan = semantic_read_plan(query).ok_or(CqnRegistrationError::QueryScopeNotRepresentable)?;
+    cache.invalidate(CatalogInvalidation::SemanticProofRefresh);
+    let mut names = plan.relations.clone();
+    names.extend(plan.values.iter().cloned());
+    let context = cache
+        .preload(cx, connection, &names, plan.statement_scope)
+        .await
+        .map_err(|_| CqnRegistrationError::LiveReadProofUnavailable)?;
+
+    let mut relations = Vec::with_capacity(plan.relations.len());
+    for name in &plan.relations {
+        let Resolution::Resolved(object) = cache.resolve(name, &context) else {
+            return Err(CqnRegistrationError::LiveReadProofUnavailable);
+        };
+        relations.push(*object);
+    }
+    for name in &plan.values {
+        let Resolution::Resolved(object) = cache.resolve(name, &context) else {
+            return Err(CqnRegistrationError::LiveReadProofUnavailable);
+        };
+        if object.kind != CatalogObjectKind::Column {
+            return Err(CqnRegistrationError::LiveReadProofUnavailable);
+        }
+    }
+
+    let purity = resolved_relations_read_purity(cx, connection, &relations)
+        .await
+        .map_err(|_| CqnRegistrationError::LiveReadProofUnavailable)?;
+    if !purity.permits_safe() {
+        return Err(CqnRegistrationError::LiveReadProofUnavailable);
+    }
+
+    let strict_classifier =
+        Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded())
+            .with_oracle(Arc::new(CqnResolvedStatementPurity(purity)))
+            .with_statement_unknown_guarded();
+    let decision = strict_classifier.classify(query);
+    if decision.danger != DangerLevel::Safe
+        || decision.required_level != Some(OperatingLevel::ReadOnly)
+    {
+        return Err(CqnRegistrationError::LiveReadProofUnavailable);
+    }
+    Ok(())
 }
 
 fn cqn_audit_timestamp() -> String {
@@ -1044,7 +1157,7 @@ mod tests {
 
     use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink, SigningKey};
     use oraclemcp_config::OracleMcpConfig;
-    use oraclemcp_db::{DbError, OracleBackend, OracleConnectionInfo, OracleRow};
+    use oraclemcp_db::{DbError, OracleBackend, OracleCell, OracleConnectionInfo, OracleRow};
 
     const URI: &str = "oracle://object/HR/PACKAGE/EMP_API";
 
@@ -1131,13 +1244,71 @@ mod tests {
         AuditSubject::new("test", "cqn-client")
     }
 
-    const PROVEN_QUERY: &str = "SELECT employee_id FROM hr.employees WHERE department_id = 10";
+    const PROVEN_QUERY: &str = "SELECT id FROM app.cqn_target";
+    const UNPROVEN_VIEW_QUERY: &str = "SELECT id FROM app.unproven_view";
+
+    #[derive(Clone, Copy, Default)]
+    enum CqnCatalogFixture {
+        #[default]
+        CleanTable,
+        UnprovenView,
+        SelectVpdPolicy,
+        VirtualColumn,
+    }
+
+    impl CqnCatalogFixture {
+        fn object_type(self) -> &'static str {
+            match self {
+                Self::CleanTable | Self::SelectVpdPolicy | Self::VirtualColumn => "TABLE",
+                Self::UnprovenView => "VIEW",
+            }
+        }
+
+        fn object_name(self) -> &'static str {
+            match self {
+                Self::UnprovenView => "UNPROVEN_VIEW",
+                Self::CleanTable | Self::SelectVpdPolicy | Self::VirtualColumn => "CQN_TARGET",
+            }
+        }
+
+        fn has_select_vpd_policy(self) -> bool {
+            matches!(self, Self::SelectVpdPolicy)
+        }
+
+        fn has_virtual_column(self) -> bool {
+            matches!(self, Self::VirtualColumn)
+        }
+    }
 
     #[derive(Default)]
     struct RecordingCqnConnection {
         registrations: Mutex<Vec<(String, Vec<OracleBind>)>>,
         emon_open_attempts: Mutex<Vec<CqnQueryRegistration>>,
         reject_emon_open: AtomicBool,
+        catalog_fixture: CqnCatalogFixture,
+    }
+
+    impl RecordingCqnConnection {
+        fn with_catalog_fixture(catalog_fixture: CqnCatalogFixture) -> Self {
+            Self {
+                catalog_fixture,
+                ..Self::default()
+            }
+        }
+    }
+
+    fn catalog_row(columns: &[(&str, Option<&str>)]) -> OracleRow {
+        OracleRow {
+            columns: columns
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        (*name).to_owned(),
+                        OracleCell::new("VARCHAR2", value.map(str::to_owned)),
+                    )
+                })
+                .collect(),
+        }
     }
 
     /// A deterministic EMON seam that exposes only the DB adapter's reduced
@@ -1170,10 +1341,50 @@ mod tests {
         async fn query_rows(
             &self,
             _cx: &Cx,
-            _sql: &str,
+            sql: &str,
             _binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
-            Ok(Vec::new())
+            if sql.contains("SYS_CONTEXT('USERENV', 'SESSION_USER')") {
+                return Ok(vec![catalog_row(&[
+                    ("SESSION_USER", Some("TEST")),
+                    ("CURRENT_SCHEMA", Some("APP")),
+                    ("EDITION_NAME", Some("ORA$BASE")),
+                ])]);
+            }
+            if sql.contains("FROM session_roles") {
+                return Ok(Vec::new());
+            }
+            if sql.contains("FROM all_objects WHERE") {
+                return Ok(vec![catalog_row(&[
+                    ("OWNER", Some("APP")),
+                    ("OBJECT_NAME", Some(self.catalog_fixture.object_name())),
+                    ("OBJECT_TYPE", Some(self.catalog_fixture.object_type())),
+                    ("OBJECT_ID", Some("42")),
+                    ("STATUS", Some("VALID")),
+                    ("EDITION_NAME", Some("ORA$BASE")),
+                ])]);
+            }
+            if sql.contains("FROM all_tab_columns") && sql.contains("column_name = :3") {
+                return Ok(vec![catalog_row(&[
+                    ("COLUMN_NAME", Some("ID")),
+                    ("COLUMN_ID", Some("1")),
+                ])]);
+            }
+            if sql.contains("FROM all_policies") {
+                return Ok(if self.catalog_fixture.has_select_vpd_policy() {
+                    vec![catalog_row(&[("POLICY_NAME", Some("CQN_POLICY"))])]
+                } else {
+                    Vec::new()
+                });
+            }
+            if sql.contains("FROM all_tab_cols") && sql.contains("virtual_column = 'YES'") {
+                return Ok(if self.catalog_fixture.has_virtual_column() {
+                    vec![catalog_row(&[("COLUMN_NAME", Some("COMPUTED"))])]
+                } else {
+                    Vec::new()
+                });
+            }
+            Err(DbError::Query("unexpected catalog query".to_owned()))
         }
 
         async fn execute(
@@ -1224,6 +1435,7 @@ mod tests {
         cx: &Cx,
         gate: &CqnRegistrationGate,
         connection: &dyn OracleConnection,
+        catalog_cache: &OracleCatalogResolverCache,
         auditor: &Auditor,
         resource_uri: &str,
     ) -> CqnRegisteredQuery {
@@ -1239,6 +1451,7 @@ mod tests {
                 Some(auditor),
                 subject(),
             )
+            .with_catalog_cache(catalog_cache)
             .with_resource_uri(resource_uri),
         )
         .await
@@ -1298,6 +1511,7 @@ mod tests {
         let gate = CqnRegistrationGate::from_profile(&profile);
         let (auditor, sink) = cqn_auditor();
         let connection = RecordingCqnConnection::default();
+        let catalog_cache = OracleCatalogResolverCache::new();
         let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("current-thread runtime");
@@ -1316,6 +1530,7 @@ mod tests {
                     Some(&auditor),
                     subject(),
                 )
+                .with_catalog_cache(&catalog_cache)
                 .with_resource_uri(URI),
             )
             .await
@@ -1324,6 +1539,43 @@ mod tests {
         assert!(matches!(
             result,
             Err(CqnRegistrationError::ObjectLevelRefused)
+        ));
+        assert!(connection.registrations.lock().is_empty());
+        assert!(sink.records().is_empty());
+    }
+
+    #[test]
+    fn cqn_effect_point_refuses_without_a_live_catalog_proof() {
+        let profile = cqn_profile(true);
+        let gate = CqnRegistrationGate::from_profile(&profile);
+        let (auditor, sink) = cqn_auditor();
+        let connection = RecordingCqnConnection::default();
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+
+        let result = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a current Cx");
+            gate.register_query(
+                &cx,
+                &connection,
+                CqnQueryRegistrationRequest::new(
+                    CqnRegistrationScope::Query,
+                    PROVEN_QUERY,
+                    &[],
+                    &Classifier::default(),
+                    &stepped_up_session(),
+                    Some(&auditor),
+                    subject(),
+                )
+                .with_resource_uri(URI),
+            )
+            .await
+        });
+
+        assert!(matches!(
+            result,
+            Err(CqnRegistrationError::LiveReadProofUnavailable)
         ));
         assert!(connection.registrations.lock().is_empty());
         assert!(sink.records().is_empty());
@@ -1363,6 +1615,65 @@ mod tests {
         ));
         assert!(connection.registrations.lock().is_empty());
         assert!(sink.records().is_empty());
+    }
+
+    #[test]
+    fn cqn_refuses_unproven_live_relations_before_audit_or_driver_effect() {
+        for (fixture, query, label) in [
+            (CqnCatalogFixture::UnprovenView, UNPROVEN_VIEW_QUERY, "view"),
+            (
+                CqnCatalogFixture::SelectVpdPolicy,
+                PROVEN_QUERY,
+                "SELECT VPD policy",
+            ),
+            (
+                CqnCatalogFixture::VirtualColumn,
+                PROVEN_QUERY,
+                "virtual column",
+            ),
+        ] {
+            let profile = cqn_profile(true);
+            let gate = CqnRegistrationGate::from_profile(&profile);
+            let (auditor, sink) = cqn_auditor();
+            let connection = RecordingCqnConnection::with_catalog_fixture(fixture);
+            let catalog_cache = OracleCatalogResolverCache::new();
+            let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .expect("current-thread runtime");
+
+            let result = runtime.block_on(async {
+                let cx = Cx::current().expect("runtime installs a current Cx");
+                gate.register_query(
+                    &cx,
+                    &connection,
+                    CqnQueryRegistrationRequest::new(
+                        CqnRegistrationScope::Query,
+                        query,
+                        &[],
+                        &Classifier::default(),
+                        &stepped_up_session(),
+                        Some(&auditor),
+                        subject(),
+                    )
+                    .with_catalog_cache(&catalog_cache)
+                    .with_resource_uri(URI),
+                )
+                .await
+            });
+
+            assert!(
+                matches!(result, Err(CqnRegistrationError::LiveReadProofUnavailable)),
+                "{label} must be refused without a live relation-purity proof"
+            );
+            assert!(
+                connection.registrations.lock().is_empty(),
+                "{label} must not reach register_cqn_query"
+            );
+            assert!(
+                sink.records().is_empty(),
+                "{label} refusal must occur before an allowed audit record"
+            );
+        }
     }
 
     #[test]
@@ -1469,15 +1780,25 @@ mod tests {
         let gate = CqnRegistrationGate::from_profile(&profile);
         let (auditor, _sink) = cqn_auditor();
         let connection = RecordingCqnConnection::default();
+        let catalog_cache = OracleCatalogResolverCache::new();
         let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("current-thread runtime");
         let (registered, principal_capped, database_capped) = runtime.block_on(async {
             let cx = Cx::current().expect("runtime installs a current Cx");
             (
-                register_cqn_for_uri(&cx, &gate, &connection, &auditor, URI).await,
-                register_cqn_for_uri(&cx, &gate, &connection, &auditor, SECOND_URI).await,
-                register_cqn_for_uri(&cx, &gate, &connection, &auditor, THIRD_URI).await,
+                register_cqn_for_uri(&cx, &gate, &connection, &catalog_cache, &auditor, URI).await,
+                register_cqn_for_uri(
+                    &cx,
+                    &gate,
+                    &connection,
+                    &catalog_cache,
+                    &auditor,
+                    SECOND_URI,
+                )
+                .await,
+                register_cqn_for_uri(&cx, &gate, &connection, &catalog_cache, &auditor, THIRD_URI)
+                    .await,
             )
         });
         let registry = SubscriptionRegistry::with_limits(1, 1);
@@ -1605,6 +1926,7 @@ mod tests {
         let gate = CqnRegistrationGate::from_profile(&profile);
         let (auditor, _sink) = cqn_auditor();
         let connection = RecordingCqnConnection::default();
+        let catalog_cache = OracleCatalogResolverCache::new();
         let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("current-thread runtime");
@@ -1622,6 +1944,7 @@ mod tests {
                     Some(&auditor),
                     subject(),
                 )
+                .with_catalog_cache(&catalog_cache)
                 .with_resource_uri(URI),
             )
             .await
