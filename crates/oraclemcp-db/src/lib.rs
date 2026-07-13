@@ -85,7 +85,8 @@ mod pool;
 
 pub use auth_adapter::{AuthAdapter, AuthAdapterError};
 pub use awr::{
-    DiagnosticsSource, TopSqlMetric, detect_diagnostics_pack, detect_statspack,
+    DiagnosticsSource, PLAN_COST_TIMELINE_NOTE, PlanCostTimeline, PlanCostTimelinePoint,
+    TopSqlMetric, detect_diagnostics_pack, detect_statspack, plan_cost_timeline,
     resolve_top_sql_source, select_diagnostics_source, top_sql_query,
 };
 pub use catalog_extract::{

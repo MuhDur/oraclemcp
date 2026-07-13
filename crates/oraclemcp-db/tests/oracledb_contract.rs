@@ -919,7 +919,9 @@ fn contract_cancellation_checkpoint_maps_to_cancelled_error() {
 #[cfg(feature = "live-xe")]
 mod live {
     use super::*;
-    use oraclemcp_db::{OracleConnectOptions, RustOracleConnection};
+    use oraclemcp_db::{
+        OracleConnectOptions, RustOracleConnection, detect_diagnostics_pack, plan_cost_timeline,
+    };
 
     fn live_opts() -> OracleConnectOptions {
         OracleConnectOptions {
@@ -947,6 +949,101 @@ mod live {
                 None
             }
         }
+    }
+
+    #[test]
+    fn live_plan_timeline_refuses_before_awr_when_diagnostics_pack_is_absent() {
+        run_with_cx(|cx| async move {
+            let Some(conn) = connect_or_skip(
+                &cx,
+                "live_plan_timeline_refuses_before_awr_when_diagnostics_pack_is_absent",
+            )
+            .await
+            else {
+                return;
+            };
+
+            if detect_diagnostics_pack(&cx, &conn).await {
+                eprintln!(
+                    "[live-xe] SKIP plan timeline refusal: this target reports a licensed Diagnostics Pack"
+                );
+                return;
+            }
+
+            let error = plan_cost_timeline(&cx, &conn, "abc123def4567", 1)
+                .await
+                .expect_err("an unlicensed target must refuse before accessing AWR");
+            assert_eq!(error.error_class, ErrorClass::PolicyDenied, "{error:?}");
+            assert!(
+                error
+                    .message
+                    .to_ascii_lowercase()
+                    .contains("diagnostics pack")
+            );
+        });
+    }
+
+    #[test]
+    fn live_plan_timeline_reads_existing_licensed_awr_history() {
+        run_with_cx(|cx| async move {
+            let Some(conn) = connect_or_skip(
+                &cx,
+                "live_plan_timeline_reads_existing_licensed_awr_history",
+            )
+            .await
+            else {
+                return;
+            };
+
+            if !detect_diagnostics_pack(&cx, &conn).await {
+                eprintln!(
+                    "[live-xe] SKIP plan timeline success: target does not report a licensed Diagnostics Pack"
+                );
+                return;
+            }
+
+            // Use only already-captured history. The contract must never create
+            // an AWR snapshot or alter the database merely to prove a timeline.
+            let candidates = match conn
+                .query_rows(
+                    &cx,
+                    "SELECT sql_id FROM dba_hist_sqlstat WHERE optimizer_cost IS NOT NULL AND rownum = 1",
+                    &[],
+                )
+                .await
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    eprintln!(
+                        "[live-xe] SKIP plan timeline success: cannot read existing AWR history ({error})"
+                    );
+                    return;
+                }
+            };
+            let Some(sql_id) = candidates
+                .first()
+                .and_then(|row| row.text("SQL_ID"))
+                .map(str::to_owned)
+            else {
+                eprintln!("[live-xe] SKIP plan timeline success: no captured AWR SQL with cost");
+                return;
+            };
+
+            let timeline = plan_cost_timeline(&cx, &conn, &sql_id, 32)
+                .await
+                .expect("licensed AWR history must return a timeline");
+            assert_eq!(timeline.sql_id, sql_id.to_ascii_lowercase());
+            assert!(
+                !timeline.points.is_empty(),
+                "the selected AWR SQL ID must yield at least one snapshot point"
+            );
+            assert!(
+                timeline
+                    .points
+                    .iter()
+                    .all(|point| point.snapshot_id >= 0 && point.plan_hash_value >= 0)
+            );
+        });
     }
 
     #[test]

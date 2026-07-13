@@ -262,6 +262,161 @@ pub fn top_sql_query(
     }
 }
 
+/// A single AWR snapshot's optimizer-plan observation.
+///
+/// `snapshot_id` and the interval bounds describe the *AWR sampling window*,
+/// not an exact historical SCN. AWR reports a plan only when the statement was
+/// captured in that snapshot, so a plan change is bounded by adjacent sampled
+/// windows rather than proven to have happened at their boundary.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlanCostTimelinePoint {
+    /// AWR snapshot identifier for this observation.
+    pub snapshot_id: i64,
+    /// RAC instance that contributed the captured cursor.
+    pub instance_number: i64,
+    /// Start of the AWR snapshot interval in the database session's time zone.
+    pub snapshot_begin_time: Option<String>,
+    /// End of the AWR snapshot interval in the database session's time zone.
+    pub snapshot_end_time: Option<String>,
+    /// Oracle's stable numerical fingerprint for the captured plan.
+    pub plan_hash_value: i64,
+    /// The optimizer's relative cost at this snapshot, when Oracle recorded
+    /// one. It is not an elapsed-time measurement or a runtime guarantee.
+    pub optimizer_cost: Option<i64>,
+}
+
+/// Historical optimizer-plan observations for one Oracle SQL ID.
+///
+/// This is deliberately snapshot-bounded: AWR has no authoritative mapping
+/// from a captured plan to an exact SCN. Consumers can identify a plan flip by
+/// comparing adjacent [`PlanCostTimelinePoint::plan_hash_value`] values.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlanCostTimeline {
+    /// The normalized 13-character Oracle SQL ID that was queried.
+    pub sql_id: String,
+    /// Ordered AWR observations, capped by the requested limit.
+    pub points: Vec<PlanCostTimelinePoint>,
+    /// Scope and interpretation contract for the data in `points`.
+    pub note: String,
+}
+
+/// Interpretation contract returned with every [`PlanCostTimeline`].
+pub const PLAN_COST_TIMELINE_NOTE: &str = "AWR observations are bounded by snapshot intervals, \
+not exact historical SCNs. optimizer_cost is the optimizer's relative estimate, not elapsed time \
+or a runtime guarantee; a row exists only when AWR captured that SQL cursor in the interval.";
+
+const PLAN_COST_TIMELINE_SQL: &str = "SELECT * FROM (\
+SELECT s.snap_id AS snapshot_id, s.instance_number AS instance_number, \
+       TO_CHAR(sn.begin_interval_time, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6') AS snapshot_begin_time, \
+       TO_CHAR(sn.end_interval_time, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6') AS snapshot_end_time, \
+       s.plan_hash_value AS plan_hash_value, \
+       COALESCE(s.optimizer_cost, p.cost) AS optimizer_cost \
+FROM dba_hist_sqlstat s \
+JOIN dba_hist_snapshot sn \
+  ON sn.snap_id = s.snap_id \
+ AND sn.dbid = s.dbid \
+ AND sn.instance_number = s.instance_number \
+LEFT JOIN dba_hist_sql_plan p \
+  ON p.dbid = s.dbid \
+ AND p.sql_id = s.sql_id \
+ AND p.plan_hash_value = s.plan_hash_value \
+ AND p.id = 0 \
+WHERE s.sql_id = :1 \
+ORDER BY s.snap_id ASC, s.instance_number ASC, s.plan_hash_value ASC\
+) WHERE ROWNUM <= :2";
+
+// This validation runs before any database call. Keeping the actionable
+// envelope unboxed makes the rejection directly usable by the tool boundary.
+#[allow(clippy::result_large_err)]
+fn normalize_sql_id(sql_id: &str) -> Result<String, ErrorEnvelope> {
+    let normalized = sql_id.trim().to_ascii_lowercase();
+    if normalized.len() == 13 && normalized.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Ok(normalized);
+    }
+
+    Err(ErrorEnvelope::new(
+        ErrorClass::InvalidArguments,
+        "sql_id must be the 13-character alphanumeric Oracle SQL identifier",
+    )
+    .with_next_step("obtain the SQL ID from oracle_top_queries or a trusted Oracle diagnostic"))
+}
+
+fn diagnostics_pack_required() -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::PolicyDenied,
+        "historical plan-cost timeline requires a licensed Oracle Diagnostics Pack; \
+         control_management_pack_access did not prove DIAGNOSTIC access",
+    )
+    .with_next_step(
+        "enable the Diagnostics Pack only when your Oracle license permits it, then retry",
+    )
+    .with_next_step(
+        "use oracle_top_queries without historical=true for free live cursor-cache diagnostics",
+    )
+}
+
+fn assemble_plan_cost_timeline(
+    sql_id: String,
+    rows: &[crate::types::OracleRow],
+) -> PlanCostTimeline {
+    let points = rows
+        .iter()
+        .filter_map(|row| {
+            Some(PlanCostTimelinePoint {
+                snapshot_id: row.parse_i64("SNAPSHOT_ID")?,
+                instance_number: row.parse_i64("INSTANCE_NUMBER")?,
+                snapshot_begin_time: row.text("SNAPSHOT_BEGIN_TIME").map(str::to_owned),
+                snapshot_end_time: row.text("SNAPSHOT_END_TIME").map(str::to_owned),
+                plan_hash_value: row.parse_i64("PLAN_HASH_VALUE")?,
+                optimizer_cost: row.parse_i64("OPTIMIZER_COST"),
+            })
+        })
+        .collect();
+    PlanCostTimeline {
+        sql_id,
+        points,
+        note: PLAN_COST_TIMELINE_NOTE.to_owned(),
+    }
+}
+
+/// Read the licensed AWR plan-cost history for an Oracle SQL ID.
+///
+/// The Diagnostics Pack probe runs before the AWR query. If the probe cannot
+/// positively prove `DIAGNOSTIC` access (including absent dictionary privilege),
+/// this returns a typed [`ErrorClass::PolicyDenied`] refusal and never touches
+/// `DBA_HIST_*`. Connection uncertainty from the probe remains an ordinary
+/// database error envelope rather than being misreported as a license result.
+///
+/// `max_points` is clamped to `1..=1_000` to bound the read. All user input is
+/// positional-bound; the SQL ID is never interpolated into the AWR query.
+#[allow(clippy::result_large_err)]
+pub async fn plan_cost_timeline(
+    cx: &asupersync::Cx,
+    conn: &dyn crate::connection::OracleConnection,
+    sql_id: &str,
+    max_points: u32,
+) -> Result<PlanCostTimeline, ErrorEnvelope> {
+    let sql_id = normalize_sql_id(sql_id)?;
+    match detect_diagnostics_pack_for_preflight(cx, conn).await {
+        Ok(true) => {}
+        Ok(false) => return Err(diagnostics_pack_required()),
+        Err(error) => return Err(error.into_envelope()),
+    }
+
+    let rows = conn
+        .query_rows(
+            cx,
+            PLAN_COST_TIMELINE_SQL,
+            &[
+                crate::types::OracleBind::String(sql_id.clone()),
+                crate::types::OracleBind::I64(i64::from(max_points.clamp(1, 1_000))),
+            ],
+        )
+        .await
+        .map_err(crate::error::DbError::into_envelope)?;
+    Ok(assemble_plan_cost_timeline(sql_id, &rows))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +430,7 @@ mod tests {
     struct ProbeMock {
         outcomes: Mutex<VecDeque<Result<Vec<OracleRow>, DbError>>>,
         sql: Mutex<Vec<String>>,
+        binds: Mutex<Vec<Vec<OracleBind>>>,
     }
 
     impl ProbeMock {
@@ -282,11 +438,16 @@ mod tests {
             Self {
                 outcomes: Mutex::new(outcomes.into()),
                 sql: Mutex::new(Vec::new()),
+                binds: Mutex::new(Vec::new()),
             }
         }
 
         fn sql(&self) -> Vec<String> {
             self.sql.lock().expect("SQL mutex").clone()
+        }
+
+        fn binds(&self) -> Vec<Vec<OracleBind>> {
+            self.binds.lock().expect("bind mutex").clone()
         }
     }
 
@@ -308,9 +469,10 @@ mod tests {
             &self,
             _cx: &Cx,
             sql: &str,
-            _binds: &[OracleBind],
+            binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
             self.sql.lock().expect("SQL mutex").push(sql.to_owned());
+            self.binds.lock().expect("bind mutex").push(binds.to_vec());
             self.outcomes
                 .lock()
                 .expect("outcome mutex")
@@ -356,6 +518,52 @@ mod tests {
                 "VALUE".to_owned(),
                 OracleCell::new("VARCHAR2", Some("DIAGNOSTIC+TUNING".to_owned())),
             )],
+        }
+    }
+
+    fn no_diagnostics_pack_row() -> OracleRow {
+        OracleRow {
+            columns: vec![(
+                "VALUE".to_owned(),
+                OracleCell::new("VARCHAR2", Some("NONE".to_owned())),
+            )],
+        }
+    }
+
+    fn plan_timeline_row(
+        snapshot_id: i64,
+        instance_number: i64,
+        plan_hash_value: i64,
+        optimizer_cost: Option<i64>,
+    ) -> OracleRow {
+        let cell = |value: Option<String>| OracleCell::new("VARCHAR2", value);
+        OracleRow {
+            columns: vec![
+                (
+                    "SNAPSHOT_ID".to_owned(),
+                    cell(Some(snapshot_id.to_string())),
+                ),
+                (
+                    "INSTANCE_NUMBER".to_owned(),
+                    cell(Some(instance_number.to_string())),
+                ),
+                (
+                    "SNAPSHOT_BEGIN_TIME".to_owned(),
+                    cell(Some("2026-07-13T10:00:00.000000".to_owned())),
+                ),
+                (
+                    "SNAPSHOT_END_TIME".to_owned(),
+                    cell(Some("2026-07-13T11:00:00.000000".to_owned())),
+                ),
+                (
+                    "PLAN_HASH_VALUE".to_owned(),
+                    cell(Some(plan_hash_value.to_string())),
+                ),
+                (
+                    "OPTIMIZER_COST".to_owned(),
+                    cell(optimizer_cost.map(|v| v.to_string())),
+                ),
+            ],
         }
     }
 
@@ -598,5 +806,125 @@ mod tests {
                 .iter()
                 .any(|s| s.to_lowercase().contains("statspack"))
         );
+    }
+
+    #[test]
+    fn plan_timeline_refuses_unlicensed_before_any_awr_query() {
+        run_with_cx(|cx| async move {
+            let conn = ProbeMock::new(vec![Err(DbError::Query(
+                "ORA-01031: insufficient privileges".to_owned(),
+            ))]);
+
+            let error = plan_cost_timeline(&cx, &conn, "abc123def4567", 20)
+                .await
+                .expect_err("unlicensed history must be a typed refusal");
+
+            assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+            assert!(
+                error
+                    .message
+                    .to_ascii_lowercase()
+                    .contains("diagnostics pack")
+            );
+            assert!(
+                error
+                    .next_steps
+                    .iter()
+                    .any(|step| step.to_ascii_lowercase().contains("license"))
+            );
+            let sql = conn.sql();
+            assert_eq!(sql.len(), 1, "the pack probe is the only database call");
+            assert!(sql[0].contains("v$parameter"));
+            assert!(
+                !sql.iter().any(|query| query.contains("dba_hist_")),
+                "unlicensed refusal must not touch paid AWR views"
+            );
+        });
+    }
+
+    #[test]
+    fn plan_timeline_refuses_when_license_parameter_is_none_before_any_awr_query() {
+        run_with_cx(|cx| async move {
+            let conn = ProbeMock::new(vec![Ok(vec![no_diagnostics_pack_row()])]);
+
+            let error = plan_cost_timeline(&cx, &conn, "abc123def4567", 20)
+                .await
+                .expect_err("a NONE Diagnostics Pack parameter must be refused");
+
+            assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+            assert_eq!(conn.sql().len(), 1, "never query AWR after NONE");
+            assert!(conn.sql()[0].contains("v$parameter"));
+        });
+    }
+
+    #[test]
+    fn plan_timeline_preserves_probe_uncertainty_without_awr_fallback() {
+        run_with_cx(|cx| async move {
+            let conn = ProbeMock::new(vec![Err(DbError::Cancelled(
+                "license probe deadline exceeded".to_owned(),
+            ))]);
+
+            let error = plan_cost_timeline(&cx, &conn, "abc123def4567", 20)
+                .await
+                .expect_err("uncertain probe must propagate");
+
+            assert_ne!(error.error_class, ErrorClass::PolicyDenied);
+            assert_eq!(conn.sql().len(), 1);
+        });
+    }
+
+    #[test]
+    fn plan_timeline_returns_snapshot_bounded_cost_history_with_bound_sql_id() {
+        run_with_cx(|cx| async move {
+            let conn = ProbeMock::new(vec![
+                Ok(vec![diagnostics_pack_row()]),
+                Ok(vec![
+                    plan_timeline_row(41, 1, 7_654_321, Some(2)),
+                    plan_timeline_row(42, 1, 9_876_543, Some(19)),
+                ]),
+            ]);
+
+            let timeline = plan_cost_timeline(&cx, &conn, "ABC123DEF4567", 9_999)
+                .await
+                .expect("licensed AWR history");
+
+            assert_eq!(timeline.sql_id, "abc123def4567");
+            assert_eq!(timeline.points.len(), 2);
+            assert_eq!(timeline.points[0].snapshot_id, 41);
+            assert_eq!(timeline.points[0].optimizer_cost, Some(2));
+            assert_eq!(timeline.points[1].plan_hash_value, 9_876_543);
+            assert_eq!(timeline.points[1].optimizer_cost, Some(19));
+            assert!(timeline.note.contains("not exact historical SCNs"));
+
+            let sql = conn.sql();
+            assert_eq!(sql.len(), 2);
+            let awr = &sql[1];
+            assert!(awr.contains("dba_hist_sqlstat"));
+            assert!(awr.contains("dba_hist_snapshot"));
+            assert!(awr.contains("dba_hist_sql_plan"));
+            assert!(awr.contains("ROWNUM <= :2"));
+            assert!(!awr.contains("ABC123DEF4567"));
+
+            assert_eq!(
+                conn.binds()[1],
+                vec![
+                    OracleBind::String("abc123def4567".to_owned()),
+                    OracleBind::I64(1_000),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn plan_timeline_rejects_malformed_sql_id_without_a_probe() {
+        run_with_cx(|cx| async move {
+            let conn = ProbeMock::new(Vec::new());
+            let error = plan_cost_timeline(&cx, &conn, "not a SQL id", 20)
+                .await
+                .expect_err("bad SQL IDs are rejected locally");
+
+            assert_eq!(error.error_class, ErrorClass::InvalidArguments);
+            assert!(conn.sql().is_empty());
+        });
     }
 }
