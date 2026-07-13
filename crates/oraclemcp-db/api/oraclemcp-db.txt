@@ -4191,10 +4191,16 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PlanCostEstimate where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::PlanCostEstimate::vzip(self) -> V
 pub struct oraclemcp_db::PlanCostRow
+pub oraclemcp_db::PlanCostRow::access_predicates: core::option::Option<alloc::string::String>
 pub oraclemcp_db::PlanCostRow::bytes: core::option::Option<i64>
 pub oraclemcp_db::PlanCostRow::cardinality: core::option::Option<i64>
 pub oraclemcp_db::PlanCostRow::cost: core::option::Option<i64>
+pub oraclemcp_db::PlanCostRow::filter_predicates: core::option::Option<alloc::string::String>
 pub oraclemcp_db::PlanCostRow::id: i64
+pub oraclemcp_db::PlanCostRow::object_name: core::option::Option<alloc::string::String>
+pub oraclemcp_db::PlanCostRow::object_owner: core::option::Option<alloc::string::String>
+pub oraclemcp_db::PlanCostRow::operation: core::option::Option<alloc::string::String>
+pub oraclemcp_db::PlanCostRow::options: core::option::Option<alloc::string::String>
 impl core::clone::Clone for oraclemcp_db::PlanCostRow
 pub fn oraclemcp_db::PlanCostRow::clone(&self) -> oraclemcp_db::PlanCostRow
 impl core::cmp::Eq for oraclemcp_db::PlanCostRow

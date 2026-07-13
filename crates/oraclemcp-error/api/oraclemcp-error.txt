@@ -118,6 +118,7 @@ impl<T> core::convert::From<T> for oraclemcp_error::OracleMcpError
 pub fn oraclemcp_error::OracleMcpError::from(T) -> T
 #[non_exhaustive] pub enum oraclemcp_error::ReasonCategory
 pub oraclemcp_error::ReasonCategory::BlockListed
+pub oraclemcp_error::ReasonCategory::CostBudgetExceeded
 pub oraclemcp_error::ReasonCategory::DynamicSql
 pub oraclemcp_error::ReasonCategory::MultiStatementBatch
 pub oraclemcp_error::ReasonCategory::Other
@@ -232,15 +233,118 @@ pub unsafe fn oraclemcp_error::ErrorEnvelope::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_error::ErrorEnvelope
 pub fn oraclemcp_error::ErrorEnvelope::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_error::ErrorEnvelope where T: for<'de> serde_core::de::Deserialize<'de>
+pub struct oraclemcp_error::OptimizerPlanRow
+pub oraclemcp_error::OptimizerPlanRow::access_predicates: core::option::Option<alloc::string::String>
+pub oraclemcp_error::OptimizerPlanRow::bytes: core::option::Option<i64>
+pub oraclemcp_error::OptimizerPlanRow::cardinality: core::option::Option<i64>
+pub oraclemcp_error::OptimizerPlanRow::cost: core::option::Option<i64>
+pub oraclemcp_error::OptimizerPlanRow::filter_predicates: core::option::Option<alloc::string::String>
+pub oraclemcp_error::OptimizerPlanRow::id: i64
+pub oraclemcp_error::OptimizerPlanRow::object_name: core::option::Option<alloc::string::String>
+pub oraclemcp_error::OptimizerPlanRow::object_owner: core::option::Option<alloc::string::String>
+pub oraclemcp_error::OptimizerPlanRow::operation: core::option::Option<alloc::string::String>
+pub oraclemcp_error::OptimizerPlanRow::options: core::option::Option<alloc::string::String>
+impl core::clone::Clone for oraclemcp_error::OptimizerPlanRow
+pub fn oraclemcp_error::OptimizerPlanRow::clone(&self) -> oraclemcp_error::OptimizerPlanRow
+impl core::cmp::Eq for oraclemcp_error::OptimizerPlanRow
+impl core::cmp::PartialEq for oraclemcp_error::OptimizerPlanRow
+pub fn oraclemcp_error::OptimizerPlanRow::eq(&self, &oraclemcp_error::OptimizerPlanRow) -> bool
+impl core::fmt::Debug for oraclemcp_error::OptimizerPlanRow
+pub fn oraclemcp_error::OptimizerPlanRow::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_error::OptimizerPlanRow
+impl serde_core::ser::Serialize for oraclemcp_error::OptimizerPlanRow
+pub fn oraclemcp_error::OptimizerPlanRow::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_error::OptimizerPlanRow
+pub fn oraclemcp_error::OptimizerPlanRow::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_error::OptimizerPlanRow
+impl core::marker::Send for oraclemcp_error::OptimizerPlanRow
+impl core::marker::Sync for oraclemcp_error::OptimizerPlanRow
+impl core::marker::Unpin for oraclemcp_error::OptimizerPlanRow
+impl core::marker::UnsafeUnpin for oraclemcp_error::OptimizerPlanRow
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_error::OptimizerPlanRow
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_error::OptimizerPlanRow
+impl<T, U> core::convert::Into<U> for oraclemcp_error::OptimizerPlanRow where U: core::convert::From<T>
+pub fn oraclemcp_error::OptimizerPlanRow::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_error::OptimizerPlanRow where U: core::convert::Into<T>
+pub type oraclemcp_error::OptimizerPlanRow::Error = core::convert::Infallible
+pub fn oraclemcp_error::OptimizerPlanRow::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_error::OptimizerPlanRow where U: core::convert::TryFrom<T>
+pub type oraclemcp_error::OptimizerPlanRow::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_error::OptimizerPlanRow::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_error::OptimizerPlanRow where T: core::clone::Clone
+pub type oraclemcp_error::OptimizerPlanRow::Owned = T
+pub fn oraclemcp_error::OptimizerPlanRow::clone_into(&self, &mut T)
+pub fn oraclemcp_error::OptimizerPlanRow::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_error::OptimizerPlanRow where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_error::OptimizerPlanRow::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_error::OptimizerPlanRow where T: ?core::marker::Sized
+pub fn oraclemcp_error::OptimizerPlanRow::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_error::OptimizerPlanRow where T: ?core::marker::Sized
+pub fn oraclemcp_error::OptimizerPlanRow::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_error::OptimizerPlanRow where T: core::clone::Clone
+pub unsafe fn oraclemcp_error::OptimizerPlanRow::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_error::OptimizerPlanRow
+pub fn oraclemcp_error::OptimizerPlanRow::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_error::OptimizerPlanRow where T: for<'de> serde_core::de::Deserialize<'de>
+pub struct oraclemcp_error::QueryCostRefusal
+pub oraclemcp_error::QueryCostRefusal::estimated_cost: u64
+pub oraclemcp_error::QueryCostRefusal::max_query_cost: u64
+pub oraclemcp_error::QueryCostRefusal::note: alloc::string::String
+pub oraclemcp_error::QueryCostRefusal::plan_rows: alloc::vec::Vec<oraclemcp_error::OptimizerPlanRow>
+pub oraclemcp_error::QueryCostRefusal::predicate_hints: alloc::vec::Vec<alloc::string::String>
+impl core::clone::Clone for oraclemcp_error::QueryCostRefusal
+pub fn oraclemcp_error::QueryCostRefusal::clone(&self) -> oraclemcp_error::QueryCostRefusal
+impl core::cmp::Eq for oraclemcp_error::QueryCostRefusal
+impl core::cmp::PartialEq for oraclemcp_error::QueryCostRefusal
+pub fn oraclemcp_error::QueryCostRefusal::eq(&self, &oraclemcp_error::QueryCostRefusal) -> bool
+impl core::fmt::Debug for oraclemcp_error::QueryCostRefusal
+pub fn oraclemcp_error::QueryCostRefusal::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_error::QueryCostRefusal
+impl serde_core::ser::Serialize for oraclemcp_error::QueryCostRefusal
+pub fn oraclemcp_error::QueryCostRefusal::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_error::QueryCostRefusal
+pub fn oraclemcp_error::QueryCostRefusal::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_error::QueryCostRefusal
+impl core::marker::Send for oraclemcp_error::QueryCostRefusal
+impl core::marker::Sync for oraclemcp_error::QueryCostRefusal
+impl core::marker::Unpin for oraclemcp_error::QueryCostRefusal
+impl core::marker::UnsafeUnpin for oraclemcp_error::QueryCostRefusal
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_error::QueryCostRefusal
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_error::QueryCostRefusal
+impl<T, U> core::convert::Into<U> for oraclemcp_error::QueryCostRefusal where U: core::convert::From<T>
+pub fn oraclemcp_error::QueryCostRefusal::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_error::QueryCostRefusal where U: core::convert::Into<T>
+pub type oraclemcp_error::QueryCostRefusal::Error = core::convert::Infallible
+pub fn oraclemcp_error::QueryCostRefusal::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_error::QueryCostRefusal where U: core::convert::TryFrom<T>
+pub type oraclemcp_error::QueryCostRefusal::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_error::QueryCostRefusal::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_error::QueryCostRefusal where T: core::clone::Clone
+pub type oraclemcp_error::QueryCostRefusal::Owned = T
+pub fn oraclemcp_error::QueryCostRefusal::clone_into(&self, &mut T)
+pub fn oraclemcp_error::QueryCostRefusal::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_error::QueryCostRefusal where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_error::QueryCostRefusal::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_error::QueryCostRefusal where T: ?core::marker::Sized
+pub fn oraclemcp_error::QueryCostRefusal::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_error::QueryCostRefusal where T: ?core::marker::Sized
+pub fn oraclemcp_error::QueryCostRefusal::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_error::QueryCostRefusal where T: core::clone::Clone
+pub unsafe fn oraclemcp_error::QueryCostRefusal::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_error::QueryCostRefusal
+pub fn oraclemcp_error::QueryCostRefusal::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_error::QueryCostRefusal where T: for<'de> serde_core::de::Deserialize<'de>
 pub struct oraclemcp_error::StructuredReason
 pub oraclemcp_error::StructuredReason::category: oraclemcp_error::ReasonCategory
 pub oraclemcp_error::StructuredReason::minimal_rewrite: core::option::Option<alloc::string::String>
 pub oraclemcp_error::StructuredReason::offending_construct: core::option::Option<alloc::string::String>
+pub oraclemcp_error::StructuredReason::query_cost_refusal: core::option::Option<oraclemcp_error::QueryCostRefusal>
 pub oraclemcp_error::StructuredReason::required_level: core::option::Option<alloc::string::String>
 impl oraclemcp_error::StructuredReason
 pub fn oraclemcp_error::StructuredReason::new(oraclemcp_error::ReasonCategory) -> Self
 pub fn oraclemcp_error::StructuredReason::with_minimal_rewrite(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oraclemcp_error::StructuredReason::with_offending_construct(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oraclemcp_error::StructuredReason::with_query_cost_refusal(self, oraclemcp_error::QueryCostRefusal) -> Self
 pub fn oraclemcp_error::StructuredReason::with_required_level(self, impl core::convert::Into<alloc::string::String>) -> Self
 impl core::clone::Clone for oraclemcp_error::StructuredReason
 pub fn oraclemcp_error::StructuredReason::clone(&self) -> oraclemcp_error::StructuredReason
