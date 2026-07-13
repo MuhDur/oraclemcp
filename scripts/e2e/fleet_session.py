@@ -123,6 +123,7 @@ class McpSession:
         )
         self.queue = queue.Queue()
         self.request_id = 0
+        self.last_wire_response = ""
         threading.Thread(target=self._reader, daemon=True).start()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
 
@@ -158,6 +159,7 @@ class McpSession:
                 continue
             message = json.loads(line)
             if message.get("id") == self.request_id:
+                self.last_wire_response = line
                 return message
 
     def initialize(self):
@@ -251,7 +253,13 @@ class FleetScenario:
                 session.call(
                     "oracle_diff",
                     {
-                        "sql": "SELECT 1 AS id, SYS_CONTEXT('USERENV', 'UNIQUE_SESSION_ID') AS session_token FROM dual",
+                        # `UNIQUE_SESSION_ID` is not a valid USERENV parameter
+                        # on supported XE 18/21 lanes. `SID` is supported by the
+                        # same portable USERENV surface that the driver records
+                        # for session evidence, and keeps this proof on DUAL's
+                        # classifier-proven read-only path. The harness records
+                        # only the resulting delta count, never either SID.
+                        "sql": "SELECT 1 AS id, SYS_CONTEXT('USERENV', 'SID') AS session_token FROM dual",
                         "profile_a": "fleet_left",
                         "profile_b": "fleet_right",
                         "key": ["ID"],
@@ -272,16 +280,29 @@ class FleetScenario:
         return self.with_session(self.args.diff_config, "fleet_left", "diff", body)
 
     def catalog_masks_and_hides_forbidden_source(self):
-        def body(session):
-            out = structured(
-                session.call(
-                    "oracle_search_objects",
-                    {"fleet": True, "detail_level": "names", "max_rows": 10},
-                ),
+        def catalog_response(session):
+            result = session.call(
                 "oracle_search_objects",
+                {"fleet": True, "detail_level": "names", "max_rows": 10},
             )
+            wire = session.last_wire_response
+            require(isinstance(wire, str) and wire, "catalog returned a real wire response")
+            return structured(result, "oracle_search_objects"), wire
+
+        def public_shape(out):
             rows = out.get("results")
             require(isinstance(rows, list) and rows, "fleet catalog returns live object rows")
+            certificates = out.get("mask_certificates")
+            require(isinstance(certificates, list) and certificates, "catalog carries a masking certificate")
+            return {
+                "catalog_rows": len(rows),
+                "certificate_count": len(certificates),
+                "result_keys": sorted({tuple(sorted(row)) for row in rows if isinstance(row, dict)}),
+            }
+
+        def body(session):
+            out, wire = catalog_response(session)
+            rows = out.get("results")
             require(
                 all(row.get("profile") == "fleet_visible" for row in rows),
                 "hidden profile contributes no catalog row",
@@ -290,24 +311,42 @@ class FleetScenario:
                 all(row.get("object_name") == "<masked>" for row in rows),
                 "source object names are masked before aggregation",
             )
-            rendered = json.dumps(out, sort_keys=True)
-            require("fleet_private" not in rendered, "forbidden profile name is not inferable from catalog output")
+            require("fleet_private" not in wire, "forbidden profile name is not inferable from real response bytes")
+            require('"profiles"' not in wire and '"summary"' not in wire, "real response bytes contain no roster or count metadata")
             require("profiles" not in out and "summary" not in out, "catalog emits no roster or profile counts")
             certificates = out.get("mask_certificates")
             require(isinstance(certificates, list) and certificates, "catalog carries a masking certificate")
             masked = any(
-                any(
+                isinstance(entry.get("certificate"), dict)
+                and any(
                     decision.get("column") == "OBJECT_NAME" and decision.get("action") == "mask"
-                    for decision in (certificate.get("columns") or [])
+                    for decision in (entry["certificate"].get("decisions") or [])
                 )
-                and isinstance(certificate.get("audit_entry_hash"), str)
-                and bool(certificate["audit_entry_hash"])
-                for certificate in certificates
+                and isinstance(entry["certificate"].get("audit_entry_hash"), str)
+                and bool(entry["certificate"]["audit_entry_hash"])
+                for entry in certificates
             )
             require(masked, "catalog certificate proves the object-name mask was audit-bound")
-            return {"catalog_rows": len(rows), "mask_certificates": len(certificates)}
+            return public_shape(out)
 
-        return self.with_session(self.args.catalog_config, "fleet_visible", "catalog", body)
+        protected = self.with_session(self.args.catalog_config, "fleet_visible", "catalog", body)
+
+        def baseline_body(session):
+            out, wire = catalog_response(session)
+            require("fleet_private" not in wire, "baseline response contains no private profile name")
+            return public_shape(out)
+
+        baseline = self.with_session(
+            self.args.catalog_baseline_config,
+            "fleet_visible",
+            "catalog-baseline",
+            baseline_body,
+        )
+        require(
+            protected == baseline,
+            "adding the caller-invisible source changes neither catalog count nor public response shape",
+        )
+        return {"catalog_rows": protected["catalog_rows"], "mask_certificates": protected["certificate_count"]}
 
     def run(self):
         self.run_case("fleet_orient_unreachable", self.orient_degrades_one_unreachable_lane)
@@ -321,10 +360,11 @@ def parse_args():
     parser.add_argument("--orient-config", required=True)
     parser.add_argument("--diff-config", required=True)
     parser.add_argument("--catalog-config", required=True)
+    parser.add_argument("--catalog-baseline-config", required=True)
     parser.add_argument("--evidence", required=True)
     parser.add_argument("--server-stderr-dir", required=True)
     args = parser.parse_args()
-    for path in (args.orient_config, args.diff_config, args.catalog_config):
+    for path in (args.orient_config, args.diff_config, args.catalog_config, args.catalog_baseline_config):
         if not Path(path).is_file():
             parser.error(f"runtime config is missing: {path}")
     Path(args.server_stderr_dir).mkdir(parents=True, exist_ok=True)

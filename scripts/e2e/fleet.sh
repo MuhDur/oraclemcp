@@ -202,7 +202,7 @@ EOF
 }
 
 write_catalog_config() {
-  local path="$1" visible_dsn="$2" visible_user="$3" private_dsn="$4" private_user="$5"
+  local path="$1" visible_dsn="$2" visible_user="$3" private_dsn="${4:-}" private_user="${5:-}"
   cat >"$path" <<EOF
 schema_version = 2
 default_profile = "fleet_visible"
@@ -217,13 +217,22 @@ max_level = "READ_ONLY"
 default_level = "READ_ONLY"
 
 [profiles.masking]
-mask_unknown_default = false
+# The served-profile validator requires unknown catalog columns to stay masked
+# unless a complete tagging source is configured. This is stricter than the
+# explicit OBJECT_NAME rule below and preserves the fleet egress invariant.
+mask_unknown_default = true
 
 [[profiles.masking.rules]]
 column_match = { column = "OBJECT_NAME" }
 action = "mask"
 tag = "e2e.fleet.object-name"
+EOF
 
+  if [ -z "$private_dsn" ]; then
+    return
+  fi
+
+  cat >>"$path" <<EOF
 [[profiles]]
 name = "fleet_private"
 description = "fleet e2e forbidden lab profile"
@@ -290,17 +299,19 @@ run_pair() {
   require_safe_toml_scalar "right DSN" "$right_dsn"
   require_safe_toml_scalar "right username" "$right_user"
 
-  local pair_dir state_dir orient_config diff_config catalog_config evidence
+  local pair_dir state_dir orient_config diff_config catalog_config catalog_baseline_config evidence
   pair_dir="$matrix_dir/${left}-to-${right}"
   state_dir="$pair_dir/state"
   orient_config="$pair_dir/orient.toml"
   diff_config="$pair_dir/diff.toml"
   catalog_config="$pair_dir/catalog.toml"
+  catalog_baseline_config="$pair_dir/catalog-baseline.toml"
   evidence="$pair_dir/evidence.jsonl"
   mkdir -p "$pair_dir" "$state_dir"
   write_orient_config "$orient_config" "$left_dsn" "$left_user"
   write_diff_config "$diff_config" "$left_dsn" "$left_user" "$right_dsn" "$right_user"
   write_catalog_config "$catalog_config" "$left_dsn" "$left_user" "$right_dsn" "$right_user"
+  write_catalog_config "$catalog_baseline_config" "$left_dsn" "$left_user"
 
   export ORACLE_FLEET_PRIMARY_PASSWORD="$left_password"
   export ORACLE_FLEET_LEFT_PASSWORD="$left_password"
@@ -316,6 +327,7 @@ run_pair() {
     --orient-config "$orient_config" \
     --diff-config "$diff_config" \
     --catalog-config "$catalog_config" \
+    --catalog-baseline-config "$catalog_baseline_config" \
     --evidence "$evidence" \
     --server-stderr-dir "$pair_dir" \
     >"$pair_dir/session.stdout"
