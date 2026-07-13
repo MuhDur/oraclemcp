@@ -39,9 +39,11 @@ scenarios=(
   scripts/e2e/dashboard_readonly.sh
   scripts/e2e/audit_append.sh
   scripts/e2e/live_oracle.sh
+  scripts/e2e/egress.sh
   scripts/e2e/load_soak.sh
   scripts/e2e/live_xe_headline.sh
   scripts/e2e/oracle_version_matrix.sh
+  scripts/e2e/time_diff.sh
   scripts/e2e/cost_gate.sh
   scripts/e2e/clean_machine_e2e.sh
 )

@@ -164,7 +164,7 @@ pub enum AsOf {
 }
 
 const CURRENT_SCN_SQL: &str =
-    "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER AS OBSERVED_SCN FROM DUAL";
+    "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER() AS OBSERVED_SCN FROM DUAL";
 const TIMESTAMP_TO_SCN_SQL: &str =
     "SELECT TIMESTAMP_TO_SCN(TO_TIMESTAMP(:1, 'YYYY-MM-DD HH24:MI:SS')) AS OBSERVED_SCN FROM DUAL";
 
@@ -184,7 +184,10 @@ impl AsOf {
     /// Call this as the first query after `SET TRANSACTION READ ONLY`: Oracle
     /// keeps later reads in that transaction on the same consistent snapshot,
     /// while the returned SCN is a deterministic `DBMS_FLASHBACK` replay
-    /// target. The SQL is server-owned and uses no caller-supplied text.
+    /// target. The profile needs execute access to `DBMS_FLASHBACK`, which the
+    /// subsequent replay operation needs too; absent that capability, the
+    /// surrounding audited read fails closed before returning data. The SQL is
+    /// server-owned and uses no caller-supplied text.
     pub async fn current_system_change_number(
         cx: &Cx,
         conn: &dyn OracleConnection,
@@ -1296,6 +1299,11 @@ mod tests {
 
     #[test]
     fn observed_scn_helpers_use_server_owned_bound_queries() {
+        assert_eq!(
+            CURRENT_SCN_SQL,
+            "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER() AS OBSERVED_SCN FROM DUAL",
+            "the Oracle package function must be invoked, not referenced as an identifier"
+        );
         let conn = FlashbackRecorder::default();
         let (current, timestamp_target, events) = run_with_cx(|cx| async move {
             let current = AsOf::current_system_change_number(&cx, &conn)

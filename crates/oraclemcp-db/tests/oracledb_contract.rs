@@ -1304,11 +1304,13 @@ mod live {
                 } => {
                     assert_eq!(kind, FlashbackRefusalKind::RetentionExceeded);
                     assert!(
-                        matches!(ora_code, Some(8180 | 1555)),
+                        matches!(ora_code, Some(8180 | 8186 | 1555)),
                         "unexpected retention ORA code: {ora_code:?}"
                     );
                     assert!(
-                        message.contains("ORA-08180") || message.contains("ORA-01555"),
+                        message.contains("ORA-08180")
+                            || message.contains("ORA-08186")
+                            || message.contains("ORA-01555"),
                         "{message}"
                     );
                     let env = DbError::FlashbackRefusal {

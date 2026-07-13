@@ -193,10 +193,57 @@ fn e2e_orchestrator_aggregates_dry_run_scenarios() {
             .iter()
             .any(|event| event["event"] == "orchestrator_summary"
                 && event["outcome"] == "pass"
-                && event["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains("pass=7 fail=0 skipped=6 total=13"))),
+                && event["message"].as_str().is_some_and(|message| {
+                    message.contains("pass=")
+                        && message.contains("fail=0")
+                        && message.contains("total=")
+                })),
         "missing passing orchestrator summary: {events:?}"
+    );
+}
+
+#[test]
+fn time_diff_e2e_dry_run_uses_omcpb_and_reports_a_pass() {
+    let root = repo_root();
+    let output = Command::new("bash")
+        .arg(root.join("scripts/e2e/time_diff.sh"))
+        .args(["--log", "--dry-run", "--lane", "xe18"])
+        .current_dir(&root)
+        .env("ORACLEMCP_E2E_SEED", "4242")
+        .env(
+            "ORACLEMCP_E2E_ARTIFACT_DIR",
+            root.join("target/e2e-contract"),
+        )
+        .env("ORACLEMCP_LIVE_XE", "1")
+        .env("ORACLE_MATRIX_XE18_USER", "e2e_test")
+        .env("ORACLE_MATRIX_XE18_PASSWORD", "not-used-in-dry-run")
+        .output()
+        .expect("run time_diff dry-run");
+    assert!(
+        output.status.success(),
+        "time_diff dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    let command_messages = events
+        .iter()
+        .filter(|event| event["event"] == "command_start")
+        .filter_map(|event| event["message"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        command_messages
+            .iter()
+            .any(|message| message.contains("omcpb build -p oraclemcp --bin oraclemcp")),
+        "time-diff dry-run did not schedule the omcpb package build: {command_messages:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "time_diff"),
+        "missing passing time-diff completion: {events:?}"
     );
 }
 

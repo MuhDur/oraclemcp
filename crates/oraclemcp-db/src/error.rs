@@ -31,7 +31,7 @@ pub enum QuarantineOutcome {
 #[non_exhaustive]
 pub enum FlashbackRefusalKind {
     /// Oracle no longer has enough undo/SCN mapping data for the requested
-    /// target (`ORA-01555`, `ORA-08180`).
+    /// target (`ORA-01555`, `ORA-08180`, `ORA-08186`).
     RetentionExceeded,
     /// The table/index definition changed after the requested target
     /// (`ORA-01466`).
@@ -487,7 +487,10 @@ pub(crate) fn classify_flashback_refusal_message(
 ) -> Option<(FlashbackRefusalKind, Option<i32>)> {
     let ora_code = parse_ora_code(message);
     match ora_code {
-        Some(1555 | 8180) => Some((FlashbackRefusalKind::RetentionExceeded, ora_code)),
+        // Oracle returns ORA-08186 when `TIMESTAMP_TO_SCN` cannot map an
+        // otherwise valid AS OF timestamp into retained history. This only
+        // becomes a retention refusal on this contextual flashback path.
+        Some(1555 | 8180 | 8186) => Some((FlashbackRefusalKind::RetentionExceeded, ora_code)),
         Some(1466) => Some((FlashbackRefusalKind::DefinitionChanged, ora_code)),
         Some(8182 | 8185 | 8187 | 8189..=8199) => {
             Some((FlashbackRefusalKind::NotFlashbackable, ora_code))
@@ -713,6 +716,10 @@ mod tests {
         assert_eq!(
             classify_flashback_refusal_message("ORA-01555: snapshot too old"),
             Some((FlashbackRefusalKind::RetentionExceeded, Some(1555)))
+        );
+        assert_eq!(
+            classify_flashback_refusal_message("ORA-08186: invalid timestamp specified"),
+            Some((FlashbackRefusalKind::RetentionExceeded, Some(8186)))
         );
         assert_eq!(
             classify_flashback_refusal_message(
