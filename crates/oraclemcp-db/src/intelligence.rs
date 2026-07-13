@@ -31,6 +31,74 @@ pub fn is_simple_identifier(s: &str) -> bool {
         && s.len() <= 30
 }
 
+/// The Oracle `VECTOR_DISTANCE` metric keywords supported by the governed
+/// semantic-search surface.  These are grammar tokens, never caller SQL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticSearchMetric {
+    /// Cosine distance.
+    Cosine,
+    /// Euclidean distance.
+    Euclidean,
+    /// Dot-product distance.
+    Dot,
+}
+
+impl SemanticSearchMetric {
+    /// Parse one documented Oracle vector-distance metric.
+    #[must_use]
+    pub fn parse(raw: Option<&str>) -> Option<Self> {
+        match raw
+            .map(|metric| metric.trim().to_ascii_uppercase())
+            .as_deref()
+        {
+            None | Some("") | Some("COSINE") => Some(Self::Cosine),
+            Some("EUCLIDEAN") => Some(Self::Euclidean),
+            Some("DOT") => Some(Self::Dot),
+            Some(_) => None,
+        }
+    }
+
+    /// The exact Oracle grammar token.
+    #[must_use]
+    pub const fn as_sql(self) -> &'static str {
+        match self {
+            Self::Cosine => "COSINE",
+            Self::Euclidean => "EUCLIDEAN",
+            Self::Dot => "DOT",
+        }
+    }
+}
+
+/// Build the bounded SQL shape used by `oracle_semantic_search`.
+///
+/// The schema, table, and vector-column positions cannot be bound by Oracle,
+/// so this helper accepts only simple unquoted identifiers. The query vector
+/// and top-k count remain positional binds (`:1`, `:2`); callers never supply
+/// a SQL fragment or a metric token outside [`SemanticSearchMetric`]. The
+/// dispatcher still runs the resulting statement through the live semantic
+/// resolver before execution, which proves the relation and value dependency.
+pub fn semantic_search_query(
+    owner: &str,
+    table: &str,
+    column: &str,
+    metric: SemanticSearchMetric,
+) -> Result<String, DbError> {
+    for (label, value) in [("owner", owner), ("table", table), ("column", column)] {
+        if !is_simple_identifier(value) {
+            return Err(DbError::Query(format!(
+                "invalid semantic-search {label} identifier: {value:?}"
+            )));
+        }
+    }
+    Ok(format!(
+        "SELECT t.* FROM {}.{} t ORDER BY VECTOR_DISTANCE(t.{}, :1, {}) FETCH FIRST :2 ROWS ONLY",
+        owner.to_ascii_uppercase(),
+        table.to_ascii_uppercase(),
+        column.to_ascii_uppercase(),
+        metric.as_sql(),
+    ))
+}
+
 /// The `DBMS_METADATA` object types we expose (validated allowlist).
 const DDL_OBJECT_TYPES: &[&str] = &[
     "TABLE",
@@ -2414,6 +2482,31 @@ mod tests {
         );
         assert_eq!(normalize_source_object_type("TYPE BODY"), Some("TYPE BODY"));
         assert_eq!(normalize_source_object_type("TABLE"), None);
+    }
+
+    #[test]
+    fn semantic_search_query_keeps_values_bound_and_metrics_allowlisted() {
+        let query =
+            semantic_search_query("hr", "documents", "embedding", SemanticSearchMetric::Cosine)
+                .expect("simple identifiers build a bounded semantic query");
+        assert_eq!(
+            query,
+            "SELECT t.* FROM HR.DOCUMENTS t ORDER BY VECTOR_DISTANCE(t.EMBEDDING, :1, COSINE) FETCH FIRST :2 ROWS ONLY"
+        );
+        assert_eq!(
+            SemanticSearchMetric::parse(Some("euclidean")),
+            Some(SemanticSearchMetric::Euclidean)
+        );
+        assert_eq!(SemanticSearchMetric::parse(Some("cosine; DROP")), None);
+        assert!(
+            semantic_search_query(
+                "HR",
+                "DOCUMENTS; DROP TABLE DOCUMENTS",
+                "EMBEDDING",
+                SemanticSearchMetric::Dot,
+            )
+            .is_err()
+        );
     }
 
     #[test]

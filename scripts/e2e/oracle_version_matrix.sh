@@ -232,8 +232,11 @@ run_lane() {
   # the ladder tests; READ_ONLY stays the default level (the ladder proves the
   # step-ups). A second READ_ONLY-ceiling sibling profile ("${lane}_ro", same
   # lane DSN) backs the oracle_switch_profile reconnect + posture assertions.
+  # FREE 23ai also gets a masking sibling used only to prove that vector search
+  # cannot create an unmasked egress side-channel.
   # Secrets go through credential_ref, never into the file.
   local ro_profile="${lane}_ro"
+  local semantic_masked_profile="${lane}_semantic_masked"
   local profiles_file="$lane_dir/profiles.toml"
   cat >"$profiles_file" <<PROFILES
 schema_version = 2
@@ -256,6 +259,23 @@ username = "$user"
 credential_ref = "env:ORACLE_MATRIX_ACTIVE_PASSWORD"
 max_level = "READ_ONLY"
 default_level = "READ_ONLY"
+
+[[profiles]]
+name = "$semantic_masked_profile"
+description = "version-matrix lab lane $lane semantic-search masking sibling (throwaway)"
+connect_string = "$dsn"
+username = "$user"
+credential_ref = "env:ORACLE_MATRIX_ACTIVE_PASSWORD"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
+
+[profiles.masking]
+mask_unknown_default = true
+
+[[profiles.masking.rules]]
+column_match = { column = "SECRET" }
+action = "mask"
+tag = "e2e.vector.secret"
 PROFILES
 
   # Operator-defined custom tools: a READ_ONLY tool the ladder proves is served
@@ -348,6 +368,7 @@ BADTOOL
     python3 "$ROOT/scripts/e2e/oracle_ladder_session.py" \
     --binary "$BINARY" --profile "$lane" --server-version-regex "$server_version_regex" \
     --ro-profile "$ro_profile" --custom-tool matrix_ro_probe \
+    --semantic-masked-profile "$semantic_masked_profile" \
     --table "$table" --evidence "$evidence" "${vector_smoke_args[@]}" >"$lane_dir/ladder_stdout.txt"
   local ladder_status=$?
   set -e

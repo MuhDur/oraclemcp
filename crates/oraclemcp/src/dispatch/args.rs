@@ -78,6 +78,34 @@ pub(super) struct QueryArgs {
     pub(super) as_of: Option<AsOfArg>,
 }
 
+/// Arguments for the governed 23ai vector-semantic search surface.
+#[derive(Deserialize)]
+pub(super) struct SemanticSearchArgs {
+    pub(super) over: SemanticSearchOverArgs,
+    #[serde(default)]
+    pub(super) query_text: Option<String>,
+    #[serde(default)]
+    pub(super) query_vector: Option<Vec<f64>>,
+    #[serde(default)]
+    pub(super) k: Option<usize>,
+    #[serde(default)]
+    pub(super) metric: Option<String>,
+    /// Reserved for F5 hybrid retrieval.  F2 refuses it rather than accepting
+    /// an unproven caller predicate as a data-egress bypass.
+    #[serde(default)]
+    pub(super) filter: Option<String>,
+    #[serde(default)]
+    pub(super) timeout_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct SemanticSearchOverArgs {
+    #[serde(default)]
+    pub(super) owner: Option<String>,
+    pub(super) table: String,
+    pub(super) column: String,
+}
+
 /// K9: the STRUCTURED flashback target for `oracle_query`. Exactly one of `scn`
 /// or `timestamp` must be set (both-set / neither-set is a typed refusal in the
 /// dispatcher, before any flashback is applied).

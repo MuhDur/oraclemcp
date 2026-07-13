@@ -56,15 +56,15 @@ use oraclemcp_db::{
     QuarantineOutcome, QueryCaps, QueryDiffSource, QueryResponse, QueryRowStream,
     QueryRowStreamStart, ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate,
     ResultMaskingDecisionAction, ResultMaskingDecisionSource, ResultMaskingPolicy,
-    ResultMaskingRule, SearchObject, SerializeOptions, StructuredDecodeCaps, compile_errors,
-    compile_object_statements, describe_columns, describe_constraints, describe_index,
-    describe_trigger, describe_view, diff_query_responses, execute_immediate_audit, explain_plan,
-    find_unused_declarations, get_ddl, get_source, get_sources_by_name,
+    ResultMaskingRule, SearchObject, SemanticSearchMetric, SerializeOptions, StructuredDecodeCaps,
+    compile_errors, compile_object_statements, describe_columns, describe_constraints,
+    describe_index, describe_trigger, describe_view, diff_query_responses, execute_immediate_audit,
+    explain_plan, find_unused_declarations, get_ddl, get_source, get_sources_by_name,
     incomparable_masked_columns, list_objects, list_schemas, orient_fks, orient_hot_objects,
     orient_recent_ddl, orient_schema, paginated_sql, plan_cost_estimate, plscope_identifiers,
     plscope_statements, primary_key_columns, probe_dependents, read_lob, read_query,
     read_query_as_of, read_query_named, resolved_relations_read_purity, sample_rows,
-    search_objects, search_source, serialize_row,
+    search_objects, search_source, semantic_search_query, serialize_row,
 };
 use oraclemcp_error::{
     ErrorClass, ErrorEnvelope, OptimizerPlanRow, QueryCostRefusal, ReasonCategory, StructuredReason,
@@ -140,6 +140,14 @@ const MAX_QUERY_STRUCTURED_CELLS: usize = StructuredDecodeCaps::DEEP.max_cells;
 const MAX_QUERY_STRUCTURED_BYTES: usize = StructuredDecodeCaps::DEEP.max_bytes;
 /// Hard cap on structured ARRAY/JSON recursion depth.
 const MAX_QUERY_STRUCTURED_DEPTH: usize = StructuredDecodeCaps::DEEP.max_depth;
+/// Default result count for `oracle_semantic_search` when the caller omits k.
+const DEFAULT_SEMANTIC_SEARCH_K: usize = 10;
+/// Hard result cap for one semantic-search request.
+const MAX_SEMANTIC_SEARCH_K: usize = 1_000;
+/// Hard dimension cap for a caller-provided semantic vector before it reaches
+/// either the driver or Oracle. Covers current embedding dimensions generously
+/// while keeping one request bounded.
+const MAX_SEMANTIC_SEARCH_VECTOR_DIMENSIONS: usize = 16_384;
 /// Default temporary session elevation window for `oracle_set_session_level`.
 const DEFAULT_SESSION_LEVEL_TTL_SECONDS: u64 = 900;
 /// Hard cap for one temporary session elevation window.
@@ -3180,6 +3188,124 @@ fn query_caps_from_args(args: &QueryArgs) -> QueryCaps {
             .unwrap_or(defaults.max_result_bytes)
             .clamp(1, MAX_QUERY_RESULT_BYTES),
     }
+}
+
+struct SemanticSearchResponseMetadata {
+    metric: &'static str,
+    k: usize,
+}
+
+/// Turn the constrained semantic-search request into the same internally-owned
+/// `QueryArgs` shape that powers `oracle_query`.  This is intentionally the
+/// only SQL-construction seam: identifiers are validated here, values stay
+/// binds, and the caller cannot inject a filter or metric fragment.
+async fn semantic_search_as_query_args(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    tool_name: &str,
+    args: Value,
+) -> Result<(QueryArgs, SemanticSearchResponseMetadata), ErrorEnvelope> {
+    let args: SemanticSearchArgs = parse_args(tool_name, args)?;
+    let has_vector = args.query_vector.is_some();
+    let has_text = args.query_text.is_some();
+    if has_vector == has_text {
+        return Err(invalid_args(
+            "oracle_semantic_search requires exactly one of query_vector or query_text",
+        ));
+    }
+    if args
+        .filter
+        .as_deref()
+        .is_some_and(|filter| !filter.trim().is_empty())
+    {
+        return Err(invalid_args(
+            "oracle_semantic_search filter is unavailable until the governed hybrid-retrieval surface can prove it; refusing an unproven predicate",
+        )
+        .with_next_step(
+            "omit filter for vector-only retrieval, or use the future validated hybrid-retrieval tool",
+        ));
+    }
+    if has_text {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::RuntimeStateRequired,
+            "oracle_semantic_search query_text requires a verified in-database embedding model; no model capability has been proven for this profile",
+        )
+        .with_next_step(
+            "supply query_vector, or configure a verified in-database model once the 23ai capability probe is available",
+        ));
+    }
+
+    let vector = args
+        .query_vector
+        .expect("query_vector is present when the one-of validation accepts it");
+    if vector.is_empty() || vector.len() > MAX_SEMANTIC_SEARCH_VECTOR_DIMENSIONS {
+        return Err(invalid_args(format!(
+            "query_vector must contain 1..={MAX_SEMANTIC_SEARCH_VECTOR_DIMENSIONS} finite dimensions",
+        )));
+    }
+    if vector.iter().any(|value| !value.is_finite()) {
+        return Err(invalid_args(
+            "query_vector dimensions must be finite numbers",
+        ));
+    }
+    let k = args
+        .k
+        .unwrap_or(DEFAULT_SEMANTIC_SEARCH_K)
+        .clamp(1, MAX_SEMANTIC_SEARCH_K);
+    if args
+        .k
+        .is_some_and(|requested| !(1..=MAX_SEMANTIC_SEARCH_K).contains(&requested))
+    {
+        return Err(invalid_args(format!(
+            "k must be in 1..={MAX_SEMANTIC_SEARCH_K}",
+        )));
+    }
+    let metric = SemanticSearchMetric::parse(args.metric.as_deref())
+        .ok_or_else(|| invalid_args("metric must be COSINE, EUCLIDEAN, or DOT"))?;
+    let (owner, table) =
+        owner_and_name_arg(cx, conn, args.over.owner, args.over.table, "table").await?;
+    let column = args.over.column.trim();
+    let sql =
+        semantic_search_query(&owner, &table, column, metric).map_err(DbError::into_envelope)?;
+    let vector_literal = format!(
+        "[{}]",
+        vector
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+
+    Ok((
+        QueryArgs {
+            sql,
+            binds: vec![Value::String(vector_literal), json!(k)],
+            cursor: None,
+            max_rows: Some(k),
+            max_result_bytes: None,
+            max_lob_chars: None,
+            max_blob_bytes: None,
+            max_col_width: None,
+            numbers_as_float: None,
+            deep_decode: false,
+            max_structured_rows: None,
+            max_structured_cells: None,
+            max_structured_bytes: None,
+            max_structured_depth: None,
+            timeout_seconds: args.timeout_seconds,
+            max_query_cost: None,
+            read_only_standby: false,
+            allow_plan_table_write: false,
+            export: false,
+            export_format: None,
+            streaming: false,
+            as_of: None,
+        },
+        SemanticSearchResponseMetadata {
+            metric: metric.as_sql(),
+            k,
+        },
+    ))
 }
 
 fn diff_query_caps_from_args(args: &DiffArgs) -> QueryCaps {
@@ -10751,6 +10877,8 @@ impl ToolDispatch for OracleDispatcher {
 /// result so both paths reuse them. Behavior is identical to the prior code.
 struct QueryPrepared {
     args: QueryArgs,
+    /// The served tool that owns this query's audit record.
+    audit_tool: &'static str,
     /// The audit-marked SQL actually executed (== the text that was classified).
     executed_sql: String,
     /// The read-only gate verdict for `executed_sql`, computed once.
@@ -11544,7 +11672,10 @@ impl OracleDispatcher {
             let a: ReadPatchPreviewArgs = parse_args(name, args)?;
             return read_patch_preview(&state, name, a);
         }
-        // A3/perf: oracle_query is handled here as a dedicated early-return arm
+        // A3/perf: the constrained semantic-search surface deliberately enters
+        // through the same early-return path as oracle_query. It constructs a
+        // server-owned QueryArgs value, then shares policy narrowing, semantic
+        // proof, the read-only transaction backstop, masking, and audit.
         // (like the write-class tools above) so its args are parsed ONCE and the
         // mark+classify pipeline runs ONCE. The prior code parsed `QueryArgs`
         // twice and marked/classified the same SQL on both the backstop path and
@@ -11554,9 +11685,20 @@ impl OracleDispatcher {
         // verdict, and reuse them for both the backstop and the read. Behavior
         // is identical; the conditional `args` move is confined to this diverging
         // branch, so `args` stays owned for the non-query match below.
-        if tool == "oracle_query" {
-            let prepared = {
-                let parsed = parse_args::<QueryArgs>(name, args)?;
+        if matches!(tool, "oracle_query" | "oracle_semantic_search") {
+            let (prepared, semantic_metadata) = {
+                let audit_tool = if tool == "oracle_semantic_search" {
+                    "oracle_semantic_search"
+                } else {
+                    "oracle_query"
+                };
+                let (parsed, semantic_metadata) = if tool == "oracle_semantic_search" {
+                    let (parsed, metadata) =
+                        semantic_search_as_query_args(cx, state.conn.as_ref(), name, args).await?;
+                    (parsed, Some(metadata))
+                } else {
+                    (parse_args::<QueryArgs>(name, args)?, None)
+                };
                 // K9: validate the STRUCTURED as_of one-of and build the
                 // flashback target BEFORE any classification or I/O (both-set /
                 // empty -> typed refusal). The base SELECT below is classified
@@ -11606,7 +11748,7 @@ impl OracleDispatcher {
                     .clone()
                     .unwrap_or_else(|| parsed.sql.clone());
                 let executed_sql =
-                    with_audit_marker(&policy_sql, state.active_profile.as_deref(), "oracle_query");
+                    with_audit_marker(&policy_sql, state.active_profile.as_deref(), audit_tool);
                 let classified = ensure_resolved_read_only(
                     cx,
                     state.conn.as_ref(),
@@ -11618,14 +11760,18 @@ impl OracleDispatcher {
                     Ok(decision) => (Ok(()), Some(decision.verdict_certificate().clone())),
                     Err(error) => (Err(error), None),
                 };
-                QueryPrepared {
-                    args: parsed,
-                    executed_sql,
-                    gate,
-                    verdict_certificate,
-                    as_of,
-                    policy: policy.attachment.clone(),
-                }
+                (
+                    QueryPrepared {
+                        args: parsed,
+                        audit_tool,
+                        executed_sql,
+                        gate,
+                        verdict_certificate,
+                        as_of,
+                        policy: policy.attachment.clone(),
+                    },
+                    semantic_metadata,
+                )
             };
             request_budget = query_budget_with_cost_limit(
                 request_budget,
@@ -11749,6 +11895,17 @@ impl OracleDispatcher {
             // The proof of what the policy took away rides on the read it governed.
             if let (Some(tightening), Value::Object(map)) = (policy_attachment, &mut response) {
                 map.insert("policy".to_owned(), tightening);
+            }
+            if let (Some(metadata), Value::Object(map)) = (semantic_metadata, &mut response) {
+                map.insert(
+                    "metric".to_owned(),
+                    Value::String(metadata.metric.to_owned()),
+                );
+                map.insert("k".to_owned(), json!(metadata.k));
+                // F2 does not inspect an execution plan: reporting a boolean
+                // here would claim an index decision that this read did not
+                // prove. The later capability/index slice can populate it.
+                map.insert("used_index".to_owned(), Value::Null);
             }
             return Ok(response);
         }
@@ -13199,6 +13356,7 @@ impl OracleDispatcher {
         } = runtime;
         let QueryPrepared {
             args: a,
+            audit_tool,
             executed_sql,
             gate,
             verdict_certificate,
@@ -13384,7 +13542,7 @@ impl OracleDispatcher {
                 {
                     append_query_read_audit(
                         read_audit,
-                        "oracle_query",
+                        audit_tool,
                         &executed_sql,
                         observed_scn,
                         audit_certificate,
@@ -13428,7 +13586,7 @@ impl OracleDispatcher {
                         {
                             append_query_read_audit(
                                 read_audit,
-                                "oracle_query",
+                                audit_tool,
                                 &executed_sql,
                                 observed_scn,
                                 audit_certificate,
@@ -13444,7 +13602,7 @@ impl OracleDispatcher {
                 {
                     append_query_read_audit(
                         read_audit,
-                        "oracle_query",
+                        audit_tool,
                         &executed_sql,
                         observed_scn,
                         audit_certificate,
@@ -13578,6 +13736,7 @@ impl OracleDispatcher {
                 };
                 QueryPrepared {
                     args: parsed,
+                    audit_tool: "oracle_query",
                     executed_sql,
                     gate,
                     verdict_certificate,
@@ -13684,6 +13843,7 @@ impl OracleDispatcher {
     ) -> Result<QueryStreamDelivery, ErrorEnvelope> {
         let QueryPrepared {
             args: a,
+            audit_tool: _,
             executed_sql,
             gate,
             verdict_certificate: _,

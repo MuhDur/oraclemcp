@@ -15,12 +15,13 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 58] = [
+pub const TOOL_NAMES: [&str; 59] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
     "oracle_set_session_level",
     "oracle_query",
+    "oracle_semantic_search",
     "oracle_diff",
     "oracle_preview_sql",
     "oracle_execute",
@@ -215,6 +216,27 @@ fn query_output_schema() -> Value {
         "required": ["columns", "row_count"],
         "additionalProperties": true
     })
+}
+
+fn semantic_search_output_schema() -> Value {
+    let mut schema = query_output_schema();
+    let properties = schema["properties"]
+        .as_object_mut()
+        .expect("query output schema has object properties");
+    properties.insert(
+        "metric".to_owned(),
+        json!({ "type": "string", "enum": ["COSINE", "EUCLIDEAN", "DOT"] }),
+    );
+    properties.insert(
+        "k".to_owned(),
+        json!({ "type": "integer", "minimum": 1, "maximum": 1000 }),
+    );
+    properties.insert(
+        "used_index".to_owned(),
+        json!({ "type": ["boolean", "null"], "description": "Null when this bounded read did not inspect an execution plan; never inferred from a requested index." }),
+    );
+    schema["required"] = json!(["columns", "row_count", "metric", "k", "used_index"]);
+    schema
 }
 
 fn diff_source_schema(description: &str) -> Value {
@@ -488,6 +510,39 @@ pub fn tool_registry() -> ToolRegistry {
             &["sql"],
         ))
         .with_output_schema(query_output_schema()),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_semantic_search",
+            ToolTier::FoundationLiveDb,
+            "Run a bounded, fail-closed 23ai vector search through the same policy, semantic-resolution, masking, and audit path as oracle_query.",
+        )
+        .with_input_schema(object_schema(
+            props_with(
+                json!({
+                    "over": {
+                        "type": "object",
+                        "description": "The local table and VECTOR column to search. Identifiers must be simple unquoted names and are live-resolved before execution.",
+                        "properties": {
+                            "owner": { "type": "string", "description": "Optional schema owner; defaults to the current schema." },
+                            "table": { "type": "string", "description": "Table containing the VECTOR column." },
+                            "column": { "type": "string", "description": "VECTOR column used only for distance ordering." }
+                        },
+                        "required": ["table", "column"],
+                        "additionalProperties": false
+                    },
+                    "query_vector": { "type": "array", "minItems": 1, "maxItems": 16384, "description": "Numeric query vector. Exactly one of query_vector or query_text is required in this tool generation.", "items": { "type": "number" } },
+                    "query_text": { "type": "string", "description": "Reserved for verified in-database embedding models. Refused until the profile capability probe proves a model; use query_vector meanwhile." },
+                    "k": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Top-k result count (default 10, hard cap 1000)." },
+                    "metric": { "type": "string", "enum": ["COSINE", "EUCLIDEAN", "DOT"], "description": "VECTOR_DISTANCE metric (default COSINE)." },
+                    "filter": { "type": "string", "description": "Reserved for the validated hybrid-retrieval surface; non-empty values are refused rather than accepted as raw SQL." }
+                }),
+                &[timeout_seconds_prop()],
+            ),
+            &["over"],
+        ))
+        .with_output_schema(semantic_search_output_schema()),
     );
 
     registry.register(
@@ -2072,6 +2127,18 @@ mod tests {
                     "max_query_cost",
                     "read_only_standby",
                     "allow_plan_table_write",
+                ],
+            ),
+            (
+                "oracle_semantic_search",
+                &[
+                    "over",
+                    "query_vector",
+                    "query_text",
+                    "k",
+                    "metric",
+                    "filter",
+                    "timeout_seconds",
                 ],
             ),
             (

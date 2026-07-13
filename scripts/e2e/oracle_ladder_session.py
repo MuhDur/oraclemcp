@@ -174,6 +174,7 @@ class Ladder:
         self.table = args.table
         self.primary_profile = args.profile
         self.ro_profile = getattr(args, "ro_profile", None)
+        self.semantic_masked_profile = getattr(args, "semantic_masked_profile", None)
         self.custom_tool = getattr(args, "custom_tool", None)
         self.vector_smoke = getattr(args, "vector_smoke", False)
         self.table_created = False
@@ -591,9 +592,14 @@ class Ladder:
             return {"describe_ok": True, "row_count": count}
 
         def vector_distance_smoke():
-            """Prove the 23ai lane executes the VECTOR SQL surface end-to-end."""
+            """Prove governed vector retrieval and its egress boundary end-to-end."""
             if not self.vector_smoke:
                 return {"skipped": "VECTOR smoke is specific to the FREE 23ai lane"}
+            require(
+                self.semantic_masked_profile,
+                "FREE 23ai vector proof has a READ_ONLY masking sibling profile",
+                self.semantic_masked_profile,
+            )
 
             vector_table = self.vector_table
             # The local FREE 23ai system account defaults to SYSTEM, whose
@@ -602,17 +608,23 @@ class Ladder:
             # tablespace and keeps this synthetic fixture out of SYSTEM.
             self.governed_execute(
                 f"CREATE TABLE {vector_table} "
-                "(id NUMBER PRIMARY KEY, embedding VECTOR(3, FLOAT32)) TABLESPACE USERS",
+                "(id NUMBER PRIMARY KEY, label VARCHAR2(40), secret VARCHAR2(80), "
+                "embedding VECTOR(3, FLOAT32)) TABLESPACE USERS",
                 commit=True,
                 expect={"committed": True},
             )
             self.vector_table_created = True
-            self.governed_execute(
-                f"INSERT INTO {vector_table} (id, embedding) "
-                "VALUES (1, '[1,0,0]')",
-                commit=True,
-                expect={"committed": True, "rolled_back": False, "rows_affected": 1},
-            )
+            for row_id, label, secret, embedding in [
+                (1, "nearest", "do-not-return-vector-secret", "[1,0,0]"),
+                (2, "second", "do-not-return-vector-secret", "[0.8,0.2,0]"),
+                (3, "far", "do-not-return-vector-secret", "[0,1,0]"),
+            ]:
+                self.governed_execute(
+                    f"INSERT INTO {vector_table} (id, label, secret, embedding) "
+                    f"VALUES ({row_id}, '{label}', '{secret}', '{embedding}')",
+                    commit=True,
+                    expect={"committed": True, "rolled_back": False, "rows_affected": 1},
+                )
             rows = self.query_rows(
                 f"SELECT VECTOR_DISTANCE(v.embedding, '[1,0,0]', COSINE) AS distance "
                 f"FROM {vector_table} v WHERE v.id = 1"
@@ -629,11 +641,136 @@ class Ladder:
                 "VECTOR_DISTANCE of identical vectors is zero",
                 {"distance": distance, "rows": rows},
             )
+
+            search_args = {
+                "over": {"table": vector_table, "column": "embedding"},
+                "query_vector": [1.0, 0.0, 0.0],
+                "k": 2,
+                "metric": "COSINE",
+            }
+            semantic_result = self.session.call("oracle_semantic_search", search_args)
+            semantic = structured(semantic_result)
+            require(
+                semantic_result.get("isError") is not True,
+                "oracle_semantic_search succeeds through the served MCP surface",
+                semantic,
+            )
+            semantic_rows = semantic.get("rows") or []
+            require(
+                semantic.get("metric") == "COSINE" and semantic.get("k") == 2,
+                "semantic search reports the bound metric and k",
+                semantic,
+            )
+            require(
+                semantic.get("used_index") is None,
+                "semantic search does not claim an unproven index decision",
+                semantic,
+            )
+            require(
+                len(semantic_rows) == 2 and semantic_rows[0].get("ID") == "1",
+                "semantic search returns the synthetic nearest row first",
+                semantic_rows,
+            )
+
+            filter_result = self.session.call(
+                "oracle_semantic_search", {**search_args, "filter": "id = 1"}
+            )
+            filter_refusal = structured(filter_result)
+            require(
+                filter_result.get("isError") is True
+                and filter_refusal.get("error_class") == "INVALID_ARGUMENTS",
+                "an unproven caller filter is refused before it can become SQL",
+                filter_refusal,
+            )
+
+            # Oracle Free can return ORA-01466 to a second session that opens
+            # while the DDL-owning session still holds its read snapshot. Close
+            # that served session first, then prove masked egress from a fresh
+            # READ_ONLY MCP client against the committed synthetic fixture.
+            # This is a lifecycle boundary, not a retry: an initialization or
+            # masked read failure remains a hard test failure.
+            self.session.close()
+            # Oracle's 23ai dictionary can expose a just-created VECTOR table
+            # to a new session before its definition-SCN settles, yielding
+            # ORA-01466 instead of a stable read. This single post-DDL barrier
+            # is not a retry and is deliberately short; the following served
+            # call still has exactly one chance to prove masked egress.
+            time.sleep(2)
+            masked = McpSession(self.args.binary, self.semantic_masked_profile)
+            try:
+                init = masked.rpc(
+                    "initialize",
+                    {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "clientInfo": {"name": "oracle-vector-mask-e2e", "version": "1"},
+                    },
+                )
+                require(
+                    init.get("result", {}).get("serverInfo", {}).get("name") == "oraclemcp",
+                    "masked semantic-search session identifies the served server",
+                    init,
+                )
+                masked.notify("notifications/initialized")
+                masked_result = masked.call("oracle_semantic_search", search_args)
+                masked_content = structured(masked_result)
+                require(
+                    masked_result.get("isError") is not True,
+                    "READ_ONLY masked profile can run semantic search",
+                    masked_content,
+                )
+                require(
+                    "do-not-return-vector-secret" not in json.dumps(masked_content),
+                    "semantic search never leaks the synthetic secret through a masked profile",
+                    masked_content,
+                )
+                certificate = masked_content.get("mask_certificate") or {}
+                decisions = certificate.get("decisions") or []
+                require(
+                    certificate.get("audit_entry_hash"),
+                    "semantic-search masking certificate is bound to the sibling audit chain",
+                    certificate,
+                )
+                require(
+                    any(decision.get("column") == "SECRET" for decision in decisions),
+                    "semantic-search masking certificate records the secret-column decision",
+                    certificate,
+                )
+            finally:
+                masked.close()
+
+            # Resume the main ladder on a fresh primary session. The fixture's
+            # DDL/DML was committed through the prior governed session, and the
+            # cleanup below still goes through the normal DDL confirmation gate.
+            self.session = McpSession(self.args.binary, self.primary_profile)
+            resumed = self.session.rpc(
+                "initialize",
+                {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "oracle-vector-resume-e2e", "version": "1"},
+                },
+            )
+            require(
+                resumed.get("result", {}).get("serverInfo", {}).get("name") == "oraclemcp",
+                "resumed primary session identifies the served server",
+                resumed,
+            )
+            self.session.notify("notifications/initialized")
+            self.harness.profile = self.primary_profile
+            self.elevate("DDL")
+
             self.governed_execute(
                 f"DROP TABLE {vector_table} PURGE", commit=True, expect={"committed": True}
             )
             self.vector_table_dropped = True
-            return {"distance": distance, "vector_column": "VECTOR(3, FLOAT32)"}
+            return {
+                "distance": distance,
+                "vector_column": "VECTOR(3, FLOAT32)",
+                "top_k": [row.get("ID") for row in semantic_rows],
+                "masked_secret_absent": True,
+                "raw_filter_refused": filter_refusal.get("error_class"),
+            }
 
         # --- Source-object governed-DDL sub-ladder (still at DDL) -----------
         # Exercises oracle_create_or_replace / oracle_compile_object /
@@ -1560,6 +1697,11 @@ def main():
         "--vector-smoke",
         action="store_true",
         help="create a synthetic VECTOR column and verify VECTOR_DISTANCE (FREE 23ai only)",
+    )
+    parser.add_argument(
+        "--semantic-masked-profile",
+        default=None,
+        help="READ_ONLY sibling profile whose masking policy proves vector-search egress",
     )
     args = parser.parse_args()
 

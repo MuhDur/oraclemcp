@@ -99,10 +99,10 @@ pub use catalog_resolver::{
     read_catalog_resolve_context, resolved_relations_read_purity,
 };
 pub use connection::{
-    DRIVER_VERSION, DbRequestQuota, DbmsOutput, ExecuteOutcome, OracleConnection, OracleRoutineArg,
-    QueryRowStream, QueryRowStreamStart, RustOracleConnection, WalletCertValidity,
-    WalletFileChoice, WalletResolutionReport, WalletResolveError, resolve_wallet_choice,
-    selected_endpoint_uses_tcps, wallet_certificate_validity,
+    CqnQueryRegistration, DRIVER_VERSION, DbRequestQuota, DbmsOutput, ExecuteOutcome,
+    OracleConnection, OracleRoutineArg, QueryRowStream, QueryRowStreamStart, RustOracleConnection,
+    WalletCertValidity, WalletFileChoice, WalletResolutionReport, WalletResolveError,
+    resolve_wallet_choice, selected_endpoint_uses_tcps, wallet_certificate_validity,
 };
 pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compiled};
 pub use drcp::{DrcpConfig, SessionPurity};
@@ -120,13 +120,13 @@ pub use intelligence::{
     OrientForeignKeyColumn, OrientHotObject, OrientRecentDdlObject, OrientSchemaObject,
     PLAN_COST_ESTIMATE_NOTE, PlanCostEstimate, PlanCostRow, PlanCostSummary, QueryDiff,
     QueryDiffChange, QueryDiffError, QueryDiffSource, SearchColumn, SearchDetailLevel, SearchIndex,
-    SearchObject, SourceText, TriggerDescription, ViewDescription, assemble_cost_estimate,
-    compile_errors, dependent_from_row, describe_columns, describe_constraints, describe_index,
-    describe_trigger, describe_view, diff_query_responses, explain_plan, get_ddl, get_source,
-    get_sources_by_name, is_ddl_object_type, list_objects, list_schemas, list_source_types,
-    normalize_source_object_type, orient_fks, orient_hot_objects, orient_recent_ddl, orient_schema,
-    plan_cost_estimate, primary_key_columns, probe_dependents, read_lob, sample_rows,
-    search_objects, search_source,
+    SearchObject, SemanticSearchMetric, SourceText, TriggerDescription, ViewDescription,
+    assemble_cost_estimate, compile_errors, dependent_from_row, describe_columns,
+    describe_constraints, describe_index, describe_trigger, describe_view, diff_query_responses,
+    explain_plan, get_ddl, get_source, get_sources_by_name, is_ddl_object_type, list_objects,
+    list_schemas, list_source_types, normalize_source_object_type, orient_fks, orient_hot_objects,
+    orient_recent_ddl, orient_schema, plan_cost_estimate, primary_key_columns, probe_dependents,
+    read_lob, sample_rows, search_objects, search_source, semantic_search_query,
 };
 pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_id};
 pub use masking::{
