@@ -90,7 +90,9 @@ import {
   parseClassifierLadder,
   parseCostEstimate,
   parseQueryCostRefusal,
+  profileCostCeiling,
   parseFleetMap,
+  parseActiveProfile,
   parseMaskCertificate,
   parsePolicyTightening,
   parseQueryAsOf,
@@ -6978,9 +6980,28 @@ function CostGatePanel({
   sql: string;
 }): React.ReactElement {
   const CostBadge = OMCP_SKIN.renderers.CostBadge;
-  // A ceiling learned from a refusal on this lane. Cleared on a profile switch,
-  // because a different profile may carry a different max_query_cost.
-  const [disclosedCeiling, setDisclosedCeiling] = React.useState<number | null>(null);
+
+  // The ceiling in force is published: /operator/v1/config carries every
+  // profile's max_query_cost. Read it from there rather than waiting for the
+  // gate to refuse something — by then the number is too late to be useful.
+  const config = useQuery({
+    queryKey: ["operator-config"],
+    queryFn: fetchOperatorConfig,
+    staleTime: 30_000
+  });
+  const connection = useQuery({
+    queryKey: ["workbench-connection", laneId],
+    queryFn: async () => {
+      if (!session) {
+        throw new Error("dashboard session is not ready");
+      }
+      return fetchExplorerConnection(session, laneId);
+    },
+    enabled: Boolean(session),
+    retry: false
+  });
+  const activeProfile = connection.data ? parseActiveProfile(connection.data.data) : null;
+  const configured = profileCostCeiling(config.data?.data ?? null, activeProfile);
 
   const estimate = useQuery({
     queryKey: ["query-cost-estimate", laneId, sql],
@@ -6998,11 +7019,6 @@ function CostGatePanel({
     () => parseQueryCostRefusal(estimate.error ?? estimate.data ?? null),
     [estimate.data, estimate.error]
   );
-  React.useEffect(() => {
-    if (refusal) {
-      setDisclosedCeiling(refusal.maxQueryCost);
-    }
-  }, [refusal]);
 
   const read = estimate.data ? parseCostEstimate(estimate.data.data) : null;
   const outcome = estimate.error
@@ -7016,7 +7032,12 @@ function CostGatePanel({
     estimateUnavailable: read?.unavailable ?? (outcome && !refusal ? outcome.message : null),
     note: read?.note ?? null,
     planRows: read?.planRows ?? [],
-    ceiling: disclosedCeiling
+    // The refusal's ceiling wins when there is one: the server has already met
+    // the profile ceiling with any per-call one via min(), so its number is the
+    // effective ceiling and can legitimately be lower than the configured one.
+    ceiling: configured.ceiling,
+    ceilingSource: configured.source,
+    ungated: configured.ungated
   });
 
   return (

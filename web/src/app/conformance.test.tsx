@@ -387,39 +387,63 @@ describe("OMCP skin conformance", () => {
     expect(markup).toContain('data-hint-count="1"');
   });
 
-  it("never invents a ceiling the server did not disclose", () => {
+  it("renders the ceiling the operator config publishes, with no refusal in play", () => {
     const CostBadge = OMCP_SKIN.renderers.CostBadge;
-    // A priced statement with no refusal: the gate discloses max_query_cost only
-    // when it refuses, so the badge must say the ceiling is undisclosed.
+    // The ceiling is on the wire: /operator/v1/config carries each profile's
+    // max_query_cost, so the badge shows it BEFORE the gate refuses anything.
     const priced = toCostBadgeViewModel({
       refusal: null,
       estimate: 1_200,
       estimateUnavailable: null,
       note: "optimizer costs are relative estimates",
       planRows: [],
-      ceiling: null
+      ceiling: 50_000,
+      ceilingSource: "config",
+      ungated: false
     });
-    expect(priced.verdict).toBe("estimated");
-    expect(priced.ceiling).toBeNull();
-    expect(priced.ratio).toBeNull();
+    expect(priced.verdict).toBe("within_ceiling");
     const markup = renderToStaticMarkup(<CostBadge model={priced} />);
-    expect(markup).toContain('data-cost-verdict="estimated"');
+    expect(markup).toContain('data-cost-verdict="within_ceiling"');
     expect(markup).toContain('data-cost-estimate="1200"');
-    expect(markup).toContain('data-cost-ceiling="undisclosed"');
+    expect(markup).toContain('data-cost-ceiling="50000"');
+    expect(markup).toContain('data-cost-ceiling-source="config"');
+  });
 
-    // Nothing priced at all: "unknown", not a zero cost and not a green light.
-    const unpriced = toCostBadgeViewModel({
+  it("never invents a ceiling, and never confuses 'ungated' with 'unknown'", () => {
+    const CostBadge = OMCP_SKIN.renderers.CostBadge;
+    // The console could not identify the active profile: it says nothing about a
+    // budget it cannot see — not zero, not unlimited.
+    const unknown = toCostBadgeViewModel({
       refusal: null,
       estimate: null,
       estimateUnavailable: null,
       note: null,
       planRows: [],
-      ceiling: null
+      ceiling: null,
+      ceilingSource: "unknown",
+      ungated: false
     });
-    expect(unpriced.verdict).toBe("unknown");
-    expect(renderToStaticMarkup(<CostBadge model={unpriced} />)).toContain(
-      'data-cost-estimate="unknown"'
-    );
+    expect(unknown.verdict).toBe("unknown");
+    const unknownMarkup = renderToStaticMarkup(<CostBadge model={unknown} />);
+    expect(unknownMarkup).toContain('data-cost-estimate="unknown"');
+    expect(unknownMarkup).toContain('data-cost-ceiling="undisclosed"');
+
+    // The config positively says this profile declares no max_query_cost: the
+    // gate is off. That is a fact, and it renders differently from "unknown".
+    const ungated = toCostBadgeViewModel({
+      refusal: null,
+      estimate: null,
+      estimateUnavailable: null,
+      note: null,
+      planRows: [],
+      ceiling: null,
+      ceilingSource: "unknown",
+      ungated: true
+    });
+    expect(ungated.verdict).toBe("ungated");
+    const ungatedMarkup = renderToStaticMarkup(<CostBadge model={ungated} />);
+    expect(ungatedMarkup).toContain('data-cost-verdict="ungated"');
+    expect(ungatedMarkup).toContain('data-cost-ceiling="none"');
   });
 
   it("renders the undo tree and refuses a plain Undo for effects that escape rollback", () => {

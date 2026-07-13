@@ -718,7 +718,8 @@ export function CostBadgeRenderer({ model }: { model: CostBadgeViewModel }): Rea
       data-grammar-version={model.grammarVersion}
       data-cost-verdict={model.verdict}
       data-cost-estimate={model.estimate === null ? "unknown" : model.estimate}
-      data-cost-ceiling={model.ceiling === null ? "undisclosed" : model.ceiling}
+      data-cost-ceiling={model.ceiling === null ? (model.verdict === "ungated" ? "none" : "undisclosed") : model.ceiling}
+      data-cost-ceiling-source={model.ceilingSource}
       data-cost-ratio={model.ratio === null ? "" : model.ratio.toFixed(3)}
       data-hint-count={model.hints.length}
     >
@@ -731,7 +732,11 @@ export function CostBadgeRenderer({ model }: { model: CostBadgeViewModel }): Rea
         <span className="font-mono text-2xs tabular-nums text-[var(--om-text-muted)]">
           {model.estimate === null ? "cost —" : `cost ${model.estimate}`}
           {" / "}
-          {model.ceiling === null ? "ceiling undisclosed" : `ceiling ${model.ceiling}`}
+          {model.ceiling === null
+            ? model.verdict === "ungated"
+              ? "no ceiling configured"
+              : "ceiling undisclosed"
+            : `ceiling ${model.ceiling}`}
         </span>
       </header>
 

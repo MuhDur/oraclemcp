@@ -5,6 +5,8 @@ import {
   OperatorOutcomeError,
   parseCostEstimate,
   parseQueryCostRefusal,
+  profileCostCeiling,
+  type ConfigOpsStatusData,
   type WorkbenchActionData
 } from "./operator-client";
 
@@ -158,6 +160,132 @@ describe("explain-plan cost estimate", () => {
   });
 });
 
+describe("configured cost ceiling (the ceiling is on the wire)", () => {
+  // /operator/v1/config publishes every profile's max_query_cost (Rust:
+  // ProfileMetadata). The console must read it there instead of waiting for the
+  // gate to refuse something — by then the number is too late to be useful.
+  const config = (
+    profiles: { name: string; max_query_cost?: number | null }[],
+    defaultProfile = "prod_read"
+  ): ConfigOpsStatusData => ({
+    source: "self_lane",
+    status: {
+      target_path: "/etc/oraclemcp/config.toml",
+      target_exists: true,
+      current_sha256: "sha256:cfg",
+      default_profile: defaultProfile,
+      profiles
+    }
+  });
+
+  it("reads the active profile's ceiling straight from the config", () => {
+    const read = profileCostCeiling(
+      config([
+        { name: "prod_read", max_query_cost: 50_000 },
+        { name: "staging", max_query_cost: 1_000_000 }
+      ]),
+      "staging"
+    );
+    expect(read.ceiling).toBe(1_000_000);
+    expect(read.source).toBe("config");
+    expect(read.ungated).toBe(false);
+  });
+
+  it("falls back to the default profile when the active one is unknown", () => {
+    const read = profileCostCeiling(config([{ name: "prod_read", max_query_cost: 50_000 }]), null);
+    expect(read.ceiling).toBe(50_000);
+    expect(read.source).toBe("config");
+  });
+
+  it("distinguishes 'no ceiling configured' from 'we do not know'", () => {
+    // The profile exists and declares no max_query_cost: the gate is OFF for it.
+    const ungated = profileCostCeiling(config([{ name: "prod_read" }]), "prod_read");
+    expect(ungated.ceiling).toBeNull();
+    expect(ungated.ungated).toBe(true);
+
+    // The profile is not in the config at all: the console knows nothing, and
+    // must not report that as "ungated".
+    const unknown = profileCostCeiling(config([{ name: "prod_read" }]), "ghost_profile");
+    expect(unknown.ceiling).toBeNull();
+    expect(unknown.ungated).toBe(false);
+    expect(unknown.source).toBe("unknown");
+
+    // No config at all: same — unknown, not ungated.
+    expect(profileCostCeiling(null, "prod_read")).toEqual({
+      ceiling: null,
+      source: "unknown",
+      ungated: false
+    });
+  });
+
+  it("shows the configured ceiling before anything has been priced", () => {
+    const model = toCostBadgeViewModel({
+      refusal: null,
+      estimate: null,
+      estimateUnavailable: null,
+      note: null,
+      planRows: [],
+      ceiling: 50_000,
+      ceilingSource: "config",
+      ungated: false
+    });
+    // The regression this bead fixes: a numeric ceiling with NO refusal in play.
+    expect(model.ceiling).toBe(50_000);
+    expect(model.ceilingSource).toBe("config");
+    expect(model.headline).toContain("Ceiling 50000");
+  });
+
+  it("judges an estimate against the configured ceiling, before the gate refuses", () => {
+    const model = toCostBadgeViewModel({
+      refusal: null,
+      estimate: 1_200,
+      estimateUnavailable: null,
+      note: null,
+      planRows: [],
+      ceiling: 50_000,
+      ceilingSource: "config",
+      ungated: false
+    });
+    expect(model.verdict).toBe("within_ceiling");
+    expect(model.ratio).toBeCloseTo(0.024, 3);
+    expect(model.detail).toContain("profile configuration");
+  });
+
+  it("lets a lower refusal-disclosed ceiling win over the configured one", () => {
+    // A per-call max_query_cost meets the profile ceiling with min(), so the
+    // refusal's number is the effective one and may be lower than the config's.
+    const model = toCostBadgeViewModel({
+      refusal: parseQueryCostRefusal(costRefusalResponse()),
+      estimate: null,
+      estimateUnavailable: null,
+      note: null,
+      planRows: [],
+      ceiling: 5_000_000,
+      ceilingSource: "config",
+      ungated: false
+    });
+    expect(model.verdict).toBe("refused");
+    expect(model.ceiling).toBe(50_000);
+    expect(model.ceilingSource).toBe("refusal");
+  });
+
+  it("reports an ungated profile as ungated, not as an unknown ceiling", () => {
+    const model = toCostBadgeViewModel({
+      refusal: null,
+      estimate: null,
+      estimateUnavailable: null,
+      note: null,
+      planRows: [],
+      ceiling: null,
+      ceilingSource: "unknown",
+      ungated: true
+    });
+    expect(model.verdict).toBe("ungated");
+    expect(model.headline).toBe("No cost ceiling configured");
+    expect(model.detail).toContain("not cost-gated");
+  });
+});
+
 describe("cost badge view-model", () => {
   it("prices a refusal with both numbers and a full meter", () => {
     const model = toCostBadgeViewModel({
@@ -176,8 +304,10 @@ describe("cost badge view-model", () => {
     expect(model.tone).toBe("warn");
   });
 
-  it("calls a statement within_ceiling only against a ceiling the server disclosed", () => {
-    const undisclosed = toCostBadgeViewModel({
+  it("calls a statement within_ceiling only against a ceiling actually in force", () => {
+    // No ceiling known — neither from the config nor from a refusal. The badge
+    // shows the price and says nothing about a budget it cannot see.
+    const noCeiling = toCostBadgeViewModel({
       refusal: null,
       estimate: 1_200,
       estimateUnavailable: null,
@@ -185,12 +315,13 @@ describe("cost badge view-model", () => {
       planRows: [],
       ceiling: null
     });
-    expect(undisclosed.verdict).toBe("estimated");
-    expect(undisclosed.ceiling).toBeNull();
-    expect(undisclosed.detail).toContain("only when the gate refuses");
+    expect(noCeiling.verdict).toBe("estimated");
+    expect(noCeiling.ceiling).toBeNull();
+    expect(noCeiling.ceilingSource).toBe("unknown");
+    expect(noCeiling.ratio).toBeNull();
 
-    // Once a refusal has disclosed the ceiling, a later estimate can be judged.
-    const disclosed = toCostBadgeViewModel({
+    // With a ceiling in force (config or refusal), the estimate can be judged.
+    const judged = toCostBadgeViewModel({
       refusal: null,
       estimate: 1_200,
       estimateUnavailable: null,
@@ -198,8 +329,8 @@ describe("cost badge view-model", () => {
       planRows: [],
       ceiling: 50_000
     });
-    expect(disclosed.verdict).toBe("within_ceiling");
-    expect(disclosed.ratio).toBeCloseTo(0.024, 3);
+    expect(judged.verdict).toBe("within_ceiling");
+    expect(judged.ratio).toBeCloseTo(0.024, 3);
   });
 
   it("stays unknown when nothing has priced the statement", () => {

@@ -3,6 +3,7 @@ import {
   isRegisteredDerivationStep,
   type CostPlanRowViewModel,
   type ClearanceLevel,
+  type CostCeilingSource,
   type CostRefusalInput,
   type FleetDbStatus,
   type FleetMapInput,
@@ -471,6 +472,11 @@ export type ConfigProfileMetadata = {
   read_only_standby?: boolean;
   mcp_exposed?: boolean;
   pool?: Record<string, unknown> | null;
+  // The profile's `oracle_query` cost ceiling, published by ProfileMetadata.
+  // Absent/null means the profile declares none: the query cost gate is off for
+  // it. That is a fact about the configuration, not a missing reading.
+  max_query_cost?: number | null;
+  call_timeout_seconds?: number | null;
 };
 
 export type ConfigOpsStatus = {
@@ -2042,6 +2048,47 @@ export function parseCostEstimate(data: WorkbenchActionData | null): CostEstimat
     note: stringValue(estimate?.["note"]),
     planRows: planRowsFrom(estimate?.["rows"])
   };
+}
+
+export type CostCeilingRead = {
+  ceiling: number | null;
+  source: CostCeilingSource;
+  // True only when the config positively says this profile declares no ceiling.
+  ungated: boolean;
+};
+
+/**
+ * The `oracle_query` cost ceiling in force, read from the operator config.
+ *
+ * `/operator/v1/config` publishes every profile's `max_query_cost` (Rust:
+ * `ProfileMetadata`), so the console does not have to wait for a refusal to
+ * learn it. Three distinct answers, and the badge must not conflate them:
+ * a number (this profile is gated at N), `ungated` (the profile declares no
+ * ceiling — the gate is off), and "unknown" (we could not identify the active
+ * profile, so we say nothing).
+ */
+export function profileCostCeiling(
+  config: ConfigOpsStatusData | null,
+  activeProfile: string | null
+): CostCeilingRead {
+  const profiles = config?.status?.profiles ?? [];
+  const name = activeProfile ?? config?.status?.default_profile ?? null;
+  const profile = name ? profiles.find((entry) => entry.name === name) : undefined;
+  if (!profile) {
+    return { ceiling: null, source: "unknown", ungated: false };
+  }
+  const ceiling = typeof profile.max_query_cost === "number" ? profile.max_query_cost : null;
+  return {
+    ceiling,
+    source: ceiling === null ? "unknown" : "config",
+    ungated: ceiling === null
+  };
+}
+
+/** The active profile name, as reported by `oracle_connection_info`. */
+export function parseActiveProfile(data: WorkbenchActionData | null): string | null {
+  const connection = recordValue(mcpPayload(data)?.["connection"]);
+  return stringValue(connection?.["profile"]);
 }
 
 export type QueryCostEstimateRequest = {

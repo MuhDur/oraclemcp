@@ -954,8 +954,9 @@ export function scnScrubberFixture(): ScnScrubberViewModel {
 
 export type CostVerdict =
   | "refused" // priced above the ceiling; the gate refused it before execution
-  | "within_ceiling" // estimate and a server-disclosed ceiling, and it fits
-  | "estimated" // estimate known, ceiling not disclosed by the server
+  | "within_ceiling" // an estimate and a ceiling in force, and it fits
+  | "estimated" // estimate known, but no ceiling is in force as far as we know
+  | "ungated" // the active profile declares no max_query_cost: the gate is off
   | "unavailable" // the optimizer could not price it — the gate fails closed
   | "unknown"; // nothing priced this statement yet
 
@@ -972,6 +973,7 @@ export type CostBadgeViewModel = {
   verdict: CostVerdict;
   estimate: number | null;
   ceiling: number | null;
+  ceilingSource: CostCeilingSource;
   // estimate / ceiling, clamped to [0, 1] for the meter. Null when either is.
   ratio: number | null;
   headline: string;
@@ -991,6 +993,8 @@ export type CostRefusalInput = {
   note: string | null;
 };
 
+export type CostCeilingSource = "refusal" | "config" | "unknown";
+
 export type CostBadgeInput = {
   // The `query_cost_refusal` payload of a refused statement, when there is one.
   refusal: CostRefusalInput | null;
@@ -1000,11 +1004,24 @@ export type CostBadgeInput = {
   estimateUnavailable: string | null;
   note: string | null;
   planRows: readonly CostPlanRowViewModel[];
-  // A ceiling is only ever known because the server disclosed it in a refusal.
+  // The ceiling in force, from the active profile's published `max_query_cost`
+  // or from a refusal. A refusal wins: the server has already met the profile
+  // ceiling with any per-call one via min(), so its number is the effective one.
   ceiling: number | null;
+  ceilingSource?: CostCeilingSource;
+  // True only when the config positively says the active profile declares NO
+  // `max_query_cost` — `oracle_query` is not cost-gated for it. That is a fact,
+  // and it is not the same as "we do not know the ceiling".
+  ungated?: boolean;
 };
 
 export function toCostBadgeViewModel(input: CostBadgeInput): CostBadgeViewModel {
+  const ungated = input.ungated === true && input.ceiling === null;
+  const ceilingSource: CostCeilingSource =
+    input.refusal !== null
+      ? "refusal"
+      : (input.ceilingSource ?? (input.ceiling !== null ? "config" : "unknown"));
+
   if (input.refusal) {
     const { estimatedCost, maxQueryCost } = input.refusal;
     return {
@@ -1012,6 +1029,7 @@ export function toCostBadgeViewModel(input: CostBadgeInput): CostBadgeViewModel 
       verdict: "refused",
       estimate: estimatedCost,
       ceiling: maxQueryCost,
+      ceilingSource: "refusal",
       ratio: maxQueryCost > 0 ? Math.min(1, estimatedCost / maxQueryCost) : 1,
       headline: `Refused — estimated cost ${estimatedCost} exceeds the ceiling ${maxQueryCost}`,
       detail: "The cost gate priced this statement before execution and refused it. Nothing ran.",
@@ -1027,6 +1045,7 @@ export function toCostBadgeViewModel(input: CostBadgeInput): CostBadgeViewModel 
       verdict: "unavailable",
       estimate: null,
       ceiling: input.ceiling,
+      ceilingSource,
       ratio: null,
       headline: "Cost unavailable",
       detail: input.estimateUnavailable,
@@ -1041,20 +1060,42 @@ export function toCostBadgeViewModel(input: CostBadgeInput): CostBadgeViewModel 
     const fits = ceiling !== null && input.estimate <= ceiling;
     return {
       grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
-      verdict: fits ? "within_ceiling" : "estimated",
+      verdict: ungated ? "ungated" : fits ? "within_ceiling" : "estimated",
       estimate: input.estimate,
       ceiling,
+      ceilingSource,
       ratio: ceiling !== null && ceiling > 0 ? Math.min(1, input.estimate / ceiling) : null,
-      headline: fits
-        ? `Estimated cost ${input.estimate} of ceiling ${ceiling}`
-        : `Estimated cost ${input.estimate}`,
-      detail: fits
-        ? "The optimizer priced this statement under the ceiling the server last disclosed."
-        : "The server discloses max_query_cost only when the gate refuses, so no ceiling is shown here.",
+      headline: ungated
+        ? `Estimated cost ${input.estimate} — no ceiling configured`
+        : fits
+          ? `Estimated cost ${input.estimate} of ceiling ${ceiling}`
+          : `Estimated cost ${input.estimate}`,
+      detail: ungated
+        ? "The active profile declares no max_query_cost, so oracle_query is not cost-gated on it."
+        : fits
+          ? `The optimizer priced this statement under the ceiling in force (from the ${ceilingSource === "config" ? "profile configuration" : "gate's own refusal"}).`
+          : "No ceiling is in force for this statement as far as the server has told the console.",
       note: input.note,
       hints: [],
       planRows: input.planRows,
-      tone: fits ? "ok" : "info"
+      tone: ungated ? "info" : fits ? "ok" : "info"
+    };
+  }
+  if (ungated) {
+    return {
+      grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+      verdict: "ungated",
+      estimate: null,
+      ceiling: null,
+      ceilingSource,
+      ratio: null,
+      headline: "No cost ceiling configured",
+      detail:
+        "The active profile declares no max_query_cost, so oracle_query is not cost-gated on it. This is the configuration speaking, not a missing reading.",
+      note: null,
+      hints: [],
+      planRows: [],
+      tone: "info"
     };
   }
   return {
@@ -1062,10 +1103,14 @@ export function toCostBadgeViewModel(input: CostBadgeInput): CostBadgeViewModel 
     verdict: "unknown",
     estimate: null,
     ceiling: input.ceiling,
+    ceilingSource,
     ratio: null,
-    headline: "Not priced",
+    headline:
+      input.ceiling !== null ? `Ceiling ${input.ceiling} — not yet priced` : "Not priced",
     detail:
-      "Nothing has priced this statement. Run an EXPLAIN PLAN estimate, or read the ceiling off a cost refusal.",
+      input.ceiling !== null
+        ? "The ceiling in force comes from the active profile's configuration. Run an EXPLAIN PLAN estimate to price this statement against it."
+        : "Nothing has priced this statement, and no ceiling is known. Run an EXPLAIN PLAN estimate, or read the ceiling off a cost refusal.",
     note: null,
     hints: [],
     planRows: [],
