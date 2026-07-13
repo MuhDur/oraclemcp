@@ -23,6 +23,12 @@ const SDU_MIN_BYTES: u32 = 512;
 const SDU_MAX_BYTES: u32 = u16::MAX as u32;
 const DRCP_CONNECTION_CLASS_MAX_CHARS: usize = 128;
 
+/// Default maximum live subscriptions for one server-derived principal.
+///
+/// The subscription registry separately accounts every admitted subscription's
+/// EMON notification connection against the database connection ceiling.
+pub const DEFAULT_MAX_SUBSCRIPTIONS: u32 = 4;
+
 /// Largest supported wait for a pooled connection checkout.
 ///
 /// One hour is already far beyond an interactive MCP request budget and keeps
@@ -766,6 +772,12 @@ pub struct ConnectionProfile {
     /// record before the driver may register it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_change_notification: Option<bool>,
+    /// Maximum live subscriptions per server-derived principal. Defaults to 4;
+    /// `0` deliberately disables new subscriptions for this profile. Each
+    /// admitted subscription also consumes one EMON notification connection
+    /// from the profile's database connection ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_subscriptions: Option<u32>,
     /// Whether this profile is exposed to the MCP **served** surface (E5
     /// connection-scope isolation). PER-PROFILE OPT-OUT: a profile is exposed to
     /// agents **by default**; set `mcp_exposed = false` to hide it. A hidden
@@ -851,6 +863,7 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("require_signed_tools", &self.require_signed_tools)
             .field("read_only_standby", &self.read_only_standby)
             .field("allow_change_notification", &self.allow_change_notification)
+            .field("max_subscriptions", &self.max_subscriptions)
             .field("dashboard_ddl_workbench", &self.dashboard_ddl_workbench)
             .field("session_identity", &self.session_identity)
             .field("pool", &self.pool)
@@ -908,6 +921,16 @@ impl ConnectionProfile {
             && !self.read_only_standby()
     }
 
+    /// Maximum concurrent subscriptions for one server-derived principal.
+    ///
+    /// This is a resource ceiling, not an authorization grant: CQN remains
+    /// disabled until [`Self::allows_change_notification`] and the privileged
+    /// registration gate both succeed. `0` is a deliberate fail-closed opt-out.
+    #[must_use]
+    pub fn max_subscriptions(&self) -> u32 {
+        self.max_subscriptions.unwrap_or(DEFAULT_MAX_SUBSCRIPTIONS)
+    }
+
     /// Whether this profile is exposed to the MCP served (agent-facing) surface
     /// (E5). Per-profile opt-out: defaults to `true` (exposed); only an explicit
     /// `mcp_exposed = false` hides it from
@@ -960,6 +983,7 @@ impl ConnectionProfile {
             require_signed_tools,
             read_only_standby,
             allow_change_notification,
+            max_subscriptions,
             mcp_exposed,
             dashboard_ddl_workbench,
             session_identity,
@@ -1170,6 +1194,7 @@ mod tests {
             require_signed_tools: None,
             read_only_standby: None,
             allow_change_notification: None,
+            max_subscriptions: None,
             mcp_exposed: None,
             dashboard_ddl_workbench: None,
             session_identity: None,
@@ -1206,6 +1231,26 @@ mod tests {
         assert!(
             !profile.allows_change_notification(),
             "standby profiles remain ineligible even with a stale opt-in"
+        );
+    }
+
+    #[test]
+    fn max_subscriptions_defaults_to_four_and_inherits() {
+        let mut base = p("base");
+        assert_eq!(base.max_subscriptions(), DEFAULT_MAX_SUBSCRIPTIONS);
+        base.max_subscriptions = Some(2);
+
+        let mut child = p("child");
+        child.base = Some("base".to_owned());
+        let mut profiles = vec![base, child];
+        resolve_inheritance(&mut profiles).expect("resolve profile inheritance");
+        assert_eq!(profiles[1].max_subscriptions(), 2);
+
+        profiles[1].max_subscriptions = Some(0);
+        assert_eq!(
+            profiles[1].max_subscriptions(),
+            0,
+            "zero is an explicit fail-closed subscription opt-out"
         );
     }
 

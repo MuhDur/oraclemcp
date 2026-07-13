@@ -26,7 +26,7 @@ use asupersync::Cx;
 use oraclemcp_audit::{
     AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor, sha256_hex,
 };
-use oraclemcp_config::ConnectionProfile;
+use oraclemcp_config::{ConnectionProfile, DEFAULT_MAX_SUBSCRIPTIONS};
 use oraclemcp_db::{CqnQueryRegistration, OracleBind, OracleConnection};
 use oraclemcp_guard::{
     Classifier, DangerLevel, LevelDecision, OperatingLevel, SessionLevelState, semantic_read_plan,
@@ -351,9 +351,46 @@ pub const STDIO_SUBSCRIPTION_OWNER: &str = "stdio-local";
 /// Per-URI subscriber registry. Cheap, in-process; one per server. Subscribers
 /// are keyed by the SERVER-DERIVED owner (principal), never a client-supplied
 /// id, so one caller can never enumerate, cancel, or impersonate another.
-#[derive(Default)]
 pub struct SubscriptionRegistry {
+    /// Per-principal subscription cap from the active connection profile.
+    max_subscriptions_per_principal: u32,
+    /// One admitted subscription needs one dedicated EMON notification
+    /// connection, so the total active count must never exceed this per-DB
+    /// ceiling.
+    emon_connection_ceiling: u32,
     by_uri: Mutex<HashMap<String, HashSet<String>>>,
+}
+
+/// Result of one atomic subscription admission attempt.
+///
+/// An idempotent re-subscribe is [`Self::Accepted`]: it neither opens another
+/// EMON connection nor consumes another per-principal slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscriptionAdmission {
+    /// The subscription was admitted (or it already existed).
+    Accepted,
+    /// The server-derived principal has reached the profile cap.
+    PerPrincipalCapReached,
+    /// A further EMON notification connection would exceed the database cap.
+    EmonConnectionCeilingReached,
+}
+
+impl SubscriptionAdmission {
+    /// Whether this attempt leaves the owner subscribed to the URI.
+    #[must_use]
+    pub const fn is_accepted(self) -> bool {
+        matches!(self, Self::Accepted)
+    }
+}
+
+impl Default for SubscriptionRegistry {
+    fn default() -> Self {
+        // A registry without a resolved runtime profile must remain bounded.
+        // C1.4 wiring supplies the actual database ceiling through
+        // `for_profile`; until then the conservative profile default is safer
+        // than treating the ceiling as unbounded.
+        Self::with_limits(DEFAULT_MAX_SUBSCRIPTIONS, DEFAULT_MAX_SUBSCRIPTIONS)
+    }
 }
 
 impl SubscriptionRegistry {
@@ -363,13 +400,57 @@ impl SubscriptionRegistry {
         Self::default()
     }
 
-    /// Subscribe `client` to `uri`. Idempotent.
-    pub fn subscribe(&self, client: &str, uri: &str) {
-        self.by_uri
-            .lock()
-            .entry(uri.to_owned())
+    /// A registry bounded by `profile` and the already-resolved runtime
+    /// database connection ceiling.
+    ///
+    /// The ceiling must be the effective pool ceiling after any runtime clamp,
+    /// rather than a client value. Every admitted `owner`/`uri` pair reserves
+    /// one EMON notification connection against it.
+    #[must_use]
+    pub fn for_profile(profile: &ConnectionProfile, emon_connection_ceiling: u32) -> Self {
+        Self::with_limits(profile.max_subscriptions(), emon_connection_ceiling)
+    }
+
+    /// A registry with explicit, server-derived resource limits. This is the
+    /// narrow integration seam used after database pool sizing is resolved.
+    #[must_use]
+    pub fn with_limits(max_subscriptions_per_principal: u32, emon_connection_ceiling: u32) -> Self {
+        SubscriptionRegistry {
+            max_subscriptions_per_principal,
+            emon_connection_ceiling,
+            by_uri: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Subscribe `client` to `uri` atomically with its per-principal and EMON
+    /// resource accounting. `client` must be the server-derived principal.
+    ///
+    /// The rejection happens before the registry changes, so it cannot leave a
+    /// subscription visible without an accounted EMON connection.
+    pub fn subscribe(&self, client: &str, uri: &str) -> SubscriptionAdmission {
+        let mut map = self.by_uri.lock();
+        if map
+            .get(uri)
+            .is_some_and(|subscribers| subscribers.contains(client))
+        {
+            return SubscriptionAdmission::Accepted;
+        }
+
+        let active_for_client = map
+            .values()
+            .filter(|subscribers| subscribers.contains(client))
+            .count();
+        if active_for_client >= self.max_subscriptions_per_principal as usize {
+            return SubscriptionAdmission::PerPrincipalCapReached;
+        }
+        if Self::active_subscription_count_locked(&map) >= self.emon_connection_ceiling as usize {
+            return SubscriptionAdmission::EmonConnectionCeilingReached;
+        }
+
+        map.entry(uri.to_owned())
             .or_default()
             .insert(client.to_owned());
+        SubscriptionAdmission::Accepted
     }
 
     /// Unsubscribe `client` from `uri`. Idempotent; drops the URI entry when its
@@ -422,6 +503,23 @@ impl SubscriptionRegistry {
             .lock()
             .get(uri)
             .is_some_and(|s| s.contains(client))
+    }
+
+    /// Active client/URI subscriptions. Every item has one accounted EMON
+    /// notification connection.
+    #[must_use]
+    pub fn emon_connection_count(&self) -> usize {
+        Self::active_subscription_count_locked(&self.by_uri.lock())
+    }
+
+    /// The server-derived ceiling that caps [`Self::emon_connection_count`].
+    #[must_use]
+    pub const fn emon_connection_ceiling(&self) -> u32 {
+        self.emon_connection_ceiling
+    }
+
+    fn active_subscription_count_locked(map: &HashMap<String, HashSet<String>>) -> usize {
+        map.values().map(HashSet::len).sum()
     }
 }
 
@@ -512,6 +610,23 @@ impl SubscriptionHub {
         }
     }
 
+    /// A hub bounded by the active profile and actual database connection
+    /// ceiling. The profile cap constrains each server-derived principal; the
+    /// resolved database ceiling constrains all EMON connections together.
+    #[must_use]
+    pub fn with_source_for_profile(
+        source: SubscribeSource,
+        profile: &ConnectionProfile,
+        emon_connection_ceiling: u32,
+    ) -> Self {
+        SubscriptionHub {
+            registry: SubscriptionRegistry::for_profile(profile, emon_connection_ceiling),
+            source,
+            fingerprints: Mutex::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
+        }
+    }
+
     /// Whether subscriptions are supported (the capability gate).
     #[must_use]
     pub fn supports_subscriptions(&self) -> bool {
@@ -527,7 +642,9 @@ impl SubscriptionHub {
         if !self.supports_subscriptions() {
             return false;
         }
-        self.registry.subscribe(owner, uri);
+        if !self.registry.subscribe(owner, uri).is_accepted() {
+            return false;
+        }
         if let SubscribeSource::Polling(source) = &self.source
             && let Some(fp) = source.poll(uri)
         {
@@ -1032,6 +1149,57 @@ mod tests {
             vec!["agent-a".to_owned(), "agent-b".to_owned()]
         );
         assert!(r.is_subscribed("agent-a", URI));
+    }
+
+    #[test]
+    fn registry_refuses_subscriptions_beyond_the_principal_and_emon_connection_caps() {
+        let mut profile = cqn_profile(true);
+        profile.max_subscriptions = Some(2);
+
+        let per_principal = SubscriptionRegistry::for_profile(&profile, 8);
+        assert_eq!(
+            per_principal.subscribe("principal-a", "oracle://resource/one"),
+            SubscriptionAdmission::Accepted
+        );
+        assert_eq!(
+            per_principal.subscribe("principal-a", "oracle://resource/two"),
+            SubscriptionAdmission::Accepted
+        );
+        assert_eq!(
+            per_principal.subscribe("principal-a", "oracle://resource/three"),
+            SubscriptionAdmission::PerPrincipalCapReached,
+            "the profile cap applies to the server-derived principal"
+        );
+        assert!(!per_principal.is_subscribed("principal-a", "oracle://resource/three"));
+
+        let emon = SubscriptionRegistry::for_profile(&profile, 2);
+        assert_eq!(emon.emon_connection_ceiling(), 2);
+        assert_eq!(
+            emon.subscribe("principal-a", "oracle://resource/one"),
+            SubscriptionAdmission::Accepted
+        );
+        assert_eq!(
+            emon.subscribe("principal-b", "oracle://resource/two"),
+            SubscriptionAdmission::Accepted,
+            "each active owner/URI pair consumes one EMON connection"
+        );
+        assert_eq!(emon.emon_connection_count(), 2);
+        assert_eq!(
+            emon.subscribe("principal-c", "oracle://resource/three"),
+            SubscriptionAdmission::EmonConnectionCeilingReached,
+            "the third EMON connection is refused before the subscription exists"
+        );
+        assert_eq!(emon.emon_connection_count(), 2);
+        assert!(!emon.is_subscribed("principal-c", "oracle://resource/three"));
+
+        emon.unsubscribe("principal-a", "oracle://resource/one");
+        assert_eq!(emon.emon_connection_count(), 1);
+        assert_eq!(
+            emon.subscribe("principal-c", "oracle://resource/three"),
+            SubscriptionAdmission::Accepted,
+            "unsubscribing releases exactly one accounted EMON connection"
+        );
+        assert_eq!(emon.emon_connection_count(), 2);
     }
 
     #[test]

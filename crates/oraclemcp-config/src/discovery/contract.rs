@@ -208,6 +208,11 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         help: "Explicit CQN-registration opt-in; default false, and every registration still needs a proven query, confirmed step-up, and durable audit record.",
     },
     FieldDisposition {
+        field: "max_subscriptions",
+        disposition: Disposition::Commented,
+        help: "Per-principal live-subscription cap; default 4, and each admitted subscription reserves one EMON connection against the database ceiling.",
+    },
+    FieldDisposition {
         field: "mcp_exposed",
         disposition: Disposition::Commented,
         help: "Per-profile MCP exposure; default exposed (opt-out). Set false to hide this profile from the agent surface.",
@@ -335,6 +340,7 @@ mod tests {
             require_signed_tools: Some(false),
             read_only_standby: Some(false),
             allow_change_notification: Some(false),
+            max_subscriptions: Some(4),
             mcp_exposed: Some(true),
             dashboard_ddl_workbench: Some(false),
             session_identity: Some(SessionIdentityConfig::default()),
@@ -381,11 +387,11 @@ mod tests {
             actual.difference(&documented).collect::<Vec<_>>(),
             documented.difference(&actual).collect::<Vec<_>>(),
         );
-        // The spec fixes the count at 32.
+        // The spec fixes the count at 33.
         assert_eq!(
             CONNECTION_PROFILE_FIELD_DISPOSITIONS.len(),
-            32,
-            "the design spec fixes ConnectionProfile at 32 serde fields"
+            33,
+            "the design spec fixes ConnectionProfile at 33 serde fields"
         );
     }
 

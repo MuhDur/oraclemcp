@@ -70,6 +70,8 @@ default_level = "READ_ONLY"
 # read_only_standby = false
 # Explicit CQN-registration opt-in; default false, and every registration still needs a proven query, confirmed step-up, and durable audit record.
 # allow_change_notification = false
+# Per-principal live-subscription cap; default 4, and each admitted subscription reserves one EMON connection against the database ceiling.
+# max_subscriptions = 4
 # Per-profile MCP exposure; default exposed (opt-out). Set false to hide this profile from the agent surface.
 # mcp_exposed = false
 # Browser dashboard DDL/Admin apply opt-in; never raises max_level or bypasses preview/confirm/rollback/audit.
@@ -161,6 +163,8 @@ default_level = "READ_ONLY"
 # read_only_standby = false
 # Explicit CQN-registration opt-in; default false, and every registration still needs a proven query, confirmed step-up, and durable audit record.
 # allow_change_notification = false
+# Per-principal live-subscription cap; default 4, and each admitted subscription reserves one EMON connection against the database ceiling.
+# max_subscriptions = 4
 # Per-profile MCP exposure; default exposed (opt-out). Set false to hide this profile from the agent surface.
 # mcp_exposed = false
 # Browser dashboard DDL/Admin apply opt-in; never raises max_level or bypasses preview/confirm/rollback/audit.

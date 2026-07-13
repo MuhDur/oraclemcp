@@ -178,6 +178,10 @@ require_signed_tools = true
 # requires a classifier-proven query, an active confirmed READ_WRITE step-up,
 # and a durable audit record; OBJECT-level registration is refused.
 # allow_change_notification = false
+# Per-principal live-subscription cap. Default: 4. Every admitted subscription
+# reserves one EMON notification connection from this profile's database
+# connection ceiling; set 0 to disable new subscriptions fail-closed.
+# max_subscriptions = 4
 # Production profile: pins the ceiling immutable. Default: false. When true,
 # max_level MUST be READ_ONLY (else config load error) and `literal:` secret refs
 # are rejected.

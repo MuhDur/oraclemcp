@@ -109,6 +109,9 @@ is deliberately conservative:
 - **`allow_change_notification`** — left unset (commented); CQN registration
   is disabled by default and discovery never opens a standing database activity
   channel on the operator's behalf.
+- **`max_subscriptions`** — left unset (commented); the effective cap is four
+  per server-derived principal, and every admitted subscription reserves one
+  EMON notification connection against the database ceiling.
 - **`mcp_exposed`** — left unset (commented); the struct default is *exposed*
   (opt-out), and discovery does not silently hide or expose a profile — the
   commented one-liner tells the operator how to opt a target out.
@@ -182,6 +185,7 @@ one-line help string using the exact serde name.
 | `require_signed_tools` | **COMMENTED** | Require HMAC signatures for operator-defined custom tools on this profile (implied by `protected`). |
 | `read_only_standby` | **COMMENTED** | Mark target as a read-only Active Data Guard standby: forces `READ_ONLY` regardless of `max_level`. |
 | `allow_change_notification` | **COMMENTED** | Explicit CQN-registration opt-in; default false, with proven query, confirmed step-up, and durable audit still required. |
+| `max_subscriptions` | **COMMENTED** | Per-principal live-subscription cap (default 4); each admitted subscription reserves one EMON notification connection against the database ceiling. |
 | `mcp_exposed` | **COMMENTED** | Per-profile MCP exposure; default is exposed (opt-out), set `false` to hide this profile from the agent surface. |
 | `dashboard_ddl_workbench` | **COMMENTED** | Browser dashboard DDL/Admin apply opt-in; never raises `max_level` or bypasses preview/confirm/rollback/audit. |
 | `session_identity` | **COMMENTED** | `[profiles.session_identity]` end-to-end Oracle session identity (program/machine/module/action/client_identifier/…). |

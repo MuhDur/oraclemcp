@@ -28,10 +28,11 @@ pub use oraclemcp_guard::{
     SqlPolicyMatchConfig, SqlPolicyRuleConfig, SqlPolicyValidationError, SqlPolicyVerb,
 };
 pub use profile::{
-    AppContextConfig, ConnectionProfile, CumulativeQueryCostBudgetConfig, DrcpRoutingConfig,
-    DrcpSessionPurity, MAX_POOL_ACQUIRE_TIMEOUT_SECS, OciConfig, PoolConfig, PoolMetadata,
-    ProfileMetadata, ProxyAuthConfig, ResultColumnMatchConfig, ResultMaskingActionConfig,
-    ResultMaskingConfig, ResultMaskingRuleConfig, SessionIdentityConfig, resolve_inheritance,
+    AppContextConfig, ConnectionProfile, CumulativeQueryCostBudgetConfig,
+    DEFAULT_MAX_SUBSCRIPTIONS, DrcpRoutingConfig, DrcpSessionPurity, MAX_POOL_ACQUIRE_TIMEOUT_SECS,
+    OciConfig, PoolConfig, PoolMetadata, ProfileMetadata, ProxyAuthConfig, ResultColumnMatchConfig,
+    ResultMaskingActionConfig, ResultMaskingConfig, ResultMaskingRuleConfig, SessionIdentityConfig,
+    resolve_inheritance,
 };
 
 /// The config schema version this build understands. A config declaring a

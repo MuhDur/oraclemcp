@@ -222,6 +222,7 @@ fn render_profile_block(synth_profile: &SynthesizedProfile) -> String {
             // CQN registration is a separate privileged operation and stays
             // disabled until an operator explicitly opts this profile in.
             "allow_change_notification" => push_commented_scalar(&mut scalars, fd, "false"),
+            "max_subscriptions" => push_commented_scalar(&mut scalars, fd, "4"),
             // mcp_exposed = false is the instructive opt-out value.
             "mcp_exposed" => push_commented_scalar(&mut scalars, fd, "false"),
             "dashboard_ddl_workbench" => push_commented_scalar(&mut scalars, fd, "false"),
