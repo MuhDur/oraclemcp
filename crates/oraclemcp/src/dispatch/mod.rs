@@ -38,8 +38,8 @@ use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
     AsOf, CatalogInvalidation, DbError, DbRequestQuota, DbmsOutput, DependentObject,
     DependentsProbe, OracleBackend, OracleBind, OracleCatalogResolverCache, OracleConnection,
-    OracleConnectionInfo, OracleRow, QuarantineOutcome, QueryCaps, QueryRowStream,
-    QueryRowStreamStart, SerializeOptions, StructuredDecodeCaps, compile_errors,
+    OracleConnectionInfo, OracleRow, PlanCostEstimate, QuarantineOutcome, QueryCaps,
+    QueryRowStream, QueryRowStreamStart, SerializeOptions, StructuredDecodeCaps, compile_errors,
     compile_object_statements, describe_columns, describe_constraints, describe_index,
     describe_trigger, describe_view, execute_immediate_audit, explain_plan,
     find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects, list_schemas,
@@ -47,7 +47,9 @@ use oraclemcp_db::{
     read_lob, read_query, read_query_as_of, read_query_named, resolved_relations_read_purity,
     sample_rows, search_objects, search_source, serialize_row,
 };
-use oraclemcp_error::{ErrorClass, ErrorEnvelope, ReasonCategory, StructuredReason};
+use oraclemcp_error::{
+    ErrorClass, ErrorEnvelope, OptimizerPlanRow, QueryCostRefusal, ReasonCategory, StructuredReason,
+};
 use oraclemcp_guard::{
     CatalogObjectKind, CatalogResolver, Classifier, ClassifierConfig, DangerLevel, EscalationError,
     ExecGrantBinding, ExecGrantError, ExecGrantStore, GuardDecision, LevelDecision, ObjectRef,
@@ -2062,14 +2064,150 @@ fn query_cost_unavailable(reason: impl Into<String>) -> ErrorEnvelope {
     .with_next_step("refresh optimizer statistics or retry without max_query_cost only if an unbounded read is acceptable")
 }
 
-fn query_cost_exceeded(observed_cost: u64, max_query_cost: u64) -> ErrorEnvelope {
+const QUERY_COST_REFUSAL_PLAN_ROW_LIMIT: usize = 25;
+const QUERY_COST_REFUSAL_HINT_LIMIT: usize = 8;
+const QUERY_COST_REFUSAL_TEXT_LIMIT: usize = 512;
+
+fn query_cost_exceeded(
+    estimate: &PlanCostEstimate,
+    observed_cost: u64,
+    max_query_cost: u64,
+) -> ErrorEnvelope {
+    let detail = query_cost_refusal_detail(estimate, observed_cost, max_query_cost);
+    let reason = StructuredReason::new(ReasonCategory::CostBudgetExceeded)
+        .with_minimal_rewrite("tighten the WHERE clause, add a narrower predicate, or ask for a lower-cardinality page")
+        .with_query_cost_refusal(detail);
     ErrorEnvelope::new(
         ErrorClass::PolicyDenied,
         format!(
             "oracle_query cost gate refused before execution: query_cost_exceeded (estimated total_cost {observed_cost} exceeds max_query_cost {max_query_cost})"
         ),
     )
+    .with_suggested_tool("oracle_explain_plan")
+    .with_structured_reason(reason)
     .with_next_step("tighten the WHERE clause, add a narrower predicate, or ask for a lower-cardinality page")
+}
+
+fn query_cost_refusal_detail(
+    estimate: &PlanCostEstimate,
+    observed_cost: u64,
+    max_query_cost: u64,
+) -> QueryCostRefusal {
+    let plan_rows = estimate
+        .rows
+        .iter()
+        .take(QUERY_COST_REFUSAL_PLAN_ROW_LIMIT)
+        .map(|row| OptimizerPlanRow {
+            id: row.id,
+            operation: row.operation.as_deref().map(sanitize_plan_text),
+            options: row.options.as_deref().map(sanitize_plan_text),
+            object_owner: row.object_owner.as_deref().map(sanitize_plan_text),
+            object_name: row.object_name.as_deref().map(sanitize_plan_text),
+            cost: row.cost,
+            cardinality: row.cardinality,
+            bytes: row.bytes,
+            access_predicates: row.access_predicates.as_deref().map(sanitize_plan_text),
+            filter_predicates: row.filter_predicates.as_deref().map(sanitize_plan_text),
+        })
+        .collect();
+    QueryCostRefusal {
+        estimated_cost: observed_cost,
+        max_query_cost,
+        plan_rows,
+        predicate_hints: query_cost_predicate_hints(estimate),
+        note: estimate.note.clone(),
+    }
+}
+
+fn query_cost_predicate_hints(estimate: &PlanCostEstimate) -> Vec<String> {
+    let mut hints = Vec::new();
+    for row in &estimate.rows {
+        for (kind, predicate) in [
+            ("access", row.access_predicates.as_deref()),
+            ("filter", row.filter_predicates.as_deref()),
+        ] {
+            let Some(predicate) = predicate else {
+                continue;
+            };
+            let predicate = sanitize_plan_text(predicate);
+            if predicate.is_empty() {
+                continue;
+            }
+            let mut location = format!("line {}", row.id);
+            if let Some(operation) = row.operation.as_deref().map(sanitize_plan_text)
+                && !operation.is_empty()
+            {
+                location.push(' ');
+                location.push_str(&operation);
+            }
+            if let Some(options) = row.options.as_deref().map(sanitize_plan_text)
+                && !options.is_empty()
+            {
+                location.push(' ');
+                location.push_str(&options);
+            }
+            if let Some(object_name) = row.object_name.as_deref().map(sanitize_plan_text)
+                && !object_name.is_empty()
+            {
+                location.push_str(" on ");
+                if let Some(owner) = row.object_owner.as_deref().map(sanitize_plan_text)
+                    && !owner.is_empty()
+                {
+                    location.push_str(&owner);
+                    location.push('.');
+                }
+                location.push_str(&object_name);
+            }
+            hints.push(format!(
+                "{location} has {kind} predicate {predicate}; tighten a selective predicate or add/support an index for that predicate"
+            ));
+            if hints.len() >= QUERY_COST_REFUSAL_HINT_LIMIT {
+                return hints;
+            }
+        }
+    }
+    hints
+}
+
+fn sanitize_plan_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len().min(QUERY_COST_REFUSAL_TEXT_LIMIT));
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if out.chars().count() >= QUERY_COST_REFUSAL_TEXT_LIMIT {
+            out.push('…');
+            break;
+        }
+        match ch {
+            '\'' => {
+                out.push_str("'<redacted>'");
+                while let Some(next) = chars.next() {
+                    if next == '\'' {
+                        if chars.next_if_eq(&'\'').is_some() {
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            }
+            '"' => {
+                out.push('"');
+                for next in chars.by_ref() {
+                    out.push(next);
+                    if next == '"' {
+                        break;
+                    }
+                }
+            }
+            digit if digit.is_ascii_digit() => {
+                out.push_str("<number>");
+                while matches!(chars.peek(), Some(next) if next.is_ascii_digit() || *next == '.') {
+                    chars.next();
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 struct QueryCostGateCtx<'a> {
@@ -2137,7 +2275,7 @@ async fn enforce_query_cost_gate(
         Ok(Some(estimate)) => match estimate.summary.total_cost {
             Some(total_cost) => match u64::try_from(total_cost) {
                 Ok(observed) if observed <= max_query_cost => Ok(()),
-                Ok(observed) => Err(query_cost_exceeded(observed, max_query_cost)),
+                Ok(observed) => Err(query_cost_exceeded(&estimate, observed, max_query_cost)),
                 Err(_) => Err(query_cost_unavailable(format!(
                     "PLAN_TABLE root total_cost was negative: {total_cost}"
                 ))),

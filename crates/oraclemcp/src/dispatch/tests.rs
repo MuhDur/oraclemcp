@@ -6182,11 +6182,41 @@ fn query_cost_limit_is_installed_on_db_boundary_and_cannot_be_widened() {
 }
 
 fn plan_cost_row(id: Option<&str>, cost: Option<&str>) -> OracleRow {
+    plan_cost_row_with(id, cost, None, None, None, None, None, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_cost_row_with(
+    id: Option<&str>,
+    cost: Option<&str>,
+    operation: Option<&str>,
+    options: Option<&str>,
+    object_owner: Option<&str>,
+    object_name: Option<&str>,
+    access_predicates: Option<&str>,
+    filter_predicates: Option<&str>,
+) -> OracleRow {
     OracleRow {
         columns: vec![
             (
                 "ID".to_owned(),
                 OracleCell::new("NUMBER", id.map(str::to_owned)),
+            ),
+            (
+                "OPERATION".to_owned(),
+                OracleCell::new("VARCHAR2", operation.map(str::to_owned)),
+            ),
+            (
+                "OPTIONS".to_owned(),
+                OracleCell::new("VARCHAR2", options.map(str::to_owned)),
+            ),
+            (
+                "OBJECT_OWNER".to_owned(),
+                OracleCell::new("VARCHAR2", object_owner.map(str::to_owned)),
+            ),
+            (
+                "OBJECT_NAME".to_owned(),
+                OracleCell::new("VARCHAR2", object_name.map(str::to_owned)),
             ),
             (
                 "COST".to_owned(),
@@ -6200,6 +6230,14 @@ fn plan_cost_row(id: Option<&str>, cost: Option<&str>) -> OracleRow {
                 "BYTES".to_owned(),
                 OracleCell::new("NUMBER", Some("8".to_owned())),
             ),
+            (
+                "ACCESS_PREDICATES".to_owned(),
+                OracleCell::new("VARCHAR2", access_predicates.map(str::to_owned)),
+            ),
+            (
+                "FILTER_PREDICATES".to_owned(),
+                OracleCell::new("VARCHAR2", filter_predicates.map(str::to_owned)),
+            ),
         ],
     }
 }
@@ -6207,6 +6245,7 @@ fn plan_cost_row(id: Option<&str>, cost: Option<&str>) -> OracleRow {
 #[derive(Clone, Copy)]
 enum PlanCostFixture {
     Root(Option<i64>),
+    RootWithPredicate(i64),
     NoRoot,
 }
 
@@ -6273,6 +6312,28 @@ impl OracleConnection for QueryCostGateMock {
                     Some("0"),
                     cost.map(|value| value.to_string()).as_deref(),
                 )]),
+                PlanCostFixture::RootWithPredicate(cost) => Ok(vec![
+                    plan_cost_row_with(
+                        Some("0"),
+                        Some(&cost.to_string()),
+                        Some("SELECT STATEMENT"),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                    plan_cost_row_with(
+                        Some("1"),
+                        Some(&cost.to_string()),
+                        Some("TABLE ACCESS"),
+                        Some("FULL"),
+                        Some("APP"),
+                        Some("ORDERS"),
+                        None,
+                        Some("\"STATUS\"='shipped-secret' AND \"AMOUNT\">12345"),
+                    ),
+                ]),
                 PlanCostFixture::NoRoot => Ok(vec![plan_cost_row(Some("1"), Some("10"))]),
             };
         }
@@ -6358,6 +6419,64 @@ fn query_cost_gate_refuses_over_ceiling_before_select() {
         1,
         "PLAN_TABLE diagnostic write is rolled back before refusal"
     );
+}
+
+#[test]
+fn query_cost_gate_over_ceiling_returns_structured_plan_context() {
+    let (dispatcher, state) =
+        query_cost_dispatcher(PlanCostFixture::RootWithPredicate(190_000), 50_000);
+    let err = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "allow_plan_table_write": true
+            }),
+        )
+        .expect_err("cost above ceiling refuses");
+
+    assert_eq!(err.error_class, ErrorClass::PolicyDenied);
+    assert!(
+        err.message.contains("estimated total_cost"),
+        "message must name an estimate, not imply measured runtime: {err:?}"
+    );
+    let reason = err
+        .structured_reason
+        .as_ref()
+        .expect("over-budget refusal carries structured reason");
+    assert_eq!(reason.category, ReasonCategory::CostBudgetExceeded);
+    let detail = reason
+        .query_cost_refusal
+        .as_ref()
+        .expect("over-budget refusal carries cost details");
+    assert_eq!(detail.estimated_cost, 190_000);
+    assert_eq!(detail.max_query_cost, 50_000);
+    assert_eq!(detail.plan_rows.len(), 2);
+    assert_eq!(
+        detail.plan_rows[1].operation.as_deref(),
+        Some("TABLE ACCESS")
+    );
+    assert_eq!(detail.plan_rows[1].options.as_deref(), Some("FULL"));
+    assert_eq!(detail.plan_rows[1].object_owner.as_deref(), Some("APP"));
+    assert_eq!(detail.plan_rows[1].object_name.as_deref(), Some("ORDERS"));
+    assert_eq!(
+        detail.plan_rows[1].filter_predicates.as_deref(),
+        Some("\"STATUS\"='<redacted>' AND \"AMOUNT\"><number>")
+    );
+    assert!(
+        detail
+            .predicate_hints
+            .iter()
+            .any(|hint| hint.contains("filter predicate")),
+        "predicate hints should be derived from PLAN_TABLE predicates: {detail:?}"
+    );
+    let serialized = err.to_json().to_string();
+    assert!(!serialized.contains("shipped-secret"), "{serialized}");
+    assert!(!serialized.contains("12345"), "{serialized}");
+    assert_eq!(state.explain_writes.load(Ordering::SeqCst), 1);
+    assert_eq!(state.plan_cost_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(state.actual_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
 }
 
 #[test]

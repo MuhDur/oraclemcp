@@ -132,6 +132,9 @@ pub enum ReasonCategory {
     /// The statement is well-formed but needs a higher operating level than the
     /// session currently permits (a write, DDL, or DCL under a lower cap).
     RequiresHigherLevel,
+    /// The optimizer estimated a read above the configured cost ceiling before
+    /// the statement was executed.
+    CostBudgetExceeded,
     /// The statement matched an operator-curated block-list pattern.
     BlockListed,
     /// A `SELECT` (or a base object it reads) the engine could not prove
@@ -139,6 +142,59 @@ pub enum ReasonCategory {
     UnprovenSideEffect,
     /// A refusal that does not fit the categories above.
     Other,
+}
+
+/// A sanitized optimizer-plan row attached to a query cost refusal. It carries
+/// only metadata from `PLAN_TABLE` plus redacted predicate text; no bind values
+/// or SQL literals should be exposed here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptimizerPlanRow {
+    /// The `PLAN_TABLE.ID` plan-line number (`0` is the plan root).
+    pub id: i64,
+    /// Plan operation (`SELECT STATEMENT`, `TABLE ACCESS`, …), when available.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub operation: Option<String>,
+    /// Operation options (`FULL`, `BY INDEX ROWID`, …), when available.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub options: Option<String>,
+    /// Referenced object owner, when available.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub object_owner: Option<String>,
+    /// Referenced object name, when available.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub object_name: Option<String>,
+    /// Relative optimizer cost for this operation, or absent when unavailable.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cost: Option<i64>,
+    /// Estimated rows this operation produces, or absent when unavailable.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cardinality: Option<i64>,
+    /// Estimated bytes this operation produces, or absent when unavailable.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub bytes: Option<i64>,
+    /// Redacted access predicate text, when available.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub access_predicates: Option<String>,
+    /// Redacted filter predicate text, when available.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub filter_predicates: Option<String>,
+}
+
+/// Structured details for a pre-execution query cost refusal. This is additive
+/// to the human message: agents can use it to tighten predicates or ask for a
+/// smaller page without parsing prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryCostRefusal {
+    /// Root-line optimizer estimate that exceeded the ceiling.
+    pub estimated_cost: u64,
+    /// Effective `max_query_cost` after profile and per-call ceilings were met.
+    pub max_query_cost: u64,
+    /// Sanitized plan rows used to make the refusal decision.
+    pub plan_rows: Vec<OptimizerPlanRow>,
+    /// Concrete, redacted predicate/index hints derived from the plan rows.
+    pub predicate_hints: Vec<String>,
+    /// Reminder that optimizer costs are relative estimates, not runtime.
+    pub note: String,
 }
 
 /// The structured "why blocked + minimal safe rewrite" reason (K8) attached to
@@ -163,6 +219,9 @@ pub struct StructuredReason {
     /// The operating level the statement requires, when it is a level gate.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub required_level: Option<String>,
+    /// Structured optimizer-plan context for a query cost refusal.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub query_cost_refusal: Option<QueryCostRefusal>,
 }
 
 impl StructuredReason {
@@ -174,6 +233,7 @@ impl StructuredReason {
             offending_construct: None,
             minimal_rewrite: None,
             required_level: None,
+            query_cost_refusal: None,
         }
     }
 
@@ -195,6 +255,13 @@ impl StructuredReason {
     #[must_use]
     pub fn with_required_level(mut self, level: impl Into<String>) -> Self {
         self.required_level = Some(level.into());
+        self
+    }
+
+    /// Attach structured query-cost refusal details.
+    #[must_use]
+    pub fn with_query_cost_refusal(mut self, detail: QueryCostRefusal) -> Self {
+        self.query_cost_refusal = Some(detail);
         self
     }
 }
@@ -618,6 +685,52 @@ mod tests {
             json["structured_reason"]
                 .get("offending_construct")
                 .is_none()
+        );
+        let back: ErrorEnvelope = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(env, back);
+    }
+
+    #[test]
+    fn structured_reason_carries_query_cost_refusal_details() {
+        let env = ErrorEnvelope::new(ErrorClass::PolicyDenied, "estimated cost too high")
+            .with_structured_reason(
+                StructuredReason::new(ReasonCategory::CostBudgetExceeded).with_query_cost_refusal(
+                    QueryCostRefusal {
+                        estimated_cost: 190_000,
+                        max_query_cost: 50_000,
+                        plan_rows: vec![OptimizerPlanRow {
+                            id: 1,
+                            operation: Some("TABLE ACCESS".to_owned()),
+                            options: Some("FULL".to_owned()),
+                            object_owner: Some("APP".to_owned()),
+                            object_name: Some("ORDERS".to_owned()),
+                            cost: Some(190_000),
+                            cardinality: Some(1_000_000),
+                            bytes: Some(64_000_000),
+                            access_predicates: None,
+                            filter_predicates: Some("\"STATUS\"='<redacted>'".to_owned()),
+                        }],
+                        predicate_hints: vec![
+                            "line 1 TABLE ACCESS FULL on APP.ORDERS has filter predicates; tighten a selective predicate or add/support an index for that predicate"
+                                .to_owned(),
+                        ],
+                        note: "optimizer estimate, not runtime".to_owned(),
+                    },
+                ),
+            );
+
+        let json = serde_json::to_value(&env).expect("serialize");
+        assert_eq!(
+            json["structured_reason"]["category"],
+            serde_json::json!("COST_BUDGET_EXCEEDED")
+        );
+        assert_eq!(
+            json["structured_reason"]["query_cost_refusal"]["estimated_cost"],
+            serde_json::json!(190_000)
+        );
+        assert_eq!(
+            json["structured_reason"]["query_cost_refusal"]["plan_rows"][0]["filter_predicates"],
+            serde_json::json!("\"STATUS\"='<redacted>'")
         );
         let back: ErrorEnvelope = serde_json::from_value(json).expect("deserialize");
         assert_eq!(env, back);

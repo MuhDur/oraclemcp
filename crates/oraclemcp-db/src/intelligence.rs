@@ -1241,12 +1241,26 @@ optimization";
 pub struct PlanCostRow {
     /// The `PLAN_TABLE.ID` plan-line number (`0` is the plan root).
     pub id: i64,
+    /// Plan operation (`SELECT STATEMENT`, `TABLE ACCESS`, …), when available.
+    pub operation: Option<String>,
+    /// Operation options (`FULL`, `BY INDEX ROWID`, …), when available.
+    pub options: Option<String>,
+    /// Referenced object owner, when available.
+    pub object_owner: Option<String>,
+    /// Referenced object name, when available.
+    pub object_name: Option<String>,
     /// Relative optimizer cost for this operation, or `None` when unavailable.
     pub cost: Option<i64>,
     /// Estimated rows this operation produces, or `None` when unavailable.
     pub cardinality: Option<i64>,
     /// Estimated bytes this operation produces, or `None` when unavailable.
     pub bytes: Option<i64>,
+    /// Access predicate text reported by Oracle for this plan line, when
+    /// available. Callers must sanitize before exposing it to untrusted clients.
+    pub access_predicates: Option<String>,
+    /// Filter predicate text reported by Oracle for this plan line, when
+    /// available. Callers must sanitize before exposing it to untrusted clients.
+    pub filter_predicates: Option<String>,
 }
 
 /// The plan root (`ID = 0`) totals: the optimizer's estimate for the whole plan.
@@ -1281,7 +1295,8 @@ pub struct PlanCostEstimate {
 /// `plan_id`, mirroring how `DBMS_XPLAN.DISPLAY` (with no explicit
 /// `statement_id`) selects the most recently explained statement — so the cost
 /// block describes exactly the plan the `DISPLAY` output above shows.
-const PLAN_COST_SQL: &str = "SELECT id, cost, cardinality, bytes \
+const PLAN_COST_SQL: &str = "SELECT id, operation, options, object_owner, object_name, \
+cost, cardinality, bytes, access_predicates, filter_predicates \
 FROM plan_table \
 WHERE plan_id = (SELECT MAX(plan_id) FROM plan_table) \
 ORDER BY id";
@@ -1301,6 +1316,11 @@ fn plan_cell_i64(cell: Option<&OracleCell>) -> Option<i64> {
         .or_else(|| trimmed.parse::<f64>().ok().map(|value| value as i64))
 }
 
+fn plan_cell_text(cell: Option<&OracleCell>) -> Option<String> {
+    let trimmed = cell.and_then(OracleCell::text)?.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
 /// Assemble a [`PlanCostEstimate`] from `PLAN_TABLE` rows shaped as
 /// `id, cost, cardinality, bytes` (case-insensitive column lookup).
 ///
@@ -1318,9 +1338,15 @@ pub fn assemble_cost_estimate(rows: &[OracleRow]) -> Option<PlanCostEstimate> {
         };
         cost_rows.push(PlanCostRow {
             id,
+            operation: plan_cell_text(row.cell("OPERATION")),
+            options: plan_cell_text(row.cell("OPTIONS")),
+            object_owner: plan_cell_text(row.cell("OBJECT_OWNER")),
+            object_name: plan_cell_text(row.cell("OBJECT_NAME")),
             cost: plan_cell_i64(row.cell("COST")),
             cardinality: plan_cell_i64(row.cell("CARDINALITY")),
             bytes: plan_cell_i64(row.cell("BYTES")),
+            access_predicates: plan_cell_text(row.cell("ACCESS_PREDICATES")),
+            filter_predicates: plan_cell_text(row.cell("FILTER_PREDICATES")),
         });
     }
     let root = cost_rows.iter().find(|row| row.id == 0)?;
@@ -2223,6 +2249,71 @@ mod tests {
         assert_eq!(estimate.summary.total_cardinality, Some(100_000));
         assert_eq!(estimate.summary.total_bytes, Some(2_400_000));
         assert_eq!(estimate.note, PLAN_COST_ESTIMATE_NOTE);
+    }
+
+    #[test]
+    fn cost_estimate_carries_plan_metadata_and_predicates() {
+        let rows = vec![
+            plan_row(Some("0"), Some("842"), Some("100000"), Some("2400000")),
+            OracleRow {
+                columns: vec![
+                    (
+                        "ID".to_owned(),
+                        OracleCell::new("NUMBER", Some("1".to_owned())),
+                    ),
+                    (
+                        "OPERATION".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("TABLE ACCESS".to_owned())),
+                    ),
+                    (
+                        "OPTIONS".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("FULL".to_owned())),
+                    ),
+                    (
+                        "OBJECT_OWNER".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("APP".to_owned())),
+                    ),
+                    (
+                        "OBJECT_NAME".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("ORDERS".to_owned())),
+                    ),
+                    (
+                        "COST".to_owned(),
+                        OracleCell::new("NUMBER", Some("842".to_owned())),
+                    ),
+                    (
+                        "CARDINALITY".to_owned(),
+                        OracleCell::new("NUMBER", Some("100000".to_owned())),
+                    ),
+                    (
+                        "BYTES".to_owned(),
+                        OracleCell::new("NUMBER", Some("2400000".to_owned())),
+                    ),
+                    (
+                        "ACCESS_PREDICATES".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("\"ID\"=:B1".to_owned())),
+                    ),
+                    (
+                        "FILTER_PREDICATES".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("\"STATUS\"='OPEN'".to_owned())),
+                    ),
+                ],
+            },
+        ];
+
+        let estimate = assemble_cost_estimate(&rows).expect("root line present");
+        assert_eq!(estimate.rows[1].operation.as_deref(), Some("TABLE ACCESS"));
+        assert_eq!(estimate.rows[1].options.as_deref(), Some("FULL"));
+        assert_eq!(estimate.rows[1].object_owner.as_deref(), Some("APP"));
+        assert_eq!(estimate.rows[1].object_name.as_deref(), Some("ORDERS"));
+        assert_eq!(
+            estimate.rows[1].access_predicates.as_deref(),
+            Some("\"ID\"=:B1")
+        );
+        assert_eq!(
+            estimate.rows[1].filter_predicates.as_deref(),
+            Some("\"STATUS\"='OPEN'")
+        );
     }
 
     #[test]
