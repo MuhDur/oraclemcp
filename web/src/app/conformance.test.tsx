@@ -13,12 +13,14 @@ import {
   isRegisteredDerivationStep,
   maskBadgeFixture,
   vectorClusterFixture,
+  editionTimelineFixture,
   policyBadgeFixture,
   scnScrubberFixture,
   skinContractFixture,
   toCostBadgeViewModel,
   toMaskBadgeViewModel,
   toVectorClusterViewModel,
+  toEditionTimelineViewModel,
   toPolicyBadgeViewModel,
   toScnScrubberViewModel,
   toUndoTreeViewModel,
@@ -266,6 +268,38 @@ describe("OMCP skin conformance", () => {
     const drifted = model.nodes.find((node) => node.dbId === "staging");
     expect(drifted?.drift?.changedSections).toContain("schema");
     expect(markup).toContain('data-db-drift="drifted"');
+  });
+
+  it("renders the edition timeline as a single-child LINEAR chain", () => {
+    const EditionTimeline = OMCP_SKIN.renderers.EditionTimeline;
+    const model = editionTimelineFixture();
+    const markup = renderToStaticMarkup(<EditionTimeline model={model} />);
+
+    expect(markup).toContain('data-grammar-version="1"');
+    expect(markup).toContain('data-edition-linear="true"');
+    expect(model.linear).toBe(true);
+
+    // Each stage names one parent and a strict linear order — never a branch node.
+    expect(markup).toContain('data-edition-stage="REVIEW_1"');
+    expect(markup).toContain('data-edition-parent="ORA$BASE"');
+    expect(markup).toContain('data-linear-order="1"');
+    const orders = [...markup.matchAll(/data-linear-order="(\d+)"/g)].map((m) => Number(m[1]));
+    expect(orders).toEqual([...orders].sort((a, b) => a - b));
+    // Every non-root stage has exactly one parent.
+    for (const stage of model.stages.slice(1)) {
+      expect(stage.parentEdition).not.toBeNull();
+    }
+
+    // A branch (a base with two children) is flagged, never flattened to a line.
+    const branched = toEditionTimelineViewModel([
+      { proposalId: "a", baseEdition: "ORA$BASE", childEdition: "LEFT", status: "requested", objectCount: 1 },
+      { proposalId: "b", baseEdition: "ORA$BASE", childEdition: "RIGHT", status: "requested", objectCount: 1 }
+    ]);
+    expect(branched.linear).toBe(false);
+    expect(branched.branchedFrom).toContain("ORA$BASE");
+    expect(renderToStaticMarkup(<EditionTimeline model={branched} />)).toContain(
+      'data-edition-linear="false"'
+    );
   });
 
   it("renders the vector cluster with k monotonic-rank neighbors", () => {

@@ -1461,6 +1461,144 @@ export function vectorClusterFixture(): VectorClusterViewModel {
   });
 }
 
+// ── Edition linear timeline (Arc D) ──────────────────────────────────────────
+// Oracle editions are inherently LINEAR: every child edition has exactly one
+// parent (`base_edition`). The Reviews board renders the proposal chain as a
+// timeline, NOT a git graph. The honesty guarantee is that a non-linear shape is
+// detected and flagged, never quietly drawn as a straight line — if a base
+// edition ever has two children, that is a branch and the model says so.
+
+export type EditionStatus = "requested" | "reviewing" | "withdrawn";
+
+export type EditionStageViewModel = {
+  edition: string;
+  // The base edition this stage derives from; null for the root of the chain.
+  parentEdition: string | null;
+  order: number;
+  status: EditionStatus | null;
+  proposalId: string | null;
+  objectCount: number;
+  tone: DashboardTone;
+};
+
+export type EditionTimelineViewModel = {
+  grammarVersion: 1;
+  linear: boolean;
+  stages: readonly EditionStageViewModel[];
+  // Base editions that have more than one child — a branch. Empty when linear.
+  branchedFrom: readonly string[];
+  headline: string;
+  detail: string;
+  tone: DashboardTone;
+};
+
+export type EditionProposalInput = {
+  proposalId: string;
+  baseEdition: string;
+  childEdition: string;
+  status: EditionStatus | null;
+  objectCount: number;
+};
+
+const EDITION_STATUS_TONE: Readonly<Record<EditionStatus, DashboardTone>> = {
+  requested: "info",
+  reviewing: "ok",
+  withdrawn: "off"
+};
+
+export function toEditionTimelineViewModel(
+  proposals: readonly EditionProposalInput[]
+): EditionTimelineViewModel {
+  // One edge per proposal: base_edition -> child_edition.
+  const childrenByBase = new Map<string, EditionProposalInput[]>();
+  const childEditions = new Set<string>();
+  for (const proposal of proposals) {
+    const list = childrenByBase.get(proposal.baseEdition) ?? [];
+    list.push(proposal);
+    childrenByBase.set(proposal.baseEdition, list);
+    childEditions.add(proposal.childEdition);
+  }
+  // A branch = a base edition with more than one child.
+  const branchedFrom = [...childrenByBase.entries()]
+    .filter(([, children]) => children.length > 1)
+    .map(([base]) => base)
+    .sort();
+
+  // Roots: base editions that are not themselves a child of any proposal.
+  const roots = [...childrenByBase.keys()].filter((base) => !childEditions.has(base)).sort();
+
+  const stages: EditionStageViewModel[] = [];
+  const stageOf = (
+    edition: string,
+    parentEdition: string | null,
+    proposal: EditionProposalInput | null
+  ): EditionStageViewModel => ({
+    edition,
+    parentEdition,
+    order: stages.length,
+    status: proposal?.status ?? null,
+    proposalId: proposal?.proposalId ?? null,
+    objectCount: proposal?.objectCount ?? 0,
+    tone: proposal?.status ? EDITION_STATUS_TONE[proposal.status] : "neutral"
+  });
+
+  // Walk the single chain from the first root. Stop if a fork or cycle appears —
+  // the flags carry the truth, the walk never fabricates a straight line past a
+  // branch.
+  const visited = new Set<string>();
+  let cursor: string | null = roots[0] ?? proposals[0]?.baseEdition ?? null;
+  let parent: string | null = null;
+  let parentProposal: EditionProposalInput | null = null;
+  while (cursor && !visited.has(cursor)) {
+    visited.add(cursor);
+    stages.push(stageOf(cursor, parent, parentProposal));
+    const children: EditionProposalInput[] = childrenByBase.get(cursor) ?? [];
+    const next: EditionProposalInput | null = children[0] ?? null;
+    parent = cursor;
+    parentProposal = next;
+    cursor = next?.childEdition ?? null;
+  }
+
+  const linear = branchedFrom.length === 0 && stages.length === childEditions.size + roots.length;
+  const tone = proposals.length === 0 ? "off" : linear ? "ok" : "warn";
+  return {
+    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+    linear,
+    stages,
+    branchedFrom,
+    headline:
+      proposals.length === 0
+        ? "No edition proposals"
+        : linear
+          ? `${stages.length}-stage linear edition chain`
+          : `Non-linear edition graph (${branchedFrom.length} branch point(s))`,
+    detail: linear
+      ? "Each edition derives from exactly one parent; rendered as a straight timeline."
+      : "A base edition has more than one child — this is a branch, shown truthfully rather than flattened into a line.",
+    tone
+  };
+}
+
+/** A three-stage linear chain: ORA$BASE -> REVIEW_1 -> REVIEW_2. */
+export function editionTimelineFixture(): EditionTimelineViewModel {
+  return toEditionTimelineViewModel([
+    {
+      proposalId: "prop-1",
+      baseEdition: "ORA$BASE",
+      childEdition: "REVIEW_1",
+      status: "reviewing",
+      objectCount: 2
+    },
+    {
+      proposalId: "prop-2",
+      baseEdition: "REVIEW_1",
+      childEdition: "REVIEW_2",
+      status: "requested",
+      objectCount: 1
+    }
+  ]);
+}
+
 export const DASHBOARD_GRAMMAR = {
   grammarVersion: 1,
   meanings: {
@@ -1633,6 +1771,7 @@ export function skinContractFixture(): {
   fleetMap: FleetMapViewModel;
   policyBadge: PolicyBadgeViewModel;
   vectorCluster: VectorClusterViewModel;
+  editionTimeline: EditionTimelineViewModel;
 } {
   return {
     policyBadge: policyBadgeFixture(),
@@ -1643,6 +1782,7 @@ export function skinContractFixture(): {
     maskBadge: maskBadgeFixture(),
     fleetMap: fleetMapFixture(),
     vectorCluster: vectorClusterFixture(),
+    editionTimeline: editionTimelineFixture(),
     groundControl: {
       grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
       verdict: "GO",

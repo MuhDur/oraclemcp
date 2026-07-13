@@ -30,6 +30,7 @@ import {
   type FleetMapViewModel,
   type MaskBadgeViewModel,
   type VectorClusterViewModel,
+  type EditionTimelineViewModel,
   type PolicyBadgeViewModel,
   type ScnScrubberViewModel,
   type SignatureId,
@@ -78,6 +79,7 @@ export type DashboardSkin = {
     FleetMap: React.ComponentType<{ model: FleetMapViewModel }>;
     PolicyBadge: React.ComponentType<{ model: PolicyBadgeViewModel }>;
     VectorCluster: React.ComponentType<{ model: VectorClusterViewModel }>;
+    EditionTimeline: React.ComponentType<{ model: EditionTimelineViewModel }>;
     ScnScrubber: React.ComponentType<{
       model: ScnScrubberViewModel;
       onScrub?: (scn: number) => void;
@@ -174,6 +176,7 @@ export const OMCP_SKIN: DashboardSkin = {
     MaskBadge: MaskBadgeRenderer,
     FleetMap: FleetMapRenderer,
     VectorCluster: VectorClusterRenderer,
+    EditionTimeline: EditionTimelineRenderer,
     PolicyBadge: PolicyBadgeRenderer
   },
   layout: {
@@ -654,6 +657,80 @@ export function VectorClusterRenderer({
   );
 }
 
+/**
+ * The edition linear timeline (Arc D).
+ *
+ * Oracle editions are linear — each derives from exactly one parent — so the
+ * Reviews board renders them as a straight timeline, not a git graph. A branch
+ * (a base edition with two children) is flagged, never flattened into a line.
+ */
+export function EditionTimelineRenderer({
+  model
+}: {
+  model: EditionTimelineViewModel;
+}): React.ReactElement {
+  return (
+    <section
+      className={cn(
+        "flex flex-col gap-3 rounded-lg border bg-[var(--om-surface)] p-4 shadow-sm",
+        model.linear
+          ? "border-[var(--om-border)]"
+          : "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)]"
+      )}
+      aria-label="edition timeline"
+      data-grammar-version={model.grammarVersion}
+      data-edition-linear={model.linear ? "true" : "false"}
+      data-stage-count={model.stages.length}
+      data-branch-count={model.branchedFrom.length}
+    >
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <FileClock className="size-4 text-[var(--om-gold)]" aria-hidden="true" />
+          <span className="text-sm font-bold text-[var(--om-text-bright)]">Edition Timeline</span>
+          <Badge tone={model.tone}>{model.linear ? "linear" : "branched"}</Badge>
+        </div>
+        <span className="font-mono text-2xs text-[var(--om-text-muted)]">{model.headline}</span>
+      </header>
+      <p className="text-xs text-[var(--om-text-muted)]">{model.detail}</p>
+
+      <ol className="flex flex-col gap-1">
+        {model.stages.map((stage) => (
+          <li
+            key={stage.edition}
+            className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--om-border)] px-3 py-2"
+            data-edition-stage={stage.edition}
+            data-edition-parent={stage.parentEdition ?? ""}
+            data-linear-order={stage.order}
+            data-edition-status={stage.status ?? "none"}
+          >
+            <span className="font-mono text-2xs text-[var(--om-text-muted)]">#{stage.order}</span>
+            {stage.parentEdition ? (
+              <span className="font-mono text-2xs text-[var(--om-text-muted)]">
+                {stage.parentEdition} →
+              </span>
+            ) : (
+              <span className="font-mono text-2xs text-[var(--om-text-muted)]">root →</span>
+            )}
+            <span className="font-mono text-xs font-bold text-[var(--om-text-bright)]">
+              {stage.edition}
+            </span>
+            {stage.status ? <Badge tone={stage.tone}>{stage.status}</Badge> : null}
+            <span className="text-2xs text-[var(--om-text-muted)]">
+              {stage.objectCount} object(s)
+            </span>
+          </li>
+        ))}
+      </ol>
+
+      {!model.linear ? (
+        <p className="text-2xs font-semibold text-[var(--om-copper)]">
+          Branch points: {model.branchedFrom.join(", ")}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
 export function MaskBadgeRenderer({ model }: { model: MaskBadgeViewModel }): React.ReactElement {
   return (
     <section
@@ -1030,6 +1107,23 @@ export function assertDashboardSkinConformance(skin: DashboardSkin): void {
   if (typeof skin.renderers.VectorCluster !== "function") {
     throw new Error(`skin ${skin.name} must provide a vector-cluster renderer`);
   }
+  if (typeof skin.renderers.EditionTimeline !== "function") {
+    throw new Error(`skin ${skin.name} must provide an edition-timeline renderer`);
+  }
+  // A linear chain: every stage after the root names its single parent, and the
+  // linear order is a strict 0..n sequence — never a branch/graph node.
+  const timeline = fixture.editionTimeline;
+  if (!timeline.linear || timeline.branchedFrom.length > 0) {
+    throw new Error("edition-timeline fixture must be a linear chain");
+  }
+  timeline.stages.forEach((stage, index) => {
+    if (stage.order !== index) {
+      throw new Error("edition stages must be in strict linear order");
+    }
+    if (index > 0 && stage.parentEdition === null) {
+      throw new Error("every non-root edition stage must name its single parent");
+    }
+  });
   // The neighbor distances (ranks) must be monotonic non-decreasing, and the
   // panel must never claim a numeric distance the server does not emit.
   const vector = fixture.vectorCluster;

@@ -65,6 +65,7 @@ import {
   toMaskBadgeViewModel,
   toPolicyBadgeViewModel,
   toVectorClusterViewModel,
+  toEditionTimelineViewModel,
   toScnScrubberViewModel,
   toUndoTreeViewModel,
   toVerdictProofViewModel,
@@ -98,10 +99,12 @@ import {
   parseMaskCertificate,
   parsePolicyTightening,
   parseVectorCluster,
+  parseEditionProposals,
   parseQueryAsOf,
   parseUndoOutcome,
   fetchFleetMap,
   fetchVectorCluster,
+  fetchEditionProposals,
   fetchQueryAsOf,
   fetchQueryCostEstimate,
   fetchVerdictProofs,
@@ -5906,9 +5909,40 @@ function ReviewsPage(): React.ReactElement {
           </ConsolePanel>
 
           <ReviewResultPanel result={lastResult} pending={draftMutation.isPending || applyMutation.isPending} />
+
+          <EditionTimelinePanel />
         </div>
       </div>
     </PageFrame>
+  );
+}
+
+/**
+ * The edition linear timeline (Arc D) on the Reviews board.
+ *
+ * Reads /operator/v1/edition-proposals and renders the base→child edition chain
+ * as a straight timeline. A non-linear shape (a base with two children) is
+ * flagged, never drawn as a line.
+ */
+function EditionTimelinePanel(): React.ReactElement {
+  const EditionTimeline = OMCP_SKIN.renderers.EditionTimeline;
+  const editions = useQuery({
+    queryKey: ["edition-proposals"],
+    queryFn: fetchEditionProposals,
+    refetchInterval: 15_000
+  });
+  const model = toEditionTimelineViewModel(parseEditionProposals(editions.data?.data ?? null));
+  return (
+    <Surface className="space-y-3 p-4" data-testid="edition-timeline-panel">
+      <h2 className="text-sm font-bold text-[var(--om-text-bright)]">Edition Timeline</h2>
+      {editions.data ? (
+        <EditionTimeline model={model} />
+      ) : (
+        <p className="text-xs text-[var(--om-text-muted)]">
+          {editions.isFetching ? "Loading edition proposals…" : "No edition proposals loaded."}
+        </p>
+      )}
+    </Surface>
   );
 }
 
