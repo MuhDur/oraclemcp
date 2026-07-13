@@ -143,6 +143,14 @@ impl AuditSink for SharedSink {
         self.0.append(record)
     }
 
+    fn append_with_verdict_certificate(
+        &self,
+        record: &AuditRecord,
+        certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+    ) -> Result<(), oraclemcp_audit::AuditError> {
+        self.0.append_with_verdict_certificate(record, certificate)
+    }
+
     fn flush(&self) -> Result<(), oraclemcp_audit::AuditError> {
         self.0.flush()
     }

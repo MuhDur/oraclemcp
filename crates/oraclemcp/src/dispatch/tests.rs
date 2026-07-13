@@ -8778,6 +8778,13 @@ mod audit_wiring {
         fn append(&self, r: &AuditRecord) -> Result<(), AuditError> {
             self.0.append(r)
         }
+        fn append_with_verdict_certificate(
+            &self,
+            record: &AuditRecord,
+            certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+        ) -> Result<(), AuditError> {
+            self.0.append_with_verdict_certificate(record, certificate)
+        }
         fn flush(&self) -> Result<(), AuditError> {
             self.0.flush()
         }
@@ -8962,6 +8969,17 @@ mod audit_wiring {
         assert_eq!(records[0].observed_scn, Some(424_242));
         assert_eq!(records[1].observed_scn, Some(424_242));
         assert_eq!(records[1].prev_hash, records[0].entry_hash);
+        let certificates = sink.certificates();
+        assert!(
+            certificates
+                .iter()
+                .zip(&records)
+                .all(|(certificate, record)| {
+                    certificate
+                        .as_ref()
+                        .is_some_and(|certificate| certificate.matches_record(record))
+                })
+        );
     }
 
     #[test]

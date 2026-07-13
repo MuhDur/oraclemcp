@@ -83,6 +83,15 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
+fn is_canonical_sha256(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
 fn push_hex_byte(out: &mut String, byte: u8) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     out.push(HEX[(byte >> 4) as usize] as char);
@@ -369,6 +378,258 @@ pub struct AuditResultMaskingCertificate {
     pub policy_id: String,
     /// Column decisions in select-list order.
     pub decisions: Vec<AuditResultMaskingColumnDecision>,
+}
+
+/// Operating level carried by a persisted verdict-certificate core.
+///
+/// This closed vocabulary is intentionally separate from the guard crate so
+/// the audit leaf never depends on the classifier. Its serialized spelling is
+/// the public certificate grammar, not caller-provided diagnostic text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AuditVerdictOperatingLevel {
+    /// Statements provably safe to read.
+    ReadOnly,
+    /// Governed data mutation.
+    ReadWrite,
+    /// Schema definition.
+    Ddl,
+    /// Administrative operation.
+    Admin,
+}
+
+/// Final classifier verdict carried by a persisted certificate core.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AuditVerdict {
+    /// The classifier proved the statement safe at its required level.
+    Safe,
+    /// The statement requires a guarded level.
+    Guarded,
+    /// The statement is destructive.
+    Destructive,
+    /// The classifier refused the statement.
+    Forbidden,
+}
+
+/// Immutable rule identifier allowed in a persisted verdict certificate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuditVerdictRuleId {
+    /// Routine-purity consult.
+    R15,
+    /// Final classifier verdict.
+    R16,
+}
+
+/// Redaction-safe construct labels from the immutable verdict-rule registry.
+///
+/// A certificate cannot carry an identifier, SQL fragment, bind value, or
+/// parser rendering because this is a closed enum rather than a free-form
+/// string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuditVerdictConstruct {
+    /// No user-defined routine call was present.
+    #[serde(rename = "routine_calls:absent")]
+    RoutineCallsAbsent,
+    /// Every consulted routine was proven read-only.
+    #[serde(rename = "routine_purity:all_proven_read_only")]
+    RoutinePurityAllProvenReadOnly,
+    /// At least one consulted routine was not proven read-only.
+    #[serde(rename = "routine_purity:unproven_present")]
+    RoutinePurityUnprovenPresent,
+    /// Final safe verdict.
+    #[serde(rename = "final_verdict:SAFE")]
+    FinalSafe,
+    /// Final guarded verdict.
+    #[serde(rename = "final_verdict:GUARDED")]
+    FinalGuarded,
+    /// Final destructive verdict.
+    #[serde(rename = "final_verdict:DESTRUCTIVE")]
+    FinalDestructive,
+    /// Final forbidden verdict.
+    #[serde(rename = "final_verdict:FORBIDDEN")]
+    FinalForbidden,
+}
+
+/// One immutable, redacted classifier-rule application.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditVerdictDerivationStep {
+    construct: AuditVerdictConstruct,
+    rule_id: AuditVerdictRuleId,
+}
+
+impl AuditVerdictDerivationStep {
+    /// Construct a registered rule/construct pair, rejecting invented pairs.
+    pub fn new(
+        rule_id: AuditVerdictRuleId,
+        construct: AuditVerdictConstruct,
+    ) -> Result<Self, AuditVerdictCertificateError> {
+        let registered = matches!(
+            (rule_id, construct),
+            (
+                AuditVerdictRuleId::R15,
+                AuditVerdictConstruct::RoutineCallsAbsent
+                    | AuditVerdictConstruct::RoutinePurityAllProvenReadOnly
+                    | AuditVerdictConstruct::RoutinePurityUnprovenPresent
+            ) | (
+                AuditVerdictRuleId::R16,
+                AuditVerdictConstruct::FinalSafe
+                    | AuditVerdictConstruct::FinalGuarded
+                    | AuditVerdictConstruct::FinalDestructive
+                    | AuditVerdictConstruct::FinalForbidden
+            )
+        );
+        if !registered {
+            return Err(AuditVerdictCertificateError::UnregisteredDerivation);
+        }
+        Ok(Self { construct, rule_id })
+    }
+}
+
+/// A redacted verdict-certificate core persisted beside its audit record.
+///
+/// The core never contains the response-only audit binding. Its
+/// domain-separated digest is covered by the signed `AuditRecord`, avoiding a
+/// hash cycle while still making later tampering detectable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditVerdictCertificate {
+    classifier_version: String,
+    derivation: Vec<AuditVerdictDerivationStep>,
+    level: Option<AuditVerdictOperatingLevel>,
+    observed_scn: Option<String>,
+    stmt_digest: String,
+    verdict: AuditVerdict,
+}
+
+/// A persisted certificate core with the response-side audit binding added.
+///
+/// The binding is derived only after the signed entry exists. It is never an
+/// authorization input: consumers must verify it against that record before
+/// treating this object as evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundAuditVerdictCertificate {
+    #[serde(flatten)]
+    certificate: AuditVerdictCertificate,
+    bound_audit_hash: String,
+}
+
+/// Why a verdict certificate cannot become persisted audit evidence.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum AuditVerdictCertificateError {
+    /// The digest is not canonical `sha256:<lowercase-hex>`.
+    #[error("verdict certificate statement digest is not canonical sha256")]
+    InvalidStatementDigest,
+    /// No derivation was supplied.
+    #[error("verdict certificate has no registered derivation steps")]
+    EmptyDerivation,
+    /// A rule id was paired with a construct outside the immutable registry.
+    #[error("verdict certificate derivation is not in the immutable registry")]
+    UnregisteredDerivation,
+    /// A persisted certificate must have a nonempty classifier identity.
+    #[error("verdict certificate classifier version is empty")]
+    EmptyClassifierVersion,
+    /// The optional SCN must be unsigned decimal text.
+    #[error("verdict certificate observed SCN is not unsigned decimal text")]
+    InvalidObservedScn,
+    /// A forbidden result has no operating level; every other result does.
+    #[error("verdict certificate level and verdict disagree")]
+    InconsistentLevel,
+    /// The audit record describes different exact statement bytes.
+    #[error("verdict certificate statement digest does not match audit record")]
+    AuditSqlDigestMismatch,
+    /// The signed audit record does not cover this certificate core.
+    #[error("audit record does not cover this verdict certificate core")]
+    AuditCoreHashMismatch,
+    /// The record cannot supply a canonical hash for response binding.
+    #[error("audit record entry hash is not canonical sha256")]
+    InvalidAuditEntryHash,
+}
+
+impl AuditVerdictCertificate {
+    /// Build a redacted certificate core that can be persisted with an audit
+    /// record. The closed derivation vocabulary prevents secret material from
+    /// entering the eventual HTTP projection by construction.
+    pub fn new(
+        classifier_version: String,
+        derivation: Vec<AuditVerdictDerivationStep>,
+        level: Option<AuditVerdictOperatingLevel>,
+        observed_scn: Option<String>,
+        stmt_digest: String,
+        verdict: AuditVerdict,
+    ) -> Result<Self, AuditVerdictCertificateError> {
+        if classifier_version.trim().is_empty() {
+            return Err(AuditVerdictCertificateError::EmptyClassifierVersion);
+        }
+        if derivation.is_empty() {
+            return Err(AuditVerdictCertificateError::EmptyDerivation);
+        }
+        if !is_canonical_sha256(&stmt_digest) {
+            return Err(AuditVerdictCertificateError::InvalidStatementDigest);
+        }
+        if observed_scn
+            .as_deref()
+            .is_some_and(|scn| scn.is_empty() || !scn.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            return Err(AuditVerdictCertificateError::InvalidObservedScn);
+        }
+        if (verdict == AuditVerdict::Forbidden) != level.is_none() {
+            return Err(AuditVerdictCertificateError::InconsistentLevel);
+        }
+        Ok(Self {
+            classifier_version,
+            derivation,
+            level,
+            observed_scn,
+            stmt_digest,
+            verdict,
+        })
+    }
+
+    /// Domain-separated digest of the exact persisted certificate core.
+    #[must_use]
+    pub fn core_hash(&self) -> String {
+        const DOMAIN: &str = "oraclemcp:verdict-certificate-core:v1\n";
+        let canonical = serde_json::to_vec(self)
+            .expect("verdict certificate core contains only infallibly serializable fields");
+        let mut payload = Vec::with_capacity(DOMAIN.len() + canonical.len());
+        payload.extend_from_slice(DOMAIN.as_bytes());
+        payload.extend_from_slice(&canonical);
+        sha256_hex(&payload)
+    }
+
+    /// Bind this core to an already-created signed record only when the record
+    /// covers the same core hash and exact statement digest.
+    pub fn bind_to_record(
+        self,
+        record: &AuditRecord,
+    ) -> Result<BoundAuditVerdictCertificate, AuditVerdictCertificateError> {
+        if self.stmt_digest != record.sql_sha256 {
+            return Err(AuditVerdictCertificateError::AuditSqlDigestMismatch);
+        }
+        let core_hash = self.core_hash();
+        if record.verdict_certificate_core_hash.as_deref() != Some(core_hash.as_str()) {
+            return Err(AuditVerdictCertificateError::AuditCoreHashMismatch);
+        }
+        if !is_canonical_sha256(&record.entry_hash) {
+            return Err(AuditVerdictCertificateError::InvalidAuditEntryHash);
+        }
+        Ok(BoundAuditVerdictCertificate {
+            certificate: self,
+            bound_audit_hash: record.entry_hash.clone(),
+        })
+    }
+}
+
+impl BoundAuditVerdictCertificate {
+    /// Verify this response-side witness against the signed audit record before
+    /// it crosses a host boundary.
+    #[must_use]
+    pub fn matches_record(&self, record: &AuditRecord) -> bool {
+        self.bound_audit_hash == record.entry_hash
+            && self.certificate.stmt_digest == record.sql_sha256
+            && record.verdict_certificate_core_hash.as_deref()
+                == Some(self.certificate.core_hash().as_str())
+    }
 }
 
 /// One audit entry. `seq` + `prev_hash` + `entry_hash` form the tamper-evident

@@ -22,7 +22,10 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use crate::anchor::{AnchorFile, ChainAnchor, load_anchor};
 use crate::keyring::AuditKeyring;
-use crate::record::{AuditCorrelation, AuditEntryDraft, AuditRecord, GENESIS_HASH, SigningKey};
+use crate::record::{
+    AuditCorrelation, AuditEntryDraft, AuditRecord, AuditVerdictCertificate,
+    BoundAuditVerdictCertificate, GENESIS_HASH, SigningKey,
+};
 use crate::rekor::{AsyncRekorAnchor, AuditChainHead};
 use crate::verify::{BrokenReason, ChainVerifier, JsonlError, JsonlReader, VerifyOutcome};
 
@@ -92,6 +95,14 @@ pub enum AuditError {
     /// certificate.
     #[error("invalid verdict certificate core hash")]
     InvalidVerdictCertificateCoreHash,
+    /// The configured sink cannot durably persist a certificate beside its
+    /// signed record. Refuse rather than emit an uninspectable proof.
+    #[error("audit sink cannot persist verdict certificates")]
+    VerdictCertificatePersistenceUnsupported,
+    /// The supplied certificate does not match the signed record the auditor
+    /// just constructed, so it cannot become audit evidence.
+    #[error("invalid verdict certificate evidence: {0}")]
+    InvalidVerdictCertificateEvidence(String),
     /// Chain resume refused at startup: an existing audit log cannot seed a
     /// continuing hash chain without forking it or masking a truncation (a
     /// malformed tail, or a tail that contradicts the head anchor). The server
@@ -134,6 +145,16 @@ pub trait AuditSink: Send + Sync {
     /// Append one record. Implementations must write the full record before
     /// returning.
     fn append(&self, record: &AuditRecord) -> Result<(), AuditError>;
+    /// Append a record together with its already-bound, redacted verdict
+    /// certificate. Implementations that cannot preserve the pair must refuse:
+    /// silently dropping evidence would make the audit-tail proof dishonest.
+    fn append_with_verdict_certificate(
+        &self,
+        _record: &AuditRecord,
+        _certificate: &BoundAuditVerdictCertificate,
+    ) -> Result<(), AuditError> {
+        Err(AuditError::VerdictCertificatePersistenceUnsupported)
+    }
     /// Flush + fsync any buffered data to durable storage.
     fn flush(&self) -> Result<(), AuditError>;
 }
@@ -441,16 +462,46 @@ impl FileAuditSink {
             ))
         })
     }
+
+    fn write_record(
+        &self,
+        record: &AuditRecord,
+        certificate: Option<&BoundAuditVerdictCertificate>,
+    ) -> Result<(), AuditError> {
+        let mut line = if let Some(certificate) = certificate {
+            let mut value =
+                serde_json::to_value(record).map_err(|e| AuditError::Io(e.to_string()))?;
+            let object = value
+                .as_object_mut()
+                .expect("audit record always serializes as an object");
+            object.insert(
+                "verdict_certificate".to_owned(),
+                serde_json::to_value(certificate).map_err(|e| AuditError::Io(e.to_string()))?,
+            );
+            serde_json::to_vec(&value).map_err(|e| AuditError::Io(e.to_string()))?
+        } else {
+            // Preserve the existing byte-exact JSONL representation for normal
+            // records so WORM mirrors remain byte-identical.
+            serde_json::to_vec(record).map_err(|e| AuditError::Io(e.to_string()))?
+        };
+        line.push(b'\n');
+        let mut file = self.file.lock();
+        file.write_all(&line)
+            .map_err(|e| AuditError::Io(e.to_string()))
+    }
 }
 
 impl AuditSink for FileAuditSink {
     fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
-        let mut line = serde_json::to_vec(record).map_err(|e| AuditError::Io(e.to_string()))?;
-        line.push(b'\n');
-        let mut f = self.file.lock();
-        f.write_all(&line)
-            .map_err(|e| AuditError::Io(e.to_string()))?;
-        Ok(())
+        self.write_record(record, None)
+    }
+
+    fn append_with_verdict_certificate(
+        &self,
+        record: &AuditRecord,
+        certificate: &BoundAuditVerdictCertificate,
+    ) -> Result<(), AuditError> {
+        self.write_record(record, Some(certificate))
     }
 
     fn flush(&self) -> Result<(), AuditError> {
@@ -465,6 +516,7 @@ impl AuditSink for FileAuditSink {
 #[derive(Default)]
 pub struct MemoryAuditSink {
     records: Mutex<Vec<AuditRecord>>,
+    certificates: Mutex<Vec<Option<BoundAuditVerdictCertificate>>>,
     flushes: Mutex<usize>,
 }
 
@@ -481,6 +533,12 @@ impl MemoryAuditSink {
         self.records.lock().clone()
     }
 
+    /// Redacted certificates aligned by index with [`Self::records`].
+    #[must_use]
+    pub fn certificates(&self) -> Vec<Option<BoundAuditVerdictCertificate>> {
+        self.certificates.lock().clone()
+    }
+
     /// How many times `flush` was called.
     #[must_use]
     pub fn flush_count(&self) -> usize {
@@ -491,6 +549,17 @@ impl MemoryAuditSink {
 impl AuditSink for MemoryAuditSink {
     fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
         self.records.lock().push(record.clone());
+        self.certificates.lock().push(None);
+        Ok(())
+    }
+
+    fn append_with_verdict_certificate(
+        &self,
+        record: &AuditRecord,
+        certificate: &BoundAuditVerdictCertificate,
+    ) -> Result<(), AuditError> {
+        self.records.lock().push(record.clone());
+        self.certificates.lock().push(Some(certificate.clone()));
         Ok(())
     }
 
@@ -955,6 +1024,53 @@ impl Auditor {
         observed_scn: Option<u64>,
         verdict_certificate_core_hash: Option<&str>,
     ) -> Result<AuditRecord, AuditError> {
+        self.append_correlated_with_observed_scn_and_certificate_internal(
+            draft,
+            timestamp,
+            durable,
+            correlation,
+            observed_scn,
+            verdict_certificate_core_hash,
+            None,
+        )
+    }
+
+    /// Append a record with a typed, redaction-safe verdict certificate. The
+    /// auditor computes the core hash itself, includes it in the signed record,
+    /// then binds the persisted certificate to the resulting `entry_hash`
+    /// before either object reaches the sink.
+    pub fn append_correlated_with_observed_scn_and_verdict_certificate(
+        &self,
+        draft: &AuditEntryDraft,
+        timestamp: String,
+        durable: bool,
+        correlation: Option<AuditCorrelation>,
+        observed_scn: Option<u64>,
+        verdict_certificate: Option<&AuditVerdictCertificate>,
+    ) -> Result<AuditRecord, AuditError> {
+        let core_hash = verdict_certificate.map(AuditVerdictCertificate::core_hash);
+        self.append_correlated_with_observed_scn_and_certificate_internal(
+            draft,
+            timestamp,
+            durable,
+            correlation,
+            observed_scn,
+            core_hash.as_deref(),
+            verdict_certificate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_correlated_with_observed_scn_and_certificate_internal(
+        &self,
+        draft: &AuditEntryDraft,
+        timestamp: String,
+        durable: bool,
+        correlation: Option<AuditCorrelation>,
+        observed_scn: Option<u64>,
+        verdict_certificate_core_hash: Option<&str>,
+        verdict_certificate: Option<&AuditVerdictCertificate>,
+    ) -> Result<AuditRecord, AuditError> {
         if verdict_certificate_core_hash.is_some_and(|hash| !is_canonical_sha256(hash)) {
             return Err(AuditError::InvalidVerdictCertificateCoreHash);
         }
@@ -977,7 +1093,17 @@ impl Auditor {
                 observed_scn,
                 verdict_certificate_core_hash.map(str::to_owned),
             );
-        match catch_unwind(AssertUnwindSafe(|| self.sink.append(&record))) {
+        let bound_certificate = verdict_certificate
+            .cloned()
+            .map(|certificate| certificate.bind_to_record(&record))
+            .transpose()
+            .map_err(|error| AuditError::InvalidVerdictCertificateEvidence(error.to_string()))?;
+        match catch_unwind(AssertUnwindSafe(|| match bound_certificate.as_ref() {
+            Some(certificate) => self
+                .sink
+                .append_with_verdict_certificate(&record, certificate),
+            None => self.sink.append(&record),
+        })) {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
                 state.poisoned = true;

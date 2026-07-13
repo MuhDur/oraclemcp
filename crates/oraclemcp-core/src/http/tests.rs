@@ -793,6 +793,49 @@ fn write_audit_tail_fixture(name: &str, break_second_hash: bool) -> PathBuf {
     path
 }
 
+fn write_certificate_audit_tail_fixture(name: &str) -> PathBuf {
+    let key = oraclemcp_audit::SigningKey::new(
+        "certificate-tail-test",
+        b"0123456789abcdef0123456789abcdef".to_vec(),
+    )
+    .expect("valid test key");
+    let path = audit_tail_fixture_path(name);
+    let certificate = Classifier::default()
+        .classify("SELECT payroll.secret_bonus FROM payroll WHERE employee_id = :secret_employee")
+        .verdict_certificate()
+        .clone()
+        .with_observed_scn(Some(42_000_001))
+        .audit_certificate()
+        .expect("the guard's registered certificate must project to audit evidence");
+    let auditor = Auditor::new(
+        Box::new(
+            oraclemcp_audit::FileAuditSink::open(&path).expect("open private audit-tail fixture"),
+        ),
+        key,
+    );
+    let record = auditor
+        .append_correlated_with_observed_scn_and_verdict_certificate(
+            &audit_tail_draft(
+                "human@example.test",
+                "oracle_query",
+                "SELECT payroll.secret_bonus FROM payroll WHERE employee_id = :secret_employee",
+                "SAFE",
+                AuditOutcome::Succeeded,
+                None,
+            ),
+            "2026-07-13T09:00:00Z".to_owned(),
+            true,
+            None,
+            Some(42_000_001),
+            Some(&certificate),
+        )
+        .expect("certificate-bearing record must fsync before returning");
+    assert!(record.hash_is_valid());
+    assert!(record.verdict_certificate_core_hash.is_some());
+    drop(auditor);
+    path
+}
+
 #[test]
 fn request_target_preserves_and_decodes_query_string() {
     let request = HttpRequest::new(
@@ -2304,7 +2347,7 @@ fn audit_tail_projects_hash_covered_operator_correlation() {
         Some(AuditCorrelation::terminal("sha256:request-9", 8)),
     );
 
-    let redacted = redacted_audit_record(&record);
+    let redacted = redacted_audit_record(&record, None);
     assert_eq!(
         redacted["correlation"]["request_sha256"],
         serde_json::json!("sha256:request-9")
@@ -2312,6 +2355,107 @@ fn audit_tail_projects_hash_covered_operator_correlation() {
     assert_eq!(redacted["correlation"]["parent_seq"], serde_json::json!(8));
     assert_eq!(redacted["outcome"], serde_json::json!("FAILED"));
     assert!(record.hash_is_valid());
+}
+
+#[test]
+fn audit_tail_projects_a_bound_redacted_verdict_certificate() {
+    let path = write_certificate_audit_tail_fixture("verdict-certificate");
+    let (auditor, _sink) = operator_auditor();
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        operator_audit_tail_path: Some(path),
+        ..Default::default()
+    };
+
+    let response = handle_http_request(
+        &test_server(),
+        &cfg,
+        HttpRequest::new(
+            "GET",
+            "/operator/v1/audit-tail?limit=10",
+            [("host", "127.0.0.1"), ("accept", "application/json")],
+            Vec::new(),
+        )
+        .with_peer_loopback(true),
+    );
+
+    assert_eq!(response.status, 200);
+    let body = response_json(&response);
+    let record = &body["data"]["records"][0];
+    let certificate = &record["verdict_certificate"];
+    // The four client-side checks from the verdict-proof inspector all hold.
+    assert_eq!(
+        certificate["bound_audit_hash"], record["proof"]["entry_hash"],
+        "certificate is bound to this exact signed audit record"
+    );
+    assert_eq!(certificate["stmt_digest"], record["sql_sha256"]);
+    assert_eq!(
+        certificate["derivation"][0]["rule_id"],
+        serde_json::json!("R16")
+    );
+    assert_eq!(
+        certificate["derivation"][0]["construct"],
+        serde_json::json!("final_verdict:SAFE")
+    );
+    assert_eq!(record["proof"]["hash_valid"], serde_json::json!(true));
+    assert!(
+        record["verdict_certificate_core_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:")),
+        "the signed record exposes the certificate core hash"
+    );
+
+    let rendered = body.to_string();
+    for forbidden in [
+        "payroll",
+        "secret_bonus",
+        "secret_employee",
+        "SELECT payroll",
+    ] {
+        assert!(
+            !rendered.contains(forbidden),
+            "audit-tail certificate must not expose SQL, binds, or identifiers: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn audit_tail_omits_a_certificate_forged_after_the_signed_append() {
+    let path = write_certificate_audit_tail_fixture("forged-verdict-certificate");
+    let persisted = std::fs::read_to_string(&path).expect("read certificate fixture");
+    let forged = persisted.replacen("final_verdict:SAFE", "final_verdict:FORBIDDEN", 1);
+    assert_ne!(
+        persisted, forged,
+        "fixture must contain the registered label"
+    );
+    std::fs::write(&path, forged).expect("rewrite only the unauthenticated sidecar envelope");
+
+    let (auditor, _sink) = operator_auditor();
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        operator_audit_tail_path: Some(path),
+        ..Default::default()
+    };
+    let response = handle_http_request(
+        &test_server(),
+        &cfg,
+        HttpRequest::new(
+            "GET",
+            "/operator/v1/audit-tail?limit=10",
+            [("host", "127.0.0.1"), ("accept", "application/json")],
+            Vec::new(),
+        )
+        .with_peer_loopback(true),
+    );
+
+    assert_eq!(response.status, 200);
+    let record = &response_json(&response)["data"]["records"][0];
+    assert_eq!(record["proof"]["hash_valid"], serde_json::json!(true));
+    assert!(
+        record["verdict_certificate"].is_null()
+            && record["verdict_certificate_core_hash"].is_null(),
+        "the HTTP surface must not promote a certificate whose core no longer matches the signed record"
+    );
 }
 
 #[test]

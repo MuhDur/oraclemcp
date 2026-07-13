@@ -207,6 +207,73 @@ impl VerdictCertificate {
         payload.extend_from_slice(&canonical);
         oraclemcp_audit::sha256_hex(&payload)
     }
+
+    /// Convert this guard-owned witness into the audit leaf's closed,
+    /// redaction-safe persistence grammar. This is deliberately fallible: a
+    /// future classifier branch cannot smuggle a new free-form derivation label
+    /// onto the audit or HTTP surfaces before the immutable registry is updated.
+    pub fn audit_certificate(
+        &self,
+    ) -> Result<
+        oraclemcp_audit::AuditVerdictCertificate,
+        oraclemcp_audit::AuditVerdictCertificateError,
+    > {
+        use oraclemcp_audit::{
+            AuditVerdict, AuditVerdictConstruct, AuditVerdictDerivationStep,
+            AuditVerdictOperatingLevel, AuditVerdictRuleId,
+        };
+
+        let derivation =
+            self.derivation
+                .iter()
+                .map(|step| {
+                    let rule_id = match step.rule_id.as_str() {
+                        "R15" => AuditVerdictRuleId::R15,
+                        "R16" => AuditVerdictRuleId::R16,
+                        _ => return Err(
+                            oraclemcp_audit::AuditVerdictCertificateError::UnregisteredDerivation,
+                        ),
+                    };
+                    let construct = match step.construct.as_str() {
+                        "routine_calls:absent" => AuditVerdictConstruct::RoutineCallsAbsent,
+                        "routine_purity:all_proven_read_only" => {
+                            AuditVerdictConstruct::RoutinePurityAllProvenReadOnly
+                        }
+                        "routine_purity:unproven_present" => {
+                            AuditVerdictConstruct::RoutinePurityUnprovenPresent
+                        }
+                        "final_verdict:SAFE" => AuditVerdictConstruct::FinalSafe,
+                        "final_verdict:GUARDED" => AuditVerdictConstruct::FinalGuarded,
+                        "final_verdict:DESTRUCTIVE" => AuditVerdictConstruct::FinalDestructive,
+                        "final_verdict:FORBIDDEN" => AuditVerdictConstruct::FinalForbidden,
+                        _ => return Err(
+                            oraclemcp_audit::AuditVerdictCertificateError::UnregisteredDerivation,
+                        ),
+                    };
+                    AuditVerdictDerivationStep::new(rule_id, construct)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        let level = self.level.map(|level| match level {
+            OperatingLevel::ReadOnly => AuditVerdictOperatingLevel::ReadOnly,
+            OperatingLevel::ReadWrite => AuditVerdictOperatingLevel::ReadWrite,
+            OperatingLevel::Ddl => AuditVerdictOperatingLevel::Ddl,
+            OperatingLevel::Admin => AuditVerdictOperatingLevel::Admin,
+        });
+        let verdict = match self.verdict {
+            DangerLevel::Safe => AuditVerdict::Safe,
+            DangerLevel::Guarded => AuditVerdict::Guarded,
+            DangerLevel::Destructive => AuditVerdict::Destructive,
+            DangerLevel::Forbidden => AuditVerdict::Forbidden,
+        };
+        oraclemcp_audit::AuditVerdictCertificate::new(
+            self.classifier_version.clone(),
+            derivation,
+            level,
+            self.observed_scn.clone(),
+            self.stmt_digest.clone(),
+            verdict,
+        )
+    }
 }
 
 fn is_canonical_sha256(value: &str) -> bool {

@@ -2837,8 +2837,22 @@ fn read_redacted_audit_tail(path: &Path, query: &AuditTailQuery) -> Result<Audit
         if line.trim().is_empty() {
             continue;
         }
-        let record: AuditRecord =
+        let persisted: Value =
             serde_json::from_str(&line).map_err(|e| format!("audit tail parse failed: {e}"))?;
+        let record: AuditRecord = serde_json::from_value(persisted.clone())
+            .map_err(|e| format!("audit tail parse failed: {e}"))?;
+        // A certificate is evidence only when the persisted, response-side
+        // binding and the signed record's core hash both agree. A forged or
+        // malformed sidecar is omitted rather than projected as a proof.
+        let certificate = persisted
+            .get("verdict_certificate")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .filter(
+                |certificate: &oraclemcp_audit::BoundAuditVerdictCertificate| {
+                    certificate.matches_record(&record)
+                },
+            );
         proof.observe(&record, line_index);
         scanned_records += 1;
         if !query.matches(&record) {
@@ -2848,7 +2862,7 @@ fn read_redacted_audit_tail(path: &Path, query: &AuditTailQuery) -> Result<Audit
         if tail.len() == query.limit {
             tail.pop_front();
         }
-        tail.push_back(redacted_audit_record(&record));
+        tail.push_back(redacted_audit_record(&record, certificate.as_ref()));
     }
     Ok(AuditTailRead {
         records: tail.into_iter().collect(),
@@ -2883,7 +2897,10 @@ fn audit_subject_key(record: &AuditRecord) -> String {
     "unknown:unknown".to_owned()
 }
 
-pub(super) fn redacted_audit_record(record: &AuditRecord) -> Value {
+pub(super) fn redacted_audit_record(
+    record: &AuditRecord,
+    certificate: Option<&oraclemcp_audit::BoundAuditVerdictCertificate>,
+) -> Value {
     let subject_key = audit_subject_key(record);
     json!({
         "schema_version": record.schema_version,
@@ -2898,6 +2915,9 @@ pub(super) fn redacted_audit_record(record: &AuditRecord) -> Value {
         "rows_affected": record.rows_affected,
         "sql_sha256": record.sql_sha256,
         "sql_normalized_sha256": record.sql_normalized_sha256,
+        "verdict_certificate": certificate,
+        "verdict_certificate_core_hash": certificate
+            .and(record.verdict_certificate_core_hash.as_deref()),
         "sql_text": {
             "availability": "not_exported",
             "reason": "timeline and proof bundle expose sql_sha256 only; SQL text may contain inlined literals"

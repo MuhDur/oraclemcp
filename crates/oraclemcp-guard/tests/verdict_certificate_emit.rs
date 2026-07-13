@@ -173,6 +173,30 @@ fn certificate_core_hash_uses_the_jcs_key_order_for_fixed_certificate_values() {
 }
 
 #[test]
+fn audit_projection_preserves_the_core_hash_and_only_registered_labels() {
+    let certificate = Classifier::default()
+        .classify("SELECT payroll.recalculate_bonus(:employee_secret) FROM dual")
+        .verdict_certificate()
+        .clone()
+        .with_observed_scn(Some(42_000_001));
+
+    let audit_certificate = certificate
+        .audit_certificate()
+        .expect("a guard-produced certificate must fit the closed audit grammar");
+    assert_eq!(audit_certificate.core_hash(), certificate.core_hash());
+
+    let wire = serde_json::to_string(&audit_certificate).expect("audit certificate serializes");
+    assert!(wire.contains("routine_purity:unproven_present"));
+    assert!(wire.contains("final_verdict:GUARDED"));
+    for forbidden in ["payroll", "recalculate_bonus", "employee_secret", "SELECT"] {
+        assert!(
+            !wire.contains(forbidden),
+            "audit projection must retain only registry labels: {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn same_classification_certificate_binds_to_the_durable_audit_record() {
     let sql = "SELECT 1 FROM dual";
     let certificate = Classifier::default()

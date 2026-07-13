@@ -56,7 +56,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
-use crate::record::AuditRecord;
+use crate::record::{AuditRecord, BoundAuditVerdictCertificate};
 use crate::sink::{AuditError, AuditSink, FileAuditSink, open_file_identity};
 
 /// A shipping (forwarding) failure. Distinct from [`AuditError`] because a
@@ -316,6 +316,21 @@ impl AuditSink for ShippingAuditSink {
         // Local durable store FIRST — this must succeed (or error) before we
         // ever consider the record shippable.
         self.local.append(record)?;
+        self.pending.lock().push(record.clone());
+        Ok(())
+    }
+
+    fn append_with_verdict_certificate(
+        &self,
+        record: &AuditRecord,
+        certificate: &BoundAuditVerdictCertificate,
+    ) -> Result<(), AuditError> {
+        // The primary JSONL is authoritative and retains the certificate
+        // envelope. The existing shipping forwarder mirrors the signed record
+        // (whose core hash already authenticates that envelope) after the local
+        // fsync, preserving its established WORM/SIEM contract.
+        self.local
+            .append_with_verdict_certificate(record, certificate)?;
         self.pending.lock().push(record.clone());
         Ok(())
     }

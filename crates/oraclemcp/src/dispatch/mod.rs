@@ -63,7 +63,7 @@ use oraclemcp_guard::{
     CatalogObjectKind, CatalogResolver, Classifier, ClassifierConfig, DangerLevel, EscalationError,
     ExecGrantBinding, ExecGrantError, ExecGrantStore, GuardDecision, LevelDecision, ObjectRef,
     OperatingLevel, Purity, Resolution, ResolvedObject, SessionLevelState, SideEffectOracle,
-    semantic_read_plan,
+    VerdictCertificate, semantic_read_plan,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1497,7 +1497,7 @@ impl OracleDispatcher {
             };
             let executed_sql = with_audit_marker(sql, Some(profile), "oracle_diff");
             let catalog_cache = OracleCatalogResolverCache::new();
-            let relations =
+            let (relations, _) =
                 resolve_read_only_relations(cx, &observed, &catalog_cache, &executed_sql).await?;
             let inferred_key = if infer_key {
                 inferred_diff_key_columns(cx, &observed, &relations).await?
@@ -4246,10 +4246,10 @@ async fn ensure_resolved_read_only(
     conn: &dyn OracleConnection,
     cache: &OracleCatalogResolverCache,
     sql: &str,
-) -> Result<(), ErrorEnvelope> {
+) -> Result<GuardDecision, ErrorEnvelope> {
     resolve_read_only_relations(cx, conn, cache, sql)
         .await
-        .map(|_| ())
+        .map(|(_, decision)| decision)
 }
 
 async fn resolve_read_only_relations(
@@ -4257,7 +4257,7 @@ async fn resolve_read_only_relations(
     conn: &dyn OracleConnection,
     cache: &OracleCatalogResolverCache,
     sql: &str,
-) -> Result<Vec<ResolvedObject>, ErrorEnvelope> {
+) -> Result<(Vec<ResolvedObject>, GuardDecision), ErrorEnvelope> {
     ensure_read_only(sql)?;
     let plan = semantic_read_plan(sql)
         .ok_or_else(|| unresolved_semantic_read("query scope is not exactly representable"))?;
@@ -4304,9 +4304,9 @@ async fn resolve_read_only_relations(
             .with_oracle(Arc::new(ResolvedStatementPurity(purity)))
             .with_statement_unknown_guarded()
             .classify(sql);
-    ensure_read_only_decision(decision)
+    ensure_read_only_decision(decision.clone())
         .map_err(|error| attach_parameterization_hint(error, sql))?;
-    Ok(relations)
+    Ok((relations, decision))
 }
 
 fn normalize_diff_key_columns(raw: Vec<String>) -> Result<Vec<String>, ErrorEnvelope> {
@@ -6234,6 +6234,7 @@ fn append_query_read_audit(
     tool: &str,
     sql: &str,
     observed_scn: u64,
+    verdict_certificate: &oraclemcp_audit::AuditVerdictCertificate,
     outcome: AuditOutcome,
     response: Option<&mut QueryResponse>,
 ) -> Result<(), ErrorEnvelope> {
@@ -6260,12 +6261,13 @@ fn append_query_read_audit(
         outcome,
     };
     let record = auditor
-        .append_correlated_with_observed_scn(
+        .append_correlated_with_observed_scn_and_verdict_certificate(
             &draft,
             audit_timestamp(),
             true,
             None,
             Some(observed_scn),
+            Some(verdict_certificate),
         )
         .map_err(audit_error_to_envelope)?;
     if let Some(certificate) = response.and_then(|response| response.mask_certificate.as_mut()) {
@@ -10088,6 +10090,10 @@ struct QueryPrepared {
     executed_sql: String,
     /// The read-only gate verdict for `executed_sql`, computed once.
     gate: Result<(), ErrorEnvelope>,
+    /// The exact semantic classification that produced `gate`. It becomes
+    /// audit evidence only after a signed record exists; it never comes from a
+    /// client request and never authorizes execution.
+    verdict_certificate: Option<VerdictCertificate>,
     /// K9: the validated flashback target (if any). It is NOT part of the
     /// classifier input or the executed SQL text — the proven `executed_sql`
     /// runs unchanged inside a `DBMS_FLASHBACK` session window when this is set.
@@ -10855,17 +10861,22 @@ impl OracleDispatcher {
                 }
                 let executed_sql =
                     with_audit_marker(&parsed.sql, state.active_profile.as_deref(), "oracle_query");
-                let gate = ensure_resolved_read_only(
+                let classified = ensure_resolved_read_only(
                     cx,
                     state.conn.as_ref(),
                     &state.catalog_cache,
                     &executed_sql,
                 )
                 .await;
+                let (gate, verdict_certificate) = match classified {
+                    Ok(decision) => (Ok(()), Some(decision.verdict_certificate().clone())),
+                    Err(error) => (Err(error), None),
+                };
                 QueryPrepared {
                     args: parsed,
                     executed_sql,
                     gate,
+                    verdict_certificate,
                     as_of,
                 }
             };
@@ -11330,7 +11341,7 @@ impl OracleDispatcher {
                                     active_profile.as_deref(),
                                     "oracle_diff",
                                 );
-                                let relations = resolve_read_only_relations(
+                                let (relations, _) = resolve_read_only_relations(
                                     cx,
                                     &observed_conn,
                                     &state.catalog_cache,
@@ -12408,6 +12419,7 @@ impl OracleDispatcher {
             args: a,
             executed_sql,
             gate,
+            verdict_certificate,
             as_of,
         } = prepared;
         let timeout_seconds = a.timeout_seconds;
@@ -12568,6 +12580,22 @@ impl OracleDispatcher {
                     ),
                     (None, _) => None,
                 };
+                let audit_certificate = observed_scn
+                    .map(|observed_scn| {
+                        verdict_certificate
+                            .as_ref()
+                            .expect("a successful prepared read gate always retains its certificate")
+                            .clone()
+                            .with_observed_scn(Some(observed_scn))
+                            .audit_certificate()
+                    })
+                    .transpose()
+                    .map_err(|error| {
+                        ErrorEnvelope::new(
+                            ErrorClass::Internal,
+                            format!("cannot persist registered verdict certificate: {error}"),
+                        )
+                    })?;
                 let read_audit_evidence =
                     collect_read_audit_db_evidence(cx, auditor, &read_conn).await?;
                 let read_audit = AuditEntryCtx {
@@ -12575,12 +12603,15 @@ impl OracleDispatcher {
                     subject: &request_subject,
                     db_evidence: read_audit_evidence.as_ref(),
                 };
-                if let Some(observed_scn) = observed_scn {
+                if let (Some(observed_scn), Some(audit_certificate)) =
+                    (observed_scn, audit_certificate.as_ref())
+                {
                     append_query_read_audit(
                         read_audit,
                         "oracle_query",
                         &executed_sql,
                         observed_scn,
+                        audit_certificate,
                         AuditOutcome::Pending,
                         None,
                     )?;
@@ -12617,12 +12648,15 @@ impl OracleDispatcher {
                 let mut response = match read {
                     Ok(response) => response,
                     Err(error) => {
-                        if let Some(observed_scn) = observed_scn {
+                        if let (Some(observed_scn), Some(audit_certificate)) =
+                            (observed_scn, audit_certificate.as_ref())
+                        {
                             append_query_read_audit(
                                 read_audit,
                                 "oracle_query",
                                 &executed_sql,
                                 observed_scn,
+                                audit_certificate,
                                 AuditOutcome::Failed,
                                 None,
                             )?;
@@ -12630,12 +12664,15 @@ impl OracleDispatcher {
                         return Err(DbError::into_envelope(error));
                     }
                 };
-                if let Some(observed_scn) = observed_scn {
+                if let (Some(observed_scn), Some(audit_certificate)) =
+                    (observed_scn, audit_certificate.as_ref())
+                {
                     append_query_read_audit(
                         read_audit,
                         "oracle_query",
                         &executed_sql,
                         observed_scn,
+                        audit_certificate,
                         AuditOutcome::Succeeded,
                         Some(&mut response),
                     )?;
@@ -12724,17 +12761,22 @@ impl OracleDispatcher {
                 }
                 let executed_sql =
                     with_audit_marker(&parsed.sql, state.active_profile.as_deref(), "oracle_query");
-                let gate = ensure_resolved_read_only(
+                let classified = ensure_resolved_read_only(
                     cx,
                     state.conn.as_ref(),
                     &state.catalog_cache,
                     &executed_sql,
                 )
                 .await;
+                let (gate, verdict_certificate) = match classified {
+                    Ok(decision) => (Ok(()), Some(decision.verdict_certificate().clone())),
+                    Err(error) => (Err(error), None),
+                };
                 QueryPrepared {
                     args: parsed,
                     executed_sql,
                     gate,
+                    verdict_certificate,
                     as_of,
                 }
             };
@@ -12816,6 +12858,7 @@ impl OracleDispatcher {
             args: a,
             executed_sql,
             gate,
+            verdict_certificate: _,
             as_of,
         } = prepared;
         dispatch_checkpoint(cx, "oraclemcp.dispatch.query.row_stream.before")?;
