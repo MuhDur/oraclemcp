@@ -99,6 +99,45 @@ pub fn semantic_search_query(
     ))
 }
 
+/// Build a bounded hybrid vector query with one bind-only equality predicate.
+///
+/// The filter column is an identifier position and therefore has the same
+/// strict simple-identifier proof as the relation and vector column. Its value
+/// is always the first bind (`:1`), followed by vector (`:2`). The already
+/// range-checked top-k is rendered as server-owned numeric grammar, matching
+/// the pagination envelope: callers cannot supply an operator, literal, or SQL
+/// fragment that could widen the search's egress surface.
+pub fn semantic_search_query_with_filter(
+    owner: &str,
+    table: &str,
+    column: &str,
+    filter_column: &str,
+    metric: SemanticSearchMetric,
+    k: usize,
+) -> Result<String, DbError> {
+    for (label, value) in [
+        ("owner", owner),
+        ("table", table),
+        ("column", column),
+        ("filter column", filter_column),
+    ] {
+        if !is_simple_identifier(value) {
+            return Err(DbError::Query(format!(
+                "invalid semantic-search {label} identifier: {value:?}"
+            )));
+        }
+    }
+    Ok(format!(
+        "SELECT t.* FROM {}.{} t WHERE t.{} = :1 ORDER BY VECTOR_DISTANCE(t.{}, :2, {}) FETCH FIRST {} ROWS ONLY",
+        owner.to_ascii_uppercase(),
+        table.to_ascii_uppercase(),
+        filter_column.to_ascii_uppercase(),
+        column.to_ascii_uppercase(),
+        metric.as_sql(),
+        k,
+    ))
+}
+
 /// Build the bounded text-embedding SQL shape used by
 /// `oracle_semantic_search` after the dispatcher has proved the selected model
 /// is a local ONNX embedding model on a compatible 23ai database.
@@ -132,6 +171,44 @@ pub fn semantic_search_text_query(
         column.to_ascii_uppercase(),
         model.to_ascii_uppercase(),
         metric.as_sql(),
+    ))
+}
+
+/// Build the bounded text-embedding hybrid query after the dispatcher has
+/// proven one local ONNX model. The caller contributes only the first bind
+/// (`:1`) used by the equality filter, followed by text (`:2`); model,
+/// identifiers, metric, top-k, and predicate grammar remain server-owned.
+pub fn semantic_search_text_query_with_filter(
+    owner: &str,
+    table: &str,
+    column: &str,
+    model: &str,
+    filter_column: &str,
+    metric: SemanticSearchMetric,
+    k: usize,
+) -> Result<String, DbError> {
+    for (label, value) in [
+        ("owner", owner),
+        ("table", table),
+        ("column", column),
+        ("model", model),
+        ("filter column", filter_column),
+    ] {
+        if !is_simple_identifier(value) {
+            return Err(DbError::Query(format!(
+                "invalid semantic-search {label} identifier: {value:?}"
+            )));
+        }
+    }
+    Ok(format!(
+        "SELECT t.* FROM {}.{} t WHERE t.{} = :1 ORDER BY VECTOR_DISTANCE(t.{}, VECTOR_EMBEDDING({} USING :2), {}) FETCH FIRST {} ROWS ONLY",
+        owner.to_ascii_uppercase(),
+        table.to_ascii_uppercase(),
+        filter_column.to_ascii_uppercase(),
+        column.to_ascii_uppercase(),
+        model.to_ascii_uppercase(),
+        metric.as_sql(),
+        k,
     ))
 }
 
@@ -2546,6 +2623,36 @@ mod tests {
     }
 
     #[test]
+    fn semantic_search_hybrid_filter_is_an_identifier_plus_scalar_bind_only() {
+        let query = semantic_search_query_with_filter(
+            "hr",
+            "documents",
+            "embedding",
+            "tenant_id",
+            SemanticSearchMetric::Cosine,
+            25,
+        )
+        .expect("simple identifiers build a bounded hybrid query");
+        assert_eq!(
+            query,
+            "SELECT t.* FROM HR.DOCUMENTS t WHERE t.TENANT_ID = :1 ORDER BY \
+             VECTOR_DISTANCE(t.EMBEDDING, :2, COSINE) FETCH FIRST 25 ROWS ONLY"
+        );
+        assert!(
+            semantic_search_query_with_filter(
+                "HR",
+                "DOCUMENTS",
+                "EMBEDDING",
+                "tenant_id OR 1=1",
+                SemanticSearchMetric::Cosine,
+                25,
+            )
+            .is_err(),
+            "a caller cannot widen the predicate with a SQL fragment"
+        );
+    }
+
+    #[test]
     fn semantic_search_text_query_uses_only_a_dictionary_safe_model_identifier() {
         let query = semantic_search_text_query(
             "hr",
@@ -2570,6 +2677,26 @@ mod tests {
             )
             .is_err(),
             "a model name cannot inject into the VECTOR_EMBEDDING grammar"
+        );
+    }
+
+    #[test]
+    fn semantic_search_text_hybrid_filter_keeps_the_model_and_value_bound() {
+        let query = semantic_search_text_query_with_filter(
+            "hr",
+            "documents",
+            "embedding",
+            "local_onnx_model",
+            "tenant_id",
+            SemanticSearchMetric::Dot,
+            25,
+        )
+        .expect("a dictionary-derived model and simple filter build hybrid SQL");
+        assert_eq!(
+            query,
+            "SELECT t.* FROM HR.DOCUMENTS t WHERE t.TENANT_ID = :1 ORDER BY \
+             VECTOR_DISTANCE(t.EMBEDDING, VECTOR_EMBEDDING(LOCAL_ONNX_MODEL USING :2), DOT) \
+             FETCH FIRST 25 ROWS ONLY"
         );
     }
 

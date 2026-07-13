@@ -37,6 +37,8 @@ fn session_bundle(conn: impl OracleConnection + 'static) -> ProfileConnectionBun
 
 struct SemanticGuardState {
     caller_queries: AtomicUsize,
+    caller_sql: Mutex<Vec<String>>,
+    caller_binds: Mutex<Vec<Vec<OracleBind>>>,
     compatible: Mutex<Option<String>>,
     embedding_models: Mutex<Vec<String>>,
 }
@@ -45,6 +47,8 @@ impl Default for SemanticGuardState {
     fn default() -> Self {
         Self {
             caller_queries: AtomicUsize::new(0),
+            caller_sql: Mutex::new(Vec::new()),
+            caller_binds: Mutex::new(Vec::new()),
             compatible: Mutex::new(Some("23.4.0.0.0".to_owned())),
             embedding_models: Mutex::new(vec!["LOCAL_ONNX_MODEL".to_owned()]),
         }
@@ -217,7 +221,7 @@ impl OracleConnection for SemanticGuardMock {
         }
         if normalized.contains("from all_tab_columns") && normalized.contains("table_name = :2") {
             let column = string_bind(binds, 2).unwrap_or_default();
-            return Ok((matches!(column, "ID" | "EMBEDDING"))
+            return Ok((matches!(column, "ID" | "EMBEDDING" | "LABEL"))
                 .then(|| semantic_row(&[("COLUMN_NAME", Some(column)), ("COLUMN_ID", Some("1"))]))
                 .into_iter()
                 .collect());
@@ -235,6 +239,16 @@ impl OracleConnection for SemanticGuardMock {
             return Ok(Vec::new());
         }
         self.state.caller_queries.fetch_add(1, Ordering::SeqCst);
+        self.state
+            .caller_sql
+            .lock()
+            .expect("caller SQL lock")
+            .push(sql.to_owned());
+        self.state
+            .caller_binds
+            .lock()
+            .expect("caller bind lock")
+            .push(binds.to_vec());
         Ok(vec![semantic_row(&[("ID", Some("1"))])])
     }
 
@@ -336,6 +350,95 @@ fn raw_query_cannot_claim_the_local_embedding_exception() {
         state.caller_queries.load(Ordering::SeqCst),
         0,
         "the unproven raw embedding expression never reaches Oracle"
+    );
+}
+
+#[test]
+fn semantic_hybrid_filter_is_bound_proven_and_cannot_widen() {
+    let (dispatcher, state) = semantic_dispatcher();
+    let response = dispatcher
+        .dispatch(
+            "oracle_semantic_search",
+            json!({
+                "over": {"table": "ORDERS", "column": "EMBEDDING"},
+                "query_vector": [1.0, 0.0, 0.0],
+                "k": 1,
+                "filter": {"column": "LABEL", "value": "nearest"},
+            }),
+        )
+        .expect("the server-owned equality predicate is a proven read");
+    assert_eq!(response["rows"][0]["ID"], json!("1"));
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
+    let caller_sql = state
+        .caller_sql
+        .lock()
+        .expect("caller SQL lock")
+        .last()
+        .cloned()
+        .expect("the proven query reaches the mock once");
+    assert!(
+        caller_sql.contains("tool=oracle_semantic_search")
+            && caller_sql.contains(
+                "SELECT t.* FROM APP.ORDERS t WHERE t.LABEL = :1 ORDER BY \
+                 VECTOR_DISTANCE(t.EMBEDDING, :2, COSINE) FETCH FIRST 1 ROWS ONLY"
+            ),
+        "the generated predicate has no caller SQL fragment: {caller_sql}"
+    );
+    assert_eq!(
+        state
+            .caller_binds
+            .lock()
+            .expect("caller bind lock")
+            .last()
+            .cloned(),
+        Some(vec![
+            OracleBind::String("nearest".to_owned()),
+            OracleBind::String("[1,0,0]".to_owned()),
+        ]),
+        "the filter scalar remains a positional bind"
+    );
+
+    for filter in [
+        json!("label = 'nearest' OR 1 = 1"),
+        json!({"column": "LABEL", "value": "nearest", "or": "1=1"}),
+        json!({"column": "LABEL OR 1=1", "value": "nearest"}),
+    ] {
+        let error = dispatcher
+            .dispatch(
+                "oracle_semantic_search",
+                json!({
+                    "over": {"table": "ORDERS", "column": "EMBEDDING"},
+                    "query_vector": [1.0, 0.0, 0.0],
+                    "filter": filter,
+                }),
+            )
+            .expect_err("unproven or widening predicate must refuse");
+        assert_eq!(error.error_class, ErrorClass::InvalidArguments, "{error:?}");
+    }
+    assert_eq!(
+        state.caller_queries.load(Ordering::SeqCst),
+        1,
+        "refused hybrid predicates never reach Oracle"
+    );
+
+    let (masked_dispatcher, masked_state) = semantic_dispatcher();
+    let masked_dispatcher = masked_dispatcher
+        .with_result_masking_policy(Some(ResultMaskingPolicy::new(Vec::new(), true)));
+    let error = masked_dispatcher
+        .dispatch(
+            "oracle_semantic_search",
+            json!({
+                "over": {"table": "ORDERS", "column": "EMBEDDING"},
+                "query_vector": [1.0, 0.0, 0.0],
+                "filter": {"column": "LABEL", "value": "nearest"},
+            }),
+        )
+        .expect_err("a masked filter column would leak row presence");
+    assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+    assert_eq!(
+        masked_state.caller_queries.load(Ordering::SeqCst),
+        0,
+        "the egress-policy refusal occurs before a hybrid read"
     );
 }
 

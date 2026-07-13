@@ -64,8 +64,8 @@ use oraclemcp_db::{
     orient_recent_ddl, orient_schema, paginated_sql, plan_cost_estimate, plscope_identifiers,
     plscope_statements, primary_key_columns, probe_dependents, read_lob, read_query,
     read_query_as_of, read_query_named, resolved_relations_read_purity, sample_rows,
-    search_objects, search_source, semantic_search_query, semantic_search_text_query,
-    serialize_row,
+    search_objects, search_source, semantic_search_query, semantic_search_query_with_filter,
+    semantic_search_text_query, semantic_search_text_query_with_filter, serialize_row,
 };
 use oraclemcp_error::{
     ErrorClass, ErrorEnvelope, OptimizerPlanRow, QueryCostRefusal, ReasonCategory, StructuredReason,
@@ -3298,6 +3298,7 @@ async fn semantic_search_text_model(
 async fn semantic_search_as_query_args(
     cx: &Cx,
     conn: &dyn OracleConnection,
+    result_masking: Option<&ResultMaskingPolicy>,
     tool_name: &str,
     args: Value,
 ) -> Result<(QueryArgs, SemanticSearchResponseMetadata), ErrorEnvelope> {
@@ -3309,18 +3310,24 @@ async fn semantic_search_as_query_args(
             "oracle_semantic_search requires exactly one of query_vector or query_text",
         ));
     }
-    if args
+    let filter = args
         .filter
-        .as_deref()
-        .is_some_and(|filter| !filter.trim().is_empty())
-    {
-        return Err(invalid_args(
-            "oracle_semantic_search filter is unavailable until the governed hybrid-retrieval surface can prove it; refusing an unproven predicate",
-        )
-        .with_next_step(
-            "omit filter for vector-only retrieval, or use the future validated hybrid-retrieval tool",
-        ));
-    }
+        .as_ref()
+        .map(|filter| {
+            let column = filter.column.trim();
+            if !oraclemcp_db::is_simple_identifier(column) {
+                return Err(invalid_args(
+                    "hybrid filter.column must be a simple unquoted identifier; raw predicates and widening expressions are refused",
+                ));
+            }
+            json_to_bind(&filter.value).map_err(|_| {
+                invalid_args(
+                    "hybrid filter.value must be a scalar bound (string, number, boolean, or null), not a SQL expression",
+                )
+            })?;
+            Ok((column.to_owned(), filter.value.clone()))
+        })
+        .transpose()?;
     if let Some(query_text) = args.query_text.as_deref() {
         let trimmed = query_text.trim();
         if trimmed.is_empty() || trimmed.chars().count() > MAX_SEMANTIC_SEARCH_TEXT_CHARS {
@@ -3358,17 +3365,48 @@ async fn semantic_search_as_query_args(
     let (owner, table) =
         owner_and_name_arg(cx, conn, args.over.owner, args.over.table, "table").await?;
     let column = args.over.column.trim();
+    if let (Some(masking), Some((filter_column, _))) = (result_masking, filter.as_ref())
+        && masking.transforms_filter_column(Some(&owner), Some(&table), filter_column)
+    {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::PolicyDenied,
+            "hybrid filter targets a column that the active profile masks; refusing row-presence inference",
+        )
+        .with_structured_reason(
+            StructuredReason::new(ReasonCategory::PolicyDenied)
+                .with_offending_construct("masked hybrid filter column"),
+        )
+        .with_next_step(
+            "filter only on a profile-visible column, or use a profile whose egress policy permits that predicate",
+        ));
+    }
     let (sql, embedding_bind) = if let Some(query_text) = args.query_text.as_deref() {
         let model = semantic_search_text_model(cx, conn).await?;
-        let sql = semantic_search_text_query(&owner, &table, column, &model, metric)
-            .map_err(DbError::into_envelope)?;
+        let sql = match filter.as_ref() {
+            Some((filter_column, _)) => semantic_search_text_query_with_filter(
+                &owner,
+                &table,
+                column,
+                &model,
+                filter_column,
+                metric,
+                k,
+            ),
+            None => semantic_search_text_query(&owner, &table, column, &model, metric),
+        }
+        .map_err(DbError::into_envelope)?;
         (sql, Value::String(query_text.trim().to_owned()))
     } else {
         let vector = args
             .query_vector
             .expect("query_vector is present when the one-of validation accepts it");
-        let sql = semantic_search_query(&owner, &table, column, metric)
-            .map_err(DbError::into_envelope)?;
+        let sql = match filter.as_ref() {
+            Some((filter_column, _)) => {
+                semantic_search_query_with_filter(&owner, &table, column, filter_column, metric, k)
+            }
+            None => semantic_search_query(&owner, &table, column, metric),
+        }
+        .map_err(DbError::into_envelope)?;
         let vector_literal = format!(
             "[{}]",
             vector
@@ -3383,7 +3421,13 @@ async fn semantic_search_as_query_args(
     Ok((
         QueryArgs {
             sql,
-            binds: vec![embedding_bind, json!(k)],
+            binds: {
+                if let Some((_, value)) = filter {
+                    vec![value, embedding_bind]
+                } else {
+                    vec![embedding_bind, json!(k)]
+                }
+            },
             cursor: None,
             max_rows: Some(k),
             max_result_bytes: None,
@@ -11841,8 +11885,15 @@ impl OracleDispatcher {
                     "oracle_query"
                 };
                 let (parsed, semantic_metadata) = if tool == "oracle_semantic_search" {
-                    let (parsed, metadata) =
-                        semantic_search_as_query_args(cx, state.conn.as_ref(), name, args).await?;
+                    let result_masking = self.result_masking_policy()?;
+                    let (parsed, metadata) = semantic_search_as_query_args(
+                        cx,
+                        state.conn.as_ref(),
+                        result_masking.as_ref(),
+                        name,
+                        args,
+                    )
+                    .await?;
                     (parsed, Some(metadata))
                 } else {
                     (parse_args::<QueryArgs>(name, args)?, None)

@@ -714,6 +714,55 @@ class Ladder:
                 filter_refusal,
             )
 
+            hybrid_args = {
+                **search_args,
+                "filter": {"column": "label", "value": "nearest"},
+            }
+            hybrid_result = self.session.call("oracle_semantic_search", hybrid_args)
+            hybrid = structured(hybrid_result)
+            require(
+                hybrid_result.get("isError") is not True,
+                "a server-owned equality filter produces a governed hybrid search",
+                hybrid,
+            )
+            hybrid_rows = hybrid.get("rows") or []
+            require(
+                [row.get("ID") for row in hybrid_rows] == ["1"],
+                "hybrid search returns top-k only within its proven filter",
+                hybrid_rows,
+            )
+
+            widening_result = self.session.call(
+                "oracle_semantic_search",
+                {
+                    **search_args,
+                    "filter": {"column": "label OR 1=1", "value": "nearest"},
+                },
+            )
+            widening_refusal = structured(widening_result)
+            require(
+                widening_result.get("isError") is True
+                and widening_refusal.get("error_class") == "INVALID_ARGUMENTS",
+                "a widening hybrid predicate is refused before it can become SQL",
+                widening_refusal,
+            )
+
+            direct_result = self.session.call(
+                "oracle_query",
+                {
+                    "sql": f"SELECT id FROM {vector_table} WHERE label = :1 ORDER BY id",
+                    "binds": ["nearest"],
+                },
+            )
+            direct = structured(direct_result)
+            require(
+                direct_result.get("isError") is not True
+                and [row.get("ID") for row in (direct.get("rows") or [])]
+                == [row.get("ID") for row in hybrid_rows],
+                "hybrid search cannot infer rows outside an equivalent direct read",
+                {"hybrid": hybrid_rows, "direct": direct},
+            )
+
             # Oracle Free can return ORA-01466 to a second session that opens
             # while the DDL-owning session still holds its read snapshot. Close
             # that served session first, then prove masked egress from a fresh
@@ -743,6 +792,14 @@ class Ladder:
                     init,
                 )
                 masked.notify("notifications/initialized")
+                masked_hybrid_result = masked.call("oracle_semantic_search", hybrid_args)
+                masked_hybrid_refusal = structured(masked_hybrid_result)
+                require(
+                    masked_hybrid_result.get("isError") is True
+                    and masked_hybrid_refusal.get("error_class") == "POLICY_DENIED",
+                    "a masked filter column cannot leak row presence through hybrid retrieval",
+                    masked_hybrid_refusal,
+                )
                 masked_result = masked.call("oracle_semantic_search", search_args)
                 masked_content = structured(masked_result)
                 require(
@@ -799,8 +856,11 @@ class Ladder:
                 "distance": distance,
                 "vector_column": "VECTOR(3, FLOAT32)",
                 "top_k": [row.get("ID") for row in semantic_rows],
+                "hybrid_top_k": [row.get("ID") for row in hybrid_rows],
                 "masked_secret_absent": True,
                 "raw_filter_refused": filter_refusal.get("error_class"),
+                "widening_filter_refused": widening_refusal.get("error_class"),
+                "masked_filter_refused": masked_hybrid_refusal.get("error_class"),
             }
 
         # --- Source-object governed-DDL sub-ladder (still at DDL) -----------

@@ -407,6 +407,27 @@ impl ResultMaskingPolicy {
         }
     }
 
+    /// Return whether this profile would transform a column when it leaves the
+    /// result boundary. A hybrid retrieval must not use such a column as a
+    /// predicate: even if its value is masked in `SELECT t.*`, row presence
+    /// would otherwise become an egress side channel.
+    #[must_use]
+    pub fn transforms_filter_column(
+        &self,
+        schema: Option<&str>,
+        table: Option<&str>,
+        column: &str,
+    ) -> bool {
+        self.decision_for(&ResultColumnContext {
+            schema,
+            table,
+            column,
+            tag: None,
+            oracle_type: "UNKNOWN",
+        })
+        .transforms_value()
+    }
+
     /// Derive the certificate for a query page from its first row. Oracle result
     /// descriptors are fixed for the page, so the first row supplies the
     /// select-list column names/types. Returns `None` when the policy did not
@@ -857,6 +878,30 @@ mod tests {
                 "COMMENT": MASKED_RESULT_VALUE,
                 "NULLABLE": null,
             })
+        );
+    }
+
+    #[test]
+    fn transformed_columns_cannot_become_hybrid_filter_oracles() {
+        let policy = ResultMaskingPolicy::new(
+            vec![ResultMaskingRule::column(
+                "SECRET",
+                ResultMaskingAction::Mask,
+            )],
+            false,
+        );
+        assert!(policy.transforms_filter_column(Some("APP"), Some("DOCS"), "SECRET"));
+        assert!(
+            !policy.transforms_filter_column(Some("APP"), Some("DOCS"), "LABEL"),
+            "a visible column may constrain a hybrid query"
+        );
+        assert!(
+            ResultMaskingPolicy::new(Vec::new(), true).transforms_filter_column(
+                Some("APP"),
+                Some("DOCS"),
+                "LABEL"
+            ),
+            "mask-unknown profiles fail closed rather than exposing row presence"
         );
     }
 

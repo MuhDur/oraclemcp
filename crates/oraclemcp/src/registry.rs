@@ -536,7 +536,24 @@ pub fn tool_registry() -> ToolRegistry {
                     "query_text": { "type": "string", "minLength": 1, "maxLength": 32768, "description": "Embedded only by exactly one visible local ONNX model after COMPATIBLE >= 23.4 is proven. Otherwise returns typed requires_23ai or no_in_db_model; it never falls back to client embedding." },
                     "k": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Top-k result count (default 10, hard cap 1000)." },
                     "metric": { "type": "string", "enum": ["COSINE", "EUCLIDEAN", "DOT"], "description": "VECTOR_DISTANCE metric (default COSINE)." },
-                    "filter": { "type": "string", "description": "Reserved for the validated hybrid-retrieval surface; non-empty values are refused rather than accepted as raw SQL." }
+                    "filter": {
+                        "type": "object",
+                        "description": "Optional governed hybrid predicate. Only equality is supported: the server validates column as a simple identifier and binds value; raw SQL, OR/IN fragments, and caller-provided operators are refused.",
+                        "properties": {
+                            "column": { "type": "string", "description": "One local table column to constrain." },
+                            "value": {
+                                "description": "One scalar value bound into the equality predicate; never SQL text.",
+                                "anyOf": [
+                                    { "type": "string" },
+                                    { "type": "number" },
+                                    { "type": "boolean" },
+                                    { "type": "null" }
+                                ]
+                            }
+                        },
+                        "required": ["column", "value"],
+                        "additionalProperties": false
+                    }
                 }),
                 &[timeout_seconds_prop()],
             ),

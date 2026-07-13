@@ -90,12 +90,24 @@ pub(super) struct SemanticSearchArgs {
     pub(super) k: Option<usize>,
     #[serde(default)]
     pub(super) metric: Option<String>,
-    /// Reserved for F5 hybrid retrieval.  F2 refuses it rather than accepting
-    /// an unproven caller predicate as a data-egress bypass.
+    /// One governed equality filter for hybrid retrieval. The dispatcher owns
+    /// the predicate grammar and binds `value`; it never accepts raw filter
+    /// SQL from an MCP caller.
     #[serde(default)]
-    pub(super) filter: Option<String>,
+    pub(super) filter: Option<SemanticSearchFilterArgs>,
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
+}
+
+/// The only caller-controlled shape admitted into a hybrid vector predicate.
+/// Both fields are data: `column` is validated as a simple identifier and
+/// `value` is bound as a scalar. Unknown fields (including `or`/`sql`) are
+/// rejected during deserialization so they cannot widen the generated read.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SemanticSearchFilterArgs {
+    pub(super) column: String,
+    pub(super) value: Value,
 }
 
 #[derive(Deserialize)]
