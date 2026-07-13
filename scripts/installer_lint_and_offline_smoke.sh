@@ -304,7 +304,10 @@ else
   log_skip "pwsh unavailable for Windows installer parse/dry-run"
 fi
 
-SMOKE_ROOT="$ROOT/target/installer-smoke"
+# Keep each run isolated: several negative-path checks assert that a rejected
+# installer invocation did not create a prefix. A fixed root lets stale prefixes
+# from a prior run make a correct rejection look like it installed.
+SMOKE_ROOT="${ORACLEMCP_INSTALLER_SMOKE_ROOT:-$ROOT/target/installer-smoke-$$}"
 PREFIX="$SMOKE_ROOT/prefix"
 HOME_DIR="$SMOKE_ROOT/home"
 CONFIG_HOME="$SMOKE_ROOT/config"
@@ -654,6 +657,7 @@ require_no_cosign_output="$(
       --target x86_64-unknown-linux-musl \
       --prefix "$SMOKE_ROOT/require-no-cosign-prefix" \
       --verify require \
+      --force \
       --no-completions \
       --no-service 2>&1
 )"
@@ -695,6 +699,7 @@ bad_signature_output="$(
       --target x86_64-unknown-linux-musl \
       --prefix "$SMOKE_ROOT/bad-signature-prefix" \
       --verify prefer \
+      --force \
       --no-completions \
       --no-service 2>&1
 )"
@@ -715,6 +720,7 @@ tampered_checksum_output="$(
       --target x86_64-unknown-linux-musl \
       --prefix "$SMOKE_ROOT/tampered-prefix" \
       --verify checksum-only \
+      --force \
       --no-completions \
       --no-service 2>&1
 )"
@@ -740,6 +746,7 @@ assert_checksum_sidecar_rejected() {
         --target x86_64-unknown-linux-musl \
         --prefix "$prefix" \
         --verify prefer \
+        --force \
         --no-completions \
         --no-service 2>&1
   )"
