@@ -48,8 +48,10 @@ required=(
   scripts/e2e/oracle_version_matrix.sh
   scripts/e2e/cost_gate.sh
   scripts/e2e/time_diff.sh
+  scripts/e2e/refusal_corpus.sh
   scripts/e2e/oracle_ladder_session.py
   scripts/e2e/time_diff_session.py
+  scripts/e2e/refusal_corpus_session.py
   scripts/e2e/clean_machine_e2e.sh
   scripts/e2e/COVERAGE.md
   scripts/e2e/PROVENANCE.md
@@ -153,6 +155,12 @@ if ! grep -F "Time-diff + observed-SCN replay live matrix" scripts/e2e/COVERAGE.
 fi
 if ! grep -F "scripts/e2e/time_diff.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
   e2e_finish_fail "PROVENANCE.md must document the time-diff command"
+fi
+if ! grep -F "Served refusal-corpus MCP proof" scripts/e2e/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "COVERAGE.md must account for the served refusal-corpus proof"
+fi
+if ! grep -F "scripts/e2e/refusal_corpus.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
+  e2e_finish_fail "PROVENANCE.md must document the refusal-corpus command"
 fi
 if ! grep -F "H5 clean-machine e2e" scripts/e2e/COVERAGE.md >/dev/null; then
   e2e_finish_fail "COVERAGE.md must account for the H5 clean-machine e2e harness"

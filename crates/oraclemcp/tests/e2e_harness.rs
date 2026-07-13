@@ -247,6 +247,56 @@ fn time_diff_e2e_dry_run_uses_omcpb_and_reports_a_pass() {
     );
 }
 
+/// Arc J's corpus proof must drive the served binary, and registration is part
+/// of the contract: a script absent from `run_all.sh` is not e2e coverage.
+#[test]
+fn refusal_corpus_e2e_dry_run_is_registered_and_schedules_omcpb() {
+    let root = repo_root();
+    let output = Command::new("bash")
+        .arg(root.join("scripts/e2e/refusal_corpus.sh"))
+        .args(["--log", "--dry-run"])
+        .current_dir(&root)
+        .env("ORACLEMCP_E2E_SEED", "4242")
+        .env(
+            "ORACLEMCP_E2E_ARTIFACT_DIR",
+            root.join("target/e2e-contract"),
+        )
+        .output()
+        .expect("run refusal_corpus dry-run");
+    assert!(
+        output.status.success(),
+        "refusal_corpus dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    let command_messages = events
+        .iter()
+        .filter(|event| event["event"] == "command_start")
+        .filter_map(|event| event["message"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        command_messages
+            .iter()
+            .any(|message| message.contains("omcpb build -p oraclemcp --bin oraclemcp")),
+        "refusal-corpus dry-run did not schedule the omcpb package build: {command_messages:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "refusal_corpus"),
+        "missing passing refusal-corpus completion: {events:?}"
+    );
+    let runner =
+        std::fs::read_to_string(root.join("scripts/e2e/run_all.sh")).expect("read run_all.sh");
+    assert!(
+        runner.contains("scripts/e2e/refusal_corpus.sh"),
+        "served refusal-corpus proof must be dispatched by run_all.sh"
+    );
+}
+
 /// The reversible-workspace matrix (Arc I) must be reachable from the runner and
 /// must schedule its own build, exactly like every other live scenario. Without
 /// this test and its `run_all.sh` entry the script would sit on disk being
