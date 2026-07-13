@@ -36,6 +36,10 @@ pub(super) struct QueryArgs {
     pub(super) max_structured_depth: Option<usize>,
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
+    /// Optional per-call cost ceiling. This may only lower the active profile's
+    /// `max_query_cost`; it can never raise it.
+    #[serde(default)]
+    pub(super) max_query_cost: Option<u64>,
     /// E3/E3b: when true, materialize the (bounded) full result as an
     /// `oracle-export://{id}` resource and return a `resource_link` instead of
     /// inlining rows. Default false preserves the inline, paginated behavior.

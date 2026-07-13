@@ -6042,6 +6042,131 @@ fn query_timeout_override_cannot_widen_profile_timeout() {
     );
 }
 
+#[derive(Default)]
+struct QueryCostQuotaState {
+    request_quota: Mutex<Option<DbRequestQuota>>,
+    observed_costs: Mutex<Vec<Option<u64>>>,
+}
+
+struct QueryCostQuotaMock {
+    state: Arc<QueryCostQuotaState>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for QueryCostQuotaMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo::default())
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+            return Ok(rows);
+        }
+        if sql.contains("SELECT 1 FROM dual") {
+            let observed = self
+                .state
+                .request_quota
+                .lock()
+                .expect("request quota mutex")
+                .clone()
+                .expect("dispatch installed a DB request quota")
+                .cost_remaining();
+            self.state
+                .observed_costs
+                .lock()
+                .expect("observed costs mutex")
+                .push(observed);
+        }
+        Ok(Vec::new())
+    }
+
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        Ok(0)
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    fn request_quota(&self, _cx: &Cx) -> Result<Option<DbRequestQuota>, DbError> {
+        Ok(self
+            .state
+            .request_quota
+            .lock()
+            .expect("request quota mutex")
+            .clone())
+    }
+
+    fn set_request_quota(&self, _cx: &Cx, quota: Option<DbRequestQuota>) -> Result<(), DbError> {
+        *self
+            .state
+            .request_quota
+            .lock()
+            .expect("request quota mutex") = quota;
+        Ok(())
+    }
+}
+
+#[test]
+fn query_cost_limit_is_installed_on_db_boundary_and_cannot_be_widened() {
+    let state = Arc::new(QueryCostQuotaState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(QueryCostQuotaMock {
+            state: Arc::clone(&state),
+        }),
+        Some("dev".to_owned()),
+        read_write_level(),
+    )
+    .with_max_query_cost(Some(12));
+
+    dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "max_query_cost": 100
+            }),
+        )
+        .expect("query succeeds with a widened per-call cost request");
+    dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "max_query_cost": 7
+            }),
+        )
+        .expect("query succeeds with a lowered per-call cost request");
+
+    let observed = state.observed_costs.lock().expect("observed costs mutex");
+    assert_eq!(observed.len(), 2);
+    assert!(
+        matches!(observed[0], Some(remaining) if remaining <= 12),
+        "per-call max_query_cost=100 must not widen the profile cap: {observed:?}"
+    );
+    assert!(
+        matches!(observed[1], Some(remaining) if remaining <= 7),
+        "per-call max_query_cost=7 must lower the effective cap: {observed:?}"
+    );
+}
+
 #[test]
 fn execute_timeout_override_is_restored_after_call() {
     let state = Arc::new(ExecState::default());
@@ -10161,6 +10286,45 @@ mod dependents_preview {
         assert_eq!(block["objects"].as_array().unwrap().len(), 0);
         assert_eq!(block["at_risk_of_invalid"].as_array().unwrap().len(), 0);
     }
+}
+
+#[test]
+fn query_cost_override_can_only_lower_profile_ceiling() {
+    let args: QueryArgs = serde_json::from_value(json!({
+        "sql": "SELECT 1 FROM dual",
+        "max_query_cost": 75
+    }))
+    .expect("query args parse");
+
+    assert_eq!(args.max_query_cost, Some(75));
+    assert_eq!(
+        effective_query_cost_limit(Some(50), args.max_query_cost),
+        Some(50)
+    );
+    assert_eq!(effective_query_cost_limit(Some(50), Some(25)), Some(25));
+    assert_eq!(effective_query_cost_limit(Some(50), None), Some(50));
+    assert_eq!(effective_query_cost_limit(None, Some(25)), Some(25));
+    assert_eq!(effective_query_cost_limit(None, None), None);
+}
+
+#[test]
+fn query_budget_applies_clamped_cost_quota() {
+    let now = Time::from_secs(100);
+    let request = RequestBudget::from_call_timeout(now, Some(Duration::from_secs(30)));
+    let clamped = query_budget_with_cost_limit(request, Some(50), Some(75));
+    assert_eq!(
+        clamped.budget().cost_quota,
+        Some(50),
+        "per-call max_query_cost above the profile ceiling is clamped down"
+    );
+
+    let request = RequestBudget::from_call_timeout(now, Some(Duration::from_secs(30)));
+    let lowered = query_budget_with_cost_limit(request, Some(50), Some(25));
+    assert_eq!(
+        lowered.budget().cost_quota,
+        Some(25),
+        "per-call max_query_cost below the profile ceiling lowers it"
+    );
 }
 
 /// QA85: a multi-round-trip health request inherits one absolute deadline and

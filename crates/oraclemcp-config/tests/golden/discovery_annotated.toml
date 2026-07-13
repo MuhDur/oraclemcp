@@ -50,6 +50,8 @@ credential_ref = "env:ORACLE_SALES_RO_PASSWORD"
 # trusted_session_statements = ["BEGIN DBMS_OUTPUT.ENABLE(500000); END;"]
 # Per-round-trip Oracle call timeout, in seconds (default 30 when omitted).
 # call_timeout_seconds = 30
+# Per-query cooperative cost ceiling for oracle_query; per-call overrides may only lower it.
+# max_query_cost = 100000
 # Oracle Net transport connect timeout, in seconds (default: the thin driver's 20s).
 # connect_timeout_seconds = 20
 # Per-read inactivity deadline on an established session, in seconds (unset = unbounded reads).
@@ -118,6 +120,8 @@ credential_ref = "env:ORACLE_PRIMARY_TCPS_PASSWORD"
 # trusted_session_statements = ["BEGIN DBMS_OUTPUT.ENABLE(500000); END;"]
 # Per-round-trip Oracle call timeout, in seconds (default 30 when omitted).
 # call_timeout_seconds = 30
+# Per-query cooperative cost ceiling for oracle_query; per-call overrides may only lower it.
+# max_query_cost = 100000
 # Oracle Net transport connect timeout, in seconds (default: the thin driver's 20s).
 # connect_timeout_seconds = 20
 # Per-read inactivity deadline on an established session, in seconds (unset = unbounded reads).

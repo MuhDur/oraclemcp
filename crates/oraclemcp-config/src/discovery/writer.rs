@@ -209,6 +209,7 @@ fn render_profile_block(synth_profile: &SynthesizedProfile) -> String {
                 "[\"BEGIN DBMS_OUTPUT.ENABLE(500000); END;\"]",
             ),
             "call_timeout_seconds" => push_commented_scalar(&mut scalars, fd, "30"),
+            "max_query_cost" => push_commented_scalar(&mut scalars, fd, "100000"),
             "connect_timeout_seconds" => push_commented_scalar(&mut scalars, fd, "20"),
             "inactivity_timeout_seconds" => push_commented_scalar(&mut scalars, fd, "300"),
             "keepalive_minutes" => push_commented_scalar(&mut scalars, fd, "10"),

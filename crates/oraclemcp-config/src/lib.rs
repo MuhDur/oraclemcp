@@ -1378,6 +1378,7 @@ fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionP
         && before.login_statements == after.login_statements
         && before.trusted_session_statements == after.trusted_session_statements
         && before.call_timeout_seconds == after.call_timeout_seconds
+        && before.max_query_cost == after.max_query_cost
         && before.connect_timeout_seconds == after.connect_timeout_seconds
         && before.inactivity_timeout_seconds == after.inactivity_timeout_seconds
         && before.keepalive_minutes == after.keepalive_minutes
@@ -3004,6 +3005,7 @@ mod tests {
                 |_| {},
                 |p| p.call_timeout_seconds = Some(7),
             ),
+            ("max_query_cost", |_| {}, |p| p.max_query_cost = Some(42)),
             (
                 "connect_timeout_seconds",
                 |_| {},

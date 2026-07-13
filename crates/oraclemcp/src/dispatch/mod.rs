@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use asupersync::combinator::try_commit_section;
 use asupersync::sync::Mutex as AsyncMutex;
-use asupersync::{CancelReason, Cx, Outcome, Time};
+use asupersync::{Budget, CancelReason, Cx, Outcome, Time};
 use oraclemcp_audit::{
     AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor, DbEvidence,
 };
@@ -204,6 +204,7 @@ fn default_read_only_level() -> SessionLevelState {
 struct ProfileDispatchPolicy {
     level: SessionLevelState,
     request_timeout: Option<Duration>,
+    max_query_cost: Option<u64>,
 }
 
 struct PreparedProfileSwitch {
@@ -213,6 +214,7 @@ struct PreparedProfileSwitch {
     stateless_conn: Option<Box<dyn OracleConnection>>,
     level: SessionLevelState,
     request_timeout: Option<Duration>,
+    max_query_cost: Option<u64>,
     custom_catalog: CustomToolCatalog,
     response: Value,
 }
@@ -229,6 +231,7 @@ fn standalone_read_only_policy() -> ProfileDispatchPolicy {
     ProfileDispatchPolicy {
         level: default_read_only_level(),
         request_timeout: Some(DEFAULT_REQUEST_TIMEOUT),
+        max_query_cost: None,
     }
 }
 
@@ -259,6 +262,7 @@ fn profile_dispatch_policy(
     Ok(ProfileDispatchPolicy {
         level: oraclemcp_core::session_level_state(profile, false),
         request_timeout: profile_request_timeout(profile.call_timeout_seconds),
+        max_query_cost: profile.max_query_cost,
     })
 }
 
@@ -342,6 +346,7 @@ struct PatchPreviewEntry {
 pub struct OracleDispatcher {
     state: AsyncMutex<DispatcherState>,
     request_timeout: SyncMutex<Option<Duration>>,
+    max_query_cost: SyncMutex<Option<u64>>,
     quarantine: SyncMutex<Option<ConnectionQuarantine>>,
     connector: Option<Arc<ProfileConnector>>,
     custom_loader: Option<Arc<CustomToolLoader>>,
@@ -413,6 +418,7 @@ impl OracleDispatcher {
                 read_only_backstop: ReadOnlyBackstop::new(),
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
+            max_query_cost: SyncMutex::new(None),
             quarantine: SyncMutex::new(None),
             connector: None,
             custom_loader: None,
@@ -493,6 +499,7 @@ impl OracleDispatcher {
                 read_only_backstop: ReadOnlyBackstop::new(),
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
+            max_query_cost: SyncMutex::new(None),
             quarantine: SyncMutex::new(None),
             connector: Some(connector),
             custom_loader,
@@ -612,6 +619,14 @@ impl OracleDispatcher {
         self
     }
 
+    /// Install the active profile's resolved `oracle_query` cost ceiling.
+    #[must_use]
+    pub fn with_max_query_cost(self, max_query_cost: Option<u64>) -> Self {
+        self.set_max_query_cost(max_query_cost)
+            .expect("max-query-cost mutex is healthy during construction");
+        self
+    }
+
     fn request_timeout(&self) -> Result<Option<Duration>, ErrorEnvelope> {
         self.request_timeout
             .lock()
@@ -632,6 +647,29 @@ impl OracleDispatcher {
             )
         })?;
         *guard = request_timeout;
+        Ok(())
+    }
+
+    fn max_query_cost(&self) -> Result<Option<u64>, ErrorEnvelope> {
+        self.max_query_cost
+            .lock()
+            .map(|guard| *guard)
+            .map_err(|err| {
+                ErrorEnvelope::new(
+                    ErrorClass::Internal,
+                    format!("max-query-cost mutex lock failed: {err}"),
+                )
+            })
+    }
+
+    fn set_max_query_cost(&self, max_query_cost: Option<u64>) -> Result<(), ErrorEnvelope> {
+        let mut guard = self.max_query_cost.lock().map_err(|err| {
+            ErrorEnvelope::new(
+                ErrorClass::Internal,
+                format!("max-query-cost mutex lock failed: {err}"),
+            )
+        })?;
+        *guard = max_query_cost;
         Ok(())
     }
 
@@ -1986,6 +2024,29 @@ fn query_caps_from_args(args: &QueryArgs) -> QueryCaps {
             .max_result_bytes
             .unwrap_or(defaults.max_result_bytes)
             .clamp(1, MAX_QUERY_RESULT_BYTES),
+    }
+}
+
+fn effective_query_cost_limit(
+    profile_max_query_cost: Option<u64>,
+    per_call_max_query_cost: Option<u64>,
+) -> Option<u64> {
+    match (profile_max_query_cost, per_call_max_query_cost) {
+        (Some(profile), Some(per_call)) => Some(profile.min(per_call)),
+        (Some(profile), None) => Some(profile),
+        (None, Some(per_call)) => Some(per_call),
+        (None, None) => None,
+    }
+}
+
+fn query_budget_with_cost_limit(
+    request_budget: RequestBudget,
+    profile_max_query_cost: Option<u64>,
+    per_call_max_query_cost: Option<u64>,
+) -> RequestBudget {
+    match effective_query_cost_limit(profile_max_query_cost, per_call_max_query_cost) {
+        Some(cost_limit) => request_budget.meet(Budget::new().with_cost_quota(cost_limit)),
+        None => request_budget,
     }
 }
 
@@ -7995,6 +8056,7 @@ impl OracleDispatcher {
                 stateless_conn,
                 level: new_level,
                 request_timeout: new_policy.request_timeout,
+                max_query_cost: new_policy.max_query_cost,
                 custom_catalog: new_custom_catalog,
                 response,
             };
@@ -8008,6 +8070,7 @@ impl OracleDispatcher {
             })?;
             request_budget.enforce(cx).map_err(DbError::into_envelope)?;
             let old_request_timeout = self.request_timeout()?;
+            let old_max_query_cost = self.max_query_cost()?;
             let PreparedProfileSwitch {
                 profile,
                 profile_generation,
@@ -8015,6 +8078,7 @@ impl OracleDispatcher {
                 stateless_conn,
                 level,
                 request_timeout,
+                max_query_cost,
                 custom_catalog,
                 mut response,
             } = prepared;
@@ -8035,8 +8099,13 @@ impl OracleDispatcher {
                 .profile_drain
                 .commit_generation(&profile, generation, || {
                     self.set_request_timeout(request_timeout)?;
+                    if let Err(err) = self.set_max_query_cost(max_query_cost) {
+                        let _ = self.set_request_timeout(old_request_timeout);
+                        return Err(err);
+                    }
                     if let Err(err) = self.clear_connection_quarantine() {
                         let _ = self.set_request_timeout(old_request_timeout);
+                        let _ = self.set_max_query_cost(old_max_query_cost);
                         return Err(err);
                     }
                     let profile_generation =
@@ -8336,6 +8405,12 @@ impl OracleDispatcher {
                     as_of,
                 }
             };
+            request_budget = query_budget_with_cost_limit(
+                request_budget,
+                self.max_query_cost()?,
+                prepared.args.max_query_cost,
+            );
+            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
 
             // A1: lazily ensure SET TRANSACTION READ ONLY is in force so a
             // MISCLASSIFIED write would still hit ORA-01456 from the engine.
@@ -9562,6 +9637,12 @@ impl OracleDispatcher {
                     as_of,
                 }
             };
+            request_budget = query_budget_with_cost_limit(
+                request_budget,
+                self.max_query_cost()?,
+                prepared.args.max_query_cost,
+            );
+            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
 
             if prepared.gate.is_ok() {
                 if prepared.as_of.is_some() {

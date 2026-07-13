@@ -688,6 +688,7 @@ struct SelectedRuntimeProfile {
     name: String,
     level: SessionLevelState,
     request_timeout: Option<std::time::Duration>,
+    max_query_cost: Option<u64>,
     require_signed_tools: bool,
 }
 
@@ -697,6 +698,7 @@ struct ResolvedProfile {
     opts: OracleConnectOptions,
     level: SessionLevelState,
     require_signed_tools: bool,
+    max_query_cost: Option<u64>,
     pool_settings: Option<PoolSettings>,
     doctor_caps: DoctorProfileCaps,
     connect_timeout_seconds: Option<u64>,
@@ -737,6 +739,7 @@ fn select_runtime_profile_from_config(
         name: chosen.name.clone(),
         level: ctx.level_state,
         request_timeout: ctx.options.call_timeout,
+        max_query_cost: chosen.max_query_cost,
         require_signed_tools: chosen.require_signed_tools(),
     }))
 }
@@ -797,6 +800,7 @@ fn resolve_profile_options_from_config_with(
         opts: ctx.options,
         level: ctx.level_state,
         require_signed_tools: chosen.require_signed_tools(),
+        max_query_cost: chosen.max_query_cost,
         pool_settings: ctx.pool_settings,
         doctor_caps,
         connect_timeout_seconds: chosen.connect_timeout_seconds,
@@ -1989,6 +1993,7 @@ struct DispatcherWiring {
     active_profile: Option<String>,
     level: SessionLevelState,
     request_timeout: Option<std::time::Duration>,
+    max_query_cost: Option<u64>,
     secret_resolver: Arc<dyn SecretResolver>,
     custom_catalog: CustomToolCatalog,
     exposure: McpExposurePolicy,
@@ -2012,6 +2017,7 @@ fn apply_selected_profile_to_wiring(
     wiring.active_profile = Some(selected.name);
     wiring.level = selected.level;
     wiring.request_timeout = selected.request_timeout;
+    wiring.max_query_cost = selected.max_query_cost;
 }
 
 fn build_oracle_dispatcher(
@@ -2029,6 +2035,7 @@ fn build_oracle_dispatcher(
         Some(Arc::new(load_custom_catalog_for_generation)),
     )
     .with_request_timeout(wiring.request_timeout)
+    .with_max_query_cost(wiring.max_query_cost)
     .with_mcp_exposure(wiring.exposure.clone())
     .with_profile_drain_state(wiring.profile_drain.clone())
     .with_exports(Arc::clone(&wiring.exports));
@@ -2082,6 +2089,7 @@ async fn open_lane_runtime_connections(
                 name: resolved.name.clone(),
                 level: resolved.level.clone(),
                 request_timeout: resolved.opts.call_timeout,
+                max_query_cost: resolved.max_query_cost,
                 require_signed_tools: resolved.require_signed_tools,
             };
             match try_open_runtime_connections(cx, resolved).await {
@@ -2764,6 +2772,7 @@ struct ServerBuildOptions {
     write_intents: Option<Arc<WriteIntentLog>>,
     secret_resolver: Arc<dyn SecretResolver>,
     request_timeout: Option<std::time::Duration>,
+    max_query_cost: Option<u64>,
     metrics: Option<Arc<Metrics>>,
     profile_drain: ProfileDrainState,
 }
@@ -2825,6 +2834,7 @@ fn build_server_with_lifecycle(
         active_profile,
         level,
         request_timeout: options.request_timeout,
+        max_query_cost: options.max_query_cost,
         secret_resolver: options.secret_resolver,
         custom_catalog: options.custom_catalog,
         exposure,
@@ -3260,7 +3270,7 @@ fn run_serve(
     // as `credential_ref` / `wallet_password_ref` until the actual connection
     // opener runs (stdio/stateless startup connect, readiness probe connect, or
     // stateful per-lane connect).
-    let (connection_plan, active_profile, level, request_timeout) =
+    let (connection_plan, active_profile, level, request_timeout, max_query_cost) =
         match select_runtime_profile_from_config(&full_config, profile.as_deref()) {
             Ok(Some(selected)) => {
                 let active_profile = Some(selected.name.clone());
@@ -3269,6 +3279,7 @@ fn run_serve(
                     active_profile,
                     selected.level,
                     selected.request_timeout,
+                    selected.max_query_cost,
                 )
             }
             Ok(None) => (
@@ -3276,6 +3287,7 @@ fn run_serve(
                 None,
                 default_read_only_level(),
                 OracleConnectOptions::default().call_timeout,
+                None,
             ),
             Err(e) if profile.is_some() => {
                 emit_status_error(
@@ -3292,6 +3304,7 @@ fn run_serve(
                     None,
                     default_read_only_level(),
                     OracleConnectOptions::default().call_timeout,
+                    None,
                 )
             }
         };
@@ -3381,6 +3394,7 @@ fn run_serve(
                     write_intents,
                     secret_resolver: Arc::clone(&secret_resolver),
                     request_timeout,
+                    max_query_cost,
                     metrics: None,
                     profile_drain: ProfileDrainState::from_config(full_config.clone()),
                 },
@@ -3533,6 +3547,7 @@ fn run_serve(
                     write_intents,
                     secret_resolver: Arc::clone(&secret_resolver),
                     request_timeout,
+                    max_query_cost,
                     metrics: Some(Arc::clone(&metrics)),
                     profile_drain: profile_drain.clone(),
                 },

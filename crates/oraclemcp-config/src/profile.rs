@@ -528,6 +528,9 @@ pub struct ConnectionProfile {
     /// Optional per-round-trip Oracle call timeout, in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_timeout_seconds: Option<u64>,
+    /// Optional per-query cooperative cost ceiling for `oracle_query`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_query_cost: Option<u64>,
     /// Optional Oracle Net transport connect timeout, in seconds. This bounds
     /// TCP/TLS/TNS connect and authentication reads before a session exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -620,6 +623,7 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("login_statement_count", &login_statement_count)
             .field("trusted_statement_count", &trusted_statement_count)
             .field("call_timeout_seconds", &self.call_timeout_seconds)
+            .field("max_query_cost", &self.max_query_cost)
             .field("connect_timeout_seconds", &self.connect_timeout_seconds)
             .field(
                 "inactivity_timeout_seconds",
@@ -715,6 +719,7 @@ impl ConnectionProfile {
             login_statements,
             trusted_session_statements,
             call_timeout_seconds,
+            max_query_cost,
             connect_timeout_seconds,
             inactivity_timeout_seconds,
             keepalive_minutes,
@@ -746,6 +751,7 @@ impl ConnectionProfile {
             description: self.description.clone(),
             is_default: false,
             call_timeout_seconds: self.call_timeout_seconds,
+            max_query_cost: self.max_query_cost,
             connect_timeout_seconds: self.connect_timeout_seconds,
             inactivity_timeout_seconds: self.inactivity_timeout_seconds,
             keepalive_minutes: self.keepalive_minutes,
@@ -820,6 +826,8 @@ pub struct ProfileMetadata {
     pub is_default: bool,
     /// Optional per-round-trip Oracle call timeout, in seconds.
     pub call_timeout_seconds: Option<u64>,
+    /// Optional per-query cooperative cost ceiling for `oracle_query`.
+    pub max_query_cost: Option<u64>,
     /// Optional Oracle Net transport connect timeout, in seconds.
     pub connect_timeout_seconds: Option<u64>,
     /// Optional per-read inactivity deadline on an established session, in seconds.
@@ -910,6 +918,7 @@ mod tests {
             login_statements: None,
             trusted_session_statements: None,
             call_timeout_seconds: None,
+            max_query_cost: None,
             connect_timeout_seconds: None,
             inactivity_timeout_seconds: None,
             keepalive_minutes: None,
@@ -1423,6 +1432,7 @@ mod tests {
         base.connect_string = Some("host:1521/svc".to_owned());
         base.max_level = Some(OperatingLevel::ReadWrite);
         base.call_timeout_seconds = Some(30);
+        base.max_query_cost = Some(1_000);
         base.connect_timeout_seconds = Some(20);
         let mut child = p("dev");
         child.base = Some("shared".to_owned());
@@ -1432,7 +1442,26 @@ mod tests {
         assert_eq!(dev.connect_string.as_deref(), Some("host:1521/svc"));
         assert_eq!(dev.max_level(), OperatingLevel::ReadWrite);
         assert_eq!(dev.call_timeout_seconds, Some(30));
+        assert_eq!(dev.max_query_cost, Some(1_000));
         assert_eq!(dev.connect_timeout_seconds, Some(20));
+    }
+
+    #[test]
+    fn max_query_cost_parses_and_surfaces_in_metadata() {
+        let cfg = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "costed"
+            connect_string = "localhost:1521/FREEPDB1"
+            max_query_cost = 42
+            "#,
+        )
+        .expect("profile with max_query_cost parses");
+
+        let profile = &cfg.profiles[0];
+        assert_eq!(profile.max_query_cost, Some(42));
+        assert_eq!(profile.metadata().max_query_cost, Some(42));
+        assert_eq!(cfg.list_profiles()[0].max_query_cost, Some(42));
     }
 
     #[test]

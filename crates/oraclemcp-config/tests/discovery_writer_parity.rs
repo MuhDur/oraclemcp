@@ -57,6 +57,7 @@ fn fully_populated_profile() -> ConnectionProfile {
         login_statements: Some(vec!["ALTER SESSION SET NLS_LANGUAGE = english".to_owned()]),
         trusted_session_statements: Some(vec!["BEGIN NULL; END;".to_owned()]),
         call_timeout_seconds: Some(30),
+        max_query_cost: Some(1_000),
         connect_timeout_seconds: Some(20),
         inactivity_timeout_seconds: Some(300),
         keepalive_minutes: Some(10),

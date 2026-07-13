@@ -323,6 +323,7 @@ fn fresh_stateful_lane_uses_reloaded_profile_ceiling_and_timeout() {
             connect_string = "prod.example:1521/service"
             max_level = "READ_ONLY"
             call_timeout_seconds = 7
+            max_query_cost = 11
             "#,
     )
     .expect("lowered config");
@@ -333,6 +334,7 @@ fn fresh_stateful_lane_uses_reloaded_profile_ceiling_and_timeout() {
         active_profile: Some("prod".to_owned()),
         level: SessionLevelState::new(OperatingLevel::Admin, false),
         request_timeout: Some(std::time::Duration::from_secs(30)),
+        max_query_cost: None,
         secret_resolver: Arc::new(SystemSecretResolver),
         custom_catalog: CustomToolCatalog::default(),
         exposure: McpExposurePolicy::AllowAll,
@@ -350,6 +352,7 @@ fn fresh_stateful_lane_uses_reloaded_profile_ceiling_and_timeout() {
         wiring.request_timeout,
         Some(std::time::Duration::from_secs(7))
     );
+    assert_eq!(wiring.max_query_cost, Some(11));
 }
 
 #[test]
@@ -3650,6 +3653,7 @@ fn build_server_advertises_the_active_custom_catalog_plus_capabilities() {
             write_intents: None,
             secret_resolver: Arc::new(SystemSecretResolver),
             request_timeout: OracleConnectOptions::default().call_timeout,
+            max_query_cost: None,
             metrics: None,
             profile_drain: ProfileDrainState::default(),
         },

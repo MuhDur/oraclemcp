@@ -237,6 +237,7 @@ pub fn synthesize_profiles(
             login_statements: None,
             trusted_session_statements: None,
             call_timeout_seconds: None,
+            max_query_cost: None,
             connect_timeout_seconds: None,
             inactivity_timeout_seconds: None,
             keepalive_minutes: None,
