@@ -1403,6 +1403,8 @@ pub fn oraclemcp_db::ResultMaskingAction::clone(&self) -> oraclemcp_db::ResultMa
 impl core::cmp::Eq for oraclemcp_db::ResultMaskingAction
 impl core::cmp::PartialEq for oraclemcp_db::ResultMaskingAction
 pub fn oraclemcp_db::ResultMaskingAction::eq(&self, &oraclemcp_db::ResultMaskingAction) -> bool
+impl core::convert::From<oraclemcp_db::ResultMaskingAction> for oraclemcp_db::ResultMaskingDecisionAction
+pub fn oraclemcp_db::ResultMaskingDecisionAction::from(oraclemcp_db::ResultMaskingAction) -> Self
 impl core::fmt::Debug for oraclemcp_db::ResultMaskingAction
 pub fn oraclemcp_db::ResultMaskingAction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for oraclemcp_db::ResultMaskingAction
@@ -1451,6 +1453,133 @@ pub type oraclemcp_db::ResultMaskingAction::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ResultMaskingAction where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ResultMaskingAction where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::ResultMaskingAction::vzip(self) -> V
+#[non_exhaustive] pub enum oraclemcp_db::ResultMaskingDecisionAction
+pub oraclemcp_db::ResultMaskingDecisionAction::Mask
+pub oraclemcp_db::ResultMaskingDecisionAction::Null
+pub oraclemcp_db::ResultMaskingDecisionAction::Pass
+pub oraclemcp_db::ResultMaskingDecisionAction::Tokenize
+impl core::clone::Clone for oraclemcp_db::ResultMaskingDecisionAction
+pub fn oraclemcp_db::ResultMaskingDecisionAction::clone(&self) -> oraclemcp_db::ResultMaskingDecisionAction
+impl core::cmp::Eq for oraclemcp_db::ResultMaskingDecisionAction
+impl core::cmp::PartialEq for oraclemcp_db::ResultMaskingDecisionAction
+pub fn oraclemcp_db::ResultMaskingDecisionAction::eq(&self, &oraclemcp_db::ResultMaskingDecisionAction) -> bool
+impl core::convert::From<oraclemcp_db::ResultMaskingAction> for oraclemcp_db::ResultMaskingDecisionAction
+pub fn oraclemcp_db::ResultMaskingDecisionAction::from(oraclemcp_db::ResultMaskingAction) -> Self
+impl core::fmt::Debug for oraclemcp_db::ResultMaskingDecisionAction
+pub fn oraclemcp_db::ResultMaskingDecisionAction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::ResultMaskingDecisionAction
+impl core::marker::StructuralPartialEq for oraclemcp_db::ResultMaskingDecisionAction
+impl serde_core::ser::Serialize for oraclemcp_db::ResultMaskingDecisionAction
+pub fn oraclemcp_db::ResultMaskingDecisionAction::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::ResultMaskingDecisionAction
+pub fn oraclemcp_db::ResultMaskingDecisionAction::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::ResultMaskingDecisionAction
+impl core::marker::Send for oraclemcp_db::ResultMaskingDecisionAction
+impl core::marker::Sync for oraclemcp_db::ResultMaskingDecisionAction
+impl core::marker::Unpin for oraclemcp_db::ResultMaskingDecisionAction
+impl core::marker::UnsafeUnpin for oraclemcp_db::ResultMaskingDecisionAction
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::ResultMaskingDecisionAction
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::ResultMaskingDecisionAction
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::ResultMaskingDecisionAction where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::ResultMaskingDecisionAction where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::ResultMaskingDecisionAction where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingDecisionAction::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::ResultMaskingDecisionAction where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::ResultMaskingDecisionAction where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::ResultMaskingDecisionAction where U: core::convert::From<T>
+pub fn oraclemcp_db::ResultMaskingDecisionAction::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::ResultMaskingDecisionAction where U: core::convert::Into<T>
+pub type oraclemcp_db::ResultMaskingDecisionAction::Error = core::convert::Infallible
+pub fn oraclemcp_db::ResultMaskingDecisionAction::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::ResultMaskingDecisionAction where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::ResultMaskingDecisionAction::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::ResultMaskingDecisionAction::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::ResultMaskingDecisionAction where T: core::clone::Clone
+pub type oraclemcp_db::ResultMaskingDecisionAction::Owned = T
+pub fn oraclemcp_db::ResultMaskingDecisionAction::clone_into(&self, &mut T)
+pub fn oraclemcp_db::ResultMaskingDecisionAction::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::ResultMaskingDecisionAction
+impl<T> core::any::Any for oraclemcp_db::ResultMaskingDecisionAction where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingDecisionAction::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::ResultMaskingDecisionAction where T: ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingDecisionAction::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::ResultMaskingDecisionAction where T: ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingDecisionAction::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::ResultMaskingDecisionAction where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::ResultMaskingDecisionAction::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::ResultMaskingDecisionAction
+pub fn oraclemcp_db::ResultMaskingDecisionAction::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ResultMaskingDecisionAction
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::ResultMaskingDecisionAction where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ResultMaskingDecisionAction
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ResultMaskingDecisionAction
+impl<T> typenum::type_operators::Same for oraclemcp_db::ResultMaskingDecisionAction
+pub type oraclemcp_db::ResultMaskingDecisionAction::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ResultMaskingDecisionAction where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ResultMaskingDecisionAction where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::ResultMaskingDecisionAction::vzip(self) -> V
+#[non_exhaustive] pub enum oraclemcp_db::ResultMaskingDecisionSource
+pub oraclemcp_db::ResultMaskingDecisionSource::MaskUnknownDefault
+pub oraclemcp_db::ResultMaskingDecisionSource::Pass
+pub oraclemcp_db::ResultMaskingDecisionSource::Rule
+impl core::clone::Clone for oraclemcp_db::ResultMaskingDecisionSource
+pub fn oraclemcp_db::ResultMaskingDecisionSource::clone(&self) -> oraclemcp_db::ResultMaskingDecisionSource
+impl core::cmp::Eq for oraclemcp_db::ResultMaskingDecisionSource
+impl core::cmp::PartialEq for oraclemcp_db::ResultMaskingDecisionSource
+pub fn oraclemcp_db::ResultMaskingDecisionSource::eq(&self, &oraclemcp_db::ResultMaskingDecisionSource) -> bool
+impl core::fmt::Debug for oraclemcp_db::ResultMaskingDecisionSource
+pub fn oraclemcp_db::ResultMaskingDecisionSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::ResultMaskingDecisionSource
+impl core::marker::StructuralPartialEq for oraclemcp_db::ResultMaskingDecisionSource
+impl serde_core::ser::Serialize for oraclemcp_db::ResultMaskingDecisionSource
+pub fn oraclemcp_db::ResultMaskingDecisionSource::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::ResultMaskingDecisionSource
+pub fn oraclemcp_db::ResultMaskingDecisionSource::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::ResultMaskingDecisionSource
+impl core::marker::Send for oraclemcp_db::ResultMaskingDecisionSource
+impl core::marker::Sync for oraclemcp_db::ResultMaskingDecisionSource
+impl core::marker::Unpin for oraclemcp_db::ResultMaskingDecisionSource
+impl core::marker::UnsafeUnpin for oraclemcp_db::ResultMaskingDecisionSource
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::ResultMaskingDecisionSource
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::ResultMaskingDecisionSource
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::ResultMaskingDecisionSource where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::ResultMaskingDecisionSource where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::ResultMaskingDecisionSource where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingDecisionSource::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::ResultMaskingDecisionSource where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::ResultMaskingDecisionSource where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::ResultMaskingDecisionSource where U: core::convert::From<T>
+pub fn oraclemcp_db::ResultMaskingDecisionSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::ResultMaskingDecisionSource where U: core::convert::Into<T>
+pub type oraclemcp_db::ResultMaskingDecisionSource::Error = core::convert::Infallible
+pub fn oraclemcp_db::ResultMaskingDecisionSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::ResultMaskingDecisionSource where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::ResultMaskingDecisionSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::ResultMaskingDecisionSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::ResultMaskingDecisionSource where T: core::clone::Clone
+pub type oraclemcp_db::ResultMaskingDecisionSource::Owned = T
+pub fn oraclemcp_db::ResultMaskingDecisionSource::clone_into(&self, &mut T)
+pub fn oraclemcp_db::ResultMaskingDecisionSource::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::ResultMaskingDecisionSource
+impl<T> core::any::Any for oraclemcp_db::ResultMaskingDecisionSource where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingDecisionSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::ResultMaskingDecisionSource where T: ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingDecisionSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::ResultMaskingDecisionSource where T: ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingDecisionSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::ResultMaskingDecisionSource where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::ResultMaskingDecisionSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::ResultMaskingDecisionSource
+pub fn oraclemcp_db::ResultMaskingDecisionSource::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ResultMaskingDecisionSource
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::ResultMaskingDecisionSource where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ResultMaskingDecisionSource
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ResultMaskingDecisionSource
+impl<T> typenum::type_operators::Same for oraclemcp_db::ResultMaskingDecisionSource
+pub type oraclemcp_db::ResultMaskingDecisionSource::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ResultMaskingDecisionSource where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ResultMaskingDecisionSource where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::ResultMaskingDecisionSource::vzip(self) -> V
 pub enum oraclemcp_db::SchemaDiffError
 pub oraclemcp_db::SchemaDiffError::DuplicateIdentity
 pub oraclemcp_db::SchemaDiffError::DuplicateIdentity::duplicate_index: usize
@@ -5240,6 +5369,7 @@ impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::QueryDiffChange where V:
 pub fn oraclemcp_db::QueryDiffChange::vzip(self) -> V
 pub struct oraclemcp_db::QueryResponse
 pub oraclemcp_db::QueryResponse::columns: alloc::vec::Vec<alloc::string::String>
+pub oraclemcp_db::QueryResponse::mask_certificate: core::option::Option<oraclemcp_db::ResultMaskingCertificate>
 pub oraclemcp_db::QueryResponse::next_cursor: core::option::Option<alloc::string::String>
 pub oraclemcp_db::QueryResponse::row_count: usize
 pub oraclemcp_db::QueryResponse::rows: alloc::vec::Vec<serde_json::value::Value>
@@ -5607,12 +5737,144 @@ pub type oraclemcp_db::ResultColumnMatch::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ResultColumnMatch where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ResultColumnMatch where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::ResultColumnMatch::vzip(self) -> V
+pub struct oraclemcp_db::ResultMaskingCertificate
+pub oraclemcp_db::ResultMaskingCertificate::audit_entry_hash: core::option::Option<alloc::string::String>
+pub oraclemcp_db::ResultMaskingCertificate::decisions: alloc::vec::Vec<oraclemcp_db::ResultMaskingColumnDecision>
+pub oraclemcp_db::ResultMaskingCertificate::policy_id: alloc::string::String
+pub oraclemcp_db::ResultMaskingCertificate::profile: core::option::Option<alloc::string::String>
+pub oraclemcp_db::ResultMaskingCertificate::schema_version: u16
+impl core::clone::Clone for oraclemcp_db::ResultMaskingCertificate
+pub fn oraclemcp_db::ResultMaskingCertificate::clone(&self) -> oraclemcp_db::ResultMaskingCertificate
+impl core::cmp::Eq for oraclemcp_db::ResultMaskingCertificate
+impl core::cmp::PartialEq for oraclemcp_db::ResultMaskingCertificate
+pub fn oraclemcp_db::ResultMaskingCertificate::eq(&self, &oraclemcp_db::ResultMaskingCertificate) -> bool
+impl core::fmt::Debug for oraclemcp_db::ResultMaskingCertificate
+pub fn oraclemcp_db::ResultMaskingCertificate::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::ResultMaskingCertificate
+impl serde_core::ser::Serialize for oraclemcp_db::ResultMaskingCertificate
+pub fn oraclemcp_db::ResultMaskingCertificate::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::ResultMaskingCertificate
+pub fn oraclemcp_db::ResultMaskingCertificate::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::ResultMaskingCertificate
+impl core::marker::Send for oraclemcp_db::ResultMaskingCertificate
+impl core::marker::Sync for oraclemcp_db::ResultMaskingCertificate
+impl core::marker::Unpin for oraclemcp_db::ResultMaskingCertificate
+impl core::marker::UnsafeUnpin for oraclemcp_db::ResultMaskingCertificate
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::ResultMaskingCertificate
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::ResultMaskingCertificate
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::ResultMaskingCertificate where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::ResultMaskingCertificate where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::ResultMaskingCertificate where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingCertificate::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::ResultMaskingCertificate where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::ResultMaskingCertificate where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::ResultMaskingCertificate where U: core::convert::From<T>
+pub fn oraclemcp_db::ResultMaskingCertificate::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::ResultMaskingCertificate where U: core::convert::Into<T>
+pub type oraclemcp_db::ResultMaskingCertificate::Error = core::convert::Infallible
+pub fn oraclemcp_db::ResultMaskingCertificate::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::ResultMaskingCertificate where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::ResultMaskingCertificate::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::ResultMaskingCertificate::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::ResultMaskingCertificate where T: core::clone::Clone
+pub type oraclemcp_db::ResultMaskingCertificate::Owned = T
+pub fn oraclemcp_db::ResultMaskingCertificate::clone_into(&self, &mut T)
+pub fn oraclemcp_db::ResultMaskingCertificate::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::ResultMaskingCertificate
+impl<T> core::any::Any for oraclemcp_db::ResultMaskingCertificate where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingCertificate::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::ResultMaskingCertificate where T: ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingCertificate::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::ResultMaskingCertificate where T: ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingCertificate::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::ResultMaskingCertificate where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::ResultMaskingCertificate::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::ResultMaskingCertificate
+pub fn oraclemcp_db::ResultMaskingCertificate::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ResultMaskingCertificate
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::ResultMaskingCertificate where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ResultMaskingCertificate
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ResultMaskingCertificate
+impl<T> typenum::type_operators::Same for oraclemcp_db::ResultMaskingCertificate
+pub type oraclemcp_db::ResultMaskingCertificate::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ResultMaskingCertificate where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ResultMaskingCertificate where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::ResultMaskingCertificate::vzip(self) -> V
+pub struct oraclemcp_db::ResultMaskingColumnDecision
+pub oraclemcp_db::ResultMaskingColumnDecision::action: oraclemcp_db::ResultMaskingDecisionAction
+pub oraclemcp_db::ResultMaskingColumnDecision::column: alloc::string::String
+pub oraclemcp_db::ResultMaskingColumnDecision::oracle_type: alloc::string::String
+pub oraclemcp_db::ResultMaskingColumnDecision::rule_index: core::option::Option<usize>
+pub oraclemcp_db::ResultMaskingColumnDecision::rule_tag: core::option::Option<alloc::string::String>
+pub oraclemcp_db::ResultMaskingColumnDecision::salt_id: core::option::Option<alloc::string::String>
+pub oraclemcp_db::ResultMaskingColumnDecision::source: oraclemcp_db::ResultMaskingDecisionSource
+impl core::clone::Clone for oraclemcp_db::ResultMaskingColumnDecision
+pub fn oraclemcp_db::ResultMaskingColumnDecision::clone(&self) -> oraclemcp_db::ResultMaskingColumnDecision
+impl core::cmp::Eq for oraclemcp_db::ResultMaskingColumnDecision
+impl core::cmp::PartialEq for oraclemcp_db::ResultMaskingColumnDecision
+pub fn oraclemcp_db::ResultMaskingColumnDecision::eq(&self, &oraclemcp_db::ResultMaskingColumnDecision) -> bool
+impl core::fmt::Debug for oraclemcp_db::ResultMaskingColumnDecision
+pub fn oraclemcp_db::ResultMaskingColumnDecision::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::ResultMaskingColumnDecision
+impl serde_core::ser::Serialize for oraclemcp_db::ResultMaskingColumnDecision
+pub fn oraclemcp_db::ResultMaskingColumnDecision::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::ResultMaskingColumnDecision
+pub fn oraclemcp_db::ResultMaskingColumnDecision::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::ResultMaskingColumnDecision
+impl core::marker::Send for oraclemcp_db::ResultMaskingColumnDecision
+impl core::marker::Sync for oraclemcp_db::ResultMaskingColumnDecision
+impl core::marker::Unpin for oraclemcp_db::ResultMaskingColumnDecision
+impl core::marker::UnsafeUnpin for oraclemcp_db::ResultMaskingColumnDecision
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::ResultMaskingColumnDecision
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::ResultMaskingColumnDecision
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::ResultMaskingColumnDecision where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::ResultMaskingColumnDecision where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::ResultMaskingColumnDecision where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingColumnDecision::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::ResultMaskingColumnDecision where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::ResultMaskingColumnDecision where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::ResultMaskingColumnDecision where U: core::convert::From<T>
+pub fn oraclemcp_db::ResultMaskingColumnDecision::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::ResultMaskingColumnDecision where U: core::convert::Into<T>
+pub type oraclemcp_db::ResultMaskingColumnDecision::Error = core::convert::Infallible
+pub fn oraclemcp_db::ResultMaskingColumnDecision::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::ResultMaskingColumnDecision where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::ResultMaskingColumnDecision::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::ResultMaskingColumnDecision::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::ResultMaskingColumnDecision where T: core::clone::Clone
+pub type oraclemcp_db::ResultMaskingColumnDecision::Owned = T
+pub fn oraclemcp_db::ResultMaskingColumnDecision::clone_into(&self, &mut T)
+pub fn oraclemcp_db::ResultMaskingColumnDecision::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::ResultMaskingColumnDecision
+impl<T> core::any::Any for oraclemcp_db::ResultMaskingColumnDecision where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingColumnDecision::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::ResultMaskingColumnDecision where T: ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingColumnDecision::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::ResultMaskingColumnDecision where T: ?core::marker::Sized
+pub fn oraclemcp_db::ResultMaskingColumnDecision::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::ResultMaskingColumnDecision where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::ResultMaskingColumnDecision::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::ResultMaskingColumnDecision
+pub fn oraclemcp_db::ResultMaskingColumnDecision::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ResultMaskingColumnDecision
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::ResultMaskingColumnDecision where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ResultMaskingColumnDecision
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ResultMaskingColumnDecision
+impl<T> typenum::type_operators::Same for oraclemcp_db::ResultMaskingColumnDecision
+pub type oraclemcp_db::ResultMaskingColumnDecision::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ResultMaskingColumnDecision where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ResultMaskingColumnDecision where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::ResultMaskingColumnDecision::vzip(self) -> V
 pub struct oraclemcp_db::ResultMaskingPolicy
 pub oraclemcp_db::ResultMaskingPolicy::mask_unknown_default: bool
+pub oraclemcp_db::ResultMaskingPolicy::policy_id: alloc::string::String
+pub oraclemcp_db::ResultMaskingPolicy::profile: core::option::Option<alloc::string::String>
 pub oraclemcp_db::ResultMaskingPolicy::rules: alloc::vec::Vec<oraclemcp_db::ResultMaskingRule>
 pub oraclemcp_db::ResultMaskingPolicy::token_salt: core::option::Option<oraclemcp_db::ProfileMaskingSalt>
 impl oraclemcp_db::ResultMaskingPolicy
+pub fn oraclemcp_db::ResultMaskingPolicy::certificate_for_row(&self, &oraclemcp_db::OracleRow) -> core::option::Option<oraclemcp_db::ResultMaskingCertificate>
 pub fn oraclemcp_db::ResultMaskingPolicy::new(alloc::vec::Vec<oraclemcp_db::ResultMaskingRule>, bool) -> Self
+pub fn oraclemcp_db::ResultMaskingPolicy::with_profile(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oraclemcp_db::ResultMaskingPolicy::with_token_salt(self, oraclemcp_db::ProfileMaskingSalt) -> Self
 impl core::clone::Clone for oraclemcp_db::ResultMaskingPolicy
 pub fn oraclemcp_db::ResultMaskingPolicy::clone(&self) -> oraclemcp_db::ResultMaskingPolicy

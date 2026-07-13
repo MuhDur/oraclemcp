@@ -14,6 +14,7 @@ use asupersync::Cx;
 // exactly like one under the full row — no `SPAWN`/`REMOTE`/`RANDOM` needed.
 use crate::connection::{OracleConnection, db_checkpoint};
 use crate::error::{DbError, QuarantineOutcome, classify_flashback_refusal_message};
+use crate::masking::ResultMaskingCertificate;
 use crate::serialize::{PageColumnCache, SerializeOptions, checked_byte_budget_add};
 use crate::types::OracleBind;
 
@@ -59,6 +60,10 @@ pub struct QueryResponse {
     /// Compact serialized bytes across the row objects in this page. Column
     /// metadata, pagination fields, and outer MCP response framing are excluded.
     pub total_bytes: usize,
+    /// Proof-carrying egress certificate for result masking, present only when
+    /// the page's active masking policy transformed one or more columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_certificate: Option<ResultMaskingCertificate>,
 }
 
 /// Wrap a SELECT in an Oracle 12c+ OFFSET/FETCH envelope for stateless cursor
@@ -291,6 +296,7 @@ pub(crate) struct QueryPageBuilder {
     offset: usize,
     columns: Vec<String>,
     column_cache: Option<PageColumnCache>,
+    mask_certificate: Option<ResultMaskingCertificate>,
     rows: Vec<Value>,
     total_bytes: usize,
 }
@@ -308,6 +314,7 @@ impl QueryPageBuilder {
             offset,
             columns: Vec::new(),
             column_cache: None,
+            mask_certificate: None,
             rows: Vec::with_capacity(caps.max_rows),
             total_bytes: 0,
         }
@@ -328,6 +335,10 @@ impl QueryPageBuilder {
         if self.column_cache.is_none() {
             self.columns = row.columns.iter().map(|(name, _)| name.clone()).collect();
             self.column_cache = Some(PageColumnCache::from_row(row));
+            self.mask_certificate = serialize_opts
+                .result_masking
+                .as_ref()
+                .and_then(|policy| policy.certificate_for_row(row));
         }
         let remaining = self.caps.max_result_bytes.saturating_sub(self.total_bytes);
         let serialized = self
@@ -375,6 +386,7 @@ impl QueryPageBuilder {
             truncated,
             next_cursor,
             total_bytes: self.total_bytes,
+            mask_certificate: self.mask_certificate,
         })
     }
 }

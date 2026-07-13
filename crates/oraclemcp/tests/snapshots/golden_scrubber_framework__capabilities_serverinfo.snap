@@ -279,6 +279,11 @@ expression: rendered
             "description": "False when the result was materialized as an export resource (export=true) rather than inlined.",
             "type": "boolean"
           },
+          "mask_certificate": {
+            "additionalProperties": true,
+            "description": "Present when result masking transformed the page: proof-carrying per-column mask decisions plus the audit entry hash binding those decisions into the audit chain.",
+            "type": "object"
+          },
           "next_cursor": {
             "type": [
               "string",
@@ -598,6 +603,11 @@ expression: rendered
           "keyed": {
             "description": "True when rows were aligned by explicit/inferred key columns and changed[] is meaningful.",
             "type": "boolean"
+          },
+          "mask_certificates": {
+            "additionalProperties": true,
+            "description": "Present when result masking transformed either flashback page: before/after mask-decision certificates with audit entry hashes.",
+            "type": "object"
           },
           "removed": {
             "description": "Rows present at scn_a but not at scn_b.",
@@ -2102,6 +2112,11 @@ expression: rendered
           "inlined": {
             "description": "False when the result was materialized as an export resource (export=true) rather than inlined.",
             "type": "boolean"
+          },
+          "mask_certificate": {
+            "additionalProperties": true,
+            "description": "Present when result masking transformed the page: proof-carrying per-column mask decisions plus the audit entry hash binding those decisions into the audit chain.",
+            "type": "object"
           },
           "next_cursor": {
             "type": [

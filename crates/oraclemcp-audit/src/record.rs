@@ -16,6 +16,7 @@ use crate::hmac::{HmacSha256Key, HmacSha256KeyError};
 const AUDIT_SCHEMA_V5: u16 = 5;
 const AUDIT_SCHEMA_V6: u16 = 6;
 const AUDIT_SCHEMA_V7: u16 = 7;
+const AUDIT_SCHEMA_V8: u16 = 8;
 
 /// Stable, non-secret replacement for the historical raw-SQL preview field.
 ///
@@ -27,7 +28,7 @@ const AUDIT_SCHEMA_V7: u16 = 7;
 pub(crate) const REDACTED_SQL_PREVIEW: &str = "<sql text redacted; see sql_sha256>";
 
 /// Current on-disk audit record schema.
-pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V7;
+pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V8;
 
 /// The guard decision being audited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +298,72 @@ impl AuditCorrelation {
     }
 }
 
+/// Action recorded for a column in a result-masking audit certificate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AuditResultMaskingAction {
+    /// Column passed through unchanged.
+    Pass,
+    /// Column was masked with the fixed masking marker.
+    Mask,
+    /// Column was replaced with a deterministic token.
+    Tokenize,
+    /// Column was replaced with JSON null.
+    Null,
+}
+
+/// Source of a result-masking decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AuditResultMaskingSource {
+    /// A masking rule matched the result column.
+    Rule,
+    /// `mask_unknown_default=true` masked an otherwise unmatched column.
+    MaskUnknownDefault,
+    /// No rule matched and the column passed through.
+    Pass,
+}
+
+/// One column decision covered by a result-masking audit certificate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditResultMaskingColumnDecision {
+    /// Result-set column name.
+    pub column: String,
+    /// Oracle type observed for the column.
+    pub oracle_type: String,
+    /// Action applied by the result-masking policy.
+    pub action: AuditResultMaskingAction,
+    /// Source of the action.
+    pub source: AuditResultMaskingSource,
+    /// Zero-based rule index for rule-derived decisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_index: Option<usize>,
+    /// Optional non-secret rule tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_tag: Option<String>,
+    /// Optional non-secret salt id used for tokenized columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub salt_id: Option<String>,
+}
+
+/// Per-result masking certificate stored in the audit chain. The response copy
+/// may also carry the audit record's `entry_hash`; that self-reference is not
+/// stored inside this hash-covered payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditResultMaskingCertificate {
+    /// Certificate schema version.
+    pub schema_version: u16,
+    /// Profile whose masking policy produced the decisions, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Stable policy identity.
+    pub policy_id: String,
+    /// Column decisions in select-list order.
+    pub decisions: Vec<AuditResultMaskingColumnDecision>,
+}
+
 /// One audit entry. `seq` + `prev_hash` + `entry_hash` form the tamper-evident
 /// chain; `entry_hash` covers the seq and all content fields — including the
 /// schema-versioned `sql_preview` field — so any edit or reorder breaks
@@ -327,6 +394,9 @@ pub struct AuditRecord {
     /// records from schema v7 onward; absent on historical records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation: Option<AuditCorrelation>,
+    /// Optional result-masking certificate for proof-carrying egress records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_masking: Option<AuditResultMaskingCertificate>,
     /// The tool invoked.
     pub tool: String,
     /// `sha256:<hex>` of the exact SQL bytes (never the bind values).
@@ -376,6 +446,7 @@ impl std::fmt::Debug for AuditRecord {
             .field("db_evidence", &self.db_evidence)
             .field("cancel", &self.cancel)
             .field("correlation", &self.correlation)
+            .field("result_masking", &self.result_masking)
             .field("tool", &self.tool)
             .field("sql_sha256", &self.sql_sha256)
             .field("sql_normalized_sha256", &self.sql_normalized_sha256)
@@ -481,6 +552,8 @@ pub struct AuditEntryDraft {
     pub db_evidence: Option<DbEvidence>,
     /// Optional structured cancellation/lifecycle reason.
     pub cancel: Option<AuditCancel>,
+    /// Optional result-masking certificate.
+    pub result_masking: Option<AuditResultMaskingCertificate>,
     /// Tool name.
     pub tool: String,
     /// The exact SQL, retained only long enough to compute audit hashes.
@@ -501,6 +574,7 @@ impl std::fmt::Debug for AuditEntryDraft {
             .field("subject", &self.subject)
             .field("db_evidence", &self.db_evidence)
             .field("cancel", &self.cancel)
+            .field("result_masking", &self.result_masking)
             .field("tool", &self.tool)
             .field("sql_sha256", &sha256_hex(self.sql.as_bytes()))
             .field("sql_normalized_sha256", &normalized_sql_sha256(&self.sql))
@@ -532,7 +606,7 @@ impl AuditRecord {
         Self::chained_signed_correlated(draft, seq, prev_hash, timestamp, key, None)
     }
 
-    /// Build a signed v7 record with optional attempt/terminal correlation.
+    /// Build a signed v8 record with optional attempt/terminal correlation.
     #[must_use]
     pub fn chained_signed_correlated(
         draft: &AuditEntryDraft,
@@ -561,7 +635,7 @@ impl AuditRecord {
         Self::chained_unsigned_correlated(draft, seq, prev_hash, timestamp, None)
     }
 
-    /// Build an unsigned v7 record with optional attempt/terminal correlation.
+    /// Build an unsigned v8 record with optional attempt/terminal correlation.
     #[must_use]
     pub fn chained_unsigned_correlated(
         draft: &AuditEntryDraft,
@@ -574,7 +648,7 @@ impl AuditRecord {
         let sql_normalized_sha256 = normalized_sql_sha256(&draft.sql);
         let sql_preview = REDACTED_SQL_PREVIEW.to_owned();
         let agent_identity = draft.subject.legacy_agent_identity();
-        let entry_hash = compute_entry_hash_v7(
+        let entry_hash = compute_entry_hash_v8(
             seq,
             &timestamp,
             &agent_identity,
@@ -582,6 +656,7 @@ impl AuditRecord {
             draft.db_evidence.as_ref(),
             draft.cancel.as_ref(),
             correlation.as_ref(),
+            draft.result_masking.as_ref(),
             &draft.tool,
             &sql_sha256,
             &sql_normalized_sha256,
@@ -601,6 +676,7 @@ impl AuditRecord {
             db_evidence: draft.db_evidence.clone(),
             cancel: draft.cancel.clone(),
             correlation,
+            result_masking: draft.result_masking.clone(),
             tool: draft.tool.clone(),
             sql_sha256,
             sql_normalized_sha256,
@@ -733,6 +809,26 @@ impl AuditRecord {
                 self.db_evidence.as_ref(),
                 self.cancel.as_ref(),
                 self.correlation.as_ref(),
+                &self.tool,
+                &self.sql_sha256,
+                &self.sql_normalized_sha256,
+                &self.sql_preview,
+                &self.danger_level,
+                self.decision,
+                self.rows_affected,
+                self.outcome,
+                &self.prev_hash,
+            )
+        } else if self.schema_version == AUDIT_SCHEMA_V8 {
+            compute_entry_hash_v8(
+                self.seq,
+                &self.timestamp,
+                &self.agent_identity,
+                &self.subject,
+                self.db_evidence.as_ref(),
+                self.cancel.as_ref(),
+                self.correlation.as_ref(),
+                self.result_masking.as_ref(),
                 &self.tool,
                 &self.sql_sha256,
                 &self.sql_normalized_sha256,
@@ -1100,6 +1196,54 @@ fn canonical_push_correlation(out: &mut Vec<u8>, correlation: Option<&AuditCorre
     }
 }
 
+fn canonical_push_result_masking(
+    out: &mut Vec<u8>,
+    certificate: Option<&AuditResultMaskingCertificate>,
+) {
+    let Some(certificate) = certificate else {
+        out.push(0);
+        return;
+    };
+    out.push(1);
+    out.extend_from_slice(&certificate.schema_version.to_be_bytes());
+    match certificate.profile.as_deref() {
+        Some(profile) => {
+            out.push(1);
+            canonical_push_str(out, profile);
+        }
+        None => out.push(0),
+    }
+    canonical_push_str(out, &certificate.policy_id);
+    out.extend_from_slice(&(certificate.decisions.len() as u64).to_be_bytes());
+    for decision in &certificate.decisions {
+        canonical_push_str(out, &decision.column);
+        canonical_push_str(out, &decision.oracle_type);
+        out.push(canonical_result_masking_action_tag(decision.action));
+        out.push(canonical_result_masking_source_tag(decision.source));
+        match decision.rule_index {
+            Some(rule_index) => {
+                out.push(1);
+                out.extend_from_slice(&(rule_index as u64).to_be_bytes());
+            }
+            None => out.push(0),
+        }
+        match decision.rule_tag.as_deref() {
+            Some(rule_tag) => {
+                out.push(1);
+                canonical_push_str(out, rule_tag);
+            }
+            None => out.push(0),
+        }
+        match decision.salt_id.as_deref() {
+            Some(salt_id) => {
+                out.push(1);
+                canonical_push_str(out, salt_id);
+            }
+            None => out.push(0),
+        }
+    }
+}
+
 fn canonical_push_rows_affected(out: &mut Vec<u8>, rows_affected: Option<u64>) {
     match rows_affected {
         Some(rows) => {
@@ -1107,6 +1251,23 @@ fn canonical_push_rows_affected(out: &mut Vec<u8>, rows_affected: Option<u64>) {
             out.extend_from_slice(&rows.to_be_bytes());
         }
         None => out.push(0),
+    }
+}
+
+const fn canonical_result_masking_action_tag(action: AuditResultMaskingAction) -> u8 {
+    match action {
+        AuditResultMaskingAction::Pass => 0,
+        AuditResultMaskingAction::Mask => 1,
+        AuditResultMaskingAction::Tokenize => 2,
+        AuditResultMaskingAction::Null => 3,
+    }
+}
+
+const fn canonical_result_masking_source_tag(source: AuditResultMaskingSource) -> u8 {
+    match source {
+        AuditResultMaskingSource::Rule => 0,
+        AuditResultMaskingSource::MaskUnknownDefault => 1,
+        AuditResultMaskingSource::Pass => 2,
     }
 }
 
@@ -1338,6 +1499,51 @@ fn compute_entry_hash_v7(
     sha256_hex(&canonical)
 }
 
+/// Deterministically hash a v8 entry, extending v7 with an optional
+/// result-masking certificate.
+#[allow(clippy::too_many_arguments)]
+fn compute_entry_hash_v8(
+    seq: u64,
+    timestamp: &str,
+    agent_identity: &str,
+    subject: &AuditSubject,
+    db_evidence: Option<&DbEvidence>,
+    cancel: Option<&AuditCancel>,
+    correlation: Option<&AuditCorrelation>,
+    result_masking: Option<&AuditResultMaskingCertificate>,
+    tool: &str,
+    sql_sha256: &str,
+    sql_normalized_sha256: &str,
+    sql_preview: &str,
+    danger_level: &str,
+    decision: AuditDecision,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+    prev_hash: &str,
+) -> String {
+    let mut canonical = canonical_entry(
+        AUDIT_SCHEMA_V8,
+        seq,
+        timestamp,
+        agent_identity,
+        subject,
+        db_evidence,
+        cancel,
+        tool,
+        sql_sha256,
+        sql_normalized_sha256,
+        sql_preview,
+        danger_level,
+        decision,
+        rows_affected,
+        outcome,
+        prev_hash,
+    );
+    canonical_push_correlation(&mut canonical, correlation);
+    canonical_push_result_masking(&mut canonical, result_masking);
+    sha256_hex(&canonical)
+}
+
 /// The genesis prev-hash for the first entry.
 pub const GENESIS_HASH: &str = "genesis";
 
@@ -1355,6 +1561,7 @@ mod kani_proofs {
             db_evidence: None,
             cancel: None,
             correlation: None,
+            result_masking: None,
             tool: "oracle_execute".to_owned(),
             sql_sha256: "sha256:sql".to_owned(),
             sql_normalized_sha256: "sha256:sql".to_owned(),
@@ -1413,6 +1620,7 @@ mod tests {
             subject: AuditSubject::new("agent", "agent-1"),
             db_evidence: None,
             cancel: None,
+            result_masking: None,
             tool: "oracle_query".to_owned(),
             sql: "DELETE FROM orders WHERE id = 1".to_owned(),
             danger_level: "GUARDED".to_owned(),
@@ -1589,6 +1797,25 @@ mod tests {
                 d.outcome,
                 prev_hash,
             ),
+            AUDIT_SCHEMA_V8 => compute_entry_hash_v8(
+                seq,
+                &timestamp,
+                &agent_identity,
+                &d.subject,
+                d.db_evidence.as_ref(),
+                d.cancel.as_ref(),
+                None,
+                d.result_masking.as_ref(),
+                &d.tool,
+                &sql_sha256,
+                &sql_normalized_sha256,
+                &sql_preview,
+                &d.danger_level,
+                d.decision,
+                d.rows_affected,
+                d.outcome,
+                prev_hash,
+            ),
             other => panic!("unsupported test schema {other}"),
         };
         AuditRecord {
@@ -1600,6 +1827,7 @@ mod tests {
             db_evidence: d.db_evidence.clone(),
             cancel: d.cancel.clone(),
             correlation: None,
+            result_masking: None,
             tool: d.tool.clone(),
             sql_sha256,
             sql_normalized_sha256: if schema_version >= 4 {
@@ -1738,6 +1966,7 @@ mod tests {
             db_evidence: d.db_evidence.clone(),
             cancel: None,
             correlation: None,
+            result_masking: None,
             tool: d.tool.clone(),
             sql_sha256,
             sql_normalized_sha256: String::new(),
@@ -1793,7 +2022,7 @@ mod tests {
     }
 
     #[test]
-    fn v7_attempt_terminal_correlation_is_hash_covered() {
+    fn v8_attempt_terminal_correlation_is_hash_covered() {
         let correlation = AuditCorrelation::terminal("sha256:request", 41);
         let mut record = AuditRecord::chained_signed_correlated(
             &draft(),
@@ -1803,7 +2032,7 @@ mod tests {
             &key(),
             Some(correlation),
         );
-        assert_eq!(record.schema_version, AUDIT_SCHEMA_V7);
+        assert_eq!(record.schema_version, AUDIT_SCHEMA_VERSION);
         assert!(record.hash_is_valid());
         assert_eq!(record.correlation.as_ref().unwrap().parent_seq, Some(41));
 
@@ -1811,6 +2040,81 @@ mod tests {
         assert!(
             !record.hash_is_valid(),
             "editing the attempt/terminal link must invalidate the chain hash"
+        );
+    }
+
+    #[test]
+    fn v8_result_masking_certificate_is_hash_covered() {
+        let mut d = draft();
+        d.result_masking = Some(AuditResultMaskingCertificate {
+            schema_version: 1,
+            profile: Some("prod".to_owned()),
+            policy_id: "sha256:policy".to_owned(),
+            // Exercise every source discriminant. Besides validating the
+            // certificate payload, this ensures future canonical encoding
+            // changes cannot silently alias two decision sources.
+            decisions: vec![
+                AuditResultMaskingColumnDecision {
+                    column: "EMAIL".to_owned(),
+                    oracle_type: "VARCHAR2".to_owned(),
+                    action: AuditResultMaskingAction::Mask,
+                    source: AuditResultMaskingSource::Rule,
+                    rule_index: Some(0),
+                    rule_tag: Some("pii.email".to_owned()),
+                    salt_id: None,
+                },
+                AuditResultMaskingColumnDecision {
+                    column: "NOTES".to_owned(),
+                    oracle_type: "CLOB".to_owned(),
+                    action: AuditResultMaskingAction::Mask,
+                    source: AuditResultMaskingSource::MaskUnknownDefault,
+                    rule_index: None,
+                    rule_tag: None,
+                    salt_id: None,
+                },
+                AuditResultMaskingColumnDecision {
+                    column: "PUBLIC_ID".to_owned(),
+                    oracle_type: "NUMBER".to_owned(),
+                    action: AuditResultMaskingAction::Pass,
+                    source: AuditResultMaskingSource::Pass,
+                    rule_index: None,
+                    rule_tag: None,
+                    salt_id: None,
+                },
+            ],
+        });
+        let record = AuditRecord::chained_signed(
+            &d,
+            1,
+            GENESIS_HASH,
+            "2026-07-13T00:00:00Z".to_owned(),
+            &key(),
+        );
+
+        assert_eq!(record.schema_version, AUDIT_SCHEMA_VERSION);
+        assert!(record.hash_is_valid());
+        let mut action_tampered = record.clone();
+        action_tampered
+            .result_masking
+            .as_mut()
+            .expect("certificate")
+            .decisions[0]
+            .action = AuditResultMaskingAction::Pass;
+        assert!(
+            !action_tampered.hash_is_valid(),
+            "editing a mask decision must invalidate the audit entry hash"
+        );
+
+        let mut source_tampered = record;
+        source_tampered
+            .result_masking
+            .as_mut()
+            .expect("certificate")
+            .decisions[0]
+            .source = AuditResultMaskingSource::MaskUnknownDefault;
+        assert!(
+            !source_tampered.hash_is_valid(),
+            "editing a decision source must invalidate the audit entry hash"
         );
     }
 
@@ -2039,6 +2343,7 @@ mod tests {
             db_evidence: None,
             cancel: None,
             correlation: None,
+            result_masking: None,
             tool: d.tool.clone(),
             sql_sha256,
             sql_normalized_sha256: String::new(),
@@ -2567,7 +2872,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_v1_through_v7_rotated_chain_verifies() {
+    fn mixed_v1_through_current_rotated_chain_verifies() {
         use crate::{VerifyOutcome, verify_records};
 
         let k1 = key();
@@ -2588,7 +2893,9 @@ mod tests {
         }
         assert_eq!(
             verify_records(&records, &[k1, k2]),
-            VerifyOutcome::Ok { records: 7 }
+            VerifyOutcome::Ok {
+                records: AUDIT_SCHEMA_VERSION as usize
+            }
         );
     }
 
@@ -2670,7 +2977,7 @@ mod tests {
         // Forge the redacted field and recompute the (unkeyed) hash so the
         // bare-hash check would pass — but leave the old MAC in place.
         forged.sql_preview = "SELECT 1".to_owned();
-        forged.entry_hash = compute_entry_hash_v7(
+        forged.entry_hash = compute_entry_hash_v8(
             forged.seq,
             &forged.timestamp,
             &forged.agent_identity,
@@ -2678,6 +2985,7 @@ mod tests {
             forged.db_evidence.as_ref(),
             forged.cancel.as_ref(),
             forged.correlation.as_ref(),
+            forged.result_masking.as_ref(),
             &forged.tool,
             &forged.sql_sha256,
             &forged.sql_normalized_sha256,

@@ -97,6 +97,7 @@ fn audit_verify_cli_uses_active_and_historical_keyring() {
         subject: AuditSubject::new("cli-test", "qa37"),
         db_evidence: None,
         cancel: None,
+        result_masking: None,
         tool: "oracle_execute".to_owned(),
         sql: format!("DELETE FROM qa37 WHERE id={id}"),
         danger_level: "GUARDED".to_owned(),

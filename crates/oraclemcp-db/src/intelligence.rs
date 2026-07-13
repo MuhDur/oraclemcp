@@ -1720,6 +1720,7 @@ mod tests {
             truncated: false,
             next_cursor: None,
             total_bytes: 0,
+            mask_certificate: None,
         }
     }
 

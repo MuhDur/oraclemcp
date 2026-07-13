@@ -1,6 +1,6 @@
 # Mutation Safety Gate
 
-<!-- MUTATION-GATE guard=95.0 audit=90.7 threshold=90 status=enforcing -->
+<!-- MUTATION-GATE guard=95.0 audit=90.0 threshold=90 status=enforcing -->
 
 D6.4 validates the safety-critical server crates with `cargo-mutants` through
 `scripts/mutation_safety_gate.sh`. The gate covers:
@@ -24,7 +24,7 @@ scripts/mutation_safety_gate.sh run --crate oraclemcp-guard --jobs 1
 TMPDIR=/var/tmp \
 MUTATION_JOBS=2 \
 MUTATION_TIMEOUT=45 \
-MUTATION_OUTPUT=/var/tmp/oraclemcp-mutation-audit-final-j2t45-20260713T014539Z \
+MUTATION_OUTPUT=/var/tmp/oraclemcp-mutation-audit-m2-final-20260713T123250Z \
 scripts/mutation_safety_gate.sh run --crate oraclemcp-audit --jobs 2
 ```
 
@@ -33,7 +33,7 @@ Results:
 | Crate | Kill rate | Caught | Missed | Timeout | Unviable |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `oraclemcp-guard` | 95.0% | 470 | 25 | 1 | 64 |
-| `oraclemcp-audit` | 90.7% | 374 | 40 | 18 | 52 |
+| `oraclemcp-audit` | 90.0% | 368 | 44 | 28 | 52 |
 
 The validated safe default remains one mutant build at a time. The guard proof
 used the default `-j1`. The audit proof used `-j2` plus a 45-second mutant test
@@ -45,8 +45,8 @@ runner is known to tolerate the extra build pressure.
 
 ## Survivor Triage
 
-The remaining survivors are below the enforcing threshold. They fall into these
-classes:
+The remaining survivors were triaged and the aggregate kill rate still meets
+the enforcing threshold. They fall into these classes:
 
 - Guard classifier fallback-equivalent arms where deleting an explicit
   `Insert`/`Merge`/transaction arm falls through to the same fail-closed

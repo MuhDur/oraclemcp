@@ -208,6 +208,7 @@ fn approval_token_never_appears_in_the_audit_record() {
         subject: AuditSubject::new("agent", "agent-1"),
         db_evidence: None,
         cancel: None,
+        result_masking: None,
         tool: "oracle_query_execute".to_owned(),
         sql: sql.to_owned(),
         danger_level: "GUARDED".to_owned(),

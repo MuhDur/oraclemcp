@@ -606,6 +606,7 @@ mod tests {
             subject: AuditSubject::new("agent", "qa14"),
             db_evidence: None,
             cancel: None,
+            result_masking: None,
             tool: "oracle_execute".to_owned(),
             sql: format!("DELETE FROM qa14 WHERE id={seq}"),
             danger_level: "DESTRUCTIVE".to_owned(),

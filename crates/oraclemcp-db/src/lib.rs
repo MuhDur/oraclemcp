@@ -126,7 +126,9 @@ pub use intelligence::{
 pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_id};
 pub use masking::{
     MASKED_RESULT_VALUE, MIN_PROFILE_MASKING_SALT_BYTES, MaskingPolicyError, ProfileMaskingSalt,
-    ResultColumnMatch, ResultMaskingAction, ResultMaskingPolicy, ResultMaskingRule,
+    ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate, ResultMaskingColumnDecision,
+    ResultMaskingDecisionAction, ResultMaskingDecisionSource, ResultMaskingPolicy,
+    ResultMaskingRule,
 };
 pub use oci::{
     AdbConnectInfo, CloudStatus, IamToken, IamTokenSource, OciError, WalletContents, WalletMode,

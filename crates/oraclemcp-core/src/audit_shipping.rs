@@ -238,6 +238,7 @@ mod tests {
             subject: AuditSubject::new("agent", "agent-1"),
             db_evidence: None,
             cancel: None,
+            result_masking: None,
             tool: "oracle_execute".to_owned(),
             sql: format!("UPDATE users SET password='{SQL_SENTINEL}'"),
             danger_level: "DESTRUCTIVE".to_owned(),

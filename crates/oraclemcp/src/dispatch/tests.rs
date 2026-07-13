@@ -8610,6 +8610,10 @@ mod audit_wiring {
         Arc::new(Auditor::new(Box::new(FailingSink), key))
     }
 
+    fn mask_all_policy() -> ResultMaskingPolicy {
+        ResultMaskingPolicy::new(Vec::new(), true).with_profile("dev")
+    }
+
     fn preview_confirm_with_context(
         dispatcher: &OracleDispatcher,
         context: DispatchContext<'_>,
@@ -8734,6 +8738,167 @@ mod audit_wiring {
             sink.records().is_empty(),
             "pure reads must not touch the audit chain"
         );
+    }
+
+    #[test]
+    fn masked_read_carries_audit_bound_certificate() {
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher = dispatcher_with(ddl_level(), auditor)
+            .with_result_masking_policy(Some(mask_all_policy()));
+
+        let out = dispatcher
+            .dispatch(
+                "oracle_query",
+                json!({ "sql": "SELECT owner FROM all_objects" }),
+            )
+            .expect("masked read dispatches");
+
+        let certificate = out["mask_certificate"]
+            .as_object()
+            .expect("masked response carries certificate");
+        let audit_entry_hash = certificate["audit_entry_hash"]
+            .as_str()
+            .expect("certificate names audit entry hash");
+        assert_eq!(certificate["profile"], json!("dev"));
+        assert!(
+            certificate["policy_id"]
+                .as_str()
+                .is_some_and(|policy_id| policy_id.starts_with("sha256:"))
+        );
+        assert!(
+            certificate["decisions"]
+                .as_array()
+                .is_some_and(|decisions| !decisions.is_empty()),
+            "certificate records column decisions"
+        );
+        assert!(
+            !out["rows"].to_string().contains("EMPLOYEES"),
+            "masked data must not leak original row values"
+        );
+
+        let records = sink.records();
+        assert_eq!(
+            records.len(),
+            1,
+            "masked read appends exactly one audit record"
+        );
+        let record = &records[0];
+        assert_eq!(record.tool, "oracle_query");
+        assert_eq!(record.danger_level, "READ_ONLY");
+        assert_eq!(record.outcome, AuditOutcome::Succeeded);
+        assert_eq!(audit_entry_hash, record.entry_hash);
+        assert!(record.hash_is_valid(), "audit certificate is hash-covered");
+        let audited = record
+            .result_masking
+            .as_ref()
+            .expect("audit record stores mask certificate");
+        assert_eq!(audited.profile.as_deref(), Some("dev"));
+        assert_eq!(
+            audited.policy_id.as_str(),
+            certificate["policy_id"].as_str().expect("policy id")
+        );
+        assert_eq!(
+            audited.decisions.len(),
+            certificate["decisions"].as_array().unwrap().len()
+        );
+    }
+
+    #[test]
+    fn masked_read_fails_closed_when_audit_append_fails() {
+        let dispatcher = dispatcher_with(ddl_level(), failing_auditor())
+            .with_result_masking_policy(Some(mask_all_policy()));
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_query",
+                json!({ "sql": "SELECT owner FROM all_objects" }),
+            )
+            .expect_err("masked read refuses unaudited result");
+
+        assert!(
+            err.message.contains("audit append failed"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn masked_read_fails_closed_without_audit_sink() {
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            ddl_level(),
+        )
+        .with_result_masking_policy(Some(mask_all_policy()));
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_query",
+                json!({ "sql": "SELECT owner FROM all_objects" }),
+            )
+            .expect_err("masked read requires audit binding");
+
+        assert!(
+            err.message.contains("no audit sink is configured"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn masked_streaming_query_is_refused_until_certificates_can_precede_rows() {
+        let (auditor, _sink) = auditor_with_sink();
+        let dispatcher = dispatcher_with(ddl_level(), auditor)
+            .with_result_masking_policy(Some(mask_all_policy()));
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_query",
+                json!({ "sql": "SELECT owner FROM all_objects", "streaming": true }),
+            )
+            .expect_err("masked streaming is refused");
+
+        assert!(
+            err.message.contains("streaming masked query results"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn masked_diff_carries_before_after_audit_bound_certificates() {
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher = dispatcher_with(ddl_level(), auditor)
+            .with_result_masking_policy(Some(mask_all_policy()));
+
+        let out = dispatcher
+            .dispatch(
+                "oracle_diff",
+                json!({
+                    "sql": "SELECT owner FROM all_objects",
+                    "scn_a": 1,
+                    "scn_b": 2,
+                    "key": ["OWNER"]
+                }),
+            )
+            .expect("masked diff dispatches");
+
+        let certificates = out["mask_certificates"]
+            .as_object()
+            .expect("masked diff carries before/after certificates");
+        let before_hash = certificates["before"]["audit_entry_hash"]
+            .as_str()
+            .expect("before cert audit hash");
+        let after_hash = certificates["after"]["audit_entry_hash"]
+            .as_str()
+            .expect("after cert audit hash");
+        assert_ne!(before_hash, after_hash);
+
+        let records = sink.records();
+        assert_eq!(records.len(), 2, "diff binds both flashback pages");
+        assert_eq!(records[0].tool, "oracle_diff");
+        assert_eq!(records[1].tool, "oracle_diff");
+        assert_eq!(before_hash, records[0].entry_hash);
+        assert_eq!(after_hash, records[1].entry_hash);
+        assert!(records.iter().all(AuditRecord::hash_is_valid));
+        assert!(records.iter().all(|record| record.result_masking.is_some()));
     }
 
     #[test]

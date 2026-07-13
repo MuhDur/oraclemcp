@@ -189,6 +189,11 @@ fn query_output_schema() -> Value {
             "truncated": { "type": "boolean" },
             "next_cursor": { "type": ["string", "null"] },
             "total_bytes": { "type": "integer", "minimum": 0 },
+            "mask_certificate": {
+                "type": "object",
+                "description": "Present when result masking transformed the page: proof-carrying per-column mask decisions plus the audit entry hash binding those decisions into the audit chain.",
+                "additionalProperties": true
+            },
             "inlined": { "type": "boolean", "description": "False when the result was materialized as an export resource (export=true) rather than inlined." },
             "export": {
                 "type": "object",
@@ -254,6 +259,11 @@ fn diff_output_schema() -> Value {
             "truncated": {
                 "type": "boolean",
                 "description": "True when either flashback page hit a row/byte cap before all rows were compared."
+            },
+            "mask_certificates": {
+                "type": "object",
+                "description": "Present when result masking transformed either flashback page: before/after mask-decision certificates with audit entry hashes.",
+                "additionalProperties": true
             }
         },
         "required": ["columns", "keyed", "key_columns", "added", "removed", "changed", "row_count_a", "row_count_b", "truncated"],
@@ -1543,6 +1553,7 @@ mod tests {
                 "rows",
                 "truncated",
                 "total_bytes",
+                "mask_certificate",
                 "export",
                 "resource_link",
             ] {
@@ -1597,6 +1608,7 @@ mod tests {
             ])
         );
         assert_eq!(diff["properties"]["changed"]["type"], json!("array"));
+        assert!(diff["properties"].get("mask_certificates").is_some());
         assert_eq!(
             diff["properties"]["changed"]["items"]["required"],
             json!(["key", "before", "after"])

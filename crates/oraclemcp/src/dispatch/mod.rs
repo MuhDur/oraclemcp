@@ -20,7 +20,9 @@ use asupersync::combinator::try_commit_section;
 use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{Budget, CancelReason, Cx, Outcome, Time};
 use oraclemcp_audit::{
-    AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor, DbEvidence,
+    AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditResultMaskingAction,
+    AuditResultMaskingCertificate, AuditResultMaskingColumnDecision, AuditResultMaskingSource,
+    AuditSubject, Auditor, DbEvidence,
 };
 use oraclemcp_auth::apply_oauth_scopes;
 use oraclemcp_config::{
@@ -39,8 +41,9 @@ use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
     AsOf, CatalogInvalidation, DbError, DbRequestQuota, DbmsOutput, DependentObject,
     DependentsProbe, OracleBackend, OracleBind, OracleCatalogResolverCache, OracleConnection,
-    OracleConnectionInfo, OracleRow, PlanCostEstimate, QuarantineOutcome, QueryCaps,
+    OracleConnectionInfo, OracleRow, PlanCostEstimate, QuarantineOutcome, QueryCaps, QueryResponse,
     QueryRowStream, QueryRowStreamStart, ResultColumnMatch, ResultMaskingAction,
+    ResultMaskingCertificate, ResultMaskingDecisionAction, ResultMaskingDecisionSource,
     ResultMaskingPolicy, ResultMaskingRule, SerializeOptions, StructuredDecodeCaps, compile_errors,
     compile_object_statements, describe_columns, describe_constraints, describe_index,
     describe_trigger, describe_view, diff_query_responses, execute_immediate_audit, explain_plan,
@@ -288,10 +291,7 @@ pub fn result_masking_policy_from_profile(
             }
         })
         .collect();
-    Some(ResultMaskingPolicy::new(
-        rules,
-        masking.mask_unknown_default,
-    ))
+    Some(ResultMaskingPolicy::new(rules, masking.mask_unknown_default).with_profile(&profile.name))
 }
 
 fn profile_dispatch_policy(
@@ -2626,6 +2626,8 @@ async fn export_query_to_resource(
     exports: Option<&oraclemcp_core::ExportRegistry>,
     as_of: Option<&AsOf>,
     result_masking: Option<&ResultMaskingPolicy>,
+    auditor: Option<&Auditor>,
+    audit_subject: &AuditSubject,
 ) -> Result<Value, ErrorEnvelope> {
     let format = oraclemcp_core::ExportFormat::parse(a.export_format.as_deref())
         .ok_or_else(|| invalid_args("export_format must be \"csv\" or \"json\""))?;
@@ -2646,7 +2648,7 @@ async fn export_query_to_resource(
     let serialize_opts = query_serialize_options_from_args_with_policy(a, result_masking);
     // K9: an export honors the flashback target too — the SAME proven SQL is
     // materialized as of the requested snapshot.
-    let response = match as_of {
+    let mut response = match as_of {
         Some(as_of) => {
             read_query_as_of(
                 cx,
@@ -2663,6 +2665,16 @@ async fn export_query_to_resource(
         None => read_query(cx, conn, executed_sql, binds, caps, offset, &serialize_opts).await,
     }
     .map_err(DbError::into_envelope)?;
+    bind_result_masking_audit(
+        cx,
+        conn,
+        auditor,
+        audit_subject,
+        "oracle_query",
+        executed_sql,
+        &mut response,
+    )
+    .await?;
     let response_value = serde_json::to_value(&response).unwrap_or(Value::Null);
     let more_rows = response.truncated;
     let next_cursor = response.next_cursor.as_deref().map(|offset| {
@@ -4849,6 +4861,7 @@ fn audit_draft(
         subject: ctx.subject.clone(),
         db_evidence: ctx.db_evidence.cloned(),
         cancel: None,
+        result_masking: None,
         tool: tool.to_owned(),
         sql: sql.to_owned(),
         danger_level: danger_level.to_owned(),
@@ -5025,6 +5038,123 @@ fn append_audit(
             .map_err(audit_error_to_envelope)?;
     }
     Ok(())
+}
+
+fn audit_masking_action(action: ResultMaskingDecisionAction) -> AuditResultMaskingAction {
+    match action {
+        ResultMaskingDecisionAction::Pass => AuditResultMaskingAction::Pass,
+        ResultMaskingDecisionAction::Mask => AuditResultMaskingAction::Mask,
+        ResultMaskingDecisionAction::Tokenize => AuditResultMaskingAction::Tokenize,
+        ResultMaskingDecisionAction::Null => AuditResultMaskingAction::Null,
+        _ => AuditResultMaskingAction::Mask,
+    }
+}
+
+fn audit_masking_source(source: ResultMaskingDecisionSource) -> AuditResultMaskingSource {
+    match source {
+        ResultMaskingDecisionSource::Rule => AuditResultMaskingSource::Rule,
+        ResultMaskingDecisionSource::MaskUnknownDefault => {
+            AuditResultMaskingSource::MaskUnknownDefault
+        }
+        ResultMaskingDecisionSource::Pass => AuditResultMaskingSource::Pass,
+        _ => AuditResultMaskingSource::MaskUnknownDefault,
+    }
+}
+
+fn audit_result_masking_certificate(
+    certificate: &ResultMaskingCertificate,
+) -> AuditResultMaskingCertificate {
+    AuditResultMaskingCertificate {
+        schema_version: certificate.schema_version,
+        profile: certificate.profile.clone(),
+        policy_id: certificate.policy_id.clone(),
+        decisions: certificate
+            .decisions
+            .iter()
+            .map(|decision| AuditResultMaskingColumnDecision {
+                column: decision.column.clone(),
+                oracle_type: decision.oracle_type.clone(),
+                action: audit_masking_action(decision.action),
+                source: audit_masking_source(decision.source),
+                rule_index: decision.rule_index,
+                rule_tag: decision.rule_tag.clone(),
+                salt_id: decision.salt_id.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn append_result_masking_audit(
+    ctx: AuditEntryCtx<'_>,
+    tool: &str,
+    sql: &str,
+    response: &mut QueryResponse,
+) -> Result<(), ErrorEnvelope> {
+    let Some(certificate) = response.mask_certificate.as_mut() else {
+        return Ok(());
+    };
+    let Some(auditor) = ctx.auditor else {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::RuntimeStateRequired,
+            "result masking is active but no audit sink is configured; refusing to return a \
+             masked result without hash-chain binding",
+        )
+        .with_next_step("configure audit logging, or disable result masking for this profile"));
+    };
+    let draft = AuditEntryDraft {
+        subject: ctx.subject.clone(),
+        db_evidence: ctx.db_evidence.cloned(),
+        cancel: None,
+        result_masking: Some(audit_result_masking_certificate(certificate)),
+        tool: tool.to_owned(),
+        sql: sql.to_owned(),
+        danger_level: "READ_ONLY".to_owned(),
+        decision: AuditDecision::Allowed,
+        rows_affected: Some(response.row_count as u64),
+        outcome: AuditOutcome::Succeeded,
+    };
+    let record = auditor
+        .append(&draft, audit_timestamp(), true)
+        .map_err(audit_error_to_envelope)?;
+    certificate.audit_entry_hash = Some(record.entry_hash);
+    Ok(())
+}
+
+async fn bind_result_masking_audit(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    auditor: Option<&Auditor>,
+    subject: &AuditSubject,
+    tool: &str,
+    sql: &str,
+    response: &mut QueryResponse,
+) -> Result<(), ErrorEnvelope> {
+    if response.mask_certificate.is_none() {
+        return Ok(());
+    }
+    let Some(auditor) = auditor else {
+        return append_result_masking_audit(
+            AuditEntryCtx {
+                auditor: None,
+                subject,
+                db_evidence: None,
+            },
+            tool,
+            sql,
+            response,
+        );
+    };
+    let db_evidence = collect_read_audit_db_evidence(cx, Some(auditor), conn).await?;
+    append_result_masking_audit(
+        AuditEntryCtx {
+            auditor: Some(auditor),
+            subject,
+            db_evidence: db_evidence.as_ref(),
+        },
+        tool,
+        sql,
+        response,
+    )
 }
 
 fn system_generated_read_subject() -> AuditSubject {
@@ -5517,6 +5647,7 @@ fn append_lifecycle_audit(
             subject: subject.clone(),
             db_evidence: db_evidence.cloned(),
             cancel: Some(close_reason_cancel(reason)),
+            result_masking: None,
             tool: "lane_lifecycle".to_owned(),
             sql: "LANE_CLOSE".to_owned(),
             danger_level: "LIFECYCLE".to_owned(),
@@ -8168,6 +8299,16 @@ struct QueryExportAccess {
     scopes: Option<Vec<String>>,
 }
 
+/// Runtime inputs for a prepared `oracle_query` execution. Kept bundled so the
+/// read handler signature stays small as cross-cutting controls are added.
+struct PreparedQueryRuntime<'a> {
+    conn: &'a dyn OracleConnection,
+    request_budget: RequestBudget,
+    active_profile: Option<String>,
+    export_access: QueryExportAccess,
+    request_subject: AuditSubject,
+}
+
 struct QueryRowStreamPlan {
     stream: QueryRowStream,
     columns: Vec<String>,
@@ -8754,6 +8895,7 @@ impl OracleDispatcher {
                     subject,
                     db_evidence: db_evidence.clone(),
                     cancel: None,
+                    result_masking: None,
                     tool: "oracle_set_session_level".to_owned(),
                     sql: format!("ESCALATE {} -> {}", before.as_str(), after.as_str()),
                     danger_level: after.as_str().to_owned(),
@@ -8997,10 +9139,13 @@ impl OracleDispatcher {
             return self
                 .run_prepared_query(
                     cx,
-                    conn,
-                    request_budget,
-                    active_profile,
-                    export_access,
+                    PreparedQueryRuntime {
+                        conn,
+                        request_budget,
+                        active_profile,
+                        export_access,
+                        request_subject: request_subject.clone(),
+                    },
                     prepared,
                 )
                 .await;
@@ -9291,7 +9436,7 @@ impl OracleDispatcher {
                             inner: conn,
                             quarantine: Some(&self.quarantine),
                         };
-                        let before = read_query_as_of(
+                        let mut before = read_query_as_of(
                             cx,
                             &read_conn,
                             &executed_sql,
@@ -9303,7 +9448,7 @@ impl OracleDispatcher {
                         )
                         .await
                         .map_err(DbError::into_envelope)?;
-                        let after = read_query_as_of(
+                        let mut after = read_query_as_of(
                             cx,
                             &read_conn,
                             &executed_sql,
@@ -9315,15 +9460,50 @@ impl OracleDispatcher {
                         )
                         .await
                         .map_err(DbError::into_envelope)?;
+                        bind_result_masking_audit(
+                            cx,
+                            &read_conn,
+                            self.auditor.as_deref(),
+                            &request_subject,
+                            "oracle_diff",
+                            &executed_sql,
+                            &mut before,
+                        )
+                        .await?;
+                        bind_result_masking_audit(
+                            cx,
+                            &read_conn,
+                            self.auditor.as_deref(),
+                            &request_subject,
+                            "oracle_diff",
+                            &executed_sql,
+                            &mut after,
+                        )
+                        .await?;
+                        let before_mask_certificate = before.mask_certificate.clone();
+                        let after_mask_certificate = after.mask_certificate.clone();
                         let diff = diff_query_responses(&before, &after, &key_columns)
                             .map_err(|err| invalid_args(err.to_string()))?;
                         dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.diff.after")?;
-                        serde_json::to_value(diff).map_err(|err| {
+                        let mut value = serde_json::to_value(diff).map_err(|err| {
                             ErrorEnvelope::new(
                                 ErrorClass::Internal,
                                 format!("oracle_diff serialization failed: {err}"),
                             )
-                        })
+                        })?;
+                        if (before_mask_certificate.is_some()
+                            || after_mask_certificate.is_some())
+                            && let Some(object) = value.as_object_mut()
+                        {
+                            object.insert(
+                                "mask_certificates".to_owned(),
+                                json!({
+                                    "before": before_mask_certificate,
+                                    "after": after_mask_certificate,
+                                }),
+                            );
+                        }
+                        Ok(value)
                     },
                 )
                 .await
@@ -10019,12 +10199,16 @@ impl OracleDispatcher {
     async fn run_prepared_query(
         &self,
         cx: &Cx,
-        conn: &dyn OracleConnection,
-        request_budget: RequestBudget,
-        active_profile: Option<String>,
-        export_access: QueryExportAccess,
+        runtime: PreparedQueryRuntime<'_>,
         prepared: QueryPrepared,
     ) -> Result<Value, ErrorEnvelope> {
+        let PreparedQueryRuntime {
+            conn,
+            request_budget,
+            active_profile,
+            export_access,
+            request_subject,
+        } = runtime;
         let QueryPrepared {
             args: a,
             executed_sql,
@@ -10089,6 +10273,16 @@ impl OracleDispatcher {
                     }
                     let caps = query_caps_from_args(&a);
                     let result_masking = self.result_masking_policy()?;
+                    if result_masking.is_some() {
+                        return Err(invalid_args(
+                            "streaming masked query results is temporarily unavailable because \
+                             mask-decision certificates must be audit-bound before rows leave the \
+                             server",
+                        )
+                        .with_next_step(
+                            "retry without streaming=true so the masked page can carry an audit-bound certificate",
+                        ));
+                    }
                     let serialize_opts =
                         query_serialize_options_from_args_with_policy(&a, result_masking.as_ref());
                     return Self::stream_query_response(
@@ -10122,6 +10316,8 @@ impl OracleDispatcher {
                         exports.as_deref(),
                         as_of.as_ref(),
                         result_masking.as_ref(),
+                        self.auditor.as_deref(),
+                        &request_subject,
                     )
                     .await;
                 }
@@ -10159,9 +10355,23 @@ impl OracleDispatcher {
                         .await
                     }
                 };
-                read.map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
-                    .map(|resp| reseal_query_cursor(resp, &a.sql, active_profile.as_deref()))
-                    .map_err(DbError::into_envelope)
+                let mut response = read.map_err(DbError::into_envelope)?;
+                bind_result_masking_audit(
+                    cx,
+                    &read_conn,
+                    self.auditor.as_deref(),
+                    &request_subject,
+                    "oracle_query",
+                    &executed_sql,
+                    &mut response,
+                )
+                .await?;
+                let response = serde_json::to_value(response).unwrap_or(Value::Null);
+                Ok(reseal_query_cursor(
+                    response,
+                    &a.sql,
+                    active_profile.as_deref(),
+                ))
             },
         )
         .await
@@ -10352,6 +10562,15 @@ impl OracleDispatcher {
         }
         let caps = query_caps_from_args(&a);
         let result_masking = self.result_masking_policy()?;
+        if result_masking.is_some() {
+            return Err(invalid_args(
+                "streaming masked query results is temporarily unavailable because \
+                 mask-decision certificates must be audit-bound before rows leave the server",
+            )
+            .with_next_step(
+                "retry without streaming=true so the masked page can carry an audit-bound certificate",
+            ));
+        }
         let serialize_opts =
             query_serialize_options_from_args_with_policy(&a, result_masking.as_ref());
         let timeout = call_timeout_duration(a.timeout_seconds)?;

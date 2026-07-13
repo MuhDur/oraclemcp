@@ -5,6 +5,7 @@
 //! can only remove or transform values that were already produced by a proven
 //! read; it never broadens what SQL may run.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -226,9 +227,100 @@ impl ResultMaskingRule {
     }
 }
 
+/// Stable action recorded in a mask-decision certificate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ResultMaskingDecisionAction {
+    /// The column was passed through unchanged.
+    Pass,
+    /// The column was replaced with [`MASKED_RESULT_VALUE`] for non-null cells.
+    Mask,
+    /// The column was replaced with a deterministic token for non-null cells.
+    Tokenize,
+    /// The column was replaced with JSON null for non-null cells.
+    Null,
+}
+
+impl From<ResultMaskingAction> for ResultMaskingDecisionAction {
+    fn from(action: ResultMaskingAction) -> Self {
+        match action {
+            ResultMaskingAction::Mask => Self::Mask,
+            ResultMaskingAction::Tokenize => Self::Tokenize,
+            ResultMaskingAction::Null => Self::Null,
+        }
+    }
+}
+
+/// Why a column received the recorded mask-decision action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ResultMaskingDecisionSource {
+    /// A policy rule matched the result column.
+    Rule,
+    /// No rule matched and `mask_unknown_default=true` masked the column.
+    MaskUnknownDefault,
+    /// No rule matched and the policy allowed the column through.
+    Pass,
+}
+
+/// One column-level decision in a result masking certificate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResultMaskingColumnDecision {
+    /// Result-set column name.
+    pub column: String,
+    /// Oracle type name observed for the column.
+    pub oracle_type: String,
+    /// Action selected for the column.
+    pub action: ResultMaskingDecisionAction,
+    /// Source of the selected action.
+    pub source: ResultMaskingDecisionSource,
+    /// Zero-based policy rule index when [`Self::source`] is
+    /// [`ResultMaskingDecisionSource::Rule`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_index: Option<usize>,
+    /// Optional non-secret tag attached to the matching policy rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_tag: Option<String>,
+    /// Non-secret salt id when tokenization was selected with an active salt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub salt_id: Option<String>,
+}
+
+impl ResultMaskingColumnDecision {
+    fn transforms_value(&self) -> bool {
+        self.action != ResultMaskingDecisionAction::Pass
+    }
+}
+
+/// Per-result proof that records the egress mask decisions used for a query
+/// page.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResultMaskingCertificate {
+    /// Certificate schema version.
+    pub schema_version: u16,
+    /// Profile whose masking policy produced the decision, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Stable hash identity of the masking policy content.
+    pub policy_id: String,
+    /// Column-level decisions in select-list order.
+    pub decisions: Vec<ResultMaskingColumnDecision>,
+    /// Audit record entry hash that durably committed this certificate. This is
+    /// populated by the dispatcher after the audit append succeeds, never by the
+    /// DB serializer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_entry_hash: Option<String>,
+}
+
 /// Profile-scoped result masking policy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResultMaskingPolicy {
+    /// Profile name the policy came from, when known.
+    pub profile: Option<String>,
+    /// Stable hash identity of the policy content.
+    pub policy_id: String,
     /// Rules evaluated in declaration order; first match wins.
     pub rules: Vec<ResultMaskingRule>,
     /// When true, any column not matched by a rule is masked rather than passed
@@ -245,11 +337,22 @@ impl ResultMaskingPolicy {
     /// Build a policy with no active tokenization salt.
     #[must_use]
     pub fn new(rules: Vec<ResultMaskingRule>, mask_unknown_default: bool) -> Self {
+        let policy_id = masking_policy_id(&rules, mask_unknown_default);
         Self {
+            profile: None,
+            policy_id,
             rules,
             mask_unknown_default,
             token_salt: None,
         }
+    }
+
+    /// Attach the non-secret profile name used in proof/audit metadata.
+    #[must_use]
+    pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
+        let profile = profile.into();
+        self.profile = (!profile.trim().is_empty()).then_some(profile);
+        self
     }
 
     /// Install the active per-profile tokenization salt.
@@ -259,14 +362,76 @@ impl ResultMaskingPolicy {
         self
     }
 
-    fn action_for(&self, ctx: &ResultColumnContext<'_>) -> Option<ResultMaskingAction> {
-        self.rules
+    fn decision_for(&self, ctx: &ResultColumnContext<'_>) -> ResultMaskingColumnDecision {
+        if let Some((rule_index, rule)) = self
+            .rules
             .iter()
-            .find(|rule| rule.column_match.matches(ctx))
-            .map(|rule| rule.action)
-            .or_else(|| {
-                self.mask_unknown_default
-                    .then_some(ResultMaskingAction::Mask)
+            .enumerate()
+            .find(|(_, rule)| rule.column_match.matches(ctx))
+        {
+            return ResultMaskingColumnDecision {
+                column: ctx.column.to_owned(),
+                oracle_type: ctx.oracle_type.to_owned(),
+                action: rule.action.into(),
+                source: ResultMaskingDecisionSource::Rule,
+                rule_index: Some(rule_index),
+                rule_tag: rule.tag.clone(),
+                salt_id: (rule.action == ResultMaskingAction::Tokenize)
+                    .then(|| {
+                        self.token_salt
+                            .as_ref()
+                            .map(|salt| salt.salt_id().to_owned())
+                    })
+                    .flatten(),
+            };
+        }
+        if self.mask_unknown_default {
+            return ResultMaskingColumnDecision {
+                column: ctx.column.to_owned(),
+                oracle_type: ctx.oracle_type.to_owned(),
+                action: ResultMaskingDecisionAction::Mask,
+                source: ResultMaskingDecisionSource::MaskUnknownDefault,
+                rule_index: None,
+                rule_tag: None,
+                salt_id: None,
+            };
+        }
+        ResultMaskingColumnDecision {
+            column: ctx.column.to_owned(),
+            oracle_type: ctx.oracle_type.to_owned(),
+            action: ResultMaskingDecisionAction::Pass,
+            source: ResultMaskingDecisionSource::Pass,
+            rule_index: None,
+            rule_tag: None,
+            salt_id: None,
+        }
+    }
+
+    /// Derive the certificate for a query page from its first row. Oracle result
+    /// descriptors are fixed for the page, so the first row supplies the
+    /// select-list column names/types. Returns `None` when the policy did not
+    /// transform any column.
+    #[must_use]
+    pub fn certificate_for_row(
+        &self,
+        row: &crate::types::OracleRow,
+    ) -> Option<ResultMaskingCertificate> {
+        let decisions = row
+            .columns
+            .iter()
+            .map(|(name, cell)| {
+                self.decision_for(&ResultColumnContext::result_column(name, &cell.oracle_type))
+            })
+            .collect::<Vec<_>>();
+        decisions
+            .iter()
+            .any(ResultMaskingColumnDecision::transforms_value)
+            .then(|| ResultMaskingCertificate {
+                schema_version: 1,
+                profile: self.profile.clone(),
+                policy_id: self.policy_id.clone(),
+                decisions,
+                audit_entry_hash: None,
             })
     }
 
@@ -276,8 +441,13 @@ impl ResultMaskingPolicy {
         cell: &OracleCell,
         serialize_original: impl FnOnce() -> Value,
     ) -> Value {
-        let Some(action) = self.action_for(ctx) else {
-            return serialize_original();
+        let action = match self.decision_for(ctx).action {
+            ResultMaskingDecisionAction::Pass => {
+                return serialize_original();
+            }
+            ResultMaskingDecisionAction::Mask => ResultMaskingAction::Mask,
+            ResultMaskingDecisionAction::Tokenize => ResultMaskingAction::Tokenize,
+            ResultMaskingDecisionAction::Null => ResultMaskingAction::Null,
         };
         if cell_is_null(cell) {
             return Value::Null;
@@ -298,6 +468,59 @@ impl ResultMaskingPolicy {
                 ))
             }
         }
+    }
+}
+
+fn masking_policy_id(rules: &[ResultMaskingRule], mask_unknown_default: bool) -> String {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"oraclemcp-result-masking-policy:v1");
+    bytes.push(u8::from(mask_unknown_default));
+    bytes.extend_from_slice(&(rules.len() as u64).to_be_bytes());
+    for rule in rules {
+        canonical_push_optional_upper(&mut bytes, rule.column_match.schema.as_deref());
+        canonical_push_optional_upper(&mut bytes, rule.column_match.table.as_deref());
+        canonical_push_optional_upper(&mut bytes, rule.column_match.column.as_deref());
+        canonical_push_optional_exact(&mut bytes, rule.column_match.tag.as_deref());
+        bytes.push(match rule.action {
+            ResultMaskingAction::Mask => 1,
+            ResultMaskingAction::Tokenize => 2,
+            ResultMaskingAction::Null => 3,
+        });
+        canonical_push_optional_exact(&mut bytes, rule.tag.as_deref());
+    }
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(7 + digest.len() * 2);
+    out.push_str("sha256:");
+    for byte in digest {
+        push_hex_byte(&mut out, byte);
+    }
+    out
+}
+
+fn push_hex_byte(out: &mut String, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push(HEX[(byte >> 4) as usize] as char);
+    out.push(HEX[(byte & 0x0f) as usize] as char);
+}
+
+fn canonical_push_optional_upper(out: &mut Vec<u8>, value: Option<&str>) {
+    canonical_push_optional_exact(
+        out,
+        value
+            .map(|value| value.trim().to_ascii_uppercase())
+            .as_deref(),
+    );
+}
+
+fn canonical_push_optional_exact(out: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            out.push(1);
+            let value = value.trim();
+            out.extend_from_slice(&(value.len() as u64).to_be_bytes());
+            out.extend_from_slice(value.as_bytes());
+        }
+        None => out.push(0),
     }
 }
 
@@ -522,6 +745,85 @@ mod tests {
         let rendered_text = rendered.to_string();
         assert!(!rendered_text.contains("alice@example.com"));
         assert!(!rendered_text.contains("123-45-6789"));
+    }
+
+    #[test]
+    fn certificate_records_rederivable_column_decisions() {
+        let policy = ResultMaskingPolicy::new(
+            vec![
+                ResultMaskingRule::column("EMAIL", ResultMaskingAction::Tokenize)
+                    .with_policy_tag("pii.email"),
+            ],
+            true,
+        )
+        .with_profile("prod")
+        .with_token_salt(vector_salt());
+        let row = OracleRow {
+            columns: vec![
+                (
+                    "EMAIL".to_owned(),
+                    OracleCell::new("VARCHAR2", Some("alice@example.com".to_owned())),
+                ),
+                (
+                    "NOTES".to_owned(),
+                    OracleCell::new("CLOB", Some("sensitive notes".to_owned())),
+                ),
+            ],
+        };
+
+        let certificate = policy
+            .certificate_for_row(&row)
+            .expect("policy transforms at least one column");
+
+        assert_eq!(certificate.schema_version, 1);
+        assert_eq!(certificate.profile.as_deref(), Some("prod"));
+        assert!(certificate.policy_id.starts_with("sha256:"));
+        assert!(certificate.audit_entry_hash.is_none());
+        assert_eq!(certificate.decisions.len(), 2);
+        assert_eq!(certificate.decisions[0].column, "EMAIL");
+        assert_eq!(
+            certificate.decisions[0].action,
+            ResultMaskingDecisionAction::Tokenize
+        );
+        assert_eq!(
+            certificate.decisions[0].source,
+            ResultMaskingDecisionSource::Rule
+        );
+        assert_eq!(certificate.decisions[0].rule_index, Some(0));
+        assert_eq!(
+            certificate.decisions[0].rule_tag.as_deref(),
+            Some("pii.email")
+        );
+        assert_eq!(
+            certificate.decisions[0].salt_id.as_deref(),
+            Some("profile:prod:masking:v1")
+        );
+        assert_eq!(
+            certificate.decisions[1].action,
+            ResultMaskingDecisionAction::Mask
+        );
+        assert_eq!(
+            certificate.decisions[1].source,
+            ResultMaskingDecisionSource::MaskUnknownDefault
+        );
+
+        let rederived = policy
+            .certificate_for_row(&row)
+            .expect("same row rederives certificate");
+        assert_eq!(certificate, rederived);
+    }
+
+    #[test]
+    fn certificate_absent_when_policy_passes_every_column() {
+        let policy = ResultMaskingPolicy::new(Vec::new(), false);
+        let row = OracleRow {
+            columns: vec![(
+                "PUBLIC_ID".to_owned(),
+                OracleCell::new("NUMBER", Some("42".to_owned())),
+            )],
+        };
+
+        assert!(policy.certificate_for_row(&row).is_none());
     }
 
     #[test]

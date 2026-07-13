@@ -999,6 +999,7 @@ mod tests {
             subject: AuditSubject::new("agent", "agent"),
             db_evidence: None,
             cancel: None,
+            result_masking: None,
             tool: "oracle_query".to_owned(),
             sql: sql.to_owned(),
             danger_level: danger.to_owned(),
