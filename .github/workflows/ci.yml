@@ -469,6 +469,52 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo build -p oraclemcp --features dashboard-bundle
 
+  # Real Oracle FREE 23ai proves the current thin-driver line and the 23ai
+  # VECTOR SQL surface. All connection values below are synthetic disposable
+  # CI fixtures; no deployment or customer identifier is committed here.
+  oracle-free23:
+    name: Oracle FREE 23ai matrix + VECTOR smoke
+    needs: web-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      free23:
+        image: gvenzl/oracle-free:23-slim
+        env:
+          ORACLE_PASSWORD: E2EOracle23
+          APP_USER: E2E_ORACLE
+          APP_USER_PASSWORD: E2EOracle23
+        ports:
+          - 1522:1521
+        options: >-
+          --health-cmd "healthcheck.sh"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # CI supplies a prebuilt binary to the harness. Local execution keeps the
+      # harness on omcpb, which owns target isolation, memory caps, and the pin.
+      - run: cargo build -p oraclemcp --bin oraclemcp --features dashboard-bundle
+      - name: 23ai matrix lane and VECTOR_DISTANCE smoke
+        env:
+          ORACLEMCP_LIVE_XE: "1"
+          ORACLEMCP_ORACLE_MATRIX_BINARY: target/debug/oraclemcp
+          ORACLE_MATRIX_FREE23_DSN: localhost:1522/FREEPDB1
+          ORACLE_MATRIX_FREE23_USER: E2E_ORACLE
+          ORACLE_MATRIX_FREE23_PASSWORD: E2EOracle23
+        run: bash scripts/e2e/oracle_version_matrix.sh --log --lane free23
+
   # No deployment-specific identifiers or secrets may reach the public repo.
   # Generic heuristics run here; operators add a site denylist locally via
   # $ORACLEMCP_SENSITIVE_DENYLIST_FILE + a pre-push hook (see the script).

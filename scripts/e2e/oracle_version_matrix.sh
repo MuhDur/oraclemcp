@@ -15,6 +15,8 @@
 #   5. drop back to READ_ONLY and prove writes refuse again
 #   6. audit hash-chain: per-step records present, chain re-verified with
 #                    `oraclemcp audit verify` (isolated XDG_STATE_HOME per run)
+#   7. FREE 23ai only: a VECTOR(3, FLOAT32) column accepts a synthetic vector
+#                    and VECTOR_DISTANCE returns the expected zero distance
 #
 # Lab containers ONLY. The lane endpoints must look like local test targets
 # (lib.sh refuses production-looking DSNs/users). Suggested lab compose:
@@ -37,6 +39,8 @@
 #                                         fails the lane instead of hanging
 #                                         run_all)
 #   ORACLE_MATRIX_DOCTOR_TIMEOUT_SECS (default 120: ceiling on doctor --online)
+#   ORACLEMCP_ORACLE_MATRIX_BINARY   (prebuilt binary path for isolated CI runners;
+#                                     otherwise this script builds through omcpb)
 #   --lane xe18|xe21|free23              (repeatable; default: all three — the
 #                                         release gate requires all three green)
 set -euo pipefail
@@ -154,9 +158,23 @@ require_matrix_env() {
 cd "$ROOT"
 e2e_log_event "scenario_start" "setup" "running" 0 "Oracle version-matrix ladder e2e: lanes=${selected_lanes[*]}"
 require_matrix_env
+command -v python3 >/dev/null 2>&1 || e2e_finish_fail "python3 is required for the version-matrix MCP harness"
 
-if ! e2e_run_command "setup" cargo build -p oraclemcp --bin oraclemcp; then
-  e2e_finish_fail "building the oraclemcp binary failed"
+if [ -n "${ORACLEMCP_ORACLE_MATRIX_BINARY:-}" ]; then
+  BINARY="$ORACLEMCP_ORACLE_MATRIX_BINARY"
+elif ! command -v omcpb >/dev/null 2>&1; then
+  e2e_finish_fail "omcpb is required to build the version-matrix MCP binary"
+elif ! e2e_run_command "setup" omcpb build -p oraclemcp --bin oraclemcp; then
+  e2e_finish_fail "building the oraclemcp binary through omcpb failed"
+elif [ "$E2E_DRY_RUN" = "1" ]; then
+  e2e_log_event "scenario_assert" "assert" "skipped" 0 "dry-run: wiring validated, no live lanes exercised"
+  e2e_finish_pass
+  exit 0
+else
+  build_output="$(e2e_artifact_dir)/output.txt"
+  build_target="$(sed -n 's/^omcpb: lane [0-9][0-9]*  target=\([^ ]*\)  jobs=.*/\1/p' "$build_output" | tail -n 1)"
+  [ -n "$build_target" ] || e2e_finish_fail "omcpb completed without reporting its selected target directory"
+  BINARY="$build_target/debug/oraclemcp"
 fi
 
 if [ "$E2E_DRY_RUN" = "1" ]; then
@@ -165,9 +183,7 @@ if [ "$E2E_DRY_RUN" = "1" ]; then
   exit 0
 fi
 
-target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r '.target_directory')"
-BINARY="$target_dir/debug/oraclemcp"
-[ -x "$BINARY" ] || e2e_finish_fail "built binary not found at $BINARY"
+[ -x "$BINARY" ] || e2e_finish_fail "oraclemcp binary not found at $BINARY"
 
 run_stamp="$(date -u +"%Y%m%dT%H%M%SZ")-$$"
 matrix_dir="$ORACLEMCP_E2E_ARTIFACT_DIR/$E2E_SCENARIO/$run_stamp"
@@ -311,13 +327,17 @@ BADTOOL
   # events flow to this script's stderr stream; its stdout is evidence.
   local evidence="$lane_dir/ladder_evidence.jsonl"
   local table="E2E_LADDER_$$"
+  local vector_smoke_args=()
+  if [ "$lane" = "free23" ]; then
+    vector_smoke_args=(--vector-smoke)
+  fi
   e2e_log_event "ladder_session" "act" "running" 0 "lane $lane: MCP stdio ladder session (table $table)"
   set +e
   timeout -k 15 "$lane_timeout_secs" \
     python3 "$ROOT/scripts/e2e/oracle_ladder_session.py" \
     --binary "$BINARY" --profile "$lane" --banner-regex "$banner_regex" \
     --ro-profile "$ro_profile" --custom-tool matrix_ro_probe \
-    --table "$table" --evidence "$evidence" >"$lane_dir/ladder_stdout.txt"
+    --table "$table" --evidence "$evidence" "${vector_smoke_args[@]}" >"$lane_dir/ladder_stdout.txt"
   local ladder_status=$?
   set -e
   cat "$lane_dir/ladder_stdout.txt"

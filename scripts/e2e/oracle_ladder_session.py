@@ -175,8 +175,12 @@ class Ladder:
         self.primary_profile = args.profile
         self.ro_profile = getattr(args, "ro_profile", None)
         self.custom_tool = getattr(args, "custom_tool", None)
+        self.vector_smoke = getattr(args, "vector_smoke", False)
         self.table_created = False
         self.table_dropped = False
+        self.vector_table = f"{args.table}_VEC"
+        self.vector_table_created = False
+        self.vector_table_dropped = False
         # Throwaway source objects for the create_or_replace / compile_object /
         # patch_source governed-DDL sub-ladder. Both a VIEW and a PL/SQL
         # PROCEDURE exercise oracle_create_or_replace's own DDL grant flow
@@ -581,6 +585,47 @@ class Ladder:
             count = self.count_rows(f"SELECT COUNT(*) AS n FROM {table}")
             require(count == 0, "fresh table is empty", count)
             return {"describe_ok": True, "row_count": count}
+
+        def vector_distance_smoke():
+            """Prove the 23ai lane executes the VECTOR SQL surface end-to-end."""
+            if not self.vector_smoke:
+                return {"skipped": "VECTOR smoke is specific to the FREE 23ai lane"}
+
+            vector_table = self.vector_table
+            self.governed_execute(
+                f"CREATE TABLE {vector_table} "
+                "(id NUMBER PRIMARY KEY, embedding VECTOR(3, FLOAT32))",
+                commit=True,
+                expect={"committed": True},
+            )
+            self.vector_table_created = True
+            self.governed_execute(
+                f"INSERT INTO {vector_table} (id, embedding) "
+                "VALUES (1, '[1,0,0]')",
+                commit=True,
+                expect={"committed": True, "rolled_back": False, "rows_affected": 1},
+            )
+            rows = self.query_rows(
+                f"SELECT VECTOR_DISTANCE(embedding, '[1,0,0]', COSINE) AS distance "
+                f"FROM {vector_table} WHERE id = 1"
+            )
+            require(len(rows) == 1, "VECTOR_DISTANCE returns one synthetic row", rows)
+            try:
+                distance = float(rows[0].get("DISTANCE"))
+            except (TypeError, ValueError) as exc:
+                raise StepFailure(
+                    f"VECTOR_DISTANCE result is not numeric: {rows!r} ({exc})"
+                ) from exc
+            require(
+                abs(distance) < 0.000001,
+                "VECTOR_DISTANCE of identical vectors is zero",
+                {"distance": distance, "rows": rows},
+            )
+            self.governed_execute(
+                f"DROP TABLE {vector_table} PURGE", commit=True, expect={"committed": True}
+            )
+            self.vector_table_dropped = True
+            return {"distance": distance, "vector_column": "VECTOR(3, FLOAT32)"}
 
         # --- Source-object governed-DDL sub-ladder (still at DDL) -----------
         # Exercises oracle_create_or_replace / oracle_compile_object /
@@ -1302,6 +1347,7 @@ class Ladder:
             ("preview_insert_requires_step_up", preview_insert_requires_step_up),
             ("elevate_ddl", elevate_ddl),
             ("ddl_create_table", ddl_create_table),
+            ("vector_distance_smoke", vector_distance_smoke),
             ("verify_table_exists", verify_table_exists),
             ("source_create_or_replace_view", source_create_or_replace_view),
             (
@@ -1353,6 +1399,21 @@ class Ladder:
 
     def cleanup(self):
         """Best-effort governed teardown of the throwaway objects, then exit."""
+        if self.vector_table_created and not self.vector_table_dropped:
+            try:
+                self.elevate("DDL")
+                self.governed_execute(
+                    f"DROP TABLE {self.vector_table} PURGE", commit=True, expect={}
+                )
+                self.harness.emit(
+                    "cleanup_drop_vector_table", "teardown", "pass", 0,
+                    "governed teardown dropped the throwaway VECTOR table",
+                )
+            except (StepFailure, OSError, ValueError) as exc:
+                self.harness.emit(
+                    "cleanup_drop_vector_table", "teardown", "fail", 0,
+                    f"governed teardown failed; throwaway VECTOR table may remain: {exc}",
+                )
         leftovers = []
         if self.proc_created and not self.proc_dropped:
             leftovers.append(("PROCEDURE", self.proc))
@@ -1511,6 +1572,11 @@ def main():
     # An operator-defined READ_ONLY custom tool the wrapper wrote into
     # ORACLEMCP_TOOLS_DIR; the ladder asserts it is served and returns its value.
     parser.add_argument("--custom-tool", default=None)
+    parser.add_argument(
+        "--vector-smoke",
+        action="store_true",
+        help="create a synthetic VECTOR column and verify VECTOR_DISTANCE (FREE 23ai only)",
+    )
     args = parser.parse_args()
 
     harness = Harness(args.evidence)
