@@ -639,6 +639,158 @@ fn base64url_no_pad(bytes: &[u8]) -> String {
     out
 }
 
+/// Why one column's values cannot be soundly compared across two profiles.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "break")]
+#[non_exhaustive]
+pub enum MaskComparabilityBreak {
+    /// Both profiles destroy the value (`mask` collapses every non-null cell to
+    /// the same marker; `null` erases it). Equal outputs no longer imply equal
+    /// inputs, so a comparison would silently report "unchanged" for rows that
+    /// actually differ.
+    ValueDestroyed {
+        /// The action both profiles applied.
+        action: ResultMaskingDecisionAction,
+    },
+    /// The two profiles applied different actions to the same column — the
+    /// masking policy has drifted between the two databases.
+    ActionMismatch {
+        /// Action applied by profile A.
+        a: ResultMaskingDecisionAction,
+        /// Action applied by profile B.
+        b: ResultMaskingDecisionAction,
+    },
+    /// Both profiles tokenized the column, but not under the same salt. Result
+    /// tokenization is salted per profile, so equal plaintext yields different
+    /// tokens and every row would be reported as changed.
+    SaltMismatch {
+        /// Non-secret salt id used by profile A, if any.
+        a: Option<String>,
+        /// Non-secret salt id used by profile B, if any.
+        b: Option<String>,
+    },
+    /// A masking certificate was present but carried no decision for the column.
+    /// Treated as incomparable rather than assumed safe.
+    DecisionMissing,
+}
+
+/// One column that cannot be compared across two profiles, and why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncomparableMaskedColumn {
+    /// Result-set column name.
+    pub column: String,
+    /// Why the two sides' masked values cannot prove equality or difference.
+    pub reason: MaskComparabilityBreak,
+}
+
+fn column_decision<'a>(
+    certificate: Option<&'a ResultMaskingCertificate>,
+    column: &str,
+) -> Option<&'a ResultMaskingColumnDecision> {
+    certificate?
+        .decisions
+        .iter()
+        .find(|decision| decision.column.eq_ignore_ascii_case(column))
+}
+
+/// Columns whose egress-mask decisions make a cross-profile value comparison
+/// unsound.
+///
+/// A cross-database diff compares the **masked** rows: plaintext of a masked
+/// column never leaves the server, and never enters the comparison. That is only
+/// sound for a column whose masked form still preserves equality:
+///
+/// * both sides `pass` — the values are plaintext on both sides;
+/// * both sides `tokenize` **under the same salt id** — tokenization is a
+///   deterministic HMAC, so equal plaintext yields equal tokens.
+///
+/// Every other combination is reported here, and the caller must refuse.
+/// [`ResultMaskingDecisionAction::Mask`] and [`ResultMaskingDecisionAction::Null`]
+/// destroy the value, so equal outputs would no longer imply equal inputs —
+/// comparing them would report "unchanged" for rows that really differ, the most
+/// dangerous possible answer for a prod-vs-staging diff. Differing salts turn
+/// identical rows into spurious changes, and a differing action is masking-policy
+/// drift between the two databases.
+///
+/// A `None` certificate means the profile's policy transformed nothing, so every
+/// column passed through as plaintext (see [`ResultMaskingPolicy::certificate_for_row`]).
+///
+/// Callers only need this when values are actually compared, i.e. when both sides
+/// returned rows: if one side is empty, every row of the other is a pure
+/// add/remove and no equality is ever evaluated.
+#[must_use]
+pub fn incomparable_masked_columns(
+    columns: &[String],
+    a: Option<&ResultMaskingCertificate>,
+    b: Option<&ResultMaskingCertificate>,
+) -> Vec<IncomparableMaskedColumn> {
+    let mut incomparable = Vec::new();
+    for column in columns {
+        let decision_a = column_decision(a, column);
+        let decision_b = column_decision(b, column);
+        // A profile with no certificate transformed nothing, so every column is
+        // plaintext. A profile *with* a certificate but no entry for this column
+        // is an inconsistency we refuse to interpret.
+        let (Some(action_a), Some(action_b)) = (
+            certificate_action(a, decision_a),
+            certificate_action(b, decision_b),
+        ) else {
+            incomparable.push(IncomparableMaskedColumn {
+                column: column.clone(),
+                reason: MaskComparabilityBreak::DecisionMissing,
+            });
+            continue;
+        };
+        if action_a != action_b {
+            incomparable.push(IncomparableMaskedColumn {
+                column: column.clone(),
+                reason: MaskComparabilityBreak::ActionMismatch {
+                    a: action_a,
+                    b: action_b,
+                },
+            });
+            continue;
+        }
+        match action_a {
+            ResultMaskingDecisionAction::Pass => {}
+            ResultMaskingDecisionAction::Tokenize => {
+                let salt_a = decision_a.and_then(|decision| decision.salt_id.clone());
+                let salt_b = decision_b.and_then(|decision| decision.salt_id.clone());
+                if salt_a.is_none() || salt_a != salt_b {
+                    incomparable.push(IncomparableMaskedColumn {
+                        column: column.clone(),
+                        reason: MaskComparabilityBreak::SaltMismatch {
+                            a: salt_a,
+                            b: salt_b,
+                        },
+                    });
+                }
+            }
+            action @ (ResultMaskingDecisionAction::Mask | ResultMaskingDecisionAction::Null) => {
+                incomparable.push(IncomparableMaskedColumn {
+                    column: column.clone(),
+                    reason: MaskComparabilityBreak::ValueDestroyed { action },
+                });
+            }
+        }
+    }
+    incomparable
+}
+
+/// The action a profile applied to one column: `Pass` when the profile produced
+/// no certificate at all, the recorded action when it did, and `None` when a
+/// certificate exists but does not describe the column.
+fn certificate_action(
+    certificate: Option<&ResultMaskingCertificate>,
+    decision: Option<&ResultMaskingColumnDecision>,
+) -> Option<ResultMaskingDecisionAction> {
+    match (certificate, decision) {
+        (None, _) => Some(ResultMaskingDecisionAction::Pass),
+        (Some(_), Some(decision)) => Some(decision.action),
+        (Some(_), None) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,5 +997,173 @@ mod tests {
         assert!(debug.contains("s1"));
         assert!(!debug.contains("do-not-print"));
         assert!(!debug.contains("1234"));
+    }
+
+    fn decision(
+        column: &str,
+        action: ResultMaskingDecisionAction,
+        salt_id: Option<&str>,
+    ) -> ResultMaskingColumnDecision {
+        ResultMaskingColumnDecision {
+            column: column.to_owned(),
+            oracle_type: "VARCHAR2".to_owned(),
+            action,
+            source: ResultMaskingDecisionSource::Rule,
+            rule_index: Some(0),
+            rule_tag: None,
+            salt_id: salt_id.map(str::to_owned),
+        }
+    }
+
+    fn certificate(decisions: Vec<ResultMaskingColumnDecision>) -> ResultMaskingCertificate {
+        ResultMaskingCertificate {
+            schema_version: 1,
+            profile: Some("prod".to_owned()),
+            policy_id: "sha256:test".to_owned(),
+            decisions,
+            audit_entry_hash: None,
+        }
+    }
+
+    fn columns(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn unmasked_profiles_compare_every_column() {
+        assert!(incomparable_masked_columns(&columns(&["ID", "EMAIL"]), None, None).is_empty());
+    }
+
+    #[test]
+    fn same_salt_tokenization_is_comparable_but_a_different_salt_is_not() {
+        let shared = certificate(vec![decision(
+            "EMAIL",
+            ResultMaskingDecisionAction::Tokenize,
+            Some("fleet:v1"),
+        )]);
+        assert!(
+            incomparable_masked_columns(&columns(&["EMAIL"]), Some(&shared), Some(&shared))
+                .is_empty(),
+            "one deterministic salt on both sides preserves equality"
+        );
+
+        let other = certificate(vec![decision(
+            "EMAIL",
+            ResultMaskingDecisionAction::Tokenize,
+            Some("staging:v1"),
+        )]);
+        assert_eq!(
+            incomparable_masked_columns(&columns(&["EMAIL"]), Some(&shared), Some(&other)),
+            vec![IncomparableMaskedColumn {
+                column: "EMAIL".to_owned(),
+                reason: MaskComparabilityBreak::SaltMismatch {
+                    a: Some("fleet:v1".to_owned()),
+                    b: Some("staging:v1".to_owned()),
+                },
+            }],
+            "per-profile salts make identical plaintext look changed"
+        );
+    }
+
+    #[test]
+    fn tokenization_without_an_active_salt_is_never_comparable() {
+        // A tokenize rule with no salt degrades to `<masked>` at the transformer
+        // seam, so both sides collapse to the same marker and equality is a lie.
+        let unsalted = certificate(vec![decision(
+            "EMAIL",
+            ResultMaskingDecisionAction::Tokenize,
+            None,
+        )]);
+        assert_eq!(
+            incomparable_masked_columns(&columns(&["EMAIL"]), Some(&unsalted), Some(&unsalted)),
+            vec![IncomparableMaskedColumn {
+                column: "EMAIL".to_owned(),
+                reason: MaskComparabilityBreak::SaltMismatch { a: None, b: None },
+            }]
+        );
+    }
+
+    #[test]
+    fn value_destroying_actions_are_refused_on_both_sides() {
+        for action in [
+            ResultMaskingDecisionAction::Mask,
+            ResultMaskingDecisionAction::Null,
+        ] {
+            let cert = certificate(vec![decision("SSN", action, None)]);
+            assert_eq!(
+                incomparable_masked_columns(&columns(&["SSN"]), Some(&cert), Some(&cert)),
+                vec![IncomparableMaskedColumn {
+                    column: "SSN".to_owned(),
+                    reason: MaskComparabilityBreak::ValueDestroyed { action },
+                }],
+                "{action:?} collapses distinct values, so `unchanged` would be a false negative"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_drift_between_profiles_is_an_action_mismatch() {
+        let masked = certificate(vec![decision(
+            "SSN",
+            ResultMaskingDecisionAction::Mask,
+            None,
+        )]);
+        // The other profile has no policy at all, so its column passes through.
+        assert_eq!(
+            incomparable_masked_columns(&columns(&["SSN"]), Some(&masked), None),
+            vec![IncomparableMaskedColumn {
+                column: "SSN".to_owned(),
+                reason: MaskComparabilityBreak::ActionMismatch {
+                    a: ResultMaskingDecisionAction::Mask,
+                    b: ResultMaskingDecisionAction::Pass,
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn a_certificate_missing_a_column_fails_closed() {
+        let cert = certificate(vec![decision(
+            "EMAIL",
+            ResultMaskingDecisionAction::Mask,
+            None,
+        )]);
+        assert_eq!(
+            incomparable_masked_columns(&columns(&["SSN"]), Some(&cert), Some(&cert)),
+            vec![IncomparableMaskedColumn {
+                column: "SSN".to_owned(),
+                reason: MaskComparabilityBreak::DecisionMissing,
+            }],
+            "an unexplained column is refused, never assumed to have passed through"
+        );
+    }
+
+    #[test]
+    fn only_the_offending_columns_are_reported() {
+        let cert = certificate(vec![
+            decision("ID", ResultMaskingDecisionAction::Pass, None),
+            decision("EMAIL", ResultMaskingDecisionAction::Mask, None),
+        ]);
+        let breaks =
+            incomparable_masked_columns(&columns(&["ID", "EMAIL"]), Some(&cert), Some(&cert));
+        assert_eq!(breaks.len(), 1);
+        assert_eq!(breaks[0].column, "EMAIL");
+    }
+
+    #[test]
+    fn column_lookup_is_case_insensitive() {
+        let cert = certificate(vec![decision(
+            "email",
+            ResultMaskingDecisionAction::Mask,
+            None,
+        )]);
+        assert_eq!(
+            incomparable_masked_columns(&columns(&["EMAIL"]), Some(&cert), Some(&cert))
+                .first()
+                .map(|entry| entry.reason.clone()),
+            Some(MaskComparabilityBreak::ValueDestroyed {
+                action: ResultMaskingDecisionAction::Mask
+            })
+        );
     }
 }
