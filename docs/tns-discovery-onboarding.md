@@ -106,6 +106,9 @@ is deliberately conservative:
 - **`protected`** — left unset (commented) by default; discovery never marks a
   profile `protected` on the operator's behalf (that is an operator decision
   that also pins the ceiling immutable).
+- **`allow_change_notification`** — left unset (commented); CQN registration
+  is disabled by default and discovery never opens a standing database activity
+  channel on the operator's behalf.
 - **`mcp_exposed`** — left unset (commented); the struct default is *exposed*
   (opt-out), and discovery does not silently hide or expose a profile — the
   commented one-liner tells the operator how to opt a target out.
@@ -178,6 +181,7 @@ one-line help string using the exact serde name.
 | `protected` | **COMMENTED** | Production profile: pins the ceiling immutable; requires `max_level = "READ_ONLY"` and rejects `literal:` secret refs. |
 | `require_signed_tools` | **COMMENTED** | Require HMAC signatures for operator-defined custom tools on this profile (implied by `protected`). |
 | `read_only_standby` | **COMMENTED** | Mark target as a read-only Active Data Guard standby: forces `READ_ONLY` regardless of `max_level`. |
+| `allow_change_notification` | **COMMENTED** | Explicit CQN-registration opt-in; default false, with proven query, confirmed step-up, and durable audit still required. |
 | `mcp_exposed` | **COMMENTED** | Per-profile MCP exposure; default is exposed (opt-out), set `false` to hide this profile from the agent surface. |
 | `dashboard_ddl_workbench` | **COMMENTED** | Browser dashboard DDL/Admin apply opt-in; never raises `max_level` or bypasses preview/confirm/rollback/audit. |
 | `session_identity` | **COMMENTED** | `[profiles.session_identity]` end-to-end Oracle session identity (program/machine/module/action/client_identifier/…). |

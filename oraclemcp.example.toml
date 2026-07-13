@@ -173,6 +173,11 @@ require_signed_tools = true
 # Mark target as a read-only standby (Active Data Guard): forces READ_ONLY
 # regardless of max_level. Default: false.
 # read_only_standby = false
+# Explicitly permit Continuous Query Notification (CQN) registration. Default:
+# false. This opens no read or write path by itself: each registration still
+# requires a classifier-proven query, an active confirmed READ_WRITE step-up,
+# and a durable audit record; OBJECT-level registration is refused.
+# allow_change_notification = false
 # Production profile: pins the ceiling immutable. Default: false. When true,
 # max_level MUST be READ_ONLY (else config load error) and `literal:` secret refs
 # are rejected.

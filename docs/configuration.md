@@ -167,6 +167,7 @@ field is unset after inheritance.
 | `protected` | bool | `false` | no | Production profile: pins the ceiling immutable. When `true`, `max_level` **must** be `READ_ONLY` (else load error) and `literal:` secret refs are rejected. Implies `require_signed_tools`. |
 | `require_signed_tools` | bool | `false` | no | Require a valid HMAC signature for every operator-defined custom tool loaded with this profile. A `protected` profile implies this even when unset. `ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY` must resolve to at least 32 bytes. |
 | `read_only_standby` | bool | `false` | no | Mark the target as a read-only standby (Active Data Guard): forces `READ_ONLY` regardless of `max_level`. |
+| `allow_change_notification` | bool | `false` | no | Explicitly permit CQN registration for this profile. It does not widen SQL admission: each registration still requires a classifier-proven query, an active confirmed `READ_WRITE` step-up, and durable audit evidence; protected and standby profiles remain ineligible, and OBJECT-level registration is refused. |
 | `mcp_exposed` | bool | `true` | no | E5 per-profile MCP exposure (opt-out). See [The `mcp_exposed` opt-out](#the-mcp_exposed-opt-out). |
 | `dashboard_ddl_workbench` | bool | `false` | no | Browser dashboard DDL/Admin apply opt-in for this profile. Still capped by `max_level`, `protected`, `read_only_standby`, confirmation, rollback, and audit controls. |
 

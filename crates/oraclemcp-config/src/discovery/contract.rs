@@ -203,6 +203,11 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         help: "Mark target as a read-only Active Data Guard standby: forces READ_ONLY regardless of max_level.",
     },
     FieldDisposition {
+        field: "allow_change_notification",
+        disposition: Disposition::Commented,
+        help: "Explicit CQN-registration opt-in; default false, and every registration still needs a proven query, confirmed step-up, and durable audit record.",
+    },
+    FieldDisposition {
         field: "mcp_exposed",
         disposition: Disposition::Commented,
         help: "Per-profile MCP exposure; default exposed (opt-out). Set false to hide this profile from the agent surface.",
@@ -329,6 +334,7 @@ mod tests {
             protected: Some(false),
             require_signed_tools: Some(false),
             read_only_standby: Some(false),
+            allow_change_notification: Some(false),
             mcp_exposed: Some(true),
             dashboard_ddl_workbench: Some(false),
             session_identity: Some(SessionIdentityConfig::default()),
@@ -375,11 +381,11 @@ mod tests {
             actual.difference(&documented).collect::<Vec<_>>(),
             documented.difference(&actual).collect::<Vec<_>>(),
         );
-        // The spec fixes the count at 31.
+        // The spec fixes the count at 32.
         assert_eq!(
             CONNECTION_PROFILE_FIELD_DISPOSITIONS.len(),
-            31,
-            "the design spec fixes ConnectionProfile at 31 serde fields"
+            32,
+            "the design spec fixes ConnectionProfile at 32 serde fields"
         );
     }
 

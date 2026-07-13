@@ -187,7 +187,10 @@ pub use service_app::{
     start_oraclemcp_service_app_with_transport,
 };
 pub use session_tool::{LeaseAcquirer, SessionAction, SessionDeps, oracle_session};
-pub use subscriptions::{PollingSource, SubscribeSource, SubscriptionHub, SubscriptionRegistry};
+pub use subscriptions::{
+    CqnChangeEvent, CqnRegistrationError, CqnRegistrationGate, CqnRegistrationPermit,
+    CqnRegistrationScope, PollingSource, SubscribeSource, SubscriptionHub, SubscriptionRegistry,
+};
 pub use tamper_token::{sign_token, verify_token};
 pub use tls::{TlsError, TlsMaterial, TlsServerConfig, build_server_config, requires_mtls};
 pub use tools::{ToolDescriptor, ToolRegistry, ToolTier};

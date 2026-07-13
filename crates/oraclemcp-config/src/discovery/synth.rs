@@ -246,6 +246,7 @@ pub fn synthesize_profiles(
             protected: None,
             require_signed_tools: None,
             read_only_standby: None,
+            allow_change_notification: None,
             mcp_exposed: None,
             dashboard_ddl_workbench: None,
             session_identity: None,

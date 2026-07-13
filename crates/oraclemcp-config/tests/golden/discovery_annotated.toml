@@ -68,6 +68,8 @@ default_level = "READ_ONLY"
 # require_signed_tools = true
 # Mark target as a read-only Active Data Guard standby: forces READ_ONLY regardless of max_level.
 # read_only_standby = false
+# Explicit CQN-registration opt-in; default false, and every registration still needs a proven query, confirmed step-up, and durable audit record.
+# allow_change_notification = false
 # Per-profile MCP exposure; default exposed (opt-out). Set false to hide this profile from the agent surface.
 # mcp_exposed = false
 # Browser dashboard DDL/Admin apply opt-in; never raises max_level or bypasses preview/confirm/rollback/audit.
@@ -157,6 +159,8 @@ default_level = "READ_ONLY"
 # require_signed_tools = true
 # Mark target as a read-only Active Data Guard standby: forces READ_ONLY regardless of max_level.
 # read_only_standby = false
+# Explicit CQN-registration opt-in; default false, and every registration still needs a proven query, confirmed step-up, and durable audit record.
+# allow_change_notification = false
 # Per-profile MCP exposure; default exposed (opt-out). Set false to hide this profile from the agent surface.
 # mcp_exposed = false
 # Browser dashboard DDL/Admin apply opt-in; never raises max_level or bypasses preview/confirm/rollback/audit.

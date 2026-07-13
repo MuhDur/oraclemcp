@@ -5,11 +5,10 @@
 //!
 //! **The change-detection fork (E1).** Oracle can push DDL/data changes via
 //! `DBMS_CHANGE_NOTIFICATION` (DCN), but that requires the `CHANGE NOTIFICATION`
-//! privilege, an open callback port, and driver support the thin line does not
-//! have. So this server's *served* change source is a **polling fallback**: a
-//! [`PollingSource`] the operator wires re-reads a resource's fingerprint on a
-//! cadence and reports a change. The DCN path is a documented future source
-//! ([`SubscribeSource::ChangeNotification`]) that is not wired here.
+//! privilege and an open callback port. The Rust thin driver already supports
+//! CQN registration; this module makes that registration an explicitly-gated
+//! privileged operation. The served source remains a **polling fallback** until
+//! the query-registration and callback fan-out beads wire the driver path.
 //!
 //! **Capability gating (E1, hard requirement).** `resources.subscribe` is
 //! advertised in the `initialize` capabilities **only** when a working change
@@ -18,9 +17,213 @@
 //! advertised and a `resources/subscribe` call fails — we never advertise a
 //! subscription we cannot honor.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
+use oraclemcp_audit::{
+    AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor, sha256_hex,
+};
+use oraclemcp_config::ConnectionProfile;
+use oraclemcp_guard::{
+    Classifier, DangerLevel, LevelDecision, OperatingLevel, SessionLevelState, semantic_read_plan,
+};
 use parking_lot::Mutex;
+
+/// The CQN registration form requested from Oracle.
+///
+/// Object-level registration is deliberately represented so the gate can
+/// refuse it explicitly instead of accidentally gaining a permissive fallback
+/// when driver wiring arrives. Object notifications reveal base-table activity
+/// beyond a query predicate's read scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CqnRegistrationScope {
+    /// Register one classifier-proven query with Oracle.
+    Query,
+    /// Register an object-wide notification. Always refused.
+    Object,
+}
+
+/// Fail-closed errors from CQN registration admission.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CqnRegistrationError {
+    /// The profile did not explicitly opt into this standing information channel.
+    #[error("CQN registration is disabled for this profile")]
+    ProfileNotPermitted,
+    /// Object-wide notifications can reveal rows outside the proven query scope.
+    #[error("OBJECT-level CQN registration is refused; only QUERY-level registration is supported")]
+    ObjectLevelRefused,
+    /// The requested SQL is not a classifier-proven `READ_ONLY` query.
+    #[error("CQN registration requires a classifier-proven READ_ONLY query")]
+    QueryNotReadOnly,
+    /// The query scope cannot be represented exactly enough for a future
+    /// callback to be bound safely.
+    #[error("CQN registration requires a query with an exactly representable semantic read scope")]
+    QueryScopeNotRepresentable,
+    /// The operation needs a confirmed, active `READ_WRITE` elevation.
+    #[error("CQN registration requires an active confirmed READ_WRITE step-up")]
+    StepUpRequired,
+    /// The profile/OAuth ceiling makes the required step-up impossible.
+    #[error(
+        "CQN registration is blocked because READ_WRITE is outside the effective operating-level ceiling"
+    )]
+    OperatingLevelBlocked,
+    /// Registration cannot proceed without the required durable audit evidence.
+    #[error("CQN registration is refused because no audit sink is configured")]
+    AuditUnavailable,
+    /// The audit append failed, so no registration permit was issued.
+    #[error("CQN registration is refused because its audit append failed")]
+    AuditAppendFailed,
+}
+
+/// Opaque proof that one CQN registration crossed the profile, classifier,
+/// active-step-up, and audit gates.
+///
+/// The fields are private and the type has no public constructor. The later
+/// driver call must still re-run [`CqnRegistrationGate::authorize`] immediately
+/// before `register_query`: this permit is evidence of the gate, never an
+/// authorization input that can widen admission after a profile/session change.
+#[derive(Debug)]
+pub struct CqnRegistrationPermit {
+    profile_name: String,
+    query_sha256: String,
+}
+
+impl CqnRegistrationPermit {
+    /// Whether this evidence is bound to exactly `profile_name` and `query`.
+    ///
+    /// This check is deliberately not an authorization decision. Consumers must
+    /// call the gate again at their point of effect (SEC-1).
+    #[must_use]
+    pub fn is_bound_to(&self, profile_name: &str, query: &str) -> bool {
+        self.profile_name == profile_name && self.query_sha256 == sha256_hex(query.as_bytes())
+    }
+}
+
+/// First-class CQN-registration gate for a single connection profile.
+///
+/// CQN registration is not SQL text and therefore cannot be admitted solely by
+/// the SQL classifier. This gate layers a fail-closed profile capability,
+/// classifier proof for the query being registered, a confirmed active
+/// `READ_WRITE` elevation, and durable audit-before-effect into one permit.
+#[derive(Debug)]
+pub struct CqnRegistrationGate {
+    profile_name: String,
+    profile_permits_cqn: bool,
+}
+
+impl CqnRegistrationGate {
+    /// Construct the gate from a profile's effective CQN capability.
+    #[must_use]
+    pub fn from_profile(profile: &ConnectionProfile) -> Self {
+        CqnRegistrationGate {
+            profile_name: profile.name.clone(),
+            profile_permits_cqn: profile.allows_change_notification(),
+        }
+    }
+
+    /// Admit and audit a query-level CQN registration immediately before its
+    /// driver effect.
+    ///
+    /// A caller cannot construct the returned permit. An audit append is
+    /// durable and completes before the permit exists, so an audit failure
+    /// fails closed before the caller can issue `subscribe_register` or
+    /// `register_query`.
+    pub fn authorize(
+        &self,
+        scope: CqnRegistrationScope,
+        query: &str,
+        classifier: &Classifier,
+        session: &SessionLevelState,
+        auditor: Option<&Auditor>,
+        subject: AuditSubject,
+    ) -> Result<CqnRegistrationPermit, CqnRegistrationError> {
+        if scope == CqnRegistrationScope::Object {
+            return Err(CqnRegistrationError::ObjectLevelRefused);
+        }
+        if !self.profile_permits_cqn {
+            return Err(CqnRegistrationError::ProfileNotPermitted);
+        }
+
+        let decision = classifier.classify(query);
+        if decision.danger != DangerLevel::Safe
+            || decision.required_level != Some(OperatingLevel::ReadOnly)
+        {
+            return Err(CqnRegistrationError::QueryNotReadOnly);
+        }
+        if semantic_read_plan(query).is_none() {
+            return Err(CqnRegistrationError::QueryScopeNotRepresentable);
+        }
+
+        match session.evaluate(Some(OperatingLevel::ReadWrite)) {
+            LevelDecision::Allow if session.has_active_elevation() => {}
+            LevelDecision::Allow | LevelDecision::RequireStepUp { .. } => {
+                return Err(CqnRegistrationError::StepUpRequired);
+            }
+            LevelDecision::Blocked { .. } => {
+                return Err(CqnRegistrationError::OperatingLevelBlocked);
+            }
+            _ => return Err(CqnRegistrationError::OperatingLevelBlocked),
+        }
+
+        let auditor = auditor.ok_or(CqnRegistrationError::AuditUnavailable)?;
+        let draft = AuditEntryDraft {
+            subject,
+            db_evidence: None,
+            cancel: None,
+            result_masking: None,
+            tool: "oracle_cqn_register_query".to_owned(),
+            sql: format!("CQN REGISTER QUERY: {query}"),
+            danger_level: OperatingLevel::ReadWrite.as_str().to_owned(),
+            decision: AuditDecision::Allowed,
+            rows_affected: None,
+            outcome: AuditOutcome::Succeeded,
+        };
+        auditor
+            .append(&draft, cqn_audit_timestamp(), true)
+            .map_err(|_| CqnRegistrationError::AuditAppendFailed)?;
+
+        Ok(CqnRegistrationPermit {
+            profile_name: self.profile_name.clone(),
+            query_sha256: sha256_hex(query.as_bytes()),
+        })
+    }
+}
+
+fn cqn_audit_timestamp() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!("unix:{seconds}")
+}
+
+/// An event emitted from a CQN callback after it was mapped to a registered MCP
+/// resource. Its only payload is the resource URI: CQN callbacks must never
+/// forward row data, column values, rowids, or driver metadata to clients.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CqnChangeEvent {
+    resource_uri: String,
+}
+
+impl CqnChangeEvent {
+    /// Build an event for one already-registered MCP resource.
+    #[must_use]
+    pub fn for_resource(resource_uri: impl Into<String>) -> Self {
+        CqnChangeEvent {
+            resource_uri: resource_uri.into(),
+        }
+    }
+
+    /// The changed MCP resource URI; clients re-read it through the normal
+    /// guarded, masked, and egress-controlled read path.
+    #[must_use]
+    pub fn resource_uri(&self) -> &str {
+        &self.resource_uri
+    }
+}
 
 /// The reserved subscription-owner key for the single stdio client.
 ///
@@ -130,10 +333,10 @@ pub enum SubscribeSource {
     Unsupported,
     /// The polling fallback: re-read resource fingerprints on a cadence.
     Polling(Box<dyn PollingSource>),
-    /// Reserved for a future Oracle `DBMS_CHANGE_NOTIFICATION`-backed source.
-    /// Not wired in the thin line; present so the gate has a named DCN arm.
-    #[allow(dead_code)]
-    ChangeNotification,
+    /// Oracle CQN source. Constructing it requires a non-forgeable permit from
+    /// [`CqnRegistrationGate`], so a caller cannot enable the standing channel
+    /// without profile opt-in, classifier proof, active step-up, and audit.
+    ChangeNotification(CqnRegistrationPermit),
 }
 
 impl SubscribeSource {
@@ -268,6 +471,17 @@ impl SubscriptionHub {
         self.enqueue_updates(std::slice::from_ref(&uri.to_owned()));
     }
 
+    /// Deliver a CQN callback as an event-only MCP resource update.
+    ///
+    /// No callback payload can cross this seam: [`CqnChangeEvent`] exposes only
+    /// an already-registered resource URI, so a client must re-read through the
+    /// ordinary classifier, masking, and egress path to see any data.
+    pub fn mark_cqn_changed(&self, event: CqnChangeEvent) {
+        if matches!(self.source, SubscribeSource::ChangeNotification(_)) {
+            self.mark_changed(event.resource_uri());
+        }
+    }
+
     /// Fan a set of changed URIs out to their subscribers, appending one pending
     /// `resources/updated` to each subscribing owner's queue. Subscribers are
     /// resolved through the registry BEFORE the `pending` lock is taken, so the
@@ -315,7 +529,262 @@ impl SubscriptionHub {
 mod tests {
     use super::*;
 
+    use std::{sync::Arc, time::Duration};
+
+    use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink, SigningKey};
+    use oraclemcp_config::OracleMcpConfig;
+
     const URI: &str = "oracle://object/HR/PACKAGE/EMP_API";
+
+    struct SharedMemoryAuditSink(Arc<MemoryAuditSink>);
+
+    impl AuditSink for SharedMemoryAuditSink {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            self.0.append(record)
+        }
+
+        fn append_with_verdict_certificate(
+            &self,
+            record: &AuditRecord,
+            certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+        ) -> Result<(), AuditError> {
+            self.0.append_with_verdict_certificate(record, certificate)
+        }
+
+        fn flush(&self) -> Result<(), AuditError> {
+            self.0.flush()
+        }
+    }
+
+    struct RefusingAuditSink;
+
+    impl AuditSink for RefusingAuditSink {
+        fn append(&self, _record: &AuditRecord) -> Result<(), AuditError> {
+            Err(AuditError::Io("synthetic audit failure".to_owned()))
+        }
+
+        fn append_with_verdict_certificate(
+            &self,
+            _record: &AuditRecord,
+            _certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+        ) -> Result<(), AuditError> {
+            Err(AuditError::Io("synthetic audit failure".to_owned()))
+        }
+
+        fn flush(&self) -> Result<(), AuditError> {
+            Err(AuditError::Io("synthetic audit failure".to_owned()))
+        }
+    }
+
+    fn cqn_profile(enabled: bool) -> ConnectionProfile {
+        let enabled_line = if enabled {
+            "allow_change_notification = true"
+        } else {
+            ""
+        };
+        OracleMcpConfig::from_toml_str(&format!(
+            r#"
+            [[profiles]]
+            name = "cqn"
+            connect_string = "synthetic:1521/service"
+            max_level = "READ_WRITE"
+            {enabled_line}
+            "#
+        ))
+        .expect("synthetic CQN profile parses")
+        .profiles
+        .into_iter()
+        .next()
+        .expect("one profile")
+    }
+
+    fn cqn_auditor() -> (Auditor, Arc<MemoryAuditSink>) {
+        let sink = Arc::new(MemoryAuditSink::new());
+        let key = SigningKey::new("cqn-test", vec![7; 32]).expect("test signing key");
+        (
+            Auditor::new(Box::new(SharedMemoryAuditSink(Arc::clone(&sink))), key),
+            sink,
+        )
+    }
+
+    fn stepped_up_session() -> SessionLevelState {
+        let mut session = SessionLevelState::new(OperatingLevel::ReadWrite, false);
+        session
+            .escalate_window(OperatingLevel::ReadWrite, Duration::from_secs(60))
+            .expect("READ_WRITE fits the synthetic ceiling");
+        session
+    }
+
+    fn subject() -> AuditSubject {
+        AuditSubject::new("test", "cqn-client")
+    }
+
+    const PROVEN_QUERY: &str = "SELECT employee_id FROM hr.employees WHERE department_id = 10";
+
+    #[test]
+    fn cqn_is_disabled_until_the_profile_explicitly_permits_it() {
+        let profile = cqn_profile(false);
+        let gate = CqnRegistrationGate::from_profile(&profile);
+        let (auditor, sink) = cqn_auditor();
+
+        let result = gate.authorize(
+            CqnRegistrationScope::Query,
+            PROVEN_QUERY,
+            &Classifier::default(),
+            &stepped_up_session(),
+            Some(&auditor),
+            subject(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(CqnRegistrationError::ProfileNotPermitted)
+        ));
+        assert!(
+            sink.records().is_empty(),
+            "a refused registration is not audited as allowed"
+        );
+    }
+
+    #[test]
+    fn cqn_refuses_object_scope_before_any_driver_or_audit_effect() {
+        let profile = cqn_profile(true);
+        let gate = CqnRegistrationGate::from_profile(&profile);
+        let (auditor, sink) = cqn_auditor();
+
+        let result = gate.authorize(
+            CqnRegistrationScope::Object,
+            PROVEN_QUERY,
+            &Classifier::default(),
+            &stepped_up_session(),
+            Some(&auditor),
+            subject(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(CqnRegistrationError::ObjectLevelRefused)
+        ));
+        assert!(sink.records().is_empty());
+    }
+
+    #[test]
+    fn cqn_demands_an_active_confirmed_step_up_not_only_a_writable_baseline() {
+        let profile = cqn_profile(true);
+        let gate = CqnRegistrationGate::from_profile(&profile);
+        let (auditor, sink) = cqn_auditor();
+        let baseline_writable = SessionLevelState::new(OperatingLevel::ReadWrite, false);
+
+        let result = gate.authorize(
+            CqnRegistrationScope::Query,
+            PROVEN_QUERY,
+            &Classifier::default(),
+            &baseline_writable,
+            Some(&auditor),
+            subject(),
+        );
+
+        assert!(matches!(result, Err(CqnRegistrationError::StepUpRequired)));
+        assert!(sink.records().is_empty());
+    }
+
+    #[test]
+    fn cqn_refuses_a_query_the_classifier_cannot_prove_read_only() {
+        let profile = cqn_profile(true);
+        let gate = CqnRegistrationGate::from_profile(&profile);
+        let (auditor, sink) = cqn_auditor();
+
+        let result = gate.authorize(
+            CqnRegistrationScope::Query,
+            "SELECT employee_id FROM hr.employees FOR UPDATE",
+            &Classifier::default(),
+            &stepped_up_session(),
+            Some(&auditor),
+            subject(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(CqnRegistrationError::QueryNotReadOnly)
+        ));
+        assert!(sink.records().is_empty());
+    }
+
+    #[test]
+    fn cqn_permit_is_audited_before_return_and_bound_to_one_query_and_profile() {
+        let profile = cqn_profile(true);
+        let gate = CqnRegistrationGate::from_profile(&profile);
+        let (auditor, sink) = cqn_auditor();
+
+        let permit = gate
+            .authorize(
+                CqnRegistrationScope::Query,
+                PROVEN_QUERY,
+                &Classifier::default(),
+                &stepped_up_session(),
+                Some(&auditor),
+                subject(),
+            )
+            .expect("the explicit, stepped-up, proven query is admitted");
+
+        assert!(permit.is_bound_to("cqn", PROVEN_QUERY));
+        assert!(!permit.is_bound_to("other-profile", PROVEN_QUERY));
+        assert!(!permit.is_bound_to("cqn", "SELECT * FROM hr.employees"));
+        let records = sink.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].tool, "oracle_cqn_register_query");
+        assert_eq!(records[0].danger_level, "READ_WRITE");
+        assert_eq!(
+            sink.flush_count(),
+            1,
+            "CQN audit evidence is durable before permit return"
+        );
+    }
+
+    #[test]
+    fn cqn_refuses_to_issue_a_permit_when_the_audit_append_fails() {
+        let profile = cqn_profile(true);
+        let gate = CqnRegistrationGate::from_profile(&profile);
+        let key = SigningKey::new("cqn-test", vec![7; 32]).expect("test signing key");
+        let auditor = Auditor::new(Box::new(RefusingAuditSink), key);
+
+        let result = gate.authorize(
+            CqnRegistrationScope::Query,
+            PROVEN_QUERY,
+            &Classifier::default(),
+            &stepped_up_session(),
+            Some(&auditor),
+            subject(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(CqnRegistrationError::AuditAppendFailed)
+        ));
+    }
+
+    #[test]
+    fn cqn_callbacks_are_event_only_and_never_carry_rows_or_columns() {
+        let profile = cqn_profile(true);
+        let gate = CqnRegistrationGate::from_profile(&profile);
+        let (auditor, _sink) = cqn_auditor();
+        let permit = gate
+            .authorize(
+                CqnRegistrationScope::Query,
+                PROVEN_QUERY,
+                &Classifier::default(),
+                &stepped_up_session(),
+                Some(&auditor),
+                subject(),
+            )
+            .expect("permit");
+        let hub = SubscriptionHub::with_source(SubscribeSource::ChangeNotification(permit));
+        assert!(hub.subscribe("principal-a", URI));
+
+        hub.mark_cqn_changed(CqnChangeEvent::for_resource(URI));
+
+        assert_eq!(hub.drain_pending("principal-a"), vec![URI.to_owned()]);
+    }
 
     #[test]
     fn subscribe_then_notify_lists_subscribers() {

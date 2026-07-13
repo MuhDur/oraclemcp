@@ -72,6 +72,7 @@ fn fully_populated_profile() -> ConnectionProfile {
         protected: Some(false),
         require_signed_tools: Some(false),
         read_only_standby: Some(false),
+        allow_change_notification: Some(false),
         mcp_exposed: Some(true),
         dashboard_ddl_workbench: Some(false),
         session_identity: Some(SessionIdentityConfig::default()),

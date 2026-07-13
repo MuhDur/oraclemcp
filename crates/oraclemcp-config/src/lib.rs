@@ -1405,6 +1405,7 @@ fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionP
         && before.protected == after.protected
         && before.require_signed_tools == after.require_signed_tools
         && before.read_only_standby == after.read_only_standby
+        && before.allow_change_notification == after.allow_change_notification
         && before.mcp_exposed == after.mcp_exposed
         && before.dashboard_ddl_workbench == after.dashboard_ddl_workbench
         && before.session_identity == after.session_identity
@@ -3107,6 +3108,11 @@ mod tests {
                 "read_only_standby",
                 |_| {},
                 |p| p.read_only_standby = Some(true),
+            ),
+            (
+                "allow_change_notification",
+                |_| {},
+                |p| p.allow_change_notification = Some(true),
             ),
             ("mcp_exposed", |_| {}, |p| p.mcp_exposed = Some(false)),
             (

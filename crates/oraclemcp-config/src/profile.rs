@@ -760,6 +760,12 @@ pub struct ConnectionProfile {
     /// Force `READ_ONLY` regardless of profile (Active Data Guard standby).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only_standby: Option<bool>,
+    /// Explicitly permit Continuous Query Notification (CQN) registration for
+    /// this profile. Defaults to `false`; a permitted registration still needs
+    /// a classifier-proven query, an active confirmed step-up, and an audit
+    /// record before the driver may register it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_change_notification: Option<bool>,
     /// Whether this profile is exposed to the MCP **served** surface (E5
     /// connection-scope isolation). PER-PROFILE OPT-OUT: a profile is exposed to
     /// agents **by default**; set `mcp_exposed = false` to hide it. A hidden
@@ -844,6 +850,7 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("protected", &self.protected)
             .field("require_signed_tools", &self.require_signed_tools)
             .field("read_only_standby", &self.read_only_standby)
+            .field("allow_change_notification", &self.allow_change_notification)
             .field("dashboard_ddl_workbench", &self.dashboard_ddl_workbench)
             .field("session_identity", &self.session_identity)
             .field("pool", &self.pool)
@@ -887,6 +894,18 @@ impl ConnectionProfile {
     #[must_use]
     pub fn read_only_standby(&self) -> bool {
         self.read_only_standby.unwrap_or(false)
+    }
+
+    /// Whether this profile explicitly permits CQN registration.
+    ///
+    /// This is a fail-closed capability switch, not an authorization bypass:
+    /// protected and standby profiles stay ineligible, and callers must still
+    /// complete the CQN gate's classifier, active-step-up, and audit checks.
+    #[must_use]
+    pub fn allows_change_notification(&self) -> bool {
+        self.allow_change_notification == Some(true)
+            && !self.protected()
+            && !self.read_only_standby()
     }
 
     /// Whether this profile is exposed to the MCP served (agent-facing) surface
@@ -940,6 +959,7 @@ impl ConnectionProfile {
             protected,
             require_signed_tools,
             read_only_standby,
+            allow_change_notification,
             mcp_exposed,
             dashboard_ddl_workbench,
             session_identity,
@@ -1149,6 +1169,7 @@ mod tests {
             protected: None,
             require_signed_tools: None,
             read_only_standby: None,
+            allow_change_notification: None,
             mcp_exposed: None,
             dashboard_ddl_workbench: None,
             session_identity: None,
@@ -1161,6 +1182,31 @@ mod tests {
             sql_policy: None,
             base: None,
         }
+    }
+
+    #[test]
+    fn change_notification_is_explicitly_opt_in_and_never_reopens_protected_or_standby() {
+        let mut profile = p("cqn");
+        assert!(
+            !profile.allows_change_notification(),
+            "an absent capability must fail closed"
+        );
+
+        profile.allow_change_notification = Some(true);
+        assert!(profile.allows_change_notification());
+
+        profile.protected = Some(true);
+        assert!(
+            !profile.allows_change_notification(),
+            "protected profiles remain ineligible even with a stale opt-in"
+        );
+
+        profile.protected = Some(false);
+        profile.read_only_standby = Some(true);
+        assert!(
+            !profile.allows_change_notification(),
+            "standby profiles remain ineligible even with a stale opt-in"
+        );
     }
 
     #[test]
