@@ -114,21 +114,24 @@ pub use health::{
     tablespace_usage_sql, unusable_indexes_sql,
 };
 pub use intelligence::{
-    DependentObject, DependentsProbe, IndexDescription, LobText, PLAN_COST_ESTIMATE_NOTE,
-    PlanCostEstimate, PlanCostRow, PlanCostSummary, QueryDiff, QueryDiffChange, QueryDiffError,
+    DependentObject, DependentsProbe, IndexDescription, LobText, OrientForeignKey,
+    OrientForeignKeyColumn, OrientSchemaObject, PLAN_COST_ESTIMATE_NOTE, PlanCostEstimate,
+    PlanCostRow, PlanCostSummary, QueryDiff, QueryDiffChange, QueryDiffError, QueryDiffSource,
     SearchColumn, SearchDetailLevel, SearchIndex, SearchObject, SourceText, TriggerDescription,
     ViewDescription, assemble_cost_estimate, compile_errors, dependent_from_row, describe_columns,
     describe_constraints, describe_index, describe_trigger, describe_view, diff_query_responses,
     explain_plan, get_ddl, get_source, get_sources_by_name, is_ddl_object_type, list_objects,
-    list_schemas, list_source_types, normalize_source_object_type, plan_cost_estimate,
-    primary_key_columns, probe_dependents, read_lob, sample_rows, search_objects, search_source,
+    list_schemas, list_source_types, normalize_source_object_type, orient_fks, orient_schema,
+    plan_cost_estimate, primary_key_columns, probe_dependents, read_lob, sample_rows,
+    search_objects, search_source,
 };
 pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_id};
 pub use masking::{
-    MASKED_RESULT_VALUE, MIN_PROFILE_MASKING_SALT_BYTES, MaskingPolicyError, ProfileMaskingSalt,
-    ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate, ResultMaskingColumnDecision,
+    IncomparableMaskedColumn, MASKED_RESULT_VALUE, MIN_PROFILE_MASKING_SALT_BYTES,
+    MaskComparabilityBreak, MaskingPolicyError, ProfileMaskingSalt, ResultColumnMatch,
+    ResultMaskingAction, ResultMaskingCertificate, ResultMaskingColumnDecision,
     ResultMaskingDecisionAction, ResultMaskingDecisionSource, ResultMaskingPolicy,
-    ResultMaskingRule,
+    ResultMaskingRule, incomparable_masked_columns,
 };
 pub use oci::{
     AdbConnectInfo, CloudStatus, IamToken, IamTokenSource, OciError, WalletContents, WalletMode,

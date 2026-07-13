@@ -31,7 +31,8 @@ use oraclemcp_db::{
     OracleBind, OracleConnectOptions, OracleConnection, OracleIdentifier, OracleSessionIdentity,
     QueryCaps, RustOracleConnection, SchemaObject, SchemaObjectType, SchemaSnapshot,
     SearchDetailLevel, SessionPurity, compare_schemas, explain_plan, extract_catalog_rowsets,
-    migration_plan, plan_cost_estimate, probe_dependents, search_objects,
+    migration_plan, orient_fks, orient_schema, plan_cost_estimate, probe_dependents,
+    search_objects,
 };
 use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use serde_json::json;
@@ -1907,6 +1908,116 @@ fn live_search_objects_summary_uses_optimizer_num_rows_not_count_star() {
             .await
             .ok();
         conn.commit(&cx).await.ok();
+    });
+}
+
+/// C2.1 (live): `oracle_orient`'s DB-layer readers expose an ordinary schema
+/// map plus a complete, positional composite FK edge from a synthetic pair of
+/// tables. The unit test proves SQL/bind shape; this is the real-dictionary
+/// proof against Oracle's `ALL_OBJECTS` / `ALL_CONSTRAINTS` / `ALL_CONS_COLUMNS`.
+#[test]
+fn live_orient_schema_map_and_fk_topology_cover_synthetic_schema() {
+    run_with_cx(|cx| async move {
+        let test_name = "live_orient_schema_map_and_fk_topology_cover_synthetic_schema";
+        let Some(conn) = connect_or_skip(&cx, test_name, test_opts()).await else {
+            return;
+        };
+        conn.set_call_timeout(Some(Duration::from_secs(30))).ok();
+
+        let parent = "ORACLEMCP_C2_ORIENT_PARENT";
+        let child = "ORACLEMCP_C2_ORIENT_CHILD";
+        let foreign_key = "ORACLEMCP_C2_ORIENT_FK";
+        for table in [child, parent] {
+            let _ = conn
+                .execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
+                .await;
+        }
+
+        if let Err(e) = conn
+            .execute(
+                &cx,
+                &format!(
+                    "CREATE TABLE {parent} ( \
+                     id NUMBER NOT NULL, tenant_id NUMBER NOT NULL, \
+                     CONSTRAINT ORACLEMCP_C2_ORIENT_PK PRIMARY KEY (id, tenant_id) \
+                     )"
+                ),
+                &[],
+            )
+            .await
+        {
+            eprintln!("[live-xe] SKIP {test_name}: cannot create parent fixture ({e})");
+            return;
+        }
+        if let Err(e) = conn
+            .execute(
+                &cx,
+                &format!(
+                    "CREATE TABLE {child} ( \
+                     id NUMBER PRIMARY KEY, parent_id NUMBER NOT NULL, \
+                     parent_tenant_id NUMBER NOT NULL, \
+                     CONSTRAINT {foreign_key} FOREIGN KEY (parent_id, parent_tenant_id) \
+                     REFERENCES {parent} (id, tenant_id) \
+                     )"
+                ),
+                &[],
+            )
+            .await
+        {
+            eprintln!("[live-xe] SKIP {test_name}: cannot create child fixture ({e})");
+            let _ = conn
+                .execute(&cx, &format!("DROP TABLE {parent} PURGE"), &[])
+                .await;
+            return;
+        }
+
+        let owner = conn
+            .describe(&cx)
+            .await
+            .ok()
+            .and_then(|info| info.current_schema)
+            .or_else(|| std::env::var("ORACLEMCP_TEST_USER").ok())
+            .unwrap_or_else(|| "SYSTEM".to_owned())
+            .to_ascii_uppercase();
+
+        let schema = orient_schema(&cx, &conn, Some(&owner), 10_000)
+            .await
+            .expect("read synthetic schema map");
+        for object in [parent, child] {
+            assert!(
+                schema.iter().any(|entry| {
+                    entry.owner == owner
+                        && entry.object_name == object
+                        && entry.object_type == "TABLE"
+                }),
+                "schema map must include {owner}.{object} as a TABLE"
+            );
+        }
+
+        let foreign_keys = orient_fks(&cx, &conn, Some(&owner), 10_000)
+            .await
+            .expect("read synthetic FK topology");
+        let edge = foreign_keys
+            .iter()
+            .find(|edge| edge.constraint_name == foreign_key)
+            .expect("synthetic composite FK edge");
+        assert_eq!(edge.child_owner, owner);
+        assert_eq!(edge.child_table, child);
+        assert_eq!(edge.parent_owner, owner);
+        assert_eq!(edge.parent_table, parent);
+        assert_eq!(edge.columns.len(), 2, "composite FK stays complete");
+        assert_eq!(edge.columns[0].position, 1);
+        assert_eq!(edge.columns[0].child_column, "PARENT_ID");
+        assert_eq!(edge.columns[0].parent_column, "ID");
+        assert_eq!(edge.columns[1].position, 2);
+        assert_eq!(edge.columns[1].child_column, "PARENT_TENANT_ID");
+        assert_eq!(edge.columns[1].parent_column, "TENANT_ID");
+
+        for table in [child, parent] {
+            let _ = conn
+                .execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
+                .await;
+        }
     });
 }
 

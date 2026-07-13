@@ -571,6 +571,185 @@ pub async fn list_objects(
     .await
 }
 
+/// One object in the bounded `oracle_orient` schema map.
+///
+/// This intentionally carries only the stable identity triplet from
+/// `ALL_OBJECTS`; object-specific detail belongs to the focused dictionary
+/// tools rather than the shared orient snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrientSchemaObject {
+    /// Schema owner as stored in `ALL_OBJECTS`.
+    pub owner: String,
+    /// Object name as stored in `ALL_OBJECTS`.
+    pub object_name: String,
+    /// Oracle object kind from `ALL_OBJECTS.OBJECT_TYPE`.
+    pub object_type: String,
+}
+
+/// One positional child-to-parent column pairing in an [`OrientForeignKey`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrientForeignKeyColumn {
+    /// One-based key-column position in both the child and parent constraints.
+    pub position: usize,
+    /// Child table column at [`Self::position`].
+    pub child_column: String,
+    /// Parent key column at [`Self::position`].
+    pub parent_column: String,
+}
+
+/// One directed foreign-key edge in the bounded `oracle_orient` topology.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrientForeignKey {
+    /// Foreign-key constraint name, unique together with [`Self::child_owner`].
+    pub constraint_name: String,
+    /// Schema that owns the referencing table.
+    pub child_owner: String,
+    /// Referencing table name.
+    pub child_table: String,
+    /// Schema that owns the referenced key.
+    pub parent_owner: String,
+    /// Referenced table name.
+    pub parent_table: String,
+    /// Child-to-parent column pairings in constraint-position order.
+    pub columns: Vec<OrientForeignKeyColumn>,
+}
+
+/// Read the bounded schema/type map for `oracle_orient` from `ALL_OBJECTS`.
+///
+/// The optional owner is normalized to upper case and bound positionally; when
+/// it is absent, the map covers all objects visible to the session. Results are
+/// deterministically ordered and capped with `ROWNUM`, so callers can safely
+/// assemble them into a cacheable snapshot without ever interpolating an
+/// identifier.
+pub async fn orient_schema(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: Option<&str>,
+    max_rows: usize,
+) -> Result<Vec<OrientSchemaObject>, DbError> {
+    let sql = "SELECT * FROM ( \
+                   WITH args AS ( \
+                       SELECT :1 owner_filter FROM dual \
+                   ) \
+                   SELECT o.owner, o.object_name, o.object_type \
+                   FROM all_objects o CROSS JOIN args \
+                   WHERE args.owner_filter IS NULL OR o.owner = args.owner_filter \
+                   ORDER BY o.owner, o.object_type, o.object_name \
+               ) WHERE ROWNUM <= :2";
+    let owner_bind = owner.map_or(OracleBind::Null, |value| {
+        OracleBind::from(value.to_ascii_uppercase())
+    });
+    let rows = conn
+        .query_rows(cx, sql, &[owner_bind, OracleBind::from(max_rows as i64)])
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| OrientSchemaObject {
+            owner: row.text("OWNER").unwrap_or_default().to_owned(),
+            object_name: row.text("OBJECT_NAME").unwrap_or_default().to_owned(),
+            object_type: row.text("OBJECT_TYPE").unwrap_or_default().to_owned(),
+        })
+        .collect())
+}
+
+/// Read bounded child-to-parent foreign-key topology for `oracle_orient`.
+///
+/// This joins the child `R` constraint to its referenced key and then joins
+/// both `ALL_CONS_COLUMNS` projections on their one-based positions. The cap
+/// is deliberately applied to foreign-key *constraints* before those column
+/// joins, preventing a composite key from being returned with only a prefix of
+/// its column pairings. The optional owner is a positional, upper-cased bind;
+/// `None` covers every foreign key visible to the session.
+pub async fn orient_fks(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: Option<&str>,
+    max_rows: usize,
+) -> Result<Vec<OrientForeignKey>, DbError> {
+    // Keep the outermost statement a SELECT. Besides matching the generated
+    // read-path contract, the thin driver recognizes this shape consistently
+    // when the dictionary query contains a CTE.
+    let sql = "SELECT * FROM ( \
+               WITH args AS ( \
+                   SELECT :1 owner_filter FROM dual \
+               ), selected_foreign_keys AS ( \
+                   SELECT * FROM ( \
+                       SELECT child.owner AS child_owner, \
+                              child.table_name AS child_table, \
+                              child.constraint_name, \
+                              child.r_owner AS parent_owner, \
+                              child.r_constraint_name AS parent_constraint_name \
+                       FROM all_constraints child CROSS JOIN args \
+                       WHERE child.constraint_type = 'R' \
+                         AND (args.owner_filter IS NULL OR child.owner = args.owner_filter) \
+                       ORDER BY child.owner, child.table_name, child.constraint_name \
+                   ) WHERE ROWNUM <= :2 \
+               ) \
+               SELECT foreign_key.child_owner, foreign_key.child_table, \
+                      foreign_key.constraint_name, foreign_key.parent_owner, \
+                      parent.table_name AS parent_table, \
+                      child_columns.column_name AS child_column, \
+                      parent_columns.column_name AS parent_column, \
+                      child_columns.position AS column_position \
+               FROM selected_foreign_keys foreign_key \
+               JOIN all_constraints parent \
+                 ON parent.owner = foreign_key.parent_owner \
+                AND parent.constraint_name = foreign_key.parent_constraint_name \
+               JOIN all_cons_columns child_columns \
+                 ON child_columns.owner = foreign_key.child_owner \
+                AND child_columns.constraint_name = foreign_key.constraint_name \
+               JOIN all_cons_columns parent_columns \
+                 ON parent_columns.owner = parent.owner \
+                AND parent_columns.constraint_name = parent.constraint_name \
+                AND parent_columns.position = child_columns.position \
+               ORDER BY foreign_key.child_owner, foreign_key.child_table, \
+                        foreign_key.constraint_name, child_columns.position \
+               )";
+    let owner_bind = owner.map_or(OracleBind::Null, |value| {
+        OracleBind::from(value.to_ascii_uppercase())
+    });
+    let rows = conn
+        .query_rows(cx, sql, &[owner_bind, OracleBind::from(max_rows as i64)])
+        .await?;
+
+    let mut foreign_keys: Vec<OrientForeignKey> = Vec::new();
+    for row in rows {
+        let constraint_name = row.text("CONSTRAINT_NAME").unwrap_or_default().to_owned();
+        let child_owner = row.text("CHILD_OWNER").unwrap_or_default().to_owned();
+        let child_table = row.text("CHILD_TABLE").unwrap_or_default().to_owned();
+        let parent_owner = row.text("PARENT_OWNER").unwrap_or_default().to_owned();
+        let parent_table = row.text("PARENT_TABLE").unwrap_or_default().to_owned();
+        let column = OrientForeignKeyColumn {
+            position: row
+                .parse_i64("COLUMN_POSITION")
+                .and_then(|position| usize::try_from(position).ok())
+                .unwrap_or_default(),
+            child_column: row.text("CHILD_COLUMN").unwrap_or_default().to_owned(),
+            parent_column: row.text("PARENT_COLUMN").unwrap_or_default().to_owned(),
+        };
+
+        if let Some(existing) = foreign_keys.last_mut()
+            && existing.constraint_name == constraint_name
+            && existing.child_owner == child_owner
+        {
+            existing.columns.push(column);
+            continue;
+        }
+
+        foreign_keys.push(OrientForeignKey {
+            constraint_name,
+            child_owner,
+            child_table,
+            parent_owner,
+            parent_table,
+            columns: vec![column],
+        });
+    }
+
+    Ok(foreign_keys)
+}
+
 /// List schemas that own objects visible to this session, optionally filtered
 /// by a SQL `LIKE` pattern.
 pub async fn list_schemas(
@@ -1162,10 +1341,15 @@ pub async fn primary_key_columns(
         .collect())
 }
 
-/// Semantic diff between two serialized flashback query pages. With key
-/// columns, rows are aligned by that key and value changes are reported as
-/// `changed`; without key columns, rows are treated as a multiset and only
-/// add/remove can be proven.
+/// Semantic diff between two serialized query pages. With key columns, rows are
+/// aligned by that key and value changes are reported as `changed`; without key
+/// columns, rows are treated as a multiset and only add/remove can be proven.
+///
+/// A *side* is one page of the same proven read. The two sides may differ in
+/// time (the same database at two SCNs) or in space (two databases in the
+/// fleet); the alignment maths is identical either way, so this type carries the
+/// side provenance in [`QueryDiff::source_a`] / [`QueryDiff::source_b`] rather
+/// than assuming an SCN pair.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryDiff {
     /// Column names in the compared query shape.
@@ -1174,11 +1358,11 @@ pub struct QueryDiff {
     pub keyed: bool,
     /// Key columns used for row alignment, in caller/primary-key order.
     pub key_columns: Vec<String>,
-    /// Rows present at `scn_b` but not at `scn_a`.
+    /// Rows present on side B but not on side A.
     pub added: Vec<serde_json::Value>,
-    /// Rows present at `scn_a` but not at `scn_b`.
+    /// Rows present on side A but not on side B.
     pub removed: Vec<serde_json::Value>,
-    /// Key-aligned rows whose non-key payload changed between the two SCNs.
+    /// Key-aligned rows whose non-key payload differs between the two sides.
     pub changed: Vec<QueryDiffChange>,
     /// Rows compared from the first page.
     pub row_count_a: usize,
@@ -1186,21 +1370,84 @@ pub struct QueryDiff {
     pub row_count_b: usize,
     /// True when either input page was truncated before all rows were compared.
     pub truncated: bool,
+    /// Where side A was read from. Empty unless the caller attaches it with
+    /// [`QueryDiff::with_sources`].
+    #[serde(default, skip_serializing_if = "QueryDiffSource::is_empty")]
+    pub source_a: QueryDiffSource,
+    /// Where side B was read from.
+    #[serde(default, skip_serializing_if = "QueryDiffSource::is_empty")]
+    pub source_b: QueryDiffSource,
 }
 
-/// One key-aligned row whose payload changed between the compared SCNs.
+impl QueryDiff {
+    /// Attach the provenance of each compared side. The diff maths never needs
+    /// this, but a cross-database delta is not interpretable without it.
+    #[must_use]
+    pub fn with_sources(mut self, source_a: QueryDiffSource, source_b: QueryDiffSource) -> Self {
+        self.source_a = source_a;
+        self.source_b = source_b;
+        self
+    }
+}
+
+/// Where one compared side of a [`QueryDiff`] was read from.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryDiffSource {
+    /// Connection profile the side was read from, for a cross-database diff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// System change number the side was read as of, when it was a flashback
+    /// read rather than a read of the current committed state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scn: Option<u64>,
+}
+
+impl QueryDiffSource {
+    /// A side read from `profile` at its current committed state.
+    #[must_use]
+    pub fn profile(profile: impl Into<String>) -> Self {
+        Self {
+            profile: Some(profile.into()),
+            scn: None,
+        }
+    }
+
+    /// A side read as of `scn`.
+    #[must_use]
+    pub fn scn(scn: u64) -> Self {
+        Self {
+            profile: None,
+            scn: Some(scn),
+        }
+    }
+
+    /// Pin this side to an SCN as well as a profile.
+    #[must_use]
+    pub fn at_scn(mut self, scn: Option<u64>) -> Self {
+        self.scn = scn;
+        self
+    }
+
+    #[must_use]
+    fn is_empty(&self) -> bool {
+        self.profile.is_none() && self.scn.is_none()
+    }
+}
+
+/// One key-aligned row whose payload differs between the two compared sides.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryDiffChange {
-    /// The key object that aligned the before/after rows.
+    /// The key object that aligned the two rows.
     pub key: serde_json::Value,
-    /// Row at the first SCN.
+    /// Row on side A.
     pub before: serde_json::Value,
-    /// Row at the second SCN.
+    /// Row on side B.
     pub after: serde_json::Value,
 }
 
 /// Why a serialized-row diff could not be computed.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum QueryDiffError {
     /// A caller-supplied or inferred key column was not present in every row.
     MissingKeyColumn {
@@ -1336,6 +1583,8 @@ pub fn diff_query_responses(
             row_count_a: a.row_count,
             row_count_b: b.row_count,
             truncated: a.truncated || b.truncated,
+            source_a: QueryDiffSource::default(),
+            source_b: QueryDiffSource::default(),
         });
     }
 
@@ -1381,6 +1630,8 @@ pub fn diff_query_responses(
         row_count_a: a.row_count,
         row_count_b: b.row_count,
         truncated: a.truncated || b.truncated,
+        source_a: QueryDiffSource::default(),
+        source_b: QueryDiffSource::default(),
     })
 }
 
@@ -2299,6 +2550,197 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// Synthetic `ALL_OBJECTS` and FK-topology rows for the C2.1 orient
+    /// contract. It also retains the generated SQL and positional binds so the
+    /// test proves the dictionary reads stay bounded and parameterized.
+    #[derive(Default)]
+    struct OrientMock {
+        calls: std::sync::Mutex<Vec<(String, Vec<OracleBind>)>>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for OrientMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.calls
+                .lock()
+                .expect("orient mock lock")
+                .push((sql.to_owned(), binds.to_vec()));
+
+            if sql.contains("FROM all_objects") {
+                return Ok(vec![
+                    cell_row(&[
+                        ("OWNER", "HR"),
+                        ("OBJECT_NAME", "CUSTOMERS"),
+                        ("OBJECT_TYPE", "TABLE"),
+                    ]),
+                    cell_row(&[
+                        ("OWNER", "HR"),
+                        ("OBJECT_NAME", "ORDERS"),
+                        ("OBJECT_TYPE", "TABLE"),
+                    ]),
+                    cell_row(&[
+                        ("OWNER", "HR"),
+                        ("OBJECT_NAME", "ORDER_REPORT"),
+                        ("OBJECT_TYPE", "VIEW"),
+                    ]),
+                ]);
+            }
+
+            assert!(sql.contains("FROM all_constraints child"));
+            Ok(vec![
+                cell_row(&[
+                    ("CHILD_OWNER", "HR"),
+                    ("CHILD_TABLE", "ORDER_LINES"),
+                    ("CONSTRAINT_NAME", "ORDER_LINES_ORDER_FK"),
+                    ("PARENT_OWNER", "HR"),
+                    ("PARENT_TABLE", "ORDERS"),
+                    ("CHILD_COLUMN", "ORDER_ID"),
+                    ("PARENT_COLUMN", "ID"),
+                    ("COLUMN_POSITION", "1"),
+                ]),
+                cell_row(&[
+                    ("CHILD_OWNER", "HR"),
+                    ("CHILD_TABLE", "ORDER_LINES"),
+                    ("CONSTRAINT_NAME", "ORDER_LINES_ORDER_FK"),
+                    ("PARENT_OWNER", "HR"),
+                    ("PARENT_TABLE", "ORDERS"),
+                    ("CHILD_COLUMN", "ORDER_REGION"),
+                    ("PARENT_COLUMN", "REGION"),
+                    ("COLUMN_POSITION", "2"),
+                ]),
+            ])
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn orient_schema_and_fks_return_bounded_synthetic_topology() {
+        let mock = OrientMock::default();
+        let conn = &mock;
+        let (schema, foreign_keys) = run_with_cx(|cx| async move {
+            let schema = orient_schema(&cx, conn, Some("hr"), 25)
+                .await
+                .expect("schema map");
+            let foreign_keys = orient_fks(&cx, conn, Some("hr"), 1)
+                .await
+                .expect("foreign-key topology");
+            (schema, foreign_keys)
+        });
+
+        assert_eq!(
+            schema,
+            vec![
+                OrientSchemaObject {
+                    owner: "HR".to_owned(),
+                    object_name: "CUSTOMERS".to_owned(),
+                    object_type: "TABLE".to_owned(),
+                },
+                OrientSchemaObject {
+                    owner: "HR".to_owned(),
+                    object_name: "ORDERS".to_owned(),
+                    object_type: "TABLE".to_owned(),
+                },
+                OrientSchemaObject {
+                    owner: "HR".to_owned(),
+                    object_name: "ORDER_REPORT".to_owned(),
+                    object_type: "VIEW".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(foreign_keys.len(), 1, "one capped FK edge");
+        assert_eq!(foreign_keys[0].constraint_name, "ORDER_LINES_ORDER_FK");
+        assert_eq!(foreign_keys[0].child_owner, "HR");
+        assert_eq!(foreign_keys[0].child_table, "ORDER_LINES");
+        assert_eq!(foreign_keys[0].parent_owner, "HR");
+        assert_eq!(foreign_keys[0].parent_table, "ORDERS");
+        assert_eq!(
+            foreign_keys[0].columns,
+            vec![
+                OrientForeignKeyColumn {
+                    position: 1,
+                    child_column: "ORDER_ID".to_owned(),
+                    parent_column: "ID".to_owned(),
+                },
+                OrientForeignKeyColumn {
+                    position: 2,
+                    child_column: "ORDER_REGION".to_owned(),
+                    parent_column: "REGION".to_owned(),
+                },
+            ],
+            "the cap is on constraints, so a composite FK remains complete"
+        );
+
+        let calls = mock.calls.lock().expect("orient mock lock");
+        assert_eq!(
+            calls.len(),
+            2,
+            "schema map and FK topology are separate reads"
+        );
+        let schema_call = calls
+            .iter()
+            .find(|(sql, _)| sql.contains("FROM all_objects"))
+            .expect("ALL_OBJECTS schema-map read");
+        assert!(schema_call.0.contains("ROWNUM <= :2"));
+        assert_eq!(
+            schema_call.1,
+            vec![OracleBind::String("HR".to_owned()), OracleBind::I64(25)],
+            "schema owner is upper-cased and bound positionally"
+        );
+
+        let fk_call = calls
+            .iter()
+            .find(|(sql, _)| sql.contains("FROM all_constraints child"))
+            .expect("ALL_CONSTRAINTS FK read");
+        assert!(fk_call.0.contains("JOIN all_constraints parent"));
+        assert!(fk_call.0.contains("JOIN all_cons_columns child_columns"));
+        assert!(fk_call.0.contains("JOIN all_cons_columns parent_columns"));
+        assert!(
+            fk_call
+                .0
+                .contains("parent_columns.position = child_columns.position"),
+            "child and parent columns must be joined by their key position"
+        );
+        assert!(fk_call.0.contains("ROWNUM <= :2"));
+        assert_eq!(
+            fk_call.1,
+            vec![OracleBind::String("HR".to_owned()), OracleBind::I64(1)],
+            "FK owner and cap are positional binds"
+        );
     }
 
     #[async_trait::async_trait(?Send)]
