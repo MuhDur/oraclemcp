@@ -432,18 +432,22 @@ class Ladder:
             self.session.notify("notifications/initialized")
             return {"server_version": server.get("version")}
 
-        def read_only_banner():
+        def read_only_server_version():
             import re
 
-            rows = self.query_rows("SELECT banner FROM v$version")
-            require(rows, "v$version returns at least one row", rows)
-            banner = str(rows[0].get("BANNER", ""))
+            connection = structured(self.session.call("oracle_connection_info", {}))
             require(
-                re.search(self.args.banner_regex, banner),
-                f"banner matches /{self.args.banner_regex}/",
-                banner,
+                connection.get("connected") is True,
+                "connection metadata confirms the served profile is live",
+                connection,
             )
-            return {"banner": banner}
+            version = str((connection.get("connection") or {}).get("server_version") or "")
+            require(
+                re.search(self.args.server_version_regex, version),
+                f"server version matches /{self.args.server_version_regex}/",
+                version,
+            )
+            return {"server_version": version}
 
         def read_only_arithmetic():
             rows = self.query_rows("SELECT 6*7 AS answer, 'ladder' AS tag FROM dual")
@@ -1326,7 +1330,7 @@ class Ladder:
 
         steps = [
             ("session_initialize", session_initialize),
-            ("read_only_banner", read_only_banner),
+            ("read_only_server_version", read_only_server_version),
             ("read_only_arithmetic", read_only_arithmetic),
             ("read_only_write_refused", read_only_write_refused),
             (
@@ -1561,7 +1565,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True)
     parser.add_argument("--profile", required=True)
-    parser.add_argument("--banner-regex", required=True)
+    parser.add_argument("--server-version-regex", required=True)
     parser.add_argument("--table", required=True)
     parser.add_argument("--evidence", required=True)
     # A READ_ONLY-ceiling sibling profile (same lane DSN) for the

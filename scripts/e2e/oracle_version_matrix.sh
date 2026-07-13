@@ -5,7 +5,7 @@
 #
 # Per lane, against the REAL binary:
 #   1. --json doctor --online --profile <lane>   (connectivity green)
-#   2. READ_ONLY   : row-VALUE assertions (v$version banner, arithmetic) and
+#   2. READ_ONLY   : live connection-version metadata and row-VALUE arithmetic
 #                    a structured OPERATING_LEVEL_TOO_LOW refusal for INSERT
 #   3. READ_WRITE  : preview verdict -> session-level grant -> elevation;
 #                    DML rollback-by-default proven, then governed commit,
@@ -33,7 +33,7 @@
 # Optional overrides:
 #   ORACLE_MATRIX_<LANE>_DSN          (defaults: localhost:1518/XEPDB1,
 #                                         localhost:1520/XEPDB1, localhost:1522/FREEPDB1)
-#   ORACLE_MATRIX_<LANE>_BANNER_REGEX (defaults pin the lane's Oracle release)
+#   ORACLE_MATRIX_<LANE>_SERVER_VERSION_REGEX (defaults pin the lane's Oracle release)
 #   ORACLE_MATRIX_LANE_TIMEOUT_SECS   (default 900: per-lane wall-clock ceiling
 #                                         on the ladder session — a hung lane
 #                                         fails the lane instead of hanging
@@ -115,14 +115,13 @@ lane_password() {
   esac
 }
 
-lane_banner_regex() {
+lane_server_version_regex() {
   case "$1" in
-    xe18) printf '%s\n' "${ORACLE_MATRIX_XE18_BANNER_REGEX:-Oracle Database 18c Express Edition}" ;;
-    xe21) printf '%s\n' "${ORACLE_MATRIX_XE21_BANNER_REGEX:-Oracle Database 21c Express Edition}" ;;
-    # gvenzl/oracle-free:23 images report "Oracle Database 23ai Free Release 23…"
-    # (newer builds re-brand as "Oracle AI Database 26ai Free Release 23.26…");
-    # both pin release 23 — the regression bar for the 23ai lane.
-    free23) printf '%s\n' "${ORACLE_MATRIX_FREE23_BANNER_REGEX:-Free Release 23\\.}" ;;
+    xe18) printf '%s\n' "${ORACLE_MATRIX_XE18_SERVER_VERSION_REGEX:-^18\\.}" ;;
+    xe21) printf '%s\n' "${ORACLE_MATRIX_XE21_SERVER_VERSION_REGEX:-^21\\.}" ;;
+    # FREE 23ai currently reports its exact patch level (for example 23.26.1.0.0)
+    # through oracle_connection_info. Pin the release line, not a mutable banner.
+    free23) printf '%s\n' "${ORACLE_MATRIX_FREE23_SERVER_VERSION_REGEX:-^23\\.}" ;;
   esac
 }
 
@@ -207,11 +206,11 @@ run_lane() {
   # local `set +e` / `set -e` pairs around doctor/ladder still toggle correctly.
   set -e
   local lane="$1"
-  local dsn user password banner_regex
+  local dsn user password server_version_regex
   dsn="$(lane_dsn "$lane")"
   user="$(lane_user "$lane")"
   password="$(lane_password "$lane")"
-  banner_regex="$(lane_banner_regex "$lane")"
+  server_version_regex="$(lane_server_version_regex "$lane")"
 
   local lane_dir="$matrix_dir/$lane"
   local state_dir="$lane_dir/state"
@@ -335,7 +334,7 @@ BADTOOL
   set +e
   timeout -k 15 "$lane_timeout_secs" \
     python3 "$ROOT/scripts/e2e/oracle_ladder_session.py" \
-    --binary "$BINARY" --profile "$lane" --banner-regex "$banner_regex" \
+    --binary "$BINARY" --profile "$lane" --server-version-regex "$server_version_regex" \
     --ro-profile "$ro_profile" --custom-tool matrix_ro_probe \
     --table "$table" --evidence "$evidence" "${vector_smoke_args[@]}" >"$lane_dir/ladder_stdout.txt"
   local ladder_status=$?
@@ -368,7 +367,7 @@ BADTOOL
   set +e
   timeout -k 15 "$lane_timeout_secs" \
     python3 "$ROOT/scripts/e2e/oracle_ladder_session.py" \
-    --binary "$BINARY" --profile "$lane" --banner-regex "$banner_regex" \
+    --binary "$BINARY" --profile "$lane" --server-version-regex "$server_version_regex" \
     --ro-profile "$ro_profile" --custom-tool matrix_ro_probe \
     --table "$table_r2" --evidence "$evidence_r2" >"$lane_dir/ladder_stdout_r2.txt"
   local resume_status=$?
