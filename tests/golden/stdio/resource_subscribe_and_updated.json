@@ -404,7 +404,7 @@
               "openWorldHint": false,
               "readOnlyHint": true
             },
-            "description": "Diff one proven read-only SELECT across two Oracle SCNs.",
+            "description": "Diff one proven read-only SELECT across two Oracle SCNs, or across two databases.",
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
@@ -412,6 +412,14 @@
                   "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
                   "items": {},
                   "type": "array"
+                },
+                "db_a": {
+                  "description": "Alias for profile_a.",
+                  "type": "string"
+                },
+                "db_b": {
+                  "description": "Alias for profile_b.",
+                  "type": "string"
                 },
                 "key": {
                   "description": "Optional result-column names used to align rows and report changed[]. If omitted, oracle_diff infers a primary key only for a single resolved local table; otherwise it falls back to keyless add/remove.",
@@ -453,13 +461,13 @@
                   "type": "integer"
                 },
                 "max_result_bytes": {
-                  "description": "Maximum compact JSON bytes per SCN page (default 10485760, hard cap 26214400).",
+                  "description": "Maximum compact JSON bytes per compared side (default 10485760, hard cap 26214400).",
                   "maximum": 26214400,
                   "minimum": 1,
                   "type": "integer"
                 },
                 "max_rows": {
-                  "description": "Maximum rows compared from each SCN page (default 200, hard cap 5000).",
+                  "description": "Maximum rows compared from each side (default 200, hard cap 5000).",
                   "maximum": 5000,
                   "minimum": 1,
                   "type": "integer"
@@ -468,18 +476,26 @@
                   "description": "Emit numeric values as JSON numbers where possible. Default false preserves Oracle NUMBER losslessly as strings.",
                   "type": "boolean"
                 },
+                "profile_a": {
+                  "description": "Connection profile for side A. Supplying profile_a and profile_b selects cross-database mode: the same proven read runs against two databases (e.g. prod vs staging), each classified against its own catalog and masked under its own egress policy. Only profiles this server exposes can be named.",
+                  "type": "string"
+                },
+                "profile_b": {
+                  "description": "Connection profile for side B. See profile_a.",
+                  "type": "string"
+                },
                 "scn_a": {
-                  "description": "Earlier or baseline system change number.",
+                  "description": "System change number for side A. Required with scn_b when comparing one database at two points in time; optional in cross-database mode, where it pins side A to a flashback read instead of the current committed state.",
                   "minimum": 1,
                   "type": "integer"
                 },
                 "scn_b": {
-                  "description": "Later or comparison system change number.",
+                  "description": "System change number for side B. See scn_a.",
                   "minimum": 1,
                   "type": "integer"
                 },
                 "sql": {
-                  "description": "A single read-only SELECT/WITH. The same proven SQL is run twice through DBMS_FLASHBACK at scn_a and scn_b.",
+                  "description": "A single read-only SELECT/WITH. The same proven SQL is run on both compared sides; it is classified as a read against each database it runs on.",
                   "type": "string"
                 },
                 "timeout_seconds": {
@@ -490,9 +506,7 @@
                 }
               },
               "required": [
-                "sql",
-                "scn_a",
-                "scn_b"
+                "sql"
               ],
               "type": "object"
             },
@@ -501,7 +515,7 @@
               "additionalProperties": false,
               "properties": {
                 "added": {
-                  "description": "Rows present at scn_b but not at scn_a.",
+                  "description": "Rows present on side B but not on side A.",
                   "items": {
                     "additionalProperties": {
                       "description": "Serialized Oracle cell value. Oracle NUMBER values are strings by default for lossless precision; JSON numbers are used only for binary float/double or numbers_as_float=true.",
@@ -655,7 +669,7 @@
                   "type": "object"
                 },
                 "removed": {
-                  "description": "Rows present at scn_a but not at scn_b.",
+                  "description": "Rows present on side A but not on side B.",
                   "items": {
                     "additionalProperties": {
                       "description": "Serialized Oracle cell value. Oracle NUMBER values are strings by default for lossless precision; JSON numbers are used only for binary float/double or numbers_as_float=true.",
@@ -694,8 +708,40 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "source_a": {
+                  "additionalProperties": false,
+                  "description": "Where side A was read from.",
+                  "properties": {
+                    "profile": {
+                      "description": "Connection profile this side was read from, for a cross-database diff.",
+                      "type": "string"
+                    },
+                    "scn": {
+                      "description": "System change number this side was read as of, when it was a flashback read.",
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                },
+                "source_b": {
+                  "additionalProperties": false,
+                  "description": "Where side B was read from.",
+                  "properties": {
+                    "profile": {
+                      "description": "Connection profile this side was read from, for a cross-database diff.",
+                      "type": "string"
+                    },
+                    "scn": {
+                      "description": "System change number this side was read as of, when it was a flashback read.",
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                },
                 "truncated": {
-                  "description": "True when either flashback page hit a row/byte cap before all rows were compared.",
+                  "description": "True when either compared page hit a row/byte cap before all rows were compared.",
                   "type": "boolean"
                 }
               },
@@ -869,6 +915,42 @@
             },
             "name": "oracle_search_objects",
             "title": "Oracle Search Objects"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "idempotentHint": true,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "description": "Return one bounded, cacheable orientation snapshot for a visible schema: object map, complete foreign-key topology, hot-object/freshness evidence, and recent DDL. Dictionary reads are parameterized and read-only; include selects schema, fks, hot, freshness, and/or ddl (all by default).",
+            "inputSchema": {
+              "additionalProperties": false,
+              "properties": {
+                "include": {
+                  "description": "Optional sections to return. Defaults to every section; ddl selects the recent_ddl field.",
+                  "items": {
+                    "enum": [
+                      "schema",
+                      "fks",
+                      "hot",
+                      "freshness",
+                      "ddl"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "owner": {
+                  "description": "Optional schema owner (case-insensitive). Omit or use * for all visible schemas.",
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            "name": "oracle_orient",
+            "title": "Oracle Orient"
           },
           {
             "annotations": {

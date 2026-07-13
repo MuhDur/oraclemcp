@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 56] = [
+pub const TOOL_NAMES: [&str; 57] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -33,6 +33,7 @@ pub const TOOL_NAMES: [&str; 56] = [
     "oracle_list_schemas",
     "oracle_schema_inspect",
     "oracle_search_objects",
+    "oracle_orient",
     "oracle_describe",
     "oracle_describe_index",
     "oracle_describe_trigger",
@@ -804,6 +805,21 @@ pub fn tool_registry() -> ToolRegistry {
                 "detail": { "type": "string", "description": "Alias for detail_level." },
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum objects to return (default 100, hard cap 5000)." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." }
+            }),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_orient",
+            ToolTier::FoundationLiveDb,
+            "Return one bounded, cacheable orientation snapshot for a visible schema: object map, complete foreign-key topology, hot-object/freshness evidence, and recent DDL. Dictionary reads are parameterized and read-only; include selects schema, fks, hot, freshness, and/or ddl (all by default).",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Omit or use * for all visible schemas." },
+                "include": { "type": "array", "items": { "type": "string", "enum": ["schema", "fks", "hot", "freshness", "ddl"] }, "description": "Optional sections to return. Defaults to every section; ddl selects the recent_ddl field." }
             }),
             &[],
         )),
@@ -2145,6 +2161,7 @@ mod tests {
                 "oracle_schema_inspect",
                 &["owner", "object_type", "name_like", "max_rows", "limit"],
             ),
+            ("oracle_orient", &["owner", "include"]),
             ("oracle_list_schemas", &["name_like", "max_rows", "limit"]),
             ("oracle_describe", &["owner", "table", "table_name", "name"]),
             ("describe_table", &["owner", "table", "table_name", "name"]),
