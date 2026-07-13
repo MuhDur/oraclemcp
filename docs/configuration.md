@@ -248,6 +248,32 @@ not matched by a rule is masked rather than passed through.
 | `salt_ref` | string | none | Non-secret salt id/reference. Required when any rule uses `action = "tokenize"`; raw salt material is not stored in the profile. |
 | `[[profiles.masking.rules]]` | array | `[]` | Ordered masking rules; first match wins. |
 
+Every `tokenize` rule must resolve one exact active record from the private
+`$XDG_STATE_HOME/oraclemcp/masking-salts.json` state file (or
+`$HOME/.local/state/oraclemcp/masking-salts.json` without XDG). The file must
+be mode `0600` or stricter. A missing, malformed, duplicate, retired, or
+non-matching record makes startup/profile switching refuse; the server never
+silently substitutes `"<masked>"` for a configured tokenization policy.
+
+```json
+{
+  "kind": "oraclemcp.masking_salts.v1",
+  "salts": [{
+    "profile": "prod",
+    "salt_id": "profile:prod:masking:v1",
+    "created_at": "2026-07-13T00:00:00Z",
+    "salt_b64": "base64url-no-pad-32-random-bytes",
+    "status": "active"
+  }]
+}
+```
+
+`profile` and `salt_id` must exactly match the selected profile and configured
+`salt_ref`. The raw `salt_b64` is never emitted in MCP, audit, diagnostics, or
+mask certificates; certificates carry only `salt_id`. Rotation appends a new
+active record for the new `salt_ref` and marks the prior one `retired`; new
+served sessions then produce a new, non-linkable token scope.
+
 Rule fields:
 
 | Field | Type | Effect |

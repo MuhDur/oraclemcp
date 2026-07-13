@@ -115,6 +115,37 @@ EOF
   fi
 }
 
+write_token_profile() {
+  local path="$1" audit_path="$2" profile_name="$3" salt_ref="$4"
+  cat >"$path" <<EOF
+schema_version = 2
+default_profile = "$profile_name"
+
+[audit]
+path = "$audit_path"
+key_id = "served-egress-e2e"
+key_ref = "env:ORACLEMCP_AUDIT_KEY"
+
+[[profiles]]
+name = "$profile_name"
+description = "served egress tokenization E2E profile"
+connect_string = "$ORACLEMCP_SERVED_EGRESS_DSN"
+username = "$ORACLEMCP_SERVED_EGRESS_USER"
+credential_ref = "env:E2E_SERVED_EGRESS_PASSWORD"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
+
+[profiles.masking]
+mask_unknown_default = true
+salt_ref = "$salt_ref"
+
+[[profiles.masking.rules]]
+column_match = { column = "TOKEN_VALUE" }
+action = "tokenize"
+tag = "e2e.served-egress.token"
+EOF
+}
+
 cd "$ROOT"
 e2e_log_event "scenario_start" "setup" "running" 0 "served MCP result-masking and profile non-inference proof"
 
@@ -160,9 +191,21 @@ hidden_config="$run_dir/with-hidden.toml"
 baseline_config="$run_dir/visible-only.toml"
 hidden_audit="$run_dir/with-hidden-audit.jsonl"
 baseline_audit="$run_dir/visible-only-audit.jsonl"
+token_v1_config="$run_dir/token-v1.toml"
+token_v1_audit="$run_dir/token-v1-audit.jsonl"
+token_alt_config="$run_dir/token-alt.toml"
+token_alt_audit="$run_dir/token-alt-audit.jsonl"
+token_v2_config="$run_dir/token-v2.toml"
+token_v2_audit="$run_dir/token-v2-audit.jsonl"
+missing_salt_config="$run_dir/missing-salt.toml"
+missing_salt_audit="$run_dir/missing-salt-audit.jsonl"
 evidence="$run_dir/evidence.jsonl"
 write_profile "$hidden_config" "$hidden_audit" 1
 write_profile "$baseline_config" "$baseline_audit" 0
+write_token_profile "$token_v1_config" "$token_v1_audit" "egress_visible" "profile:egress_visible:masking:v1"
+write_token_profile "$token_alt_config" "$token_alt_audit" "egress_alternate" "profile:egress_alternate:masking:v1"
+write_token_profile "$token_v2_config" "$token_v2_audit" "egress_visible" "profile:egress_visible:masking:v2"
+write_token_profile "$missing_salt_config" "$missing_salt_audit" "egress_missing_salt" "profile:egress_missing_salt:masking:v1"
 
 export ORACLEMCP_AUDIT_KEY="$audit_key"
 export E2E_SERVED_EGRESS_PASSWORD="$ORACLEMCP_SERVED_EGRESS_PASSWORD"
@@ -174,6 +217,10 @@ timeout -k 15 180 python3 "$ROOT/scripts/e2e/served_egress_session.py" \
   --baseline-config "$baseline_config" \
   --hidden-audit "$hidden_audit" \
   --baseline-audit "$baseline_audit" \
+  --token-v1-config "$token_v1_config" \
+  --token-alt-config "$token_alt_config" \
+  --token-v2-config "$token_v2_config" \
+  --missing-salt-config "$missing_salt_config" \
   --state-home "$run_dir/state" \
   --evidence "$evidence" \
   --server-stderr-dir "$run_dir/server-stderr"
@@ -184,5 +231,5 @@ if [ "$status" -ne 0 ]; then
   e2e_finish_fail "served egress MCP scenario failed"
 fi
 
-e2e_log_event "served_egress" "assert" "pass" 0 "raw wire masking, certificate re-derivation, and hidden-profile non-inference passed"
+e2e_log_event "served_egress" "assert" "pass" 0 "raw wire masking, served token scope/rotation, certificate re-derivation, and hidden-profile non-inference passed"
 e2e_finish_pass

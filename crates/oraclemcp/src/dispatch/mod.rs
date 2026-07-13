@@ -23,6 +23,7 @@ mod refusal_corpus;
 use crate::cost_budget::{
     QueryCostBudgetAdmission, QueryCostBudgetStore, QueryCostBudgetStoreError,
 };
+use crate::masking_salts::{MaskingSaltLoadError, load_active_profile_masking_salt};
 use refusal_corpus::RefusalCorpusWriter;
 
 use asupersync::combinator::try_commit_section;
@@ -306,14 +307,29 @@ fn standalone_read_only_policy() -> ProfileDispatchPolicy {
 }
 
 /// Convert the validated profile config DTO into the DB-layer result masking
-/// transformer. Tokenization salt material is resolved by the later salt-store
-/// seam; until then tokenize rules degrade fail-closed to `mask` in
-/// `oraclemcp-db`.
-#[must_use]
+/// transformer. A configured tokenization rule is admitted only with the one
+/// exact active state-file salt; an unavailable salt refuses policy loading
+/// before a served query can silently collapse tokens to `mask`.
 pub fn result_masking_policy_from_profile(
     profile: &ConnectionProfile,
-) -> Option<ResultMaskingPolicy> {
-    let masking = profile.masking.as_ref()?;
+) -> Result<Option<ResultMaskingPolicy>, MaskingSaltLoadError> {
+    let Some(masking) = profile.masking.as_ref() else {
+        return Ok(None);
+    };
+    let has_tokenize_rule = masking
+        .rules
+        .iter()
+        .any(|rule| rule.action == oraclemcp_config::ResultMaskingActionConfig::Tokenize);
+    let token_salt = if has_tokenize_rule {
+        let Some(salt_ref) = masking.salt_ref.as_deref() else {
+            // Config validation normally catches this, but the runtime seam
+            // must remain fail-closed when an embedder constructs a DTO.
+            return Err(MaskingSaltLoadError::ActiveSaltUnavailable);
+        };
+        Some(load_active_profile_masking_salt(&profile.name, salt_ref)?)
+    } else {
+        None
+    };
     let rules = masking
         .rules
         .iter()
@@ -349,7 +365,22 @@ pub fn result_masking_policy_from_profile(
             }
         })
         .collect();
-    Some(ResultMaskingPolicy::new(rules, masking.mask_unknown_default).with_profile(&profile.name))
+    let policy =
+        ResultMaskingPolicy::new(rules, masking.mask_unknown_default).with_profile(&profile.name);
+    Ok(match token_salt {
+        Some(salt) => Some(policy.with_token_salt(salt)),
+        None => Some(policy),
+    })
+}
+
+fn result_masking_policy_error(profile: &str, error: MaskingSaltLoadError) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::RuntimeStateRequired,
+        format!("result masking cannot load an active tokenization salt for profile `{profile}`: {error}"),
+    )
+    .with_next_step(
+        "install one private active masking-salt state record matching this profile's configured salt_ref",
+    )
 }
 
 fn profile_dispatch_policy(
@@ -381,7 +412,8 @@ fn profile_dispatch_policy(
         request_timeout: profile_request_timeout(profile.call_timeout_seconds),
         max_query_cost: profile.max_query_cost,
         cumulative_query_cost_budget: profile.cumulative_query_cost_budget.clone(),
-        result_masking: result_masking_policy_from_profile(profile),
+        result_masking: result_masking_policy_from_profile(profile)
+            .map_err(|error| result_masking_policy_error(&profile.name, error))?,
         // Arc N: a configured policy now GOVERNS this profile's dispatch path.
         // It is validated at config load and can only ever restrict.
         sql_policy: profile.sql_policy.clone(),

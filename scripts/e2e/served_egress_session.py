@@ -8,6 +8,7 @@ the client, not a reconstructed result object.
 """
 
 import argparse
+import base64
 import json
 import os
 import queue
@@ -23,6 +24,7 @@ from pathlib import Path
 MASKED_VALUE = "<masked>"
 VISIBLE_PROFILE = "egress_visible"
 HIDDEN_PROFILE = "egress_hidden"
+ALTERNATE_PROFILE = "egress_alternate"
 
 
 class StepFailure(Exception):
@@ -113,11 +115,11 @@ class Harness:
 class McpSession:
     """One actual stdio client connection to an actual oraclemcp process."""
 
-    def __init__(self, binary, config, state_home, stderr_path):
+    def __init__(self, binary, config, state_home, stderr_path, profile=VISIBLE_PROFILE):
         self.stderr = open(stderr_path, "a", encoding="utf-8")
         self.stderr_path = stderr_path
         self.proc = subprocess.Popen(
-            [binary, "serve", "--profile", VISIBLE_PROFILE, "--allow-no-auth"],
+            [binary, "serve", "--profile", profile, "--allow-no-auth"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -273,20 +275,46 @@ class ServedEgressScenario:
         self.harness.evidence_line(name, "pass", detail)
         return detail
 
-    def with_session(self, config, state_label, body):
+    def with_session(self, config, state_label, body, profile=VISIBLE_PROFILE, salt_records=None):
         state_home = Path(self.args.state_home) / state_label
         state_home.mkdir(parents=True, exist_ok=True)
+        if salt_records is not None:
+            write_masking_salt_state(state_home, salt_records)
         session = McpSession(
             self.args.binary,
             config,
             state_home,
             str(Path(self.args.server_stderr_dir) / f"{state_label}.stderr"),
+            profile,
         )
         try:
             session.initialize()
             return body(session, state_home)
         finally:
             session.close()
+
+    def token_from_served_query(self, session, marker, suffix, expected_salt_id):
+        result, raw = session.call(
+            "oracle_query",
+            {"sql": f"SELECT '{marker}' AS TOKEN_VALUE FROM dual{suffix}"},
+        )
+        content = structured(result, "oracle_query")
+        require(marker.encode() not in raw.encode(), "tokenized synthetic literal is absent from actual response bytes")
+        rows = content.get("rows")
+        require(isinstance(rows, list) and len(rows) == 1, "tokenized served query returns one real DUAL row")
+        token = rows[0].get("TOKEN_VALUE")
+        require(isinstance(token, str) and token.startswith("tok_v1_"), "served tokenization returns a non-reversible token")
+        require(token != MASKED_VALUE, "configured tokenization does not silently degrade to the mask marker")
+        certificate = content.get("mask_certificate")
+        require(isinstance(certificate, dict), "tokenized served result carries a masking certificate")
+        decision = decision_for(certificate, "TOKEN_VALUE")
+        require(
+            isinstance(decision, dict)
+            and decision.get("action") == "tokenize"
+            and decision.get("salt_id") == expected_salt_id,
+            "certificate carries the configured non-secret salt scope",
+        )
+        return token
 
     def run(self):
         nonce = uuid.uuid4().hex
@@ -395,6 +423,117 @@ class ServedEgressScenario:
             {"count_equal_with_and_without_hidden_profile": True},
         )
 
+        token_marker = f"synthetic_mcp_token_{uuid.uuid4().hex}"
+        distinct_marker = f"synthetic_mcp_token_other_{uuid.uuid4().hex}"
+        v1_salt_id = "profile:egress_visible:masking:v1"
+        alt_salt_id = "profile:egress_alternate:masking:v1"
+        v2_salt_id = "profile:egress_visible:masking:v2"
+        v1_material = os.urandom(32)
+        alternate_material = os.urandom(32)
+        v2_material = os.urandom(32)
+        v1_token = None
+
+        def served_token_scope_proof():
+            def body(session, _state_home):
+                nonlocal v1_token
+                first = self.token_from_served_query(session, token_marker, "", v1_salt_id)
+                second = self.token_from_served_query(session, token_marker, " WHERE 1 = 1", v1_salt_id)
+                different = self.token_from_served_query(session, distinct_marker, "", v1_salt_id)
+                require(first == second, "equal values from distinct served queries have the same client-join token")
+                require(first != different, "different values do not share a token")
+                v1_token = first
+                return {"same_value_join_token_matches": True, "distinct_value_token_differs": True}
+
+            return self.with_session(
+                self.args.token_v1_config,
+                "token-v1",
+                body,
+                salt_records=[(VISIBLE_PROFILE, v1_salt_id, v1_material)],
+            )
+
+        self.run_step("served_tokenization_join_consistency", served_token_scope_proof)
+
+        def alternate_scope_proof():
+            def body(session, _state_home):
+                return self.token_from_served_query(session, token_marker, "", alt_salt_id)
+
+            return self.with_session(
+                self.args.token_alt_config,
+                "token-alternate",
+                body,
+                profile=ALTERNATE_PROFILE,
+                salt_records=[(ALTERNATE_PROFILE, alt_salt_id, alternate_material)],
+            )
+
+        alternate_token = self.run_step("served_tokenization_scope_separation", alternate_scope_proof)
+        require(v1_token is not None and alternate_token != v1_token, "different profile salt scopes produce different client-visible tokens")
+
+        def rotation_proof():
+            def body(session, _state_home):
+                return self.token_from_served_query(session, token_marker, "", v2_salt_id)
+
+            return self.with_session(
+                self.args.token_v2_config,
+                "token-v2",
+                body,
+                salt_records=[(VISIBLE_PROFILE, v2_salt_id, v2_material)],
+            )
+
+        rotated_token = self.run_step("served_tokenization_rotation", rotation_proof)
+        require(
+            rotated_token != v1_token,
+            "rotating the active profile salt produces a different client-visible token",
+        )
+
+        def missing_salt_refusal():
+            state_home = Path(self.args.state_home) / "missing-salt"
+            state_home.mkdir(parents=True, exist_ok=True)
+            result = subprocess.run(
+                [self.args.binary, "serve", "--profile", "egress_missing_salt", "--allow-no-auth"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+                env=server_env(self.args.missing_salt_config, state_home),
+            )
+            require(result.returncode == 2, "served startup refuses a configured token rule without an active salt")
+            require(not result.stdout.strip(), "missing-salt refusal emits no MCP result envelope")
+            return {"missing_token_salt_refused_before_serving": True}
+
+        self.run_step("served_tokenization_missing_salt_refusal", missing_salt_refusal)
+
+
+def write_masking_salt_state(state_home, records):
+    """Install private run-local state without emitting raw key material."""
+
+    state_dir = Path(state_home) / "oraclemcp"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(state_dir, 0o700)
+    except OSError as error:
+        raise StepFailure("could not secure run-local masking salt state directory") from error
+    document = {
+        "kind": "oraclemcp.masking_salts.v1",
+        "salts": [
+            {
+                "profile": profile,
+                "salt_id": salt_id,
+                "created_at": now_iso(),
+                "salt_b64": base64.urlsafe_b64encode(material).rstrip(b"=").decode("ascii"),
+                "status": "active",
+            }
+            for profile, salt_id, material in records
+        ],
+    }
+    path = state_dir / "masking-salts.json"
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, separators=(",", ":"))
+    except OSError as error:
+        raise StepFailure("could not write run-local masking salt state") from error
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -403,11 +542,22 @@ def parse_args():
     parser.add_argument("--baseline-config", required=True)
     parser.add_argument("--hidden-audit", required=True)
     parser.add_argument("--baseline-audit", required=True)
+    parser.add_argument("--token-v1-config", required=True)
+    parser.add_argument("--token-alt-config", required=True)
+    parser.add_argument("--token-v2-config", required=True)
+    parser.add_argument("--missing-salt-config", required=True)
     parser.add_argument("--state-home", required=True)
     parser.add_argument("--evidence", required=True)
     parser.add_argument("--server-stderr-dir", required=True)
     args = parser.parse_args()
-    for config in (args.hidden_config, args.baseline_config):
+    for config in (
+        args.hidden_config,
+        args.baseline_config,
+        args.token_v1_config,
+        args.token_alt_config,
+        args.token_v2_config,
+        args.missing_salt_config,
+    ):
         if not Path(config).is_file():
             parser.error(f"runtime config is missing: {config}")
     Path(args.server_stderr_dir).mkdir(parents=True, exist_ok=True)

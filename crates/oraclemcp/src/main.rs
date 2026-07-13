@@ -749,7 +749,12 @@ fn select_runtime_profile_from_config(
         request_timeout: ctx.options.call_timeout,
         max_query_cost: chosen.max_query_cost,
         cumulative_query_cost_budget: chosen.cumulative_query_cost_budget.clone(),
-        result_masking: result_masking_policy_from_profile(chosen),
+        result_masking: result_masking_policy_from_profile(chosen).map_err(|error| {
+            DbError::UnsupportedAuth(format!(
+                "failed to load result masking policy for profile `{}`: {error}",
+                chosen.name
+            ))
+        })?,
         sql_policy: chosen.sql_policy.clone(),
         require_signed_tools: chosen.require_signed_tools(),
     }))
@@ -2149,9 +2154,17 @@ async fn open_lane_runtime_connections(
                 request_timeout: resolved.opts.call_timeout,
                 max_query_cost: resolved.max_query_cost,
                 cumulative_query_cost_budget: resolved.cumulative_query_cost_budget.clone(),
-                result_masking: config
-                    .profile(&resolved.name)
-                    .and_then(result_masking_policy_from_profile),
+                result_masking: match config.profile(&resolved.name) {
+                    Some(profile) => {
+                        result_masking_policy_from_profile(profile).map_err(|error| {
+                            DbError::UnsupportedAuth(format!(
+                                "failed to load result masking policy for profile `{}`: {error}",
+                                resolved.name
+                            ))
+                        })?
+                    }
+                    None => None,
+                },
                 sql_policy: config
                     .profile(&resolved.name)
                     .and_then(|profile| profile.sql_policy.clone()),

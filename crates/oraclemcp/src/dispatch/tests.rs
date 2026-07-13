@@ -4046,6 +4046,7 @@ fn profile_result_masking_policy_flows_into_query_serialization_fail_closed() {
     )
     .expect("valid masking config");
     let policy = result_masking_policy_from_profile(cfg.profile("prod").expect("profile"))
+        .expect("runtime masking policy loads")
         .expect("runtime masking policy");
     let args: QueryArgs = serde_json::from_value(json!({
         "sql": "SELECT email, ssn FROM customers"
