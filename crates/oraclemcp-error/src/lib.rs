@@ -159,6 +159,10 @@ pub enum ReasonCategory {
     /// second `CREATE EDITION … AS CHILD OF …`, the condition Oracle reports as
     /// ORA-38807. The wire value is `ONE_CHILD_EDITION`.
     OneChildEdition,
+    /// An edition workflow was asked to stage a table or data change. Editions
+    /// isolate only editionable objects; table and data state remain shared
+    /// across every edition. The wire value is `NOT_EDITIONABLE`.
+    NotEditionable,
     /// A refusal that does not fit the categories above.
     Other,
 }

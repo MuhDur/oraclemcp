@@ -6341,6 +6341,29 @@ fn one_child_edition_error() -> ErrorEnvelope {
     )
 }
 
+/// Refuse an edition-scoped source change that would falsely imply table or
+/// data isolation. This is deliberately narrower than ordinary `oracle_execute`:
+/// a normal, governed table migration remains a DDL/DML operation, but it must
+/// never be represented as an edition stage.
+fn not_editionable_error(object_type: &str) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::ForbiddenStatement,
+        format!(
+            "edition stage refused: {object_type} is not editionable; an edition isolates editionable program units and views, never tables or data"
+        ),
+    )
+    .with_structured_reason(
+        StructuredReason::new(ReasonCategory::NotEditionable)
+            .with_offending_construct(format!("non-editionable object type {object_type}"))
+            .with_minimal_rewrite(
+                "stage an editionable view, synonym, or PL/SQL unit; plan table and data changes as a separate governed migration",
+            ),
+    )
+    .with_next_step(
+        "edition flips redirect new sessions to editionable definitions only; table definitions and data remain shared, so apply their governed DDL/DML independently rather than claiming they are staged",
+    )
+}
+
 fn reserve_edition_child_slot(
     parent: &EditionIdentifier,
     active_profile: Option<&str>,
@@ -8822,6 +8845,9 @@ async fn compile_object_inner(
     let (owner, object_name) =
         owner_and_name_arg(cx, conn, args.owner, object_name, "name").await?;
     let object_type = normalize_compile_type_for_wire(&args.object_type);
+    if object_type == "TABLE" {
+        return Err(not_editionable_error(&object_type));
+    }
     let warnings = args.warnings || tool_name == "compile_with_warnings";
     let statements =
         compile_object_statements(&object_type, &owner, &object_name, args.plscope, warnings)
@@ -9298,6 +9324,12 @@ fn create_or_replace_source_arg(
     let source = required_non_empty_arg(tool_name, "source_code", value)?;
     let normalized = source.trim_start();
     let upper = normalized.to_ascii_uppercase();
+    // Let the normal classifier and DDL ladder inspect a table-shaped source
+    // before the edition-specific refusal below explains why it cannot be a
+    // stage. Ordinary table DDL remains on oracle_execute/deploy_ddl.
+    if upper.starts_with("CREATE TABLE ") || upper.starts_with("CREATE OR REPLACE TABLE ") {
+        return Ok(source);
+    }
     if !upper.starts_with("CREATE OR REPLACE ") {
         return Err(invalid_args(format!(
             "invalid arguments for {tool_name}: source_code must start with CREATE OR REPLACE"
@@ -9336,6 +9368,7 @@ fn normalize_patch_object_type(
     match normalized.as_str() {
         "PACKAGE" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "TYPE" | "VIEW" => Ok(normalized),
         "PACKAGE BODY" | "TYPE BODY" => Ok(normalized),
+        "TABLE" => Err(not_editionable_error("TABLE")),
         _ => Err(invalid_args(format!(
             "invalid arguments for {tool_name}: unsupported object_type {value:?}"
         ))
@@ -10049,6 +10082,12 @@ async fn create_or_replace_inner(
     let decision = DEFAULT_CLASSIFIER.classify(&source);
     let gate = decision.gate(session);
     let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);
+    let upper_source = source.trim_start().to_ascii_uppercase();
+    if upper_source.starts_with("CREATE TABLE ")
+        || upper_source.starts_with("CREATE OR REPLACE TABLE ")
+    {
+        return Err(not_editionable_error("TABLE"));
+    }
     let detected = detect_create_or_replace_object(cx, conn, &source).await;
     let confirm = match (args.execute, decision.required_level, &gate) {
         (false, Some(level), LevelDecision::Allow) if level >= OperatingLevel::Ddl => {

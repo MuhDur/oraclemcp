@@ -4955,6 +4955,81 @@ fn edition_inflight_child_reservation_refuses_a_second_proposal_before_dictionar
 }
 
 #[test]
+fn edition_scoped_source_paths_refuse_table_changes_with_a_typed_explanation_before_db_io() {
+    let state = Arc::new(EditionLifecycleState::default());
+    let dispatcher = edition_lifecycle_dispatcher(Arc::clone(&state));
+
+    for (tool, args) in [
+        (
+            "oracle_create_or_replace",
+            json!({ "source_code": "CREATE TABLE stage_table (id NUMBER)" }),
+        ),
+        (
+            "oracle_patch_source",
+            json!({
+                "name": "stage_table",
+                "object_type": "TABLE",
+                "old_text": "old",
+                "new_text": "new",
+            }),
+        ),
+        (
+            "oracle_compile_object",
+            json!({ "name": "stage_table", "object_type": "TABLE" }),
+        ),
+    ] {
+        let error = dispatcher
+            .dispatch(tool, args)
+            .expect_err("edition-scoped table change must be refused before Oracle");
+        assert_eq!(error.error_class, ErrorClass::ForbiddenStatement, "{tool}");
+        let reason = error
+            .structured_reason
+            .as_ref()
+            .expect("edition refusal must be machine-readable");
+        assert_eq!(reason.category, ReasonCategory::NotEditionable, "{tool}");
+        let wire = serde_json::to_value(&error).expect("serialize typed edition refusal");
+        assert_eq!(
+            wire["structured_reason"]["category"],
+            json!("NOT_EDITIONABLE"),
+            "{tool} must expose a stable wire category"
+        );
+        assert_eq!(
+            reason.offending_construct.as_deref(),
+            Some("non-editionable object type TABLE"),
+            "{tool}"
+        );
+        assert!(
+            reason
+                .minimal_rewrite
+                .as_deref()
+                .is_some_and(|rewrite| rewrite.contains("table and data changes")),
+            "{tool} must explain that table/data work is outside the stage"
+        );
+        assert!(
+            error.message.contains("never tables or data"),
+            "{tool} must state the isolation limit"
+        );
+    }
+
+    assert!(
+        state
+            .queries
+            .lock()
+            .expect("edition query mutex")
+            .is_empty(),
+        "a non-editionable source request must not query Oracle"
+    );
+    assert!(
+        state
+            .executed
+            .lock()
+            .expect("edition execute mutex")
+            .is_empty(),
+        "a non-editionable source request must not execute Oracle DDL"
+    );
+}
+
+#[test]
 fn malformed_and_unauthorized_sql_are_refused_before_any_db_io() {
     let counts = Arc::new(TouchCounts::default());
     let dispatcher = OracleDispatcher::new(Box::new(TouchCountingMock {
@@ -5905,7 +5980,7 @@ fn create_or_replace_rejects_other_sql_shapes() {
     let err = dispatcher
         .dispatch(
             "oracle_create_or_replace",
-            json!({ "source_code": "CREATE TABLE t (id NUMBER)" }),
+            json!({ "source_code": "ALTER TABLE t ADD (id NUMBER)" }),
         )
         .expect_err("non create-or-replace is rejected");
     assert_eq!(err.error_class, ErrorClass::InvalidArguments);
