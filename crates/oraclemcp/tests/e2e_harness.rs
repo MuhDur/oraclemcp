@@ -296,6 +296,62 @@ fn reversible_e2e_dry_run_uses_omcpb_and_reports_a_pass() {
     );
 }
 
+/// Arc H's fleet proof must be in the ordinary e2e sweep and must schedule its
+/// package build through the swarm wrapper. A script left off `run_all.sh` is
+/// not coverage, and a direct Cargo path would bypass the pinned build lane.
+#[test]
+fn fleet_e2e_dry_run_is_registered_and_schedules_omcpb() {
+    let root = repo_root();
+    let output = Command::new("bash")
+        .arg(root.join("scripts/e2e/fleet.sh"))
+        .args(["--log", "--dry-run", "--lane", "xe18", "--lane", "xe21"])
+        .current_dir(&root)
+        .env("ORACLEMCP_E2E_SEED", "4242")
+        .env(
+            "ORACLEMCP_E2E_ARTIFACT_DIR",
+            root.join("target/e2e-contract"),
+        )
+        .env("ORACLEMCP_LIVE_XE", "1")
+        .env("ORACLE_MATRIX_XE18_USER", "e2e_test")
+        .env("ORACLE_MATRIX_XE18_PASSWORD", "not-used-in-dry-run")
+        .env("ORACLE_MATRIX_XE21_USER", "e2e_test")
+        .env("ORACLE_MATRIX_XE21_PASSWORD", "not-used-in-dry-run")
+        .output()
+        .expect("run fleet dry-run");
+    assert!(
+        output.status.success(),
+        "fleet dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    let command_messages = events
+        .iter()
+        .filter(|event| event["event"] == "command_start")
+        .filter_map(|event| event["message"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        command_messages
+            .iter()
+            .any(|message| message.contains("omcpb build -p oraclemcp --bin oraclemcp")),
+        "fleet dry-run did not schedule the omcpb package build: {command_messages:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "fleet"),
+        "missing passing fleet completion: {events:?}"
+    );
+    let runner =
+        std::fs::read_to_string(root.join("scripts/e2e/run_all.sh")).expect("read run_all.sh");
+    assert!(
+        runner.contains("scripts/e2e/fleet.sh"),
+        "fleet live matrix must be dispatched by run_all.sh"
+    );
+}
+
 /// A scenario that is not in `run_all.sh` never runs in the sweep, so "we have an
 /// e2e for that" quietly stops being true. Pin the registration itself: every
 /// scenario script in scripts/e2e/ is either dispatched by the runner or is a
