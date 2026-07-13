@@ -35,7 +35,12 @@
 //! The glob import mirrors the inline test module: the moved code resolves every
 //! name in exactly the environment it was written in.
 use super::*;
-use crate::change_proposal::{EditionProposalCreateRequest, EditionProposalTransitionRequest};
+use crate::change_proposal::{
+    EditionProposal, EditionProposalCreateRequest, EditionProposalStatus,
+    EditionProposalTransitionRequest,
+};
+use oraclemcp_guard::{Classifier, OperatingLevel};
+use serde::Deserialize;
 
 pub(super) const MAX_OPERATOR_EVENTS_PER_STREAM: usize = 128;
 
@@ -630,6 +635,8 @@ pub(super) enum OperatorRouteKind {
     EditionProposalsList,
     EditionProposalsDraft,
     EditionProposalsTransition,
+    EditionProposalsMerge,
+    EditionProposalsRollback,
     SchemaDiff,
     SourceHistoryList,
     SourceHistoryRevert,
@@ -667,6 +674,8 @@ pub(super) fn operator_route_kind(path: &str) -> OperatorRouteKind {
         "/operator/v1/edition-proposals/transition" => {
             OperatorRouteKind::EditionProposalsTransition
         }
+        "/operator/v1/edition-proposals/merge" => OperatorRouteKind::EditionProposalsMerge,
+        "/operator/v1/edition-proposals/rollback" => OperatorRouteKind::EditionProposalsRollback,
         "/operator/v1/schema-diff" => OperatorRouteKind::SchemaDiff,
         "/operator/v1/source-history" => OperatorRouteKind::SourceHistoryList,
         "/operator/v1/source-history/revert" => OperatorRouteKind::SourceHistoryRevert,
@@ -716,6 +725,8 @@ impl OperatorRouteKind {
             | Self::ChangeProposalsApply
             | Self::EditionProposalsDraft
             | Self::EditionProposalsTransition
+            | Self::EditionProposalsMerge
+            | Self::EditionProposalsRollback
             | Self::SchemaDiff
             | Self::SourceHistoryRevert
             | Self::ClientCredentialRotate
@@ -792,9 +803,17 @@ pub(super) fn handle_operator_api_route(
         ),
         OperatorRouteKind::EditionProposalsList
         | OperatorRouteKind::EditionProposalsDraft
-        | OperatorRouteKind::EditionProposalsTransition => {
-            handle_operator_edition_proposal_route(config, request, route)
-        }
+        | OperatorRouteKind::EditionProposalsTransition
+        | OperatorRouteKind::EditionProposalsMerge
+        | OperatorRouteKind::EditionProposalsRollback => handle_operator_edition_proposal_route(
+            server,
+            config,
+            request,
+            operator_subject,
+            route,
+            operator_audit_seq,
+            dashboard_browser,
+        ),
         OperatorRouteKind::SchemaDiff => handle_operator_schema_diff_route(request),
         OperatorRouteKind::SourceHistoryList | OperatorRouteKind::SourceHistoryRevert => {
             handle_operator_source_history_route(config, request, operator_subject, route)
@@ -1514,14 +1533,20 @@ fn handle_operator_change_proposal_route(
     }
 }
 
-/// Handle the Edition-Based Redefinition request board. This deliberately has
-/// no apply endpoint: a persisted proposal is review metadata, never an input
-/// to the guarded action path. Future lifecycle actions must re-classify at
-/// their own point of execution rather than treating this record as authority.
+/// Handle the Edition-Based Redefinition request board.
+///
+/// The stored proposal remains review metadata, never executable authority.
+/// The two lifecycle endpoints below derive a fixed statement from validated
+/// metadata, classify it again at the moment of the request, and forward it
+/// only through the normal guarded `oracle_execute` confirmation path.
 fn handle_operator_edition_proposal_route(
+    server: &OracleMcpServer,
     config: &HttpTransportConfig,
     request: &HttpRequest,
+    operator_subject: &AuditSubject,
     route: OperatorRouteKind,
+    operator_audit_seq: u64,
+    dashboard_browser: bool,
 ) -> HttpResponse {
     let Some(store) = config.change_proposals.as_ref() else {
         return operator_json_response(
@@ -1614,8 +1639,243 @@ fn handle_operator_edition_proposal_route(
                 Err(error) => operator_edition_proposal_error_response(&request.path, error),
             }
         }
+        OperatorRouteKind::EditionProposalsMerge | OperatorRouteKind::EditionProposalsRollback => {
+            let context = ChangeProposalApplyContext {
+                server,
+                config,
+                original_request: request,
+                operator_subject,
+                operator_audit_seq,
+                dashboard_browser,
+            };
+            let flip = if route == OperatorRouteKind::EditionProposalsMerge {
+                EditionDefaultFlip::Merge
+            } else {
+                EditionDefaultFlip::Rollback
+            };
+            handle_operator_edition_default_flip(&context, store, flip)
+        }
         _ => unreachable!("non-edition-proposal route"),
     }
+}
+
+/// The only two database-wide default-edition operations exposed by the board.
+/// The target is selected from persisted, validated metadata; callers cannot
+/// supply arbitrary SQL or an alternative edition identifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditionDefaultFlip {
+    Merge,
+    Rollback,
+}
+
+impl EditionDefaultFlip {
+    fn action(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Rollback => "rollback",
+        }
+    }
+
+    fn target_edition(self, proposal: &EditionProposal) -> &str {
+        match self {
+            Self::Merge => &proposal.child_edition,
+            Self::Rollback => &proposal.base_edition,
+        }
+    }
+}
+
+/// Transient, caller-supplied input for an ADMIN default-edition flip.
+///
+/// `deny_unknown_fields` is deliberate: SQL, a stored verdict, a replacement
+/// target, and an execution switch are all rejected rather than becoming an
+/// alternate authorization path around the persisted review request.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditionProposalFlipRequest {
+    proposal_id: String,
+    #[serde(default)]
+    lane_id: Option<String>,
+    #[serde(default)]
+    confirm: Option<String>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
+}
+
+/// Merge to a proposal child, or re-flip to its base edition.
+///
+/// This handler is intentionally not an executor.  It refuses unsafe review
+/// state locally, reclassifies the canonical SQL from scratch, then delegates
+/// profile ceilings, protected/read-only profiles, the ADMIN elevation window,
+/// and one-use confirmation-token validation to the same `oracle_execute`
+/// dispatch path used by every other privileged operation.
+fn handle_operator_edition_default_flip(
+    context: &ChangeProposalApplyContext<'_>,
+    store: &crate::change_proposal::ChangeProposalStore,
+    flip: EditionDefaultFlip,
+) -> HttpResponse {
+    if !content_type_is_json(context.original_request) {
+        return empty_response(415);
+    }
+    let apply = match serde_json::from_slice::<EditionProposalFlipRequest>(
+        &context.original_request.body,
+    ) {
+        Ok(apply) => apply,
+        Err(_) => {
+            return operator_json_response(
+                400,
+                &context.original_request.path,
+                json!({
+                    "source": "edition_proposals",
+                    "error": "invalid_edition_default_flip",
+                    "message": "edition merge or rollback accepts only proposal_id, lane_id, confirmation, and idempotency_key",
+                }),
+            );
+        }
+    };
+    let proposal = match store.edition_proposal(&apply.proposal_id) {
+        Ok(proposal) => proposal,
+        Err(error) => {
+            return operator_edition_proposal_error_response(&context.original_request.path, error);
+        }
+    };
+    if proposal.status != EditionProposalStatus::Reviewing {
+        return operator_json_response(
+            409,
+            &context.original_request.path,
+            json!({
+                "source": "edition_proposals",
+                "error": "edition_proposal_not_reviewed",
+                "message": "default-edition changes require a separately reviewed proposal",
+                "proposal_id": proposal.proposal_id,
+            }),
+        );
+    }
+    let conflict = match store.active_edition_branch_conflict(&proposal) {
+        Ok(conflict) => conflict,
+        Err(error) => {
+            return operator_edition_proposal_error_response(&context.original_request.path, error);
+        }
+    };
+    if conflict.is_some() {
+        return operator_json_response(
+            409,
+            &context.original_request.path,
+            json!({
+                "source": "edition_proposals",
+                "error": "edition_linear_chain_required",
+                "message": "edition default change refused: the reviewed board has a competing active child for this base; Oracle editions are a linear chain, not a branch graph (ORA-38807)",
+                "proposal_id": proposal.proposal_id,
+            }),
+        );
+    }
+
+    // SEC-1: the review record has no verdict and is never treated as one.  A
+    // new classifier decision is required for the exact canonical statement on
+    // every merge and rollback request.  The live dispatch repeats this with
+    // the active lane policy before Oracle can see the statement.
+    let target_edition = flip.target_edition(&proposal);
+    let sql = format!("ALTER DATABASE DEFAULT EDITION = {target_edition}");
+    let decision = Classifier::default().classify(&sql);
+    if decision.required_level != Some(OperatingLevel::Admin) {
+        return operator_json_response(
+            409,
+            &context.original_request.path,
+            json!({
+                "source": "edition_proposals",
+                "error": "edition_default_classifier_refused",
+                "message": "default-edition change was not proven to require ADMIN by the current classifier; refusing rather than falling through",
+                "proposal_id": proposal.proposal_id,
+            }),
+        );
+    }
+    let Some(confirm) = apply
+        .confirm
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return operator_json_response(
+            409,
+            &context.original_request.path,
+            json!({
+                "source": "edition_proposals",
+                "error": "edition_default_confirmation_required",
+                "message": "database-wide default-edition changes require an ADMIN preview confirmation; this endpoint never performs a bare execution",
+                "proposal_id": proposal.proposal_id,
+                "required_level": OperatingLevel::Admin,
+                "next_step": "obtain an oracle_preview_sql confirmation for this proposal's canonical ALTER DATABASE DEFAULT EDITION statement, then resubmit it here",
+            }),
+        );
+    };
+
+    let key_prefix = apply
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("edition-default-flip");
+    let response = forward_operator_action(
+        context,
+        OperatorActionForward {
+            idempotency_key: format!("{key_prefix}:{}:{}", flip.action(), proposal.proposal_id),
+            lane_id: apply.lane_id.as_deref(),
+            tool: "oracle_execute",
+            arguments: json!({
+                "sql": sql.as_str(),
+                "binds": [],
+                "commit": true,
+                "confirm": confirm,
+                "capture_dbms_output": false,
+            }),
+        },
+    );
+    let action_body: Value = serde_json::from_slice(&response.body).unwrap_or_else(|_| {
+        json!({
+            "error": "invalid_operator_action_response",
+            "message": "guarded default-edition action response was not valid JSON",
+        })
+    });
+    let mcp_response = action_body
+        .pointer("/data/mcp_response")
+        .cloned()
+        .unwrap_or(action_body);
+    let action_failed = operator_action_response_failed(
+        response.status,
+        &json!({
+            "data": { "mcp_response": &mcp_response }
+        }),
+    );
+    let rollback_scope = (flip == EditionDefaultFlip::Rollback).then(|| {
+        json!({
+            "changes_default_edition_for": "new_sessions_only",
+            "not_a_global_instant_undo": true,
+            "cannot_restore": [
+                "autonomous transaction effects",
+                "sequence increments",
+                "trigger side effects"
+            ],
+        })
+    });
+    operator_json_response(
+        response.status,
+        &context.original_request.path,
+        json!({
+            "source": "edition_proposals",
+            "status": if action_failed { "refused" } else { "forwarded" },
+            "action": flip.action(),
+            "proposal": proposal.view(),
+            "target_edition": target_edition,
+            "sql_sha256": prefixed_sha256_hex(sql.as_bytes()),
+            "reclassified": {
+                "required_level": decision.required_level,
+                "danger": decision.danger,
+                "stored_proposal_is_authority": false,
+                "live_dispatch_reclassifies": true,
+            },
+            "mcp_response": mcp_response,
+            "rollback_scope": rollback_scope,
+        }),
+    )
 }
 
 fn handle_operator_schema_diff_route(request: &HttpRequest) -> HttpResponse {

@@ -42,6 +42,12 @@
     "editionProposalListResponse": {
       "$ref": "#/$defs/versionedResponse"
     },
+    "editionProposalMergeResponse": {
+      "$ref": "#/$defs/versionedResponse"
+    },
+    "editionProposalRollbackResponse": {
+      "$ref": "#/$defs/versionedResponse"
+    },
     "editionProposalTransitionResponse": {
       "$ref": "#/$defs/versionedResponse"
     },
@@ -348,6 +354,20 @@
       "method": "POST",
       "path": "/operator/v1/edition-proposals/transition",
       "schema": "editionProposalTransitionResponse",
+      "sse": false
+    },
+    {
+      "mcp_tool": "oracle_execute (ADMIN default-edition flip)",
+      "method": "POST",
+      "path": "/operator/v1/edition-proposals/merge",
+      "schema": "editionProposalMergeResponse",
+      "sse": false
+    },
+    {
+      "mcp_tool": "oracle_execute (ADMIN default-edition flip)",
+      "method": "POST",
+      "path": "/operator/v1/edition-proposals/rollback",
+      "schema": "editionProposalRollbackResponse",
       "sse": false
     },
     {

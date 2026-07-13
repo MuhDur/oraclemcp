@@ -3291,6 +3291,346 @@ fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
     assert_operator_audit_pair(&records[6..8], AuditDecision::Blocked, AuditOutcome::Failed);
 }
 
+#[test]
+fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit() {
+    let (auditor, sink) = operator_auditor();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = server_with_dispatch(Arc::new(WorkbenchDispatch {
+        calls: Arc::clone(&calls),
+    }));
+    let dir = dashboard_test_dir("edition-default-flip");
+    let store = Arc::new(
+        crate::change_proposal::ChangeProposalStore::open(dir.join("state"))
+            .expect("proposal store"),
+    );
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        change_proposals: Some(store),
+        ..Default::default()
+    };
+
+    let draft = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/draft",
+            &serde_json::json!({
+                "profile": "synthetic_stage",
+                "child_edition": "synthetic_child",
+                "base_edition": "synthetic_base",
+                "objects": ["SYNTHETIC_EDITIONABLE_VIEW"]
+            }),
+        ),
+    );
+    assert_eq!(draft.status, 200);
+    let proposal_id = response_json(&draft)["data"]["proposal"]["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_owned();
+    let reviewing = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/transition",
+            &serde_json::json!({ "proposal_id": proposal_id, "status": "reviewing" }),
+        ),
+    );
+    assert_eq!(reviewing.status, 200);
+
+    // A merge is never a convenience bare tool call.  The token is transient
+    // input; the durable record contains no token and cannot execute by itself.
+    let without_confirmation = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/merge",
+            &serde_json::json!({ "proposal_id": proposal_id }),
+        ),
+    );
+    assert_eq!(without_confirmation.status, 409);
+    assert_eq!(
+        response_json(&without_confirmation)["data"]["error"],
+        serde_json::json!("edition_default_confirmation_required")
+    );
+    assert_eq!(
+        calls.load(AtomicOrdering::SeqCst),
+        0,
+        "missing confirmation must fail before guarded dispatch"
+    );
+
+    let merge = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/merge",
+            &serde_json::json!({
+                "proposal_id": proposal_id,
+                "confirm": "synthetic-admin-preview-grant",
+                "idempotency_key": "synthetic-edition-merge"
+            }),
+        ),
+    );
+    assert_eq!(merge.status, 200);
+    let merge_json = response_json(&merge);
+    assert_eq!(merge_json["data"]["action"], serde_json::json!("merge"));
+    assert_eq!(
+        merge_json["data"]["reclassified"]["required_level"],
+        serde_json::json!("ADMIN"),
+        "apply must freshly classify the generated default-edition SQL at ADMIN"
+    );
+    assert_eq!(
+        merge_json["data"]["reclassified"]["stored_proposal_is_authority"],
+        serde_json::json!(false)
+    );
+    let merged_action = &merge_json["data"]["mcp_response"]["result"]["structuredContent"];
+    assert_eq!(merged_action["tool"], serde_json::json!("oracle_execute"));
+    assert_eq!(
+        merged_action["classification"]["required_level"],
+        serde_json::json!("ADMIN"),
+        "the guarded execution seam must receive the same fresh ADMIN classification"
+    );
+    assert_eq!(
+        merged_action["args"]["sql"],
+        serde_json::json!("ALTER DATABASE DEFAULT EDITION = SYNTHETIC_CHILD")
+    );
+    assert_eq!(merged_action["args"]["commit"], serde_json::json!(true));
+    assert_eq!(
+        merged_action["args"]["confirm"],
+        serde_json::json!("synthetic-admin-preview-grant")
+    );
+
+    let rollback = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/rollback",
+            &serde_json::json!({
+                "proposal_id": proposal_id,
+                "confirm": "synthetic-rollback-preview-grant",
+                "idempotency_key": "synthetic-edition-rollback"
+            }),
+        ),
+    );
+    assert_eq!(rollback.status, 200);
+    let rollback_json = response_json(&rollback);
+    assert_eq!(rollback_json["data"]["action"], serde_json::json!("rollback"));
+    assert_eq!(
+        rollback_json["data"]["target_edition"],
+        serde_json::json!("SYNTHETIC_BASE")
+    );
+    assert_eq!(
+        rollback_json["data"]["rollback_scope"]["changes_default_edition_for"],
+        serde_json::json!("new_sessions_only")
+    );
+    assert_eq!(
+        rollback_json["data"]["rollback_scope"]["cannot_restore"],
+        serde_json::json!([
+            "autonomous transaction effects",
+            "sequence increments",
+            "trigger side effects"
+        ]),
+        "rollback must not claim to undo effects that Oracle does not roll back"
+    );
+
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+    let records = sink.records();
+    assert_eq!(records.len(), 10, "every default-edition attempt is hash-chain audited");
+    assert_operator_audit_pair(&records[0..2], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(&records[2..4], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(&records[4..6], AuditDecision::Blocked, AuditOutcome::Failed);
+    assert_operator_audit_pair(&records[6..8], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(&records[8..10], AuditDecision::Allowed, AuditOutcome::Succeeded);
+}
+
+#[test]
+fn edition_default_flip_refuses_forked_or_replayed_review_state() {
+    let (auditor, sink) = operator_auditor();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = server_with_dispatch(Arc::new(WorkbenchDispatch {
+        calls: Arc::clone(&calls),
+    }));
+    let dir = dashboard_test_dir("edition-default-fork");
+    let store = Arc::new(
+        crate::change_proposal::ChangeProposalStore::open(dir.join("state"))
+            .expect("proposal store"),
+    );
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        change_proposals: Some(store),
+        ..Default::default()
+    };
+    let draft = |child: &str| {
+        handle_http_request(
+            &server,
+            &cfg,
+            operator_json_post(
+                "/operator/v1/edition-proposals/draft",
+                &serde_json::json!({
+                    "profile": "synthetic_stage",
+                    "child_edition": child,
+                    "base_edition": "synthetic_base",
+                    "objects": ["SYNTHETIC_EDITIONABLE_VIEW"]
+                }),
+            ),
+        )
+    };
+    let first = draft("synthetic_child_a");
+    let first_id = response_json(&first)["data"]["proposal"]["proposal_id"]
+        .as_str()
+        .expect("first proposal id")
+        .to_owned();
+    assert_eq!(
+        handle_http_request(
+            &server,
+            &cfg,
+            operator_json_post(
+                "/operator/v1/edition-proposals/transition",
+                &serde_json::json!({ "proposal_id": first_id, "status": "reviewing" }),
+            ),
+        )
+        .status,
+        200
+    );
+    let second = draft("synthetic_child_b");
+    assert_eq!(second.status, 200);
+
+    // The second non-withdrawn child is ambiguous board state.  Refuse before
+    // the confirmation is consumed or a database can report ORA-38807 late.
+    let forked = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/merge",
+            &serde_json::json!({
+                "proposal_id": first_id,
+                "confirm": "synthetic-admin-preview-grant"
+            }),
+        ),
+    );
+    assert_eq!(forked.status, 409);
+    assert_eq!(
+        response_json(&forked)["data"]["error"],
+        serde_json::json!("edition_linear_chain_required")
+    );
+
+    let forked_rollback = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/rollback",
+            &serde_json::json!({
+                "proposal_id": first_id,
+                "confirm": "synthetic-rollback-preview-grant"
+            }),
+        ),
+    );
+    assert_eq!(forked_rollback.status, 409);
+    assert_eq!(
+        response_json(&forked_rollback)["data"]["error"],
+        serde_json::json!("edition_linear_chain_required"),
+        "rollback uses the same no-fork preflight before it can redirect new sessions"
+    );
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+
+    // A caller cannot replay a manufactured verdict or substitute SQL through
+    // an otherwise valid request.  Unknown fields are rejected before dispatch,
+    // so only the canonical, freshly classified ALTER DATABASE statement exists.
+    let replay = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/merge",
+            &serde_json::json!({
+                "proposal_id": first_id,
+                "confirm": "synthetic-admin-preview-grant",
+                "sql": "SELECT 1 FROM dual",
+                "stored_verdict": { "required_level": "READ_ONLY" }
+            }),
+        ),
+    );
+    assert_eq!(replay.status, 400);
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+
+    let records = sink.records();
+    assert_eq!(records.len(), 12);
+    assert_operator_audit_pair(&records[0..2], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(&records[2..4], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(&records[4..6], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(&records[6..8], AuditDecision::Blocked, AuditOutcome::Failed);
+    assert_operator_audit_pair(&records[8..10], AuditDecision::Blocked, AuditOutcome::Failed);
+    assert_operator_audit_pair(&records[10..12], AuditDecision::Blocked, AuditOutcome::Failed);
+}
+
+#[test]
+fn edition_default_flip_surfaces_a_live_policy_refusal_as_an_audited_block() {
+    let (auditor, sink) = operator_auditor();
+    let server = server_with_dispatch(Arc::new(PolicyDeniedDispatch));
+    let dir = dashboard_test_dir("edition-default-reclassified-refusal");
+    let store = Arc::new(
+        crate::change_proposal::ChangeProposalStore::open(dir.join("state"))
+            .expect("proposal store"),
+    );
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        change_proposals: Some(store),
+        ..Default::default()
+    };
+    let draft = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/draft",
+            &serde_json::json!({
+                "profile": "synthetic_stage",
+                "child_edition": "synthetic_child",
+                "base_edition": "synthetic_base",
+                "objects": ["SYNTHETIC_EDITIONABLE_VIEW"]
+            }),
+        ),
+    );
+    let proposal_id = response_json(&draft)["data"]["proposal"]["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_owned();
+    assert_eq!(
+        handle_http_request(
+            &server,
+            &cfg,
+            operator_json_post(
+                "/operator/v1/edition-proposals/transition",
+                &serde_json::json!({ "proposal_id": proposal_id, "status": "reviewing" }),
+            ),
+        )
+        .status,
+        200
+    );
+
+    let refused = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/merge",
+            &serde_json::json!({
+                "proposal_id": proposal_id,
+                "confirm": "synthetic-admin-preview-grant"
+            }),
+        ),
+    );
+    assert_eq!(refused.status, 200);
+    let refused_json = response_json(&refused);
+    assert_eq!(refused_json["data"]["status"], serde_json::json!("refused"));
+    assert_eq!(
+        refused_json["data"]["mcp_response"]["result"]["structuredContent"]["error_class"],
+        serde_json::json!("POLICY_DENIED"),
+        "a current dispatcher denial wins over any prior review-board state"
+    );
+    let records = sink.records();
+    assert_eq!(records.len(), 6);
+    assert_operator_audit_pair(&records[0..2], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(&records[2..4], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(&records[4..6], AuditDecision::Blocked, AuditOutcome::Failed);
+}
+
 fn change_proposals_test_config() -> (OracleMcpServer, HttpTransportConfig, String) {
     let (auditor, _sink) = operator_auditor();
     let dir = dashboard_test_dir("change-proposals-list");

@@ -214,6 +214,41 @@ impl ChangeProposalStore {
         Ok(proposals)
     }
 
+    /// Load one durable Edition-Based Redefinition review request.
+    ///
+    /// Callers receive metadata only.  This never returns a SQL statement,
+    /// classifier verdict, confirmation grant, or any other executable
+    /// authority; a later guarded operation must derive and classify its own
+    /// statement from this request at its point of execution.
+    pub fn edition_proposal(
+        &self,
+        proposal_id: &str,
+    ) -> Result<EditionProposal, ChangeProposalError> {
+        self.load_edition_proposal(proposal_id)
+    }
+
+    /// Find a still-active competing child request for the same parent edition.
+    ///
+    /// Oracle editions form a linear chain.  A review board that contains two
+    /// different non-withdrawn children for one base is ambiguous evidence, so
+    /// guarded lifecycle operations refuse it before they can reach Oracle's
+    /// late ORA-38807 enforcement.  This deliberately treats an unreviewed
+    /// competing request as blocking too: uncertainty tightens the operation.
+    pub fn active_edition_branch_conflict(
+        &self,
+        proposal: &EditionProposal,
+    ) -> Result<Option<EditionProposalView>, ChangeProposalError> {
+        Ok(self
+            .list_edition_proposals()?
+            .into_iter()
+            .find(|candidate| {
+                candidate.proposal_id != proposal.proposal_id
+                    && candidate.base_edition == proposal.base_edition
+                    && candidate.child_edition != proposal.child_edition
+                    && candidate.status != EditionProposalStatus::Withdrawn
+            }))
+    }
+
     /// Persist a new Edition-Based Redefinition request. Persisting this
     /// request does not create an edition, evaluate a statement, issue a grant,
     /// or otherwise authorize a guarded write.
@@ -432,7 +467,12 @@ impl EditionProposal {
         Ok(())
     }
 
-    fn view(&self) -> EditionProposalView {
+    /// Return the redacted Reviews-board projection for this request.
+    ///
+    /// The projection carries only the durable request metadata and cannot be
+    /// converted into executable authority.
+    #[must_use]
+    pub fn view(&self) -> EditionProposalView {
         EditionProposalView {
             schema_version: self.schema_version,
             proposal_id: self.proposal_id.clone(),
