@@ -570,6 +570,7 @@ mod tests {
             cancel: None,
             correlation: None,
             result_masking: None,
+            observed_scn: None,
             tool: "oracle_execute".to_owned(),
             sql_sha256,
             sql_normalized_sha256: String::new(),

@@ -1604,4 +1604,100 @@ mod live {
             }
         });
     }
+
+    #[test]
+    fn live_observed_scn_replays_the_committed_read_snapshot() {
+        use oraclemcp_db::{AsOf, QueryCaps, read_query_as_of};
+        run_with_cx(|cx| async move {
+            let Some(conn) =
+                connect_or_skip(&cx, "live_observed_scn_replays_the_committed_read_snapshot").await
+            else {
+                return;
+            };
+            let table = format!("ORAMCP_RP_{}", std::process::id());
+            let cleanup_sql = format!("DROP TABLE {table} PURGE");
+            if let Err(error) = conn
+                .execute(
+                    &cx,
+                    &format!("CREATE TABLE {table} (id NUMBER PRIMARY KEY, val VARCHAR2(30))"),
+                    &[],
+                )
+                .await
+            {
+                eprintln!(
+                    "[live-xe] SKIP observed-SCN replay setup: cannot create table ({error})"
+                );
+                return;
+            }
+
+            let result: Result<(), DbError> = async {
+                conn.execute(
+                    &cx,
+                    &format!("INSERT INTO {table} (id, val) VALUES (:1, :2)"),
+                    &[OracleBind::I64(1), OracleBind::from("before")],
+                )
+                .await?;
+                conn.commit(&cx).await?;
+
+                let observed_scn = AsOf::current_system_change_number(&cx, &conn).await?;
+                let sql = format!("SELECT id, val FROM {table} ORDER BY id");
+                let observed = read_query_as_of(
+                    &cx,
+                    &conn,
+                    &sql,
+                    &[],
+                    QueryCaps::default(),
+                    0,
+                    &SerializeOptions::default(),
+                    &AsOf::Scn(observed_scn),
+                )
+                .await?;
+
+                conn.execute(
+                    &cx,
+                    &format!("UPDATE {table} SET val = :1 WHERE id = :2"),
+                    &[OracleBind::from("after"), OracleBind::I64(1)],
+                )
+                .await?;
+                conn.commit(&cx).await?;
+
+                let replay = read_query_as_of(
+                    &cx,
+                    &conn,
+                    &sql,
+                    &[],
+                    QueryCaps::default(),
+                    0,
+                    &SerializeOptions::default(),
+                    &AsOf::Scn(observed_scn),
+                )
+                .await?;
+                assert_eq!(
+                    replay.rows, observed.rows,
+                    "the audited SCN replays the same committed rows"
+                );
+                assert_eq!(replay.rows, vec![json!({ "ID": "1", "VAL": "before" })]);
+                Ok(())
+            }
+            .await;
+
+            let _ = conn.execute(&cx, &cleanup_sql, &[]).await;
+            match result {
+                Ok(()) => {}
+                Err(error) => {
+                    let message = error.to_string();
+                    if message.contains("ORA-01031")
+                        || message.contains("ORA-08180")
+                        || message.contains("FLASHBACK")
+                    {
+                        eprintln!(
+                            "[live-xe] SKIP observed-SCN replay (privilege/retention): {error}"
+                        );
+                        return;
+                    }
+                    panic!("observed-SCN replay live check failed: {error}");
+                }
+            }
+        });
+    }
 }

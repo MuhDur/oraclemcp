@@ -876,7 +876,7 @@ impl Auditor {
         timestamp: String,
         durable: bool,
     ) -> Result<AuditRecord, AuditError> {
-        self.append_correlated(draft, timestamp, durable, None)
+        self.append_correlated_with_observed_scn(draft, timestamp, durable, None, None)
     }
 
     /// Append a chained record carrying optional attempt/terminal correlation.
@@ -888,6 +888,21 @@ impl Auditor {
         durable: bool,
         correlation: Option<AuditCorrelation>,
     ) -> Result<AuditRecord, AuditError> {
+        self.append_correlated_with_observed_scn(draft, timestamp, durable, correlation, None)
+    }
+
+    /// Append a chained record carrying an optional observed read snapshot SCN.
+    /// The SCN is stored in the current hash-covered record schema, so a caller
+    /// can use it as a tamper-evident flashback replay target. Durability and
+    /// poisoning semantics are identical to [`Self::append`].
+    pub fn append_correlated_with_observed_scn(
+        &self,
+        draft: &AuditEntryDraft,
+        timestamp: String,
+        durable: bool,
+        correlation: Option<AuditCorrelation>,
+        observed_scn: Option<u64>,
+    ) -> Result<AuditRecord, AuditError> {
         let mut state = self.state.lock();
         // Fail closed: once an append/flush failure or panic may have left a
         // record in the byte stream without advancing state, issuing any further
@@ -896,13 +911,14 @@ impl Auditor {
             return Err(AuditError::Poisoned);
         }
         let seq = state.seq + 1;
-        let record = AuditRecord::chained_signed_correlated(
+        let record = AuditRecord::chained_signed_correlated_with_observed_scn(
             draft,
             seq,
             &state.last_hash,
             timestamp,
             self.keyring.active(),
             correlation,
+            observed_scn,
         );
         match catch_unwind(AssertUnwindSafe(|| self.sink.append(&record))) {
             Ok(Ok(())) => {}

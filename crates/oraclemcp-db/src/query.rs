@@ -163,7 +163,61 @@ pub enum AsOf {
     Timestamp(String),
 }
 
+const CURRENT_SCN_SQL: &str =
+    "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER AS OBSERVED_SCN FROM DUAL";
+const TIMESTAMP_TO_SCN_SQL: &str =
+    "SELECT TIMESTAMP_TO_SCN(TO_TIMESTAMP(:1, 'YYYY-MM-DD HH24:MI:SS')) AS OBSERVED_SCN FROM DUAL";
+
+fn parse_observed_scn(rows: &[crate::types::OracleRow], source: &str) -> Result<u64, DbError> {
+    let value = rows
+        .first()
+        .and_then(|row| row.text("OBSERVED_SCN"))
+        .ok_or_else(|| DbError::Query(format!("Oracle returned no {source}")))?;
+    value
+        .parse::<u64>()
+        .map_err(|_| DbError::Query(format!("Oracle returned a non-numeric {source}: {value:?}")))
+}
+
 impl AsOf {
+    /// Capture the SCN of the current read-only transaction snapshot.
+    ///
+    /// Call this as the first query after `SET TRANSACTION READ ONLY`: Oracle
+    /// keeps later reads in that transaction on the same consistent snapshot,
+    /// while the returned SCN is a deterministic `DBMS_FLASHBACK` replay
+    /// target. The SQL is server-owned and uses no caller-supplied text.
+    pub async fn current_system_change_number(
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+    ) -> Result<u64, DbError> {
+        let rows = conn.query_rows(cx, CURRENT_SCN_SQL, &[]).await?;
+        parse_observed_scn(&rows, "current system change number")
+    }
+
+    /// Resolve this structured flashback target to the exact SCN used for
+    /// replay.
+    ///
+    /// An SCN target is already deterministic. A timestamp target is converted
+    /// by Oracle before the flashback window is opened, so the recorded audit
+    /// value is an SCN rather than a lossy wall-clock hint.
+    pub async fn resolve_to_scn(
+        &self,
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+    ) -> Result<u64, DbError> {
+        match self {
+            Self::Scn(scn) => Ok(*scn),
+            Self::Timestamp(timestamp) => {
+                let bind = OracleBind::String(timestamp.trim().replacen('T', " ", 1));
+                let rows = conn
+                    .query_rows(cx, TIMESTAMP_TO_SCN_SQL, std::slice::from_ref(&bind))
+                    .await
+                    .map_err(map_flashback_refusal)?;
+                parse_observed_scn(&rows, "timestamp flashback target")
+                    .map_err(map_flashback_refusal)
+            }
+        }
+    }
+
     /// The `DBMS_FLASHBACK.ENABLE_*` anonymous PL/SQL block and its single bound
     /// argument. The SCN/timestamp is the ONLY value and it is a positional bind
     /// (`:1`) against a FIXED template, so the value can never be interpolated or
@@ -1140,10 +1194,15 @@ mod tests {
         async fn query_rows(
             &self,
             _cx: &Cx,
-            _sql: &str,
-            _b: &[OracleBind],
+            sql: &str,
+            binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
-            self.events.lock().expect("events").push("query".to_owned());
+            let event = if sql == CURRENT_SCN_SQL || sql == TIMESTAMP_TO_SCN_SQL {
+                format!("query[{}]:{sql}", binds.len())
+            } else {
+                "query".to_owned()
+            };
+            self.events.lock().expect("events").push(event);
             if self.fail_read {
                 return Err(DbError::Query(
                     self.fail_read_message
@@ -1152,10 +1211,17 @@ mod tests {
                 ));
             }
             Ok(vec![OracleRow {
-                columns: vec![(
-                    "C".to_owned(),
-                    OracleCell::new("NUMBER", Some("1".to_owned())),
-                )],
+                columns: if sql == CURRENT_SCN_SQL || sql == TIMESTAMP_TO_SCN_SQL {
+                    vec![(
+                        "OBSERVED_SCN".to_owned(),
+                        OracleCell::new("NUMBER", Some("4242".to_owned())),
+                    )]
+                } else {
+                    vec![(
+                        "C".to_owned(),
+                        OracleCell::new("NUMBER", Some("1".to_owned())),
+                    )]
+                },
             }])
         }
         async fn execute(&self, _cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
@@ -1226,6 +1292,35 @@ mod tests {
         );
         // The `T` date/time separator is normalized to a space; the value is BOUND.
         assert_eq!(bind, OracleBind::String("2026-07-08 10:11:12".to_owned()));
+    }
+
+    #[test]
+    fn observed_scn_helpers_use_server_owned_bound_queries() {
+        let conn = FlashbackRecorder::default();
+        let (current, timestamp_target, events) = run_with_cx(|cx| async move {
+            let current = AsOf::current_system_change_number(&cx, &conn)
+                .await
+                .expect("current SCN");
+            let timestamp_target = AsOf::Timestamp("2026-07-08T10:11:12".to_owned())
+                .resolve_to_scn(&cx, &conn)
+                .await
+                .expect("timestamp resolves to SCN");
+            (
+                current,
+                timestamp_target,
+                conn.events.into_inner().expect("events"),
+            )
+        });
+
+        assert_eq!(current, 4242);
+        assert_eq!(timestamp_target, 4242);
+        assert_eq!(
+            events,
+            vec![
+                format!("query[0]:{CURRENT_SCN_SQL}"),
+                format!("query[1]:{TIMESTAMP_TO_SCN_SQL}"),
+            ]
+        );
     }
 
     #[test]
