@@ -16,6 +16,8 @@ than treating it as permanent.
 | [0006](0006-oraclemcp-db-canonical-foundation.md) | `oraclemcp-db` is the canonical shared driver foundation; converge `plsql-mcp` onto it | Accepted |
 | [0007](0007-phase0-lane-bridge.md) | Phase-0 lane bridge for non-Send Oracle sessions | Accepted |
 | [0008](0008-result-masking-policy.md) | Result masking policy and per-profile tokenization | Accepted |
+| [0009](0009-policy-as-code-grammar.md) | Policy-as-code grammar and monotone decisions | Accepted |
+| [0010](0010-verdict-certificate-schema.md) | Verdict-certificate schema and classifier rule registry | Accepted |
 
 These records describe *why*, not *how*. For the runtime behavior they govern,
 see the [`README.md`](../../README.md) safety model and
