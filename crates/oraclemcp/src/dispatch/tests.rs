@@ -3675,6 +3675,56 @@ fn query_structured_decode_caps_require_deep_decode_for_larger_limits() {
 }
 
 #[test]
+fn profile_result_masking_policy_flows_into_query_serialization_fail_closed() {
+    let cfg = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "prod"
+        connect_string = "prod:1521/svc"
+
+        [profiles.masking]
+        mask_unknown_default = true
+
+        [[profiles.masking.rules]]
+        column_match = { column = "EMAIL" }
+        action = "mask"
+        tag = "pii.email"
+        "#,
+    )
+    .expect("valid masking config");
+    let policy = result_masking_policy_from_profile(cfg.profile("prod").expect("profile"))
+        .expect("runtime masking policy");
+    let args: QueryArgs = serde_json::from_value(json!({
+        "sql": "SELECT email, ssn FROM customers"
+    }))
+    .expect("query args parse");
+    let opts = query_serialize_options_from_args_with_policy(&args, Some(&policy));
+    let row = OracleRow {
+        columns: vec![
+            (
+                "EMAIL".to_owned(),
+                OracleCell::new("VARCHAR2", Some("alice@example.com".to_owned())),
+            ),
+            (
+                "SSN".to_owned(),
+                OracleCell::new("VARCHAR2", Some("123-45-6789".to_owned())),
+            ),
+        ],
+    };
+
+    let out = serialize_row(&row, &opts);
+    assert_eq!(out["EMAIL"], json!(oraclemcp_db::MASKED_RESULT_VALUE));
+    assert_eq!(
+        out["SSN"],
+        json!(oraclemcp_db::MASKED_RESULT_VALUE),
+        "unlisted columns remain masked by default"
+    );
+    let rendered = out.to_string();
+    assert!(!rendered.contains("alice@example.com"));
+    assert!(!rendered.contains("123-45-6789"));
+}
+
+#[test]
 fn invalid_bind_type_is_invalid_arguments() {
     let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
     let err = dispatcher

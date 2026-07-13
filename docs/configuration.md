@@ -191,6 +191,7 @@ field is unset after inheritance.
 | `[profiles.oci]` | OCI / Autonomous DB connection fields (wallet/TLS/SNI and the IAM-token fields). See [Auth modes](#auth-modes). |
 | `[profiles.drcp]` | Database Resident Connection Pooling server routing. |
 | `[profiles.pool]` | Local client-side pool for stateless catalog/metadata reads where pool-backed reads are used. |
+| `[profiles.masking]` | Result egress masking policy applied after SQL admission and before result JSON leaves the DB layer. |
 | `[profiles.proxy_auth]` | Thin proxy authentication. |
 | `[[profiles.app_context]]` | Driver-level application-context triples applied at logon (repeatable). |
 | `[profiles.session_identity]` | End-to-end Oracle session identity (profile-local; redacted from `list_profiles`). |
@@ -234,6 +235,26 @@ routing.
 | `min_idle` | integer | `2` | Minimum idle connections kept warm. Must be ≤ `max_size`. |
 | `acquire_timeout_secs` | integer | `5` | Seconds to wait for a checkout before returning `BUSY`. Range: 1–3600. |
 | `statement_cache_size` | integer | `50` | Per-connection statement-cache size passed to the thin driver. |
+
+#### `[profiles.masking]`
+
+Profile-scoped result masking for `oracle_query`-shaped result payloads. When
+this table is present, `mask_unknown_default` must be `true`: any result column
+not matched by a rule is masked rather than passed through.
+
+| Field | Type | Default | Effect |
+|---|---|---|---|
+| `mask_unknown_default` | bool | `true` | Required to remain `true` in the current server-side masking seam. |
+| `salt_ref` | string | none | Non-secret salt id/reference. Required when any rule uses `action = "tokenize"`; raw salt material is not stored in the profile. |
+| `[[profiles.masking.rules]]` | array | `[]` | Ordered masking rules; first match wins. |
+
+Rule fields:
+
+| Field | Type | Effect |
+|---|---|---|
+| `column_match` | inline table | Selector with optional `schema`/`table` and exactly one of `column` or `tag`. |
+| `action` | enum | `mask`, `tokenize`, or `null`. |
+| `tag` | string | Optional non-secret policy/audit tag. |
 
 #### `[profiles.proxy_auth]`
 

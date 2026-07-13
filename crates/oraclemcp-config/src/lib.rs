@@ -27,7 +27,8 @@ pub use oraclemcp_guard::OperatingLevel;
 pub use profile::{
     AppContextConfig, ConnectionProfile, DrcpRoutingConfig, DrcpSessionPurity,
     MAX_POOL_ACQUIRE_TIMEOUT_SECS, OciConfig, PoolConfig, PoolMetadata, ProfileMetadata,
-    ProxyAuthConfig, SessionIdentityConfig, resolve_inheritance,
+    ProxyAuthConfig, ResultColumnMatchConfig, ResultMaskingActionConfig, ResultMaskingConfig,
+    ResultMaskingRuleConfig, SessionIdentityConfig, resolve_inheritance,
 };
 
 /// The config schema version this build understands. A config declaring a
@@ -1106,6 +1107,9 @@ impl OracleMcpConfig {
                 }
             }
             prof.validate_thin_routing()?;
+            if let Some(masking) = &prof.masking {
+                masking.validate(&prof.name)?;
+            }
             if let Some(entries) = &prof.app_context {
                 AppContextConfig::validate_list(&prof.name, entries)?;
             }
@@ -1396,6 +1400,7 @@ fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionP
         && before.drcp == after.drcp
         && before.proxy_auth == after.proxy_auth
         && before.app_context == after.app_context
+        && before.masking == after.masking
 }
 
 /// Configuration load / validation error.
@@ -1502,6 +1507,16 @@ pub enum ConfigError {
         profile: String,
         /// Entry index in the configured list.
         index: usize,
+        /// Field name.
+        field: &'static str,
+        /// Validation failure.
+        reason: &'static str,
+    },
+    /// Profile-scoped result masking policy is malformed.
+    #[error("connection profile `{profile}` has invalid masking.{field}: {reason}")]
+    InvalidMasking {
+        /// Profile name.
+        profile: String,
         /// Field name.
         field: &'static str,
         /// Validation failure.
@@ -3114,6 +3129,11 @@ mod tests {
                         value: Some("A".into()),
                     }]);
                 },
+            ),
+            (
+                "masking",
+                |_| {},
+                |p| p.masking = Some(ResultMaskingConfig::default()),
             ),
         ];
 

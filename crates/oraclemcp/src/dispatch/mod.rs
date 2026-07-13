@@ -24,7 +24,8 @@ use oraclemcp_audit::{
 };
 use oraclemcp_auth::apply_oauth_scopes;
 use oraclemcp_config::{
-    ConfigReloadPlan, OracleMcpConfig, ProfileMetadata, ReloadProfileAction, ReloadProfileReason,
+    ConfigReloadPlan, ConnectionProfile, OracleMcpConfig, ProfileMetadata, ReloadProfileAction,
+    ReloadProfileReason,
 };
 use oraclemcp_core::{
     CLEANUP_POLL_QUOTA, ConnectionStatus, CustomToolCatalog, CustomToolExecutor,
@@ -39,7 +40,8 @@ use oraclemcp_db::{
     AsOf, CatalogInvalidation, DbError, DbRequestQuota, DbmsOutput, DependentObject,
     DependentsProbe, OracleBackend, OracleBind, OracleCatalogResolverCache, OracleConnection,
     OracleConnectionInfo, OracleRow, PlanCostEstimate, QuarantineOutcome, QueryCaps,
-    QueryRowStream, QueryRowStreamStart, SerializeOptions, StructuredDecodeCaps, compile_errors,
+    QueryRowStream, QueryRowStreamStart, ResultColumnMatch, ResultMaskingAction,
+    ResultMaskingPolicy, ResultMaskingRule, SerializeOptions, StructuredDecodeCaps, compile_errors,
     compile_object_statements, describe_columns, describe_constraints, describe_index,
     describe_trigger, describe_view, diff_query_responses, execute_immediate_audit, explain_plan,
     find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects, list_schemas,
@@ -209,6 +211,7 @@ struct ProfileDispatchPolicy {
     level: SessionLevelState,
     request_timeout: Option<Duration>,
     max_query_cost: Option<u64>,
+    result_masking: Option<ResultMaskingPolicy>,
 }
 
 struct PreparedProfileSwitch {
@@ -219,6 +222,7 @@ struct PreparedProfileSwitch {
     level: SessionLevelState,
     request_timeout: Option<Duration>,
     max_query_cost: Option<u64>,
+    result_masking: Option<ResultMaskingPolicy>,
     custom_catalog: CustomToolCatalog,
     response: Value,
 }
@@ -236,7 +240,58 @@ fn standalone_read_only_policy() -> ProfileDispatchPolicy {
         level: default_read_only_level(),
         request_timeout: Some(DEFAULT_REQUEST_TIMEOUT),
         max_query_cost: None,
+        result_masking: None,
     }
+}
+
+/// Convert the validated profile config DTO into the DB-layer result masking
+/// transformer. Tokenization salt material is resolved by the later salt-store
+/// seam; until then tokenize rules degrade fail-closed to `mask` in
+/// `oraclemcp-db`.
+#[must_use]
+pub fn result_masking_policy_from_profile(
+    profile: &ConnectionProfile,
+) -> Option<ResultMaskingPolicy> {
+    let masking = profile.masking.as_ref()?;
+    let rules = masking
+        .rules
+        .iter()
+        .map(|rule| {
+            let mut column_match = ResultColumnMatch {
+                schema: rule.column_match.schema.clone(),
+                table: rule.column_match.table.clone(),
+                column: rule.column_match.column.clone(),
+                tag: rule.column_match.tag.clone(),
+            };
+            if let Some(schema) = column_match.schema.as_mut() {
+                *schema = schema.trim().to_owned();
+            }
+            if let Some(table) = column_match.table.as_mut() {
+                *table = table.trim().to_owned();
+            }
+            if let Some(column) = column_match.column.as_mut() {
+                *column = column.trim().to_owned();
+            }
+            if let Some(tag) = column_match.tag.as_mut() {
+                *tag = tag.trim().to_owned();
+            }
+            ResultMaskingRule {
+                column_match,
+                action: match rule.action {
+                    oraclemcp_config::ResultMaskingActionConfig::Mask => ResultMaskingAction::Mask,
+                    oraclemcp_config::ResultMaskingActionConfig::Tokenize => {
+                        ResultMaskingAction::Tokenize
+                    }
+                    oraclemcp_config::ResultMaskingActionConfig::Null => ResultMaskingAction::Null,
+                },
+                tag: rule.tag.as_ref().map(|tag| tag.trim().to_owned()),
+            }
+        })
+        .collect();
+    Some(ResultMaskingPolicy::new(
+        rules,
+        masking.mask_unknown_default,
+    ))
 }
 
 fn profile_dispatch_policy(
@@ -267,6 +322,7 @@ fn profile_dispatch_policy(
         level: oraclemcp_core::session_level_state(profile, false),
         request_timeout: profile_request_timeout(profile.call_timeout_seconds),
         max_query_cost: profile.max_query_cost,
+        result_masking: result_masking_policy_from_profile(profile),
     })
 }
 
@@ -351,6 +407,7 @@ pub struct OracleDispatcher {
     state: AsyncMutex<DispatcherState>,
     request_timeout: SyncMutex<Option<Duration>>,
     max_query_cost: SyncMutex<Option<u64>>,
+    result_masking: SyncMutex<Option<ResultMaskingPolicy>>,
     quarantine: SyncMutex<Option<ConnectionQuarantine>>,
     connector: Option<Arc<ProfileConnector>>,
     custom_loader: Option<Arc<CustomToolLoader>>,
@@ -423,6 +480,7 @@ impl OracleDispatcher {
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
+            result_masking: SyncMutex::new(None),
             quarantine: SyncMutex::new(None),
             connector: None,
             custom_loader: None,
@@ -504,6 +562,7 @@ impl OracleDispatcher {
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
+            result_masking: SyncMutex::new(None),
             quarantine: SyncMutex::new(None),
             connector: Some(connector),
             custom_loader,
@@ -631,6 +690,14 @@ impl OracleDispatcher {
         self
     }
 
+    /// Install the active profile's result masking policy.
+    #[must_use]
+    pub fn with_result_masking_policy(self, result_masking: Option<ResultMaskingPolicy>) -> Self {
+        self.set_result_masking_policy(result_masking)
+            .expect("result-masking mutex is healthy during construction");
+        self
+    }
+
     fn request_timeout(&self) -> Result<Option<Duration>, ErrorEnvelope> {
         self.request_timeout
             .lock()
@@ -674,6 +741,32 @@ impl OracleDispatcher {
             )
         })?;
         *guard = max_query_cost;
+        Ok(())
+    }
+
+    fn result_masking_policy(&self) -> Result<Option<ResultMaskingPolicy>, ErrorEnvelope> {
+        self.result_masking
+            .lock()
+            .map(|guard| guard.clone())
+            .map_err(|err| {
+                ErrorEnvelope::new(
+                    ErrorClass::Internal,
+                    format!("result-masking mutex lock failed: {err}"),
+                )
+            })
+    }
+
+    fn set_result_masking_policy(
+        &self,
+        result_masking: Option<ResultMaskingPolicy>,
+    ) -> Result<(), ErrorEnvelope> {
+        let mut guard = self.result_masking.lock().map_err(|err| {
+            ErrorEnvelope::new(
+                ErrorClass::Internal,
+                format!("result-masking mutex lock failed: {err}"),
+            )
+        })?;
+        *guard = result_masking;
         Ok(())
     }
 
@@ -2327,7 +2420,15 @@ async fn enforce_query_cost_gate(
     decision
 }
 
+#[cfg(test)]
 fn query_serialize_options_from_args(args: &QueryArgs) -> SerializeOptions {
+    query_serialize_options_from_args_with_policy(args, None)
+}
+
+fn query_serialize_options_from_args_with_policy(
+    args: &QueryArgs,
+    result_masking: Option<&ResultMaskingPolicy>,
+) -> SerializeOptions {
     let defaults = SerializeOptions::default();
     SerializeOptions {
         numbers_as_float: args.numbers_as_float.unwrap_or(defaults.numbers_as_float),
@@ -2341,11 +2442,15 @@ fn query_serialize_options_from_args(args: &QueryArgs) -> SerializeOptions {
             .unwrap_or(defaults.max_blob_bytes)
             .clamp(1, MAX_QUERY_BLOB_BYTES),
         structured_decode_caps: query_structured_decode_caps_from_args(args),
+        result_masking: result_masking.cloned(),
         ..defaults
     }
 }
 
-fn diff_serialize_options_from_args(args: &DiffArgs) -> SerializeOptions {
+fn diff_serialize_options_from_args_with_policy(
+    args: &DiffArgs,
+    result_masking: Option<&ResultMaskingPolicy>,
+) -> SerializeOptions {
     let defaults = SerializeOptions::default();
     SerializeOptions {
         numbers_as_float: args.numbers_as_float.unwrap_or(defaults.numbers_as_float),
@@ -2358,6 +2463,7 @@ fn diff_serialize_options_from_args(args: &DiffArgs) -> SerializeOptions {
             .max_blob_bytes
             .unwrap_or(defaults.max_blob_bytes)
             .clamp(1, MAX_QUERY_BLOB_BYTES),
+        result_masking: result_masking.cloned(),
         ..defaults
     }
 }
@@ -2519,6 +2625,7 @@ async fn export_query_to_resource(
     export_access: &QueryExportAccess,
     exports: Option<&oraclemcp_core::ExportRegistry>,
     as_of: Option<&AsOf>,
+    result_masking: Option<&ResultMaskingPolicy>,
 ) -> Result<Value, ErrorEnvelope> {
     let format = oraclemcp_core::ExportFormat::parse(a.export_format.as_deref())
         .ok_or_else(|| invalid_args("export_format must be \"csv\" or \"json\""))?;
@@ -2536,7 +2643,7 @@ async fn export_query_to_resource(
         max_rows: MAX_QUERY_EXPORT_ROWS,
         max_result_bytes: oraclemcp_core::export::MAX_EXPORT_BYTES,
     };
-    let serialize_opts = query_serialize_options_from_args(a);
+    let serialize_opts = query_serialize_options_from_args_with_policy(a, result_masking);
     // K9: an export honors the flashback target too — the SAME proven SQL is
     // materialized as of the requested snapshot.
     let response = match as_of {
@@ -8446,6 +8553,7 @@ impl OracleDispatcher {
                 level: new_level,
                 request_timeout: new_policy.request_timeout,
                 max_query_cost: new_policy.max_query_cost,
+                result_masking: new_policy.result_masking,
                 custom_catalog: new_custom_catalog,
                 response,
             };
@@ -8460,6 +8568,7 @@ impl OracleDispatcher {
             request_budget.enforce(cx).map_err(DbError::into_envelope)?;
             let old_request_timeout = self.request_timeout()?;
             let old_max_query_cost = self.max_query_cost()?;
+            let old_result_masking = self.result_masking_policy()?;
             let PreparedProfileSwitch {
                 profile,
                 profile_generation,
@@ -8468,6 +8577,7 @@ impl OracleDispatcher {
                 level,
                 request_timeout,
                 max_query_cost,
+                result_masking,
                 custom_catalog,
                 mut response,
             } = prepared;
@@ -8492,9 +8602,15 @@ impl OracleDispatcher {
                         let _ = self.set_request_timeout(old_request_timeout);
                         return Err(err);
                     }
+                    if let Err(err) = self.set_result_masking_policy(result_masking) {
+                        let _ = self.set_request_timeout(old_request_timeout);
+                        let _ = self.set_max_query_cost(old_max_query_cost);
+                        return Err(err);
+                    }
                     if let Err(err) = self.clear_connection_quarantine() {
                         let _ = self.set_request_timeout(old_request_timeout);
                         let _ = self.set_max_query_cost(old_max_query_cost);
+                        let _ = self.set_result_masking_policy(old_result_masking);
                         return Err(err);
                     }
                     let profile_generation =
@@ -9166,7 +9282,11 @@ impl OracleDispatcher {
                             explicit_key
                         };
                         let caps = diff_query_caps_from_args(&a);
-                        let serialize_opts = diff_serialize_options_from_args(&a);
+                        let result_masking = self.result_masking_policy()?;
+                        let serialize_opts = diff_serialize_options_from_args_with_policy(
+                            &a,
+                            result_masking.as_ref(),
+                        );
                         let read_conn = ReadUncertaintyConn {
                             inner: conn,
                             quarantine: Some(&self.quarantine),
@@ -9968,7 +10088,9 @@ impl OracleDispatcher {
                         .with_next_step("drop streaming, or page the as_of read with cursor"));
                     }
                     let caps = query_caps_from_args(&a);
-                    let serialize_opts = query_serialize_options_from_args(&a);
+                    let result_masking = self.result_masking_policy()?;
+                    let serialize_opts =
+                        query_serialize_options_from_args_with_policy(&a, result_masking.as_ref());
                     return Self::stream_query_response(
                         cx,
                         &read_conn,
@@ -9987,6 +10109,7 @@ impl OracleDispatcher {
                 // result as an oracle-export://{id} resource and return a
                 // resource_link instead of inlining the rows.
                 if a.export {
+                    let result_masking = self.result_masking_policy()?;
                     return export_query_to_resource(
                         cx,
                         &read_conn,
@@ -9998,6 +10121,7 @@ impl OracleDispatcher {
                         &export_access,
                         exports.as_deref(),
                         as_of.as_ref(),
+                        result_masking.as_ref(),
                     )
                     .await;
                 }
@@ -10005,7 +10129,9 @@ impl OracleDispatcher {
                 // a bounded DBMS_FLASHBACK window (`read_query_as_of`); otherwise the
                 // plain read path. Both take the identical proven `executed_sql`.
                 let caps = query_caps_from_args(&a);
-                let serialize_opts = query_serialize_options_from_args(&a);
+                let result_masking = self.result_masking_policy()?;
+                let serialize_opts =
+                    query_serialize_options_from_args_with_policy(&a, result_masking.as_ref());
                 let read = match as_of.as_ref() {
                     Some(as_of) => {
                         read_query_as_of(
@@ -10225,7 +10351,9 @@ impl OracleDispatcher {
             .with_next_step("drop streaming, or page the as_of read with cursor"));
         }
         let caps = query_caps_from_args(&a);
-        let serialize_opts = query_serialize_options_from_args(&a);
+        let result_masking = self.result_masking_policy()?;
+        let serialize_opts =
+            query_serialize_options_from_args_with_policy(&a, result_masking.as_ref());
         let timeout = call_timeout_duration(a.timeout_seconds)?;
         let stream_budget = match timeout {
             Some(timeout) => request_budget.tighten_timeout(timeout),

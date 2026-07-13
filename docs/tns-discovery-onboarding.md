@@ -151,7 +151,7 @@ would duplicate `oraclemcp.example.toml`, which the docs bead forbids. The
 writer emits a short commented pointer to the example plus the one `[audit]`
 safety note above.
 
-### C.2 Per-profile `ConnectionProfile` fields (25 serde fields)
+### C.2 Per-profile `ConnectionProfile` fields (29 serde fields)
 
 Disposition legend: **SET** = written uncommented with a value; **SET?** = set
 only when known, else commented; **COMMENTED** = present but commented with a
@@ -170,7 +170,10 @@ one-line help string using the exact serde name.
 | `login_statements` | **COMMENTED** | Inline allowlist-validated `ALTER SESSION SET …` statements run on lease acquire. |
 | `trusted_session_statements` | **COMMENTED** | Trusted local session setup, authored by the profile owner, never accepted from agent tool calls. |
 | `call_timeout_seconds` | **COMMENTED** | Per-round-trip Oracle call timeout, in seconds (default 30 when omitted). |
+| `max_query_cost` | **COMMENTED** | Per-query cooperative cost ceiling for `oracle_query`; per-call overrides may only lower it. |
 | `connect_timeout_seconds` | **COMMENTED** | Oracle Net transport connect timeout, in seconds (default: the thin driver's 20s). |
+| `inactivity_timeout_seconds` | **COMMENTED** | Per-read inactivity deadline on an established session, in seconds (unset = unbounded reads). |
+| `keepalive_minutes` | **COMMENTED** | Oracle `EXPIRE_TIME` dead-connection-detection probe interval, in minutes. |
 | `sdu` | **COMMENTED** | Session Data Unit request size for the thin driver (512..=65535 bytes; negotiated when unset). |
 | `protected` | **COMMENTED** | Production profile: pins the ceiling immutable; requires `max_level = "READ_ONLY"` and rejects `literal:` secret refs. |
 | `require_signed_tools` | **COMMENTED** | Require HMAC signatures for operator-defined custom tools on this profile (implied by `protected`). |
@@ -183,6 +186,7 @@ one-line help string using the exact serde name.
 | `drcp` | **COMMENTED** | `[profiles.drcp]` Database Resident Connection Pooling server routing (`pooled`, `connection_class`, `purity`). |
 | `proxy_auth` | **COMMENTED** | `[profiles.proxy_auth]` thin proxy authentication (`proxy_user`, `target_schema`). |
 | `app_context` | **COMMENTED** | `[[profiles.app_context]]` driver-level application-context triples applied at logon (redacted from diagnostics). |
+| `masking` | **COMMENTED** | `[profiles.masking]` result egress masking policy; `mask_unknown_default` must stay true unless complete catalog tagging is configured. |
 | `base` | **COMMENTED** | Name of a profile to inherit unset fields from (shallow-merge). |
 
 ---

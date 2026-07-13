@@ -253,6 +253,7 @@ pub fn synthesize_profiles(
             drcp: None,
             proxy_auth: None,
             app_context: None,
+            masking: None,
             base: None,
         };
 

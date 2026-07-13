@@ -272,6 +272,16 @@ fn render_profile_block(synth_profile: &SynthesizedProfile) -> String {
                 sections.push_str("# key = \"tenant_id\"\n");
                 sections.push_str("# value = \"tenant-123\"\n");
             }
+            "masking" => {
+                push_help(&mut sections, fd.help);
+                sections.push_str("# [profiles.masking]\n");
+                sections.push_str("# mask_unknown_default = true\n");
+                sections.push_str("# salt_ref = \"profile:sample:masking:v1\"\n");
+                sections.push_str("# [[profiles.masking.rules]]\n");
+                sections.push_str("# column_match = { column = \"EMAIL\" }\n");
+                sections.push_str("# action = \"mask\"\n");
+                sections.push_str("# tag = \"pii.email\"\n");
+            }
             _ => {}
         }
     }

@@ -103,6 +103,14 @@ default_level = "READ_ONLY"
 # namespace = "ORACLEMCP_CTX"
 # key = "tenant_id"
 # value = "tenant-123"
+# [profiles.masking] result egress masking policy; mask_unknown_default must stay true unless complete catalog tagging is configured.
+# [profiles.masking]
+# mask_unknown_default = true
+# salt_ref = "profile:sample:masking:v1"
+# [[profiles.masking.rules]]
+# column_match = { column = "EMAIL" }
+# action = "mask"
+# tag = "pii.email"
 
 [[profiles]]
 # Unverified until you export ORACLE_PRIMARY_TCPS_PASSWORD and run `oraclemcp doctor --online`.
@@ -174,3 +182,11 @@ default_level = "READ_ONLY"
 # namespace = "ORACLEMCP_CTX"
 # key = "tenant_id"
 # value = "tenant-123"
+# [profiles.masking] result egress masking policy; mask_unknown_default must stay true unless complete catalog tagging is configured.
+# [profiles.masking]
+# mask_unknown_default = true
+# salt_ref = "profile:sample:masking:v1"
+# [[profiles.masking.rules]]
+# column_match = { column = "EMAIL" }
+# action = "mask"
+# tag = "pii.email"

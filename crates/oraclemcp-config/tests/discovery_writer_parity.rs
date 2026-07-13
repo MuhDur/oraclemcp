@@ -16,7 +16,7 @@ use oraclemcp_config::discovery::synth::{DiscoveredNetService, SynthOptions, syn
 use oraclemcp_config::discovery::{DiscoverySynthesis, render_annotated_config};
 use oraclemcp_config::{
     AppContextConfig, ConnectionProfile, DrcpRoutingConfig, HttpConfig, OciConfig, OperatingLevel,
-    OracleMcpConfig, PoolConfig, ProxyAuthConfig, SessionIdentityConfig,
+    OracleMcpConfig, PoolConfig, ProxyAuthConfig, ResultMaskingConfig, SessionIdentityConfig,
 };
 
 /// A two-net-service synthesis: a plain alias and a TCPS + wallet target (so the
@@ -75,6 +75,7 @@ fn fully_populated_profile() -> ConnectionProfile {
         drcp: Some(DrcpRoutingConfig::default()),
         proxy_auth: Some(ProxyAuthConfig::default()),
         app_context: Some(vec![AppContextConfig::default()]),
+        masking: Some(ResultMaskingConfig::default()),
         base: Some("base_profile".to_owned()),
     }
 }

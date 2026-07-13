@@ -491,6 +491,161 @@ impl std::fmt::Debug for SessionIdentityConfig {
     }
 }
 
+/// Result-masking action for one profile policy rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultMaskingActionConfig {
+    /// Replace every non-null value with a fixed marker.
+    Mask,
+    /// Replace every non-null value with a deterministic per-profile token.
+    Tokenize,
+    /// Replace every non-null value with JSON null.
+    Null,
+}
+
+/// Column selector for one result-masking rule.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResultColumnMatchConfig {
+    /// Optional Oracle owner/schema constraint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    /// Optional table/object constraint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    /// Result/catalog column name. Mutually exclusive with `tag`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    /// Operator-defined sensitivity tag. Mutually exclusive with `column`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+}
+
+impl ResultColumnMatchConfig {
+    fn validate(&self, profile: &str) -> Result<(), ConfigError> {
+        validate_optional_non_empty_masking_field(
+            profile,
+            "rules[].column_match.schema",
+            self.schema.as_deref(),
+        )?;
+        validate_optional_non_empty_masking_field(
+            profile,
+            "rules[].column_match.table",
+            self.table.as_deref(),
+        )?;
+        validate_optional_non_empty_masking_field(
+            profile,
+            "rules[].column_match.column",
+            self.column.as_deref(),
+        )?;
+        validate_optional_non_empty_masking_field(
+            profile,
+            "rules[].column_match.tag",
+            self.tag.as_deref(),
+        )?;
+        match (self.column.as_ref(), self.tag.as_ref()) {
+            (Some(_), Some(_)) => Err(ConfigError::InvalidMasking {
+                profile: profile.to_owned(),
+                field: "rules[].column_match",
+                reason: "column and tag are mutually exclusive",
+            }),
+            (None, None) => Err(ConfigError::InvalidMasking {
+                profile: profile.to_owned(),
+                field: "rules[].column_match",
+                reason: "exactly one of column or tag must be configured",
+            }),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// One result-masking rule.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResultMaskingRuleConfig {
+    /// Column selector.
+    pub column_match: ResultColumnMatchConfig,
+    /// Action applied to matching non-null cells.
+    pub action: ResultMaskingActionConfig,
+    /// Optional non-secret policy/audit tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+}
+
+impl ResultMaskingRuleConfig {
+    fn validate(&self, profile: &str) -> Result<(), ConfigError> {
+        self.column_match.validate(profile)?;
+        validate_optional_non_empty_masking_field(profile, "rules[].tag", self.tag.as_deref())
+    }
+}
+
+/// Profile-scoped result-masking policy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResultMaskingConfig {
+    /// Any column not matched by a rule is masked rather than passed through.
+    pub mask_unknown_default: bool,
+    /// Non-secret reference/id for the profile tokenization salt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub salt_ref: Option<String>,
+    /// Ordered rules; first match wins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<ResultMaskingRuleConfig>,
+}
+
+impl Default for ResultMaskingConfig {
+    fn default() -> Self {
+        Self {
+            mask_unknown_default: true,
+            salt_ref: None,
+            rules: Vec::new(),
+        }
+    }
+}
+
+impl ResultMaskingConfig {
+    pub(crate) fn validate(&self, profile: &str) -> Result<(), ConfigError> {
+        if !self.mask_unknown_default {
+            return Err(ConfigError::InvalidMasking {
+                profile: profile.to_owned(),
+                field: "mask_unknown_default",
+                reason: "must be true until a complete catalog-tagging source is configured",
+            });
+        }
+        validate_optional_non_empty_masking_field(profile, "salt_ref", self.salt_ref.as_deref())?;
+        let has_tokenize_rule = self
+            .rules
+            .iter()
+            .any(|rule| rule.action == ResultMaskingActionConfig::Tokenize);
+        if has_tokenize_rule && self.salt_ref.is_none() {
+            return Err(ConfigError::InvalidMasking {
+                profile: profile.to_owned(),
+                field: "salt_ref",
+                reason: "is required when any masking rule uses action = \"tokenize\"",
+            });
+        }
+        for rule in &self.rules {
+            rule.validate(profile)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_optional_non_empty_masking_field(
+    profile: &str,
+    field: &'static str,
+    value: Option<&str>,
+) -> Result<(), ConfigError> {
+    if value.is_some_and(|value| value.trim().is_empty()) {
+        return Err(ConfigError::InvalidMasking {
+            profile: profile.to_owned(),
+            field,
+            reason: "must be non-empty when configured",
+        });
+    }
+    Ok(())
+}
+
 /// A single named Oracle connection profile, as written in
 /// `~/.config/oraclemcp/profiles.toml`. Inheritable fields are `Option`;
 /// [`resolve_inheritance`] merges a `base` chain and the accessors apply
@@ -601,6 +756,9 @@ pub struct ConnectionProfile {
     /// Driver-level application context triples applied at logon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<Vec<AppContextConfig>>,
+    /// Optional profile-scoped result masking policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub masking: Option<ResultMaskingConfig>,
     /// Name of a profile to inherit unset fields from (shallow-merge).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
@@ -613,6 +771,7 @@ impl std::fmt::Debug for ConnectionProfile {
         let login_statement_count = self.login_statements.as_ref().map(Vec::len);
         let trusted_statement_count = self.trusted_session_statements.as_ref().map(Vec::len);
         let app_context_count = self.app_context.as_ref().map(Vec::len);
+        let masking_rule_count = self.masking.as_ref().map(|masking| masking.rules.len());
         f.debug_struct("ConnectionProfile")
             .field("name", &self.name)
             .field("description", &self.description)
@@ -643,6 +802,7 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("drcp", &self.drcp)
             .field("proxy_auth", &self.proxy_auth)
             .field("app_context_count", &app_context_count)
+            .field("masking_rule_count", &masking_rule_count)
             .field("base", &self.base)
             .finish()
     }
@@ -737,6 +897,7 @@ impl ConnectionProfile {
             drcp,
             proxy_auth,
             app_context,
+            masking,
         );
     }
 
@@ -936,6 +1097,7 @@ mod tests {
             drcp: None,
             proxy_auth: None,
             app_context: None,
+            masking: None,
             base: None,
         }
     }
@@ -1023,6 +1185,114 @@ mod tests {
         )
         .expect_err("misspelled keepalive field must be rejected");
         assert!(err.to_string().contains("keepalive_minute"));
+    }
+
+    #[test]
+    fn result_masking_policy_parse_validation_and_inheritance_are_strict() {
+        let cfg = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "base"
+            connect_string = "base:1521/svc"
+
+            [profiles.masking]
+            mask_unknown_default = true
+            salt_ref = "profile:base:masking:v1"
+
+            [[profiles.masking.rules]]
+            column_match = { column = "EMAIL" }
+            action = "tokenize"
+            tag = "pii.email"
+
+            [[profiles]]
+            name = "child"
+            base = "base"
+            connect_string = "child:1521/svc"
+            "#,
+        )
+        .expect("valid masking profile");
+
+        let base = cfg.profile("base").expect("base profile");
+        let masking = base.masking.as_ref().expect("masking config");
+        assert!(masking.mask_unknown_default);
+        assert_eq!(masking.salt_ref.as_deref(), Some("profile:base:masking:v1"));
+        assert_eq!(masking.rules.len(), 1);
+        assert_eq!(
+            masking.rules[0].column_match.column.as_deref(),
+            Some("EMAIL")
+        );
+        assert_eq!(masking.rules[0].action, ResultMaskingActionConfig::Tokenize);
+
+        let child = cfg.profile("child").expect("child profile");
+        assert_eq!(
+            child.masking.as_ref().and_then(|m| m.salt_ref.as_deref()),
+            Some("profile:base:masking:v1"),
+            "masking config is inherited as one shallow profile sub-table"
+        );
+
+        let err = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "bad_unknown"
+            connect_string = "localhost:1521/FREEPDB1"
+
+            [profiles.masking]
+            mask_unknown_defualt = true
+            "#,
+        )
+        .expect_err("misspelled masking field is rejected");
+        assert!(err.to_string().contains("mask_unknown_defualt"));
+
+        let err = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "open"
+            connect_string = "localhost:1521/FREEPDB1"
+
+            [profiles.masking]
+            mask_unknown_default = false
+            "#,
+        )
+        .expect_err("masking must fail closed on unknown columns");
+        assert!(matches!(err, ConfigError::InvalidMasking { .. }));
+        assert!(err.to_string().contains("mask_unknown_default"));
+
+        let err = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "ambiguous"
+            connect_string = "localhost:1521/FREEPDB1"
+
+            [profiles.masking]
+            mask_unknown_default = true
+
+            [[profiles.masking.rules]]
+            column_match = { column = "EMAIL", tag = "pii.email" }
+            action = "mask"
+            "#,
+        )
+        .expect_err("column and tag selectors are mutually exclusive");
+        assert!(
+            err.to_string()
+                .contains("column and tag are mutually exclusive")
+        );
+
+        let err = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "token"
+            connect_string = "localhost:1521/FREEPDB1"
+
+            [profiles.masking]
+            mask_unknown_default = true
+
+            [[profiles.masking.rules]]
+            column_match = { column = "EMAIL" }
+            action = "tokenize"
+            "#,
+        )
+        .expect_err("tokenize requires a configured salt reference");
+        assert!(err.to_string().contains("salt_ref"));
     }
 
     #[test]

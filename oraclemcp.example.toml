@@ -273,6 +273,18 @@ purity = "reuse"
 # acquire_timeout_secs = 5      # Default: 5. Range: 1..=3600.
 # statement_cache_size = 50     # Default: 50.
 
+# [profiles.masking] — result egress masking. Optional; when present, unknown
+# columns MUST stay masked by default until a complete catalog-tagging source is
+# configured. This protects business data after SQL admission and before result
+# JSON leaves the server.
+# [profiles.masking]
+# mask_unknown_default = true    # Required true for the current server-side seam.
+# salt_ref = "profile:dev_ro:masking:v1"  # Required only when a rule uses action = "tokenize".
+# [[profiles.masking.rules]]
+# column_match = { column = "EMAIL" }     # Exactly one of column or tag.
+# action = "mask"                         # "mask", "tokenize", or "null".
+# tag = "pii.email"                       # Optional non-secret policy/audit tag.
+
 # [profiles.proxy_auth] — thin proxy authentication. Optional. When set,
 # credential_ref belongs to proxy_user; top-level `username`, if present, must
 # match proxy_user. Needs: ALTER USER <target_schema> GRANT CONNECT THROUGH <proxy_user>.
