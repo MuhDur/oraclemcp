@@ -1506,6 +1506,12 @@ function GroundControl2DRenderer({
       data-health={model.health}
       data-verdict={model.verdict}
     >
+      {/* Announce the fail-closed verdict to assistive tech. Kept separate from
+          the per-second UTC clock below so the live region fires only on a
+          GO/NO-GO change, not every tick. */}
+      <span className="sr-only" role="status" aria-live="polite">
+        Fail-closed guard status: {model.verdict}. {statusHeadline}.
+      </span>
       {goNoGo ? (
         <StripCell className="xl:max-w-52">
           <SignatureCell signature={goNoGo} />
@@ -1601,6 +1607,13 @@ export function ChainStrip({ chain }: { chain: GroundControlChain }): React.Reac
       aria-label="audit chain"
       data-chain-status={chain.status}
     >
+      {/* Announce audit-chain tamper/verify state; a broken chain is a security
+          event an operator must not miss. Separate from the ticking "verified
+          ago" so the live region fires on a status change, not every tick. */}
+      <span className="sr-only" role="status" aria-live="polite">
+        Audit chain {headline}
+        {chain.height === null ? "" : `, height ${chain.height}`}.
+      </span>
       <div className="flex items-center gap-2.5">
         <Link2 className="size-4 text-[var(--om-text-muted)]" aria-hidden="true" />
         <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">

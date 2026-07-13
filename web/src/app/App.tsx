@@ -6515,6 +6515,8 @@ export function OperatorOutcomeNotice({
       className={cn("rounded-md border p-3", stateClass)}
       data-operator-outcome={outcome.state}
       data-outcome-tone={tone}
+      role="status"
+      aria-live="polite"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm font-semibold">{outcome.message}</p>
