@@ -235,6 +235,256 @@ export function toVerdictProofViewModel(proof: VerdictProofInput): VerdictProofV
   };
 }
 
+// ── Fleet map (Arc H) ────────────────────────────────────────────────────────
+// `oracle_orient fleet=true` maps every MCP-visible profile independently and
+// returns a typed lane status per profile: REACHABLE, UNREACHABLE, FAIL_CLOSED.
+// The whole point of that design is that one dead lane never omits or fails the
+// others — so the map must never DROP a node it could not reach. An unreachable
+// database is a fact about the fleet, not a gap in the picture.
+
+export type FleetDbStatus = "reachable" | "unreachable" | "fail_closed";
+
+export type FleetDriftViewModel = {
+  baselineProfile: string;
+  schemaChanged: boolean;
+  foreignKeysChanged: boolean;
+  freshnessChanged: boolean;
+  recentDdlChanged: boolean;
+  changedSections: readonly string[];
+};
+
+export type FleetDbViewModel = {
+  dbId: string;
+  status: FleetDbStatus;
+  serverVersion: string | null;
+  databaseRole: string | null;
+  openMode: string | null;
+  readOnly: boolean | null;
+  poolOpenConnections: number | null;
+  // Null whenever the lane was not read — an unread lane has no drift, and the
+  // console must not render "no drift" for a database it never reached.
+  drift: FleetDriftViewModel | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  detail: string;
+  tone: DashboardTone;
+};
+
+export type FleetMapViewModel = {
+  grammarVersion: 1;
+  profileCount: number;
+  reachableCount: number;
+  unreachableCount: number;
+  failClosedCount: number;
+  baselineProfile: string | null;
+  driftedCount: number;
+  headline: string;
+  detail: string;
+  nodes: readonly FleetDbViewModel[];
+  tone: DashboardTone;
+};
+
+export type FleetMapInput = {
+  profiles: readonly {
+    profile: string;
+    status: FleetDbStatus;
+    serverVersion: string | null;
+    databaseRole: string | null;
+    openMode: string | null;
+    readOnly: boolean | null;
+    poolOpenConnections: number | null;
+    drift: FleetDriftViewModel | null;
+    errorCode: string | null;
+    errorMessage: string | null;
+  }[];
+  summary: {
+    profileCount: number;
+    reachableCount: number;
+    unreachableCount: number;
+    failClosedCount: number;
+  } | null;
+};
+
+export function driftSections(drift: {
+  schemaChanged: boolean;
+  foreignKeysChanged: boolean;
+  freshnessChanged: boolean;
+  recentDdlChanged: boolean;
+}): string[] {
+  const sections: string[] = [];
+  if (drift.schemaChanged) {
+    sections.push("schema");
+  }
+  if (drift.foreignKeysChanged) {
+    sections.push("foreign_keys");
+  }
+  if (drift.freshnessChanged) {
+    sections.push("freshness");
+  }
+  if (drift.recentDdlChanged) {
+    sections.push("recent_ddl");
+  }
+  return sections;
+}
+
+export function toFleetMapViewModel(input: FleetMapInput): FleetMapViewModel {
+  const nodes = input.profiles.map((profile): FleetDbViewModel => {
+    if (profile.status === "reachable") {
+      const changed = profile.drift?.changedSections ?? [];
+      return {
+        dbId: profile.profile,
+        status: "reachable",
+        serverVersion: profile.serverVersion,
+        databaseRole: profile.databaseRole,
+        openMode: profile.openMode,
+        readOnly: profile.readOnly,
+        poolOpenConnections: profile.poolOpenConnections,
+        drift: profile.drift,
+        errorCode: null,
+        errorMessage: null,
+        detail:
+          changed.length > 0
+            ? `drift vs ${profile.drift?.baselineProfile}: ${changed.join(", ")}`
+            : profile.drift
+              ? `no drift vs ${profile.drift.baselineProfile}`
+              : "reachable",
+        tone: changed.length > 0 ? "info" : "ok"
+      };
+    }
+    return {
+      dbId: profile.profile,
+      status: profile.status,
+      serverVersion: null,
+      databaseRole: null,
+      openMode: null,
+      readOnly: null,
+      poolOpenConnections: null,
+      // Never "no drift": an unread lane was not compared to anything.
+      drift: null,
+      errorCode: profile.errorCode,
+      errorMessage: profile.errorMessage,
+      detail:
+        profile.errorMessage ??
+        (profile.status === "unreachable"
+          ? "profile connection or orientation metadata is unavailable"
+          : "the lane refused fail-closed"),
+      tone: "warn"
+    };
+  });
+
+  const summary = input.summary;
+  const reachableCount = summary?.reachableCount ?? nodes.filter((n) => n.status === "reachable").length;
+  const unreachableCount =
+    summary?.unreachableCount ?? nodes.filter((n) => n.status === "unreachable").length;
+  const failClosedCount =
+    summary?.failClosedCount ?? nodes.filter((n) => n.status === "fail_closed").length;
+  const driftedCount = nodes.filter((node) => (node.drift?.changedSections.length ?? 0) > 0).length;
+  const degraded = unreachableCount + failClosedCount;
+
+  return {
+    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+    profileCount: summary?.profileCount ?? nodes.length,
+    reachableCount,
+    unreachableCount,
+    failClosedCount,
+    baselineProfile: nodes.find((node) => node.drift)?.drift?.baselineProfile ?? null,
+    driftedCount,
+    headline:
+      degraded > 0
+        ? `${reachableCount} of ${nodes.length} database(s) reachable — ${degraded} degraded`
+        : `${reachableCount} database(s) reachable`,
+    detail:
+      degraded > 0
+        ? "A lane that could not be read is shown as it is; it is never dropped from the map and never reported as drift-free."
+        : "Every visible profile answered its own orientation read.",
+    nodes,
+    tone: degraded > 0 ? "warn" : "ok"
+  };
+}
+
+/** Two healthy databases, one drifted, and one unreachable that must still render. */
+export function fleetMapFixture(): FleetMapViewModel {
+  return toFleetMapViewModel({
+    summary: {
+      profileCount: 4,
+      reachableCount: 3,
+      unreachableCount: 1,
+      failClosedCount: 0
+    },
+    profiles: [
+      {
+        profile: "prod_read",
+        status: "reachable",
+        serverVersion: "23.4.0.0",
+        databaseRole: "PRIMARY",
+        openMode: "READ WRITE",
+        readOnly: false,
+        poolOpenConnections: 2,
+        drift: {
+          baselineProfile: "prod_read",
+          schemaChanged: false,
+          foreignKeysChanged: false,
+          freshnessChanged: false,
+          recentDdlChanged: false,
+          changedSections: []
+        },
+        errorCode: null,
+        errorMessage: null
+      },
+      {
+        profile: "prod_standby",
+        status: "reachable",
+        serverVersion: "23.4.0.0",
+        databaseRole: "PHYSICAL STANDBY",
+        openMode: "READ ONLY",
+        readOnly: true,
+        poolOpenConnections: 1,
+        drift: {
+          baselineProfile: "prod_read",
+          schemaChanged: false,
+          foreignKeysChanged: false,
+          freshnessChanged: true,
+          recentDdlChanged: false,
+          changedSections: ["freshness"]
+        },
+        errorCode: null,
+        errorMessage: null
+      },
+      {
+        profile: "staging",
+        status: "reachable",
+        serverVersion: "21.3.0.0",
+        databaseRole: "PRIMARY",
+        openMode: "READ WRITE",
+        readOnly: false,
+        poolOpenConnections: 1,
+        drift: {
+          baselineProfile: "prod_read",
+          schemaChanged: true,
+          foreignKeysChanged: true,
+          freshnessChanged: false,
+          recentDdlChanged: true,
+          changedSections: ["schema", "foreign_keys", "recent_ddl"]
+        },
+        errorCode: null,
+        errorMessage: null
+      },
+      {
+        profile: "dr_site",
+        status: "unreachable",
+        serverVersion: null,
+        databaseRole: null,
+        openMode: null,
+        readOnly: null,
+        poolOpenConnections: null,
+        drift: null,
+        errorCode: "UNREACHABLE",
+        errorMessage: "profile connection or orientation metadata is unavailable"
+      }
+    ]
+  });
+}
+
 // ── Egress mask badge (Arc M) ────────────────────────────────────────────────
 // A result page carries a `mask_certificate` ONLY when the active policy
 // actually transformed a column. So an absent certificate is not proof that
@@ -1062,6 +1312,7 @@ export function skinContractFixture(): {
   costBadge: CostBadgeViewModel;
   scnScrubber: ScnScrubberViewModel;
   maskBadge: MaskBadgeViewModel;
+  fleetMap: FleetMapViewModel;
 } {
   return {
     verdictProof: verdictProofFixture(),
@@ -1069,6 +1320,7 @@ export function skinContractFixture(): {
     costBadge: costBadgeFixture(),
     scnScrubber: scnScrubberFixture(),
     maskBadge: maskBadgeFixture(),
+    fleetMap: fleetMapFixture(),
     groundControl: {
       grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
       verdict: "GO",

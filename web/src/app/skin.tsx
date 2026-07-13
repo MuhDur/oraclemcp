@@ -27,6 +27,7 @@ import {
   type GroundControlViewModel,
   type HealthPosture,
   type CostBadgeViewModel,
+  type FleetMapViewModel,
   type MaskBadgeViewModel,
   type ScnScrubberViewModel,
   type SignatureId,
@@ -72,6 +73,7 @@ export type DashboardSkin = {
     VerdictProof: React.ComponentType<{ model: VerdictProofViewModel }>;
     CostBadge: React.ComponentType<{ model: CostBadgeViewModel }>;
     MaskBadge: React.ComponentType<{ model: MaskBadgeViewModel }>;
+    FleetMap: React.ComponentType<{ model: FleetMapViewModel }>;
     ScnScrubber: React.ComponentType<{
       model: ScnScrubberViewModel;
       onScrub?: (scn: number) => void;
@@ -165,7 +167,8 @@ export const OMCP_SKIN: DashboardSkin = {
     UndoTree: UndoTreeRenderer,
     CostBadge: CostBadgeRenderer,
     ScnScrubber: ScnScrubberRenderer,
-    MaskBadge: MaskBadgeRenderer
+    MaskBadge: MaskBadgeRenderer,
+    FleetMap: FleetMapRenderer
   },
   layout: {
     appShell: "min-h-screen bg-[var(--om-bg)] text-[var(--om-text)]",
@@ -384,6 +387,85 @@ function VerdictProofFact({ label, value }: { label: string; value: string }): R
         {value}
       </dd>
     </div>
+  );
+}
+
+/**
+ * The fleet map (Arc H).
+ *
+ * One node per MCP-visible profile, including the ones the server could not
+ * read. An unreachable database keeps its place on the map with its typed
+ * status and error; it is never dropped, and it never renders "no drift",
+ * because nothing was compared.
+ */
+export function FleetMapRenderer({ model }: { model: FleetMapViewModel }): React.ReactElement {
+  return (
+    <section
+      className="flex flex-col gap-3 rounded-lg border border-[var(--om-border)] bg-[var(--om-surface)] p-4 shadow-sm"
+      aria-label="fleet map"
+      data-grammar-version={model.grammarVersion}
+      data-profile-count={model.profileCount}
+      data-reachable-count={model.reachableCount}
+      data-unreachable-count={model.unreachableCount}
+      data-fail-closed-count={model.failClosedCount}
+      data-baseline-profile={model.baselineProfile ?? ""}
+    >
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Users className="size-4 text-[var(--om-gold)]" aria-hidden="true" />
+          <span className="text-sm font-bold text-[var(--om-text-bright)]">Fleet Map</span>
+          <Badge tone={model.tone}>{model.headline}</Badge>
+        </div>
+        <span className="font-mono text-2xs text-[var(--om-text-muted)]">
+          {model.driftedCount} drifted
+          {model.baselineProfile ? ` vs ${model.baselineProfile}` : ""}
+        </span>
+      </header>
+      <p className="text-xs text-[var(--om-text-muted)]">{model.detail}</p>
+
+      <ul className="grid gap-2 sm:grid-cols-2">
+        {model.nodes.map((node) => (
+          <li
+            key={node.dbId}
+            className={cn(
+              "flex flex-col gap-1 rounded-md border px-3 py-2",
+              node.status === "reachable"
+                ? "border-[var(--om-border)]"
+                : "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)]"
+            )}
+            data-db-id={node.dbId}
+            data-db-status={node.status}
+            data-db-drift={
+              node.drift === null ? "unknown" : node.drift.changedSections.length > 0 ? "drifted" : "none"
+            }
+            data-db-role={node.databaseRole ?? ""}
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge tone={node.tone}>{node.status}</Badge>
+              <span className="truncate font-mono text-xs font-bold text-[var(--om-text-bright)]">
+                {node.dbId}
+              </span>
+              {node.serverVersion ? (
+                <span className="font-mono text-2xs text-[var(--om-text-muted)]">
+                  {node.serverVersion}
+                </span>
+              ) : null}
+            </div>
+            <p className="text-2xs text-[var(--om-text-muted)]">{node.detail}</p>
+            {node.status === "reachable" ? (
+              <p className="font-mono text-2xs text-[var(--om-text-muted)]">
+                {node.databaseRole ?? "role —"} · {node.openMode ?? "mode —"} ·{" "}
+                {node.poolOpenConnections ?? 0} conn
+              </p>
+            ) : (
+              <p className="font-mono text-2xs text-[var(--om-copper)]">
+                {node.errorCode ?? "UNKNOWN"} · drift not evaluated
+              </p>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -756,6 +838,21 @@ export function assertDashboardSkinConformance(skin: DashboardSkin): void {
   }
   if (typeof skin.renderers.MaskBadge !== "function") {
     throw new Error(`skin ${skin.name} must provide an egress-mask renderer`);
+  }
+  if (typeof skin.renderers.FleetMap !== "function") {
+    throw new Error(`skin ${skin.name} must provide a fleet-map renderer`);
+  }
+  // The fleet map must render every lane the server typed, including the ones it
+  // could not read, and must never claim drift for a lane it never compared.
+  const fleet = fixture.fleetMap;
+  if (fleet.nodes.length !== fleet.profileCount) {
+    throw new Error("fleet-map fixture drops a database node");
+  }
+  if (!fleet.nodes.some((node) => node.status === "unreachable")) {
+    throw new Error("fleet-map fixture must keep an unreachable database on the map");
+  }
+  if (fleet.nodes.some((node) => node.status !== "reachable" && node.drift !== null)) {
+    throw new Error("an unread lane must carry no drift verdict");
   }
   // A certified page must name the policy that made every decision, and a
   // transformed column must never render as passed-through.

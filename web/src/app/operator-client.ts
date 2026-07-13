@@ -1,7 +1,10 @@
 import {
+  driftSections,
   isRegisteredDerivationStep,
   type CostPlanRowViewModel,
   type CostRefusalInput,
+  type FleetDbStatus,
+  type FleetMapInput,
   type MaskAction,
   type MaskCertificateInput,
   type MaskSource,
@@ -1639,6 +1642,96 @@ export async function fetchAuditTail(
     throw new Error(errorMessage(parsed, response.status));
   }
   return parsed as OperatorResponse<AuditTailData>;
+}
+
+// ── Fleet map (Arc H) ────────────────────────────────────────────────────────
+// `oracle_orient fleet=true` orients every MCP-visible profile independently and
+// types each lane REACHABLE / UNREACHABLE / FAIL_CLOSED. A lane that failed is
+// still a lane: the parser keeps it, with its error, exactly as the server sent it.
+
+const FLEET_STATUSES: Readonly<Record<string, FleetDbStatus>> = {
+  REACHABLE: "reachable",
+  UNREACHABLE: "unreachable",
+  FAIL_CLOSED: "fail_closed"
+};
+
+export type FleetMapRequest = {
+  laneId?: string;
+};
+
+/** `oracle_orient` with `fleet: true` — one independent read per profile. */
+export async function fetchFleetMap(
+  session: DashboardSession,
+  request: FleetMapRequest = {}
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("fleet-orient"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_orient",
+    arguments: { fleet: true, include: ["schema", "freshness", "ddl"] }
+  });
+}
+
+export function parseFleetMap(data: WorkbenchActionData | null): FleetMapInput {
+  const payload = mcpPayload(data);
+  const summaryRaw = recordValue(payload?.["summary"]);
+  const summary = summaryRaw
+    ? {
+        profileCount: numberValue(summaryRaw["profile_count"]) ?? 0,
+        reachableCount: numberValue(summaryRaw["reachable_count"]) ?? 0,
+        unreachableCount: numberValue(summaryRaw["unreachable_count"]) ?? 0,
+        failClosedCount: numberValue(summaryRaw["fail_closed_count"]) ?? 0
+      }
+    : null;
+
+  const rawProfiles = Array.isArray(payload?.["profiles"]) ? payload["profiles"] : [];
+  const profiles = rawProfiles.flatMap((raw) => {
+    const entry = recordValue(raw);
+    const profile = stringValue(entry?.["profile"]);
+    const status = FLEET_STATUSES[stringValue(entry?.["status"]) ?? ""];
+    if (!entry || !profile || !status) {
+      return [];
+    }
+    const connection = recordValue(entry["connection"]);
+    const error = recordValue(entry["error"]);
+    const driftRaw = recordValue(entry["drift"]);
+    const drift = driftRaw
+      ? (() => {
+          const flags = {
+            schemaChanged: driftRaw["schema_changed"] === true,
+            foreignKeysChanged: driftRaw["foreign_keys_changed"] === true,
+            freshnessChanged: driftRaw["freshness_changed"] === true,
+            recentDdlChanged: driftRaw["recent_ddl_changed"] === true
+          };
+          return {
+            baselineProfile: stringValue(driftRaw["baseline_profile"]) ?? profile,
+            ...flags,
+            changedSections: driftSections(flags)
+          };
+        })()
+      : null;
+    return [
+      {
+        profile,
+        status,
+        serverVersion: stringValue(connection?.["server_version"]),
+        databaseRole: stringValue(connection?.["database_role"]),
+        openMode: stringValue(connection?.["open_mode"]),
+        readOnly:
+          typeof connection?.["read_only"] === "boolean"
+            ? (connection["read_only"] as boolean)
+            : null,
+        poolOpenConnections: numberValue(connection?.["pool_open_connections"]),
+        // A lane the server did not read has no drift to report; keep it null
+        // rather than letting an absent block read as "no drift".
+        drift: status === "reachable" ? drift : null,
+        errorCode: stringValue(error?.["code"]),
+        errorMessage: stringValue(error?.["message"])
+      }
+    ];
+  });
+
+  return { profiles, summary };
 }
 
 // ── Egress masking (Arc M) ───────────────────────────────────────────────────

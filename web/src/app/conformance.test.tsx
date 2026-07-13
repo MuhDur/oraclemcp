@@ -9,6 +9,7 @@ import {
   VERDICT_RULE_REGISTRY,
   costBadgeFixture,
   defaultSkinCapabilities,
+  fleetMapFixture,
   isRegisteredDerivationStep,
   maskBadgeFixture,
   scnScrubberFixture,
@@ -188,6 +189,34 @@ describe("OMCP skin conformance", () => {
     });
     expect(brokenBinding.proofStatus).toBe("unverified");
     expect(brokenBinding.tone).toBe("warn");
+  });
+
+  it("renders every database on the fleet map, including an unreachable one", () => {
+    const FleetMap = OMCP_SKIN.renderers.FleetMap;
+    const model = fleetMapFixture();
+    const markup = renderToStaticMarkup(<FleetMap model={model} />);
+
+    expect(markup).toContain('data-grammar-version="1"');
+    for (const node of model.nodes) {
+      expect(markup).toContain(`data-db-id="${node.dbId}"`);
+    }
+    expect(markup).toContain('data-db-status="reachable"');
+
+    // The unreachable lane is still a node on the map — Arc H types it precisely
+    // so one dead database never omits the others.
+    const dead = model.nodes.find((node) => node.status === "unreachable");
+    expect(dead?.dbId).toBe("dr_site");
+    expect(markup).toContain('data-db-status="unreachable"');
+    expect(markup).toContain('data-db-id="dr_site"');
+    // And it reports no drift verdict, because nothing was compared.
+    expect(dead?.drift).toBeNull();
+    expect(markup).toContain('data-db-drift="unknown"');
+    expect(markup).toContain("drift not evaluated");
+
+    // Drift is named per section against the baseline the server chose.
+    const drifted = model.nodes.find((node) => node.dbId === "staging");
+    expect(drifted?.drift?.changedSections).toContain("schema");
+    expect(markup).toContain('data-db-drift="drifted"');
   });
 
   it("renders the egress mask badge with a policy id and a per-column decision", () => {

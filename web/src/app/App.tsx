@@ -61,6 +61,7 @@ import {
   DASHBOARD_GRAMMAR,
   clampActivity,
   toCostBadgeViewModel,
+  toFleetMapViewModel,
   toMaskBadgeViewModel,
   toScnScrubberViewModel,
   toUndoTreeViewModel,
@@ -88,9 +89,11 @@ import {
   parseClassifierLadder,
   parseCostEstimate,
   parseQueryCostRefusal,
+  parseFleetMap,
   parseMaskCertificate,
   parseQueryAsOf,
   parseUndoOutcome,
+  fetchFleetMap,
   fetchQueryAsOf,
   fetchQueryCostEstimate,
   fetchVerdictProofs,
@@ -509,6 +512,7 @@ function OverviewPage(): React.ReactElement {
     >
       <div className="space-y-4">
         <BigBoardSurface capabilities={capabilities} model={fleet} skin={OMCP_SKIN} />
+        <FleetMapPanel />
         <OverviewMetricTiles
           snapshot={snapshot}
           lanes={lanes}
@@ -6733,6 +6737,70 @@ function WorkbenchPage(): React.ReactElement {
         <WorkbenchResultPanel result={lastResult} pending={action.isPending} />
       </div>
     </PageFrame>
+  );
+}
+
+/**
+ * The fleet map (Arc H).
+ *
+ * `oracle_orient fleet=true` reads every MCP-visible profile independently, so
+ * one dead database never blanks the map: an UNREACHABLE or FAIL_CLOSED lane
+ * comes back as its own typed node, and this panel renders it as such. Before
+ * the first successful call there is nothing to show — and the panel says the
+ * fleet has not been mapped rather than drawing an empty, healthy-looking one.
+ */
+function FleetMapPanel(): React.ReactElement {
+  const FleetMap = OMCP_SKIN.renderers.FleetMap;
+  const session = useQuery({
+    queryKey: ["dashboard-session"],
+    queryFn: fetchDashboardSession,
+    staleTime: 60_000,
+    retry: 1
+  });
+  const fleet = useQuery({
+    queryKey: ["fleet-map"],
+    queryFn: async () => {
+      if (!session.data) {
+        throw new Error("dashboard session is not ready");
+      }
+      return fetchFleetMap(session.data);
+    },
+    enabled: Boolean(session.data),
+    refetchInterval: 30_000,
+    retry: false
+  });
+
+  const input = fleet.data ? parseFleetMap(fleet.data.data) : null;
+  const outcome = fleet.error ? operatorOutcomeFromError(fleet.error, "fleet orient failed") : null;
+
+  return (
+    <Surface className="space-y-3 p-4" data-testid="fleet-map-panel">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-[var(--om-text-muted)]">
+          Every MCP-visible profile, oriented independently. A lane that cannot be reached stays on
+          the map.
+        </p>
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={!session.data || fleet.isFetching}
+          onClick={() => void fleet.refetch()}
+        >
+          <RefreshCcw className="size-4" aria-hidden="true" />
+          Re-map
+        </Button>
+      </div>
+      {outcome ? <OperatorOutcomeNotice outcome={outcome} /> : null}
+      {input ? (
+        <FleetMap model={toFleetMapViewModel(input)} />
+      ) : (
+        <p className="text-xs text-[var(--om-text-muted)]">
+          {fleet.isFetching
+            ? "Orienting every visible profile…"
+            : "The fleet has not been mapped yet."}
+        </p>
+      )}
+    </Surface>
   );
 }
 
