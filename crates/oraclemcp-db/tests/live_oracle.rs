@@ -28,11 +28,11 @@ use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
     AuthAdapter, CatalogExtractRequest, CatalogRowSetName, DbError, DependentsProbe, DrcpConfig,
-    OracleBind, OracleConnectOptions, OracleConnection, OracleIdentifier, OracleSessionIdentity,
-    QueryCaps, RustOracleConnection, SchemaObject, SchemaObjectType, SchemaSnapshot,
-    SearchDetailLevel, SessionPurity, compare_schemas, explain_plan, extract_catalog_rowsets,
-    migration_plan, orient_fks, orient_hot_objects, orient_recent_ddl, orient_schema,
-    plan_cost_estimate, probe_dependents, search_objects,
+    NativeRedactionAvailability, OracleBind, OracleConnectOptions, OracleConnection,
+    OracleIdentifier, OracleSessionIdentity, QueryCaps, RustOracleConnection, SchemaObject,
+    SchemaObjectType, SchemaSnapshot, SearchDetailLevel, SessionPurity, compare_schemas,
+    explain_plan, extract_catalog_rowsets, migration_plan, orient_fks, orient_hot_objects,
+    orient_recent_ddl, orient_schema, plan_cost_estimate, probe_dependents, search_objects,
 };
 use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use serde_json::json;
@@ -217,6 +217,46 @@ fn live_profile_config_username_password_identity_and_session_fields_round_trip(
                 "client_driver should include configured driver name when visible: {client_driver}"
             );
         }
+    });
+}
+
+#[test]
+fn live_free_native_redaction_is_explicitly_fail_closed() {
+    run_with_cx(|cx| async move {
+        let Some(conn) = connect_or_skip(
+            &cx,
+            "live_free_native_redaction_is_explicitly_fail_closed",
+            test_opts(),
+        )
+        .await
+        else {
+            return;
+        };
+        let info = conn
+            .describe(&cx)
+            .await
+            .expect("native capability describe");
+        let Some(features) = info.server_features else {
+            eprintln!("[live-xe] SKIP native redaction: driver did not report server features");
+            return;
+        };
+        let Some(edition) = features.edition.as_deref() else {
+            eprintln!("[live-xe] SKIP native redaction: database edition is unreadable");
+            return;
+        };
+        let is_free_or_express = edition.to_ascii_lowercase().contains("free")
+            || edition.to_ascii_lowercase().contains("express");
+        if !is_free_or_express {
+            eprintln!(
+                "[live-xe] SKIP native redaction: this assertion targets FREE/XE, got {edition}"
+            );
+            return;
+        }
+        assert_eq!(
+            features.native_redaction,
+            NativeRedactionAvailability::RequiresAdvancedSecurity,
+            "FREE/XE must expose an explicit native-redaction refusal, not silently claim policy enforcement"
+        );
     });
 }
 

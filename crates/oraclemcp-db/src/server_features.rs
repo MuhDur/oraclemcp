@@ -29,6 +29,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::native_redaction::NativeRedactionAvailability;
+
 /// AI Vector Search (the native `VECTOR` type + vector indexes/operators) was
 /// introduced in **Oracle Database 23ai** (23c). Inferred for major >= 23.
 /// Source: Oracle Database AI Vector Search User's Guide, 23ai — "Oracle AI
@@ -168,6 +170,11 @@ pub struct ServerFeatures {
     /// the account cannot read the view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partitioning: Option<bool>,
+    /// Whether the optional native Data Redaction tier can be considered for
+    /// an ADMIN-gated policy install. This is fail-closed: an unreadable
+    /// `v$option` probe reports `requires_advanced_security`, never `available`.
+    #[serde(default)]
+    pub native_redaction: NativeRedactionAvailability,
     /// The negotiated TTC protocol version from the server's ACCEPT packet (the
     /// `TNS_VERSION_*` level the client and server agreed on, e.g. `319` for a
     /// 19c+/23ai-era server). Driver-reported (K2; iec3.6.1); omitted when
@@ -218,9 +225,17 @@ impl ServerFeatures {
             supports_soda: derived.map(|d| d.supports_soda),
             edition,
             partitioning,
+            native_redaction: NativeRedactionAvailability::RequiresAdvancedSecurity,
             protocol_version,
             supports_fast_auth,
         }
+    }
+
+    /// Attach the fail-closed native Data Redaction capability probe.
+    #[must_use]
+    pub fn with_native_redaction(mut self, availability: NativeRedactionAvailability) -> Self {
+        self.native_redaction = availability;
+        self
     }
 }
 
@@ -309,6 +324,10 @@ mod tests {
         assert_eq!(f.supports_soda, Some(true));
         assert_eq!(f.edition.as_deref(), Some("Oracle Database 23ai Free"));
         assert_eq!(f.partitioning, Some(false));
+        assert_eq!(
+            f.native_redaction,
+            NativeRedactionAvailability::RequiresAdvancedSecurity
+        );
         assert_eq!(f.protocol_version, Some(319));
         assert_eq!(f.supports_fast_auth, Some(true));
     }
@@ -335,6 +354,12 @@ mod tests {
         assert!(
             json.get("partitioning").is_none(),
             "partitioning omitted when None"
+        );
+        assert_eq!(
+            json.get("native_redaction"),
+            Some(&serde_json::Value::String(
+                "requires_advanced_security".to_owned()
+            ))
         );
         // K2 accessors unknown here → omitted from JSON.
         assert!(
@@ -393,13 +418,25 @@ mod tests {
     }
 
     #[test]
-    fn default_is_empty_and_serializes_to_empty_object() {
+    fn default_reports_fail_closed_native_redaction_status() {
         let f = ServerFeatures::default();
         let json = serde_json::to_value(&f).expect("serialize");
         assert_eq!(
             json,
-            serde_json::json!({}),
-            "all fields omitted when unknown"
+            serde_json::json!({ "native_redaction": "requires_advanced_security" }),
+            "the optional native tier is explicit rather than silently omitted"
+        );
+    }
+
+    #[test]
+    fn legacy_capability_payload_defaults_native_redaction_to_refusal() {
+        let legacy: ServerFeatures = serde_json::from_value(serde_json::json!({
+            "edition": "Oracle Database 23ai Free"
+        }))
+        .expect("older capability payload remains readable");
+        assert_eq!(
+            legacy.native_redaction,
+            NativeRedactionAvailability::RequiresAdvancedSecurity
         );
     }
 

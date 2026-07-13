@@ -5161,16 +5161,21 @@ mod driver {
                     ),
                     None => (None, None),
                 };
-                info.server_features = Some(crate::server_features::ServerFeatures::from_probe(
-                    version_tuple,
-                    sdu,
-                    supports_pipelining,
-                    supports_oob,
-                    edition,
-                    partitioning,
-                    Some(protocol_version),
-                    Some(supports_fast_auth),
-                ));
+                let native_redaction =
+                    crate::native_redaction::probe_native_redaction(cx, self).await?;
+                info.server_features = Some(
+                    crate::server_features::ServerFeatures::from_probe(
+                        version_tuple,
+                        sdu,
+                        supports_pipelining,
+                        supports_oob,
+                        edition,
+                        partitioning,
+                        Some(protocol_version),
+                        Some(supports_fast_auth),
+                    )
+                    .with_native_redaction(native_redaction),
+                );
             }
             super::db_checkpoint(cx, "oracle_db.describe.after")?;
             Ok(info.with_read_only_status())

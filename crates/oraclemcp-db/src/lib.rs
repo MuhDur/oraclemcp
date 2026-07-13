@@ -70,6 +70,7 @@ mod health;
 mod intelligence;
 mod lease;
 mod masking;
+mod native_redaction;
 mod oci;
 mod plscope;
 mod privileges;
@@ -134,6 +135,12 @@ pub use masking::{
     ResultMaskingAction, ResultMaskingCertificate, ResultMaskingColumnDecision,
     ResultMaskingDecisionAction, ResultMaskingDecisionSource, ResultMaskingPolicy,
     ResultMaskingRule, incomparable_masked_columns,
+};
+pub use native_redaction::{
+    NATIVE_REDACTION_ADD_POLICY_SQL, NATIVE_REDACTION_OPTION_SQL, NativeRedactionApplyError,
+    NativeRedactionAvailability, NativeRedactionGate, NativeRedactionPolicy,
+    NativeRedactionPolicyError, apply_native_redaction_policy, gate_native_redaction,
+    probe_native_redaction,
 };
 pub use oci::{
     AdbConnectInfo, CloudStatus, IamToken, IamTokenSource, OciError, WalletContents, WalletMode,
