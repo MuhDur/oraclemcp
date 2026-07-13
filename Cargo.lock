@@ -2136,6 +2136,7 @@ version = "0.9.0"
 dependencies = [
  "oraclemcp-audit",
  "oraclemcp-guard",
+ "serde_json",
  "thiserror",
 ]
 

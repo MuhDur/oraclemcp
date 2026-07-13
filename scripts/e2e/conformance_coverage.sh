@@ -46,12 +46,14 @@ required=(
   scripts/e2e/load_soak.sh
   scripts/e2e/live_xe_headline.sh
   scripts/e2e/oracle_version_matrix.sh
+  scripts/e2e/verdict_certificate.sh
   scripts/e2e/cost_gate.sh
   scripts/e2e/time_diff.sh
   scripts/e2e/sql_policy.sh
   scripts/e2e/refusal_corpus.sh
   scripts/e2e/served_egress.sh
   scripts/e2e/oracle_ladder_session.py
+  scripts/e2e/verdict_certificate_session.py
   scripts/e2e/time_diff_session.py
   scripts/e2e/sql_policy_session.py
   scripts/e2e/refusal_corpus_session.py
@@ -153,6 +155,12 @@ if ! grep -F "Oracle version matrix ladder" scripts/e2e/COVERAGE.md >/dev/null; 
 fi
 if ! grep -F "scripts/e2e/oracle_version_matrix.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
   e2e_finish_fail "PROVENANCE.md must document the Oracle version-matrix command"
+fi
+if ! grep -F "Served verdict-certificate proof" scripts/e2e/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "COVERAGE.md must account for the served verdict-certificate proof"
+fi
+if ! grep -F "scripts/e2e/verdict_certificate.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
+  e2e_finish_fail "PROVENANCE.md must document the served verdict-certificate command"
 fi
 if ! grep -F "Time-diff + observed-SCN replay live matrix" scripts/e2e/COVERAGE.md >/dev/null; then
   e2e_finish_fail "COVERAGE.md must account for the time-diff and observed-SCN replay gate"
