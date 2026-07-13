@@ -503,6 +503,38 @@ class Ladder:
             )
             return {"error_class": content.get("error_class")}
 
+        def dbms_vector_provider_egress_refused():
+            # DBMS_VECTOR.UTL_TO_EMBEDDING may invoke an external embedding
+            # provider. Exercise both served preview and apply paths against the
+            # live database lanes: the classifier must refuse before it can mint
+            # a grant or reach Oracle (and therefore before any provider egress).
+            sql = "BEGIN :embedding := DBMS_VECTOR.UTL_TO_EMBEDDING(:txt); END;"
+            preview = self.preview(sql)
+            require(
+                preview.get("gate_decision") == "blocked",
+                "DBMS_VECTOR external-provider embedding is blocked at READ_ONLY",
+                preview,
+            )
+            require(
+                (preview.get("blocked_reason") or {}).get("type") == "forbidden",
+                "DBMS_VECTOR refusal is a policy block, not an elevation request",
+                preview,
+            )
+            require(
+                preview.get("execute_confirmation") is None,
+                "a DBMS_VECTOR provider call never mints an execution grant",
+                preview,
+            )
+            result = self.session.call("oracle_execute", {"sql": sql})
+            content = structured(result)
+            require(
+                result.get("isError") is True
+                and content.get("error_class") == "FORBIDDEN_STATEMENT",
+                "DBMS_VECTOR provider call is refused before Oracle/provider egress",
+                content,
+            )
+            return {"error_class": content.get("error_class")}
+
         def read_only_smuggled_dml_not_served_as_read():
             # Regression for the derived-subquery-smuggled-DML classifier fix
             # (oracle-derived-dml-body): a write hidden in a FROM-derived subquery
@@ -1549,6 +1581,7 @@ class Ladder:
                 "read_only_forbidden_statement_refused",
                 read_only_forbidden_statement_refused,
             ),
+            ("dbms_vector_provider_egress_refused", dbms_vector_provider_egress_refused),
             (
                 "read_only_smuggled_dml_not_served_as_read",
                 read_only_smuggled_dml_not_served_as_read,
