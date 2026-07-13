@@ -1325,6 +1325,142 @@ export function toUndoTreeViewModel(input: UndoTreeInput): UndoTreeViewModel {
   };
 }
 
+// ── Vector cluster panel (Arc F) ─────────────────────────────────────────────
+// `oracle_semantic_search` runs a bounded 23ai VECTOR search through the SAME
+// policy, masking, and audit path as oracle_query. Two honesty facts shape this
+// panel:
+//   • The server orders neighbors by VECTOR_DISTANCE(...) FETCH FIRST k, but it
+//     selects only `t.*` — the distance VALUE is never egressed. So the panel's
+//     "distance" is the returned RANK (0,1,2,…), which is monotonic by
+//     construction, and it says plainly that the numeric distance is not emitted
+//     rather than inventing one.
+//   • `used_index` is null when the read did not inspect a plan; the panel shows
+//     "not reported", never an inferred index.
+// And the mask rule holds: a neighbor row is never shown as unmasked when the
+// result's mask certificate transformed its columns.
+
+export type VectorMetric = "COSINE" | "EUCLIDEAN" | "DOT";
+
+export type VectorNeighborViewModel = {
+  // 0-based position in the server's distance ordering. This IS the neighbor's
+  // distance rank — monotonic non-decreasing by construction.
+  rank: number;
+  // The row's cells in select-list order, already mask-transformed by the server
+  // when a mask certificate applied. Never the raw value when masked.
+  cells: readonly string[];
+  // True when at least one cell of this row was transformed by the mask policy.
+  masked: boolean;
+};
+
+export type VectorClusterViewModel = {
+  grammarVersion: 1;
+  status: "results" | "refused" | "empty" | "unavailable";
+  metric: VectorMetric | null;
+  k: number | null;
+  returned: number;
+  columns: readonly string[];
+  neighbors: readonly VectorNeighborViewModel[];
+  // The guarded surface orders by distance but does not emit the distance value.
+  distanceReported: false;
+  // null = the server did not inspect a plan (never inferred from a request).
+  usedIndex: boolean | null;
+  // The mask certificate summary for the whole result, or null when the page
+  // carried none (absence of proof, not proof of no masking).
+  maskPolicyId: string | null;
+  maskedColumns: number;
+  headline: string;
+  detail: string;
+  // Verbatim server refusal (e.g. an unproven filter predicate rejected as a
+  // data-egress bypass), when the search was refused.
+  refusalReason: string | null;
+  tone: DashboardTone;
+};
+
+export type VectorClusterInput = {
+  metric: VectorMetric | null;
+  k: number | null;
+  columns: readonly string[];
+  // Rows in the server's returned (distance) order; each a list of cells.
+  rows: readonly (readonly string[])[];
+  // Per-row masked flag, derived from the mask certificate (aligned to `rows`).
+  rowMasked?: readonly boolean[];
+  usedIndex: boolean | null;
+  maskPolicyId: string | null;
+  maskedColumns: number;
+  // Set when the tool refused the search (filter predicate, capability, level).
+  refusalReason?: string | null;
+};
+
+export function toVectorClusterViewModel(input: VectorClusterInput): VectorClusterViewModel {
+  if (input.refusalReason) {
+    return {
+      grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+      status: "refused",
+      metric: input.metric,
+      k: input.k,
+      returned: 0,
+      columns: input.columns,
+      neighbors: [],
+      distanceReported: false,
+      usedIndex: input.usedIndex,
+      maskPolicyId: input.maskPolicyId,
+      maskedColumns: input.maskedColumns,
+      headline: "Search refused",
+      detail: input.refusalReason,
+      refusalReason: input.refusalReason,
+      tone: "warn"
+    };
+  }
+  const neighbors = input.rows.map((cells, rank): VectorNeighborViewModel => ({
+    rank,
+    cells,
+    masked: input.rowMasked?.[rank] === true
+  }));
+  const maskedColumns = input.maskedColumns;
+  const status = neighbors.length > 0 ? "results" : "empty";
+  return {
+    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+    status,
+    metric: input.metric,
+    k: input.k,
+    returned: neighbors.length,
+    columns: input.columns,
+    neighbors,
+    distanceReported: false,
+    usedIndex: input.usedIndex,
+    maskPolicyId: input.maskPolicyId,
+    maskedColumns,
+    headline:
+      status === "empty"
+        ? "No neighbors returned"
+        : `${neighbors.length} nearest neighbor(s) by ${input.metric ?? "distance"}`,
+    detail:
+      maskedColumns > 0
+        ? `${maskedColumns} column(s) masked on egress; ordered by distance rank (the server does not emit the distance value).`
+        : "Ordered by distance rank; the guarded surface orders by VECTOR_DISTANCE but does not emit the distance value.",
+    refusalReason: null,
+    tone: maskedColumns > 0 ? "warn" : status === "empty" ? "off" : "ok"
+  };
+}
+
+/** A k=3 cosine result with one masked column, ordered by distance rank. */
+export function vectorClusterFixture(): VectorClusterViewModel {
+  return toVectorClusterViewModel({
+    metric: "COSINE",
+    k: 3,
+    columns: ["DOC_ID", "TITLE", "SECRET_NOTE"],
+    rows: [
+      ["1001", "Onboarding guide", "'?'"],
+      ["1042", "Expense policy", "'?'"],
+      ["1099", "Travel FAQ", "'?'"]
+    ],
+    rowMasked: [true, true, true],
+    usedIndex: null,
+    maskPolicyId: "sha256:pol".padEnd(71, "0"),
+    maskedColumns: 1
+  });
+}
+
 export const DASHBOARD_GRAMMAR = {
   grammarVersion: 1,
   meanings: {
@@ -1496,6 +1632,7 @@ export function skinContractFixture(): {
   maskBadge: MaskBadgeViewModel;
   fleetMap: FleetMapViewModel;
   policyBadge: PolicyBadgeViewModel;
+  vectorCluster: VectorClusterViewModel;
 } {
   return {
     policyBadge: policyBadgeFixture(),
@@ -1505,6 +1642,7 @@ export function skinContractFixture(): {
     scnScrubber: scnScrubberFixture(),
     maskBadge: maskBadgeFixture(),
     fleetMap: fleetMapFixture(),
+    vectorCluster: vectorClusterFixture(),
     groundControl: {
       grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
       verdict: "GO",

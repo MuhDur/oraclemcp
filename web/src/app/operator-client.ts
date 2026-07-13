@@ -1,6 +1,8 @@
 import {
   driftSections,
   isRegisteredDerivationStep,
+  type VectorClusterInput,
+  type VectorMetric,
   type CostPlanRowViewModel,
   type ClearanceLevel,
   type CostCeilingSource,
@@ -1387,6 +1389,111 @@ export async function readWorkbenchSql(
       max_rows: request.maxRows
     }
   });
+}
+
+// ── Vector cluster (Arc F) ───────────────────────────────────────────────────
+// oracle_semantic_search is bounded and fail-closed: it runs through the same
+// policy/masking/audit path as oracle_query and REFUSES a non-empty `filter`
+// rather than accepting it as raw SQL (a data-egress bypass). The console never
+// sends a filter; it consumes the guarded result and the mask certificate.
+
+export type VectorSearchRequest = {
+  laneId?: string;
+  owner?: string;
+  table: string;
+  column: string;
+  queryVector: number[];
+  k: number;
+  metric: VectorMetric;
+};
+
+/** `oracle_semantic_search` — vector-only retrieval, no caller filter. */
+export async function fetchVectorCluster(
+  session: DashboardSession,
+  request: VectorSearchRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("vector-search"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_semantic_search",
+    arguments: {
+      over: {
+        ...(request.owner ? { owner: request.owner } : {}),
+        table: request.table,
+        column: request.column
+      },
+      query_vector: request.queryVector,
+      k: request.k,
+      metric: request.metric
+    }
+  });
+}
+
+const VECTOR_METRICS: readonly VectorMetric[] = ["COSINE", "EUCLIDEAN", "DOT"];
+
+/**
+ * Project a semantic-search response into the cluster view-model.
+ *
+ * Honesty is enforced here: the server orders neighbors by distance but emits no
+ * distance value, so the model carries none (the renderer shows the rank);
+ * `used_index` is passed through as null when the server did not inspect a plan;
+ * and every masked column from the result's mask certificate is reflected, so a
+ * masked cell is never surfaced as if it were the real value.
+ */
+export function parseVectorCluster(
+  data: WorkbenchActionData | null,
+  refusal?: OperatorOutcome | null
+): VectorClusterInput {
+  if (refusal && (refusal.state === "refused" || refusal.state === "failed")) {
+    return {
+      metric: null,
+      k: null,
+      columns: [],
+      rows: [],
+      usedIndex: null,
+      maskPolicyId: null,
+      maskedColumns: 0,
+      refusalReason: refusal.message
+    };
+  }
+  const payload = mcpPayload(data);
+  const rawMetric = stringValue(payload?.["metric"]);
+  const metric = VECTOR_METRICS.includes(rawMetric as VectorMetric)
+    ? (rawMetric as VectorMetric)
+    : null;
+  const columns = Array.isArray(payload?.["columns"])
+    ? payload["columns"].filter((c): c is string => typeof c === "string")
+    : [];
+  const rawRows = Array.isArray(payload?.["rows"]) ? payload["rows"] : [];
+  const rows = rawRows.map((raw) => {
+    const record = recordValue(raw);
+    // A row is an object keyed by column; render cells in column order.
+    return columns.map((column) => {
+      const cell = record?.[column];
+      return cell === null || cell === undefined ? "" : String(cell);
+    });
+  });
+
+  const certificate = parseMaskCertificate(data);
+  const maskedColumnNames = new Set(
+    (certificate?.decisions ?? [])
+      .filter((decision) => decision.action !== "pass")
+      .map((decision) => decision.column)
+  );
+  const rowMasked = rows.map(() => maskedColumnNames.size > 0);
+
+  return {
+    metric,
+    k: numberValue(payload?.["k"]),
+    columns,
+    rows,
+    rowMasked,
+    // Passed through verbatim: null means the server did not inspect a plan.
+    usedIndex:
+      typeof payload?.["used_index"] === "boolean" ? (payload["used_index"] as boolean) : null,
+    maskPolicyId: certificate?.policyId ?? null,
+    maskedColumns: maskedColumnNames.size
+  };
 }
 
 export async function executeWorkbenchSql(

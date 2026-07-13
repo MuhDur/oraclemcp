@@ -12,11 +12,13 @@ import {
   fleetMapFixture,
   isRegisteredDerivationStep,
   maskBadgeFixture,
+  vectorClusterFixture,
   policyBadgeFixture,
   scnScrubberFixture,
   skinContractFixture,
   toCostBadgeViewModel,
   toMaskBadgeViewModel,
+  toVectorClusterViewModel,
   toPolicyBadgeViewModel,
   toScnScrubberViewModel,
   toUndoTreeViewModel,
@@ -264,6 +266,62 @@ describe("OMCP skin conformance", () => {
     const drifted = model.nodes.find((node) => node.dbId === "staging");
     expect(drifted?.drift?.changedSections).toContain("schema");
     expect(markup).toContain('data-db-drift="drifted"');
+  });
+
+  it("renders the vector cluster with k monotonic-rank neighbors", () => {
+    const VectorCluster = OMCP_SKIN.renderers.VectorCluster;
+    const model = vectorClusterFixture();
+    const markup = renderToStaticMarkup(<VectorCluster model={model} />);
+
+    expect(markup).toContain('data-grammar-version="1"');
+    expect(markup).toContain('data-metric="COSINE"');
+    expect(markup).toContain('data-k="3"');
+
+    // k neighbors render, and their distances (ranks) are monotonic non-decreasing.
+    expect(model.k).toBe(3);
+    const ranks = [...markup.matchAll(/data-neighbor-distance="(\d+)"/g)].map((m) => Number(m[1]));
+    expect(ranks).toHaveLength(3);
+    expect(ranks).toEqual([0, 1, 2]);
+    for (let i = 1; i < ranks.length; i++) {
+      expect(ranks[i]).toBeGreaterThanOrEqual(ranks[i - 1]);
+    }
+  });
+
+  it("is honest about what the vector surface does not emit", () => {
+    const VectorCluster = OMCP_SKIN.renderers.VectorCluster;
+    const model = vectorClusterFixture();
+    const markup = renderToStaticMarkup(<VectorCluster model={model} />);
+
+    // The server orders by distance but never egresses the value — the panel says so.
+    expect(model.distanceReported).toBe(false);
+    expect(markup).toContain('data-distance-reported="false"');
+    // used_index was null (server did not inspect a plan) — never inferred.
+    expect(model.usedIndex).toBeNull();
+    expect(markup).toContain('data-used-index="not_reported"');
+    // The masked column is reflected, never rendered as a real value.
+    expect(model.maskedColumns).toBeGreaterThan(0);
+    expect(markup).toContain('data-neighbor-masked="true"');
+    for (const neighbor of model.neighbors) {
+      expect(neighbor.cells).toContain("'?'");
+    }
+
+    // A refused search (e.g. an unproven filter predicate) shows the refusal,
+    // not an empty cluster pretending nothing was searched.
+    const refused = toVectorClusterViewModel({
+      metric: null,
+      k: null,
+      columns: [],
+      rows: [],
+      usedIndex: null,
+      maskPolicyId: null,
+      maskedColumns: 0,
+      refusalReason: "oracle_semantic_search filter is unavailable; refusing an unproven predicate"
+    });
+    expect(refused.status).toBe("refused");
+    const refusedMarkup = renderToStaticMarkup(<VectorCluster model={refused} />);
+    expect(refusedMarkup).toContain('data-vector-status="refused"');
+    expect(refusedMarkup).toContain("refusing an unproven predicate");
+    expect(refusedMarkup).not.toContain("data-neighbor-rank");
   });
 
   it("renders the egress mask badge with a policy id and a per-column decision", () => {

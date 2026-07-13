@@ -29,6 +29,7 @@ import {
   type CostBadgeViewModel,
   type FleetMapViewModel,
   type MaskBadgeViewModel,
+  type VectorClusterViewModel,
   type PolicyBadgeViewModel,
   type ScnScrubberViewModel,
   type SignatureId,
@@ -76,6 +77,7 @@ export type DashboardSkin = {
     MaskBadge: React.ComponentType<{ model: MaskBadgeViewModel }>;
     FleetMap: React.ComponentType<{ model: FleetMapViewModel }>;
     PolicyBadge: React.ComponentType<{ model: PolicyBadgeViewModel }>;
+    VectorCluster: React.ComponentType<{ model: VectorClusterViewModel }>;
     ScnScrubber: React.ComponentType<{
       model: ScnScrubberViewModel;
       onScrub?: (scn: number) => void;
@@ -171,6 +173,7 @@ export const OMCP_SKIN: DashboardSkin = {
     ScnScrubber: ScnScrubberRenderer,
     MaskBadge: MaskBadgeRenderer,
     FleetMap: FleetMapRenderer,
+    VectorCluster: VectorClusterRenderer,
     PolicyBadge: PolicyBadgeRenderer
   },
   layout: {
@@ -565,6 +568,92 @@ export function FleetMapRenderer({ model }: { model: FleetMapViewModel }): React
  * emits one when it transformed something, so silence proves nothing and the
  * badge refuses to render a reassuring "unmasked" row it cannot back.
  */
+/**
+ * The vector cluster panel (Arc F).
+ *
+ * Nearest neighbors from a guarded 23ai vector search, in the server's distance
+ * order. The panel is honest about two things the backend does not give it: the
+ * numeric distance (only the RANK is real, shown per neighbor) and the index use
+ * (`null` = not reported, never inferred). A refused search — e.g. an unproven
+ * filter predicate rejected as a data-egress bypass — shows the refusal, not an
+ * empty cluster. A masked cell is never rendered as if it were the real value.
+ */
+export function VectorClusterRenderer({
+  model
+}: {
+  model: VectorClusterViewModel;
+}): React.ReactElement {
+  return (
+    <section
+      className={cn(
+        "flex flex-col gap-3 rounded-lg border bg-[var(--om-surface)] p-4 shadow-sm",
+        model.status === "refused"
+          ? "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)]"
+          : "border-[var(--om-border)]"
+      )}
+      aria-label="vector cluster"
+      data-grammar-version={model.grammarVersion}
+      data-vector-status={model.status}
+      data-metric={model.metric ?? "none"}
+      data-k={model.k === null ? "unknown" : model.k}
+      data-returned={model.returned}
+      data-distance-reported={model.distanceReported ? "true" : "false"}
+      data-used-index={model.usedIndex === null ? "not_reported" : model.usedIndex ? "true" : "false"}
+      data-masked-columns={model.maskedColumns}
+    >
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Activity className="size-4 text-[var(--om-gold)]" aria-hidden="true" />
+          <span className="text-sm font-bold text-[var(--om-text-bright)]">Vector Cluster</span>
+          <Badge tone={model.tone}>{model.metric ?? "no metric"}</Badge>
+          {model.maskedColumns > 0 ? <Badge tone="warn">masked</Badge> : null}
+        </div>
+        <span className="font-mono text-2xs text-[var(--om-text-muted)]">
+          k={model.k ?? "?"} · {model.returned} returned ·{" "}
+          {model.usedIndex === null ? "index n/r" : model.usedIndex ? "indexed" : "no index"}
+        </span>
+      </header>
+
+      <p className="text-sm font-semibold text-[var(--om-text-bright)]">{model.headline}</p>
+      <p className="text-xs text-[var(--om-text-muted)]">{model.detail}</p>
+
+      {model.status === "results" ? (
+        <table className="w-full text-2xs" data-testid="vector-neighbors">
+          <thead>
+            <tr className="text-left text-[var(--om-text-muted)]">
+              <th className="py-1 font-semibold">rank</th>
+              {model.columns.map((column) => (
+                <th key={column} className="py-1 font-semibold">
+                  {column}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="font-mono">
+            {model.neighbors.map((neighbor) => (
+              <tr
+                key={neighbor.rank}
+                data-neighbor-rank={neighbor.rank}
+                // The distance the server ordered by is not egressed, so the rank
+                // IS the distance signal — monotonic non-decreasing by construction.
+                data-neighbor-distance={neighbor.rank}
+                data-neighbor-masked={neighbor.masked ? "true" : "false"}
+              >
+                <td className="py-1 text-[var(--om-text-muted)]">{neighbor.rank}</td>
+                {neighbor.cells.map((cell, index) => (
+                  <td key={`${neighbor.rank}:${index}`} className="py-1 text-[var(--om-text)]">
+                    {cell}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : null}
+    </section>
+  );
+}
+
 export function MaskBadgeRenderer({ model }: { model: MaskBadgeViewModel }): React.ReactElement {
   return (
     <section
@@ -937,6 +1026,20 @@ export function assertDashboardSkinConformance(skin: DashboardSkin): void {
   }
   if (typeof skin.renderers.PolicyBadge !== "function") {
     throw new Error(`skin ${skin.name} must provide a policy-narrowing renderer`);
+  }
+  if (typeof skin.renderers.VectorCluster !== "function") {
+    throw new Error(`skin ${skin.name} must provide a vector-cluster renderer`);
+  }
+  // The neighbor distances (ranks) must be monotonic non-decreasing, and the
+  // panel must never claim a numeric distance the server does not emit.
+  const vector = fixture.vectorCluster;
+  if (vector.distanceReported !== false) {
+    throw new Error("the vector panel must not report a distance the server does not emit");
+  }
+  for (let i = 1; i < vector.neighbors.length; i++) {
+    if (vector.neighbors[i].rank < vector.neighbors[i - 1].rank) {
+      throw new Error("vector neighbor distances (ranks) must be monotonic non-decreasing");
+    }
   }
   // Policy is monotone: a narrowing may only raise the level it started from.
   const policy = fixture.policyBadge;

@@ -64,11 +64,13 @@ import {
   toFleetMapViewModel,
   toMaskBadgeViewModel,
   toPolicyBadgeViewModel,
+  toVectorClusterViewModel,
   toScnScrubberViewModel,
   toUndoTreeViewModel,
   toVerdictProofViewModel,
   type ScnMarkViewModel,
   type UndoTreeEntry,
+  type VectorMetric,
   type FleetViewModel,
   type DashboardTone,
   type GoNoGoVerdict,
@@ -95,9 +97,11 @@ import {
   parseActiveProfile,
   parseMaskCertificate,
   parsePolicyTightening,
+  parseVectorCluster,
   parseQueryAsOf,
   parseUndoOutcome,
   fetchFleetMap,
+  fetchVectorCluster,
   fetchQueryAsOf,
   fetchQueryCostEstimate,
   fetchVerdictProofs,
@@ -4624,9 +4628,147 @@ function ExplorerPage(): React.ReactElement {
           onReadDdl={(ref) => detailMutation.mutate({ kind: "ddl", ref })}
           onReadSource={(ref) => detailMutation.mutate({ kind: "source", ref })}
         />
+
+        <VectorClusterPanel session={session.data ?? null} laneId={laneId} owner={owner} />
       </div>
     </PageFrame>
   );
+}
+
+/**
+ * The vector cluster panel (Arc F).
+ *
+ * Runs a guarded 23ai vector search (`oracle_semantic_search`) and renders the
+ * nearest neighbors through the console's parser. The search is vector-only —
+ * the console never sends a `filter`, because the guarded surface refuses an
+ * unproven predicate as a data-egress bypass; if the server refuses for any
+ * reason the panel shows the refusal rather than an empty cluster. Masked cells
+ * from the result's mask certificate are reflected, never shown as real values.
+ */
+function VectorClusterPanel({
+  session,
+  laneId,
+  owner
+}: {
+  session: DashboardSession | null;
+  laneId: string;
+  owner: string;
+}): React.ReactElement {
+  const VectorCluster = OMCP_SKIN.renderers.VectorCluster;
+  const [table, setTable] = React.useState("");
+  const [column, setColumn] = React.useState("");
+  const [vectorText, setVectorText] = React.useState("");
+  const [metric, setMetric] = React.useState<VectorMetric>("COSINE");
+  const [k, setK] = React.useState(10);
+
+  const search = useMutation({
+    mutationFn: async () => {
+      if (!session) {
+        throw new Error("dashboard session is not ready");
+      }
+      const queryVector = vectorText
+        .split(/[,\s]+/)
+        .map((token) => Number(token.trim()))
+        .filter((value) => Number.isFinite(value));
+      return fetchVectorCluster(session, {
+        laneId,
+        owner: owner.trim() || undefined,
+        table: table.trim(),
+        column: column.trim(),
+        queryVector,
+        k,
+        metric
+      });
+    }
+  });
+
+  const outcome = search.error
+    ? operatorOutcomeFromError(search.error, "vector search failed")
+    : search.data
+      ? decodeOperatorOutcome(200, search.data)
+      : null;
+  const model = toVectorClusterViewModel(
+    parseVectorCluster(search.data?.data ?? null, outcome)
+  );
+  const parsedVectorLength = vectorText
+    .split(/[,\s]+/)
+    .map((token) => Number(token.trim()))
+    .filter((value) => Number.isFinite(value)).length;
+  const canSearch =
+    Boolean(session) &&
+    !search.isPending &&
+    table.trim().length > 0 &&
+    column.trim().length > 0 &&
+    parsedVectorLength > 0;
+
+  return (
+    <Surface className="space-y-3 p-4" data-testid="vector-cluster-panel">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="block">
+          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Table</span>
+          <input
+            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            value={table}
+            onChange={(event) => setTable(event.target.value)}
+            placeholder="DOCUMENTS"
+          />
+        </label>
+        <label className="block">
+          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Vector column</span>
+          <input
+            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            value={column}
+            onChange={(event) => setColumn(event.target.value)}
+            placeholder="EMBEDDING"
+          />
+        </label>
+        <label className="block">
+          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Metric</span>
+          <select
+            className="h-10 rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            value={metric}
+            onChange={(event) => setMetric(event.target.value as VectorMetric)}
+          >
+            <option value="COSINE">COSINE</option>
+            <option value="EUCLIDEAN">EUCLIDEAN</option>
+            <option value="DOT">DOT</option>
+          </select>
+        </label>
+        <label className="block">
+          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">k</span>
+          <input
+            className="h-10 w-20 rounded-md border border-[var(--om-border)] px-3 text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            type="number"
+            min={1}
+            max={1000}
+            value={k}
+            onChange={(event) => setK(clampVectorK(event.target.valueAsNumber))}
+          />
+        </label>
+        <Button type="button" variant="secondary" disabled={!canSearch} onClick={() => search.mutate()}>
+          <Activity className="size-4" aria-hidden="true" />
+          Search
+        </Button>
+      </div>
+      <label className="block">
+        <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Query vector</span>
+        <input
+          className="h-10 w-full rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+          value={vectorText}
+          onChange={(event) => setVectorText(event.target.value)}
+          placeholder="0.12, -0.44, 0.9, …"
+        />
+      </label>
+      {search.data || search.error ? <VectorCluster model={model} /> : null}
+    </Surface>
+  );
+}
+
+function clampVectorK(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 10;
+  }
+  return Math.min(1000, Math.max(1, Math.trunc(value)));
 }
 
 function ExplorerGlobalSearchPanel({
