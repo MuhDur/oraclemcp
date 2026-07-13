@@ -750,6 +750,102 @@ pub async fn orient_fks(
     Ok(foreign_keys)
 }
 
+/// Per-table DML activity and freshness evidence for `oracle_orient`.
+///
+/// Oracle records these counters in `ALL_TAB_MODIFICATIONS` since the table's
+/// last statistics collection. They are dictionary telemetry, never a scan of
+/// table data, and are therefore suitable for the bounded read-only orient
+/// snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrientHotObject {
+    /// Schema owner of the changed table.
+    pub owner: String,
+    /// Changed table name.
+    pub object_name: String,
+    /// Object kind; activity telemetry is currently table-only.
+    pub object_type: String,
+    /// Inserts reported since the last statistics collection.
+    pub inserts: i64,
+    /// Updates reported since the last statistics collection.
+    pub updates: i64,
+    /// Deletes reported since the last statistics collection.
+    pub deletes: i64,
+    /// Sum of inserts, updates, and deletes since the last statistics collection.
+    pub changes_since_last_stats: i64,
+    /// Time Oracle last recorded table-modification activity, when available.
+    pub last_modified: Option<String>,
+    /// Whether Oracle recorded a table truncate since the last statistics collection.
+    pub truncated: bool,
+    /// Number of segment drops recorded since the last statistics collection.
+    pub drop_segments: i64,
+}
+
+/// Read bounded hot-table activity and freshness from `ALL_TAB_MODIFICATIONS`.
+///
+/// The optional owner is upper-cased and bound positionally; `None` includes
+/// every visible schema. Only table-level rows are admitted so partition and
+/// subpartition telemetry cannot duplicate an object in the orient snapshot.
+/// The result is ordered by DML volume, then recency, and capped with `ROWNUM`.
+pub async fn orient_hot_objects(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: Option<&str>,
+    max_rows: usize,
+) -> Result<Vec<OrientHotObject>, DbError> {
+    let sql = "SELECT * FROM ( \
+                   WITH args AS ( \
+                       SELECT :1 owner_filter FROM dual \
+                   ) \
+                   SELECT modifications.table_owner AS owner, \
+                          modifications.table_name AS object_name, \
+                          NVL(modifications.inserts, 0) AS inserts, \
+                          NVL(modifications.updates, 0) AS updates, \
+                          NVL(modifications.deletes, 0) AS deletes, \
+                          modifications.timestamp AS last_modified, \
+                          NVL(modifications.truncated, 'NO') AS truncated, \
+                          NVL(modifications.drop_segments, 0) AS drop_segments \
+                   FROM all_tab_modifications modifications CROSS JOIN args \
+                   WHERE (args.owner_filter IS NULL \
+                          OR modifications.table_owner = args.owner_filter) \
+                     AND modifications.partition_name IS NULL \
+                     AND modifications.subpartition_name IS NULL \
+                   ORDER BY (NVL(modifications.inserts, 0) \
+                             + NVL(modifications.updates, 0) \
+                             + NVL(modifications.deletes, 0)) DESC, \
+                            modifications.timestamp DESC NULLS LAST, \
+                            modifications.table_owner, modifications.table_name \
+               ) WHERE ROWNUM <= :2";
+    let owner_bind = owner.map_or(OracleBind::Null, |value| {
+        OracleBind::from(value.to_ascii_uppercase())
+    });
+    let rows = conn
+        .query_rows(cx, sql, &[owner_bind, OracleBind::from(max_rows as i64)])
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let inserts = row.parse_i64("INSERTS").unwrap_or_default();
+            let updates = row.parse_i64("UPDATES").unwrap_or_default();
+            let deletes = row.parse_i64("DELETES").unwrap_or_default();
+            OrientHotObject {
+                owner: row.text("OWNER").unwrap_or_default().to_owned(),
+                object_name: row.text("OBJECT_NAME").unwrap_or_default().to_owned(),
+                object_type: "TABLE".to_owned(),
+                inserts,
+                updates,
+                deletes,
+                changes_since_last_stats: inserts.saturating_add(updates).saturating_add(deletes),
+                last_modified: row.text("LAST_MODIFIED").map(str::to_owned),
+                truncated: row
+                    .text("TRUNCATED")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("YES")),
+                drop_segments: row.parse_i64("DROP_SEGMENTS").unwrap_or_default(),
+            }
+        })
+        .collect())
+}
+
 /// List schemas that own objects visible to this session, optionally filtered
 /// by a SQL `LIKE` pattern.
 pub async fn list_schemas(
@@ -2605,6 +2701,31 @@ mod tests {
                 ]);
             }
 
+            if sql.contains("FROM all_tab_modifications") {
+                return Ok(vec![
+                    cell_row(&[
+                        ("OWNER", "HR"),
+                        ("OBJECT_NAME", "ORDERS"),
+                        ("INSERTS", "12"),
+                        ("UPDATES", "4"),
+                        ("DELETES", "1"),
+                        ("LAST_MODIFIED", "2026-07-13T12:00:00"),
+                        ("TRUNCATED", "NO"),
+                        ("DROP_SEGMENTS", "0"),
+                    ]),
+                    cell_row(&[
+                        ("OWNER", "HR"),
+                        ("OBJECT_NAME", "ARCHIVE"),
+                        ("INSERTS", "0"),
+                        ("UPDATES", "0"),
+                        ("DELETES", "0"),
+                        ("LAST_MODIFIED", "2026-07-13T11:00:00"),
+                        ("TRUNCATED", "YES"),
+                        ("DROP_SEGMENTS", "1"),
+                    ]),
+                ]);
+            }
+
             assert!(sql.contains("FROM all_constraints child"));
             Ok(vec![
                 cell_row(&[
@@ -2740,6 +2861,57 @@ mod tests {
             fk_call.1,
             vec![OracleBind::String("HR".to_owned()), OracleBind::I64(1)],
             "FK owner and cap are positional binds"
+        );
+    }
+
+    #[test]
+    fn orient_hot_objects_reports_dml_activity_and_freshness_with_bound_scope() {
+        let mock = OrientMock::default();
+        let conn = &mock;
+        let objects = run_with_cx(|cx| async move {
+            orient_hot_objects(&cx, conn, Some("hr"), 10)
+                .await
+                .expect("hot-object activity")
+        });
+
+        assert_eq!(objects.len(), 2);
+        assert_eq!(objects[0].owner, "HR");
+        assert_eq!(objects[0].object_name, "ORDERS");
+        assert_eq!(objects[0].object_type, "TABLE");
+        assert_eq!(objects[0].inserts, 12);
+        assert_eq!(objects[0].updates, 4);
+        assert_eq!(objects[0].deletes, 1);
+        assert_eq!(objects[0].changes_since_last_stats, 17);
+        assert_eq!(
+            objects[0].last_modified.as_deref(),
+            Some("2026-07-13T12:00:00")
+        );
+        assert!(!objects[0].truncated);
+        assert_eq!(objects[0].drop_segments, 0);
+
+        assert_eq!(objects[1].object_name, "ARCHIVE");
+        assert_eq!(objects[1].changes_since_last_stats, 0);
+        assert!(objects[1].truncated, "truncate is freshness evidence");
+        assert_eq!(objects[1].drop_segments, 1);
+
+        let calls = mock.calls.lock().expect("orient mock lock");
+        let activity_call = calls
+            .iter()
+            .find(|(sql, _)| sql.contains("FROM all_tab_modifications"))
+            .expect("ALL_TAB_MODIFICATIONS activity read");
+        assert!(activity_call.0.contains("ROWNUM <= :2"));
+        assert!(activity_call.0.contains("partition_name IS NULL"));
+        assert!(activity_call.0.contains("subpartition_name IS NULL"));
+        assert!(
+            activity_call
+                .0
+                .contains("ORDER BY (NVL(modifications.inserts, 0)"),
+            "hot objects must order by accumulated DML volume"
+        );
+        assert_eq!(
+            activity_call.1,
+            vec![OracleBind::String("HR".to_owned()), OracleBind::I64(10)],
+            "owner and cap are normalized positional binds"
         );
     }
 

@@ -31,8 +31,8 @@ use oraclemcp_db::{
     OracleBind, OracleConnectOptions, OracleConnection, OracleIdentifier, OracleSessionIdentity,
     QueryCaps, RustOracleConnection, SchemaObject, SchemaObjectType, SchemaSnapshot,
     SearchDetailLevel, SessionPurity, compare_schemas, explain_plan, extract_catalog_rowsets,
-    migration_plan, orient_fks, orient_schema, plan_cost_estimate, probe_dependents,
-    search_objects,
+    migration_plan, orient_fks, orient_hot_objects, orient_schema, plan_cost_estimate,
+    probe_dependents, search_objects,
 };
 use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use serde_json::json;
@@ -2018,6 +2018,119 @@ fn live_orient_schema_map_and_fk_topology_cover_synthetic_schema() {
                 .execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
                 .await;
         }
+    });
+}
+
+/// C2.2 (live): a synthetic table is analyzed, mutated, and flushed through
+/// Oracle's monitoring view. `oracle_orient` must then expose both DML volume
+/// and a concrete freshness timestamp without reading the table's data.
+#[test]
+fn live_orient_hot_objects_reports_synthetic_dml_freshness() {
+    run_with_cx(|cx| async move {
+        let test_name = "live_orient_hot_objects_reports_synthetic_dml_freshness";
+        let Some(conn) = connect_or_skip(&cx, test_name, test_opts()).await else {
+            return;
+        };
+        conn.set_call_timeout(Some(Duration::from_secs(30))).ok();
+
+        let table = "ORACLEMCP_C2_HOT_T";
+        let _ = conn
+            .execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
+            .await;
+        if let Err(e) = conn
+            .execute(
+                &cx,
+                &format!("CREATE TABLE {table} (id NUMBER PRIMARY KEY, value NUMBER)"),
+                &[],
+            )
+            .await
+        {
+            eprintln!("[live-xe] SKIP {test_name}: cannot create fixture table ({e})");
+            return;
+        }
+
+        // Establish the "since last stats" baseline before creating the DML
+        // evidence that `ALL_TAB_MODIFICATIONS` is meant to report.
+        if let Err(e) = conn
+            .execute(
+                &cx,
+                &format!("BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, '{table}'); END;"),
+                &[],
+            )
+            .await
+        {
+            eprintln!("[live-xe] SKIP {test_name}: cannot gather fixture stats ({e})");
+            let _ = conn
+                .execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
+                .await;
+            return;
+        }
+
+        for id in 1..=3 {
+            conn.execute(
+                &cx,
+                &format!("INSERT INTO {table} VALUES ({id}, {id})"),
+                &[],
+            )
+            .await
+            .expect("insert DML fixture row");
+        }
+        conn.execute(
+            &cx,
+            &format!("UPDATE {table} SET value = 20 WHERE id = 2"),
+            &[],
+        )
+        .await
+        .expect("update DML fixture row");
+        conn.execute(&cx, &format!("DELETE FROM {table} WHERE id = 3"), &[])
+            .await
+            .expect("delete DML fixture row");
+        conn.commit(&cx).await.expect("commit DML fixture rows");
+        if let Err(e) = conn
+            .execute(
+                &cx,
+                "BEGIN DBMS_STATS.FLUSH_DATABASE_MONITORING_INFO; END;",
+                &[],
+            )
+            .await
+        {
+            eprintln!("[live-xe] SKIP {test_name}: cannot flush monitoring info ({e})");
+            let _ = conn
+                .execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
+                .await;
+            return;
+        }
+
+        let owner = conn
+            .describe(&cx)
+            .await
+            .ok()
+            .and_then(|info| info.current_schema)
+            .or_else(|| std::env::var("ORACLEMCP_TEST_USER").ok())
+            .unwrap_or_else(|| "SYSTEM".to_owned())
+            .to_ascii_uppercase();
+        let objects = orient_hot_objects(&cx, &conn, Some(&owner), 10_000)
+            .await
+            .expect("read synthetic activity and freshness");
+        let object = objects
+            .iter()
+            .find(|object| object.object_name == table)
+            .expect("synthetic table has activity telemetry");
+        assert_eq!(object.owner, owner);
+        assert_eq!(object.object_type, "TABLE");
+        assert!(object.inserts >= 3, "all inserted rows are recorded");
+        assert!(object.updates >= 1, "update is recorded");
+        assert!(object.deletes >= 1, "delete is recorded");
+        assert!(object.changes_since_last_stats >= 5);
+        assert!(
+            object.last_modified.is_some(),
+            "the modification timestamp is freshness evidence"
+        );
+        assert!(!object.truncated);
+
+        let _ = conn
+            .execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
+            .await;
     });
 }
 
