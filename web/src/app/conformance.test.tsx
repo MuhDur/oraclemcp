@@ -15,6 +15,7 @@ import {
   vectorClusterFixture,
   editionTimelineFixture,
   cqnChangeFeedFixture,
+  columnLineageFixture,
   policyBadgeFixture,
   scnScrubberFixture,
   skinContractFixture,
@@ -23,6 +24,7 @@ import {
   toVectorClusterViewModel,
   toEditionTimelineViewModel,
   toCqnChangeFeedViewModel,
+  toColumnLineageViewModel,
   toPolicyBadgeViewModel,
   toScnScrubberViewModel,
   toUndoTreeViewModel,
@@ -270,6 +272,41 @@ describe("OMCP skin conformance", () => {
     const drifted = model.nodes.find((node) => node.dbId === "staging");
     expect(drifted?.drift?.changedSections).toContain("schema");
     expect(markup).toContain('data-db-drift="drifted"');
+  });
+
+  it("renders each typed column-lineage edge status, injected drift included", () => {
+    const ColumnLineage = OMCP_SKIN.renderers.ColumnLineage;
+    const model = columnLineageFixture();
+    const markup = renderToStaticMarkup(<ColumnLineage model={model} />);
+
+    expect(markup).toContain('data-grammar-version="1"');
+    expect(markup).toContain('data-lineage-status="edges"');
+
+    // Every one of the four typed markers renders.
+    for (const status of ["verified", "drift-missing", "drift-type-mismatch", "partial"]) {
+      expect(markup).toContain(`data-edge-status="${status}"`);
+    }
+
+    // An injected drift renders its OWN marker and is never upgraded to verified.
+    const drift = toColumnLineageViewModel({
+      edges: [{ from: "HR.V.C", to: "HR.T.C", status: "drift-type-mismatch" }]
+    });
+    expect(drift.edges[0].status).toBe("drift-type-mismatch");
+    expect(drift.driftCount).toBe(1);
+    expect(drift.verifiedCount).toBe(0);
+    const driftMarkup = renderToStaticMarkup(<ColumnLineage model={drift} />);
+    expect(driftMarkup).toContain('data-edge-status="drift-type-mismatch"');
+    expect(driftMarkup).not.toContain('data-edge-status="verified"');
+  });
+
+  it("reports lineage 'not reported' rather than implying a clean graph", () => {
+    const ColumnLineage = OMCP_SKIN.renderers.ColumnLineage;
+    const none = toColumnLineageViewModel({ edges: null });
+    expect(none.status).toBe("not_reported");
+    expect(none.detail).toContain("not a clean-graph claim");
+    const markup = renderToStaticMarkup(<ColumnLineage model={none} />);
+    expect(markup).toContain('data-lineage-status="not_reported"');
+    expect(markup).not.toContain("data-edge-status");
   });
 
   it("renders the CQN change feed with resource-scoped, coalesced events", () => {

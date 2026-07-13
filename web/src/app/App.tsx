@@ -23,6 +23,7 @@ import {
 } from "@tanstack/react-table";
 import {
   Activity,
+  Link2,
   AlertTriangle,
   Ban,
   BarChart3,
@@ -67,6 +68,7 @@ import {
   toVectorClusterViewModel,
   toEditionTimelineViewModel,
   toCqnChangeFeedViewModel,
+  toColumnLineageViewModel,
   toScnScrubberViewModel,
   toUndoTreeViewModel,
   toVerdictProofViewModel,
@@ -102,11 +104,13 @@ import {
   parseVectorCluster,
   parseEditionProposals,
   parseCqnChangeFeed,
+  parseColumnLineage,
   parseQueryAsOf,
   parseUndoOutcome,
   fetchFleetMap,
   fetchVectorCluster,
   fetchEditionProposals,
+  fetchColumnLineage,
   fetchQueryAsOf,
   fetchQueryCostEstimate,
   fetchVerdictProofs,
@@ -4636,8 +4640,83 @@ function ExplorerPage(): React.ReactElement {
         />
 
         <VectorClusterPanel session={session.data ?? null} laneId={laneId} owner={owner} />
+
+        <ColumnLineagePanel session={session.data ?? null} laneId={laneId} owner={owner} />
       </div>
     </PageFrame>
+  );
+}
+
+/**
+ * The column-lineage / drift view (Arc K) in Explorer.
+ *
+ * Runs oracle_lineage for a column and renders its source-derived edges with the
+ * typed drift markers the backend assigns after cross-checking the live catalog.
+ * When the lineage surface emits no edges (the Arc K backend is not yet wired),
+ * the panel says "not reported" rather than implying a clean graph.
+ */
+function ColumnLineagePanel({
+  session,
+  laneId,
+  owner
+}: {
+  session: DashboardSession | null;
+  laneId: string;
+  owner: string;
+}): React.ReactElement {
+  const ColumnLineage = OMCP_SKIN.renderers.ColumnLineage;
+  const [object, setObject] = React.useState("");
+  const [column, setColumn] = React.useState("");
+
+  const lineage = useMutation({
+    mutationFn: async () => {
+      if (!session) {
+        throw new Error("dashboard session is not ready");
+      }
+      return fetchColumnLineage(session, {
+        laneId,
+        owner: owner.trim() || undefined,
+        object: object.trim(),
+        column: column.trim()
+      });
+    }
+  });
+
+  const model = toColumnLineageViewModel(parseColumnLineage(lineage.data?.data ?? null));
+
+  return (
+    <Surface className="space-y-3 p-4" data-testid="column-lineage-panel">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="block">
+          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Object</span>
+          <input
+            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            value={object}
+            onChange={(event) => setObject(event.target.value)}
+            placeholder="V_PAID"
+          />
+        </label>
+        <label className="block">
+          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Column</span>
+          <input
+            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            value={column}
+            onChange={(event) => setColumn(event.target.value)}
+            placeholder="AMOUNT"
+          />
+        </label>
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={!session || lineage.isPending || object.trim().length === 0 || column.trim().length === 0}
+          onClick={() => lineage.mutate()}
+        >
+          <Link2 className="size-4" aria-hidden="true" />
+          Trace lineage
+        </Button>
+      </div>
+      {lineage.data || lineage.error ? <ColumnLineage model={model} /> : null}
+    </Surface>
   );
 }
 

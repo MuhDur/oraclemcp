@@ -6,6 +6,7 @@ import {
   type EditionProposalInput,
   type EditionStatus,
   type CqnChangeFeedInput,
+  type ColumnLineageInput,
   type CostPlanRowViewModel,
   type ClearanceLevel,
   type CostCeilingSource,
@@ -641,6 +642,55 @@ export type ClassifierLadderData = {
   reason?: string;
   verdicts: ClassifierVerdict[];
 };
+
+// ── Column lineage / drift (Arc K) ───────────────────────────────────────────
+// Reads the column-lineage tool response and projects its typed edges. An edge
+// whose status the console cannot type is dropped rather than shown as verified.
+// When the response carries no lineage the input is null (not the same as an
+// empty edge set), so the console can say "not reported" honestly.
+
+export type ColumnLineageRequest = {
+  laneId?: string;
+  owner?: string;
+  object: string;
+  column: string;
+};
+
+/** `oracle_lineage` — source-derived column lineage with typed drift markers. */
+export async function fetchColumnLineage(
+  session: DashboardSession,
+  request: ColumnLineageRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("column-lineage"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_lineage",
+    arguments: {
+      ...(request.owner ? { owner: request.owner } : {}),
+      object: request.object,
+      column: request.column
+    }
+  });
+}
+
+export function parseColumnLineage(data: WorkbenchActionData | null): ColumnLineageInput {
+  const payload = mcpPayload(data);
+  const raw = payload?.["edges"];
+  if (!Array.isArray(raw)) {
+    return { edges: null };
+  }
+  const edges = raw.flatMap((item) => {
+    const record = recordValue(item);
+    const from = stringValue(record?.["from"]) ?? stringValue(record?.["source"]);
+    const to = stringValue(record?.["to"]) ?? stringValue(record?.["target"]);
+    const status = stringValue(record?.["status"]) ?? stringValue(record?.["edge_status"]);
+    if (!from || !to || !status) {
+      return [];
+    }
+    return [{ from, to, status, detail: stringValue(record?.["detail"]) ?? undefined }];
+  });
+  return { edges };
+}
 
 // ── CQN change feed (Arc C1) ─────────────────────────────────────────────────
 // A change event carries only the bound resource URI (the proven query scope);

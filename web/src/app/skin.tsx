@@ -32,6 +32,7 @@ import {
   type VectorClusterViewModel,
   type EditionTimelineViewModel,
   type CqnChangeFeedViewModel,
+  type ColumnLineageViewModel,
   type PolicyBadgeViewModel,
   type ScnScrubberViewModel,
   type SignatureId,
@@ -82,6 +83,7 @@ export type DashboardSkin = {
     VectorCluster: React.ComponentType<{ model: VectorClusterViewModel }>;
     EditionTimeline: React.ComponentType<{ model: EditionTimelineViewModel }>;
     CqnChangeFeed: React.ComponentType<{ model: CqnChangeFeedViewModel }>;
+    ColumnLineage: React.ComponentType<{ model: ColumnLineageViewModel }>;
     ScnScrubber: React.ComponentType<{
       model: ScnScrubberViewModel;
       onScrub?: (scn: number) => void;
@@ -180,6 +182,7 @@ export const OMCP_SKIN: DashboardSkin = {
     VectorCluster: VectorClusterRenderer,
     EditionTimeline: EditionTimelineRenderer,
     CqnChangeFeed: CqnChangeFeedRenderer,
+    ColumnLineage: ColumnLineageRenderer,
     PolicyBadge: PolicyBadgeRenderer
   },
   layout: {
@@ -801,6 +804,74 @@ export function CqnChangeFeedRenderer({
   );
 }
 
+/**
+ * The column-lineage / drift view (Arc K).
+ *
+ * Each source-derived column edge carries the typed status the backend assigned
+ * after cross-checking the live catalog: verified, drift-missing,
+ * drift-type-mismatch, or partial (a wrapped body). The console renders that
+ * marker verbatim — it never upgrades a drift to verified — and reports "not
+ * reported" when the lineage surface projected no edges.
+ */
+export function ColumnLineageRenderer({
+  model
+}: {
+  model: ColumnLineageViewModel;
+}): React.ReactElement {
+  return (
+    <section
+      className={cn(
+        "flex flex-col gap-3 rounded-lg border bg-[var(--om-surface)] p-4 shadow-sm",
+        model.driftCount > 0
+          ? "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)]"
+          : "border-[var(--om-border)]"
+      )}
+      aria-label="column lineage"
+      data-grammar-version={model.grammarVersion}
+      data-lineage-status={model.status}
+      data-edge-count={model.edges.length}
+      data-verified-count={model.verifiedCount}
+      data-drift-count={model.driftCount}
+      data-partial-count={model.partialCount}
+    >
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Link2 className="size-4 text-[var(--om-gold)]" aria-hidden="true" />
+          <span className="text-sm font-bold text-[var(--om-text-bright)]">Column Lineage</span>
+          <Badge tone={model.tone}>{model.status}</Badge>
+        </div>
+        <span className="font-mono text-2xs text-[var(--om-text-muted)]">{model.headline}</span>
+      </header>
+      <p className="text-xs text-[var(--om-text-muted)]">{model.detail}</p>
+
+      {model.edges.length > 0 ? (
+        <ul className="flex flex-col gap-1">
+          {model.edges.map((edge) => (
+            <li
+              key={`${edge.from}->${edge.to}`}
+              className={cn(
+                "flex flex-wrap items-center gap-2 rounded-md border px-3 py-2",
+                edge.status.startsWith("drift")
+                  ? "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)]"
+                  : "border-[var(--om-border)]"
+              )}
+              data-edge-status={edge.status}
+              data-edge-from={edge.from}
+              data-edge-to={edge.to}
+            >
+              <Badge tone={edge.tone}>{edge.status}</Badge>
+              <span className="truncate font-mono text-2xs text-[var(--om-text)]">
+                {edge.from} → {edge.to}
+              </span>
+              <span className="text-2xs text-[var(--om-text-muted)]">{edge.detail}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
+  );
+}
+
 export function MaskBadgeRenderer({ model }: { model: MaskBadgeViewModel }): React.ReactElement {
   return (
     <section
@@ -1182,6 +1253,18 @@ export function assertDashboardSkinConformance(skin: DashboardSkin): void {
   }
   if (typeof skin.renderers.CqnChangeFeed !== "function") {
     throw new Error(`skin ${skin.name} must provide a CQN change-feed renderer`);
+  }
+  if (typeof skin.renderers.ColumnLineage !== "function") {
+    throw new Error(`skin ${skin.name} must provide a column-lineage renderer`);
+  }
+  // Every one of the four typed edge statuses must render, and a drift edge must
+  // never be reported as verified.
+  const lineage = fixture.columnLineage;
+  const statuses = new Set(lineage.edges.map((edge) => edge.status));
+  for (const required of ["verified", "drift-missing", "drift-type-mismatch", "partial"] as const) {
+    if (!statuses.has(required)) {
+      throw new Error(`column-lineage fixture must include a ${required} edge`);
+    }
   }
   // A change scope is always a resource URI (the proven query), never an
   // object-level scope, and repeat callbacks for one scope must coalesce.

@@ -1701,6 +1701,146 @@ export function cqnChangeFeedFixture(): CqnChangeFeedViewModel {
   });
 }
 
+// ── Column-lineage / drift view (Arc K) ──────────────────────────────────────
+// Each source-derived column edge is cross-checked against the live catalog and
+// carries a typed status: `verified` (target object+column present),
+// `drift-missing` (the target is absent), `drift-type-mismatch` (present but the
+// column type differs), or `partial` (a wrapped/obfuscated body yields only
+// partial lineage — never a hard failure). The console renders the marker the
+// backend assigned; it never upgrades a drift to verified, and when the lineage
+// surface emits no edges it says so rather than implying a clean graph.
+
+export type LineageEdgeStatus =
+  | "verified"
+  | "drift-missing"
+  | "drift-type-mismatch"
+  | "partial";
+
+export type LineageEdgeViewModel = {
+  from: string;
+  to: string;
+  status: LineageEdgeStatus;
+  detail: string;
+  tone: DashboardTone;
+};
+
+export type ColumnLineageViewModel = {
+  grammarVersion: 1;
+  status: "edges" | "empty" | "not_reported";
+  edges: readonly LineageEdgeViewModel[];
+  verifiedCount: number;
+  driftCount: number;
+  partialCount: number;
+  headline: string;
+  detail: string;
+  tone: DashboardTone;
+};
+
+export type LineageEdgeInput = {
+  from: string;
+  to: string;
+  status: string;
+  detail?: string;
+};
+
+export type ColumnLineageInput = {
+  // Null when the lineage surface projected nothing (not the same as "no edges").
+  edges: readonly LineageEdgeInput[] | null;
+};
+
+const LINEAGE_EDGE_STATUSES: readonly LineageEdgeStatus[] = [
+  "verified",
+  "drift-missing",
+  "drift-type-mismatch",
+  "partial"
+];
+
+const LINEAGE_EDGE_TONE: Readonly<Record<LineageEdgeStatus, DashboardTone>> = {
+  verified: "ok",
+  "drift-missing": "warn",
+  "drift-type-mismatch": "warn",
+  partial: "info"
+};
+
+export function isLineageEdgeStatus(value: string): value is LineageEdgeStatus {
+  return (LINEAGE_EDGE_STATUSES as readonly string[]).includes(value);
+}
+
+export function toColumnLineageViewModel(input: ColumnLineageInput): ColumnLineageViewModel {
+  if (input.edges === null) {
+    return {
+      grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+      status: "not_reported",
+      edges: [],
+      verifiedCount: 0,
+      driftCount: 0,
+      partialCount: 0,
+      headline: "Lineage not reported",
+      detail:
+        "The lineage surface projected no column edges. That is not a clean-graph claim — the console shows only the edges the server derived and cross-checked.",
+      tone: "off"
+    };
+  }
+  const edges = input.edges.flatMap((edge): LineageEdgeViewModel[] => {
+    // An unknown status is not silently rendered as verified: the console drops
+    // an edge it cannot type rather than implying it was cross-checked clean.
+    if (!isLineageEdgeStatus(edge.status)) {
+      return [];
+    }
+    return [
+      {
+        from: edge.from,
+        to: edge.to,
+        status: edge.status,
+        detail: edge.detail ?? DEFAULT_LINEAGE_DETAIL[edge.status],
+        tone: LINEAGE_EDGE_TONE[edge.status]
+      }
+    ];
+  });
+  const verifiedCount = edges.filter((edge) => edge.status === "verified").length;
+  const partialCount = edges.filter((edge) => edge.status === "partial").length;
+  const driftCount = edges.filter(
+    (edge) => edge.status === "drift-missing" || edge.status === "drift-type-mismatch"
+  ).length;
+  const status = edges.length > 0 ? "edges" : "empty";
+  return {
+    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+    status,
+    edges,
+    verifiedCount,
+    driftCount,
+    partialCount,
+    headline:
+      status === "empty"
+        ? "No column edges"
+        : `${edges.length} column edge(s): ${verifiedCount} verified, ${driftCount} drifted, ${partialCount} partial`,
+    detail:
+      driftCount > 0
+        ? "A drift marker means the source-derived edge disagrees with the live catalog — shown, never smoothed over."
+        : "Each edge was cross-checked against the live catalog.",
+    tone: driftCount > 0 ? "warn" : partialCount > 0 ? "info" : status === "empty" ? "off" : "ok"
+  };
+}
+
+const DEFAULT_LINEAGE_DETAIL: Readonly<Record<LineageEdgeStatus, string>> = {
+  verified: "target object and column present in the live catalog",
+  "drift-missing": "the target object or column is absent from the live catalog",
+  "drift-type-mismatch": "the target column exists but its type differs from the source",
+  partial: "a wrapped or obfuscated body yields only partial lineage"
+};
+
+/** One edge of each typed status, including an injected drift. */
+export function columnLineageFixture(): ColumnLineageViewModel {
+  return toColumnLineageViewModel({
+    edges: [
+      { from: "HR.V_PAID.AMOUNT", to: "HR.ORDERS.AMOUNT", status: "verified" },
+      { from: "HR.V_PAID.OWNER_ID", to: "HR.ORDERS.OWNER_ID", status: "drift-missing" },
+      { from: "HR.V_PAID.STATUS", to: "HR.ORDERS.STATUS", status: "drift-type-mismatch" },
+      { from: "HR.WRAPPED_PKG.OUT", to: "HR.SECRETS.VAL", status: "partial" }
+    ]
+  });
+}
+
 export const DASHBOARD_GRAMMAR = {
   grammarVersion: 1,
   meanings: {
@@ -1875,6 +2015,7 @@ export function skinContractFixture(): {
   vectorCluster: VectorClusterViewModel;
   editionTimeline: EditionTimelineViewModel;
   cqnChangeFeed: CqnChangeFeedViewModel;
+  columnLineage: ColumnLineageViewModel;
 } {
   return {
     policyBadge: policyBadgeFixture(),
@@ -1887,6 +2028,7 @@ export function skinContractFixture(): {
     vectorCluster: vectorClusterFixture(),
     editionTimeline: editionTimelineFixture(),
     cqnChangeFeed: cqnChangeFeedFixture(),
+    columnLineage: columnLineageFixture(),
     groundControl: {
       grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
       verdict: "GO",
