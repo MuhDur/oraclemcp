@@ -16,6 +16,7 @@ mod anchor;
 mod hmac;
 mod keyring;
 mod record;
+mod rekor;
 mod shipping;
 mod shipping_spool;
 mod sink;
@@ -36,6 +37,12 @@ pub use record::{
     AuditOutcome, AuditRecord, AuditResultMaskingAction, AuditResultMaskingCertificate,
     AuditResultMaskingColumnDecision, AuditResultMaskingSource, AuditSubject, DbEvidence,
     GENESIS_HASH, SigningKey, SigningKeyError, normalized_sql_sha256, sha256_hex,
+};
+pub use rekor::{
+    AsyncRekorAnchor, AuditChainHead, DEFAULT_REKOR_QUEUE_CAPACITY, MAX_REKOR_CHECKPOINT_BYTES,
+    MAX_REKOR_ENTRY_BODY_BYTES, MAX_REKOR_PROOF_HASHES, RekorAnchorReceipt, RekorAnchorStatus,
+    RekorCheckpointVerifier, RekorInclusionProof, RekorProofError, RekorSubmitError,
+    RekorSubmitter,
 };
 pub use shipping::{
     ShippingAuditSink, ShippingError, ShippingForwarder, WormFileForwarder, cef_line, syslog_line,

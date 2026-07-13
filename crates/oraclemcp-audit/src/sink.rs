@@ -23,6 +23,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use crate::anchor::{AnchorFile, ChainAnchor, load_anchor};
 use crate::keyring::AuditKeyring;
 use crate::record::{AuditCorrelation, AuditEntryDraft, AuditRecord, GENESIS_HASH, SigningKey};
+use crate::rekor::{AsyncRekorAnchor, AuditChainHead};
 use crate::verify::{BrokenReason, ChainVerifier, JsonlError, JsonlReader, VerifyOutcome};
 
 /// Stable identity of an already-open filesystem object. Comparing identities
@@ -706,6 +707,9 @@ pub struct Auditor {
     /// FIRST — the anchor can be behind (explainable crash window) but never
     /// ahead of the durable chain. See `crate::anchor` for the semantics.
     anchor: Option<AnchorFile>,
+    /// Best-effort external transparency anchoring. It only observes heads
+    /// that already passed local fsync; an outage is never an admission gate.
+    rekor_anchor: Option<AsyncRekorAnchor>,
     state: Mutex<ChainState>,
 }
 
@@ -724,6 +728,7 @@ impl Auditor {
             sink,
             keyring,
             anchor: None,
+            rekor_anchor: None,
             state: Mutex::new(ChainState {
                 seq: 0,
                 last_hash: GENESIS_HASH.to_owned(),
@@ -742,6 +747,16 @@ impl Auditor {
     #[must_use]
     pub fn with_head_anchor(mut self, path: impl Into<PathBuf>) -> Self {
         self.anchor = Some(AnchorFile::new(path.into(), self.keyring.active().clone()));
+        self
+    }
+
+    /// Attach a bounded asynchronous Rekor anchor worker. The worker observes
+    /// durable audit heads after their local fsync; submission failure and queue
+    /// pressure are visible through its status handle but never alter whether a
+    /// guarded database operation may proceed.
+    #[must_use]
+    pub fn with_rekor_anchor(mut self, rekor_anchor: AsyncRekorAnchor) -> Self {
+        self.rekor_anchor = Some(rekor_anchor);
         self
     }
 
@@ -1014,6 +1029,9 @@ impl Auditor {
         // a durable append, fsync already preceded the anchor attempt above.
         state.anchor_transition_pending = false;
         anchor_outcome?;
+        if durable && let Some(rekor_anchor) = &self.rekor_anchor {
+            rekor_anchor.enqueue(AuditChainHead::from_record(&record));
+        }
         Ok(record)
     }
 
@@ -1034,6 +1052,15 @@ impl Auditor {
             && !state.anchor_transition_pending
         {
             anchor.record_head(state.seq, &state.last_hash)?;
+        }
+        if let Some(rekor_anchor) = &self.rekor_anchor
+            && state.seq > 0
+            && !state.anchor_transition_pending
+        {
+            rekor_anchor.enqueue(AuditChainHead {
+                seq: state.seq,
+                entry_hash: state.last_hash.clone(),
+            });
         }
         Ok(())
     }
