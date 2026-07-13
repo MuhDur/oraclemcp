@@ -12,9 +12,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
+
+#[path = "../refusal_corpus.rs"]
+mod refusal_corpus;
+
+use refusal_corpus::RefusalCorpusWriter;
 
 use asupersync::combinator::try_commit_section;
 use asupersync::sync::Mutex as AsyncMutex;
@@ -148,6 +154,19 @@ const EXECUTE_APPROVED_TOKEN_TTL_SECONDS: u64 = 300;
 const MAX_EXECUTE_APPROVED_TOKENS: usize = 128;
 /// Tamper-token scope for signed execution grant references.
 const EXECUTE_GRANT_TOKEN_SCOPE: &str = "grant:execute";
+
+/// State-file location for the served refusal corpus. It deliberately follows
+/// the same XDG-first layout as the audit log, but remains a separate artifact:
+/// a public training record is never part of the privileged audit chain.
+fn default_refusal_corpus_path() -> PathBuf {
+    if let Ok(state_dir) = oraclemcp_core::FileStore::default_state_dir() {
+        return state_dir.join("corpus").join("refusals.jsonl");
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".local/state/oraclemcp/corpus/refusals.jsonl"))
+        .unwrap_or_else(|| PathBuf::from("oraclemcp-refusal-corpus.jsonl"))
+}
 /// Hard cap on remembered source patch previews in one server process.
 const MAX_PATCH_PREVIEWS: usize = 128;
 /// Each orient snapshot is four bounded dictionary reads; cap retained profiles,
@@ -858,9 +877,50 @@ pub struct OracleDispatcher {
     profile_drain: ProfileDrainState,
     /// Durable write-ahead idempotency ledger for committing tools (CX-C1).
     write_intents: Option<Arc<WriteIntentLog>>,
+    /// Append-only, redacted refusal corpus. This is an observer only: a
+    /// corpus failure cannot alter the original guard refusal.
+    refusal_corpus: Option<Arc<RefusalCorpusWriter>>,
 }
 
 impl OracleDispatcher {
+    /// Persist a redacted refusal record after the guard has already rejected a
+    /// SQL-bearing request. This observer deliberately ignores persistence
+    /// errors: failure to record must never weaken or replace the refusal.
+    fn append_refusal_corpus_from_result(
+        &self,
+        args: &Value,
+        result: &Result<Value, ErrorEnvelope>,
+    ) {
+        let Err(envelope) = result else {
+            return;
+        };
+        if !matches!(
+            envelope.error_class,
+            ErrorClass::ForbiddenStatement | ErrorClass::OperatingLevelTooLow
+        ) {
+            return;
+        }
+        let Some(sql) = args.get("sql").and_then(Value::as_str) else {
+            return;
+        };
+        let refusal_class = envelope
+            .structured_reason
+            .as_ref()
+            .map_or(ReasonCategory::UnprovenSideEffect, |reason| reason.category);
+        let Some(writer) = &self.refusal_corpus else {
+            return;
+        };
+        if writer
+            .append_refusal(&DEFAULT_CLASSIFIER, sql, refusal_class)
+            .is_err()
+        {
+            tracing::warn!(
+                refusal_class = ?refusal_class,
+                "failed to append redacted refusal corpus record; original SQL remains refused"
+            );
+        }
+    }
+
     /// Build a dispatcher over an open (or stub) connection.
     pub fn new(conn: Box<dyn OracleConnection>) -> Self {
         Self::new_with_profile(conn, None)
@@ -913,6 +973,7 @@ impl OracleDispatcher {
             mcp_exposure: McpExposurePolicy::default(),
             profile_drain,
             write_intents: None,
+            refusal_corpus: None,
         }
     }
 
@@ -997,6 +1058,9 @@ impl OracleDispatcher {
             mcp_exposure: McpExposurePolicy::default(),
             profile_drain,
             write_intents: None,
+            refusal_corpus: Some(Arc::new(RefusalCorpusWriter::new(
+                default_refusal_corpus_path(),
+            ))),
         }
     }
 
@@ -1084,6 +1148,17 @@ impl OracleDispatcher {
     #[must_use]
     pub fn with_write_intent_log(mut self, write_intents: Arc<WriteIntentLog>) -> Self {
         self.write_intents = Some(write_intents);
+        self
+    }
+
+    /// Direct a served dispatcher to append redacted guard refusals to `path`.
+    ///
+    /// The writer receives only a refusal after dispatch has already failed. It
+    /// has no authority to change the guard result, and it reclassifies any
+    /// proposed rewrite before storing it as advice.
+    #[must_use]
+    pub fn with_refusal_corpus_path(mut self, path: PathBuf) -> Self {
+        self.refusal_corpus = Some(Arc::new(RefusalCorpusWriter::new(path)));
         self
     }
 
@@ -4573,7 +4648,9 @@ fn attach_parameterization_hint(envelope: ErrorEnvelope, sql: &str) -> ErrorEnve
     ) {
         return envelope;
     }
-    match oraclemcp_guard::suggest_parameterized_form(sql) {
+    match oraclemcp_guard::suggest_parameterized_form(sql).filter(|rewrite| {
+        oraclemcp_guard::corpus::classifier_proves_rewrite(&DEFAULT_CLASSIFIER, rewrite)
+    }) {
         Some(rewrite) => envelope.with_next_step(format!(
             "parameterize inline literals to enable cursor sharing and avoid literal exposure, \
              e.g. `{rewrite}`"
@@ -10007,7 +10084,9 @@ impl ToolDispatch for OracleDispatcher {
                     cx.cancel_reason().unwrap_or_else(CancelReason::timeout),
                 );
             }
+            let refusal_args = args.clone();
             let result = self.dispatch_with_cx_inner(cx, context, name, args).await;
+            self.append_refusal_corpus_from_result(&refusal_args, &result);
             let terminal_result = match &result {
                 Ok(value) => response_reports_terminal_effect(name, value),
                 Err(_) => self.connection_quarantine().ok().flatten().is_some(),
@@ -10034,12 +10113,14 @@ impl ToolDispatch for OracleDispatcher {
                     cx.cancel_reason().unwrap_or_else(CancelReason::timeout),
                 );
             }
+            let refusal_args = args.clone();
             let result = if canonical_tool_name(name) == "oracle_query" {
                 self.dispatch_query_stream_with_cx(cx, context, name, args, frames)
                     .await
             } else {
                 self.dispatch_with_cx_inner(cx, context, name, args).await
             };
+            self.append_refusal_corpus_from_result(&refusal_args, &result);
             let terminal_result = match &result {
                 Ok(value) => response_reports_terminal_effect(name, value),
                 Err(_) => self.connection_quarantine().ok().flatten().is_some(),
@@ -10169,6 +10250,7 @@ impl OracleDispatcher {
         // cancellation/budget state is the contract the dispatch must honor (a
         // fresh runtime's ambient Cx would lose a pre-cancelled request).
         let caller_cx = cx.clone();
+        let refusal_args = args.clone();
         // block-on-boundary: sync->async dispatch ENTRY shim (not the per-call
         // DB round-trip path). The server's real entry is the async
         // `ToolDispatch::dispatch` which is `.await`-ed on the dispatch runtime;
@@ -10183,8 +10265,11 @@ impl OracleDispatcher {
             .expect("current-thread runtime")
             // block-on-boundary: one-shot dispatch ENTRY runtime (release-gre.16).
             .block_on(async move {
-                self.dispatch_with_cx_inner(&caller_cx, DispatchContext::default(), name, args)
-                    .await
+                let result = self
+                    .dispatch_with_cx_inner(&caller_cx, DispatchContext::default(), name, args)
+                    .await;
+                self.append_refusal_corpus_from_result(&refusal_args, &result);
+                result
             })
     }
 
@@ -10212,6 +10297,7 @@ impl OracleDispatcher {
         // (release-gre.16).
         let reactor = asupersync::runtime::reactor::create_reactor()
             .expect("native reactor for dispatch I/O");
+        let refusal_args = args.clone();
         asupersync::runtime::RuntimeBuilder::current_thread()
             .with_reactor(reactor)
             .build()
@@ -10219,7 +10305,9 @@ impl OracleDispatcher {
             // block-on-boundary: one-shot dispatch ENTRY runtime (release-gre.16).
             .block_on(async move {
                 let cx = Cx::current().expect("block_on installs a request Cx");
-                self.dispatch_with_cx_inner(&cx, context, name, args).await
+                let result = self.dispatch_with_cx_inner(&cx, context, name, args).await;
+                self.append_refusal_corpus_from_result(&refusal_args, &result);
+                result
             })
     }
 

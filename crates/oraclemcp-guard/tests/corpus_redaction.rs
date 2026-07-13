@@ -11,9 +11,11 @@
 //! of those strings, the test fails and names it.
 
 use oraclemcp_guard::corpus::{
-    CORPUS_RECORD_VERSION, CorpusRecord, CorpusRedactionError, ReasonCategory, dedup_by_content,
-    redact_sql, safe_why, validate_redacted_sql,
+    CORPUS_RECORD_VERSION, CorpusRecord, CorpusRedactionError, ReasonCategory,
+    classifier_proves_rewrite, dedup_by_content, reclassify_rewrite_at_apply, redact_sql, safe_why,
+    validate_redacted_sql,
 };
+use oraclemcp_guard::{Classifier, ClassifierConfig, DangerLevel};
 
 /// Every string that must never reach the corpus, whatever field it entered by.
 /// Synthetic throughout — no real identifiers (see the repo's confidentiality
@@ -139,6 +141,45 @@ fn no_field_of_a_serialized_record_ever_carries_a_secret() {
         assert_carries_no_secret(&record.to_jsonl_line(), "full record");
         assert_carries_no_secret(&record.id, "content id");
     }
+}
+
+#[test]
+fn a_stored_corpus_record_never_replays_a_verdict_at_apply_time() {
+    let default_classifier = Classifier::default();
+    let raw_rewrite = "UPDATE acme_corp.customers SET status = :status WHERE id = :id";
+    assert!(
+        classifier_proves_rewrite(&default_classifier, raw_rewrite),
+        "a level-gated rewrite is classifier-proven advice, not an execution grant"
+    );
+
+    let record = CorpusRecord::new(
+        "UPDATE acme_corp.customers SET status = 'closed' WHERE id = 42",
+        ReasonCategory::RequiresHigherLevel,
+        Some(raw_rewrite),
+        "the statement needs a higher operating level",
+    )
+    .expect("redacted corpus record");
+    let serialized = record.to_jsonl_line();
+    assert!(
+        !serialized.contains("verdict")
+            && !serialized.contains("danger")
+            && !serialized.contains("required_level"),
+        "stored corpus data contains no reusable classifier outcome"
+    );
+
+    let tightened = Classifier::new(ClassifierConfig::new().with_block_pattern("(?i)UPDATE"));
+    assert_eq!(
+        reclassify_rewrite_at_apply(&tightened, raw_rewrite).danger,
+        DangerLevel::Forbidden,
+        "a later tighter policy decides from raw SQL, not from the old corpus record"
+    );
+    assert!(
+        !classifier_proves_rewrite(
+            &default_classifier,
+            "BEGIN EXECUTE IMMEDIATE 'DROP TABLE acme_corp.customers'; END;"
+        ),
+        "a forbidden candidate cannot be offered or recorded"
+    );
 }
 
 #[test]

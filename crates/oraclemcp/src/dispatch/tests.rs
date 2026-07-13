@@ -10,6 +10,8 @@ use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_core::{DispatchCloseReason, DispatchContext, ScopeGrant};
 use oraclemcp_db::{OracleBackend, OracleCell, OracleRow, QueryRowStream, QueryRowStreamStart};
 use oraclemcp_guard::SET_TRANSACTION_READ_ONLY;
+use oraclemcp_guard::corpus::{CorpusRecord, ReasonCategory};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Barrier;
 use std::sync::Mutex;
@@ -246,6 +248,35 @@ fn served_read_gate_refuses_view_policy_and_zero_arg_function_before_evaluation(
             .expect_err("hidden or executable dependency must fail closed");
         assert_eq!(error.error_class, ErrorClass::ForbiddenStatement, "{sql}");
         assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0, "{sql}");
+    }
+}
+
+#[test]
+fn guard_refusal_appends_only_a_redacted_classifier_proven_corpus_record() {
+    let temp = tempfile::tempdir().expect("temporary corpus directory");
+    let corpus_path = temp.path().join("corpus/refusals.jsonl");
+    let (dispatcher, state) = semantic_dispatcher();
+    let dispatcher = dispatcher.with_refusal_corpus_path(corpus_path.clone());
+    let raw_refusal = "UPDATE acme_corp.customers SET token = 'hunter2' WHERE id = 42";
+
+    let error = dispatcher
+        .dispatch("oracle_query", json!({"sql": raw_refusal}))
+        .expect_err("the read-only guard refuses the mutation before database I/O");
+
+    assert_eq!(error.error_class, ErrorClass::OperatingLevelTooLow);
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0);
+    let line = fs::read_to_string(corpus_path).expect("the refusal corpus was appended");
+    let record = CorpusRecord::from_jsonl_line(line.trim()).expect("stored corpus record is valid");
+    assert_eq!(record.refusal_class, ReasonCategory::RequiresHigherLevel);
+    assert!(
+        record.suggested_rewrite_redacted.is_some(),
+        "only the independently classifier-proven rewrite is retained"
+    );
+    for secret in ["hunter2", "acme_corp", "customers", ":token"] {
+        assert!(
+            !line.to_ascii_lowercase().contains(secret),
+            "the public corpus must not persist raw secret, bind, or identifier {secret:?}: {line}"
+        );
     }
 }
 

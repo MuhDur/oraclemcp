@@ -37,6 +37,8 @@ use sqlparser::dialect::OracleDialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
 
+use crate::{Classifier, DangerLevel, GuardDecision};
+
 pub use oraclemcp_error::ReasonCategory;
 
 /// Version of the corpus record schema. Included in the content hash so a schema
@@ -240,6 +242,32 @@ pub fn dedup_by_content(records: Vec<CorpusRecord>) -> Vec<CorpusRecord> {
         .into_iter()
         .filter(|record| seen.insert(record.id.clone()))
         .collect()
+}
+
+/// Classify raw proposed SQL at the point a rewrite would be applied.
+///
+/// Corpus records intentionally contain only a redacted SQL skeleton and no
+/// verdict. This function therefore accepts neither a [`CorpusRecord`] nor a
+/// prior decision: every apply attempt starts from the current classifier.
+#[must_use]
+pub fn reclassify_rewrite_at_apply(classifier: &Classifier, raw_rewrite: &str) -> GuardDecision {
+    classifier.classify(raw_rewrite)
+}
+
+/// Whether a raw rewrite is classifier-proven enough to offer or record as
+/// governed advice.
+///
+/// This is deliberately **not** execution authorization. A level-gated
+/// statement can be useful advice, but it must pass
+/// [`reclassify_rewrite_at_apply`] and the active session-level gate again when
+/// a later request tries to execute it. A `Forbidden` candidate is never
+/// offered or recorded.
+#[must_use]
+pub fn classifier_proves_rewrite(classifier: &Classifier, raw_rewrite: &str) -> bool {
+    !matches!(
+        reclassify_rewrite_at_apply(classifier, raw_rewrite).danger,
+        DangerLevel::Forbidden
+    )
 }
 
 fn content_id(
