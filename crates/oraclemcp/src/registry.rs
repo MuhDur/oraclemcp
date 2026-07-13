@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 55] = [
+pub const TOOL_NAMES: [&str; 56] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -26,6 +26,7 @@ pub const TOOL_NAMES: [&str; 55] = [
     "oracle_execute",
     "oracle_checkpoint",
     "oracle_undo_to",
+    "oracle_preview_dml",
     "oracle_compile_object",
     "oracle_create_or_replace",
     "oracle_patch_source",
@@ -618,6 +619,55 @@ pub fn tool_registry() -> ToolRegistry {
             ("discarded_statements", json!({ "type": "integer", "minimum": 0, "description": "Held statements whose effects this undo discarded." })),
             ("released_checkpoints", json!({ "type": "array", "items": { "type": "string" }, "description": "Checkpoints Oracle erased because they were established after the target." })),
         ]))
+        .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_preview_dml",
+            ToolTier::FoundationLiveDb,
+            "Dry-run one DML statement: the server brackets it in its own savepoint, executes it, reads the rows it touched, then rolls back to that savepoint and presents the result — nothing is committed and nothing is left behind. Supply witness to see the affected rows before and after (it is proven read-only like any other read). A statement whose effect ESCAPES rollback (sequence NEXTVAL, and by nature autonomous transactions or triggers) is refused rather than dry-run, and returned labeled cannot_undo: a dry run must not cause an effect it cannot take back. Committing the previewed change afterwards still re-classifies and re-gates the exact statement — the preview grants nothing.",
+        )
+        .with_input_schema(object_schema(
+            props_with(
+                json!({
+                    "sql": { "type": "string", "description": "A single reversible DML statement (INSERT/UPDATE/DELETE/MERGE). Use :1, :2 … for binds. DDL cannot be dry-run: Oracle commits it implicitly." },
+                    "binds": {
+                        "type": "array",
+                        "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
+                        "items": {}
+                    },
+                    "witness": { "type": "string", "description": "Optional read-only SELECT run inside the sandbox before and after the DML, so the response can show the rows it changed. Proven read-only by the same classifier as oracle_query." },
+                    "witness_sql": { "type": "string", "description": "Alias for witness." },
+                    "witness_binds": {
+                        "type": "array",
+                        "description": "Positional bind values for the witness SELECT.",
+                        "items": {}
+                    },
+                    "max_rows": { "type": "integer", "minimum": 1, "description": "Row cap for each witness read (default: the profile page size)." }
+                }),
+                &[timeout_seconds_prop()],
+            ),
+            &["sql"],
+        ))
+        .with_output_schema(json!({
+            "type": "object",
+            "properties": {
+                "previewed": { "type": "boolean", "description": "True when the statement was executed in the sandbox and rolled back." },
+                "reversible": { "type": "boolean", "description": "False when the statement has an effect the sandbox cannot take back; it is then refused, not run." },
+                "rows_affected": { "type": "integer", "minimum": 0, "description": "Rows the DML changed inside the sandbox." },
+                "before": { "type": "object", "description": "Witness rows read inside the sandbox before the DML.", "additionalProperties": true },
+                "after": { "type": "object", "description": "Witness rows read inside the sandbox after the DML, before the rollback.", "additionalProperties": true },
+                "cannot_undo": { "type": "array", "items": { "type": "string" }, "description": "Effects that would escape the rollback. Non-empty means the statement was NOT run." },
+                "rolled_back": { "type": "boolean" },
+                "committed": { "type": "boolean", "enum": [false] },
+                "required_level": { "type": "string" },
+                "danger": { "type": "string" },
+                "next_step": { "type": "string" }
+            },
+            "required": ["previewed", "reversible", "rolled_back", "committed"],
+            "additionalProperties": true
+        }))
         .destructive(),
     );
 
@@ -1563,6 +1613,7 @@ mod tests {
                 "oracle_execute",
                 "oracle_checkpoint",
                 "oracle_undo_to",
+                "oracle_preview_dml",
                 "oracle_compile_object",
                 "oracle_create_or_replace",
                 "oracle_patch_source",

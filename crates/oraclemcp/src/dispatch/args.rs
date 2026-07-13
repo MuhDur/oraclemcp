@@ -159,6 +159,27 @@ pub(super) struct UndoToArgs {
     pub(super) name: Option<String>,
 }
 
+/// Arc I: `oracle_preview_dml` — run the DML inside a savepoint sandbox, capture
+/// what it did, roll it back, and present the result.
+#[derive(Deserialize)]
+pub(super) struct PreviewDmlArgs {
+    /// The DML to dry-run. Classified and gated exactly like `oracle_execute`'s.
+    pub(super) sql: String,
+    #[serde(default)]
+    pub(super) binds: Vec<Value>,
+    /// An optional read the server runs *inside the sandbox*, once before the DML
+    /// and once after, to show the rows it changed. It is proven read-only by the
+    /// unchanged classifier, like any other read.
+    #[serde(default, alias = "witness_sql")]
+    pub(super) witness: Option<String>,
+    #[serde(default)]
+    pub(super) witness_binds: Vec<Value>,
+    #[serde(default, alias = "limit")]
+    pub(super) max_rows: Option<usize>,
+    #[serde(default)]
+    pub(super) timeout_seconds: Option<u64>,
+}
+
 #[derive(Deserialize)]
 pub(super) struct ExecuteArgs {
     pub(super) sql: String,

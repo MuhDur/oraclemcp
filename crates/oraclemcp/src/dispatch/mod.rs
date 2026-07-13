@@ -6592,6 +6592,302 @@ async fn undo_to_checkpoint(ctx: DbToolCtx<'_>, args: UndoToArgs) -> Result<Valu
     }))
 }
 
+/// `oracle_preview_dml` — the dry run (Arc I / bead `.11.2`).
+///
+/// The sandbox is a savepoint the *server* owns: `SAVEPOINT OMCP_PREVIEW_DML` →
+/// witness read → the DML → witness read → `ROLLBACK TO SAVEPOINT
+/// OMCP_PREVIEW_DML`. Because the sandbox savepoint is the newest one, rolling
+/// back to it restores the exact pre-preview state and leaves an agent's own
+/// checkpoints — and any work held above them — untouched. When no workspace is
+/// open the transaction is then ended outright, exactly as a `commit=false`
+/// execute does, so a dry run never leaves an open transaction behind.
+///
+/// Three properties make this honest:
+///
+/// - **A dry run must not cause what it cannot undo.** A statement the classifier
+///   proves has a non-transactional effect (sequence `NEXTVAL`) is *refused*, not
+///   executed, and returned labeled `cannot_undo`. Autonomous transactions and
+///   triggers can escape rollback without being provable from the text; the
+///   response says so rather than implying a guarantee we cannot make.
+/// - **The preview grants nothing.** It mints no confirmation and consumes none.
+///   Committing the change afterwards goes through `oracle_execute`, which
+///   re-classifies and re-gates the exact statement (SEC-1) — a previewed verdict
+///   is never trusted at commit time.
+/// - **The witness is a real read.** It is proven read-only by the same
+///   classifier as `oracle_query`, so "before/after" is never a hole through
+///   which unproven SQL runs.
+async fn preview_dml(ctx: DbToolCtx<'_>, args: PreviewDmlArgs) -> Result<Value, ErrorEnvelope> {
+    let timeout_seconds = args.timeout_seconds;
+    with_call_timeout(
+        ctx.cx,
+        ctx.conn,
+        ctx.quarantine,
+        ctx.request_budget.clone(),
+        timeout_seconds,
+        CompletionPolicy::EnforceDeadlineAfterBody,
+        || preview_dml_inner(ctx, args),
+    )
+    .await
+}
+
+async fn preview_dml_inner(
+    ctx: DbToolCtx<'_>,
+    args: PreviewDmlArgs,
+) -> Result<Value, ErrorEnvelope> {
+    let cx = ctx.cx;
+    let conn = ctx.conn;
+    let decision = DEFAULT_CLASSIFIER.classify(&args.sql);
+    let gate = decision.gate(ctx.session);
+    if !matches!(gate, LevelDecision::Allow) {
+        return Err(execute_gate_error(&decision, gate, ctx.session));
+    }
+    let required_level = decision.required_level.ok_or_else(|| {
+        ErrorEnvelope::new(
+            ErrorClass::ForbiddenStatement,
+            format!(
+                "statement is forbidden by the SQL classifier: {}",
+                decision.reason
+            ),
+        )
+    })?;
+    if required_level <= OperatingLevel::ReadOnly {
+        return Err(
+            invalid_args("oracle_preview_dml dry-runs a write; a read needs no sandbox")
+                .with_suggested_tool("oracle_query"),
+        );
+    }
+    if required_level >= OperatingLevel::Ddl {
+        return Err(invalid_args(
+            "DDL/Admin statements cannot be dry-run: Oracle commits them implicitly, so the sandbox could not roll them back",
+        )
+        .with_suggested_tool("oracle_preview_sql")
+        .with_next_step(
+            "use oracle_preview_sql to see the classifier verdict for DDL without executing anything",
+        ));
+    }
+    // A dry run must not cause an effect it cannot take back. Refuse — and label
+    // it — instead of advancing the sequence and calling the result a preview.
+    if decision.non_transactional_effect || decision.query_effect_requires_fetch {
+        return Ok(json!({
+            "previewed": false,
+            "reversible": false,
+            "rolled_back": false,
+            "committed": false,
+            "cannot_undo": [decision.reason.clone()],
+            "required_level": required_level,
+            "danger": decision.danger,
+            "objects_affected": decision.objects_affected,
+            "reason": decision.reason,
+            "next_step": "this statement was NOT executed: its effect escapes rollback, so no sandbox could undo it. Preview it with oracle_preview_sql and run it deliberately with oracle_execute once you accept the permanent effect",
+        }));
+    }
+    ensure_workspace_level(ctx.session, "oracle_preview_dml")?;
+
+    // The witness is an ordinary proven read — same classifier, same gate.
+    let witness = match args
+        .witness
+        .as_deref()
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+    {
+        Some(witness) => {
+            let marked = with_audit_marker(witness, ctx.active_profile, "oracle_preview_dml");
+            ensure_resolved_read_only(cx, conn, ctx.catalog_cache, &marked).await?;
+            let binds = args
+                .witness_binds
+                .iter()
+                .map(json_to_bind)
+                .collect::<Result<Vec<_>, _>>()?;
+            Some((marked, binds))
+        }
+        None => None,
+    };
+    let binds = args
+        .binds
+        .iter()
+        .map(json_to_bind)
+        .collect::<Result<Vec<_>, _>>()?;
+    let executed_sql = with_audit_marker(&args.sql, ctx.active_profile, "oracle_preview_dml");
+    if DEFAULT_CLASSIFIER.classify(&executed_sql) != decision {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "audit marker changed the classifier verdict; refusing to execute",
+        ));
+    }
+    let caps = QueryCaps {
+        max_rows: args.max_rows.unwrap_or(QueryCaps::default().max_rows),
+        ..QueryCaps::default()
+    };
+
+    // The sandbox is a write on the transaction: end any armed read-only one
+    // first, exactly as the governed write path does.
+    clear_read_only_transaction_before_write(&ctx).await?;
+    let danger_str = audit_danger_string(decision.danger);
+    let db_evidence = collect_effect_audit_db_evidence(&ctx).await?;
+    let audit_entry = AuditEntryCtx {
+        auditor: ctx.audit.auditor,
+        subject: ctx.audit.subject,
+        db_evidence: db_evidence.as_ref(),
+    };
+    // fsync-before-execute: the dry run really does run, so it is logged before
+    // it can touch the database, and its rollback is logged after.
+    append_audit(
+        audit_entry,
+        "oracle_preview_dml",
+        &executed_sql,
+        &danger_str,
+        None,
+        AuditOutcome::Pending,
+    )?;
+
+    let sandbox = workspace::savepoint_statement(workspace::PREVIEW_SANDBOX);
+    if let Err(error) = execute_conn(cx, conn, &sandbox, &[] as &[OracleBind]).await {
+        append_terminal_audit(
+            &ctx,
+            audit_entry,
+            "oracle_preview_dml",
+            &executed_sql,
+            &danger_str,
+            None,
+            AuditOutcome::Failed,
+        )?;
+        return Err(DbError::into_envelope(error));
+    }
+
+    // Everything from here rolls back to the sandbox savepoint, whatever happens.
+    let sandboxed = async {
+        let before = match &witness {
+            Some((sql, binds)) => Some(
+                read_query(cx, conn, sql, binds, caps, 0, &SerializeOptions::default())
+                    .await
+                    .map_err(DbError::into_envelope)?,
+            ),
+            None => None,
+        };
+        let rows_affected = execute_conn(cx, conn, &executed_sql, &binds)
+            .await
+            .map_err(DbError::into_envelope)?;
+        let after = match &witness {
+            Some((sql, binds)) => Some(
+                read_query(cx, conn, sql, binds, caps, 0, &SerializeOptions::default())
+                    .await
+                    .map_err(DbError::into_envelope)?,
+            ),
+            None => None,
+        };
+        Ok::<_, ErrorEnvelope>((before, rows_affected, after))
+    }
+    .await;
+
+    // Undo the sandbox. This is the whole contract, so a failure here is a
+    // quarantine: we could not prove the dry run left nothing behind.
+    let undo = workspace::undo_statement(workspace::PREVIEW_SANDBOX);
+    let undone = run_cleanup_with_budget(
+        cx,
+        &RequestBudget::fresh_cleanup(cx.now()),
+        conn.execute(cx, &undo, &[] as &[OracleBind]),
+    )
+    .await;
+    if let Err(error) = undone {
+        let message = format!(
+            "oracle_preview_dml could not roll its sandbox back, so its effect cannot be proven absent: {error}"
+        );
+        mark_connection_quarantined(
+            ctx.quarantine,
+            AuditOutcome::UnknownDiscarded,
+            message.clone(),
+        )?;
+        if let Err(audit_error) = append_terminal_audit(
+            &ctx,
+            audit_entry,
+            "oracle_preview_dml",
+            &executed_sql,
+            &danger_str,
+            None,
+            AuditOutcome::UnknownDiscarded,
+        ) {
+            tracing::error!(error = %audit_error.message, "terminal audit failed after an unrolled-back preview sandbox");
+        }
+        return Err(
+            quarantined_db_error(QuarantineOutcome::UnknownDiscarded, message).into_envelope(),
+        );
+    }
+    // With no workspace open there is nothing to preserve, so end the transaction
+    // outright rather than leaving one open — the same posture a rollback-preview
+    // execute leaves the session in.
+    if !ctx.checkpoints.is_open()
+        && let Err(error) = rollback_conn_cleanup(cx, conn).await
+    {
+        let message = format!(
+            "oracle_preview_dml rolled its sandbox back, but could not end the transaction: {error}"
+        );
+        mark_connection_quarantined(
+            ctx.quarantine,
+            AuditOutcome::UnknownDiscarded,
+            message.clone(),
+        )?;
+        return Err(
+            quarantined_db_error(QuarantineOutcome::UnknownDiscarded, message).into_envelope(),
+        );
+    }
+
+    let (before, rows_affected, after) = match sandboxed {
+        Ok(result) => result,
+        Err(error) => {
+            append_terminal_audit(
+                &ctx,
+                audit_entry,
+                "oracle_preview_dml",
+                &executed_sql,
+                &danger_str,
+                None,
+                AuditOutcome::Failed,
+            )?;
+            return Err(error);
+        }
+    };
+    // The documented meaning of RolledBack is exactly this: a savepoint preview.
+    append_terminal_audit(
+        &ctx,
+        audit_entry,
+        "oracle_preview_dml",
+        &executed_sql,
+        &danger_str,
+        Some(rows_affected),
+        AuditOutcome::RolledBack,
+    )?;
+
+    let mut response = json!({
+        "previewed": true,
+        "reversible": true,
+        "rolled_back": true,
+        "committed": false,
+        "rows_affected": rows_affected,
+        "cannot_undo": Value::Array(Vec::new()),
+        "required_level": required_level,
+        "danger": decision.danger,
+        "objects_affected": decision.objects_affected,
+        "reason": decision.reason,
+        "sandbox": sandbox,
+        "next_step": "nothing was committed. To apply this exact change: oracle_preview_sql for its confirmation, then oracle_execute with commit=true — which re-classifies and re-gates the statement rather than trusting this preview",
+        "caveat": "a trigger or an autonomous transaction fired by the target objects can commit independently of this rollback; the classifier flags only what it can prove from the statement text",
+    });
+    if let Some(before) = before {
+        response["before"] = serde_json::to_value(&before).unwrap_or(Value::Null);
+    }
+    if let Some(after) = after {
+        response["after"] = serde_json::to_value(&after).unwrap_or(Value::Null);
+    }
+    if witness.is_none() {
+        response["next_actions"] = json!([{
+            "intent": "see_the_rows_it_changes",
+            "tool": "oracle_preview_dml",
+            "args": { "sql": args.sql, "witness": "SELECT … FROM <table> WHERE <the rows this DML targets>" },
+        }]);
+    }
+    Ok(response)
+}
+
 async fn execute_sql(
     ctx: DbToolCtx<'_>,
     audit_tool: &str,
@@ -10160,6 +10456,31 @@ impl OracleDispatcher {
                     quarantine: &self.quarantine,
                 };
                 return open_checkpoint(tool_ctx, a).await;
+            }
+            "oracle_preview_dml" => {
+                let a: PreviewDmlArgs = parse_args(name, args)?;
+                let subject = request_subject.clone();
+                let grant_binding = grant_binding_for_context(&state, context);
+                let audit = AuditCtx {
+                    auditor: self.auditor.as_deref(),
+                    subject: &subject,
+                };
+                let tool_ctx = DbToolCtx {
+                    cx,
+                    conn,
+                    read_only_backstop: &state.read_only_backstop,
+                    checkpoints: &state.checkpoints,
+                    request_budget,
+                    active_profile: state.active_profile.as_deref(),
+                    session: &scoped_level,
+                    execute_grants: &state.execute_grants,
+                    grant_binding: &grant_binding,
+                    write_intents: self.write_intents.as_deref(),
+                    catalog_cache: &state.catalog_cache,
+                    audit,
+                    quarantine: &self.quarantine,
+                };
+                return preview_dml(tool_ctx, a).await;
             }
             "oracle_undo_to" => {
                 let a: UndoToArgs = parse_args(name, args)?;

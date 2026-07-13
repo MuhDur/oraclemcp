@@ -1416,6 +1416,9 @@ fn args_for(name: &str) -> Value {
         "preview_sql" => json!({ "sql": "SELECT 1 FROM dual" }),
         "oracle_checkpoint" => json!({ "name": "before_change" }),
         "oracle_undo_to" => json!({}),
+        "oracle_preview_dml" => {
+            json!({ "sql": "UPDATE employees SET salary = salary WHERE employee_id = 100" })
+        }
         other => panic!("no test args for {other}"),
     }
 }
@@ -12673,5 +12676,207 @@ fn diff_needs_either_two_scns_or_two_profiles() {
         same.message.contains("against itself"),
         "an always-empty delta must be refused, not returned: {}",
         same.message
+    );
+}
+
+// --- Arc I / bead .11.2 — the dry run (oracle_preview_dml) ------------------
+
+/// The dry run really executes, inside a savepoint the server owns, and really
+/// takes it back: the transaction ends where it started and nothing is committed.
+#[test]
+fn preview_dml_runs_the_statement_in_a_sandbox_and_rolls_it_back() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+
+    let preview = dispatcher
+        .dispatch(
+            "oracle_preview_dml",
+            json!({
+                "sql": "UPDATE employees SET salary = salary * 2 WHERE department_id = :1",
+                "binds": [10],
+                "witness": "SELECT employee_id, salary FROM employees WHERE department_id = :1",
+                "witness_binds": [10],
+            }),
+        )
+        .expect("a reversible DML can be dry-run");
+    assert_eq!(preview["previewed"], json!(true));
+    assert_eq!(preview["reversible"], json!(true));
+    assert_eq!(preview["rolled_back"], json!(true));
+    assert_eq!(preview["committed"], json!(false));
+    assert_eq!(preview["rows_affected"], json!(3));
+    assert_eq!(preview["cannot_undo"], json!([]));
+    assert!(
+        preview["before"].is_object() && preview["after"].is_object(),
+        "the witness read shows the rows before and after: {preview}"
+    );
+
+    let executed = executed_statements(&state);
+    assert_eq!(
+        executed.first().map(String::as_str),
+        Some("SAVEPOINT OMCP_PREVIEW_DML"),
+        "the dry run opens its own sandbox first: {executed:?}"
+    );
+    assert_eq!(
+        executed.last().map(String::as_str),
+        Some("ROLLBACK TO SAVEPOINT OMCP_PREVIEW_DML"),
+        "and takes it back last: {executed:?}"
+    );
+    assert!(
+        executed.iter().any(|sql| sql.contains("UPDATE employees")),
+        "the DML really ran: {executed:?}"
+    );
+    assert_eq!(
+        state.commits.load(Ordering::SeqCst),
+        0,
+        "a dry run commits nothing"
+    );
+    assert_eq!(
+        state.rollbacks.load(Ordering::SeqCst),
+        1,
+        "with no workspace open it also ends the transaction, like any rollback preview"
+    );
+}
+
+/// A dry run must not cause an effect it cannot take back. A sequence NEXTVAL
+/// advances independently of rollback, so the statement is refused and labeled —
+/// never executed "just to see".
+#[test]
+fn preview_dml_labels_what_it_cannot_undo_instead_of_running_it() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+
+    let preview = dispatcher
+        .dispatch(
+            "oracle_preview_dml",
+            json!({ "sql": "INSERT INTO orders (id) VALUES (app_seq.NEXTVAL)" }),
+        )
+        .expect("the tool answers rather than erroring — it has something honest to say");
+    assert_eq!(preview["previewed"], json!(false));
+    assert_eq!(preview["reversible"], json!(false));
+    assert_eq!(preview["committed"], json!(false));
+    let cannot_undo = preview["cannot_undo"]
+        .as_array()
+        .expect("cannot_undo is a list");
+    assert_eq!(cannot_undo.len(), 1);
+    assert!(
+        cannot_undo[0]
+            .as_str()
+            .is_some_and(|reason| reason.contains("rollback")),
+        "the label must say WHY it cannot be undone: {cannot_undo:?}"
+    );
+    assert!(
+        executed_statements(&state).is_empty(),
+        "nothing ran: the sequence was never advanced by a 'dry' run"
+    );
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+}
+
+/// The sandbox nests inside an open reversible workspace: it rolls back to its
+/// own savepoint, so the agent's checkpoints and held work survive intact.
+#[test]
+fn preview_dml_nests_inside_an_open_workspace_without_disturbing_it() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+    dispatcher
+        .dispatch("oracle_checkpoint", json!({ "name": "cp" }))
+        .expect("checkpoint");
+    dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": "UPDATE t SET c = 1", "hold": true }),
+        )
+        .expect("held DML");
+
+    let preview = dispatcher
+        .dispatch(
+            "oracle_preview_dml",
+            json!({ "sql": "DELETE FROM t WHERE c = 1" }),
+        )
+        .expect("a dry run inside the workspace");
+    assert_eq!(preview["previewed"], json!(true));
+    assert_eq!(
+        state.rollbacks.load(Ordering::SeqCst),
+        0,
+        "the sandbox must NOT end the transaction — that would discard the held work"
+    );
+
+    let undo = dispatcher
+        .dispatch("oracle_undo_to", json!({ "name": "cp" }))
+        .expect("the workspace survived the dry run");
+    assert_eq!(
+        undo["discarded_statements"],
+        json!(1),
+        "the held statement is still there, and still the agent's to undo"
+    );
+}
+
+/// DDL cannot be dry-run (Oracle commits it implicitly), a read needs no sandbox,
+/// and the preview mints no authority to commit.
+#[test]
+fn preview_dml_refuses_what_it_cannot_sandbox_and_grants_nothing() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        ddl_level(),
+    );
+
+    let ddl = dispatcher
+        .dispatch(
+            "oracle_preview_dml",
+            json!({ "sql": "CREATE TABLE t (id NUMBER)" }),
+        )
+        .expect_err("DDL commits implicitly, so no sandbox could take it back");
+    assert_eq!(ddl.error_class, ErrorClass::InvalidArguments);
+
+    let read = dispatcher
+        .dispatch("oracle_preview_dml", json!({ "sql": "SELECT 1 FROM dual" }))
+        .expect_err("a read needs no sandbox");
+    assert_eq!(read.error_class, ErrorClass::InvalidArguments);
+    assert_eq!(read.suggested_tool.as_deref(), Some("oracle_query"));
+
+    let sql = "UPDATE employees SET salary = 1 WHERE employee_id = 100";
+    let preview = dispatcher
+        .dispatch("oracle_preview_dml", json!({ "sql": sql }))
+        .expect("the dry run itself is allowed");
+    assert!(
+        preview.get("execute_confirmation").is_none() && preview.get("confirm").is_none(),
+        "the preview must mint NO confirmation: committing re-classifies through oracle_execute"
+    );
+    // And the commit path still demands its own grant.
+    let unconfirmed = dispatcher
+        .dispatch("oracle_execute", json!({ "sql": sql, "commit": true }))
+        .expect_err("a dry run authorizes nothing");
+    assert_eq!(unconfirmed.error_class, ErrorClass::ChallengeRequired);
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+}
+
+/// The witness is an ordinary read, held to the same fail-closed classifier: it
+/// is not a side door for unproven SQL.
+#[test]
+fn the_witness_read_is_classifier_proven() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+
+    let error = dispatcher
+        .dispatch(
+            "oracle_preview_dml",
+            json!({
+                "sql": "UPDATE t SET c = 1",
+                "witness": "DELETE FROM audit_log",
+            }),
+        )
+        .expect_err("a write dressed as a witness must be refused");
+    assert!(
+        matches!(
+            error.error_class,
+            ErrorClass::ForbiddenStatement | ErrorClass::OperatingLevelTooLow
+        ),
+        "unexpected class {:?}",
+        error.error_class
+    );
+    assert!(
+        executed_statements(&state).is_empty(),
+        "the refusal happens before the sandbox is even opened"
     );
 }

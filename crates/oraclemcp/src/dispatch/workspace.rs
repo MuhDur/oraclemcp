@@ -55,6 +55,18 @@ pub(crate) const MAX_CHECKPOINTS: usize = 16;
 /// (11g..23ai); the 128-byte extension does not apply to savepoint names.
 const MAX_NAME_BYTES: usize = 30;
 
+/// Savepoint names the *server* reserves for its own sandboxes. An agent that
+/// could name a checkpoint `OMCP_PREVIEW` would be able to move or erase the
+/// savepoint `oracle_preview_dml` rolls its dry run back to, so the prefix is
+/// refused at the door.
+const RESERVED_PREFIX: &str = "OMCP_";
+
+/// The savepoint `oracle_preview_dml` brackets its dry run with. It is nested
+/// *inside* whatever transaction is running, so rolling back to it restores the
+/// exact pre-preview state — including any work the agent is holding above its
+/// own checkpoints, which are older and therefore untouched.
+pub(crate) const PREVIEW_SANDBOX: &str = "OMCP_PREVIEW_DML";
+
 /// One live checkpoint: a savepoint name plus the number of held statements
 /// executed *after* it was established (the work an undo to this checkpoint
 /// discards, excluding anything discarded by the checkpoints stacked above it).
@@ -254,7 +266,13 @@ pub(crate) fn validated_checkpoint_name(raw: &str) -> Result<String, ErrorEnvelo
             "{bad:?} is not allowed; only ASCII letters, digits, and underscores are"
         ));
     }
-    Ok(name.to_ascii_uppercase())
+    let name = name.to_ascii_uppercase();
+    if name.starts_with(RESERVED_PREFIX) {
+        return refuse(&format!(
+            "the {RESERVED_PREFIX} prefix is reserved for the server's own sandbox savepoints"
+        ));
+    }
+    Ok(name)
 }
 
 /// `SAVEPOINT <name>` for a name already through [`validated_checkpoint_name`].
@@ -323,6 +341,10 @@ mod tests {
             "spé",
             "sp.x",
             "sp-x",
+            // The server's own sandbox savepoints are off limits: an agent that
+            // could name this could move or erase the one a dry run rolls back to.
+            "omcp_preview_dml",
+            "OMCP_anything",
             &"a".repeat(31),
         ] {
             let error = validated_checkpoint_name(raw)

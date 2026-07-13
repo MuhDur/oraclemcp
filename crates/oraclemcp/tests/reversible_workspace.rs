@@ -345,3 +345,148 @@ fn an_open_workspace_refuses_to_commit_and_leaves_the_row_untouched() {
         drop_table(&cx, &setup).await;
     });
 }
+
+/// I2 (bead .11.2), live: the dry run really executes the DML, really shows the
+/// rows it changed, and really takes it back — the committed table is untouched
+/// and the served session is left with no pending change of its own.
+#[test]
+fn preview_dml_shows_before_and_after_then_leaves_nothing_behind() {
+    run_with_cx(|cx| async move {
+        let Some(setup) = connect_or_skip(&cx, "preview_dml/setup").await else {
+            return;
+        };
+        seed(&cx, &setup).await;
+
+        let Some(served) = connect_or_skip(&cx, "preview_dml/served").await else {
+            return;
+        };
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(served),
+            Some("live".to_owned()),
+            read_write(),
+        );
+
+        let preview = call(
+            &dispatcher,
+            &cx,
+            "oracle_preview_dml",
+            json!({
+                "sql": format!("UPDATE {TABLE} SET V = :1 WHERE ID = :2"),
+                "binds": ["previewed", 1],
+                "witness": format!("SELECT ID, V FROM {TABLE} WHERE ID = :1"),
+                "witness_binds": [1],
+            }),
+        )
+        .await;
+        assert_eq!(preview["previewed"], json!(true));
+        assert_eq!(preview["reversible"], json!(true));
+        assert_eq!(preview["rows_affected"], json!(1));
+        assert_eq!(
+            preview["before"]["rows"][0]["V"],
+            json!("baseline"),
+            "before: the row as it stood"
+        );
+        assert_eq!(
+            preview["after"]["rows"][0]["V"],
+            json!("previewed"),
+            "after: the row as the DML would leave it — read inside the sandbox"
+        );
+
+        // The sandbox was rolled back: the served session sees the original row…
+        let now = call(
+            &dispatcher,
+            &cx,
+            "oracle_query",
+            json!({ "sql": format!("SELECT V FROM {TABLE} WHERE ID = 1") }),
+        )
+        .await;
+        assert_eq!(
+            now["rows"][0]["V"],
+            json!("baseline"),
+            "the dry run left nothing pending in its own session"
+        );
+        drop(dispatcher);
+
+        // …and so does every other session: nothing was committed.
+        assert_eq!(
+            read_v(&cx, &setup).await.as_deref(),
+            Some("baseline"),
+            "a dry run commits nothing"
+        );
+        drop_table(&cx, &setup).await;
+    });
+}
+
+/// A dry run must not cause what it cannot undo: a sequence-touching statement is
+/// refused and labeled, and the sequence is never advanced.
+#[test]
+fn preview_dml_will_not_advance_a_sequence_to_show_you_what_would_happen() {
+    run_with_cx(|cx| async move {
+        let Some(setup) = connect_or_skip(&cx, "preview_dml_sequence/setup").await else {
+            return;
+        };
+        seed(&cx, &setup).await;
+        let _ = setup
+            .execute(&cx, "DROP SEQUENCE ORACLEMCP_I2_SEQ", &[] as &[OracleBind])
+            .await;
+        setup
+            .execute(
+                &cx,
+                "CREATE SEQUENCE ORACLEMCP_I2_SEQ START WITH 1 INCREMENT BY 1",
+                &[] as &[OracleBind],
+            )
+            .await
+            .expect("create the witness sequence");
+
+        let Some(served) = connect_or_skip(&cx, "preview_dml_sequence/served").await else {
+            return;
+        };
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(served),
+            Some("live".to_owned()),
+            read_write(),
+        );
+
+        let labeled = call(
+            &dispatcher,
+            &cx,
+            "oracle_preview_dml",
+            json!({
+                "sql": format!(
+                    "INSERT INTO {TABLE} (ID, V) VALUES (ORACLEMCP_I2_SEQ.NEXTVAL, 'seq')"
+                ),
+            }),
+        )
+        .await;
+        assert_eq!(labeled["previewed"], json!(false));
+        assert_eq!(labeled["reversible"], json!(false));
+        assert!(
+            !labeled["cannot_undo"]
+                .as_array()
+                .expect("cannot_undo list")
+                .is_empty(),
+            "the sequence effect must be labeled: {labeled}"
+        );
+        drop(dispatcher);
+
+        // The sequence was never touched: its first value is still 1.
+        let rows = setup
+            .query_rows(
+                &cx,
+                "SELECT ORACLEMCP_I2_SEQ.NEXTVAL AS N FROM DUAL",
+                &[] as &[OracleBind],
+            )
+            .await
+            .expect("read the sequence");
+        assert_eq!(
+            rows.first().and_then(|row| row.parse_i64("N")),
+            Some(1),
+            "a refused dry run must not have advanced the sequence"
+        );
+
+        let _ = setup
+            .execute(&cx, "DROP SEQUENCE ORACLEMCP_I2_SEQ", &[] as &[OracleBind])
+            .await;
+        drop_table(&cx, &setup).await;
+    });
+}
