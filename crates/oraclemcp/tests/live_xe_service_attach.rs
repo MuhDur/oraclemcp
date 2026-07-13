@@ -515,3 +515,45 @@ fn live_xe_service_attachs_mcp_status_and_dashboard_without_mocks() {
         })
     );
 }
+
+/// The guard admits a conventional CTE as READ_ONLY, so this must reach
+/// Oracle's query path and return a row through the public MCP service. It is
+/// intentionally held ignored until an operator-approved crates.io `oracledb`
+/// release includes the driver-side query-path fix; this repository remains
+/// pinned to `=0.8.2` until then.
+#[test]
+#[ignore = "blocked on an operator-approved crates.io oracledb release with the CTE query-path fix; then set ORACLEMCP_LIVE_XE=1 and ORACLEMCP_TEST_* (23ai Free: localhost:1522/FREEPDB1)"]
+fn live_xe_cte_query_returns_rows_through_mcp_after_driver_release() {
+    let Some((dsn, user, password)) = live_env() else {
+        return;
+    };
+    let root = temp_root("cte-query");
+    let runtime_dir = root.join("run");
+    let state_dir = root.join("state");
+    fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+    let config = write_live_config(&root, &dsn, &user);
+    let addr = free_loopback_addr();
+    let mut service = spawn_service(addr, &config, &runtime_dir, &state_dir);
+    wait_for_service(&mut service, addr);
+
+    let session = initialize(addr, "cte-driver-regression");
+    let reply = tool_call(
+        addr,
+        &session,
+        23,
+        "oracle_query",
+        json!({
+            "sql": "WITH cte AS (SELECT 'cte-query' AS marker FROM dual) SELECT marker AS cte_marker FROM cte",
+            "max_rows": 1
+        }),
+    );
+
+    assert_eq!(reply["result"]["isError"], json!(false), "{reply}");
+    assert_eq!(
+        reply["result"]["structuredContent"]["rows"],
+        json!([{ "CTE_MARKER": "cte-query" }]),
+        "the leading-WITH query must return its Oracle row instead of ORA-00900: {reply}"
+    );
+    assert_no_secret_leak(&reply.to_string(), &dsn, &user, &password);
+}
