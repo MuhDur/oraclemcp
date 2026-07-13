@@ -5897,6 +5897,7 @@ fn opaque_plsql_calls_are_refused_before_database_io() {
     for sql in [
         "BEGIN DBMS_UTILITY.EXEC_DDL_STATEMENT('DROP TABLE protected_target'); END;",
         "BEGIN dbms_utility /* gap */ . execute_ddl_statement('DROP ' || 'TABLE protected_target'); END;",
+        "BEGIN :embedding := DBMS_VECTOR.UTL_TO_EMBEDDING(:txt); END;",
         "CALL app_admin.run_ddl('protected_target')",
         "BEGIN app_admin.run_ddl; END;",
     ] {

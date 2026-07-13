@@ -176,6 +176,10 @@ const CORPUS: &[(&str, DangerLevel)] = &[
     ),
     ("SELECT /*+ index(emp) */ * FROM emp", DangerLevel::Safe),
     ("SELECT COUNT(*), MAX(sal) FROM emp", DangerLevel::Safe),
+    (
+        "SELECT VECTOR_DISTANCE(doc_embedding, query_embedding) AS distance FROM docs",
+        DangerLevel::Safe,
+    ),
     // A q-quoted literal containing DROP/;/END is data, not a statement: stays a
     // single Safe SELECT — the splitter must not invent a phantom boundary.
     (
@@ -258,6 +262,10 @@ const CORPUS: &[(&str, DangerLevel)] = &[
     ),
     (
         "BEGIN UTL_FILE.FOPEN('D','f','w'); END;",
+        DangerLevel::Forbidden,
+    ),
+    (
+        "BEGIN :embedding := DBMS_VECTOR.UTL_TO_EMBEDDING(:txt); END;",
         DangerLevel::Forbidden,
     ),
     (

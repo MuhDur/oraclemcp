@@ -193,6 +193,7 @@ const PLSQL_SIDE_EFFECT_MARKERS: &[&str] = &[
     "UTL_HTTP",
     "UTL_TCP",
     "UTL_SMTP",
+    "DBMS_VECTOR",
     "DBMS_SCHEDULER",
     "DBMS_JOB",
     "PRAGMA AUTONOMOUS_TRANSACTION",
@@ -1239,6 +1240,7 @@ fn is_builtin_function(name: &str) -> bool {
         "case",
         "exists",
         "cardinality",
+        "vector_distance",
     ];
     BUILTINS.contains(&name.to_ascii_lowercase().as_str())
 }
@@ -3451,6 +3453,18 @@ mod tests {
     }
 
     #[test]
+    fn vector_distance_builtin_is_safe() {
+        // Oracle 23ai VECTOR_DISTANCE is deterministic math over its arguments.
+        // It must not be routed through the unknown-UDF purity consult, otherwise
+        // normal semantic-search reads would be refused as Guarded/ReadWrite.
+        let d = classify(
+            "SELECT VECTOR_DISTANCE(doc_embedding, query_embedding) AS distance FROM docs",
+        );
+        assert_eq!(d.danger, DangerLevel::Safe);
+        assert_eq!(d.required_level, Some(OperatingLevel::ReadOnly));
+    }
+
+    #[test]
     fn sequence_nextval_is_not_read_only() {
         for sql in [
             "SELECT app_seq.NEXTVAL FROM dual",
@@ -5115,6 +5129,17 @@ mod tests {
         let d = classify("BEGIN EXECUTE IMMEDIATE 'DELETE FROM orders'; END;");
         assert_eq!(d.danger, DangerLevel::Forbidden);
         assert_eq!(d.required_level, None);
+    }
+
+    #[test]
+    fn plsql_with_dbms_vector_provider_call_is_forbidden() {
+        // DBMS_VECTOR.UTL_TO_EMBEDDING can call an external provider; keep the
+        // package marker fail-closed even though bare VECTOR_DISTANCE is pure SQL
+        // math and safe above.
+        let d = classify("BEGIN :v := DBMS_VECTOR.UTL_TO_EMBEDDING(:txt); END;");
+        assert_eq!(d.danger, DangerLevel::Forbidden);
+        assert_eq!(d.required_level, None);
+        assert_eq!(d.reason_category, Some(ReasonCategory::DynamicSql));
     }
 
     #[test]
