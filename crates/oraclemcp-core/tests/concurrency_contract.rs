@@ -273,8 +273,44 @@ fn artifact_text(artifact: &str) -> &'static str {
             env!("CARGO_MANIFEST_DIR"),
             "/../oraclemcp/src/dispatch/tests.rs"
         )),
-        // http_runtime proofs are test-fn names -> read the extracted test module
-        "http_runtime" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/http/tests.rs")),
+        // http_runtime proofs are test-fn names. The split test seam is a
+        // facade plus flat include files, so this contract must scan the full
+        // seam rather than silently losing proofs moved out of tests.rs.
+        "http_runtime" => concat!(
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/http/tests.rs")),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/http/tests_auth.rs"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/http/tests_config.rs"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/http/tests_dashboard.rs"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/http/tests_operator.rs"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/http/tests_serve.rs"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/http/tests_serve_tls.rs"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/http/tests_sse.rs"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/http/tests_stores.rs"
+            )),
+        ),
         _ => "",
     }
 }
