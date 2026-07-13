@@ -8,7 +8,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use oraclemcp_guard::{Classifier, OperatingLevel};
+use oraclemcp_guard::{
+    Classifier, EditionLifecycleParse, EditionLifecycleSql, OperatingLevel,
+    parse_edition_lifecycle_sql,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -20,6 +23,10 @@ const CHANGE_PROPOSAL_COLLECTION: &str = "change-proposals";
 const CHANGE_PROPOSAL_EXTENSION: &str = "json";
 const CHANGE_PROPOSAL_SCHEMA_VERSION: u8 = 1;
 const MAX_PROPOSAL_STATEMENTS: usize = 32;
+const EDITION_PROPOSAL_COLLECTION: &str = "edition-proposals";
+const EDITION_PROPOSAL_EXTENSION: &str = "json";
+const EDITION_PROPOSAL_SCHEMA_VERSION: u8 = 1;
+const MAX_EDITION_PROPOSAL_OBJECTS: usize = 64;
 /// Tamper-token scope for change-proposal list cursors.
 const CHANGE_PROPOSAL_CURSOR_KIND: &str = "change-proposals";
 
@@ -180,6 +187,90 @@ impl ChangeProposalStore {
         }
         load_proposal_from_path(&path)
     }
+
+    /// List Edition-Based Redefinition requests shown beside ordinary change
+    /// proposals on the Reviews board. These records are requests only: they
+    /// contain no SQL, confirmation, verdict, or executable authority.
+    pub fn list_edition_proposals(&self) -> Result<Vec<EditionProposalView>, ChangeProposalError> {
+        let dir = self.store.root().join(EDITION_PROPOSAL_COLLECTION);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut proposals = Vec::new();
+        for entry in fs::read_dir(&dir).map_err(|e| ChangeProposalError::Io(e.to_string()))? {
+            let entry = entry.map_err(|e| ChangeProposalError::Io(e.to_string()))?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some(EDITION_PROPOSAL_EXTENSION) {
+                continue;
+            }
+            proposals.push(load_edition_proposal_from_path(&path)?.view());
+        }
+        proposals.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| a.profile.cmp(&b.profile))
+                .then_with(|| a.proposal_id.cmp(&b.proposal_id))
+        });
+        Ok(proposals)
+    }
+
+    /// Persist a new Edition-Based Redefinition request. Persisting this
+    /// request does not create an edition, evaluate a statement, issue a grant,
+    /// or otherwise authorize a guarded write.
+    pub fn create_edition_proposal(
+        &self,
+        request: EditionProposalCreateRequest,
+    ) -> Result<EditionProposalView, ChangeProposalError> {
+        let proposal = EditionProposal::from_request(request)?;
+        self.write_edition_proposal(&proposal)?;
+        Ok(proposal.view())
+    }
+
+    /// Move an Edition-Based Redefinition request through its non-authorizing
+    /// Reviews-board lifecycle. The only mutable field is the board status;
+    /// this method cannot forward or synthesize a database action.
+    pub fn transition_edition_proposal(
+        &self,
+        request: EditionProposalTransitionRequest,
+    ) -> Result<EditionProposalView, ChangeProposalError> {
+        let mut proposal = self.load_edition_proposal(&request.proposal_id)?;
+        proposal.transition_to(request.status)?;
+        self.write_edition_proposal(&proposal)?;
+        Ok(proposal.view())
+    }
+
+    fn load_edition_proposal(
+        &self,
+        proposal_id: &str,
+    ) -> Result<EditionProposal, ChangeProposalError> {
+        let id = StoreId::from_safe_segment(proposal_id.trim().to_owned())?;
+        let path =
+            self.store
+                .path_for(EDITION_PROPOSAL_COLLECTION, &id, EDITION_PROPOSAL_EXTENSION)?;
+        if !path.exists() {
+            return Err(ChangeProposalError::UnknownEditionProposal);
+        }
+        load_edition_proposal_from_path(&path)
+    }
+
+    fn write_edition_proposal(
+        &self,
+        proposal: &EditionProposal,
+    ) -> Result<(), ChangeProposalError> {
+        let id = StoreId::from_safe_segment(proposal.proposal_id.clone())?;
+        let mut bytes = serde_json::to_vec_pretty(proposal)
+            .map_err(|e| ChangeProposalError::Json(e.to_string()))?;
+        bytes.push(b'\n');
+        let _mutation = self.owner.mutation_guard();
+        self.store.write_atomic(
+            &self.owner,
+            EDITION_PROPOSAL_COLLECTION,
+            &id,
+            EDITION_PROPOSAL_EXTENSION,
+            &bytes,
+        )?;
+        Ok(())
+    }
 }
 
 /// Operator-facing proposal-store errors.
@@ -202,6 +293,206 @@ pub enum ChangeProposalError {
     /// The requested proposal id does not exist.
     #[error("unknown change proposal")]
     UnknownProposal,
+    /// The requested edition proposal id does not exist.
+    #[error("unknown edition proposal")]
+    UnknownEditionProposal,
+}
+
+/// A non-authorizing request to stage editionable objects in one child edition.
+///
+/// This is intentionally separate from [`ChangeProposalDraftRequest`]: a
+/// Reviews-board record must never smuggle SQL, bind values, stored verdicts,
+/// confirmation tokens, or an `execute` switch into a later action path.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct EditionProposalCreateRequest {
+    pub profile: String,
+    pub child_edition: String,
+    pub base_edition: String,
+    pub objects: Vec<String>,
+}
+
+/// The deliberately narrow lifecycle recorded by the Reviews board.
+///
+/// No status means an edition has been created, applied, merged, or otherwise
+/// authorized. Those effects belong to later guarded actions, which must
+/// classify at their point of execution.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EditionProposalStatus {
+    Requested,
+    Reviewing,
+    Withdrawn,
+}
+
+/// A request to update one persisted Reviews-board status.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EditionProposalTransitionRequest {
+    pub proposal_id: String,
+    pub status: EditionProposalStatus,
+}
+
+/// Full on-disk edition-proposal record.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EditionProposal {
+    pub schema_version: u8,
+    pub proposal_id: String,
+    pub profile: String,
+    pub child_edition: String,
+    pub base_edition: String,
+    pub objects: Vec<String>,
+    pub status: EditionProposalStatus,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl EditionProposal {
+    fn from_request(request: EditionProposalCreateRequest) -> Result<Self, ChangeProposalError> {
+        let profile = normalize_non_empty(request.profile, "profile")?;
+        let child_edition = normalize_edition_identifier(request.child_edition)?;
+        let base_edition = normalize_edition_identifier(request.base_edition)?;
+        if child_edition == base_edition {
+            return Err(ChangeProposalError::Invalid(
+                "child_edition must differ from base_edition",
+            ));
+        }
+        if request.objects.is_empty() {
+            return Err(ChangeProposalError::Invalid(
+                "edition proposal must name at least one object",
+            ));
+        }
+        if request.objects.len() > MAX_EDITION_PROPOSAL_OBJECTS {
+            return Err(ChangeProposalError::Invalid(
+                "edition proposal has too many objects",
+            ));
+        }
+        let mut objects = request
+            .objects
+            .into_iter()
+            .map(normalize_edition_object)
+            .collect::<Result<Vec<_>, _>>()?;
+        objects.sort();
+        objects.dedup();
+        if objects.is_empty() {
+            return Err(ChangeProposalError::Invalid(
+                "edition proposal must name at least one object",
+            ));
+        }
+
+        let now = unix_timestamp();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos().to_string())
+            .unwrap_or_else(|_| "0".to_owned());
+        let mut id_parts = vec![
+            profile.as_str(),
+            child_edition.as_str(),
+            base_edition.as_str(),
+            now.as_str(),
+            nonce.as_str(),
+        ];
+        id_parts.extend(objects.iter().map(String::as_str));
+        let proposal_id = StoreId::content_hashed("edition", &id_parts)?
+            .as_str()
+            .to_owned();
+
+        Ok(Self {
+            schema_version: EDITION_PROPOSAL_SCHEMA_VERSION,
+            proposal_id,
+            profile,
+            child_edition,
+            base_edition,
+            objects,
+            status: EditionProposalStatus::Requested,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
+
+    fn transition_to(&mut self, next: EditionProposalStatus) -> Result<(), ChangeProposalError> {
+        let valid = matches!(
+            (self.status, next),
+            (
+                EditionProposalStatus::Requested,
+                EditionProposalStatus::Reviewing | EditionProposalStatus::Withdrawn
+            ) | (
+                EditionProposalStatus::Reviewing,
+                EditionProposalStatus::Requested | EditionProposalStatus::Withdrawn
+            )
+        );
+        if !valid {
+            return Err(ChangeProposalError::Invalid(
+                "edition proposal status transition is not allowed",
+            ));
+        }
+        self.status = next;
+        self.updated_at = unix_timestamp();
+        Ok(())
+    }
+
+    fn view(&self) -> EditionProposalView {
+        EditionProposalView {
+            schema_version: self.schema_version,
+            proposal_id: self.proposal_id.clone(),
+            profile: self.profile.clone(),
+            child_edition: self.child_edition.clone(),
+            base_edition: self.base_edition.clone(),
+            objects: self.objects.clone(),
+            status: self.status,
+            created_at: self.created_at.clone(),
+            updated_at: self.updated_at.clone(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), ChangeProposalError> {
+        if self.schema_version != EDITION_PROPOSAL_SCHEMA_VERSION {
+            return Err(ChangeProposalError::Invalid(
+                "unsupported edition proposal schema version",
+            ));
+        }
+        if StoreId::from_safe_segment(self.proposal_id.clone()).is_err()
+            || normalize_non_empty(self.profile.clone(), "profile")? != self.profile
+            || normalize_edition_identifier(self.child_edition.clone())? != self.child_edition
+            || normalize_edition_identifier(self.base_edition.clone())? != self.base_edition
+            || self.child_edition == self.base_edition
+            || self.objects.is_empty()
+            || self.objects.len() > MAX_EDITION_PROPOSAL_OBJECTS
+        {
+            return Err(ChangeProposalError::Invalid(
+                "invalid edition proposal record",
+            ));
+        }
+        let mut canonical_objects = self
+            .objects
+            .iter()
+            .cloned()
+            .map(normalize_edition_object)
+            .collect::<Result<Vec<_>, _>>()?;
+        canonical_objects.sort();
+        canonical_objects.dedup();
+        if canonical_objects != self.objects {
+            return Err(ChangeProposalError::Invalid(
+                "invalid edition proposal objects",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Redacted Reviews-board representation of an edition request.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct EditionProposalView {
+    pub schema_version: u8,
+    pub proposal_id: String,
+    pub profile: String,
+    pub child_edition: String,
+    pub base_edition: String,
+    pub objects: Vec<String>,
+    pub status: EditionProposalStatus,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// New proposal request.
@@ -592,6 +883,41 @@ fn load_proposal_from_path(path: &Path) -> Result<ChangeProposal, ChangeProposal
     Ok(proposal)
 }
 
+fn load_edition_proposal_from_path(path: &Path) -> Result<EditionProposal, ChangeProposalError> {
+    let bytes = fs::read(path).map_err(|e| ChangeProposalError::Io(e.to_string()))?;
+    let proposal: EditionProposal =
+        serde_json::from_slice(&bytes).map_err(|e| ChangeProposalError::Json(e.to_string()))?;
+    proposal.validate()?;
+    Ok(proposal)
+}
+
+fn normalize_edition_identifier(value: String) -> Result<String, ChangeProposalError> {
+    let value = normalize_non_empty(value, "edition")?;
+    let candidate = format!("CREATE EDITION {value} AS CHILD OF ORACLEMCP_BASE");
+    match parse_edition_lifecycle_sql(&candidate) {
+        EditionLifecycleParse::Parsed(EditionLifecycleSql::CreateChild { child, .. }) => {
+            Ok(child.as_str().to_owned())
+        }
+        _ => Err(ChangeProposalError::Invalid(
+            "edition must be one Oracle identifier",
+        )),
+    }
+}
+
+fn normalize_edition_object(value: String) -> Result<String, ChangeProposalError> {
+    let value = normalize_non_empty(value, "object")?;
+    if value.len() > 512
+        || value
+            .chars()
+            .any(|character| character.is_control() || character == ';')
+    {
+        return Err(ChangeProposalError::Invalid(
+            "edition proposal object is not safe metadata",
+        ));
+    }
+    Ok(value)
+}
+
 fn normalize_non_empty(value: String, field: &'static str) -> Result<String, ChangeProposalError> {
     let value = value.trim();
     if value.is_empty() {
@@ -783,5 +1109,54 @@ mod tests {
         let one = store.etag().expect("etag after draft");
         assert_ne!(one, empty, "a new proposal changes the validator");
         assert_eq!(one, store.etag().expect("etag stable while unchanged"));
+    }
+
+    #[test]
+    fn edition_proposal_is_durable_review_metadata_not_execution_authority() {
+        let root = store_root("edition-proposal");
+        let store = ChangeProposalStore::open(&root).expect("store");
+        let proposal = store
+            .create_edition_proposal(EditionProposalCreateRequest {
+                profile: "stage".to_owned(),
+                child_edition: "child_v2".to_owned(),
+                base_edition: "ora$base".to_owned(),
+                objects: vec!["SYNTHETIC_PACKAGE".to_owned(), "SYNTHETIC_VIEW".to_owned()],
+            })
+            .expect("create edition proposal");
+
+        assert_eq!(proposal.status, EditionProposalStatus::Requested);
+        assert_eq!(proposal.child_edition, "CHILD_V2");
+        assert_eq!(proposal.base_edition, "ORA$BASE");
+        let record_path = root
+            .join(EDITION_PROPOSAL_COLLECTION)
+            .join(format!("{}.json", proposal.proposal_id));
+        let record = fs::read_to_string(&record_path).expect("persisted record");
+        assert!(record.contains("\"status\": \"requested\""));
+        for forbidden in ["sql", "bind", "confirm", "execute", "verdict", "grant"] {
+            assert!(
+                !record.contains(forbidden),
+                "edition request must not persist {forbidden} authority"
+            );
+        }
+
+        let listed = store
+            .list_edition_proposals()
+            .expect("list edition proposals");
+        assert_eq!(listed, vec![proposal.clone()]);
+
+        let transitioned = store
+            .transition_edition_proposal(EditionProposalTransitionRequest {
+                proposal_id: proposal.proposal_id.clone(),
+                status: EditionProposalStatus::Reviewing,
+            })
+            .expect("transition to review");
+        assert_eq!(transitioned.status, EditionProposalStatus::Reviewing);
+        let replay = store
+            .transition_edition_proposal(EditionProposalTransitionRequest {
+                proposal_id: proposal.proposal_id,
+                status: EditionProposalStatus::Reviewing,
+            })
+            .expect_err("replaying the same status must not reset a request");
+        assert!(matches!(replay, ChangeProposalError::Invalid(_)));
     }
 }

@@ -3189,6 +3189,108 @@ fn cp_apply_reclassifies_never_trusts_stored_verdict() {
     );
 }
 
+#[test]
+fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
+    let (auditor, sink) = operator_auditor();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = server_with_dispatch(Arc::new(WorkbenchDispatch {
+        calls: Arc::clone(&calls),
+    }));
+    let dir = dashboard_test_dir("edition-proposals");
+    let store = Arc::new(
+        crate::change_proposal::ChangeProposalStore::open(dir.join("state"))
+            .expect("proposal store"),
+    );
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        change_proposals: Some(Arc::clone(&store)),
+        ..Default::default()
+    };
+
+    let draft = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/draft",
+            &serde_json::json!({
+                "profile": "stage",
+                "child_edition": "synthetic_child",
+                "base_edition": "ora$base",
+                "objects": ["SYNTHETIC_PACKAGE", "SYNTHETIC_VIEW"]
+            }),
+        ),
+    );
+    assert_eq!(draft.status, 200);
+    let draft_json = response_json(&draft);
+    assert_eq!(draft_json["data"]["authority"], serde_json::json!("request_only"));
+    assert_eq!(
+        draft_json["data"]["proposal"]["status"],
+        serde_json::json!("requested")
+    );
+    let proposal_id = draft_json["data"]["proposal"]["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_owned();
+
+    let list = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_get("/operator/v1/edition-proposals"),
+    );
+    assert_eq!(list.status, 200);
+    assert_eq!(
+        response_json(&list)["data"]["proposals"][0]["proposal_id"],
+        serde_json::json!(proposal_id)
+    );
+
+    let transition = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/transition",
+            &serde_json::json!({
+                "proposal_id": proposal_id,
+                "status": "reviewing"
+            }),
+        ),
+    );
+    assert_eq!(transition.status, 200);
+    assert_eq!(
+        response_json(&transition)["data"]["proposal"]["status"],
+        serde_json::json!("reviewing")
+    );
+
+    // A stored request has no apply route and cannot smuggle SQL, a stored
+    // verdict, or confirmation into the normal guard/dispatch path. This is
+    // the negative SEC-1 proof: review state is never replay authority.
+    let attempted_apply = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/apply",
+            &serde_json::json!({
+                "proposal_id": proposal_id,
+                "sql": "DROP TABLE synthetic_edition_target",
+                "stored_verdict": { "danger": "SAFE" },
+                "confirm": "forged"
+            }),
+        ),
+    );
+    assert_eq!(attempted_apply.status, 404);
+    assert_eq!(
+        calls.load(AtomicOrdering::SeqCst),
+        0,
+        "edition request records must never reach dispatch; later guarded apply re-classifies independently"
+    );
+
+    let records = sink.records();
+    assert_eq!(records.len(), 8, "every board read/write attempt is audited");
+    assert_operator_audit_pair(&records[0..2], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(&records[2..4], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(&records[4..6], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(&records[6..8], AuditDecision::Blocked, AuditOutcome::Failed);
+}
+
 fn change_proposals_test_config() -> (OracleMcpServer, HttpTransportConfig, String) {
     let (auditor, _sink) = operator_auditor();
     let dir = dashboard_test_dir("change-proposals-list");

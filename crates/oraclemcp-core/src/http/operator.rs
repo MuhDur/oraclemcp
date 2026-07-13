@@ -35,6 +35,7 @@
 //! The glob import mirrors the inline test module: the moved code resolves every
 //! name in exactly the environment it was written in.
 use super::*;
+use crate::change_proposal::{EditionProposalCreateRequest, EditionProposalTransitionRequest};
 
 pub(super) const MAX_OPERATOR_EVENTS_PER_STREAM: usize = 128;
 
@@ -626,6 +627,9 @@ pub(super) enum OperatorRouteKind {
     ChangeProposalsDetail,
     ChangeProposalsDraft,
     ChangeProposalsApply,
+    EditionProposalsList,
+    EditionProposalsDraft,
+    EditionProposalsTransition,
     SchemaDiff,
     SourceHistoryList,
     SourceHistoryRevert,
@@ -658,6 +662,11 @@ pub(super) fn operator_route_kind(path: &str) -> OperatorRouteKind {
         "/operator/v1/change-proposals" => OperatorRouteKind::ChangeProposalsList,
         "/operator/v1/change-proposals/draft" => OperatorRouteKind::ChangeProposalsDraft,
         "/operator/v1/change-proposals/apply" => OperatorRouteKind::ChangeProposalsApply,
+        "/operator/v1/edition-proposals" => OperatorRouteKind::EditionProposalsList,
+        "/operator/v1/edition-proposals/draft" => OperatorRouteKind::EditionProposalsDraft,
+        "/operator/v1/edition-proposals/transition" => {
+            OperatorRouteKind::EditionProposalsTransition
+        }
         "/operator/v1/schema-diff" => OperatorRouteKind::SchemaDiff,
         "/operator/v1/source-history" => OperatorRouteKind::SourceHistoryList,
         "/operator/v1/source-history/revert" => OperatorRouteKind::SourceHistoryRevert,
@@ -705,6 +714,8 @@ impl OperatorRouteKind {
             | Self::ConfigRollback
             | Self::ChangeProposalsDraft
             | Self::ChangeProposalsApply
+            | Self::EditionProposalsDraft
+            | Self::EditionProposalsTransition
             | Self::SchemaDiff
             | Self::SourceHistoryRevert
             | Self::ClientCredentialRotate
@@ -779,6 +790,11 @@ pub(super) fn handle_operator_api_route(
             operator_audit_seq,
             dashboard_browser,
         ),
+        OperatorRouteKind::EditionProposalsList
+        | OperatorRouteKind::EditionProposalsDraft
+        | OperatorRouteKind::EditionProposalsTransition => {
+            handle_operator_edition_proposal_route(config, request, route)
+        }
         OperatorRouteKind::SchemaDiff => handle_operator_schema_diff_route(request),
         OperatorRouteKind::SourceHistoryList | OperatorRouteKind::SourceHistoryRevert => {
             handle_operator_source_history_route(config, request, operator_subject, route)
@@ -1498,6 +1514,110 @@ fn handle_operator_change_proposal_route(
     }
 }
 
+/// Handle the Edition-Based Redefinition request board. This deliberately has
+/// no apply endpoint: a persisted proposal is review metadata, never an input
+/// to the guarded action path. Future lifecycle actions must re-classify at
+/// their own point of execution rather than treating this record as authority.
+fn handle_operator_edition_proposal_route(
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+    route: OperatorRouteKind,
+) -> HttpResponse {
+    let Some(store) = config.change_proposals.as_ref() else {
+        return operator_json_response(
+            503,
+            &request.path,
+            json!({
+                "source": "edition_proposals",
+                "error": "edition_proposals_unavailable",
+                "message": "edition proposal store is not configured for this transport",
+            }),
+        );
+    };
+
+    match route {
+        OperatorRouteKind::EditionProposalsList => match store.list_edition_proposals() {
+            Ok(proposals) => operator_json_response(
+                200,
+                &request.path,
+                json!({
+                    "source": "edition_proposals",
+                    "proposals": proposals,
+                }),
+            ),
+            Err(error) => operator_edition_proposal_error_response(&request.path, error),
+        },
+        OperatorRouteKind::EditionProposalsDraft => {
+            if !content_type_is_json(request) {
+                return empty_response(415);
+            }
+            let draft = match serde_json::from_slice::<EditionProposalCreateRequest>(&request.body)
+            {
+                Ok(draft) => draft,
+                Err(_) => {
+                    return operator_json_response(
+                        400,
+                        &request.path,
+                        json!({
+                            "source": "edition_proposals",
+                            "error": "invalid_edition_proposal",
+                            "message": "edition proposal draft body must be a request without SQL or execution fields",
+                        }),
+                    );
+                }
+            };
+            match store.create_edition_proposal(draft) {
+                Ok(proposal) => operator_json_response(
+                    200,
+                    &request.path,
+                    json!({
+                        "source": "edition_proposals",
+                        "status": "requested",
+                        "proposal": proposal,
+                        "authority": "request_only",
+                    }),
+                ),
+                Err(error) => operator_edition_proposal_error_response(&request.path, error),
+            }
+        }
+        OperatorRouteKind::EditionProposalsTransition => {
+            if !content_type_is_json(request) {
+                return empty_response(415);
+            }
+            let transition = match serde_json::from_slice::<EditionProposalTransitionRequest>(
+                &request.body,
+            ) {
+                Ok(transition) => transition,
+                Err(_) => {
+                    return operator_json_response(
+                        400,
+                        &request.path,
+                        json!({
+                            "source": "edition_proposals",
+                            "error": "invalid_edition_proposal_transition",
+                            "message": "edition proposal transition body must contain only proposal_id and a non-authorizing status",
+                        }),
+                    );
+                }
+            };
+            match store.transition_edition_proposal(transition) {
+                Ok(proposal) => operator_json_response(
+                    200,
+                    &request.path,
+                    json!({
+                        "source": "edition_proposals",
+                        "status": "transitioned",
+                        "proposal": proposal,
+                        "authority": "request_only",
+                    }),
+                ),
+                Err(error) => operator_edition_proposal_error_response(&request.path, error),
+            }
+        }
+        _ => unreachable!("non-edition-proposal route"),
+    }
+}
+
 fn handle_operator_schema_diff_route(request: &HttpRequest) -> HttpResponse {
     if !content_type_is_json(request) {
         return empty_response(415);
@@ -2100,6 +2220,7 @@ fn operator_change_proposal_error_response(
     let (status, code) = match &error {
         ChangeProposalError::Invalid(_) => (400, "invalid_change_proposal"),
         ChangeProposalError::UnknownProposal => (404, "unknown_change_proposal"),
+        ChangeProposalError::UnknownEditionProposal => (404, "unknown_edition_proposal"),
         ChangeProposalError::FileStore(FileStoreError::InvalidSegment { .. }) => {
             (400, "invalid_change_proposal")
         }
@@ -2115,6 +2236,35 @@ fn operator_change_proposal_error_response(
         route,
         json!({
             "source": "change_proposals",
+            "error": code,
+            "message": error.to_string(),
+        }),
+    )
+}
+
+fn operator_edition_proposal_error_response(
+    route: &str,
+    error: ChangeProposalError,
+) -> HttpResponse {
+    let (status, code) = match &error {
+        ChangeProposalError::Invalid(_) => (400, "invalid_edition_proposal"),
+        ChangeProposalError::UnknownEditionProposal => (404, "unknown_edition_proposal"),
+        ChangeProposalError::UnknownProposal => (404, "unknown_edition_proposal"),
+        ChangeProposalError::FileStore(FileStoreError::InvalidSegment { .. }) => {
+            (400, "invalid_edition_proposal")
+        }
+        ChangeProposalError::FileStore(FileStoreError::Locked) => {
+            (409, "edition_proposal_store_locked")
+        }
+        ChangeProposalError::FileStore(_)
+        | ChangeProposalError::Io(_)
+        | ChangeProposalError::Json(_) => (500, "edition_proposal_store_failed"),
+    };
+    operator_json_response(
+        status,
+        route,
+        json!({
+            "source": "edition_proposals",
             "error": code,
             "message": error.to_string(),
         }),
