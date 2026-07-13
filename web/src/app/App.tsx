@@ -8335,7 +8335,7 @@ function WorkbenchResultPanel({
   const successfulResponse = result?.state === "success" ? result.response : null;
   const confirm = successfulResponse ? confirmationFromResponse(successfulResponse) : null;
   const facts = successfulResponse ? factsFromResponse(successfulResponse) : [];
-  const verdict = successfulResponse ? workbenchVerdictFromResponse(successfulResponse) : null;
+  const verdict = successfulResponse ? workbenchVerdictFromAction(successfulResponse.data) : null;
   // Arc M: only a row-returning read has an egress decision to certify. On any
   // other tool there is nothing to say, so the badge is not rendered at all
   // rather than reporting a misleading "no certificate".
@@ -8403,7 +8403,12 @@ function WorkbenchResultPanel({
   );
 }
 
-type WorkbenchVerdict = {
+// The honest admission the guard proved for a workbench statement.
+// `pass` is a genuine green light; every other state must never render as one.
+export type WorkbenchVerdictStatus = "pass" | "step_up" | "refused" | "unknown";
+
+export type WorkbenchVerdict = {
+  status: WorkbenchVerdictStatus;
   refused: boolean;
   decision: string;
   danger: string;
@@ -8416,27 +8421,59 @@ type WorkbenchVerdict = {
 // response. A refused statement shows WHY (K8 structured reason) and, when the
 // guard can name one, the minimal safe rewrite (K7 suggest_parameterized_form).
 // Purely additive: fields absent from the response simply do not render.
-function workbenchVerdictFromResponse(
-  response: OperatorResponse<WorkbenchActionData>
+export function workbenchVerdictFromAction(
+  data: WorkbenchActionData | null
 ): WorkbenchVerdict | null {
-  const result = mcpResult(response.data.mcp_response);
+  const result = mcpResult(data?.mcp_response);
   if (!isRecord(result)) {
     return null;
   }
   const danger = result["danger"];
   const requiredLevel = result["required_level"];
   const decision = result["decision"] ?? result["outcome"];
-  if (danger === undefined && requiredLevel === undefined && decision === undefined) {
+  const gate = result["gate_decision"];
+  if (
+    danger === undefined &&
+    requiredLevel === undefined &&
+    decision === undefined &&
+    gate === undefined
+  ) {
     return null;
   }
   const decisionText = stringValue(decision, "").toLowerCase();
   const dangerText = stringValue(danger, "").toLowerCase();
-  const refused =
+  const gateText = stringValue(gate, "").toLowerCase();
+  // A statement that actually ran against Oracle was admitted; committed /
+  // rolled_back / rows_affected is real wire evidence of admission, not a
+  // default. A blocked or step-up statement never executes, so this cannot
+  // manufacture a false pass.
+  const executed =
+    result["committed"] === true ||
+    result["rolled_back"] === true ||
+    typeof result["rows_affected"] === "number";
+  // Honesty (bead oraclemcp-tmmi): gate_decision is the admission authority.
+  // `danger` classifies the statement but does not admit it — only an explicit
+  // allow, a classifier-proven SAFE read, or observed execution is a PASS. A
+  // blocked/FORBIDDEN/deny is a refusal; require_step_up is pending, not
+  // cleared; anything else fails closed to `unknown`. A green PASS is never
+  // manufactured from an absent or unrecognized gate.
+  const status: WorkbenchVerdictStatus =
+    gateText === "blocked" ||
+    dangerText === "forbidden" ||
+    dangerText === "refused" ||
+    dangerText === "blocked" ||
     decisionText.includes("refus") ||
     decisionText.includes("block") ||
-    decisionText.includes("deny") ||
-    dangerText === "refused" ||
-    dangerText === "blocked";
+    decisionText.includes("deny")
+      ? "refused"
+      : gateText === "require_step_up"
+        ? "step_up"
+        : gateText === "allow" ||
+            gateText === "allow_lowering" ||
+            dangerText === "safe" ||
+            executed
+          ? "pass"
+          : "unknown";
   const reason = firstString(
     result["reason"],
     nestedString(result, ["reason", "message"]),
@@ -8450,13 +8487,30 @@ function workbenchVerdictFromResponse(
     result["parameterized_form"]
   );
   return {
-    refused,
-    decision: stringValue(decision, refused ? "REFUSED" : "n/a"),
+    status,
+    refused: status === "refused",
+    decision: stringValue(decision ?? gate, "n/a"),
     danger: stringValue(danger, "n/a"),
     requiredLevel: stringValue(requiredLevel, "n/a"),
     reason,
     rewrite
   };
+}
+
+function workbenchVerdictBadge(status: WorkbenchVerdictStatus): {
+  tone: DashboardTone;
+  label: string;
+} {
+  switch (status) {
+    case "pass":
+      return { tone: "ok", label: "PASS" };
+    case "step_up":
+      return { tone: "info", label: "STEP-UP REQUIRED" };
+    case "refused":
+      return { tone: "warn", label: "REFUSED" };
+    case "unknown":
+      return { tone: "off", label: "UNKNOWN" };
+  }
 }
 
 function firstString(...values: unknown[]): string | null {
@@ -8469,22 +8523,24 @@ function firstString(...values: unknown[]): string | null {
 }
 
 function WorkbenchVerdictBlock({ verdict }: { verdict: WorkbenchVerdict }): React.ReactElement {
-  const tone: DashboardTone = verdict.refused ? "warn" : "ok";
+  const { tone, label } = workbenchVerdictBadge(verdict.status);
+  const affirmed = verdict.status === "pass";
   return (
     <div
       className={cn(
         "grid gap-2 rounded-md border p-3",
-        verdict.refused
-          ? "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_10%,transparent)]"
-          : "border-[color-mix(in_srgb,var(--om-sage)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-sage)_10%,transparent)]"
+        affirmed
+          ? "border-[color-mix(in_srgb,var(--om-sage)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-sage)_10%,transparent)]"
+          : "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_10%,transparent)]"
       )}
       data-classifier-refused={verdict.refused}
+      data-workbench-verdict={verdict.status}
     >
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
           Classifier Verdict
         </span>
-        <Badge tone={tone}>{verdict.refused ? "REFUSED" : "PASS"}</Badge>
+        <Badge tone={tone}>{label}</Badge>
         <span className="font-mono text-xs text-[var(--om-text-muted)]">
           danger {verdict.danger} · needs {verdict.requiredLevel}
         </span>
