@@ -10,8 +10,10 @@ import {
   costBadgeFixture,
   defaultSkinCapabilities,
   isRegisteredDerivationStep,
+  scnScrubberFixture,
   skinContractFixture,
   toCostBadgeViewModel,
+  toScnScrubberViewModel,
   toUndoTreeViewModel,
   toVerdictProofViewModel,
   undoTreeFixture,
@@ -184,6 +186,67 @@ describe("OMCP skin conformance", () => {
     });
     expect(brokenBinding.proofStatus).toBe("unverified");
     expect(brokenBinding.tone).toBe("warn");
+  });
+
+  it("renders the SCN scrubber with the current SCN clamped inside the confirmed range", () => {
+    const ScnScrubber = OMCP_SKIN.renderers.ScnScrubber;
+    const model = scnScrubberFixture();
+    const markup = renderToStaticMarkup(<ScnScrubber model={model} />);
+
+    expect(markup).toContain('data-grammar-version="1"');
+    expect(markup).toContain('data-scn-current="15200400"');
+    expect(markup).toContain('data-scn-min="15200000"');
+    expect(markup).toContain('data-scn-max="15200400"');
+    expect(model.current).toBeGreaterThanOrEqual(model.min!);
+    expect(model.current).toBeLessThanOrEqual(model.max!);
+
+    // The refused snapshot (SCN 15900000) is listed with its ORA- reason but is
+    // NOT allowed to widen the range — the console only claims snapshots the
+    // server actually served.
+    expect(markup).toContain('data-mark-status="refused"');
+    expect(model.max).toBe(15_200_400);
+    expect(model.marks.some((mark) => mark.scn === 15_900_000)).toBe(true);
+  });
+
+  it("draws no axis at all when the server has served no snapshot", () => {
+    const ScnScrubber = OMCP_SKIN.renderers.ScnScrubber;
+    // No confirmed read: the server publishes neither the current SCN nor the
+    // retention window, so there is no timeline to draw and the scrubber says so.
+    const empty = toScnScrubberViewModel({ current: null, marks: [], refusal: null });
+    expect(empty.rangeKnown).toBe(false);
+    expect(empty.status).toBe("unavailable");
+    const markup = renderToStaticMarkup(<ScnScrubber model={empty} />);
+    expect(markup).toContain('data-scn-min="unknown"');
+    expect(markup).toContain('data-scn-max="unknown"');
+    expect(markup).toContain('data-scn-current="live"');
+    expect(markup).not.toContain('type="range"');
+
+    // An out-of-range request is clamped into the confirmed window, not honored.
+    const clamped = toScnScrubberViewModel({
+      current: 99_000_000,
+      refusal: null,
+      marks: [
+        {
+          id: "m1",
+          scn: 100,
+          label: "SCN 100",
+          status: "confirmed",
+          detail: "1 row",
+          tone: "ok"
+        },
+        {
+          id: "m2",
+          scn: 200,
+          label: "SCN 200",
+          status: "confirmed",
+          detail: "1 row",
+          tone: "ok"
+        }
+      ]
+    });
+    expect(clamped.current).toBe(200);
+    expect(clamped.clamped).toBe(true);
+    expect(clamped.position).toBe(1);
   });
 
   it("renders the cost badge with the estimate and the ceiling the refusal disclosed", () => {

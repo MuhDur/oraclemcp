@@ -235,6 +235,159 @@ export function toVerdictProofViewModel(proof: VerdictProofInput): VerdictProofV
   };
 }
 
+// ── SCN time-scrubber (Arc A) ────────────────────────────────────────────────
+// `oracle_query as_of {scn|timestamp}` replays a proven-read-only SELECT against
+// a past committed snapshot. That is the only time-travel the server offers the
+// console: no operator endpoint publishes the database's CURRENT SCN, and none
+// publishes the flashback retention window. So the scrubber's axis is not the
+// database's history — it is exactly the snapshots this console has SUCCESSFULLY
+// read, and the view-model says so rather than drawing a timeline it cannot see.
+
+export type ScnMarkStatus =
+  | "confirmed" // the server replayed the query at this SCN and returned rows
+  | "refused" // the server refused this snapshot (privilege, too old, …)
+  | "pending" // in flight
+  | "timestamp"; // pinned by wall clock; Oracle resolved it, but never echoed the SCN
+
+export type ScnMarkViewModel = {
+  id: string;
+  scn: number | null;
+  label: string;
+  status: ScnMarkStatus;
+  detail: string;
+  tone: DashboardTone;
+};
+
+export type ScnScrubberViewModel = {
+  grammarVersion: 1;
+  current: number | null;
+  min: number | null;
+  max: number | null;
+  // True when `current` had to be pulled back inside [min, max].
+  clamped: boolean;
+  // The axis exists only once a snapshot has been confirmed by the server.
+  rangeKnown: boolean;
+  // Position of `current` on [min, max], 0..1. Null when the range is unknown.
+  position: number | null;
+  status: "idle" | "pinned" | "refused" | "unavailable";
+  headline: string;
+  detail: string;
+  marks: readonly ScnMarkViewModel[];
+  tone: DashboardTone;
+};
+
+export type ScnScrubberInput = {
+  current: number | null;
+  marks: readonly ScnMarkViewModel[];
+  // The verbatim server refusal for the snapshot currently pinned, if it refused.
+  refusal: string | null;
+};
+
+export function clampScn(current: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, current));
+}
+
+export function toScnScrubberViewModel(input: ScnScrubberInput): ScnScrubberViewModel {
+  const confirmed = input.marks
+    .filter((mark) => mark.status === "confirmed" && mark.scn !== null)
+    .map((mark) => mark.scn as number);
+  const min = confirmed.length > 0 ? Math.min(...confirmed) : null;
+  const max = confirmed.length > 0 ? Math.max(...confirmed) : null;
+  const rangeKnown = min !== null && max !== null;
+
+  const requested = input.current;
+  const current =
+    requested !== null && rangeKnown ? clampScn(requested, min, max) : requested;
+  const clamped = requested !== null && current !== null && current !== requested;
+  const span = rangeKnown ? max - min : 0;
+  const position =
+    rangeKnown && current !== null ? (span === 0 ? 1 : (current - min) / span) : null;
+
+  if (input.refusal) {
+    return {
+      grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+      current,
+      min,
+      max,
+      clamped,
+      rangeKnown,
+      position,
+      status: "refused",
+      headline: "Snapshot refused",
+      detail: input.refusal,
+      marks: input.marks,
+      tone: "warn"
+    };
+  }
+  if (current === null) {
+    return {
+      grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+      current: null,
+      min,
+      max,
+      clamped: false,
+      rangeKnown,
+      position: null,
+      status: rangeKnown ? "idle" : "unavailable",
+      headline: rangeKnown ? "Live (no snapshot pinned)" : "No snapshot read yet",
+      detail:
+        "The server publishes neither the current SCN nor the flashback retention window, so this axis spans only the snapshots this console has read.",
+      marks: input.marks,
+      tone: "off"
+    };
+  }
+  return {
+    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+    current,
+    min,
+    max,
+    clamped,
+    rangeKnown,
+    position,
+    status: "pinned",
+    headline: `Reading as of SCN ${current}`,
+    detail: clamped
+      ? "The requested SCN sat outside the snapshots this console has confirmed; it was clamped to the known range."
+      : "This SELECT was replayed against that committed snapshot by the server.",
+    marks: input.marks,
+    tone: "info"
+  };
+}
+
+/** Two confirmed snapshots and one refused one, with the current SCN in range. */
+export function scnScrubberFixture(): ScnScrubberViewModel {
+  return toScnScrubberViewModel({
+    current: 15_200_400,
+    refusal: null,
+    marks: [
+      {
+        id: "m1",
+        scn: 15_200_000,
+        label: "SCN 15200000",
+        status: "confirmed",
+        detail: "42 rows",
+        tone: "ok"
+      },
+      {
+        id: "m2",
+        scn: 15_200_400,
+        label: "SCN 15200400",
+        status: "confirmed",
+        detail: "41 rows",
+        tone: "ok"
+      },
+      {
+        id: "m3",
+        scn: 15_900_000,
+        label: "SCN 15900000",
+        status: "refused",
+        detail: "ORA-01031: insufficient privileges (the profile lacks FLASHBACK)",
+        tone: "warn"
+      }
+    ]
+  });
+}
+
 // ── Cost/gas badge (Arc G) ───────────────────────────────────────────────────
 // The cost gate prices a statement with the optimizer before it runs. Two facts
 // reach the console, and only these two:
@@ -740,11 +893,13 @@ export function skinContractFixture(): {
   verdictProof: VerdictProofViewModel;
   undoTree: UndoTreeViewModel;
   costBadge: CostBadgeViewModel;
+  scnScrubber: ScnScrubberViewModel;
 } {
   return {
     verdictProof: verdictProofFixture(),
     undoTree: undoTreeFixture(),
     costBadge: costBadgeFixture(),
+    scnScrubber: scnScrubberFixture(),
     groundControl: {
       grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
       verdict: "GO",

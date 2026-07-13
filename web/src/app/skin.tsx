@@ -27,6 +27,7 @@ import {
   type GroundControlViewModel,
   type HealthPosture,
   type CostBadgeViewModel,
+  type ScnScrubberViewModel,
   type SignatureId,
   type SkinCapability,
   type UndoTreeViewModel,
@@ -69,6 +70,10 @@ export type DashboardSkin = {
     GroundControl: React.ComponentType<{ model: GroundControlViewModel }>;
     VerdictProof: React.ComponentType<{ model: VerdictProofViewModel }>;
     CostBadge: React.ComponentType<{ model: CostBadgeViewModel }>;
+    ScnScrubber: React.ComponentType<{
+      model: ScnScrubberViewModel;
+      onScrub?: (scn: number) => void;
+    }>;
     UndoTree: React.ComponentType<{
       model: UndoTreeViewModel;
       // Offered only for a plainly reversible checkpoint; a partial rollback is a
@@ -156,7 +161,8 @@ export const OMCP_SKIN: DashboardSkin = {
     GroundControl: GroundControl2DRenderer,
     VerdictProof: VerdictProofInspector,
     UndoTree: UndoTreeRenderer,
-    CostBadge: CostBadgeRenderer
+    CostBadge: CostBadgeRenderer,
+    ScnScrubber: ScnScrubberRenderer
   },
   layout: {
     appShell: "min-h-screen bg-[var(--om-bg)] text-[var(--om-text)]",
@@ -375,6 +381,76 @@ function VerdictProofFact({ label, value }: { label: string; value: string }): R
         {value}
       </dd>
     </div>
+  );
+}
+
+/**
+ * The SCN time-scrubber (Arc A).
+ *
+ * The slider exists only when the console has confirmed snapshots to slide
+ * between; with no confirmed read there is no axis, and the scrubber says why
+ * rather than drawing a fake timeline from 0 to "now".
+ */
+export function ScnScrubberRenderer({
+  model,
+  onScrub
+}: {
+  model: ScnScrubberViewModel;
+  onScrub?: (scn: number) => void;
+}): React.ReactElement {
+  return (
+    <section
+      className="flex flex-col gap-3 rounded-lg border border-[var(--om-border)] bg-[var(--om-surface)] p-4 shadow-sm"
+      aria-label="scn time scrubber"
+      data-grammar-version={model.grammarVersion}
+      data-scn-current={model.current === null ? "live" : model.current}
+      data-scn-min={model.min === null ? "unknown" : model.min}
+      data-scn-max={model.max === null ? "unknown" : model.max}
+      data-scn-clamped={model.clamped ? "true" : "false"}
+      data-scn-status={model.status}
+      data-range-known={model.rangeKnown ? "true" : "false"}
+    >
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Timer className="size-4 text-[var(--om-gold)]" aria-hidden="true" />
+          <span className="text-sm font-bold text-[var(--om-text-bright)]">Time Scrubber</span>
+          <Badge tone={model.tone}>{model.status}</Badge>
+        </div>
+        <span className="font-mono text-2xs tabular-nums text-[var(--om-text-muted)]">
+          {model.min ?? "—"} … {model.max ?? "—"}
+        </span>
+      </header>
+
+      <p className="text-sm font-semibold text-[var(--om-text-bright)]">{model.headline}</p>
+      <p className="text-xs text-[var(--om-text-muted)]">{model.detail}</p>
+
+      {model.rangeKnown && model.min !== null && model.max !== null ? (
+        <input
+          type="range"
+          className="w-full"
+          aria-label="system change number"
+          min={model.min}
+          max={model.max}
+          value={model.current ?? model.max}
+          onChange={(event) => onScrub?.(event.target.valueAsNumber)}
+        />
+      ) : null}
+
+      <ol className="flex flex-col gap-1">
+        {model.marks.map((mark) => (
+          <li
+            key={mark.id}
+            className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--om-border)] px-2 py-1"
+            data-mark-scn={mark.scn === null ? "unreported" : mark.scn}
+            data-mark-status={mark.status}
+          >
+            <Badge tone={mark.tone}>{mark.status}</Badge>
+            <span className="font-mono text-2xs text-[var(--om-text)]">{mark.label}</span>
+            <span className="text-2xs text-[var(--om-text-muted)]">{mark.detail}</span>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }
 
@@ -600,6 +676,24 @@ export function assertDashboardSkinConformance(skin: DashboardSkin): void {
   const fixture = skinContractFixture();
   if (typeof skin.renderers.CostBadge !== "function") {
     throw new Error(`skin ${skin.name} must provide a cost-badge renderer`);
+  }
+  if (typeof skin.renderers.ScnScrubber !== "function") {
+    throw new Error(`skin ${skin.name} must provide an SCN-scrubber renderer`);
+  }
+  // The scrubbed SCN must always sit inside the confirmed range, and the range
+  // must be built only from snapshots the server actually served.
+  const scrubber = fixture.scnScrubber;
+  if (
+    scrubber.min === null ||
+    scrubber.max === null ||
+    scrubber.current === null ||
+    scrubber.current < scrubber.min ||
+    scrubber.current > scrubber.max
+  ) {
+    throw new Error("scn-scrubber fixture must clamp the current SCN inside its confirmed range");
+  }
+  if (scrubber.marks.some((mark) => mark.status === "refused" && mark.scn === scrubber.max)) {
+    throw new Error("a refused snapshot must never define the scrubber range");
   }
   // A refused statement must carry BOTH numbers the server disclosed; a badge
   // that shows a verdict without its evidence is the failure mode here.

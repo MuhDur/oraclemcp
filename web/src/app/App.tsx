@@ -61,8 +61,10 @@ import {
   DASHBOARD_GRAMMAR,
   clampActivity,
   toCostBadgeViewModel,
+  toScnScrubberViewModel,
   toUndoTreeViewModel,
   toVerdictProofViewModel,
+  type ScnMarkViewModel,
   type UndoTreeEntry,
   type FleetViewModel,
   type DashboardTone,
@@ -85,9 +87,12 @@ import {
   parseClassifierLadder,
   parseCostEstimate,
   parseQueryCostRefusal,
+  parseQueryAsOf,
   parseUndoOutcome,
+  fetchQueryAsOf,
   fetchQueryCostEstimate,
   fetchVerdictProofs,
+  type AsOfTarget,
   fetchWorkspaceHistory,
   establishCheckpoint,
   holdWorkbenchSql,
@@ -6714,11 +6719,171 @@ function WorkbenchPage(): React.ReactElement {
 
         <CostGatePanel session={session.data ?? null} laneId={laneId} sql={sql} />
 
+        <ScnScrubberPanel
+          session={session.data ?? null}
+          laneId={laneId}
+          sql={sql}
+          maxRows={maxRows}
+        />
+
         <UndoTreePanel session={session.data ?? null} laneId={laneId} sql={sql} />
 
         <WorkbenchResultPanel result={lastResult} pending={action.isPending} />
       </div>
     </PageFrame>
+  );
+}
+
+/**
+ * The SCN time-scrubber (Arc A).
+ *
+ * Every mark on the axis is a snapshot the server actually served: the console
+ * asks `oracle_query as_of`, and only a read that came back with rows becomes a
+ * confirmed mark. A refused snapshot (no FLASHBACK privilege, a snapshot older
+ * than undo retention) is kept on the list with its ORA- reason and is never
+ * allowed to define the range. A timestamp pin is recorded as such, because
+ * Oracle resolves it to an SCN the response never echoes.
+ */
+function ScnScrubberPanel({
+  session,
+  laneId,
+  sql,
+  maxRows
+}: {
+  session: DashboardSession | null;
+  laneId: string;
+  sql: string;
+  maxRows: number;
+}): React.ReactElement {
+  const ScnScrubber = OMCP_SKIN.renderers.ScnScrubber;
+  const [scnInput, setScnInput] = React.useState("");
+  const [timestampInput, setTimestampInput] = React.useState("");
+  const [current, setCurrent] = React.useState<number | null>(null);
+  const [refusal, setRefusal] = React.useState<string | null>(null);
+  const [marks, setMarks] = React.useState<ScnMarkViewModel[]>([]);
+
+  const replay = useMutation({
+    mutationFn: async (target: AsOfTarget) => {
+      if (!session) {
+        throw new Error("dashboard session is not ready");
+      }
+      const response = await fetchQueryAsOf(session, {
+        laneId,
+        sql: sql.trim(),
+        maxRows,
+        target
+      });
+      return { target, response };
+    },
+    onSuccess: ({ target, response }) => {
+      const read = parseQueryAsOf(response.data);
+      setRefusal(null);
+      if (target.kind === "scn") {
+        setCurrent(target.scn);
+        setMarks((existing) => [
+          ...existing.filter((mark) => mark.scn !== target.scn),
+          {
+            id: `scn-${target.scn}`,
+            scn: target.scn,
+            label: `SCN ${target.scn}`,
+            status: "confirmed",
+            detail: `${read.rowCount ?? 0} row(s)${read.truncated ? ", truncated" : ""}`,
+            tone: "ok"
+          }
+        ]);
+        return;
+      }
+      setMarks((existing) => [
+        ...existing,
+        {
+          id: `ts-${target.timestamp}-${existing.length}`,
+          scn: null,
+          label: target.timestamp,
+          status: "timestamp",
+          detail: "Oracle resolved this timestamp to an SCN it does not report back",
+          tone: "info"
+        }
+      ]);
+    },
+    onError: (error, target) => {
+      const outcome = operatorOutcomeFromError(error, "flashback read failed");
+      setRefusal(outcome.message);
+      if (target.kind === "scn") {
+        setMarks((existing) => [
+          ...existing.filter((mark) => mark.scn !== target.scn),
+          {
+            id: `scn-${target.scn}`,
+            scn: target.scn,
+            label: `SCN ${target.scn}`,
+            status: "refused",
+            detail: outcome.message,
+            tone: "warn"
+          }
+        ]);
+      }
+    }
+  });
+
+  const model = toScnScrubberViewModel({ current, marks, refusal });
+  const parsedScn = Number.parseInt(scnInput.trim(), 10);
+  const canReplayScn =
+    Boolean(session) && !replay.isPending && Number.isFinite(parsedScn) && parsedScn > 0;
+
+  return (
+    <Surface className="space-y-3 p-4" data-testid="scn-scrubber-panel">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="block">
+          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">SCN</span>
+          <input
+            className="h-10 w-48 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            value={scnInput}
+            inputMode="numeric"
+            onChange={(event) => setScnInput(event.target.value)}
+            placeholder="15200400"
+          />
+        </label>
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={!canReplayScn || sql.trim().length === 0}
+          onClick={() => replay.mutate({ kind: "scn", scn: parsedScn })}
+        >
+          Read as of SCN
+        </Button>
+        <label className="block">
+          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Timestamp</span>
+          <input
+            className="h-10 w-56 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            value={timestampInput}
+            onChange={(event) => setTimestampInput(event.target.value)}
+            placeholder="2026-07-13 09:00:00"
+          />
+        </label>
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={!session || replay.isPending || timestampInput.trim().length === 0}
+          onClick={() => replay.mutate({ kind: "timestamp", timestamp: timestampInput.trim() })}
+        >
+          Read as of time
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={current === null}
+          onClick={() => {
+            setCurrent(null);
+            setRefusal(null);
+          }}
+        >
+          Back to live
+        </Button>
+      </div>
+      <ScnScrubber
+        model={model}
+        onScrub={(scn) => replay.mutate({ kind: "scn", scn })}
+      />
+    </Surface>
   );
 }
 

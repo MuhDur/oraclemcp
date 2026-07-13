@@ -1638,6 +1638,59 @@ export async function fetchAuditTail(
   return parsed as OperatorResponse<AuditTailData>;
 }
 
+// ── SCN time-travel (Arc A) ──────────────────────────────────────────────────
+// The flashback read is real and governed: the base SELECT is proven read-only
+// first, then bounded in a DBMS_FLASHBACK window with the SCN bound, never
+// interpolated. The server does not echo the SCN it read at, and no endpoint
+// publishes the current SCN, so the console records exactly what it asked for
+// and what came back.
+
+export type AsOfTarget = { kind: "scn"; scn: number } | { kind: "timestamp"; timestamp: string };
+
+export type QueryAsOfRequest = {
+  laneId?: string;
+  sql: string;
+  maxRows: number;
+  target: AsOfTarget;
+};
+
+export type QueryAsOfRead = {
+  rowCount: number | null;
+  truncated: boolean;
+};
+
+/** `oracle_query` with `as_of` — replay a proven SELECT at a past snapshot. */
+export async function fetchQueryAsOf(
+  session: DashboardSession,
+  request: QueryAsOfRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("query-as-of"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_query",
+    arguments: {
+      sql: request.sql,
+      max_rows: request.maxRows,
+      as_of:
+        request.target.kind === "scn"
+          ? { scn: request.target.scn }
+          : { timestamp: request.target.timestamp }
+    }
+  });
+}
+
+/**
+ * What the snapshot read returned. `row_count` is the only evidence the console
+ * gets that the snapshot was actually readable — the response carries no SCN.
+ */
+export function parseQueryAsOf(data: WorkbenchActionData | null): QueryAsOfRead {
+  const payload = mcpPayload(data);
+  return {
+    rowCount: numberValue(payload?.["row_count"]),
+    truncated: payload?.["truncated"] === true
+  };
+}
+
 // ── Cost/gas gate (Arc G) ────────────────────────────────────────────────────
 // Two real sources, and nothing else: the `query_cost_refusal` block a cost
 // refusal carries (estimate + the ceiling it broke), and the `cost_estimate`
