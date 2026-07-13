@@ -476,6 +476,25 @@ impl SideEffectOracle for AllSideEffectingOracle {
     }
 }
 
+/// Models an engine binding that proves ordinary base objects read-only, but
+/// knows the sensitive-orders policy path can have side effects. The regression
+/// below is only meaningful if the classifier actually supplies this object to
+/// `statement_purity`: returning `ProvenReadOnly` for an omitted object would
+/// otherwise make the fail-open look like a successful read.
+struct SensitiveOrdersOracle;
+impl SideEffectOracle for SensitiveOrdersOracle {
+    fn statement_purity(&self, base_objects: &[ObjectRef]) -> Purity {
+        if base_objects
+            .iter()
+            .any(|object| object.name.eq_ignore_ascii_case("sensitive_orders"))
+        {
+            Purity::ProvenSideEffecting
+        } else {
+            Purity::ProvenReadOnly
+        }
+    }
+}
+
 fn strict_classify(sql: &str) -> GuardDecision {
     Classifier::default()
         .with_oracle(Arc::new(AllSideEffectingOracle))
@@ -1046,6 +1065,52 @@ fn a_stricter_oracle_is_consulted_however_the_base_object_is_spelled() {
              base-object walk returned nothing, an empty list was read as \
              ProvenReadOnly, and the purity/VPD consult was skipped entirely: \
              {sql:?} -> {decision:?}"
+        );
+    }
+}
+
+#[test]
+fn sensitive_base_objects_in_every_expression_subquery_reach_the_oracle() {
+    let classifier = Classifier::default()
+        .with_oracle(Arc::new(SensitiveOrdersOracle))
+        .with_statement_unknown_guarded();
+
+    for (position, sql) in [
+        (
+            "EXISTS predicate",
+            "SELECT 1 FROM dual WHERE EXISTS (SELECT 1 FROM sensitive_orders)",
+        ),
+        (
+            "IN predicate",
+            "SELECT 1 FROM dual WHERE 1 IN (SELECT id FROM sensitive_orders)",
+        ),
+        (
+            "scalar projection",
+            "SELECT (SELECT id FROM sensitive_orders WHERE ROWNUM = 1) FROM dual",
+        ),
+        (
+            "ANY predicate",
+            "SELECT 1 FROM dual WHERE 1 = ANY (SELECT id FROM sensitive_orders)",
+        ),
+        (
+            "ALL predicate",
+            "SELECT 1 FROM dual WHERE 1 = ALL (SELECT id FROM sensitive_orders)",
+        ),
+        (
+            "comparison right-hand side",
+            "SELECT 1 FROM dual WHERE 1 = (SELECT id FROM sensitive_orders WHERE ROWNUM = 1)",
+        ),
+    ] {
+        let decision = classifier.classify(sql);
+        assert_eq!(
+            decision.danger,
+            DangerLevel::Guarded,
+            "{position} must surface sensitive_orders to the side-effect oracle: {sql:?} -> {decision:?}"
+        );
+        assert_eq!(
+            decision.required_level,
+            Some(OperatingLevel::ReadWrite),
+            "a proven side effect in {position} must require READ_WRITE: {sql:?} -> {decision:?}"
         );
     }
 }

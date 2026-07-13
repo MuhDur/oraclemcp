@@ -2652,133 +2652,83 @@ fn object_name_to_ref(name: &sqlparser::ast::ObjectName) -> Option<ObjectRef> {
     }
 }
 
-/// Walk a `Query`'s FROM/JOIN/CTE structure and collect the **base objects**
-/// (real tables/views named in `FROM`/`JOIN` factors and inside CTE bodies and
-/// derived subqueries). CTE *alias* names are not base objects, so a `FROM cte`
-/// reference is filtered out (its body's base tables are already collected).
+/// Recursive SQLParser visitor that collects every real table/view named by a
+/// [`TableFactor::Table`], while retaining the lexical CTE aliases active for
+/// the query currently being visited.
+///
+/// The visitor deliberately follows SQLParser's complete AST traversal instead
+/// of hand-enumerating expression positions. `Query` nodes can occur in SELECT
+/// lists, predicates, comparison operands, and dialect-specific expressions;
+/// missing one can make the side-effect oracle see an empty base-object list.
+#[derive(Default)]
+struct QueryBaseObjectCollector {
+    objects: Vec<ObjectRef>,
+    cte_alias_scopes: Vec<HashSet<String>>,
+}
+
+impl Visitor for QueryBaseObjectCollector {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        let mut aliases = self.cte_alias_scopes.last().cloned().unwrap_or_default();
+        if let Some(with) = &query.with {
+            aliases.extend(
+                with.cte_tables
+                    .iter()
+                    .map(|cte| cte.alias.name.value.to_ascii_lowercase()),
+            );
+        }
+        self.cte_alias_scopes.push(aliases);
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
+        debug_assert!(
+            self.cte_alias_scopes.pop().is_some(),
+            "every post-visited query must have an alias scope"
+        );
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
+        if let TableFactor::Table { name, .. } = factor
+            && let Some(object) = object_name_to_ref(name)
+        {
+            let is_cte_reference = object.schema.is_none()
+                && self
+                    .cte_alias_scopes
+                    .last()
+                    .is_some_and(|aliases| aliases.contains(&object.name.to_ascii_lowercase()));
+            if !is_cte_reference {
+                self.objects.push(object);
+            }
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Walk a `Query` and collect the **base objects** (real tables/views named in
+/// `FROM`/`JOIN` factors, including factors inside CTEs, derived queries, and
+/// every expression-contained subquery). CTE *alias* names are not base objects,
+/// so a `FROM cte` reference is filtered out (its body's base tables are already
+/// collected).
 ///
 /// This is the resolved-object set the engine's [`SideEffectOracle::statement_purity`]
 /// trigger/VPD walk runs over (a `SELECT`/DML can fire a side-effecting trigger
 /// or row-level-security policy function the statement text never names).
-/// Best-effort + fail-closed: missing a factor only *omits* an object (it can
-/// never invent a `ProvenReadOnly`), and over-collection only adds objects the
-/// oracle is free to report `ProvenSideEffecting`.
+/// This collection is safety-critical: omitting a base object can make an empty
+/// list look `ProvenReadOnly`, while over-collection can only tighten through a
+/// `ProvenSideEffecting` oracle result.
 fn query_base_objects(query: &sqlparser::ast::Query) -> Vec<ObjectRef> {
-    use sqlparser::ast::{SetExpr, TableFactor};
-
-    let mut objects: Vec<ObjectRef> = Vec::new();
-    let mut cte_aliases: HashSet<String> = HashSet::new();
-
-    fn collect_factor(
-        factor: &TableFactor,
-        objects: &mut Vec<ObjectRef>,
-        cte_aliases: &HashSet<String>,
-    ) {
-        match factor {
-            TableFactor::Table { name, .. } => {
-                if let Some(obj) = object_name_to_ref(name) {
-                    // A single-part name that matches a CTE alias is a CTE
-                    // reference, not a base table.
-                    let is_cte_ref = obj.schema.is_none()
-                        && cte_aliases.contains(&obj.name.to_ascii_lowercase());
-                    if !is_cte_ref {
-                        objects.push(obj);
-                    }
-                }
-            }
-            TableFactor::Derived { subquery, .. } => {
-                collect_query(subquery, objects, cte_aliases);
-            }
-            // A parenthesized join — `FROM (a JOIN b ON …)` — names its base
-            // tables through the `TableWithJoins` it wraps, and PIVOT / UNPIVOT /
-            // MATCH_RECOGNIZE name theirs through the factor they decorate. These
-            // fell into the `_` arm below, so the walk returned NO base objects —
-            // and an empty base-object list is read as `Purity::ProvenReadOnly` by
-            // `classify_statement`, which means the engine's `statement_purity`
-            // consult (the trigger / VPD `DBMS_RLS` walk) was never performed and
-            // the read was cleared as Safe without ever being asked about. The DML
-            // walk (`table_factor_carries_dml`) and the qualifier walk
-            // (`collect_factor_qualifiers`) already descend both shapes; this walk
-            // must too, or the strictest possible oracle cannot close the hole
-            // because it is never consulted.
-            TableFactor::NestedJoin {
-                table_with_joins, ..
-            } => {
-                collect_table_with_joins(table_with_joins, objects, cte_aliases);
-            }
-            TableFactor::Pivot { table, .. }
-            | TableFactor::Unpivot { table, .. }
-            | TableFactor::MatchRecognize { table, .. } => {
-                collect_factor(table, objects, cte_aliases);
-            }
-            // Table functions, UNNEST, JSON_TABLE, etc. name no base table (or are
-            // handled via the UDF/routine consult) — skip.
-            _ => {}
-        }
-    }
-
-    fn collect_table_with_joins(
-        twj: &sqlparser::ast::TableWithJoins,
-        objects: &mut Vec<ObjectRef>,
-        cte_aliases: &HashSet<String>,
-    ) {
-        collect_factor(&twj.relation, objects, cte_aliases);
-        for join in &twj.joins {
-            collect_factor(&join.relation, objects, cte_aliases);
-        }
-    }
-
-    fn collect_set_expr(
-        body: &SetExpr,
-        objects: &mut Vec<ObjectRef>,
-        cte_aliases: &HashSet<String>,
-    ) {
-        match body {
-            SetExpr::Select(select) => {
-                for twj in &select.from {
-                    collect_table_with_joins(twj, objects, cte_aliases);
-                }
-            }
-            SetExpr::Query(q) => collect_query(q, objects, cte_aliases),
-            SetExpr::SetOperation { left, right, .. } => {
-                collect_set_expr(left, objects, cte_aliases);
-                collect_set_expr(right, objects, cte_aliases);
-            }
-            // VALUES / TABLE / nested INSERT|UPDATE|DELETE|MERGE bodies name no
-            // SELECT base table here (DML arms are classified separately).
-            _ => {}
-        }
-    }
-
-    fn collect_query(
-        query: &sqlparser::ast::Query,
-        objects: &mut Vec<ObjectRef>,
-        cte_aliases: &HashSet<String>,
-    ) {
-        let mut local_aliases = cte_aliases.clone();
-        if let Some(with) = &query.with {
-            for cte in &with.cte_tables {
-                local_aliases.insert(cte.alias.name.value.to_ascii_lowercase());
-            }
-            for cte in &with.cte_tables {
-                collect_query(&cte.query, objects, &local_aliases);
-            }
-        }
-        collect_set_expr(&query.body, objects, &local_aliases);
-    }
-
-    // Seed top-level CTE aliases, then walk.
-    if let Some(with) = &query.with {
-        for cte in &with.cte_tables {
-            cte_aliases.insert(cte.alias.name.value.to_ascii_lowercase());
-        }
-    }
-    collect_query(query, &mut objects, &cte_aliases);
+    let mut collector = QueryBaseObjectCollector::default();
+    let _ = query.visit(&mut collector);
 
     // Deduplicate while preserving order (small N; readability over a HashSet).
     let mut seen: HashSet<(Option<String>, String)> = HashSet::new();
-    objects.retain(|o| seen.insert((o.schema.clone(), o.name.clone())));
-    objects
+    collector
+        .objects
+        .retain(|object| seen.insert((object.schema.clone(), object.name.clone())));
+    collector.objects
 }
 
 /// Whether a `SELECT`/`WITH` query body carries a DML `SetExpr` at any depth —
@@ -4840,6 +4790,37 @@ mod tests {
         // Set operations on both arms.
         let e = parse("SELECT id FROM a UNION SELECT id FROM b");
         assert_eq!(names(&e), vec!["a", "b"]);
+
+        // Every expression-position subquery contributes its base object. These
+        // are deliberately tested through the collector rather than only the
+        // classifier: an omission here would otherwise turn an engine oracle's
+        // `ProvenSideEffecting` answer into an unasked, fail-open Safe verdict.
+        for sql in [
+            "SELECT 1 FROM dual WHERE EXISTS (SELECT 1 FROM sensitive_orders)",
+            "SELECT 1 FROM dual WHERE 1 IN (SELECT id FROM sensitive_orders)",
+            "SELECT (SELECT id FROM sensitive_orders WHERE ROWNUM = 1) FROM dual",
+            "SELECT 1 FROM dual WHERE 1 = ANY (SELECT id FROM sensitive_orders)",
+            "SELECT 1 FROM dual WHERE 1 = ALL (SELECT id FROM sensitive_orders)",
+            "SELECT 1 FROM dual WHERE 1 = (SELECT id FROM sensitive_orders WHERE ROWNUM = 1)",
+        ] {
+            let mut found = names(&parse(sql));
+            found.sort_unstable();
+            assert_eq!(
+                found,
+                vec!["dual", "sensitive_orders"],
+                "expression subquery base object must be collected: {sql}"
+            );
+        }
+
+        // A CTE alias remains an alias even when the reference is inside a
+        // predicate subquery, and repeated references remain de-duplicated.
+        let mut cte_expression = names(&parse(
+            "WITH sensitive AS (SELECT id FROM sensitive_orders) \
+             SELECT 1 FROM dual WHERE EXISTS (SELECT 1 FROM sensitive) \
+             AND 1 IN (SELECT id FROM sensitive)",
+        ));
+        cte_expression.sort_unstable();
+        assert_eq!(cte_expression, vec!["dual", "sensitive_orders"]);
     }
 
     #[test]
