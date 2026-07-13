@@ -71,6 +71,7 @@ registry at this spike is:
 | Rule id | Classifier fact | Allowed `construct` labels |
 | --- | --- | --- |
 | `R15` | A query containing user-defined routine calls is `Safe` only when every consulted routine is `ProvenReadOnly`; `Unknown` and `ProvenSideEffecting` prevent that admission. | `routine_calls:absent`, `routine_purity:all_proven_read_only`, `routine_purity:unproven_present` |
+| `R16` | The certificate is constructed from the final `GuardDecision` returned by the exact public `Classifier::classify` call that gates the statement. It observes that decision and never admits or lowers a statement. | `final_verdict:SAFE`, `final_verdict:GUARDED`, `final_verdict:DESTRUCTIVE`, `final_verdict:FORBIDDEN` |
 
 The labels are an allowlist, not free-form diagnostic text. In particular,
 they must not contain a routine name, identifier, SQL fragment, literal, bind
@@ -93,9 +94,12 @@ The binding protocol for B1.1 is:
    It serializes that core with RFC 8785 JSON Canonicalization Scheme and
    computes `certificate_core_hash` as `sha256:` over the UTF-8 bytes of
    `"oraclemcp:verdict-certificate-core:v1\\n" || JCS(core)`.
-2. The audit schema adds `verdict_certificate_core_hash` to `AuditEntryDraft`
-   and `AuditRecord`; the audit canonical-entry function covers that field.
-   The pre-execution record is appended and fsynced before execution, producing
+2. The certificate-aware audit append API accepts
+   `verdict_certificate_core_hash` alongside the generic `AuditEntryDraft` and
+   persists it on `AuditRecord`; the audit canonical-entry function covers that
+   field. Keeping the specialized proof input out of the generic draft prevents
+   unrelated audit producers from inventing certificate evidence. The record is
+   appended and fsynced before the proof-carrying result is released, producing
    its signed `entry_hash`.
 3. Only after that succeeds does the response projection set
    `bound_audit_hash = entry_hash`. The response-only bound field is not stored

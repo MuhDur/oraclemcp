@@ -18,6 +18,7 @@ const AUDIT_SCHEMA_V6: u16 = 6;
 const AUDIT_SCHEMA_V7: u16 = 7;
 const AUDIT_SCHEMA_V8: u16 = 8;
 const AUDIT_SCHEMA_V9: u16 = 9;
+const AUDIT_SCHEMA_V10: u16 = 10;
 
 /// Stable, non-secret replacement for the historical raw-SQL preview field.
 ///
@@ -29,7 +30,7 @@ const AUDIT_SCHEMA_V9: u16 = 9;
 pub(crate) const REDACTED_SQL_PREVIEW: &str = "<sql text redacted; see sql_sha256>";
 
 /// Current on-disk audit record schema.
-pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V9;
+pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V10;
 
 /// The guard decision being audited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,6 +409,11 @@ pub struct AuditRecord {
     /// forensic replay support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_scn: Option<u64>,
+    /// Domain-separated hash of the redacted verdict-certificate core. Present
+    /// only when the audit append received a certificate; it is covered by the
+    /// schema-v10 chain hash and HMAC, never by an untrusted response field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_certificate_core_hash: Option<String>,
     /// The tool invoked.
     pub tool: String,
     /// `sha256:<hex>` of the exact SQL bytes (never the bind values).
@@ -459,6 +465,10 @@ impl std::fmt::Debug for AuditRecord {
             .field("correlation", &self.correlation)
             .field("result_masking", &self.result_masking)
             .field("observed_scn", &self.observed_scn)
+            .field(
+                "verdict_certificate_core_hash",
+                &self.verdict_certificate_core_hash,
+            )
             .field("tool", &self.tool)
             .field("sql_sha256", &self.sql_sha256)
             .field("sql_normalized_sha256", &self.sql_normalized_sha256)
@@ -653,14 +663,44 @@ impl AuditRecord {
         correlation: Option<AuditCorrelation>,
         observed_scn: Option<u64>,
     ) -> Self {
-        let mut record = Self::chained_unsigned_correlated_with_observed_scn(
+        Self::chained_signed_correlated_with_observed_scn_and_certificate_core_hash(
             draft,
             seq,
             prev_hash,
             timestamp,
+            key,
             correlation,
             observed_scn,
-        );
+            None,
+        )
+    }
+
+    /// Build a signed current-schema record with optional correlation, an
+    /// observed read snapshot SCN, and a redacted certificate-core hash. The
+    /// hash is an opaque correlation value; the certificate itself never enters
+    /// the audit record or its debug projection.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn chained_signed_correlated_with_observed_scn_and_certificate_core_hash(
+        draft: &AuditEntryDraft,
+        seq: u64,
+        prev_hash: &str,
+        timestamp: String,
+        key: &SigningKey,
+        correlation: Option<AuditCorrelation>,
+        observed_scn: Option<u64>,
+        verdict_certificate_core_hash: Option<String>,
+    ) -> Self {
+        let mut record =
+            Self::chained_unsigned_correlated_with_observed_scn_and_certificate_core_hash(
+                draft,
+                seq,
+                prev_hash,
+                timestamp,
+                correlation,
+                observed_scn,
+                verdict_certificate_core_hash,
+            );
         record.signature = Some(key.sign(&record.entry_hash));
         record.key_id = Some(key.key_id().to_owned());
         record
@@ -709,11 +749,34 @@ impl AuditRecord {
         correlation: Option<AuditCorrelation>,
         observed_scn: Option<u64>,
     ) -> Self {
+        Self::chained_unsigned_correlated_with_observed_scn_and_certificate_core_hash(
+            draft,
+            seq,
+            prev_hash,
+            timestamp,
+            correlation,
+            observed_scn,
+            None,
+        )
+    }
+
+    /// Build an unsigned current-schema record with optional correlation, an
+    /// observed read snapshot SCN, and a redacted certificate-core hash.
+    #[must_use]
+    pub fn chained_unsigned_correlated_with_observed_scn_and_certificate_core_hash(
+        draft: &AuditEntryDraft,
+        seq: u64,
+        prev_hash: &str,
+        timestamp: String,
+        correlation: Option<AuditCorrelation>,
+        observed_scn: Option<u64>,
+        verdict_certificate_core_hash: Option<String>,
+    ) -> Self {
         let sql_sha256 = sha256_hex(draft.sql.as_bytes());
         let sql_normalized_sha256 = normalized_sql_sha256(&draft.sql);
         let sql_preview = REDACTED_SQL_PREVIEW.to_owned();
         let agent_identity = draft.subject.legacy_agent_identity();
-        let entry_hash = compute_entry_hash_v9(
+        let entry_hash = compute_entry_hash_v10(
             seq,
             &timestamp,
             &agent_identity,
@@ -723,6 +786,7 @@ impl AuditRecord {
             correlation.as_ref(),
             draft.result_masking.as_ref(),
             observed_scn,
+            verdict_certificate_core_hash.as_deref(),
             &draft.tool,
             &sql_sha256,
             &sql_normalized_sha256,
@@ -744,6 +808,7 @@ impl AuditRecord {
             correlation,
             result_masking: draft.result_masking.clone(),
             observed_scn,
+            verdict_certificate_core_hash,
             tool: draft.tool.clone(),
             sql_sha256,
             sql_normalized_sha256,
@@ -917,6 +982,28 @@ impl AuditRecord {
                 self.correlation.as_ref(),
                 self.result_masking.as_ref(),
                 self.observed_scn,
+                &self.tool,
+                &self.sql_sha256,
+                &self.sql_normalized_sha256,
+                &self.sql_preview,
+                &self.danger_level,
+                self.decision,
+                self.rows_affected,
+                self.outcome,
+                &self.prev_hash,
+            )
+        } else if self.schema_version == AUDIT_SCHEMA_V10 {
+            compute_entry_hash_v10(
+                self.seq,
+                &self.timestamp,
+                &self.agent_identity,
+                &self.subject,
+                self.db_evidence.as_ref(),
+                self.cancel.as_ref(),
+                self.correlation.as_ref(),
+                self.result_masking.as_ref(),
+                self.observed_scn,
+                self.verdict_certificate_core_hash.as_deref(),
                 &self.tool,
                 &self.sql_sha256,
                 &self.sql_normalized_sha256,
@@ -1352,6 +1439,16 @@ fn canonical_push_observed_scn(out: &mut Vec<u8>, observed_scn: Option<u64>) {
     }
 }
 
+fn canonical_push_verdict_certificate_core_hash(out: &mut Vec<u8>, core_hash: Option<&str>) {
+    match core_hash {
+        Some(hash) => {
+            out.push(1);
+            canonical_push_str(out, hash);
+        }
+        None => out.push(0),
+    }
+}
+
 const fn canonical_result_masking_action_tag(action: AuditResultMaskingAction) -> u8 {
     match action {
         AuditResultMaskingAction::Pass => 0,
@@ -1692,6 +1789,55 @@ fn compute_entry_hash_v9(
     sha256_hex(&canonical)
 }
 
+/// Deterministically hash a v10 entry, extending v9 with the optional
+/// domain-separated verdict-certificate core hash.
+#[allow(clippy::too_many_arguments)]
+fn compute_entry_hash_v10(
+    seq: u64,
+    timestamp: &str,
+    agent_identity: &str,
+    subject: &AuditSubject,
+    db_evidence: Option<&DbEvidence>,
+    cancel: Option<&AuditCancel>,
+    correlation: Option<&AuditCorrelation>,
+    result_masking: Option<&AuditResultMaskingCertificate>,
+    observed_scn: Option<u64>,
+    verdict_certificate_core_hash: Option<&str>,
+    tool: &str,
+    sql_sha256: &str,
+    sql_normalized_sha256: &str,
+    sql_preview: &str,
+    danger_level: &str,
+    decision: AuditDecision,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+    prev_hash: &str,
+) -> String {
+    let mut canonical = canonical_entry(
+        AUDIT_SCHEMA_V10,
+        seq,
+        timestamp,
+        agent_identity,
+        subject,
+        db_evidence,
+        cancel,
+        tool,
+        sql_sha256,
+        sql_normalized_sha256,
+        sql_preview,
+        danger_level,
+        decision,
+        rows_affected,
+        outcome,
+        prev_hash,
+    );
+    canonical_push_correlation(&mut canonical, correlation);
+    canonical_push_result_masking(&mut canonical, result_masking);
+    canonical_push_observed_scn(&mut canonical, observed_scn);
+    canonical_push_verdict_certificate_core_hash(&mut canonical, verdict_certificate_core_hash);
+    sha256_hex(&canonical)
+}
+
 /// The genesis prev-hash for the first entry.
 pub const GENESIS_HASH: &str = "genesis";
 
@@ -1711,6 +1857,7 @@ mod kani_proofs {
             correlation: None,
             result_masking: None,
             observed_scn: None,
+            verdict_certificate_core_hash: None,
             tool: "oracle_execute".to_owned(),
             sql_sha256: "sha256:sql".to_owned(),
             sql_normalized_sha256: "sha256:sql".to_owned(),
@@ -1985,6 +2132,27 @@ mod tests {
                 d.outcome,
                 prev_hash,
             ),
+            AUDIT_SCHEMA_V10 => compute_entry_hash_v10(
+                seq,
+                &timestamp,
+                &agent_identity,
+                &d.subject,
+                d.db_evidence.as_ref(),
+                d.cancel.as_ref(),
+                None,
+                d.result_masking.as_ref(),
+                None,
+                None,
+                &d.tool,
+                &sql_sha256,
+                &sql_normalized_sha256,
+                &sql_preview,
+                &d.danger_level,
+                d.decision,
+                d.rows_affected,
+                d.outcome,
+                prev_hash,
+            ),
             other => panic!("unsupported test schema {other}"),
         };
         AuditRecord {
@@ -1998,6 +2166,7 @@ mod tests {
             correlation: None,
             result_masking: None,
             observed_scn: None,
+            verdict_certificate_core_hash: None,
             tool: d.tool.clone(),
             sql_sha256,
             sql_normalized_sha256: if schema_version >= 4 {
@@ -2138,6 +2307,7 @@ mod tests {
             correlation: None,
             result_masking: None,
             observed_scn: None,
+            verdict_certificate_core_hash: None,
             tool: d.tool.clone(),
             sql_sha256,
             sql_normalized_sha256: String::new(),
@@ -2312,6 +2482,38 @@ mod tests {
         assert!(
             !record.hash_is_valid(),
             "changing a replay target must break the tamper-evident chain"
+        );
+    }
+
+    #[test]
+    fn verdict_certificate_core_hash_is_serialized_and_hash_covered() {
+        let certificate_core_hash = sha256_hex(b"verdict certificate core");
+        let mut record =
+            AuditRecord::chained_signed_correlated_with_observed_scn_and_certificate_core_hash(
+                &draft(),
+                1,
+                GENESIS_HASH,
+                "2026-07-13T00:00:00Z".to_owned(),
+                &key(),
+                None,
+                Some(42_000_001),
+                Some(certificate_core_hash.clone()),
+            );
+
+        assert_eq!(record.schema_version, AUDIT_SCHEMA_VERSION);
+        assert_eq!(
+            record.verdict_certificate_core_hash.as_deref(),
+            Some(certificate_core_hash.as_str())
+        );
+        assert!(record.hash_is_valid());
+        assert!(record.signature_is_valid(&key()));
+        let encoded = serde_json::to_string(&record).expect("record serializes");
+        assert!(encoded.contains("\"verdict_certificate_core_hash\""));
+
+        record.verdict_certificate_core_hash = Some(sha256_hex(b"forged core"));
+        assert!(
+            !record.hash_is_valid(),
+            "changing a certificate core hash must break the tamper-evident chain"
         );
     }
 
@@ -2542,6 +2744,7 @@ mod tests {
             correlation: None,
             result_masking: None,
             observed_scn: None,
+            verdict_certificate_core_hash: None,
             tool: d.tool.clone(),
             sql_sha256,
             sql_normalized_sha256: String::new(),
@@ -3175,7 +3378,7 @@ mod tests {
         // Forge the redacted field and recompute the (unkeyed) hash so the
         // bare-hash check would pass — but leave the old MAC in place.
         forged.sql_preview = "SELECT 1".to_owned();
-        forged.entry_hash = compute_entry_hash_v9(
+        forged.entry_hash = compute_entry_hash_v10(
             forged.seq,
             &forged.timestamp,
             &forged.agent_identity,
@@ -3185,6 +3388,7 @@ mod tests {
             forged.correlation.as_ref(),
             forged.result_masking.as_ref(),
             forged.observed_scn,
+            forged.verdict_certificate_core_hash.as_deref(),
             &forged.tool,
             &forged.sql_sha256,
             &forged.sql_normalized_sha256,

@@ -29,7 +29,9 @@ pub use enforcement::{
 };
 
 pub use classifier::{
-    BatchShape, Classifier, ClassifierConfig, GuardDecision, StageA, analyze_batch,
+    BatchShape, Classifier, ClassifierConfig, GuardDecision, StageA,
+    VERDICT_CERTIFICATE_CLASSIFIER_VERSION, VERDICT_CERTIFICATE_REGISTRY_GENERATION,
+    VerdictCertificate, VerdictCertificateBindingError, VerdictDerivationStep, analyze_batch,
     named_bind_placeholders, semantic_read_plan, stage_a,
 };
 pub use clock::MonotonicDeadline;

@@ -86,6 +86,11 @@ pub enum AuditError {
     /// Operator action (inspect/repair the audit log) is required.
     #[error("audit sink poisoned after uncertain append")]
     Poisoned,
+    /// The verdict-certificate core hash is not canonical `sha256:<lowercase
+    /// hex>`. Refuse it before an audit record can attest to an unverifiable
+    /// certificate.
+    #[error("invalid verdict certificate core hash")]
+    InvalidVerdictCertificateCoreHash,
     /// Chain resume refused at startup: an existing audit log cannot seed a
     /// continuing hash chain without forking it or masking a truncation (a
     /// malformed tail, or a tail that contradicts the head anchor). The server
@@ -112,6 +117,15 @@ pub enum AuditError {
         /// (best-effort operator hint; `None` when it could not be read).
         holder_pid: Option<u32>,
     },
+}
+
+fn is_canonical_sha256(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
 }
 
 /// An append-only, durable audit sink.
@@ -903,6 +917,32 @@ impl Auditor {
         correlation: Option<AuditCorrelation>,
         observed_scn: Option<u64>,
     ) -> Result<AuditRecord, AuditError> {
+        self.append_correlated_with_observed_scn_and_certificate_core_hash(
+            draft,
+            timestamp,
+            durable,
+            correlation,
+            observed_scn,
+            None,
+        )
+    }
+
+    /// Append a record carrying an optional observed SCN and a certificate-core
+    /// hash. The hash must be canonical SHA-256 before it becomes signed audit
+    /// evidence; a malformed certificate therefore fails closed before append
+    /// or execution can proceed.
+    pub fn append_correlated_with_observed_scn_and_certificate_core_hash(
+        &self,
+        draft: &AuditEntryDraft,
+        timestamp: String,
+        durable: bool,
+        correlation: Option<AuditCorrelation>,
+        observed_scn: Option<u64>,
+        verdict_certificate_core_hash: Option<&str>,
+    ) -> Result<AuditRecord, AuditError> {
+        if verdict_certificate_core_hash.is_some_and(|hash| !is_canonical_sha256(hash)) {
+            return Err(AuditError::InvalidVerdictCertificateCoreHash);
+        }
         let mut state = self.state.lock();
         // Fail closed: once an append/flush failure or panic may have left a
         // record in the byte stream without advancing state, issuing any further
@@ -911,15 +951,17 @@ impl Auditor {
             return Err(AuditError::Poisoned);
         }
         let seq = state.seq + 1;
-        let record = AuditRecord::chained_signed_correlated_with_observed_scn(
-            draft,
-            seq,
-            &state.last_hash,
-            timestamp,
-            self.keyring.active(),
-            correlation,
-            observed_scn,
-        );
+        let record =
+            AuditRecord::chained_signed_correlated_with_observed_scn_and_certificate_core_hash(
+                draft,
+                seq,
+                &state.last_hash,
+                timestamp,
+                self.keyring.active(),
+                correlation,
+                observed_scn,
+                verdict_certificate_core_hash.map(str::to_owned),
+            );
         match catch_unwind(AssertUnwindSafe(|| self.sink.append(&record))) {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
@@ -1041,6 +1083,84 @@ mod tests {
             .expect("append");
         assert_eq!(sink.records().len(), 1, "record written");
         assert_eq!(sink.flush_count(), 1, "fsynced before returning");
+    }
+
+    #[test]
+    fn certificate_core_hash_is_durable_and_malformed_evidence_refuses_before_append() {
+        let sink = Arc::new(MemoryAuditSink::new());
+        let auditor = Auditor::new(Box::new(SharedSink(sink.clone())), test_key());
+        let certificate_core_hash = crate::sha256_hex(b"verdict certificate core");
+        let record = auditor
+            .append_correlated_with_observed_scn_and_certificate_core_hash(
+                &draft("SELECT 1 FROM dual", "SAFE"),
+                "t0".to_owned(),
+                true,
+                None,
+                Some(42_000_001),
+                Some(&certificate_core_hash),
+            )
+            .expect("canonical certificate evidence must append");
+        assert_eq!(
+            record.verdict_certificate_core_hash.as_deref(),
+            Some(certificate_core_hash.as_str())
+        );
+        assert!(record.hash_is_valid());
+        assert_eq!(sink.flush_count(), 1, "certificate evidence is fsynced");
+
+        assert!(matches!(
+            auditor.append_correlated_with_observed_scn_and_certificate_core_hash(
+                &draft("SELECT 2 FROM dual", "SAFE"),
+                "t1".to_owned(),
+                true,
+                None,
+                None,
+                Some("not-a-canonical-sha256"),
+            ),
+            Err(AuditError::InvalidVerdictCertificateCoreHash)
+        ));
+        assert_eq!(
+            sink.records().len(),
+            1,
+            "invalid certificate evidence must not append an unauditable read"
+        );
+    }
+
+    #[test]
+    fn certificate_audit_write_failure_refuses_and_poisoned_auditor_stays_closed() {
+        let sink = Arc::new(FlushFailsOnceSink::default());
+        let auditor = Auditor::new(Box::new(SharedFlakySink(sink.clone())), test_key());
+        let certificate_core_hash = crate::sha256_hex(b"verdict certificate core");
+
+        let first = auditor.append_correlated_with_observed_scn_and_certificate_core_hash(
+            &draft("SELECT 1 FROM dual", "SAFE"),
+            "t0".to_owned(),
+            true,
+            None,
+            Some(42_000_001),
+            Some(&certificate_core_hash),
+        );
+        assert!(
+            matches!(first, Err(AuditError::Io(_))),
+            "certificate-bearing audit write failure must refuse before a read can proceed: {first:?}"
+        );
+        assert_eq!(
+            sink.records().len(),
+            1,
+            "the uncertain record is never retried"
+        );
+
+        let retry = auditor.append_correlated_with_observed_scn_and_certificate_core_hash(
+            &draft("SELECT 2 FROM dual", "SAFE"),
+            "t1".to_owned(),
+            true,
+            None,
+            Some(42_000_002),
+            Some(&certificate_core_hash),
+        );
+        assert!(
+            matches!(retry, Err(AuditError::Poisoned)),
+            "a certificate write failure must leave the auditor fail-closed: {retry:?}"
+        );
     }
 
     #[test]

@@ -36,6 +36,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlparser::ast::{
     Expr, Ident, Query, Select, SetExpr, TableAlias, TableFactor, TableWithJoins, Visit, Visitor,
@@ -55,8 +56,179 @@ use crate::resolver::{
     SyntacticRole,
 };
 
+/// One redacted, immutable rule application recorded in a verdict certificate.
+///
+/// `construct` is selected solely from the certificate registry's fixed
+/// allowlist. It is deliberately not the parser rendering, a reason string, an
+/// object name, or any user-controlled text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerdictDerivationStep {
+    /// Redacted, registry-approved construct label.
+    pub construct: String,
+    /// Immutable certificate-registry identifier for the applied rule.
+    pub rule_id: String,
+}
+
+/// A redacted witness for the exact statement and decision returned by one
+/// [`Classifier::classify`] call.
+///
+/// This is a proof *of the decision already enforced by the guard*; it never
+/// authorizes execution by itself. The response-side `bound_audit_hash` is
+/// intentionally excluded from [`Self::core_hash`] to avoid a cycle with the
+/// audit entry hash that covers the core hash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerdictCertificate {
+    /// SHA-256 of the exact statement bytes classified by the guard.
+    pub stmt_digest: String,
+    /// Required operating level, absent only for a forbidden verdict.
+    pub level: Option<OperatingLevel>,
+    /// Final risk verdict returned by this classification call.
+    pub verdict: DangerLevel,
+    /// Ordered, redacted derivation facts from the immutable registry.
+    pub derivation: Vec<VerdictDerivationStep>,
+    /// Guard package version plus immutable rule-registry generation.
+    pub classifier_version: String,
+    /// Oracle-observed SCN when a later execution path has one.
+    pub observed_scn: Option<String>,
+    /// Response-side binding to the durable audit entry, added only after a
+    /// matching audit append and fsync succeeds.
+    pub bound_audit_hash: Option<String>,
+}
+
+/// Why a certificate could not be bound to a persisted audit record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VerdictCertificateBindingError {
+    /// The audit record describes different exact SQL bytes.
+    SqlDigestMismatch,
+    /// The audit record is missing this certificate's core hash, or contains a
+    /// hash for a different certificate core.
+    CoreHashMismatch,
+    /// The purported audit entry hash is not the canonical SHA-256 wire form.
+    InvalidAuditEntryHash,
+}
+
+/// Current immutable certificate registry generation.
+pub const VERDICT_CERTIFICATE_REGISTRY_GENERATION: u16 = 1;
+
+/// Classifier build and certificate-registry identity carried in every proof.
+pub const VERDICT_CERTIFICATE_CLASSIFIER_VERSION: &str = concat!(
+    env!("CARGO_PKG_NAME"),
+    "/",
+    env!("CARGO_PKG_VERSION"),
+    ";registry=1"
+);
+
+const CERTIFICATE_CORE_HASH_DOMAIN: &str = "oraclemcp:verdict-certificate-core:v1\n";
+const CERTIFICATE_TERMINAL_RULE_ID: &str = "R16";
+
+impl VerdictCertificate {
+    fn from_decision(sql: &str, decision: &GuardDecision) -> Self {
+        let mut derivation = decision.certificate_derivation.clone();
+        derivation.push(VerdictDerivationStep {
+            construct: terminal_verdict_construct(decision.danger).to_owned(),
+            rule_id: CERTIFICATE_TERMINAL_RULE_ID.to_owned(),
+        });
+        VerdictCertificate {
+            stmt_digest: oraclemcp_audit::sha256_hex(sql.as_bytes()),
+            level: decision.required_level,
+            verdict: decision.danger,
+            derivation,
+            classifier_version: VERDICT_CERTIFICATE_CLASSIFIER_VERSION.to_owned(),
+            observed_scn: None,
+            bound_audit_hash: None,
+        }
+    }
+
+    /// Return a copy carrying an Oracle-observed SCN in the canonical decimal
+    /// wire form. The SCN remains inside the core hash, so callers must make
+    /// this update before persisting that hash to the audit record.
+    #[must_use]
+    pub fn with_observed_scn(mut self, observed_scn: Option<u64>) -> Self {
+        self.observed_scn = observed_scn.map(|scn| scn.to_string());
+        self
+    }
+
+    /// Bind this response projection to a persisted audit entry only when that
+    /// entry attests to the same SQL digest and certificate core. Callers must
+    /// treat an error as fail-closed: returning an unbound certificate (or a
+    /// read result that relies on it) would make the proof unverifiable.
+    ///
+    /// The audit record stores [`Self::core_hash`], not the returned
+    /// `bound_audit_hash`, to keep the two hash domains non-circular.
+    pub fn bind_to_persisted_audit(
+        mut self,
+        audit_sql_sha256: &str,
+        audit_certificate_core_hash: Option<&str>,
+        audit_entry_hash: &str,
+    ) -> Result<Self, VerdictCertificateBindingError> {
+        if self.stmt_digest != audit_sql_sha256 {
+            return Err(VerdictCertificateBindingError::SqlDigestMismatch);
+        }
+        let certificate_core_hash = self.core_hash();
+        if audit_certificate_core_hash != Some(certificate_core_hash.as_str()) {
+            return Err(VerdictCertificateBindingError::CoreHashMismatch);
+        }
+        if !is_canonical_sha256(audit_entry_hash) {
+            return Err(VerdictCertificateBindingError::InvalidAuditEntryHash);
+        }
+        self.bound_audit_hash = Some(audit_entry_hash.to_owned());
+        Ok(self)
+    }
+
+    /// Compute the domain-separated SHA-256 over the RFC-8785-compatible core
+    /// JSON. The core has only ASCII strings, `null`, and arrays of fixed
+    /// labels, so `serde_json`'s compact serialization of this lexicographically
+    /// ordered struct is JCS-equivalent without accepting arbitrary JSON values.
+    #[must_use]
+    pub fn core_hash(&self) -> String {
+        #[derive(Serialize)]
+        struct CertificateCore<'a> {
+            classifier_version: &'a str,
+            derivation: &'a [VerdictDerivationStep],
+            level: Option<OperatingLevel>,
+            observed_scn: &'a Option<String>,
+            stmt_digest: &'a str,
+            verdict: DangerLevel,
+        }
+
+        let core = CertificateCore {
+            classifier_version: &self.classifier_version,
+            derivation: &self.derivation,
+            level: self.level,
+            observed_scn: &self.observed_scn,
+            stmt_digest: &self.stmt_digest,
+            verdict: self.verdict,
+        };
+        let canonical = serde_json::to_vec(&core)
+            .expect("verdict certificate core contains only infallibly serializable fields");
+        let mut payload = Vec::with_capacity(CERTIFICATE_CORE_HASH_DOMAIN.len() + canonical.len());
+        payload.extend_from_slice(CERTIFICATE_CORE_HASH_DOMAIN.as_bytes());
+        payload.extend_from_slice(&canonical);
+        oraclemcp_audit::sha256_hex(&payload)
+    }
+}
+
+fn is_canonical_sha256(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
+fn terminal_verdict_construct(danger: DangerLevel) -> &'static str {
+    match danger {
+        DangerLevel::Safe => "final_verdict:SAFE",
+        DangerLevel::Guarded => "final_verdict:GUARDED",
+        DangerLevel::Destructive => "final_verdict:DESTRUCTIVE",
+        DangerLevel::Forbidden => "final_verdict:FORBIDDEN",
+    }
+}
+
 /// What the guard decided about a statement batch (before the level gate).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq)]
 pub struct GuardDecision {
     /// The batch danger tier (max over statements).
     pub danger: DangerLevel,
@@ -84,9 +256,45 @@ pub struct GuardDecision {
     /// occurs only when query rows are fetched. The generic execute path must
     /// not report this effect as completed without driving that fetch.
     pub query_effect_requires_fetch: bool,
+    /// Always populated by public [`Classifier::classify`]. The raw classifier
+    /// keeps it absent while it builds a decision so every public certificate
+    /// is derived from the exact final decision, not an early approximation.
+    verdict_certificate: Option<VerdictCertificate>,
+    /// Internal redacted rule facts accumulated by the exact classification
+    /// branches that ran. They are copied into the public certificate only
+    /// after the final decision is fixed.
+    certificate_derivation: Vec<VerdictDerivationStep>,
+}
+
+impl PartialEq for GuardDecision {
+    fn eq(&self, other: &Self) -> bool {
+        self.danger == other.danger
+            && self.required_level == other.required_level
+            && self.objects_affected == other.objects_affected
+            && self.safe_alternative == other.safe_alternative
+            && self.reason == other.reason
+            && self.reason_category == other.reason_category
+            && self.offending_construct == other.offending_construct
+            && self.non_transactional_effect == other.non_transactional_effect
+            && self.query_effect_requires_fetch == other.query_effect_requires_fetch
+    }
 }
 
 impl GuardDecision {
+    /// The redacted certificate produced by the same call that returned this
+    /// decision. This accessor cannot be absent for public classifications.
+    #[must_use]
+    pub fn verdict_certificate(&self) -> &VerdictCertificate {
+        self.verdict_certificate
+            .as_ref()
+            .expect("public Classifier::classify must attach a verdict certificate")
+    }
+
+    fn with_verdict_certificate(mut self, certificate: VerdictCertificate) -> Self {
+        self.verdict_certificate = Some(certificate);
+        self
+    }
+
     /// Gate the decision against a session's operating level (wires P1-1 into
     /// the P0-7 level core): classification runs *before* the step-up gate, so
     /// the required level is known when compared to the session's current level.
@@ -1167,6 +1375,25 @@ pub struct StatementClass {
     pub required: Option<OperatingLevel>,
     /// Objects/routines referenced (best-effort).
     pub objects: Vec<String>,
+    /// Redacted R15 outcome when this query actually consulted the routine
+    /// purity oracle. Internal so no caller can confuse object names with the
+    /// certificate's fixed construct vocabulary.
+    r15_derivation: Option<R15Derivation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum R15Derivation {
+    AllProvenReadOnly,
+    UnprovenPresent,
+}
+
+impl R15Derivation {
+    const fn construct(self) -> &'static str {
+        match self {
+            R15Derivation::AllProvenReadOnly => "routine_purity:all_proven_read_only",
+            R15Derivation::UnprovenPresent => "routine_purity:unproven_present",
+        }
+    }
 }
 
 impl StatementClass {
@@ -1175,6 +1402,7 @@ impl StatementClass {
             danger: DangerLevel::Forbidden,
             required: None,
             objects: Vec::new(),
+            r15_derivation: None,
         }
     }
 }
@@ -2445,6 +2673,7 @@ fn raise_to_leading_floor(class: StatementClass, sql: &str) -> StatementClass {
         // floor never relaxes a Forbidden statement back to a permissible level.
         required: class.required.map(|level| level.max(floor_level)),
         objects: class.objects,
+        r15_derivation: class.r15_derivation,
     }
 }
 
@@ -2475,6 +2704,7 @@ fn classify_statement(
                     danger: DangerLevel::Destructive,
                     required: Some(OperatingLevel::Admin),
                     objects: Vec::new(),
+                    r15_derivation: None,
                 };
             }
             // Object-level destructive DDL that sqlparser 0.62 cannot parse —
@@ -2490,6 +2720,7 @@ fn classify_statement(
                     danger: DangerLevel::Destructive,
                     required: Some(OperatingLevel::Ddl),
                     objects: Vec::new(),
+                    r15_derivation: None,
                 };
             }
             // A dangerous verb BURIED after a benign leading clause in an
@@ -2509,6 +2740,7 @@ fn classify_statement(
                 danger: DangerLevel::Guarded,
                 required: Some(OperatingLevel::ReadWrite),
                 objects: Vec::new(),
+                r15_derivation: None,
             };
         }
     };
@@ -2516,11 +2748,13 @@ fn classify_statement(
         danger: DangerLevel::Guarded,
         required: Some(OperatingLevel::ReadWrite),
         objects,
+        r15_derivation: None,
     };
     let destructive = |level: OperatingLevel, objects: Vec<String>| StatementClass {
         danger: DangerLevel::Destructive,
         required: Some(level),
         objects,
+        r15_derivation: None,
     };
     // NOTE: `Statement::Variant { .. }` matches tuple / newtype variants too
     // (their fields are positional `0`, `1`, …), so every arm below uses the
@@ -2594,19 +2828,30 @@ fn classify_statement(
                 && !stmt_blocks_safe
                 && !has_row_lock
                 && !has_unresolved_call;
+            let r15_derivation = (!calls.is_empty()).then_some(if all_proven {
+                R15Derivation::AllProvenReadOnly
+            } else {
+                R15Derivation::UnprovenPresent
+            });
             let mut objects: Vec<String> = calls.iter().map(|c| c.name.clone()).collect();
             if stmt_pure {
                 StatementClass {
                     danger: DangerLevel::Safe,
                     required: Some(OperatingLevel::ReadOnly),
                     objects,
+                    r15_derivation,
                 }
             } else {
                 if stmt_blocks_safe {
                     objects.extend(base_objects.iter().map(|o| o.name.clone()));
                 }
                 objects.extend(unresolved_calls);
-                guarded_rw(objects)
+                StatementClass {
+                    danger: DangerLevel::Guarded,
+                    required: Some(OperatingLevel::ReadWrite),
+                    objects,
+                    r15_derivation,
+                }
             }
         }
         Statement::Insert(_) => guarded_rw(Vec::new()),
@@ -2630,6 +2875,7 @@ fn classify_statement(
             danger: DangerLevel::Guarded,
             required: Some(OperatingLevel::ReadWrite),
             objects: Vec::new(),
+            r15_derivation: None,
         },
         // Transaction control, cursor lifecycle, table locks, non-role session
         // SET, and CALL are session-/transaction-scoped ReadWrite operations —
@@ -2942,9 +3188,19 @@ impl Classifier {
         }
     }
 
-    /// Classify a statement / batch into a [`GuardDecision`], fail-closed.
+    /// Classify a statement / batch into a [`GuardDecision`], fail-closed, and
+    /// attach the certificate built from this exact final decision.
     #[must_use]
     pub fn classify(&self, sql: &str) -> GuardDecision {
+        let decision = self.classify_raw(sql);
+        let certificate = VerdictCertificate::from_decision(sql, &decision);
+        decision.with_verdict_certificate(certificate)
+    }
+
+    /// Classification implementation before the response/audit witness is
+    /// attached. Keeping this private makes it impossible for callers to obtain
+    /// an enforced decision without the certificate from the same call.
+    fn classify_raw(&self, sql: &str) -> GuardDecision {
         let trimmed = sql.trim();
         if trimmed.is_empty() {
             return GuardDecision {
@@ -2957,6 +3213,8 @@ impl Classifier {
                 offending_construct: None,
                 non_transactional_effect: false,
                 query_effect_requires_fetch: false,
+                verdict_certificate: None,
+                certificate_derivation: Vec::new(),
             };
         }
 
@@ -2990,6 +3248,8 @@ impl Classifier {
                 offending_construct: Some("ALTER SESSION".to_owned()),
                 non_transactional_effect: true,
                 query_effect_requires_fetch: false,
+                verdict_certificate: None,
+                certificate_derivation: Vec::new(),
             };
         }
 
@@ -3048,6 +3308,8 @@ impl Classifier {
                     offending_construct: None,
                     non_transactional_effect: false,
                     query_effect_requires_fetch: false,
+                    verdict_certificate: None,
+                    certificate_derivation: Vec::new(),
                 };
             }
             StageA::BlockListed(pat) => {
@@ -3182,6 +3444,8 @@ impl Classifier {
                     offending_construct: Some("PL/SQL block".to_owned()),
                     non_transactional_effect: has_sequence_nextval,
                     query_effect_requires_fetch: false,
+                    verdict_certificate: None,
+                    certificate_derivation: Vec::new(),
                 };
             }
             StageA::PureSql => {}
@@ -3259,6 +3523,14 @@ impl Classifier {
             .or(Some(OperatingLevel::ReadOnly));
         let objects_affected: Vec<String> =
             classes.iter().flat_map(|c| c.objects.clone()).collect();
+        let certificate_derivation = classes
+            .iter()
+            .filter_map(|class| class.r15_derivation)
+            .map(|r15| VerdictDerivationStep {
+                construct: r15.construct().to_owned(),
+                rule_id: "R15".to_owned(),
+            })
+            .collect();
         // A well-formed statement that needs more than READ_ONLY is a level gate
         // (K8: RequiresHigherLevel); a proven read stays uncategorized.
         let needs_escalation = required_level.is_some_and(|level| level > OperatingLevel::ReadOnly);
@@ -3291,6 +3563,8 @@ impl Classifier {
             offending_construct: has_sequence_nextval.then(|| "sequence.NEXTVAL".to_owned()),
             non_transactional_effect: has_sequence_nextval,
             query_effect_requires_fetch,
+            verdict_certificate: None,
+            certificate_derivation,
         }
     }
 }
@@ -3308,6 +3582,8 @@ fn forbidden_decision(reason: String) -> GuardDecision {
         offending_construct: None,
         non_transactional_effect: false,
         query_effect_requires_fetch: false,
+        verdict_certificate: None,
+        certificate_derivation: Vec::new(),
     }
 }
 
