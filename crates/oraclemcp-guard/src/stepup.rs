@@ -230,6 +230,9 @@ impl StepUpRegistry {
         if pending.deadline.is_expired() {
             return Err(StepUpError::Expired);
         }
+        if let Some(resolution) = pending.resolution {
+            return Ok(resolution);
+        }
         let resolution = match option {
             StepUpOption::ApproveOnce => StepUpResolution::ApprovedOnce,
             StepUpOption::ApproveWindow { ttl_secs } => StepUpResolution::ApprovedWindow {
@@ -251,18 +254,22 @@ impl StepUpRegistry {
         token: &CiToken,
         presented_secret: &str,
     ) -> Result<StepUpResolution, StepUpError> {
-        let target = {
-            let challenges = self.challenges.lock().expect("stepup mutex poisoned");
-            let pending = challenges.get(challenge_id).ok_or(StepUpError::NotFound)?;
-            if pending.deadline.is_expired() {
-                return Err(StepUpError::Expired);
-            }
-            pending.target_level
-        };
-        if !token.authorizes(presented_secret, target) {
+        let mut challenges = self.challenges.lock().expect("stepup mutex poisoned");
+        let pending = challenges.get(challenge_id).ok_or(StepUpError::NotFound)?;
+        if pending.deadline.is_expired() {
+            return Err(StepUpError::Expired);
+        }
+        if !token.authorizes(presented_secret, pending.target_level) {
             return Err(StepUpError::Unauthorized);
         }
-        self.resolve(challenge_id, StepUpOption::ApproveWindow { ttl_secs: 900 })
+        let resolution = pending
+            .resolution
+            .unwrap_or(StepUpResolution::ApprovedWindow {
+                level: pending.target_level,
+                ttl_secs: 900,
+            });
+        challenges.remove(challenge_id);
+        Ok(resolution)
     }
 
     /// The agent polls a challenge's status (poll/Task — P1-10b).
@@ -276,6 +283,31 @@ impl StepUpRegistry {
                 Some(resolution) => ChallengeStatus::Resolved { resolution },
                 None => ChallengeStatus::Pending,
             },
+        }
+    }
+
+    /// Consume a resolved challenge that is about to be applied.
+    ///
+    /// Plain [`poll`](Self::poll) is non-destructive so a client can observe
+    /// pending state. Grant application is different: once an approval has been
+    /// used to create a statement grant or an elevation window, the same
+    /// challenge id must not be replayable to refresh the window.
+    #[must_use]
+    pub fn take_resolved(&self, challenge_id: &str) -> ChallengeStatus {
+        let mut challenges = self.challenges.lock().expect("stepup mutex poisoned");
+        let Some(pending) = challenges.get(challenge_id) else {
+            return ChallengeStatus::ExpiredOrUnknown;
+        };
+        if pending.deadline.is_expired() {
+            challenges.remove(challenge_id);
+            return ChallengeStatus::ExpiredOrUnknown;
+        }
+        match pending.resolution {
+            Some(resolution) => {
+                challenges.remove(challenge_id);
+                ChallengeStatus::Resolved { resolution }
+            }
+            None => ChallengeStatus::Pending,
         }
     }
 
@@ -377,6 +409,64 @@ mod tests {
     }
 
     #[test]
+    fn resolution_is_first_writer_wins() {
+        let reg = StepUpRegistry::new();
+        let c = reg.issue(
+            OperatingLevel::ReadWrite,
+            "UPDATE t SET x=1",
+            "w",
+            Duration::from_secs(300),
+        );
+        let first = reg
+            .resolve(&c.challenge_id, StepUpOption::Deny)
+            .expect("first resolution");
+        let second = reg
+            .resolve(
+                &c.challenge_id,
+                StepUpOption::ApproveWindow { ttl_secs: 900 },
+            )
+            .expect("second resolution is idempotent");
+        assert_eq!(first, StepUpResolution::Denied);
+        assert_eq!(second, StepUpResolution::Denied);
+        assert_eq!(
+            reg.poll(&c.challenge_id),
+            ChallengeStatus::Resolved {
+                resolution: StepUpResolution::Denied
+            }
+        );
+    }
+
+    #[test]
+    fn resolved_challenge_is_consumed_once_when_applied() {
+        let reg = StepUpRegistry::new();
+        let c = reg.issue(
+            OperatingLevel::ReadWrite,
+            "UPDATE t SET x=1",
+            "w",
+            Duration::from_secs(300),
+        );
+        reg.resolve(
+            &c.challenge_id,
+            StepUpOption::ApproveWindow { ttl_secs: 600 },
+        )
+        .expect("resolve");
+        assert_eq!(
+            reg.take_resolved(&c.challenge_id),
+            ChallengeStatus::Resolved {
+                resolution: StepUpResolution::ApprovedWindow {
+                    level: OperatingLevel::ReadWrite,
+                    ttl_secs: 600
+                }
+            }
+        );
+        assert_eq!(
+            reg.take_resolved(&c.challenge_id),
+            ChallengeStatus::ExpiredOrUnknown
+        );
+        assert_eq!(reg.poll(&c.challenge_id), ChallengeStatus::ExpiredOrUnknown);
+    }
+
+    #[test]
     fn expired_challenge_cannot_resolve_or_poll() {
         let reg = StepUpRegistry::new();
         let c = reg.issue(
@@ -456,6 +546,7 @@ mod tests {
             .resolve_with_ci_token(&c.challenge_id, &token, "ci")
             .expect("ci resolve");
         assert!(matches!(res, StepUpResolution::ApprovedWindow { .. }));
+        assert_eq!(reg.poll(&c.challenge_id), ChallengeStatus::ExpiredOrUnknown);
         // A token scoped below the target cannot approve.
         let weak = CiToken::issue("ci", OperatingLevel::ReadOnly, Duration::from_secs(3600));
         let c2 = reg.issue(

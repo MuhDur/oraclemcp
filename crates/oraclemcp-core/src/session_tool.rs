@@ -366,8 +366,10 @@ pub async fn oracle_session(
                             })?;
                         return resolution_to_result(deps.level, target, res);
                     }
-                    // Interactive: poll the (operator-resolved) challenge.
-                    match deps.stepup.poll(&cid) {
+                    // Interactive: consume the (operator-resolved) challenge
+                    // when applying it. A resolved window grant must not be
+                    // replayable to refresh the elevation deadline.
+                    match deps.stepup.take_resolved(&cid) {
                         ChallengeStatus::Pending => Ok(json!({
                             "action": "escalate", "status": "pending", "challenge_id": cid,
                         })),
@@ -671,6 +673,41 @@ parse(r#"{"action":"set_session","lease_id":"l","statement":"ALTER SESSION SET C
         assert_eq!(out["status"], json!("escalated"));
         assert!(d.level.has_active_elevation());
         assert_eq!(d.level.effective_level(), OperatingLevel::ReadWrite);
+    }
+
+    #[test]
+    fn approved_window_challenge_cannot_be_replayed_to_refresh_elevation() {
+        let leases = LeaseManager::new();
+        let mut level = SessionLevelState::new(OperatingLevel::ReadWrite, false);
+        let stepup = StepUpRegistry::new();
+        let acq = OkAcquirer;
+        let chal = stepup.issue(
+            OperatingLevel::ReadWrite,
+            "ESCALATE SESSION TO READ_WRITE",
+            "x",
+            CHALLENGE_TTL,
+        );
+        stepup
+            .resolve(
+                &chal.challenge_id,
+                StepUpOption::ApproveWindow { ttl_secs: 600 },
+            )
+            .expect("resolve");
+        let mut d = deps(&leases, &mut level, &stepup, &acq);
+        let args = format!(
+            r#"{{"action":"escalate","target_level":"READ_WRITE","challenge_id":"{}"}}"#,
+            chal.challenge_id
+        );
+        let first = sess(parse(&args), &mut d).expect("first application escalates");
+        assert_eq!(first["status"], json!("escalated"));
+
+        let replay = sess(parse(&args), &mut d).expect_err("challenge is single-use");
+        assert_eq!(replay.error_class, ErrorClass::ChallengeRequired);
+        assert!(
+            replay.message.contains("expired or unknown"),
+            "{}",
+            replay.message
+        );
     }
 
     #[test]
