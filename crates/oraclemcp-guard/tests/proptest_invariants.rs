@@ -21,7 +21,11 @@
 //! Small case counts keep CI fast; the standing adversarial corpus + cargo-fuzz
 //! target cover the example-level and never-panic dimensions.
 
-use oraclemcp_guard::{Classifier, DangerLevel, is_allowed_alter_session};
+use oraclemcp_guard::policy::{
+    PolicyTightening, SQL_POLICY_VERSION, SqlPolicyConfig, SqlPolicyEffectConfig,
+    SqlPolicyEvaluationContext, SqlPolicyMatchConfig, SqlPolicyRuleConfig, SqlPolicyVerb,
+};
+use oraclemcp_guard::{Classifier, DangerLevel, OperatingLevel, is_allowed_alter_session};
 use proptest::prelude::*;
 
 const ALLOWLISTED_PARAMS: &[&str] = &[
@@ -223,6 +227,110 @@ fn canonical_whitespace(sql: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase()
+}
+
+fn policy_property_statement(kind: u8) -> (&'static str, SqlPolicyEvaluationContext) {
+    match kind % 5 {
+        0 => (
+            "SELECT id FROM app.orders WHERE status = 'OPEN'",
+            SqlPolicyEvaluationContext::new(
+                Some("APP".to_owned()),
+                Some("ORDERS".to_owned()),
+                SqlPolicyVerb::Select,
+                Some("oauth:analyst-7".to_owned()),
+            ),
+        ),
+        1 => (
+            "UPDATE app.orders SET status = 'OPEN' WHERE id = 7",
+            SqlPolicyEvaluationContext::new(
+                Some("APP".to_owned()),
+                Some("ORDERS".to_owned()),
+                SqlPolicyVerb::Update,
+                Some("oauth:analyst-7".to_owned()),
+            ),
+        ),
+        2 => (
+            "DELETE FROM app.orders WHERE id = 7",
+            SqlPolicyEvaluationContext::new(
+                Some("APP".to_owned()),
+                Some("ORDERS".to_owned()),
+                SqlPolicyVerb::Delete,
+                Some("oauth:analyst-7".to_owned()),
+            ),
+        ),
+        3 => (
+            "DROP TABLE app.orders",
+            SqlPolicyEvaluationContext::new(
+                Some("APP".to_owned()),
+                Some("ORDERS".to_owned()),
+                SqlPolicyVerb::Ddl,
+                Some("oauth:analyst-7".to_owned()),
+            ),
+        ),
+        _ => (
+            "BEGIN EXECUTE IMMEDIATE 'DROP TABLE app.orders'; END;",
+            SqlPolicyEvaluationContext::new(
+                None,
+                None,
+                SqlPolicyVerb::Plsql,
+                Some("oauth:analyst-7".to_owned()),
+            ),
+        ),
+    }
+}
+
+fn generated_tightening_policy(
+    context: &SqlPolicyEvaluationContext,
+    effects: &[u8],
+    matching: &[bool],
+    levels: &[u8],
+) -> SqlPolicyConfig {
+    let rules = effects
+        .iter()
+        .enumerate()
+        .map(|(index, effect_kind)| {
+            let matches_context = matching[index % matching.len()];
+            let (schema, object) = if matches_context {
+                (context.schema.clone(), context.object.clone())
+            } else {
+                (Some("OTHER".to_owned()), Some("ORDERS".to_owned()))
+            };
+            let can_require_predicate = matches!(
+                context.verb,
+                SqlPolicyVerb::Select | SqlPolicyVerb::Update | SqlPolicyVerb::Delete
+            );
+            let effect = match effect_kind % 3 {
+                0 => SqlPolicyEffectConfig::Deny,
+                1 => SqlPolicyEffectConfig::RequireLevel {
+                    level: OperatingLevel::all()[usize::from(levels[index % levels.len()] % 4)],
+                },
+                _ if can_require_predicate => SqlPolicyEffectConfig::RequirePredicate {
+                    sql_fragment: "tenant_id = 7".to_owned(),
+                },
+                _ => SqlPolicyEffectConfig::RequireLevel {
+                    level: OperatingLevel::all()[usize::from(levels[index % levels.len()] % 4)],
+                },
+            };
+            SqlPolicyRuleConfig {
+                id: format!("generated-{index}"),
+                match_clause: SqlPolicyMatchConfig {
+                    schema,
+                    object,
+                    verb: Some(context.verb),
+                    principal: Some(if matches_context {
+                        "oauth:analyst-7".to_owned()
+                    } else {
+                        "oauth:other-9".to_owned()
+                    }),
+                },
+                effect,
+            }
+        })
+        .collect();
+    SqlPolicyConfig {
+        version: SQL_POLICY_VERSION,
+        rules,
+    }
 }
 
 #[test]
@@ -431,5 +539,41 @@ proptest! {
             "wrapped {:?}",
             wrapped
         );
+    }
+
+    /// Arc N N4: every syntactically loadable generated policy composes as a
+    /// restriction. The result is either `Deny`, or it carries a required level
+    /// no lower than the already-classified base statement. This covers matched
+    /// and non-matching selectors plus all three v1 effect kinds over reads,
+    /// writes, DDL, and a base-classifier refusal.
+    #[test]
+    fn sql_policy_composition_is_never_more_permissive_than_base(
+        statement_kind in 0u8..5,
+        effects in prop::collection::vec(0u8..3, 0..6),
+        matching in prop::collection::vec(any::<bool>(), 1..6),
+        levels in prop::collection::vec(0u8..4, 1..6),
+    ) {
+        let (sql, context) = policy_property_statement(statement_kind);
+        let policy = generated_tightening_policy(&context, &effects, &matching, &levels);
+        prop_assert!(policy.validate().is_ok(), "generator emitted an unloadable policy: {policy:?}");
+
+        let base = Classifier::default().classify(sql);
+        match policy.evaluate(&base, &context) {
+            PolicyTightening::Deny(_) => {}
+            PolicyTightening::Narrow(narrowing) => {
+                let base_level = base.required_level.expect(
+                    "a non-denied policy result must preserve a non-forbidden base decision",
+                );
+                prop_assert_ne!(base.danger, DangerLevel::Forbidden);
+                prop_assert!(
+                    narrowing.required_level >= base_level,
+                    "POLICY LOOSENING: base={base:?}, narrowing={narrowing:?}, policy={policy:?}",
+                );
+                prop_assert!(
+                    narrowing.base_required_level >= base_level,
+                    "POLICY BASE FLOOR LOST: base={base:?}, narrowing={narrowing:?}",
+                );
+            }
+        }
     }
 }

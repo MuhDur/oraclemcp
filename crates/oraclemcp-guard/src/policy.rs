@@ -549,7 +549,7 @@ pub enum PolicyPredicateRewrite {
     /// Rewriting or candidate classification failed closed.
     Deny(PolicyRewriteDenial),
     /// A newly rendered candidate passed mandatory reclassification.
-    Reclassified(PolicyReclassifiedStatement),
+    Reclassified(Box<PolicyReclassifiedStatement>),
 }
 
 /// Add the policy predicates to a parsed AST and immediately re-classify the
@@ -829,12 +829,12 @@ fn finalize_reclassified_candidate(
         return rewrite_deny(PolicyRewriteDenialReason::CandidateNotReadOnly, narrowing);
     }
 
-    PolicyPredicateRewrite::Reclassified(PolicyReclassifiedStatement {
+    PolicyPredicateRewrite::Reclassified(Box::new(PolicyReclassifiedStatement {
         sql,
         final_danger: base.danger.max(candidate.danger),
         final_required_level: narrowing.required_level.max(candidate_required_level),
         candidate,
-    })
+    }))
 }
 
 /// A load-time SQL-policy grammar failure with the policy-relative field and a

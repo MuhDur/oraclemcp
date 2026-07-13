@@ -495,6 +495,47 @@ fn policy_composition_corpus_never_loosens_a_classifier_refusal() {
 }
 
 #[test]
+fn policy_composition_corpus_level_floor_never_lowers_a_write_requirement() {
+    // Arc N N4 representative: a policy-level floor can only raise an already
+    // admitted write's requirement; it cannot replace READ_WRITE with a lower
+    // level or an allow-like result.
+    let base = Classifier::default().classify("UPDATE app.orders SET status = 'OPEN' WHERE id = 7");
+    let policy = SqlPolicyConfig {
+        version: SQL_POLICY_VERSION,
+        rules: vec![SqlPolicyRuleConfig {
+            id: "operator-ddl-floor".to_owned(),
+            match_clause: SqlPolicyMatchConfig {
+                schema: Some("APP".to_owned()),
+                object: Some("ORDERS".to_owned()),
+                verb: Some(SqlPolicyVerb::Update),
+                principal: Some("oauth:operator-7".to_owned()),
+            },
+            effect: SqlPolicyEffectConfig::RequireLevel {
+                level: oraclemcp_guard::OperatingLevel::Ddl,
+            },
+        }],
+    };
+    let context = SqlPolicyEvaluationContext::new(
+        Some("APP".to_owned()),
+        Some("ORDERS".to_owned()),
+        SqlPolicyVerb::Update,
+        Some("oauth:operator-7".to_owned()),
+    );
+
+    let PolicyTightening::Narrow(narrowing) = policy.evaluate(&base, &context) else {
+        panic!("a matching level-floor policy must return Narrow, never an Allow-like result");
+    };
+    assert!(
+        narrowing.required_level >= base.required_level.expect("UPDATE requires a level"),
+        "policy must never lower the base write requirement"
+    );
+    assert_eq!(
+        narrowing.required_level,
+        oraclemcp_guard::OperatingLevel::Ddl
+    );
+}
+
+#[test]
 fn derived_subquery_smuggled_dml_is_never_read_only() {
     // The fail-closed-net hole (oracle-derived-dml-body): a DML SetExpr hidden in
     // a derived / JOIN / UNION-branch / Expr subquery escaped the top-level-only
