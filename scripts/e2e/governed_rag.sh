@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Live 23ai proof for governed hybrid retrieval. The underlying version-matrix
-# ladder provisions an isolated VECTOR fixture and drives the served MCP
-# binary; this wrapper makes the Arc-F contract an explicit run_all scenario.
+# Live governed-RAG proof. The underlying version-matrix ladder provisions an
+# isolated VECTOR fixture and drives the served MCP binary; this wrapper makes
+# the Arc-F contract explicit across the real capability boundary: FREE 23ai
+# proves vector/hybrid egress, while XE 18 and XE 21 prove the same served
+# `query_text` request fails with the typed `requires_23ai` refusal.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT/scripts/e2e/lib.sh"
 
 E2E_SCENARIO="governed_rag"
-E2E_LANE="free23"
+E2E_LANE="governed-rag-matrix"
 E2E_PROFILE="governed-rag"
 E2E_LEVEL="READ_ONLY"
 export E2E_SCENARIO E2E_LANE E2E_PROFILE E2E_LEVEL
@@ -21,7 +23,7 @@ for arg in "$@"; do
   case "$parsed" in
     0) continue ;;
     3)
-      echo "Run the served governed-RAG hybrid retrieval proof on local FREE 23ai."
+      echo "Run served governed-RAG proof on local XE 18, XE 21, and FREE 23ai lab lanes."
       e2e_usage_common
       exit 0
       ;;
@@ -33,27 +35,39 @@ for arg in "$@"; do
 done
 
 cd "$ROOT"
-e2e_log_event "scenario_start" "setup" "running" 0 "governed hybrid retrieval requires a live FREE 23ai lane"
+e2e_log_event "scenario_start" "setup" "running" 0 "governed hybrid retrieval requires local XE 18, XE 21, and FREE 23ai lanes"
 
 # Unlike optional general live scenarios, this bead's acceptance criterion IS a
-# served 23ai proof. A missing opt-in or credential is therefore a hard failure,
-# never a green skip in run_all.
+# served capability-boundary proof. A missing opt-in or any lane credential is
+# therefore a hard failure, never a green skip in run_all.
 if [ "${ORACLEMCP_LIVE_XE:-}" != "1" ]; then
-  e2e_finish_fail "governed-RAG requires ORACLEMCP_LIVE_XE=1 and the local FREE 23ai lab"
+  e2e_finish_fail "governed-RAG requires ORACLEMCP_LIVE_XE=1 and the local XE 18, XE 21, and FREE 23ai labs"
 fi
-for name in ORACLE_MATRIX_FREE23_USER ORACLE_MATRIX_FREE23_PASSWORD; do
-  if [ -z "${!name:-}" ]; then
-    e2e_finish_fail "governed-RAG requires $name for localhost:1522/FREEPDB1"
+for lane in XE18 XE21 FREE23; do
+  for suffix in USER PASSWORD; do
+    name="ORACLE_MATRIX_${lane}_${suffix}"
+    if [ -z "${!name:-}" ]; then
+      e2e_finish_fail "governed-RAG requires $name for the live capability-boundary matrix"
+    fi
+  done
+done
+
+for lane in XE18 XE21 FREE23; do
+  dsn_name="ORACLE_MATRIX_${lane}_DSN"
+  case "$lane" in
+    XE18) default_dsn="localhost:1518/XEPDB1" ;;
+    XE21) default_dsn="localhost:1520/XEPDB1" ;;
+    FREE23) default_dsn="localhost:1522/FREEPDB1" ;;
+  esac
+  if ! e2e_value_has_test_marker "${!dsn_name:-$default_dsn}"; then
+    e2e_finish_fail "governed-RAG $lane DSN must name a local/free/xe/test target"
   fi
 done
 
-if ! e2e_value_has_test_marker "${ORACLE_MATRIX_FREE23_DSN:-localhost:1522/FREEPDB1}"; then
-  e2e_finish_fail "governed-RAG FREE 23ai DSN must name a local/free/xe/test target"
+if ! bash "$ROOT/scripts/e2e/oracle_version_matrix.sh" \
+  --lane xe18 --lane xe21 --lane free23 "$@"; then
+  e2e_finish_fail "governed-RAG served capability-boundary proof failed"
 fi
 
-if ! bash "$ROOT/scripts/e2e/oracle_version_matrix.sh" --lane free23 "$@"; then
-  e2e_finish_fail "governed-RAG served FREE 23ai proof failed"
-fi
-
-e2e_log_event "scenario_assert" "assert" "pass" 0 "hybrid filter, masking, and direct-read equivalence passed"
+e2e_log_event "scenario_assert" "assert" "pass" 0 "FREE 23ai hybrid filter/masking/direct-read proof and XE 18/XE 21 typed-degrade proof passed"
 e2e_finish_pass
