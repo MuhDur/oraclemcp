@@ -37,13 +37,15 @@
 //!    capture fails closed and no directory appears. That is what makes a later,
 //!    well-meaning loosening of a projection a *test failure* instead of a leak.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
 use oraclemcp_audit::AuditRecord;
 use oraclemcp_config::OracleMcpConfig;
-use oraclemcp_guard::corpus::{CorpusRedactionError, redact_sql, safe_why};
+use oraclemcp_guard::classifier::{Classifier, ClassifierConfig};
+use oraclemcp_guard::corpus::{CorpusRedactionError, redact_sql, safe_why, validate_redacted_sql};
 use oraclemcp_guard::incident::{
     BuildIdentity, BundleEntry, BundleEntryKind, CASSETTE_DIR_NAME, CapturedLane, CapturedVerdict,
     IncidentCapture, IncidentManifest, IncidentManifestError, IncidentTrigger, MANIFEST_FILE_NAME,
@@ -91,6 +93,64 @@ pub enum IncidentCaptureError {
     /// manifest.
     #[error("incident bundle io failed: {0}")]
     Io(String),
+}
+
+/// Why a captured incident could not be replayed safely.
+///
+/// The variants intentionally carry no artifact text or path. A replay error is
+/// often copied into an operator ticket; returning the rejected bytes there
+/// would turn a fail-closed parser into a disclosure path.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum IncidentReplayError {
+    /// The bundle failed its manifest/hash verification.
+    #[error("the incident bundle could not be verified")]
+    Capture(#[from] IncidentCaptureError),
+    /// A cassette claimed to be redacted but did not survive the Arc J seam.
+    #[error("the incident bundle contains an unsafe replay artifact")]
+    UnsafeArtifact,
+    /// One lane gave two cassette frames the same deterministic position.
+    #[error("the incident bundle has ambiguous replay ordering")]
+    AmbiguousOrdering,
+    /// The deterministic runtime did not drain after replay.
+    #[error("the deterministic replay runtime did not quiesce")]
+    RuntimeNotQuiescent,
+}
+
+/// One fresh classification derived while replaying an incident cassette.
+///
+/// This deliberately contains only closed-vocabulary guard results. It does
+/// not repeat the statement, tool text, captured verdict, configuration, or
+/// audit tail, any of which could carry customer material in a tampered bundle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct IncidentReplayStep {
+    /// The validated manifest lane that supplied this frame.
+    pub lane_id: String,
+    /// The lane-local, recorded order of the replayed frame.
+    pub seq: u64,
+    /// The current classifier's closed danger label.
+    pub danger: String,
+    /// The current classifier's required operating level, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_level: Option<String>,
+    /// The current classifier's closed refusal category, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_class: Option<String>,
+}
+
+/// Deterministic, redaction-preserving result of replaying one bundle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct IncidentReplayReport {
+    /// Content-addressed identity of the verified bundle.
+    pub manifest_id: String,
+    /// The exact LabRuntime seed used for this replay.
+    pub seed: u64,
+    /// The number of fresh classifications in [`Self::verdicts`].
+    pub replayed_steps: usize,
+    /// Freshly derived classifications, in canonical lane/sequence order.
+    pub verdicts: Vec<IncidentReplayStep>,
+    /// Digest of the redacted audit tail's exact bytes.
+    pub audit_tail_sha256: String,
 }
 
 /// One recorded interaction in a lane's cassette.
@@ -246,6 +306,86 @@ pub fn verify_bundle(dir: &Path) -> Result<IncidentManifest, IncidentCaptureErro
         }
     }
     Ok(manifest)
+}
+
+/// Replay a verified incident bundle under asupersync's deterministic
+/// [`LabRuntimeTarget`].
+///
+/// Replay starts by re-checking the manifest and every entry hash, but that is
+/// not enough to make a bundle safe to consume: a bundle may have been rebuilt
+/// by an untrusted party with matching hashes. Each purportedly-redacted
+/// statement is therefore run through Arc J's stored-skeleton postcondition
+/// before the live classifier derives a fresh verdict. The manifest's
+/// `captured_verdict` is never read here; it is evidence only.
+pub fn replay_bundle(dir: &Path) -> Result<IncidentReplayReport, IncidentReplayError> {
+    let manifest = verify_bundle(dir)?;
+    let config = TestConfig {
+        rng_seed: Some(manifest.seed),
+        ..TestConfig::default()
+    };
+    let mut runtime = LabRuntimeTarget::create_runtime(config);
+    let replay_dir = dir.to_path_buf();
+
+    let report = LabRuntimeTarget::block_on(&mut runtime, async move {
+        replay_verified_bundle(&replay_dir, manifest)
+    });
+    if !runtime.is_quiescent() {
+        return Err(IncidentReplayError::RuntimeNotQuiescent);
+    }
+    report
+}
+
+fn replay_verified_bundle(
+    dir: &Path,
+    manifest: IncidentManifest,
+) -> Result<IncidentReplayReport, IncidentReplayError> {
+    let classifier = Classifier::new(ClassifierConfig::served_strict());
+    let mut verdicts = Vec::new();
+
+    for lane in &manifest.lanes {
+        let mut frames = read_cassette(dir, &lane.lane_id)?;
+        let mut seen_sequences = BTreeSet::new();
+        for frame in &frames {
+            if !seen_sequences.insert(frame.seq) {
+                return Err(IncidentReplayError::AmbiguousOrdering);
+            }
+            if let Some(statement) = frame.statement_redacted.as_deref() {
+                // Reuse, rather than duplicate, the Arc J redaction seam. Its
+                // postcondition understands the generated placeholders in a
+                // stored skeleton, which the raw-input redactor intentionally
+                // does not treat as ordinary Oracle source text.
+                validate_redacted_sql(statement)
+                    .map_err(|_| IncidentReplayError::UnsafeArtifact)?;
+            }
+        }
+        frames.sort_by_key(|frame| frame.seq);
+
+        for frame in frames {
+            let Some(statement) = frame.statement_redacted.as_deref() else {
+                continue;
+            };
+            let decision = oraclemcp_guard::reclassify_at_replay(&classifier, statement);
+            verdicts.push(IncidentReplayStep {
+                lane_id: lane.lane_id.clone(),
+                seq: frame.seq,
+                danger: format!("{:?}", decision.danger),
+                required_level: decision.required_level.map(|level| format!("{level:?}")),
+                reason_class: decision
+                    .reason_category
+                    .map(|reason_class| format!("{reason_class:?}")),
+            });
+        }
+    }
+
+    let audit_tail = fs::read(dir.join(REDACTED_AUDIT_TAIL_FILE_NAME))
+        .map_err(|_| IncidentReplayError::UnsafeArtifact)?;
+    Ok(IncidentReplayReport {
+        manifest_id: manifest.id,
+        seed: manifest.seed,
+        replayed_steps: verdicts.len(),
+        verdicts,
+        audit_tail_sha256: oraclemcp_audit::sha256_hex(&audit_tail),
+    })
 }
 
 fn entry_kind(path: &str) -> BundleEntryKind {

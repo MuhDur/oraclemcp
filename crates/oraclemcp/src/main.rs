@@ -66,6 +66,9 @@ use oraclemcp_config::{
 };
 use oraclemcp_core::admission::DEFAULT_READ_PER_PROFILE_CAP;
 use oraclemcp_core::http::SinglePrincipalGuard;
+use oraclemcp_core::incident::{
+    Cassette, CassetteFrame, IncidentCaptureRequest, capture_bundle, replay_bundle,
+};
 use oraclemcp_core::{
     AdmissionController, CapabilitiesReport, ChangeProposalStore, ClientCredentialError,
     ClientCredentialIssueRequest, ClientCredentialLifecycle, ClientCredentialStore,
@@ -91,6 +94,7 @@ use oraclemcp_db::{
     RustOracleConnection,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
+use oraclemcp_guard::incident::{BuildIdentity, CapturedLane, CapturedVerdict, IncidentTrigger};
 use oraclemcp_guard::{
     Classifier, ClassifierConfig, OperatingLevel, SessionLevelState, SqlPolicyConfig,
 };
@@ -275,6 +279,11 @@ enum Command {
         #[command(subcommand)]
         command: AuditCommand,
     },
+    /// Capture a redacted, deterministic incident bundle for offline replay.
+    Incident {
+        #[command(subcommand)]
+        command: IncidentCommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -293,6 +302,29 @@ enum AuditCommand {
         #[arg(long, visible_alias = "with_db_evidence")]
         with_db_evidence: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum IncidentCommand {
+    /// Capture one stdin-supplied statement into a new redacted bundle directory.
+    Capture(IncidentCaptureCliArgs),
+    /// Re-classify a verified bundle under its recorded LabRuntime seed.
+    Replay(IncidentReplayCliArgs),
+}
+
+#[derive(Args, Debug)]
+struct IncidentCaptureCliArgs {
+    /// New directory for the redacted incident bundle. It must not already exist.
+    bundle: PathBuf,
+    /// Deterministic LabRuntime seed recorded for a future replay.
+    #[arg(long)]
+    seed: u64,
+}
+
+#[derive(Args, Debug)]
+struct IncidentReplayCliArgs {
+    /// Existing self-verifying incident bundle directory.
+    bundle: PathBuf,
 }
 
 #[derive(Subcommand, Debug)]
@@ -645,6 +677,10 @@ fn main() -> ExitCode {
                 key_id,
                 with_db_evidence,
             } => run_audit_verify(robot_json, &file, key_id.as_deref(), with_db_evidence),
+        },
+        Command::Incident { command } => match command {
+            IncidentCommand::Capture(args) => run_incident_capture(robot_json, args),
+            IncidentCommand::Replay(args) => run_incident_replay(robot_json, args),
         },
     }
 }
@@ -5131,6 +5167,157 @@ fn audit_verification_keyring_from_sources(
              the chain"
         )
     })
+}
+
+/// Capture an offline-replayable bundle without trusting the artifact as an
+/// authorization source. The raw statement remains in process only long enough
+/// for the Arc J redactor and the capture gate to prove it cannot reach disk.
+fn run_incident_capture(robot_json: bool, args: IncidentCaptureCliArgs) -> ExitCode {
+    if args.bundle.exists() {
+        emit_command_error(
+            robot_json,
+            "incident capture",
+            "ORACLEMCP_INCIDENT_TARGET_EXISTS",
+            "incident capture requires a new bundle directory",
+        );
+        return ExitCode::from(2);
+    }
+
+    // A statement can contain a bind value or a literal secret. Accept it only
+    // on stdin so it is not left in a shell history or visible in a process
+    // listing while the capture gate proves it cannot enter the artifact.
+    let mut statement = String::new();
+    if io::stdin().read_to_string(&mut statement).is_err() || statement.trim().is_empty() {
+        emit_command_error(
+            robot_json,
+            "incident capture",
+            "ORACLEMCP_INCIDENT_STATEMENT_REQUIRED",
+            "incident capture requires a non-empty statement on standard input",
+        );
+        return ExitCode::from(2);
+    }
+
+    let config = match OracleMcpConfig::load(None) {
+        Ok(config) => config,
+        Err(_) => {
+            emit_command_error(
+                robot_json,
+                "incident capture",
+                "ORACLEMCP_INCIDENT_CONFIG_INVALID",
+                "incident capture could not load a validated configuration",
+            );
+            return ExitCode::from(2);
+        }
+    };
+
+    // Capture the guard's verdict as evidence for comparison only. E2 must call
+    // `reclassify_at_replay` again; no persisted verdict reaches an admission
+    // decision or an execution path.
+    let decision = Classifier::new(ClassifierConfig::served_strict()).classify(&statement);
+    let captured_verdict = CapturedVerdict {
+        danger: decision.danger,
+        required_level: decision.required_level,
+        reason_class: decision.reason_category,
+    };
+    let statement_sha256 = oraclemcp_audit::sha256_hex(statement.as_bytes());
+    let frames = [CassetteFrame {
+        seq: 1,
+        // This is a closed, implementation-owned label, never an operator or
+        // customer identifier. The statement itself is redacted in core.
+        tool: "captured_statement",
+        statement: Some(&statement),
+        sql_sha256: Some(&statement_sha256),
+        outcome: "captured",
+    }];
+    let cassettes = [Cassette {
+        lane_id: "local",
+        frames: &frames,
+    }];
+    let lanes = [CapturedLane {
+        lane_id: "local".to_owned(),
+        // An implementation-owned stable value, not an operator identity.
+        subject_id_hash: oraclemcp_audit::sha256_hex(b"oraclemcp-incident-local"),
+    }];
+    let sensitive = [statement.clone()];
+    let request = IncidentCaptureRequest {
+        trigger: IncidentTrigger::Refusal,
+        seed: args.seed,
+        statement: Some(&statement),
+        captured_verdict: Some(captured_verdict),
+        why: "operator requested a deterministic incident capture",
+        lanes: &lanes,
+        build: BuildIdentity {
+            server: format!("oraclemcp/{}", env!("CARGO_PKG_VERSION")),
+            classifier: format!("oraclemcp-guard/{};registry=1", env!("CARGO_PKG_VERSION")),
+            driver: "oracledb/0.8.2".to_owned(),
+        },
+        // The live server owns durable audit-tail collection. This standalone
+        // command intentionally creates a self-describing empty projection,
+        // rather than reading arbitrary operator-selected files into a bundle.
+        audit_records: &[],
+        cassettes: &cassettes,
+        config: &config,
+        sensitive: &sensitive,
+    };
+    let manifest = match capture_bundle(&args.bundle, &request) {
+        Ok(manifest) => manifest,
+        Err(_) => {
+            emit_command_error(
+                robot_json,
+                "incident capture",
+                "ORACLEMCP_INCIDENT_CAPTURE_REFUSED",
+                "incident capture was refused before a bundle could be written",
+            );
+            return ExitCode::from(2);
+        }
+    };
+
+    let payload = serde_json::json!({
+        "kind": "oraclemcp_incident_capture",
+        "bundle_id": manifest.id,
+        "seed": manifest.seed,
+        "entries": manifest.entries.len(),
+    });
+    let output = if robot_json {
+        payload.to_string()
+    } else {
+        format!(
+            "captured redacted incident bundle {} (seed {}, {} entries)",
+            manifest.id,
+            manifest.seed,
+            manifest.entries.len()
+        )
+    };
+    stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
+}
+
+fn run_incident_replay(robot_json: bool, args: IncidentReplayCliArgs) -> ExitCode {
+    let report = match replay_bundle(&args.bundle) {
+        Ok(report) => report,
+        Err(_) => {
+            emit_command_error(
+                robot_json,
+                "incident replay",
+                "ORACLEMCP_INCIDENT_REPLAY_REFUSED",
+                "incident replay refused an invalid or unsafe bundle",
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let payload = serde_json::json!({
+        "kind": "oraclemcp_incident_replay",
+        "bundle_id": report.manifest_id,
+        "seed": report.seed,
+        "replayed_steps": report.replayed_steps,
+        "verdicts": report.verdicts,
+        "audit_tail_sha256": report.audit_tail_sha256,
+    });
+    let output = if robot_json {
+        payload.to_string()
+    } else {
+        serde_json::to_string_pretty(&payload).expect("incident replay payload serializes")
+    };
+    stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
 }
 
 fn run_audit_verify(

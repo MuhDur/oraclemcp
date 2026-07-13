@@ -536,6 +536,58 @@ fn refusal_corpus_e2e_dry_run_is_registered_and_schedules_omcpb() {
     );
 }
 
+/// Arc E's incident artifact is meaningful only when the real command surface
+/// is wired into the ordinary runner. The dry-run proves registration and the
+/// capped build schedule; `scripts/e2e/incident.sh` owns the no-database real
+/// binary proof of capture redaction and deterministic replay.
+#[test]
+fn incident_e2e_dry_run_is_registered_and_schedules_omcpb() {
+    let root = repo_root();
+    let output = Command::new("bash")
+        .arg(root.join("scripts/e2e/incident.sh"))
+        .args(["--log", "--dry-run"])
+        .current_dir(&root)
+        .env("ORACLEMCP_E2E_SEED", "4242")
+        .env(
+            "ORACLEMCP_E2E_ARTIFACT_DIR",
+            root.join("target/e2e-contract"),
+        )
+        .output()
+        .expect("run incident dry-run");
+    assert!(
+        output.status.success(),
+        "incident dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    let command_messages = events
+        .iter()
+        .filter(|event| event["event"] == "command_start")
+        .filter_map(|event| event["message"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        command_messages
+            .iter()
+            .any(|message| message.contains("omcpb build -p oraclemcp --bin oraclemcp")),
+        "incident dry-run did not schedule the omcpb package build: {command_messages:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "incident"),
+        "missing passing incident completion: {events:?}"
+    );
+    let runner =
+        std::fs::read_to_string(root.join("scripts/e2e/run_all.sh")).expect("read run_all.sh");
+    assert!(
+        runner.contains("scripts/e2e/incident.sh"),
+        "incident proof must be dispatched by run_all.sh"
+    );
+}
+
 /// Arc M must prove masking at the actual served MCP boundary. Keeping the
 /// scenario in the ordinary runner prevents the real-wire proof from becoming
 /// an uncalled script beside the direct DB-layer egress tests.
