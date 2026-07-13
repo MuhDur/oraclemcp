@@ -1,4 +1,4 @@
-//! Lazy per-statement read-only backstop (bead A1 / oraclemcp-040-epic-wp-a-ia1.1).
+//! Fresh-per-request read-only backstop (bead A1 / oraclemcp-040-epic-wp-a-ia1.1).
 //!
 //! Defense-in-depth layer **B** of the read-only enforcement stack (the layers
 //! are documented in `oraclemcp_guard::enforcement`): even if the fail-closed
@@ -35,14 +35,15 @@
 //! so the backstop's `armed` flag needs no interior synchronization beyond that
 //! `&mut` borrow.
 //!
-//! ## Lazy / reset / fail-closed behavior
+//! ## Freshness / reset / fail-closed behavior
 //!
-//! - **Lazy.** [`ReadOnlyBackstop::ensure_armed`] resets any open startup or
-//!   metadata transaction with `ROLLBACK`, then issues `SET TRANSACTION READ
-//!   ONLY`, only when the backstop is not already `armed`. Once armed, repeated
-//!   reads in the SAME read-only transaction pay no extra round trip — the
-//!   property persists until a transaction boundary. The deterministic test
-//!   asserts the statement is issued exactly once across many reads.
+//! - **Fresh per request.** [`ReadOnlyBackstop::ensure_armed`] resets the prior
+//!   transaction with `ROLLBACK`, then issues `SET TRANSACTION READ ONLY` before
+//!   every `READ_ONLY` request. Oracle gives read-only transactions
+//!   transaction-level consistency: keeping one armed across requests would pin
+//!   the lane to the first request's snapshot indefinitely. Ending the previous
+//!   read-only transaction immediately before the next guarded read keeps the
+//!   engine backstop armed while giving each request a fresh committed snapshot.
 //! - **Clear before a governed write.** Flipping the in-memory belief is not a
 //!   transaction boundary. When an armed session is about to run an authorized
 //!   write, [`ReadOnlyBackstop::clear_before_write`] first performs a bounded,
@@ -85,7 +86,7 @@ use std::cell::Cell;
 
 use super::DbError;
 
-/// Per-pinned-session tracker for the lazy read-only transaction backstop (A1).
+/// Per-pinned-session tracker for the read-only transaction backstop (A1).
 ///
 /// `armed == true` means this read context believes the pinned session's
 /// current transaction was opened `READ ONLY` and no transaction boundary has
@@ -111,23 +112,29 @@ impl ReadOnlyBackstop {
         self.armed.get()
     }
 
-    /// Read-path entry point. When the live effective level is `READ_ONLY` and
-    /// the backstop is not already armed, issue `SET TRANSACTION READ ONLY` on
-    /// the pinned session so Oracle enforces read-only at the transaction level.
+    /// Read-path entry point. When the live effective level is `READ_ONLY`, end
+    /// the prior transaction and issue `SET TRANSACTION READ ONLY` on the pinned
+    /// session so Oracle enforces read-only at the transaction level for this
+    /// request's fresh snapshot.
     ///
-    /// Lazy: a no-op when already armed (no per-read round trip). When the
+    /// The transaction boundary occurs before the next request rather than in a
+    /// post-read finalizer: the dispatch mutex serializes this pinned session,
+    /// so no next read can start before the prior request completed, and a
+    /// cancelled response cannot skip the transaction cleanup. When the
     /// effective level is above `READ_ONLY`, this does nothing — a write may be
     /// legitimately authorized and must not be blocked by the backstop.
     ///
     /// Fail-closed: a failure to apply the statement is propagated (the read is
     /// refused) and the backstop is left disarmed so a retry re-attempts it.
     ///
-    /// Returns whether it actually asserted the statement. Asserting rolls the
-    /// transaction back, which erases every Oracle savepoint, so the caller must
-    /// drop the reversible workspace's belief when this returns `true` (Arc I).
-    /// This is the path a silently-expired elevation window takes: the level
-    /// falls back to `READ_ONLY`, the next read re-arms, and any uncommitted
-    /// held work is discarded — the existing, correct fail-closed behavior.
+    /// Returns whether it actually asserted the statement. Every `READ_ONLY`
+    /// call returns `true` after it creates its fresh backstopped transaction.
+    /// Asserting rolls the prior transaction back, which erases every Oracle
+    /// savepoint, so the caller must drop the reversible workspace's belief when
+    /// this returns `true` (Arc I). This is also the path a silently-expired
+    /// elevation window takes: the level falls back to `READ_ONLY`, the next
+    /// read re-arms, and any uncommitted held work is discarded — the existing,
+    /// correct fail-closed behavior.
     pub(crate) async fn ensure_armed(
         &mut self,
         cx: &Cx,
@@ -140,23 +147,24 @@ impl ReadOnlyBackstop {
         if session.effective_level() != OperatingLevel::ReadOnly {
             return Ok(false);
         }
-        if self.armed.get() {
-            return Ok(false);
-        }
         self.assert_read_only(cx, conn).await?;
         Ok(true)
     }
 
-    /// Reset the current transaction, issue `SET TRANSACTION READ ONLY`, and
-    /// only on success mark armed.
+    /// Reset the prior transaction, issue `SET TRANSACTION READ ONLY`, and only
+    /// on success mark armed for the upcoming guarded read.
     async fn assert_read_only(
         &mut self,
         cx: &Cx,
         conn: &dyn OracleConnection,
     ) -> Result<(), ErrorEnvelope> {
         // Oracle requires SET TRANSACTION to be the first statement in a
-        // transaction. Startup/profile attach may already have described or
-        // pinged the session, so reset before arming the database backstop.
+        // transaction. More importantly, an already-armed transaction has
+        // transaction-level read consistency, so it must end before this
+        // request can see a newly committed snapshot. Clear our belief before
+        // the boundary: a failed rollback or SET leaves this request refused and
+        // must never be treated as an armed backstop on a retry.
+        self.armed.set(false);
         conn.rollback(cx).await.map_err(DbError::into_envelope)?;
         conn.execute(cx, SET_TRANSACTION_READ_ONLY, &[] as &[OracleBind])
             .await
@@ -315,12 +323,13 @@ mod tests {
     }
 
     #[test]
-    fn arms_lazily_once_across_many_reads() {
+    fn arms_a_fresh_read_only_transaction_for_every_read() {
         run(|cx| async move {
             let conn = RecordingConn::default();
             let session = read_only();
             let mut backstop = ReadOnlyBackstop::new();
-            // Three reads in the same read-only transaction.
+            // Each next read ends the prior read-only transaction and begins a
+            // fresh one, so Oracle cannot retain the first read's snapshot.
             for _ in 0..3 {
                 backstop
                     .ensure_armed(&cx, &conn, &session)
@@ -330,13 +339,17 @@ mod tests {
             let executed = conn.executed.lock().expect("exec mutex").clone();
             assert_eq!(
                 executed,
-                vec![SET_TRANSACTION_READ_ONLY.to_owned()],
-                "SET TRANSACTION READ ONLY issued exactly once (lazy), not per read"
+                vec![
+                    SET_TRANSACTION_READ_ONLY.to_owned(),
+                    SET_TRANSACTION_READ_ONLY.to_owned(),
+                    SET_TRANSACTION_READ_ONLY.to_owned(),
+                ],
+                "SET TRANSACTION READ ONLY is re-issued for every fresh read transaction"
             );
             assert_eq!(
                 *conn.rollbacks.lock().expect("rollback mutex"),
-                1,
-                "the arming path resets the transaction once before the lazy backstop"
+                3,
+                "each read transaction is reset before its read-only backstop is armed"
             );
             assert!(backstop.is_armed());
         });

@@ -382,10 +382,12 @@ struct DispatcherState {
     /// before every uncertain DDL/session-context mutation, so stale snapshots
     /// are never reused as current catalog evidence.
     orient_snapshots: SyncMutex<HashMap<OrientSnapshotCacheKey, OrientSnapshot>>,
-    /// A1: lazy read-only transaction backstop for the pinned/primary session.
+    /// A1: fresh-per-request read-only transaction backstop for the
+    /// pinned/primary session.
     /// Scoped to `conn` only (the stateless metadata pool relies on the
-    /// least-privilege DB user, A2). Re-asserted at the start of every read
-    /// transaction; disarmed by a gated write and reset on a profile switch.
+    /// least-privilege DB user, A2). Each READ_ONLY request starts a fresh,
+    /// engine-enforced transaction; it is disarmed by a gated write and reset
+    /// on a profile switch.
     read_only_backstop: ReadOnlyBackstop,
     /// Arc I: the pinned session's reversible workspace — the live
     /// `SAVEPOINT` stack behind `oracle_checkpoint` / `oracle_undo_to`, and the

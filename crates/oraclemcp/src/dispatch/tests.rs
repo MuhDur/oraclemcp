@@ -9668,12 +9668,13 @@ mod db_health {
     }
 }
 
-/// A1 (oraclemcp-040-epic-wp-a-ia1.1): the lazy read-only backstop, exercised
+/// A1 (oraclemcp-040-epic-wp-a-ia1.1): the fresh-per-request read-only
+/// backstop, exercised
 /// END TO END through the real dispatch path (not just the unit-tested
 /// `ReadOnlyBackstop` primitive). These prove the backstop is WIRED into
-/// `oracle_query`/`oracle_execute` on the pinned session: armed lazily on the
-/// read path, disarmed by a gated write so an authorized write is never blocked,
-/// and re-asserted on the next read transaction.
+/// `oracle_query`/`oracle_execute` on the pinned session: a fresh read-only
+/// transaction begins for every `READ_ONLY` request, a committed external change
+/// becomes visible on the next request, and a gated write is never blocked.
 mod read_only_backstop_wiring {
     use super::*;
     use oraclemcp_guard::SET_TRANSACTION_READ_ONLY;
@@ -9688,6 +9689,8 @@ mod read_only_backstop_wiring {
         events: Mutex<Vec<String>>,
         read_only_transaction: AtomicBool,
         fail_next_rollback: AtomicBool,
+        committed_freshness_value: Mutex<String>,
+        read_only_snapshot_value: Mutex<String>,
     }
 
     struct BackstopRecordingMock {
@@ -9716,6 +9719,27 @@ mod read_only_backstop_wiring {
         ) -> Result<Vec<OracleRow>, DbError> {
             if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
                 return Ok(rows);
+            }
+            if sql
+                .to_ascii_lowercase()
+                .contains("from app.freshness_probe")
+            {
+                let value = if self.state.read_only_transaction.load(Ordering::SeqCst) {
+                    self.state
+                        .read_only_snapshot_value
+                        .lock()
+                        .expect("freshness snapshot mutex")
+                        .clone()
+                } else {
+                    self.state
+                        .committed_freshness_value
+                        .lock()
+                        .expect("freshness committed mutex")
+                        .clone()
+                };
+                return Ok(vec![OracleRow {
+                    columns: vec![("V".to_owned(), OracleCell::new("VARCHAR2", Some(value)))],
+                }]);
             }
             if sql
                 .to_ascii_lowercase()
@@ -9759,6 +9783,16 @@ mod read_only_backstop_wiring {
                 self.state
                     .read_only_transaction
                     .store(true, Ordering::SeqCst);
+                *self
+                    .state
+                    .read_only_snapshot_value
+                    .lock()
+                    .expect("freshness snapshot mutex") = self
+                    .state
+                    .committed_freshness_value
+                    .lock()
+                    .expect("freshness committed mutex")
+                    .clone();
             } else if self.state.read_only_transaction.load(Ordering::SeqCst)
                 && DEFAULT_CLASSIFIER
                     .classify(sql)
@@ -9892,25 +9926,49 @@ mod read_only_backstop_wiring {
     }
 
     #[test]
-    fn read_path_arms_set_transaction_read_only_lazily_once() {
-        // Three oracle_query calls on a READ_ONLY session: the backstop is
-        // asserted exactly once (lazy), not once per read.
+    fn read_only_lane_observes_a_committed_change_on_its_next_read() {
+        // Regression for oraclemcp-8s77. Oracle READ ONLY transactions retain
+        // one transaction-level snapshot. The first query starts one at
+        // "before"; a different session then commits "after". The second
+        // query on THIS SAME dispatcher must begin a fresh, still-read-only
+        // transaction and observe that commit.
         let state = Arc::new(BackstopRecordingState::default());
+        *state
+            .committed_freshness_value
+            .lock()
+            .expect("freshness committed mutex") = "before".to_owned();
         let dispatcher = OracleDispatcher::new_with_profile(
             Box::new(BackstopRecordingMock {
                 state: state.clone(),
             }),
             Some("dev".to_owned()),
         );
-        for _ in 0..3 {
-            dispatcher
-                .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
-                .expect("read succeeds under the backstop");
-        }
+        let sql = "SELECT v FROM app.freshness_probe WHERE id = 1";
+        let before = dispatcher
+            .dispatch("oracle_query", json!({ "sql": sql }))
+            .expect("first read succeeds under the backstop");
+        assert_eq!(before["rows"], json!([{ "V": "before" }]));
+
+        // Simulate an independent writer committing after the first read. The
+        // served READ_ONLY lane never writes, so this is precisely the commit
+        // it must observe on its next request.
+        *state
+            .committed_freshness_value
+            .lock()
+            .expect("freshness committed mutex") = "after".to_owned();
+
+        let after = dispatcher
+            .dispatch("oracle_query", json!({ "sql": sql }))
+            .expect("second read succeeds under a fresh backstop");
+        assert_eq!(after["rows"], json!([{ "V": "after" }]));
         assert_eq!(
             backstop_statements(&state),
-            1,
-            "SET TRANSACTION READ ONLY is issued exactly once across many reads (lazy)"
+            2,
+            "each READ_ONLY request begins a fresh transaction while retaining Oracle's read-only enforcement"
+        );
+        assert!(
+            state.read_only_transaction.load(Ordering::SeqCst),
+            "the second read remains protected by SET TRANSACTION READ ONLY"
         );
     }
 

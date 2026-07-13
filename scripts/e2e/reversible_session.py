@@ -11,6 +11,9 @@ surface, on a real Oracle — the three claims the reversible workspace makes:
     sequence-touching one with a cannot-undo label, without advancing it; and
   * committing re-classifies the exact statement — a confirmation carried onto a
     different statement is refused, and the grant is spent exactly once.
+  * a READ_ONLY witness observes a commit made after its first read, proving
+    each read begins a fresh database-enforced read-only transaction rather
+    than retaining Oracle's transaction-level snapshot indefinitely.
 
 Every claim is checked against the committed table read back from a second,
 independent session: nothing here trusts the server's own report of itself.
@@ -284,35 +287,6 @@ class Reversible:
     # --- the scenario -----------------------------------------------------
 
     def run(self):
-        def elevate_witness():
-            """The witness must see COMMITS, not a frozen snapshot.
-
-            A READ_ONLY lane arms `SET TRANSACTION READ ONLY` once and never ends
-            that transaction, and Oracle pins a read-only transaction to the
-            snapshot it started with — so a read-only witness would report the
-            world as it stood at its first read, forever (bead oraclemcp-8s77,
-            found by this very script). Elevating the witness to READ_WRITE — it
-            never writes — puts its reads back on statement-level consistency, so
-            "what the witness sees" means "what is committed right now".
-            """
-            preview = structured(
-                self.witness.call("oracle_set_session_level", {"level": "READ_WRITE"})
-            )
-            token = (preview.get("confirmation") or {}).get("confirm")
-            require(token, "witness elevation preview returns a grant", preview)
-            applied = structured(
-                self.witness.call(
-                    "oracle_set_session_level",
-                    {"level": "READ_WRITE", "execute": True, "confirm": token},
-                )
-            )
-            require(
-                (applied.get("session") or {}).get("current_level") == "READ_WRITE",
-                "the witness reads committed state, never a frozen snapshot",
-                applied,
-            )
-            return {"witness_level": "READ_WRITE"}
-
         def initialize():
             reply = self.session.rpc(
                 "initialize",
@@ -361,6 +335,31 @@ class Reversible:
                 self.committed_value(),
             )
             return {"table": self.table, "sequence": self.sequence}
+
+        def read_only_witness_refreshes_after_commit():
+            # Regression for oraclemcp-8s77. The witness stays at the product's
+            # default READ_ONLY level. Its first read opens a database-enforced
+            # READ ONLY transaction; the primary session then commits an update;
+            # its second read must observe that committed value rather than the
+            # original transaction-level snapshot.
+            before = self.committed_value()
+            require(
+                before == "baseline",
+                "the READ_ONLY witness sees the initial committed value",
+                before,
+            )
+            self.execute(
+                f"UPDATE {self.table} SET V = 'fresh-after-commit' WHERE ID = 1"
+            )
+            after = self.committed_value()
+            require(
+                after == "fresh-after-commit",
+                "the same READ_ONLY witness observes the later committed value",
+                {"before": before, "after": after},
+            )
+            # Preserve the baseline expected by the Arc-I workspace cases below.
+            self.execute(f"UPDATE {self.table} SET V = 'baseline' WHERE ID = 1")
+            return {"before": before, "after": after}
 
         def checkpoint_dml_undo():
             checkpoint = structured(
@@ -613,8 +612,11 @@ class Reversible:
             return {"labeled": out}
 
         self.step("initialize", initialize)
-        self.step("elevate_witness_for_committed_reads", elevate_witness)
         self.step("seed_lab_table", seed)
+        self.step(
+            "read_only_witness_refreshes_after_commit",
+            read_only_witness_refreshes_after_commit,
+        )
         self.step("checkpoint_dml_undo", checkpoint_dml_undo)
         self.step("open_workspace_refuses_to_commit", open_workspace_refuses_to_commit)
         self.step("dry_run_before_after", dry_run_shows_before_and_after)
