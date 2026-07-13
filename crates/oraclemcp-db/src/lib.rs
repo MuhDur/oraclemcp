@@ -103,7 +103,9 @@ pub use connection::{
 };
 pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compiled};
 pub use drcp::{DrcpConfig, SessionPurity};
-pub use error::{CONNECT_TRACE_NEXT_STEP, ConnectFailureKind, DbError, QuarantineOutcome};
+pub use error::{
+    CONNECT_TRACE_NEXT_STEP, ConnectFailureKind, DbError, FlashbackRefusalKind, QuarantineOutcome,
+};
 pub use health::{
     Finding, HealthSubcheck, ParsedHealthRequest, PreflightReport, Severity, SubcheckPreflight,
     ViewTier, buffer_cache_hit_ratio_sql, detect_view_tier, disabled_constraints_sql,

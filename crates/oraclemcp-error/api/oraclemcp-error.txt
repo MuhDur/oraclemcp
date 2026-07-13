@@ -8,6 +8,9 @@ pub oraclemcp_error::ErrorClass::AtCapacity
 pub oraclemcp_error::ErrorClass::Busy
 pub oraclemcp_error::ErrorClass::ChallengeRequired
 pub oraclemcp_error::ErrorClass::ConnectionFailed
+pub oraclemcp_error::ErrorClass::FlashbackDefinitionChanged
+pub oraclemcp_error::ErrorClass::FlashbackNotFlashbackable
+pub oraclemcp_error::ErrorClass::FlashbackRetentionExceeded
 pub oraclemcp_error::ErrorClass::ForbiddenStatement
 pub oraclemcp_error::ErrorClass::InsufficientPrivilege
 pub oraclemcp_error::ErrorClass::Internal

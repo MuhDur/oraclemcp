@@ -1260,6 +1260,199 @@ mod live {
     }
 
     #[test]
+    fn live_flashback_old_timestamp_returns_typed_retention_refusal() {
+        use oraclemcp_db::{AsOf, FlashbackRefusalKind, QueryCaps, read_query_as_of};
+        run_with_cx(|cx| async move {
+            let Some(conn) = connect_or_skip(
+                &cx,
+                "live_flashback_old_timestamp_returns_typed_retention_refusal",
+            )
+            .await
+            else {
+                return;
+            };
+
+            let error = match read_query_as_of(
+                &cx,
+                &conn,
+                "SELECT count(*) AS c FROM dual",
+                &[],
+                QueryCaps::default(),
+                0,
+                &SerializeOptions::default(),
+                &AsOf::Timestamp("1900-01-01 00:00:00".to_owned()),
+            )
+            .await
+            {
+                Ok(resp) => {
+                    panic!("1900 flashback timestamp unexpectedly succeeded: {resp:?}");
+                }
+                Err(e) if e.to_string().contains("ORA-01031") => {
+                    eprintln!(
+                        "[live-xe] SKIP flashback retention refusal: missing FLASHBACK privilege ({e})"
+                    );
+                    return;
+                }
+                Err(e) => e,
+            };
+
+            match error {
+                DbError::FlashbackRefusal {
+                    kind,
+                    ora_code,
+                    message,
+                } => {
+                    assert_eq!(kind, FlashbackRefusalKind::RetentionExceeded);
+                    assert!(
+                        matches!(ora_code, Some(8180 | 1555)),
+                        "unexpected retention ORA code: {ora_code:?}"
+                    );
+                    assert!(
+                        message.contains("ORA-08180") || message.contains("ORA-01555"),
+                        "{message}"
+                    );
+                    let env = DbError::FlashbackRefusal {
+                        kind,
+                        message,
+                        ora_code,
+                    }
+                    .into_envelope();
+                    assert_eq!(
+                        env.error_class,
+                        oraclemcp_error::ErrorClass::FlashbackRetentionExceeded
+                    );
+                    assert!(
+                        env.next_steps.iter().any(|step| step.contains("newer SCN")),
+                        "{:?}",
+                        env.next_steps
+                    );
+                }
+                other => panic!("expected typed flashback retention refusal, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn live_flashback_post_ddl_scn_returns_typed_definition_refusal() {
+        use oraclemcp_db::{AsOf, FlashbackRefusalKind, QueryCaps, read_query_as_of};
+        run_with_cx(|cx| async move {
+            let Some(conn) = connect_or_skip(
+                &cx,
+                "live_flashback_post_ddl_scn_returns_typed_definition_refusal",
+            )
+            .await
+            else {
+                return;
+            };
+            let table = format!("ORAMCP_DDL_{}", std::process::id());
+            let cleanup_sql = format!("DROP TABLE {table} PURGE");
+
+            if let Err(e) = conn
+                .execute(
+                    &cx,
+                    &format!("CREATE TABLE {table} (id NUMBER PRIMARY KEY)"),
+                    &[],
+                )
+                .await
+            {
+                eprintln!("[live-xe] SKIP flashback DDL refusal setup: cannot create table ({e})");
+                return;
+            }
+
+            let test_result: Result<(), DbError> = async {
+                conn.execute(
+                    &cx,
+                    &format!("INSERT INTO {table} (id) VALUES (:1)"),
+                    &[OracleBind::I64(1)],
+                )
+                .await?;
+                conn.commit(&cx).await?;
+
+                let scn_before_ddl = conn
+                    .query_rows(
+                        &cx,
+                        "SELECT dbms_flashback.get_system_change_number AS scn FROM dual",
+                        &[],
+                    )
+                    .await?
+                    .first()
+                    .and_then(|row| row.text("SCN"))
+                    .and_then(|scn| scn.parse::<u64>().ok())
+                    .expect("numeric pre-DDL SCN");
+
+                conn.execute(&cx, &format!("ALTER TABLE {table} ADD (extra NUMBER)"), &[])
+                    .await?;
+
+                let sql = format!("SELECT id FROM {table}");
+                match read_query_as_of(
+                    &cx,
+                    &conn,
+                    &sql,
+                    &[],
+                    QueryCaps::default(),
+                    0,
+                    &SerializeOptions::default(),
+                    &AsOf::Scn(scn_before_ddl),
+                )
+                .await
+                {
+                    Err(DbError::FlashbackRefusal {
+                        kind,
+                        ora_code,
+                        message,
+                    }) => {
+                        assert_eq!(kind, FlashbackRefusalKind::DefinitionChanged);
+                        assert_eq!(ora_code, Some(1466));
+                        assert!(message.contains("ORA-01466"), "{message}");
+                        let env = DbError::FlashbackRefusal {
+                            kind,
+                            message,
+                            ora_code,
+                        }
+                        .into_envelope();
+                        assert_eq!(
+                            env.error_class,
+                            oraclemcp_error::ErrorClass::FlashbackDefinitionChanged
+                        );
+                        assert!(
+                            env.next_steps
+                                .iter()
+                                .any(|step| step.contains("DDL boundary")),
+                            "{:?}",
+                            env.next_steps
+                        );
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                    Ok(response) => Err(DbError::Query(format!(
+                        "expected ORA-01466 definition-change refusal, got {} rows",
+                        response.row_count
+                    ))),
+                }
+            }
+            .await;
+
+            let _ = conn.execute(&cx, &cleanup_sql, &[]).await;
+            match test_result {
+                Ok(()) => {}
+                Err(e) => {
+                    let message = e.to_string();
+                    if message.contains("ORA-01031")
+                        || message.contains("ORA-08180")
+                        || message.contains("FLASHBACK")
+                    {
+                        eprintln!(
+                            "[live-xe] SKIP flashback DDL refusal (privilege/retention): {e}"
+                        );
+                        return;
+                    }
+                    panic!("flashback DDL refusal live check failed: {e}");
+                }
+            }
+        });
+    }
+
+    #[test]
     fn live_flashback_diff_synthetic_table_across_scns() {
         use oraclemcp_db::{
             AsOf, QueryCaps, diff_query_responses, primary_key_columns, read_query_as_of,

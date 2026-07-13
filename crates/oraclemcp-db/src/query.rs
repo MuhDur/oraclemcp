@@ -13,7 +13,7 @@ use asupersync::Cx;
 // a read handler running under a narrowed `Cx<ReadPathCaps>` (A9) checkpoints
 // exactly like one under the full row — no `SPAWN`/`REMOTE`/`RANDOM` needed.
 use crate::connection::{OracleConnection, db_checkpoint};
-use crate::error::{DbError, QuarantineOutcome};
+use crate::error::{DbError, QuarantineOutcome, classify_flashback_refusal_message};
 use crate::serialize::{PageColumnCache, SerializeOptions, checked_byte_budget_add};
 use crate::types::OracleBind;
 
@@ -221,11 +221,14 @@ pub async fn read_query_as_of(
     // FLASHBACK privilege, ORA-08180 no snapshot at that SCN) is surfaced
     // fail-closed; flashback was NOT enabled, so no window is left open.
     conn.execute(cx, enable_sql, std::slice::from_ref(&bind))
-        .await?;
+        .await
+        .map_err(map_flashback_refusal)?;
 
     // Flashback is now active: guarantee teardown regardless of the read
     // outcome. Capture the result WITHOUT `?` so the window is always closed.
-    let read = read_query(cx, conn, sql, binds, caps, offset, serialize_opts).await;
+    let read = read_query(cx, conn, sql, binds, caps, offset, serialize_opts)
+        .await
+        .map_err(map_flashback_refusal);
     let disable = conn.flashback_disable(cx).await;
     // End the flashback read transaction so the next statement starts clean.
     let rollback = conn.rollback(cx).await;
@@ -252,6 +255,34 @@ pub async fn read_query_as_of(
                 ),
             })
         }
+    }
+}
+
+fn map_flashback_refusal(error: DbError) -> DbError {
+    match error {
+        DbError::Query(message) => {
+            if let Some((kind, ora_code)) = classify_flashback_refusal_message(&message) {
+                DbError::FlashbackRefusal {
+                    kind,
+                    message,
+                    ora_code,
+                }
+            } else {
+                DbError::Query(message)
+            }
+        }
+        DbError::Execute(message) => {
+            if let Some((kind, ora_code)) = classify_flashback_refusal_message(&message) {
+                DbError::FlashbackRefusal {
+                    kind,
+                    message,
+                    ora_code,
+                }
+            } else {
+                DbError::Execute(message)
+            }
+        }
+        other => other,
     }
 }
 
@@ -1025,6 +1056,8 @@ mod tests {
     struct FlashbackRecorder {
         events: std::sync::Mutex<Vec<String>>,
         fail_read: bool,
+        fail_read_message: Option<String>,
+        fail_enable_message: Option<String>,
         fail_disable_call: Option<usize>,
         fail_rollback_call: Option<usize>,
         disable_calls: std::sync::atomic::AtomicUsize,
@@ -1049,7 +1082,11 @@ mod tests {
         ) -> Result<Vec<OracleRow>, DbError> {
             self.events.lock().expect("events").push("query".to_owned());
             if self.fail_read {
-                return Err(DbError::Query("boom".to_owned()));
+                return Err(DbError::Query(
+                    self.fail_read_message
+                        .clone()
+                        .unwrap_or_else(|| "boom".to_owned()),
+                ));
             }
             Ok(vec![OracleRow {
                 columns: vec![(
@@ -1063,6 +1100,11 @@ mod tests {
                 .lock()
                 .expect("events")
                 .push(format!("exec[{}]:{sql}", binds.len()));
+            if sql.starts_with("BEGIN DBMS_FLASHBACK.ENABLE_")
+                && let Some(message) = &self.fail_enable_message
+            {
+                return Err(DbError::Execute(message.clone()));
+            }
             if sql == crate::connection::DBMS_FLASHBACK_DISABLE {
                 let call = self
                     .disable_calls
@@ -1152,6 +1194,177 @@ mod tests {
                 "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
                 "rollback".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn read_query_as_of_maps_old_snapshot_enable_error_to_typed_retention_refusal() {
+        let conn = FlashbackRecorder {
+            fail_enable_message: Some(
+                "ORA-08180: no snapshot found based on specified time".to_owned(),
+            ),
+            ..Default::default()
+        };
+        let (error, events) = run_with_cx(|cx| async move {
+            let error = read_query_as_of(
+                &cx,
+                &conn,
+                "SELECT 1 FROM t",
+                &[],
+                QueryCaps::default(),
+                0,
+                &SerializeOptions::default(),
+                &AsOf::Scn(1),
+            )
+            .await
+            .expect_err("old SCN is a typed flashback refusal");
+            (error, conn.events.into_inner().expect("events"))
+        });
+
+        match error {
+            DbError::FlashbackRefusal {
+                kind,
+                message,
+                ora_code,
+            } => {
+                assert_eq!(kind, crate::FlashbackRefusalKind::RetentionExceeded);
+                assert_eq!(ora_code, Some(8180));
+                assert!(message.contains("ORA-08180"), "{message}");
+            }
+            other => panic!("expected flashback retention refusal, got {other:?}"),
+        }
+        assert_eq!(
+            events,
+            vec![
+                "rollback".to_owned(),
+                "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
+                "exec[1]:BEGIN DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;".to_owned(),
+            ],
+            "ENABLE failure happens before a flashback window is active"
+        );
+    }
+
+    #[test]
+    fn read_query_as_of_maps_snapshot_too_old_read_error_to_typed_retention_refusal() {
+        let conn = FlashbackRecorder {
+            fail_read: true,
+            fail_read_message: Some("ORA-01555: snapshot too old".to_owned()),
+            ..Default::default()
+        };
+        let error = run_with_cx(|cx| async move {
+            read_query_as_of(
+                &cx,
+                &conn,
+                "SELECT 1 FROM t",
+                &[],
+                QueryCaps::default(),
+                0,
+                &SerializeOptions::default(),
+                &AsOf::Scn(42),
+            )
+            .await
+            .expect_err("snapshot-too-old read is a typed flashback refusal")
+        });
+
+        match error {
+            DbError::FlashbackRefusal {
+                kind,
+                ora_code,
+                message,
+            } => {
+                assert_eq!(kind, crate::FlashbackRefusalKind::RetentionExceeded);
+                assert_eq!(ora_code, Some(1555));
+                assert!(message.contains("ORA-01555"), "{message}");
+            }
+            other => panic!("expected flashback retention refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_query_as_of_maps_definition_change_to_typed_refusal() {
+        let conn = FlashbackRecorder {
+            fail_read: true,
+            fail_read_message: Some(
+                "ORA-01466: unable to read data - table definition has changed".to_owned(),
+            ),
+            ..Default::default()
+        };
+        let error = run_with_cx(|cx| async move {
+            read_query_as_of(
+                &cx,
+                &conn,
+                "SELECT 1 FROM t",
+                &[],
+                QueryCaps::default(),
+                0,
+                &SerializeOptions::default(),
+                &AsOf::Scn(42),
+            )
+            .await
+            .expect_err("post-DDL SCN is a typed flashback refusal")
+        });
+
+        match error {
+            DbError::FlashbackRefusal {
+                kind,
+                ora_code,
+                message,
+            } => {
+                assert_eq!(kind, crate::FlashbackRefusalKind::DefinitionChanged);
+                assert_eq!(ora_code, Some(1466));
+                assert!(message.contains("ORA-01466"), "{message}");
+            }
+            other => panic!("expected flashback definition-change refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_query_as_of_maps_non_flashbackable_target_to_typed_refusal() {
+        let conn = FlashbackRecorder {
+            fail_read: true,
+            fail_read_message: Some(
+                "ORA-02070: database REMOTE does not support flashback in this context".to_owned(),
+            ),
+            ..Default::default()
+        };
+        let error = run_with_cx(|cx| async move {
+            read_query_as_of(
+                &cx,
+                &conn,
+                "SELECT 1 FROM t@remote",
+                &[],
+                QueryCaps::default(),
+                0,
+                &SerializeOptions::default(),
+                &AsOf::Scn(42),
+            )
+            .await
+            .expect_err("remote/non-flashbackable read is a typed refusal")
+        });
+
+        match error {
+            DbError::FlashbackRefusal {
+                kind,
+                ora_code,
+                message,
+            } => {
+                assert_eq!(kind, crate::FlashbackRefusalKind::NotFlashbackable);
+                assert_eq!(ora_code, Some(2070));
+                assert!(message.contains("ORA-02070"), "{message}");
+            }
+            other => panic!("expected flashback unsupported refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flashback_refusal_mapper_does_not_reclassify_non_query_execute_errors() {
+        let error = map_flashback_refusal(DbError::Cancelled(
+            "ORA-08180: no snapshot found based on specified time".to_owned(),
+        ));
+
+        assert!(
+            matches!(error, DbError::Cancelled(_)),
+            "only Oracle Query/Execute errors from the flashback path are typed"
         );
     }
 

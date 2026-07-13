@@ -780,6 +780,49 @@ impl OracleConnection for FailingMock {
     }
 }
 
+/// A mock that lets semantic dictionary resolution and DBMS_FLASHBACK
+/// enable/disable calls succeed, then fails the protected read with a supplied
+/// Oracle flashback error. This pins the DB-layer typed refusal all the way out
+/// to MCP tool envelopes.
+struct FlashbackFailingMock {
+    message: &'static str,
+}
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for FlashbackFailingMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+            return Ok(rows);
+        }
+        Err(DbError::Query(self.message.to_owned()))
+    }
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        Ok(0)
+    }
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
 struct DescribeFailingMock;
 #[async_trait::async_trait(?Send)]
 impl OracleConnection for DescribeFailingMock {
@@ -4768,6 +4811,55 @@ fn read_base_with_as_of_dispatches_through_the_flashback_wrapper() {
     assert!(
         out.get("rows").is_some(),
         "returns a normal, inline query response"
+    );
+}
+
+#[test]
+fn as_of_flashback_definition_error_surfaces_typed_tool_envelope() {
+    let dispatcher = OracleDispatcher::new(Box::new(FlashbackFailingMock {
+        message: "ORA-01466: unable to read data - table definition has changed",
+    }));
+    let err = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "SELECT count(*) AS c FROM app.t", "as_of": { "scn": 9_000_000 } }),
+        )
+        .expect_err("post-DDL flashback read is a typed refusal");
+
+    assert_eq!(err.error_class, ErrorClass::FlashbackDefinitionChanged);
+    assert_eq!(err.ora_code, Some(1466));
+    assert!(
+        err.next_steps
+            .iter()
+            .any(|step| step.contains("DDL boundary")),
+        "{:?}",
+        err.next_steps
+    );
+}
+
+#[test]
+fn oracle_diff_flashback_retention_error_surfaces_typed_tool_envelope() {
+    let dispatcher = OracleDispatcher::new(Box::new(FlashbackFailingMock {
+        message: "ORA-08180: no snapshot found based on specified time",
+    }));
+    let err = dispatcher
+        .dispatch(
+            "oracle_diff",
+            json!({
+                "sql": "SELECT id FROM app.t",
+                "scn_a": 1,
+                "scn_b": 2,
+                "key": ["ID"]
+            }),
+        )
+        .expect_err("oracle_diff maps flashback page failures to typed refusals");
+
+    assert_eq!(err.error_class, ErrorClass::FlashbackRetentionExceeded);
+    assert_eq!(err.ora_code, Some(8180));
+    assert!(
+        err.next_steps.iter().any(|step| step.contains("newer SCN")),
+        "{:?}",
+        err.next_steps
     );
 }
 

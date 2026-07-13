@@ -70,6 +70,17 @@ pub enum ErrorClass {
     Timeout,
     /// A transient, retryable Oracle/network condition (ORA-03113, ORA-12170…).
     Transient,
+    /// A flashback/AS-OF read targeted an SCN or timestamp outside the
+    /// available undo/flashback retention window.
+    FlashbackRetentionExceeded,
+    /// A flashback/AS-OF read crossed a table/index definition change, so
+    /// Oracle cannot reconstruct the requested snapshot with the current
+    /// dictionary definition.
+    FlashbackDefinitionChanged,
+    /// A flashback/AS-OF read referenced an object or route that Oracle cannot
+    /// serve through flashback query (for example a remote table through a
+    /// database link).
+    FlashbackNotFlashbackable,
     /// An unexpected internal error; the agent cannot fix it by changing input.
     Internal,
 }
@@ -643,6 +654,33 @@ mod tests {
         let json = serde_json::to_value(&env).expect("serialize");
         assert_eq!(json["error_class"], serde_json::json!("BUSY"));
         assert_eq!(json["retry_after_ms"], serde_json::json!(250));
+    }
+
+    #[test]
+    fn flashback_error_classes_have_stable_wire_names_and_are_not_retryable() {
+        for (class, wire) in [
+            (
+                ErrorClass::FlashbackRetentionExceeded,
+                "FLASHBACK_RETENTION_EXCEEDED",
+            ),
+            (
+                ErrorClass::FlashbackDefinitionChanged,
+                "FLASHBACK_DEFINITION_CHANGED",
+            ),
+            (
+                ErrorClass::FlashbackNotFlashbackable,
+                "FLASHBACK_NOT_FLASHBACKABLE",
+            ),
+        ] {
+            let env = ErrorEnvelope::new(class, "flashback refused");
+            let json = serde_json::to_value(&env).expect("serialize");
+            assert_eq!(json["error_class"], serde_json::json!(wire));
+            assert!(
+                !class.is_retryable(),
+                "{wire} is a terminal input/snapshot limitation, not a same-call retry"
+            );
+            assert_eq!(class.default_suggested_tool(), None);
+        }
     }
 
     #[test]

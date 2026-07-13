@@ -4,7 +4,7 @@
 //! (the one-way boundary, §0). [`DbError::into_envelope`] renders the
 //! agent-facing [`ErrorEnvelope`] via the shared `oraclemcp-error` classifier.
 
-use oraclemcp_error::{ErrorClass, ErrorEnvelope, envelope_from_oracle_message};
+use oraclemcp_error::{ErrorClass, ErrorEnvelope, envelope_from_oracle_message, parse_ora_code};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -23,6 +23,84 @@ pub enum QuarantineOutcome {
     CommitInDoubt,
     /// The session state is unknown; it was discarded and must not be reused.
     UnknownDiscarded,
+}
+
+/// Machine-stable category for a flashback/AS-OF read refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FlashbackRefusalKind {
+    /// Oracle no longer has enough undo/SCN mapping data for the requested
+    /// target (`ORA-01555`, `ORA-08180`).
+    RetentionExceeded,
+    /// The table/index definition changed after the requested target
+    /// (`ORA-01466`).
+    DefinitionChanged,
+    /// Oracle cannot serve this object or route through flashback query.
+    NotFlashbackable,
+}
+
+impl FlashbackRefusalKind {
+    /// Stable, lower-case wire/log label for this refusal kind.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            FlashbackRefusalKind::RetentionExceeded => "retention_exceeded",
+            FlashbackRefusalKind::DefinitionChanged => "definition_changed",
+            FlashbackRefusalKind::NotFlashbackable => "not_flashbackable",
+        }
+    }
+
+    /// Agent-facing error class paired with this flashback refusal kind.
+    #[must_use]
+    pub(crate) const fn error_class(self) -> ErrorClass {
+        match self {
+            FlashbackRefusalKind::RetentionExceeded => ErrorClass::FlashbackRetentionExceeded,
+            FlashbackRefusalKind::DefinitionChanged => ErrorClass::FlashbackDefinitionChanged,
+            FlashbackRefusalKind::NotFlashbackable => ErrorClass::FlashbackNotFlashbackable,
+        }
+    }
+
+    /// Short operator-facing explanation of the refusal.
+    #[must_use]
+    pub(crate) const fn summary(self) -> &'static str {
+        match self {
+            FlashbackRefusalKind::RetentionExceeded => {
+                "the requested flashback target is outside available retention"
+            }
+            FlashbackRefusalKind::DefinitionChanged => {
+                "the object definition changed after the requested flashback target"
+            }
+            FlashbackRefusalKind::NotFlashbackable => {
+                "the query references an object Oracle cannot serve through flashback"
+            }
+        }
+    }
+
+    /// Concrete recovery hints exposed in the error envelope.
+    #[must_use]
+    pub(crate) const fn next_steps(self) -> &'static [&'static str] {
+        match self {
+            FlashbackRefusalKind::RetentionExceeded => &[
+                "retry with a newer SCN/timestamp inside the database undo/flashback retention window",
+                "for future comparisons, record the current SCN before the change and use that observed_scn",
+            ],
+            FlashbackRefusalKind::DefinitionChanged => &[
+                "retry with an SCN after the table or index DDL change",
+                "split the comparison at the DDL boundary or compare against current metadata instead",
+            ],
+            FlashbackRefusalKind::NotFlashbackable => &[
+                "remove the non-flashbackable object from the query or run the read directly on the source database",
+                "retry without as_of/oracle_diff only if a current read is acceptable",
+            ],
+        }
+    }
+}
+
+impl std::fmt::Display for FlashbackRefusalKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl QuarantineOutcome {
@@ -229,6 +307,19 @@ pub enum DbError {
     /// A DML/DDL execute failed.
     #[error("oracle execute failed: {0}")]
     Execute(String),
+    /// A flashback/AS-OF read failed for a known, typed Oracle flashback
+    /// limitation. This variant is constructed only by flashback read paths, so
+    /// ordinary `ORA-01555` on a non-flashback long query is not mislabeled as a
+    /// flashback retention refusal.
+    #[error("oracle flashback refused ({kind}): {message}")]
+    FlashbackRefusal {
+        /// Machine-stable refusal kind.
+        kind: FlashbackRefusalKind,
+        /// Sanitized Oracle detail.
+        message: String,
+        /// Parsed originating ORA code, when present.
+        ora_code: Option<i32>,
+    },
     /// A pool operation failed (acquire timeout, build failure, …).
     #[error("connection pool error: {0}")]
     Pool(String),
@@ -322,6 +413,23 @@ impl DbError {
                     env
                 }
             }
+            DbError::FlashbackRefusal {
+                kind,
+                message,
+                ora_code,
+            } => {
+                let mut env = ErrorEnvelope::new(
+                    kind.error_class(),
+                    format!("flashback refused: {}; {message}", kind.summary()),
+                );
+                if let Some(code) = ora_code {
+                    env = env.with_ora_code(code);
+                }
+                for step in kind.next_steps() {
+                    env = env.with_next_step(*step);
+                }
+                env
+            }
             DbError::QueryRowTooLarge {
                 row_offset,
                 row_bytes,
@@ -365,6 +473,38 @@ impl DbError {
                 _ => "do not reuse the quarantined session",
             }),
             DbError::Internal(msg) => ErrorEnvelope::new(ErrorClass::Internal, msg),
+        }
+    }
+}
+
+/// Map an Oracle error message that arose inside a flashback/AS-OF read path to
+/// a typed refusal. The mapping is intentionally contextual: the same ORA code
+/// can have broader meanings outside flashback and should remain a normal
+/// Oracle error there.
+#[must_use]
+pub(crate) fn classify_flashback_refusal_message(
+    message: &str,
+) -> Option<(FlashbackRefusalKind, Option<i32>)> {
+    let ora_code = parse_ora_code(message);
+    match ora_code {
+        Some(1555 | 8180) => Some((FlashbackRefusalKind::RetentionExceeded, ora_code)),
+        Some(1466) => Some((FlashbackRefusalKind::DefinitionChanged, ora_code)),
+        Some(8182 | 8185 | 8187 | 8189..=8199) => {
+            Some((FlashbackRefusalKind::NotFlashbackable, ora_code))
+        }
+        Some(2070) if message.to_ascii_lowercase().contains("flashback") => {
+            Some((FlashbackRefusalKind::NotFlashbackable, ora_code))
+        }
+        _ => {
+            let lower = message.to_ascii_lowercase();
+            if lower.contains("cannot perform a flashback query")
+                || lower.contains("not flashbackable")
+                || lower.contains("non-flashbackable")
+            {
+                Some((FlashbackRefusalKind::NotFlashbackable, ora_code))
+            } else {
+                None
+            }
         }
     }
 }
@@ -504,6 +644,99 @@ mod tests {
             DbError::Execute("ORA-20000: server detail suppressed".to_owned()).into_envelope();
         assert_eq!(env.error_class, ErrorClass::ConnectionFailed);
         assert_eq!(env.ora_code, Some(20_000));
+    }
+
+    #[test]
+    fn flashback_retention_refusal_has_typed_class_and_next_steps() {
+        let env = DbError::FlashbackRefusal {
+            kind: FlashbackRefusalKind::RetentionExceeded,
+            message: "ORA-08180: no snapshot found based on specified time".to_owned(),
+            ora_code: Some(8180),
+        }
+        .into_envelope();
+
+        assert_eq!(env.error_class, ErrorClass::FlashbackRetentionExceeded);
+        assert_eq!(env.ora_code, Some(8180));
+        assert!(env.message.contains("outside available retention"));
+        assert!(
+            env.next_steps.iter().any(|step| step.contains("newer SCN")),
+            "{:?}",
+            env.next_steps
+        );
+    }
+
+    #[test]
+    fn flashback_definition_change_refusal_has_typed_class_and_next_steps() {
+        let env = DbError::FlashbackRefusal {
+            kind: FlashbackRefusalKind::DefinitionChanged,
+            message: "ORA-01466: unable to read data - table definition has changed".to_owned(),
+            ora_code: Some(1466),
+        }
+        .into_envelope();
+
+        assert_eq!(env.error_class, ErrorClass::FlashbackDefinitionChanged);
+        assert_eq!(env.ora_code, Some(1466));
+        assert!(env.message.contains("definition changed"));
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("DDL boundary")),
+            "{:?}",
+            env.next_steps
+        );
+    }
+
+    #[test]
+    fn flashback_non_flashbackable_refusal_has_typed_class_and_next_steps() {
+        let env = DbError::FlashbackRefusal {
+            kind: FlashbackRefusalKind::NotFlashbackable,
+            message: "ORA-02070: database REMOTE does not support flashback in this context"
+                .to_owned(),
+            ora_code: Some(2070),
+        }
+        .into_envelope();
+
+        assert_eq!(env.error_class, ErrorClass::FlashbackNotFlashbackable);
+        assert_eq!(env.ora_code, Some(2070));
+        assert!(env.message.contains("cannot serve through flashback"));
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("source database")),
+            "{:?}",
+            env.next_steps
+        );
+    }
+
+    #[test]
+    fn flashback_refusal_classifier_is_contextual_and_conservative() {
+        assert_eq!(
+            classify_flashback_refusal_message("ORA-01555: snapshot too old"),
+            Some((FlashbackRefusalKind::RetentionExceeded, Some(1555)))
+        );
+        assert_eq!(
+            classify_flashback_refusal_message(
+                "ORA-01466: unable to read data - table definition has changed"
+            ),
+            Some((FlashbackRefusalKind::DefinitionChanged, Some(1466)))
+        );
+        assert_eq!(
+            classify_flashback_refusal_message(
+                "ORA-02070: database REMOTE does not support flashback in this context"
+            ),
+            Some((FlashbackRefusalKind::NotFlashbackable, Some(2070)))
+        );
+        assert_eq!(
+            classify_flashback_refusal_message("ORA-08185: flashback not supported for user SYS"),
+            Some((FlashbackRefusalKind::NotFlashbackable, Some(8185)))
+        );
+        assert_eq!(
+            classify_flashback_refusal_message(
+                "ORA-02070: database REMOTE does not support DECODE in this context"
+            ),
+            None,
+            "generic ORA-02070 must not be mislabeled as a flashback refusal"
+        );
     }
 
     #[test]
