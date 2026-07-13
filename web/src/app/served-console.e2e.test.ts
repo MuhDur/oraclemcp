@@ -44,12 +44,13 @@ const ENABLED = process.env.OMCP_SERVED_E2E === "1";
 const BIN = process.env.OMCP_BIN ?? "";
 const PORT = Number(process.env.OMCP_SERVED_PORT ?? "7393");
 const BASE = `http://127.0.0.1:${PORT}`;
-// When a live Oracle is configured, a real SELECT produces a real proof-carrying
-// record and the positive-path proofs run. Otherwise only the honest negatives.
+// This registered E2E is a live-proof gate: all three values are mandatory when
+// the harness is enabled. A no-DB console posture belongs in focused UI tests,
+// not a release proof that claims a real certificate and observed SCN.
 const LIVE_DSN = process.env.OMCP_LIVE_DSN ?? "";
 const LIVE_USER = process.env.OMCP_LIVE_USER ?? "";
 const LIVE_CRED = process.env.OMCP_LIVE_CRED ?? "";
-const LIVE = LIVE_DSN !== "";
+const LIVE = LIVE_DSN !== "" && LIVE_USER !== "" && LIVE_CRED !== "";
 
 type Cookie = string;
 
@@ -130,15 +131,13 @@ beforeAll(async () => {
   }
   expect(BIN, "OMCP_BIN must point at the built oraclemcp binary").not.toBe("");
   workdir = mkdtempSync(join(tmpdir(), "omcp-served-console-"));
-  // The default "reader" profile points at a live DB when OMCP_LIVE_DSN is set,
-  // so a real SELECT executes and produces a REAL proof-carrying audit record
-  // (verdict certificate + observed_scn). Without a live DB it points at a dead
-  // address, and the suite proves the honest negatives instead. Either way the
-  // "unreachable" profile is a genuinely dead lane for the fleet map, and
-  // "capped" carries a real cost ceiling for the config badge.
-  const readerDsn = LIVE_DSN || "127.0.0.1:1599/NOPE";
-  const readerUser = LIVE_USER || "e2e_reader";
-  const readerCred = LIVE_CRED || "not-a-real-password";
+  expect(LIVE, "served-console E2E requires OMCP_LIVE_DSN, OMCP_LIVE_USER, and OMCP_LIVE_CRED").toBe(true);
+  // The reader always points at the validated live lab. A real SELECT must
+  // complete and produce an audit-bound verdict certificate plus observed SCN.
+  // The separate unreachable profile is deliberately dead for fleet honesty.
+  const readerDsn = LIVE_DSN;
+  const readerUser = LIVE_USER;
+  const readerCred = LIVE_CRED;
   const config = `schema_version = 2
 default_profile = "reader"
 
@@ -158,12 +157,21 @@ credential_ref = "literal:${readerCred}"
 max_level = "READ_ONLY"
 default_level = "READ_ONLY"
 
+[profiles.masking]
+mask_unknown_default = true
+
+[[profiles.masking.rules]]
+column_match = { column = "SYNTHETIC_MASKED" }
+action = "mask"
+tag = "e2e.served-console.mask"
+
 [[profiles]]
 name = "capped"
 connect_string = "${readerDsn}"
 username = "${readerUser}"
 credential_ref = "literal:${readerCred}"
 max_level = "READ_ONLY"
+default_level = "READ_ONLY"
 max_query_cost = 50000
 
 [[profiles]]
@@ -172,6 +180,7 @@ connect_string = "127.0.0.1:1598/GONE"
 username = "e2e_reader"
 credential_ref = "literal:not-a-real-password"
 max_level = "READ_ONLY"
+default_level = "READ_ONLY"
 `;
   writeFileSync(join(workdir, "config.toml"), config);
   server = spawn(BIN, ["serve", "--listen", `127.0.0.1:${PORT}`, "--allow-no-auth"], {
@@ -236,14 +245,19 @@ describe.runIf(ENABLED)("shipped console affordances against a served backend", 
     expect(parseQueryCostRefusal(response.mcp_response)).toBeNull();
   });
 
-  it("verdict-proof inspector: real proof when the DB completes a read, honest absence otherwise", async () => {
-    if (LIVE) {
-      // A real governed SELECT executed against the live DB, so the audit tail
-      // now carries a REAL proof-carrying record. The inspector must render it
-      // as VERIFIED — every client-side check (audit binding, statement digest,
-      // rule registry, chain hash) passing against real bytes.
-      await mcp("oracle_query", { sql: "SELECT 1 AS one FROM dual" });
-    }
+  it("verdict-proof inspector renders a real governed row as verified evidence", async () => {
+    const read = await mcp("oracle_query", {
+      sql: 'SELECT 1 AS "SYNTHETIC_MASKED" FROM dual',
+      max_rows: 1
+    });
+    const page = read.mcp_response as { isError?: boolean; row_count?: number; rows?: unknown[] };
+    expect(page.isError).not.toBe(true);
+    expect(page.row_count).toBe(1);
+    expect(page.rows).toHaveLength(1);
+
+    // The completed read was executed against the live lab, so the audit tail
+    // carries real certificate and chain bytes. The console must render them as
+    // VERIFIED rather than trusting a server assertion.
     const tail = await operatorGet<{ data: AuditTailData }>("/operator/v1/audit-tail?limit=10");
     expect(tail.data.source).toBe("self_lane");
     const proofs = parseVerdictProofs(tail.data);
@@ -252,25 +266,17 @@ describe.runIf(ENABLED)("shipped console affordances against a served backend", 
     // counted as uncertified.
     expect(proofs.proofs.length + proofs.uncertified).toBe(tail.data.records.length);
 
-    if (LIVE) {
-      expect(proofs.proofs.length).toBeGreaterThan(0);
-      const proof = proofs.proofs[0];
-      const model = toVerdictProofViewModel(proof);
-      // The REAL certificate verifies end to end through the console's own checks.
-      expect(model.proofStatus).toBe("verified");
-      expect(model.certHash).not.toBe("");
-      expect(model.auditHash).not.toBeNull();
-      expect(model.derivation.every((step) => step.registered)).toBe(true);
-      expect(model.checks.every((check) => check.ok)).toBe(true);
-    } else {
-      for (const proof of proofs.proofs) {
-        expect(proof.certHash).not.toBe("");
-        expect(proof.auditHash).not.toBeNull();
-      }
-    }
+    expect(proofs.proofs.length).toBeGreaterThan(0);
+    const proof = proofs.proofs[0];
+    const model = toVerdictProofViewModel(proof);
+    expect(model.proofStatus).toBe("verified");
+    expect(model.certHash).not.toBe("");
+    expect(model.auditHash).not.toBeNull();
+    expect(model.derivation.every((step) => step.registered)).toBe(true);
+    expect(model.checks.every((check) => check.ok)).toBe(true);
   });
 
-  it.runIf(LIVE)("SCN scrubber binds to a REAL observed_scn from a completed read", async () => {
+  it("SCN scrubber binds to a REAL observed_scn from a completed read", async () => {
     await mcp("oracle_query", { sql: "SELECT 1 AS one FROM dual" });
     const tail = await operatorGet<{ data: AuditTailData }>("/operator/v1/audit-tail?limit=10");
     // The proof carries the exact SCN the read observed — a real forensic handle,
@@ -281,46 +287,38 @@ describe.runIf(ENABLED)("shipped console affordances against a served backend", 
     expect(Number(withScn!.observedScn)).toBeGreaterThan(0);
   });
 
-  it("egress mask badge treats 'no certificate' as absence of proof, not proof of no masking", async () => {
-    // A read the server refused (no live DB) carries no mask certificate. The
-    // badge must render no_certificate — NOT a reassuring 'nothing was masked'.
-    const read = await mcp("oracle_query", { sql: "SELECT 1 FROM dual", max_rows: 1 });
+  it("egress mask badge renders the real audit-bound transformation", async () => {
+    const read = await mcp("oracle_query", {
+      sql: 'SELECT 1 AS "SYNTHETIC_MASKED" FROM dual',
+      max_rows: 1
+    });
     const badge = toMaskBadgeViewModel(parseMaskCertificate(read));
-    expect(badge.status).toBe("no_certificate");
-    expect(badge.maskedColumns).toBe(0);
-    expect(badge.detail).toContain("not proof that nothing was masked");
+    expect(badge.status).toBe("certified");
+    expect(badge.profile).toBe("reader");
+    expect(badge.auditHash).not.toBeNull();
+    expect(badge.maskedColumns).toBeGreaterThan(0);
+    expect(badge.columns.some((column) => column.column === "SYNTHETIC_MASKED" && column.masked)).toBe(true);
   });
 
   it("fleet map shows every lane — the UNREACHABLE one visible and drift-unknown", async () => {
     const orient = await mcp("oracle_orient", { fleet: true, include: ["schema", "freshness"] });
     const model = toFleetMapViewModel(parseFleetMap(orient));
 
-    if (LIVE) {
-      // The active lane is up, so the real federated map lists every profile.
-      // The dead "unreachable" lane is a VISIBLE node, not dropped, and carries
-      // no drift verdict because nothing was read from it.
-      const unreachable = model.nodes.find((node) => node.dbId === "unreachable");
-      expect(unreachable, "the dead lane must stay on the map").toBeTruthy();
-      expect(unreachable!.status).toBe("unreachable");
-      expect(unreachable!.drift).toBeNull();
-      expect(model.nodes.length).toBe(model.profileCount);
-      expect(model.reachableCount).toBeGreaterThan(0);
-      expect(model.unreachableCount).toBe(1);
-    } else {
-      // With the active lane's DB down, oracle_orient returns a whole-tool
-      // CONNECTION_FAILED — no per-lane map. The parser yields ZERO nodes rather
-      // than a green "0 issues" fleet, and the App surfaces the error notice.
-      const result = orient.mcp_response as { isError?: boolean };
-      expect(result.isError).toBe(true);
-      expect(model.nodes).toHaveLength(0);
-      expect(model.reachableCount).toBe(0);
-    }
+    // The active lane is up, so the real federated map lists every profile.
+    // The dead "unreachable" lane is a VISIBLE node, not dropped, and carries
+    // no drift verdict because nothing was read from it.
+    const unreachable = model.nodes.find((node) => node.dbId === "unreachable");
+    expect(unreachable, "the dead lane must stay on the map").toBeTruthy();
+    expect(unreachable!.status).toBe("unreachable");
+    expect(unreachable!.drift).toBeNull();
+    expect(model.nodes.length).toBe(model.profileCount);
+    expect(model.reachableCount).toBeGreaterThan(0);
+    expect(model.unreachableCount).toBe(1);
   });
 
-  it("policy badge reports 'not reported' honestly when the response carries no verdict", async () => {
-    // The gated profile carries no policy verdict on a refused statement, so the
-    // badge must NOT claim 'no policy applied' — it says the verdict was not
-    // reported, which is a different, honest statement.
+  it("policy badge reflects the real server response without inventing a verdict", async () => {
+    // The active profile carries no policy outcome on this real classifier
+    // refusal, so the badge must not manufacture a reassuring policy state.
     const drop = ["DROP", "TABLE", "hr.employees"].join(" ");
     const response = await mcp("oracle_execute", { sql: drop, commit: false });
     const badge = toPolicyBadgeViewModel(parsePolicyTightening(response.mcp_response));

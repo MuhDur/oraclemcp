@@ -202,6 +202,83 @@ fn e2e_orchestrator_aggregates_dry_run_scenarios() {
     );
 }
 
+/// Arc L's console scenario is release evidence only when its non-dry-run path
+/// requires a real lab connection. A missing live input must fail before any
+/// UI-only honesty assertion can be mistaken for a served-Oracle proof.
+#[test]
+fn served_console_requires_live_oracle_and_dry_run_only_checks_wiring() {
+    let root = repo_root();
+    let mut command = Command::new("bash");
+    let missing_live = command
+        .arg(root.join("scripts/e2e/served_console.sh"))
+        .arg("--log")
+        .current_dir(&root)
+        .env("ORACLEMCP_E2E_SEED", "4242")
+        .env(
+            "ORACLEMCP_E2E_ARTIFACT_DIR",
+            root.join("target/e2e-contract"),
+        )
+        .env_remove("OMCP_LIVE_DSN")
+        .env_remove("OMCP_LIVE_USER")
+        .env_remove("OMCP_LIVE_CRED")
+        .output()
+        .expect("run served-console without live inputs");
+    assert!(
+        !missing_live.status.success(),
+        "served-console must not report success without its mandatory live Oracle inputs: {}",
+        String::from_utf8_lossy(&missing_live.stderr)
+    );
+    let missing_events = json_lines(&missing_live.stderr);
+    assert!(
+        missing_events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "fail"
+                && event["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("OMCP_LIVE_DSN"))),
+        "missing explicit live-input failure: {missing_events:?}"
+    );
+
+    let dry_run = Command::new("bash")
+        .arg(root.join("scripts/e2e/served_console.sh"))
+        .args(["--log", "--dry-run"])
+        .current_dir(&root)
+        .env("ORACLEMCP_E2E_SEED", "4242")
+        .env(
+            "ORACLEMCP_E2E_ARTIFACT_DIR",
+            root.join("target/e2e-contract"),
+        )
+        .env_remove("OMCP_LIVE_DSN")
+        .env_remove("OMCP_LIVE_USER")
+        .env_remove("OMCP_LIVE_CRED")
+        .output()
+        .expect("run served-console dry-run");
+    assert!(
+        dry_run.status.success(),
+        "served-console dry-run failed: {}",
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    let dry_events = json_lines(&dry_run.stderr);
+    assert!(
+        dry_events
+            .iter()
+            .any(|event| event["event"] == "command_start"
+                && event["message"].as_str().is_some_and(
+                    |message| message.contains("omcpb build -p oraclemcp --bin oraclemcp")
+                )),
+        "served-console dry-run did not schedule its omcpb build: {dry_events:?}"
+    );
+    assert!(
+        dry_events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "served_console"),
+        "missing served-console dry-run completion: {dry_events:?}"
+    );
+}
+
 #[test]
 fn time_diff_e2e_dry_run_uses_omcpb_and_reports_a_pass() {
     let root = repo_root();
