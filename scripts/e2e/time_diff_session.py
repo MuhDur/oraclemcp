@@ -250,6 +250,24 @@ class TimeDiff:
         require(result.get("isError") is not True, "oracle_diff succeeds", content)
         return content
 
+    def diff_refused(self, sql, scn_a, scn_b, expected_class, expected_oras):
+        result = self.session.call(
+            "oracle_diff", {"sql": sql, "scn_a": scn_a, "scn_b": scn_b, "key": ["ID"]}
+        )
+        content = structured(result)
+        require(result.get("isError") is True, "oracle_diff is refused", content)
+        require(
+            content.get("error_class") == expected_class,
+            f"oracle_diff refusal error_class is {expected_class}",
+            content,
+        )
+        require(
+            content.get("ora_code") in expected_oras,
+            f"oracle_diff refusal ora_code is one of {sorted(expected_oras)}",
+            content,
+        )
+        return content
+
     def elevate(self):
         preview = structured(self.session.call("oracle_set_session_level", {"level": "DDL"}))
         token = (preview.get("confirmation") or {}).get("confirm")
@@ -448,11 +466,16 @@ class TimeDiff:
 
         self.step("flashback_retention_refusal", retention_refusal)
 
-        def definition_refusal():
+        def definition_change():
             # Oracle documents a column MODIFY as invalidating the prior undo
             # image; widening this synthetic column preserves every fixture
             # value while making a pre-DDL SCN deterministically unreplayable.
             self.execute(f"ALTER TABLE {self.table} MODIFY (val VARCHAR2(31))")
+            return {"table": self.table}
+
+        self.step("definition_change", definition_change)
+
+        def query_definition_refusal():
             refusal = self.query_refused(
                 row_sql,
                 {"scn": scn_b},
@@ -461,7 +484,19 @@ class TimeDiff:
             )
             return {"error_class": refusal.get("error_class"), "ora_code": refusal.get("ora_code")}
 
-        self.step("flashback_definition_refusal", definition_refusal)
+        self.step("flashback_definition_refusal", query_definition_refusal)
+
+        def diff_definition_refusal():
+            refusal = self.diff_refused(
+                row_sql,
+                scn_a,
+                scn_b,
+                "FLASHBACK_DEFINITION_CHANGED",
+                (1466,),
+            )
+            return {"error_class": refusal.get("error_class"), "ora_code": refusal.get("ora_code")}
+
+        self.step("oracle_diff_definition_refusal", diff_definition_refusal)
 
     def cleanup(self):
         try:
