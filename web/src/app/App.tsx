@@ -4100,7 +4100,7 @@ type ExplorerSchemaRow = {
   objectCount: string;
 };
 
-type ExplorerObjectRow = {
+export type ExplorerObjectRow = {
   owner: string;
   objectName: string;
   objectType: string;
@@ -5128,7 +5128,7 @@ function ExplorerSchemasPanel({
   );
 }
 
-function ExplorerObjectsPanel({
+export function ExplorerObjectsPanel({
   rows,
   selectedRef,
   pending,
@@ -5181,12 +5181,22 @@ function ExplorerObjectsPanel({
                   <tr
                     key={objectRefKey(ref)}
                     className={cn(
-                      "cursor-pointer",
+                      "cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--om-gold)]",
                       selected
                         ? "bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)]"
                         : "bg-transparent"
                     )}
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={Boolean(selected)}
+                    aria-label={`Select ${row.objectName}`}
                     onClick={() => onSelect(row)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        onSelect(row);
+                      }
+                    }}
                   >
                     <td className="px-4 py-4 align-top">
                       <p className="font-mono text-sm font-semibold text-[var(--om-text-bright)]">
