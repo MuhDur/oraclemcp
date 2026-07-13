@@ -39,7 +39,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlparser::ast::{
-    Expr, Ident, Query, Select, SetExpr, TableAlias, TableFactor, TableWithJoins, Visit, Visitor,
+    Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Query, Select, SetExpr,
+    TableAlias, TableFactor, TableWithJoins, Visit, Visitor,
 };
 use sqlparser::dialect::OracleDialect;
 use sqlparser::keywords::Keyword;
@@ -2349,12 +2350,29 @@ fn unresolved_qualified_calls(query: &Query) -> Vec<String> {
 
 struct SemanticValueVisitor {
     values: Vec<RawName>,
+    /// Addresses of the exact `VECTOR_DISTANCE` metric expressions currently
+    /// being visited. The metric is Oracle grammar, not a caller-controlled
+    /// data identifier, but this must not suppress an identically named column
+    /// elsewhere in the same query.
+    vector_metric_expressions: Vec<*const Expr>,
 }
 
 impl Visitor for SemanticValueVisitor {
     type Break = ();
 
     fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        if let Expr::Function(function) = expr
+            && let Some(metric) = vector_distance_metric_expr(function)
+        {
+            self.vector_metric_expressions.push(metric as *const Expr);
+        }
+        if self
+            .vector_metric_expressions
+            .iter()
+            .any(|metric| std::ptr::eq(*metric, expr as *const Expr))
+        {
+            return ControlFlow::Continue(());
+        }
         let parts = match expr {
             Expr::Identifier(part) => std::slice::from_ref(part),
             Expr::CompoundIdentifier(parts) => parts.as_slice(),
@@ -2368,6 +2386,51 @@ impl Visitor for SemanticValueVisitor {
         }
         ControlFlow::Continue(())
     }
+
+    fn post_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        if let Expr::Function(function) = expr
+            && let Some(metric) = vector_distance_metric_expr(function)
+        {
+            let metric = metric as *const Expr;
+            let position = self
+                .vector_metric_expressions
+                .iter()
+                .rposition(|active| std::ptr::eq(*active, metric))
+                .expect("VECTOR_DISTANCE metric was registered before its arguments");
+            self.vector_metric_expressions.remove(position);
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Return the exact third argument when it is one of Oracle's documented
+/// `VECTOR_DISTANCE` metric keywords. This intentionally recognizes no quoted
+/// identifier, qualified call, named argument, or unreviewed metric spelling.
+fn vector_distance_metric_expr(function: &Function) -> Option<&Expr> {
+    let [name] = function.name.0.as_slice() else {
+        return None;
+    };
+    let name = name.as_ident()?;
+    if name.quote_style.is_some() || !name.value.eq_ignore_ascii_case("VECTOR_DISTANCE") {
+        return None;
+    }
+    let FunctionArguments::List(arguments) = &function.args else {
+        return None;
+    };
+    let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(metric @ Expr::Identifier(identifier)))) =
+        arguments.args.get(2)
+    else {
+        return None;
+    };
+    is_vector_distance_metric(identifier).then_some(metric)
+}
+
+fn is_vector_distance_metric(metric: &Ident) -> bool {
+    metric.quote_style.is_none()
+        && matches!(
+            metric.value.to_ascii_uppercase().as_str(),
+            "COSINE" | "EUCLIDEAN" | "DOT"
+        )
 }
 
 fn is_semantic_builtin_identifier(ident: &Ident) -> bool {
@@ -2474,7 +2537,10 @@ pub fn semantic_read_plan(sql: &str) -> Option<SemanticReadPlan> {
             relations.push(simple_statement_relation(&join.relation)?);
         }
     }
-    let mut visitor = SemanticValueVisitor { values: Vec::new() };
+    let mut visitor = SemanticValueVisitor {
+        values: Vec::new(),
+        vector_metric_expressions: Vec::new(),
+    };
     let _ = query.visit(&mut visitor);
     let mut seen_values = HashSet::new();
     visitor
@@ -3766,6 +3832,50 @@ mod tests {
                 "missing semantic value candidate {expected}"
             );
         }
+    }
+
+    #[test]
+    fn semantic_read_plan_treats_only_vector_distance_metrics_as_grammar() {
+        for metric in ["COSINE", "EUCLIDEAN", "DOT"] {
+            let sql = format!(
+                "SELECT VECTOR_DISTANCE(d.embedding, '[1,0,0]', {metric}) AS distance FROM docs d"
+            );
+            let plan = semantic_read_plan(&sql).expect("vector query has an exact semantic plan");
+            assert!(plan.values.iter().any(|name| {
+                name.parts.len() == 2
+                    && name.parts[0].text.eq_ignore_ascii_case("d")
+                    && name.parts[1].text.eq_ignore_ascii_case("embedding")
+            }));
+            assert!(
+                !plan.values.iter().any(|name| {
+                    name.parts.len() == 1 && name.parts[0].text.eq_ignore_ascii_case(metric)
+                }),
+                "approved VECTOR_DISTANCE metric {metric} is grammar, not a column"
+            );
+        }
+
+        let retained = semantic_read_plan(
+            "SELECT COSINE, VECTOR_DISTANCE(d.embedding, '[1,0,0]', COSINE) AS distance FROM docs d",
+        )
+        .expect("query mixing a column and metric has an exact semantic plan");
+        assert!(
+            retained.values.iter().any(|name| {
+                name.parts.len() == 1 && name.parts[0].text.eq_ignore_ascii_case("COSINE")
+            }),
+            "a same-named column outside the metric position still needs catalog proof"
+        );
+
+        let unknown = semantic_read_plan(
+            "SELECT VECTOR_DISTANCE(d.embedding, '[1,0,0]', UNREVIEWED_METRIC) AS distance FROM docs d",
+        )
+        .expect("unknown metric query still has a plan");
+        assert!(
+            unknown.values.iter().any(|name| {
+                name.parts.len() == 1
+                    && name.parts[0].text.eq_ignore_ascii_case("UNREVIEWED_METRIC")
+            }),
+            "unreviewed metric spelling must remain a resolved value dependency"
+        );
     }
 
     #[test]

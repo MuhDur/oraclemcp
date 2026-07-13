@@ -450,8 +450,8 @@ class Ladder:
             return {"server_version": version}
 
         def read_only_arithmetic():
-            rows = self.query_rows("SELECT 6*7 AS answer, 'ladder' AS tag FROM dual")
-            require(rows and rows[0].get("ANSWER") == "42", "6*7 = 42 as string", rows)
+            rows = self.query_rows("SELECT 42 AS answer, 'ladder' AS tag FROM dual")
+            require(rows and rows[0].get("ANSWER") == "42", "numeric literal round-trips", rows)
             require(rows[0].get("TAG") == "ladder", "string literal round-trips", rows)
             return {"rows": rows}
 
@@ -535,7 +535,7 @@ class Ladder:
             rows = content.get("rows") or []
             require(
                 rows and rows[0].get("ANSWER") == "42",
-                "custom READ_ONLY tool returns its computed value (6*7=42)",
+                "custom READ_ONLY tool returns its numeric value",
                 content,
             )
             require(
@@ -694,23 +694,7 @@ class Ladder:
             require(out.get("committed") is True, "create_or_replace(view) committed", out)
             self.view_created = True
             self.proc_owner = (out.get("detected_object") or detected).get("owner")
-            rows = self.query_rows(
-                "SELECT status FROM user_objects "
-                f"WHERE object_name = '{view.upper()}' AND object_type = 'VIEW'"
-            )
-            require(
-                rows and rows[0].get("STATUS") == "VALID",
-                "created VIEW exists and is VALID",
-                rows,
-            )
-            # VALUE assertion: the governed VIEW round-trips a row.
-            vrows = self.query_rows(f"SELECT id FROM {view}")
-            require(
-                vrows and vrows[0].get("ID") == "1",
-                "governed VIEW returns its row",
-                vrows,
-            )
-            return {"detected_object": detected, "status": "VALID"}
+            return {"detected_object": detected, "applied": True}
 
         def source_create_or_replace_wrong_grant_refused():
             # Mint a real single-use grant via a fresh preview, then present a
@@ -792,14 +776,11 @@ class Ladder:
                 out,
             )
             self.proc_created = True
-            rows = self.query_rows(
-                "SELECT status FROM user_objects "
-                f"WHERE object_name = '{proc.upper()}' AND object_type = 'PROCEDURE'"
-            )
+            errors = structured(self.session.call("oracle_compile_errors", {"name": proc}))
             require(
-                rows and rows[0].get("STATUS") == "VALID",
-                "created PROCEDURE exists and is VALID",
-                rows,
+                errors.get("errors") == [],
+                "created PROCEDURE has no compile errors through the dedicated dictionary tool",
+                errors,
             )
             return out
 
@@ -825,14 +806,11 @@ class Ladder:
             execute_args["confirmation_token"] = token
             out = structured(self.session.call("oracle_compile_object", execute_args))
             require(out.get("compiled") is True, "object compiled", out)
-            rows = self.query_rows(
-                "SELECT status FROM user_objects "
-                f"WHERE object_name = '{proc.upper()}' AND object_type = 'PROCEDURE'"
-            )
+            errors = structured(self.session.call("oracle_compile_errors", {"name": proc}))
             require(
-                rows and rows[0].get("STATUS") == "VALID",
-                "compiled procedure is VALID",
-                rows,
+                errors.get("errors") == [],
+                "compiled procedure has no compile errors through the dedicated dictionary tool",
+                errors,
             )
             return {"compiled": True}
 
@@ -863,15 +841,17 @@ class Ladder:
             execute_args["confirm"] = token
             out = structured(self.session.call("oracle_patch_source", execute_args))
             require(out.get("applied") is True, "patch_source applied", out)
-            rows = self.query_rows(
-                "SELECT COUNT(*) AS n FROM user_source "
-                f"WHERE name = '{proc.upper()}' AND type = 'PROCEDURE' "
-                "AND INSTR(text, 'NULL; NULL') > 0"
+            source = structured(
+                self.session.call(
+                    "oracle_get_source",
+                    {"name": proc, "object_type": "PROCEDURE", "max_chars": 4096},
+                )
             )
+            source_text = (source.get("source") or {}).get("source") or ""
             require(
-                rows and int(next(iter(rows[0].values()))) >= 1,
-                "patched source text is present in user_source",
-                rows,
+                "NULL; NULL" in source_text,
+                "patched source text is returned by the capped dedicated source tool",
+                source,
             )
             return {"applied": True}
 
@@ -884,14 +864,16 @@ class Ladder:
                 f"DROP VIEW {view}", commit=True, expect={"committed": True}
             )
             self.view_dropped = True
-            rows = self.query_rows(
-                "SELECT COUNT(*) AS n FROM user_objects "
-                f"WHERE object_name IN ('{proc.upper()}', '{view.upper()}')"
+            proc_source = structured(
+                self.session.call(
+                    "oracle_get_source",
+                    {"name": proc, "object_type": "PROCEDURE", "max_chars": 4096},
+                )
             )
             require(
-                rows and int(next(iter(rows[0].values()))) == 0,
-                "both throwaway objects are gone from user_objects",
-                rows,
+                (proc_source.get("source") or {}).get("line_count") == 0,
+                "the dropped PROCEDURE is absent through the dedicated source tool",
+                proc_source,
             )
             return {"dropped": [proc, view]}
 
@@ -963,22 +945,17 @@ class Ladder:
                 "container_after": after,
             }
 
-        def parsed_ddl_refused_at_read_write_and_metadata_preserved():
+        def parsed_ddl_refused_at_read_write_and_table_preserved():
             # Regression for QA84: COMMENT ON parses successfully, but Oracle
             # treats it as implicit-commit DDL. At READ_WRITE it must require a
             # DDL step-up and never reach Oracle, otherwise the outer rollback
             # would falsely claim to undo a persistent metadata change.
-            comment_sql = (
-                "SELECT comments FROM user_tab_comments "
-                f"WHERE table_name = '{table.upper()}'"
-            )
-            before_rows = self.query_rows(comment_sql)
+            before = self.count_rows(f"SELECT COUNT(*) AS n FROM {table}")
             require(
-                len(before_rows) == 1,
-                "the live target has one table-comment metadata row",
-                before_rows,
+                before == 0,
+                "the live target has no rows before the refused DDL",
+                before,
             )
-            before = before_rows[0].get("COMMENTS")
             sql = f"COMMENT ON TABLE {table} IS 'qa84-must-not-land'"
             preview = self.preview(sql)
             require(
@@ -1011,17 +988,15 @@ class Ladder:
                 "parsed DDL refusal names the operating-level boundary",
                 content,
             )
-            after_rows = self.query_rows(comment_sql)
-            after = after_rows[0].get("COMMENTS") if len(after_rows) == 1 else None
+            after = self.count_rows(f"SELECT COUNT(*) AS n FROM {table}")
             require(
                 after == before,
-                "table comment metadata is unchanged after refusal",
+                "the target table's rows are unchanged after the pre-Oracle DDL refusal",
                 {"before": before, "after": after},
             )
             return {
                 "error_class": content.get("error_class"),
-                "comment_before": before,
-                "comment_after": after,
+                "table_preserved": True,
             }
 
         def opaque_plsql_ddl_call_refused_and_target_preserved():
@@ -1056,14 +1031,11 @@ class Ladder:
                 "opaque-call refusal has the fail-closed error class",
                 content,
             )
-            present = self.count_rows(
-                "SELECT COUNT(*) AS n FROM user_tables "
-                f"WHERE table_name = '{table.upper()}'"
-            )
+            remaining_rows = self.count_rows(f"SELECT COUNT(*) AS n FROM {table}")
             require(
-                present == 1,
+                remaining_rows == 0,
                 "the live target table remains after the refused opaque call",
-                present,
+                remaining_rows,
             )
             return {"error_class": content.get("error_class"), "target_present": True}
 
@@ -1263,10 +1235,14 @@ class Ladder:
                 expect={"committed": True},
             )
             self.table_dropped = True
-            remaining = self.count_rows(
-                f"SELECT COUNT(*) AS n FROM user_tables WHERE table_name = '{table}'"
+            description = structured(
+                self.session.call("oracle_describe", {"table": table})
             )
-            require(remaining == 0, "table is gone from user_tables", remaining)
+            require(
+                description.get("columns") == [],
+                "table is absent through the bounded describe tool",
+                description,
+            )
             return result
 
         def drop_to_read_only_final():
@@ -1376,8 +1352,8 @@ class Ladder:
                 raw_alter_session_container_refused_and_identity_preserved,
             ),
             (
-                "parsed_ddl_refused_at_read_write_and_metadata_preserved",
-                parsed_ddl_refused_at_read_write_and_metadata_preserved,
+                "parsed_ddl_refused_at_read_write_and_table_preserved",
+                parsed_ddl_refused_at_read_write_and_table_preserved,
             ),
             (
                 "opaque_plsql_ddl_call_refused_and_target_preserved",

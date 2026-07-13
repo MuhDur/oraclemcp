@@ -48,6 +48,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT/scripts/e2e/lib.sh"
 
+# `ORACLEMCP_` is the server's strict configuration prefix.  Keep the harness
+# artifact root available to this shell, but do not pass it to the served
+# binary: otherwise an externally exported artifact-root setting is parsed as
+# an unknown server config field before the live lane can prove anything.
+export -n ORACLEMCP_E2E_ARTIFACT_DIR
+
 E2E_SCENARIO="oracle_version_matrix"
 E2E_LANE="version-matrix"
 E2E_PROFILE="matrix"
@@ -188,6 +194,12 @@ run_stamp="$(date -u +"%Y%m%dT%H%M%SZ")-$$"
 matrix_dir="$ORACLEMCP_E2E_ARTIFACT_DIR/$E2E_SCENARIO/$run_stamp"
 mkdir -p "$matrix_dir"
 
+# These controls have now been consumed by the harness.  The served binary
+# treats its `ORACLEMCP_` environment prefix as strict configuration, so no
+# E2E-only controls may cross this process boundary.
+export -n ORACLEMCP_E2E_ARTIFACT_DIR ORACLEMCP_E2E_SEED \
+  ORACLEMCP_LIVE_XE ORACLEMCP_ORACLE_MATRIX_BINARY
+
 audit_key="$(openssl rand -hex 32 2>/dev/null || date +%s%N | sha256sum | cut -d' ' -f1)"
 
 # Per-lane wall-clock ceilings: a hung lane (stuck DB, wedged stdio session)
@@ -254,8 +266,8 @@ PROFILES
   cat >"$tools_dir/matrix_ro_probe.toml" <<'TOOLS'
 [[tool]]
 name = "matrix_ro_probe"
-description = "version-matrix READ_ONLY operator tool (throwaway): returns 6*7"
-sql = "SELECT 6*7 AS answer, 'matrix' AS tag FROM dual"
+description = "version-matrix READ_ONLY operator tool (throwaway): returns a literal row"
+sql = "SELECT 42 AS answer, 'matrix' AS tag FROM dual"
 output_mode = "rows"
 TOOLS
 
