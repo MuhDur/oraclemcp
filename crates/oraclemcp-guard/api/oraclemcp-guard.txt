@@ -2227,6 +2227,7 @@ pub fn oraclemcp_guard::stepup::StepUpRegistry::new() -> Self
 pub fn oraclemcp_guard::stepup::StepUpRegistry::poll(&self, &str) -> oraclemcp_guard::stepup::ChallengeStatus
 pub fn oraclemcp_guard::stepup::StepUpRegistry::resolve(&self, &str, oraclemcp_guard::stepup::StepUpOption) -> core::result::Result<oraclemcp_guard::stepup::StepUpResolution, oraclemcp_guard::stepup::StepUpError>
 pub fn oraclemcp_guard::stepup::StepUpRegistry::resolve_with_ci_token(&self, &str, &oraclemcp_guard::stepup::CiToken, &str) -> core::result::Result<oraclemcp_guard::stepup::StepUpResolution, oraclemcp_guard::stepup::StepUpError>
+pub fn oraclemcp_guard::stepup::StepUpRegistry::take_resolved(&self, &str) -> oraclemcp_guard::stepup::ChallengeStatus
 impl core::default::Default for oraclemcp_guard::stepup::StepUpRegistry
 pub fn oraclemcp_guard::stepup::StepUpRegistry::default() -> oraclemcp_guard::stepup::StepUpRegistry
 impl !core::marker::Freeze for oraclemcp_guard::stepup::StepUpRegistry
@@ -4389,6 +4390,7 @@ pub fn oraclemcp_guard::stepup::StepUpRegistry::new() -> Self
 pub fn oraclemcp_guard::stepup::StepUpRegistry::poll(&self, &str) -> oraclemcp_guard::stepup::ChallengeStatus
 pub fn oraclemcp_guard::stepup::StepUpRegistry::resolve(&self, &str, oraclemcp_guard::stepup::StepUpOption) -> core::result::Result<oraclemcp_guard::stepup::StepUpResolution, oraclemcp_guard::stepup::StepUpError>
 pub fn oraclemcp_guard::stepup::StepUpRegistry::resolve_with_ci_token(&self, &str, &oraclemcp_guard::stepup::CiToken, &str) -> core::result::Result<oraclemcp_guard::stepup::StepUpResolution, oraclemcp_guard::stepup::StepUpError>
+pub fn oraclemcp_guard::stepup::StepUpRegistry::take_resolved(&self, &str) -> oraclemcp_guard::stepup::ChallengeStatus
 impl core::default::Default for oraclemcp_guard::stepup::StepUpRegistry
 pub fn oraclemcp_guard::stepup::StepUpRegistry::default() -> oraclemcp_guard::stepup::StepUpRegistry
 impl !core::marker::Freeze for oraclemcp_guard::stepup::StepUpRegistry
