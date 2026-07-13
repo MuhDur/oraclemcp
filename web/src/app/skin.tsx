@@ -28,6 +28,7 @@ import {
   type HealthPosture,
   type SignatureId,
   type SkinCapability,
+  type VerdictProofViewModel,
   defaultSkinCapabilities,
   normalizeRendererChoice,
   skinContractFixture
@@ -64,6 +65,7 @@ export type DashboardSkin = {
   bigBoardRenderers: Readonly<Record<BigBoardRendererKind, BigBoardRendererDefinition>>;
   renderers: {
     GroundControl: React.ComponentType<{ model: GroundControlViewModel }>;
+    VerdictProof: React.ComponentType<{ model: VerdictProofViewModel }>;
   };
   layout: {
     appShell: string;
@@ -141,7 +143,8 @@ export const OMCP_SKIN: DashboardSkin = {
     }
   },
   renderers: {
-    GroundControl: GroundControl2DRenderer
+    GroundControl: GroundControl2DRenderer,
+    VerdictProof: VerdictProofInspector
   },
   layout: {
     appShell: "min-h-screen bg-[var(--om-bg)] text-[var(--om-text)]",
@@ -228,8 +231,152 @@ export function detectDashboardCapabilities(): SkinCapability {
   };
 }
 
+/**
+ * The verdict-proof inspector (Arc B1).
+ *
+ * It answers three operator questions about one governed statement: was it
+ * admitted or refused, which registry rules fired to get there, and does the
+ * certificate actually verify against the audit record it names. The proof
+ * badge is driven by the client-side checks, never by a server assertion, and
+ * an unregistered rule id renders as unregistered rather than being hidden.
+ */
+export function VerdictProofInspector({
+  model
+}: {
+  model: VerdictProofViewModel;
+}): React.ReactElement {
+  const verified = model.proofStatus === "verified";
+  return (
+    <section
+      className="flex flex-col gap-3 rounded-lg border border-[var(--om-border)] bg-[var(--om-surface)] p-4 shadow-sm"
+      aria-label={`verdict proof for audit record ${model.seq}`}
+      data-grammar-version={model.grammarVersion}
+      data-verdict={model.verdict}
+      data-go-no-go={model.goNoGo}
+      data-admitted={model.admitted ? "true" : "false"}
+      data-proof-status={model.proofStatus}
+      data-cert-hash={model.certHash}
+      data-audit-hash={model.auditHash ?? ""}
+      data-clearance-level={model.level ?? "NONE"}
+      data-seq={model.seq}
+    >
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          {verified ? (
+            <ShieldCheck className="size-4 text-[var(--om-sage)]" aria-hidden="true" />
+          ) : (
+            <AlertTriangle className="size-4 text-[var(--om-copper)]" aria-hidden="true" />
+          )}
+          <span className="text-sm font-bold text-[var(--om-text-bright)]">
+            {model.admitted ? "Admitted" : "Refused"}
+          </span>
+          <Badge tone={model.tone}>{model.verdict}</Badge>
+          <span
+            className="font-mono text-2xs uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]"
+            data-testid="verdict-proof-level"
+          >
+            {model.level ?? "no level"}
+          </span>
+        </div>
+        <span
+          className={cn(
+            "font-mono text-2xs uppercase tracking-[var(--tracking-label)]",
+            verified ? "text-[var(--om-sage)]" : "text-[var(--om-copper)]"
+          )}
+        >
+          proof {model.proofStatus}
+        </span>
+      </header>
+
+      <dl className="grid gap-2 sm:grid-cols-2">
+        <VerdictProofFact label="Certificate hash" value={model.certHash || "absent"} />
+        <VerdictProofFact label="Bound audit entry" value={model.auditHash ?? "unbound"} />
+        <VerdictProofFact label="Statement digest" value={model.stmtDigest} />
+        <VerdictProofFact label="Classifier" value={model.classifierVersion} />
+        {model.observedScn ? (
+          <VerdictProofFact label="Observed SCN" value={model.observedScn} />
+        ) : null}
+        <VerdictProofFact label="Tool" value={model.tool} />
+      </dl>
+
+      <div>
+        <p className="mb-2 text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+          Derivation
+        </p>
+        <ol className="flex flex-col gap-1">
+          {model.derivation.map((step, index) => (
+            <li
+              key={`${step.ruleId}:${step.construct}:${index}`}
+              className="flex items-center gap-2 rounded-md border border-[var(--om-border)] px-2 py-1"
+              data-rule-id={step.ruleId}
+              data-construct={step.construct}
+              data-registered={step.registered ? "true" : "false"}
+            >
+              <span className="font-mono text-2xs font-bold text-[var(--om-gold)]">
+                {step.ruleId}
+              </span>
+              <span className="font-mono text-2xs text-[var(--om-text)]">{step.construct}</span>
+              {step.registered ? null : (
+                <span className="font-mono text-2xs text-[var(--om-copper)]">unregistered</span>
+              )}
+            </li>
+          ))}
+        </ol>
+      </div>
+
+      <div>
+        <p className="mb-2 text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+          Verification
+        </p>
+        <ul className="flex flex-col gap-1">
+          {model.checks.map((check) => (
+            <li
+              key={check.id}
+              className="flex items-center gap-2 text-xs"
+              data-check-id={check.id}
+              data-check-ok={check.ok ? "true" : "false"}
+            >
+              <Link2
+                className={cn(
+                  "size-3",
+                  check.ok ? "text-[var(--om-sage)]" : "text-[var(--om-copper)]"
+                )}
+                aria-hidden="true"
+              />
+              <span className="font-semibold text-[var(--om-text-bright)]">{check.label}</span>
+              <span className="text-[var(--om-text-muted)]">{check.detail}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  );
+}
+
+function VerdictProofFact({ label, value }: { label: string; value: string }): React.ReactElement {
+  return (
+    <div className="min-w-0">
+      <dt className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+        {label}
+      </dt>
+      <dd className="truncate font-mono text-xs text-[var(--om-text)]" title={value}>
+        {value}
+      </dd>
+    </div>
+  );
+}
+
 export function assertDashboardSkinConformance(skin: DashboardSkin): void {
   const fixture = skinContractFixture();
+  if (typeof skin.renderers.VerdictProof !== "function") {
+    throw new Error(`skin ${skin.name} must provide a verdict-proof renderer`);
+  }
+  if (fixture.verdictProof.proofStatus !== "verified") {
+    throw new Error("verdict-proof fixture must verify against its own registry and binding");
+  }
+  if (fixture.verdictProof.derivation.some((step) => !step.registered)) {
+    throw new Error("verdict-proof fixture carries an unregistered rule id");
+  }
   if (skin.grammarVersion !== DASHBOARD_GRAMMAR.grammarVersion) {
     throw new Error(`skin ${skin.name} has an unsupported grammar version`);
   }

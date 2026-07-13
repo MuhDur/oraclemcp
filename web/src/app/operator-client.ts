@@ -1,3 +1,10 @@
+import {
+  isRegisteredDerivationStep,
+  type VerdictKind,
+  type VerdictProofCheckView,
+  type VerdictProofInput
+} from "./presentation-model";
+
 export type ProbeState = "loading" | "ok" | "warn" | "off";
 
 export type ProbeKind = "public" | "operator";
@@ -961,6 +968,10 @@ export type AuditTailRecord = {
   db_evidence?: Record<string, unknown> | null;
   proof?: Record<string, unknown>;
   bind_values?: Record<string, unknown>;
+  // Present only on proof-carrying records (ADR 0010): the redacted verdict
+  // certificate and the audit-covered hash of its core.
+  verdict_certificate?: Record<string, unknown> | null;
+  verdict_certificate_core_hash?: string | null;
 };
 
 /**
@@ -1623,6 +1634,177 @@ export async function fetchAuditTail(
     throw new Error(errorMessage(parsed, response.status));
   }
   return parsed as OperatorResponse<AuditTailData>;
+}
+
+// ── Verdict-proof inspector (Arc B1) ─────────────────────────────────────────
+// The certificate (ADR 0010) rides on the audit record it is bound to, so the
+// inspector reads the same redacted, hash-chained tail the Audit page reads —
+// it never opens a second, less-guarded path to the guard's decisions.
+
+export type VerdictCertificateWire = {
+  stmt_digest: string;
+  level: OperatingLevel | null;
+  verdict: VerdictKind;
+  derivation: { rule_id: string; construct: string }[];
+  classifier_version: string;
+  observed_scn: string | null;
+  bound_audit_hash: string | null;
+};
+
+export type VerdictProof = VerdictProofInput & {
+  certificate: VerdictCertificateWire;
+};
+
+export type VerdictProofData = {
+  source: "self_lane" | "unavailable";
+  reason?: string;
+  // Records scanned that carried no certificate; certificates only appear on
+  // proof-carrying records, so this is "not yet proof-carrying", not an error.
+  uncertified: number;
+  proofs: VerdictProof[];
+};
+
+function nestedStringField(value: unknown, key: string): string | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === "string" && field.length > 0 ? field : null;
+}
+
+function certificateFromRecord(record: AuditTailRecord): VerdictCertificateWire | null {
+  const raw = record.verdict_certificate;
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const candidate = raw as Partial<VerdictCertificateWire>;
+  if (
+    typeof candidate.stmt_digest !== "string" ||
+    typeof candidate.verdict !== "string" ||
+    typeof candidate.classifier_version !== "string" ||
+    !Array.isArray(candidate.derivation)
+  ) {
+    return null;
+  }
+  return {
+    stmt_digest: candidate.stmt_digest,
+    level: (candidate.level ?? null) as OperatingLevel | null,
+    verdict: candidate.verdict as VerdictKind,
+    derivation: candidate.derivation
+      .filter(
+        (step): step is { rule_id: string; construct: string } =>
+          !!step && typeof step.rule_id === "string" && typeof step.construct === "string"
+      )
+      .map((step) => ({ rule_id: step.rule_id, construct: step.construct })),
+    classifier_version: candidate.classifier_version,
+    observed_scn: typeof candidate.observed_scn === "string" ? candidate.observed_scn : null,
+    bound_audit_hash:
+      typeof candidate.bound_audit_hash === "string" ? candidate.bound_audit_hash : null
+  };
+}
+
+/**
+ * Re-derive the four checks a browser can make without the SQL bytes.
+ *
+ * The console does not trust a server-side "verified" flag: it compares the
+ * certificate against the audit record it claims to be bound to. Replaying the
+ * classifier over the statement bytes remains the standalone verifier's job
+ * (`oraclemcp-verifier`); the SQL never leaves the host.
+ */
+export function verdictProofChecks(
+  record: AuditTailRecord,
+  certificate: VerdictCertificateWire,
+  certHash: string
+): VerdictProofCheckView[] {
+  const entryHash = nestedStringField(record.proof, "entry_hash");
+  const hashValid = !!record.proof && (record.proof as Record<string, unknown>)["hash_valid"] === true;
+  const registered = certificate.derivation.filter((step) =>
+    isRegisteredDerivationStep(step.rule_id, step.construct)
+  ).length;
+  const boundHash = certificate.bound_audit_hash;
+  return [
+    {
+      id: "audit_binding",
+      label: "Bound to audit entry",
+      ok: boundHash !== null && entryHash !== null && boundHash === entryHash,
+      detail:
+        boundHash === null
+          ? "certificate carries no bound_audit_hash"
+          : entryHash === null
+            ? "audit record exposes no entry_hash"
+            : boundHash === entryHash
+              ? "bound_audit_hash == record.entry_hash"
+              : "bound_audit_hash does not match record.entry_hash"
+    },
+    {
+      id: "statement_digest",
+      label: "Statement digest",
+      ok: certificate.stmt_digest === record.sql_sha256,
+      detail:
+        certificate.stmt_digest === record.sql_sha256
+          ? "stmt_digest == record.sql_sha256"
+          : "stmt_digest does not match the audited SQL digest"
+    },
+    {
+      id: "rule_registry",
+      label: "Rule registry",
+      ok: certificate.derivation.length > 0 && registered === certificate.derivation.length,
+      detail: `${registered} of ${certificate.derivation.length} derivation steps registered`
+    },
+    {
+      id: "chain_hash",
+      label: "Chain hash",
+      ok: hashValid && certHash.length > 0,
+      detail: !hashValid
+        ? "audit record hash is not valid"
+        : certHash.length === 0
+          ? "audit record carries no certificate core hash"
+          : "record hash is valid"
+    }
+  ];
+}
+
+/**
+ * Project the proof-carrying records of an audit tail into inspectable proofs.
+ * A record without a certificate is counted, never synthesized into one.
+ */
+export function parseVerdictProofs(data: AuditTailData | null): VerdictProofData {
+  if (!data || data.source !== "self_lane") {
+    return {
+      source: "unavailable",
+      reason: data?.reason ?? "audit tail provider is not available",
+      uncertified: 0,
+      proofs: []
+    };
+  }
+  const proofs: VerdictProof[] = [];
+  let uncertified = 0;
+  for (const record of data.records) {
+    const certificate = certificateFromRecord(record);
+    if (!certificate) {
+      uncertified += 1;
+      continue;
+    }
+    const certHash = record.verdict_certificate_core_hash ?? "";
+    proofs.push({
+      seq: record.seq,
+      timestamp: record.timestamp,
+      tool: record.tool,
+      subjectIdHash: record.subject_id_hash,
+      certHash,
+      auditHash: nestedStringField(record.proof, "entry_hash"),
+      certificate,
+      checks: verdictProofChecks(record, certificate, certHash)
+    });
+  }
+  return { source: "self_lane", uncertified, proofs };
+}
+
+export async function fetchVerdictProofs(
+  filters: AuditTailFilters
+): Promise<OperatorResponse<VerdictProofData>> {
+  const response = await fetchAuditTail(filters);
+  return { ...response, data: parseVerdictProofs(response.data) };
 }
 
 // Per-path conditional-request cache. A polled GET revalidates with the

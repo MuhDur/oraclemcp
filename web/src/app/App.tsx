@@ -60,6 +60,7 @@ import {
   CLEARANCE_LADDER,
   DASHBOARD_GRAMMAR,
   clampActivity,
+  toVerdictProofViewModel,
   type FleetViewModel,
   type DashboardTone,
   type GoNoGoVerdict,
@@ -79,6 +80,8 @@ import {
   cancelLane,
   coalesceAuditTimelineRecords,
   parseClassifierLadder,
+  fetchVerdictProofs,
+  type VerdictProofData,
   fetchActiveLanes,
   fetchClientCredentials,
   fetchDashboardSession,
@@ -7005,6 +7008,10 @@ function AuditPage(): React.ReactElement {
     queryKey: ["audit-tail", filters],
     queryFn: () => fetchAuditTail(filters)
   });
+  const verdictProofs = useQuery({
+    queryKey: ["verdict-proofs", filters],
+    queryFn: () => fetchVerdictProofs(filters)
+  });
   const data = auditTail.data?.data ?? null;
 
   return (
@@ -7087,10 +7094,64 @@ function AuditPage(): React.ReactElement {
           error={auditTail.error instanceof Error ? auditTail.error.message : null}
         />
         <AuditTimelineTable records={data?.records ?? []} />
+        <VerdictProofInspectorPanel
+          data={verdictProofs.data?.data ?? null}
+          pending={verdictProofs.isFetching}
+          error={verdictProofs.error instanceof Error ? verdictProofs.error.message : null}
+        />
         {exportProofBundle ? <AuditProofBundlePanel bundle={data?.export ?? null} /> : null}
         <ProbeDashboard probes={auditProbes} compact />
       </div>
     </PageFrame>
+  );
+}
+
+/**
+ * Verdict-proof inspector (Arc B1): why the guard admitted or refused each
+ * proof-carrying statement, which registry rules fired, and whether the
+ * certificate still verifies against the audit record it is bound to.
+ */
+function VerdictProofInspectorPanel({
+  data,
+  pending,
+  error
+}: {
+  data: VerdictProofData | null;
+  pending: boolean;
+  error: string | null;
+}): React.ReactElement {
+  const VerdictProof = OMCP_SKIN.renderers.VerdictProof;
+  const proofs = data?.proofs ?? [];
+  return (
+    <Surface className="space-y-3 p-4" data-testid="verdict-proof-inspector">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-bold text-[var(--om-text-bright)]">Verdict Proofs</h2>
+          <p className="text-xs text-[var(--om-text-muted)]">
+            Redacted verdict certificates, re-checked in the browser against the audit chain.
+          </p>
+        </div>
+        <Badge tone={proofs.length > 0 ? "ok" : "off"}>
+          {proofs.length} {proofs.length === 1 ? "proof" : "proofs"}
+        </Badge>
+      </div>
+      {error ? <p className="text-xs text-[var(--om-copper)]">{error}</p> : null}
+      {proofs.length === 0 ? (
+        <p className="text-xs text-[var(--om-text-muted)]">
+          {pending
+            ? "Loading verdict certificates…"
+            : data?.source === "unavailable"
+              ? (data.reason ?? "Audit tail provider is unavailable.")
+              : `No proof-carrying records in this window (${data?.uncertified ?? 0} record(s) without a certificate).`}
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {proofs.map((proof) => (
+            <VerdictProof key={proof.seq} model={toVerdictProofViewModel(proof)} />
+          ))}
+        </div>
+      )}
+    </Surface>
   );
 }
 

@@ -6,8 +6,12 @@ import {
   DASHBOARD_GRAMMAR,
   REQUIRED_BIG_BOARD_RENDERERS,
   REQUIRED_THEME_MODES,
+  VERDICT_RULE_REGISTRY,
   defaultSkinCapabilities,
+  isRegisteredDerivationStep,
   skinContractFixture,
+  toVerdictProofViewModel,
+  verdictProofFixture,
   type SkinCapability
 } from "./presentation-model";
 import {
@@ -82,6 +86,95 @@ describe("OMCP skin conformance", () => {
     for (const level of ["READ_ONLY", "READ_WRITE", "DDL", "ADMIN"]) {
       expect(markup).toContain(`data-clearance-level="${level}"`);
     }
+  });
+
+  it("renders the verdict-proof inspector with its rule derivation and certificate hash", () => {
+    const VerdictProof = OMCP_SKIN.renderers.VerdictProof;
+    const model = verdictProofFixture();
+    const markup = renderToStaticMarkup(<VerdictProof model={model} />);
+
+    expect(markup).toContain('data-grammar-version="1"');
+    expect(markup).toContain(`data-verdict="${model.verdict}"`);
+    expect(markup).toContain(`data-cert-hash="${model.certHash}"`);
+    expect(model.certHash).not.toBe("");
+    expect(markup).toContain(`data-audit-hash="${model.auditHash ?? ""}"`);
+    expect(markup).toContain('data-go-no-go="GO"');
+    expect(markup).toContain('data-proof-status="verified"');
+
+    // The rendered rule-id set is exactly the certificate's derivation — the
+    // inspector may not drop, reorder into, or invent a rule.
+    const renderedRuleIds = [...markup.matchAll(/data-rule-id="([^"]+)"/g)].map(
+      (match) => match[1]
+    );
+    expect(renderedRuleIds).toEqual(model.derivation.map((step) => step.ruleId));
+    expect(new Set(renderedRuleIds)).toEqual(
+      new Set(Object.keys(VERDICT_RULE_REGISTRY).filter((id) => renderedRuleIds.includes(id)))
+    );
+    for (const step of model.derivation) {
+      expect(markup).toContain(`data-construct="${step.construct}"`);
+      expect(isRegisteredDerivationStep(step.ruleId, step.construct)).toBe(true);
+    }
+    for (const check of model.checks) {
+      expect(markup).toContain(`data-check-id="${check.id}"`);
+    }
+  });
+
+  it("refuses to call a proof verified when a rule id is outside the registry", () => {
+    // Fail-closed: an unknown rule id or a broken binding downgrades the proof,
+    // it never renders as a verified certificate.
+    const unknownRule = toVerdictProofViewModel({
+      seq: 7,
+      timestamp: "2026-07-13T00:00:00Z",
+      tool: "oracle_execute",
+      subjectIdHash: "subject-sha256:fixture",
+      certHash: "sha256:aa",
+      auditHash: "sha256:bb",
+      certificate: {
+        stmt_digest: "sha256:cc",
+        level: "READ_ONLY",
+        verdict: "SAFE",
+        derivation: [{ rule_id: "R99", construct: "final_verdict:SAFE" }],
+        classifier_version: "oraclemcp-guard/0.8.0;registry=1",
+        observed_scn: null,
+        bound_audit_hash: "sha256:bb"
+      },
+      checks: [{ id: "audit_binding", label: "Bound to audit entry", ok: true, detail: "bound" }]
+    });
+    expect(unknownRule.proofStatus).toBe("unverified");
+
+    const VerdictProof = OMCP_SKIN.renderers.VerdictProof;
+    const markup = renderToStaticMarkup(<VerdictProof model={unknownRule} />);
+    expect(markup).toContain('data-proof-status="unverified"');
+    expect(markup).toContain('data-rule-id="R99"');
+    expect(markup).toContain('data-registered="false"');
+
+    const brokenBinding = toVerdictProofViewModel({
+      seq: 8,
+      timestamp: "2026-07-13T00:00:01Z",
+      tool: "oracle_execute",
+      subjectIdHash: "subject-sha256:fixture",
+      certHash: "sha256:aa",
+      auditHash: "sha256:bb",
+      certificate: {
+        stmt_digest: "sha256:cc",
+        level: "READ_ONLY",
+        verdict: "SAFE",
+        derivation: [{ rule_id: "R16", construct: "final_verdict:SAFE" }],
+        classifier_version: "oraclemcp-guard/0.8.0;registry=1",
+        observed_scn: null,
+        bound_audit_hash: "sha256:zz"
+      },
+      checks: [
+        {
+          id: "audit_binding",
+          label: "Bound to audit entry",
+          ok: false,
+          detail: "bound_audit_hash does not match record.entry_hash"
+        }
+      ]
+    });
+    expect(brokenBinding.proofStatus).toBe("unverified");
+    expect(brokenBinding.tone).toBe("warn");
   });
 
   it("renders both the 2D board and the table fallback for the fleet view-model", () => {
