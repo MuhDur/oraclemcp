@@ -768,6 +768,18 @@ mod tests {
         wake.notify_all();
     }
 
+    struct GateRelease(Arc<(Mutex<bool>, Condvar)>);
+
+    impl Drop for GateRelease {
+        fn drop(&mut self) {
+            open_gate(&self.0);
+        }
+    }
+
+    fn release_gate_on_drop(gate: &Arc<(Mutex<bool>, Condvar)>) -> GateRelease {
+        GateRelease(Arc::clone(gate))
+    }
+
     #[test]
     fn bounded_spool_persists_an_overflow_indicator() {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -779,6 +791,7 @@ mod tests {
             }),
         )
         .expect("open spool");
+        let _release = release_gate_on_drop(&gate);
         let status = delivery.status_handle();
         assert!(delivery.forward(&record(1)).is_ok());
         assert!(delivery.forward(&record(2)).is_ok());
@@ -867,6 +880,7 @@ mod tests {
             first: slow,
             second: fast,
         };
+        let _release = release_gate_on_drop(&gate);
         pair.forward(&record(1)).expect("enqueue both");
         pair.forward(&record(2)).expect("enqueue both");
         wait_until(Duration::from_secs(1), || {
@@ -979,5 +993,166 @@ mod tests {
         assert!(sink.flush().is_err());
         assert_eq!(status.snapshot().pending_records, 0);
         assert!(!record_path(directory.path(), 1).exists());
+    }
+
+    #[test]
+    fn spool_config_rejects_empty_capacity_and_invalid_retry_bounds() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let valid = config(directory.path(), "valid-destination");
+        validate_config(&valid).expect("baseline config is valid");
+
+        let invalid_destination = config(directory.path(), " \t ");
+        assert!(
+            validate_config(&invalid_destination)
+                .expect_err("blank destination id must fail closed")
+                .to_string()
+                .contains("destination identity is empty")
+        );
+
+        let zero_capacity = valid.clone().with_max_records(0);
+        assert!(
+            validate_config(&zero_capacity)
+                .expect_err("zero capacity must fail closed")
+                .to_string()
+                .contains("capacity must be non-zero")
+        );
+
+        for bad in [
+            valid
+                .clone()
+                .with_retry(Duration::ZERO, Duration::from_millis(20)),
+            valid
+                .clone()
+                .with_retry(Duration::from_millis(5), Duration::ZERO),
+            valid
+                .clone()
+                .with_retry(Duration::from_millis(30), Duration::from_millis(20)),
+        ] {
+            assert!(
+                validate_config(&bad)
+                    .expect_err("invalid retry bounds must fail closed")
+                    .to_string()
+                    .contains("retry delays must be non-zero and initial <= max")
+            );
+        }
+    }
+
+    #[test]
+    fn shutdown_stops_future_enqueue_attempts() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let delivery = DurableShippingForwarder::open(
+            config(directory.path(), "shutdown"),
+            Box::new(Capture::default()),
+        )
+        .expect("open spool");
+
+        delivery.shutdown();
+        let error = delivery
+            .forward(&record(1))
+            .expect_err("shutdown forwarder must fail closed to new records");
+        assert!(
+            error.to_string().contains("worker is stopped"),
+            "unexpected shutdown error: {error}"
+        );
+    }
+
+    #[test]
+    fn recovered_spool_capacity_allows_exact_boundary_only() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        for seq in 1..=2 {
+            let bytes = serde_json::to_vec(&record(seq)).expect("serialize record");
+            write_new_file(&record_path(directory.path(), seq), &bytes)
+                .expect("seed pending record");
+        }
+
+        let cfg = config(directory.path(), "capacity").with_max_records(2);
+        let delivery =
+            DurableShippingForwarder::open(cfg.clone(), Box::new(AlwaysFails)).expect("at cap");
+        assert_eq!(delivery.status_handle().snapshot().pending_records, 2);
+        delivery.shutdown();
+        drop(delivery);
+
+        let error =
+            match DurableShippingForwarder::open(cfg.with_max_records(1), Box::new(AlwaysFails)) {
+                Err(error) => error,
+                Ok(_) => panic!("over-capacity recovered spool must fail"),
+            };
+        assert!(
+            error.to_string().contains("exceeding configured capacity"),
+            "unexpected capacity error: {error}"
+        );
+    }
+
+    #[test]
+    fn duplicate_spool_sequence_must_be_byte_identical() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let delivery = DurableShippingForwarder::open(
+            config(directory.path(), "duplicate"),
+            Box::new(GateForwarder {
+                gate: Arc::clone(&gate),
+            }),
+        )
+        .expect("open spool");
+        let _release = release_gate_on_drop(&gate);
+        let original = record(1);
+        let conflicting = AuditRecord::chained_signed(
+            &draft(99),
+            1,
+            GENESIS_HASH,
+            "different timestamp".to_owned(),
+            &key(),
+        );
+
+        delivery.forward(&original).expect("initial enqueue");
+        assert_eq!(delivery.status_handle().snapshot().pending_records, 1);
+        delivery
+            .forward(&original)
+            .expect("byte-identical replay is idempotent");
+        assert_eq!(
+            delivery.status_handle().snapshot().pending_records,
+            1,
+            "idempotent replay must not double-count pending records"
+        );
+        let error = delivery
+            .forward(&conflicting)
+            .expect_err("same sequence with different bytes must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("already contains a different signed record"),
+            "unexpected duplicate error: {error}"
+        );
+        open_gate(&gate);
+    }
+
+    #[test]
+    fn recovery_promotes_matching_temporary_record() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let rec = record(7);
+        let tmp = temp_record_path(directory.path(), rec.seq);
+        let bytes = serde_json::to_vec(&rec).expect("serialize record");
+        write_new_file(&tmp, &bytes).expect("write temp record");
+
+        let pending = recover_pending(directory.path()).expect("recover temp");
+        let final_path = record_path(directory.path(), rec.seq);
+        assert_eq!(pending.get(&rec.seq), Some(&final_path));
+        assert!(final_path.exists(), "matching temporary record is promoted");
+        assert!(!tmp.exists(), "temporary name is consumed during recovery");
+    }
+
+    #[test]
+    fn recovery_rejects_temporary_record_sequence_mismatch() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let rec = record(8);
+        let tmp = temp_record_path(directory.path(), 9);
+        let bytes = serde_json::to_vec(&rec).expect("serialize record");
+        write_new_file(&tmp, &bytes).expect("write mismatched temp record");
+
+        let error = recover_pending(directory.path()).expect_err("mismatched temp sequence");
+        assert!(
+            error.to_string().contains("temporary filename sequence 9"),
+            "unexpected recovery error: {error}"
+        );
     }
 }

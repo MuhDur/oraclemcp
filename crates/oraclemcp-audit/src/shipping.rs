@@ -917,6 +917,173 @@ mod tests {
     }
 
     #[test]
+    fn worm_rejects_same_sequence_with_different_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary_path = dir.path().join("audit.jsonl");
+        let worm_path = dir.path().join("worm.jsonl");
+        let primary = crate::sink::FileAuditSink::open(&primary_path).expect("open primary");
+        let first = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=1", "DESTRUCTIVE"),
+            1,
+            crate::GENESIS_HASH,
+            "t1".to_owned(),
+            &key(),
+        );
+        let conflicting_tail = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=2", "DESTRUCTIVE"),
+            1,
+            crate::GENESIS_HASH,
+            "t2".to_owned(),
+            &key(),
+        );
+        let mut different_sequence_same_hash = first.clone();
+        different_sequence_same_hash.seq = 2;
+        let worm = WormFileForwarder::open_distinct(&worm_path, &primary).expect("open worm");
+        worm.forward(&first).expect("first delivery");
+        let error = worm
+            .forward(&conflicting_tail)
+            .expect_err("same sequence with a different hash must not be idempotent");
+        assert!(
+            error.to_string().contains("expected sequence 2"),
+            "unexpected WORM error: {error}"
+        );
+        let error = worm
+            .forward(&different_sequence_same_hash)
+            .expect_err("different sequence with the same tail hash must not be idempotent");
+        assert!(
+            error.to_string().contains("chained from its current tail"),
+            "unexpected WORM error: {error}"
+        );
+    }
+
+    #[test]
+    fn worm_rejects_sequence_gap_and_wrong_previous_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary_path = dir.path().join("audit.jsonl");
+        let worm_path = dir.path().join("worm.jsonl");
+        let primary = crate::sink::FileAuditSink::open(&primary_path).expect("open primary");
+        let first = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=1", "DESTRUCTIVE"),
+            1,
+            crate::GENESIS_HASH,
+            "t1".to_owned(),
+            &key(),
+        );
+        let gap = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=3", "DESTRUCTIVE"),
+            3,
+            &first.entry_hash,
+            "t3".to_owned(),
+            &key(),
+        );
+        let wrong_prev = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=2", "DESTRUCTIVE"),
+            2,
+            crate::GENESIS_HASH,
+            "t2".to_owned(),
+            &key(),
+        );
+        let worm = WormFileForwarder::open_distinct(&worm_path, &primary).expect("open worm");
+        worm.forward(&first).expect("first delivery");
+        for bad in [&gap, &wrong_prev] {
+            let error = worm
+                .forward(bad)
+                .expect_err("WORM tail must require contiguous seq and prev_hash");
+            assert!(
+                error.to_string().contains("chained from its current tail"),
+                "unexpected WORM error for seq {}: {error}",
+                bad.seq
+            );
+        }
+    }
+
+    #[test]
+    fn empty_worm_requires_first_record_chained_from_genesis() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary_path = dir.path().join("audit.jsonl");
+        let worm_path = dir.path().join("worm.jsonl");
+        let primary = crate::sink::FileAuditSink::open(&primary_path).expect("open primary");
+        let seq_two = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=2", "DESTRUCTIVE"),
+            2,
+            crate::GENESIS_HASH,
+            "t2".to_owned(),
+            &key(),
+        );
+        let wrong_genesis = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=1", "DESTRUCTIVE"),
+            1,
+            "sha256:not-genesis",
+            "t1".to_owned(),
+            &key(),
+        );
+        let worm = WormFileForwarder::open_distinct(&worm_path, &primary).expect("open worm");
+        for bad in [&seq_two, &wrong_genesis] {
+            let error = worm
+                .forward(bad)
+                .expect_err("empty WORM mirror must start at seq=1 from genesis");
+            assert!(
+                error
+                    .to_string()
+                    .contains("empty WORM mirror expected sequence 1"),
+                "unexpected WORM error for seq {}: {error}",
+                bad.seq
+            );
+        }
+    }
+
+    #[test]
+    fn worm_open_rejects_existing_mirror_chain_anomalies() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary_path = dir.path().join("audit.jsonl");
+        let primary = crate::sink::FileAuditSink::open(&primary_path).expect("open primary");
+        let first = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=1", "DESTRUCTIVE"),
+            1,
+            crate::GENESIS_HASH,
+            "t1".to_owned(),
+            &key(),
+        );
+        let seq_gap = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=2", "DESTRUCTIVE"),
+            2,
+            crate::GENESIS_HASH,
+            "t2".to_owned(),
+            &key(),
+        );
+        let wrong_prev = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=2", "DESTRUCTIVE"),
+            2,
+            "sha256:not-the-tail",
+            "t2".to_owned(),
+            &key(),
+        );
+        let mut invalid_hash = first.clone();
+        invalid_hash.entry_hash.push('x');
+
+        for (case, records) in [
+            ("seq-gap", vec![seq_gap]),
+            ("wrong-prev", vec![first.clone(), wrong_prev]),
+            ("invalid-hash", vec![invalid_hash]),
+        ] {
+            let worm_path = dir.path().join(format!("worm-{case}.jsonl"));
+            let body = records
+                .iter()
+                .map(|record| serde_json::to_string(record).expect("serialize") + "\n")
+                .collect::<String>();
+            std::fs::write(&worm_path, body).expect("seed malformed WORM");
+            let error = match WormFileForwarder::open_distinct(&worm_path, &primary) {
+                Err(error) => error,
+                Ok(_) => panic!("malformed existing WORM mirror must fail closed"),
+            };
+            assert!(
+                error.to_string().contains("broken chain"),
+                "unexpected {case} error: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn mixed_key_worm_and_siem_streams_preserve_order_and_signatures() {
         let dir = tempfile::tempdir().expect("tempdir");
         let primary_path = dir.path().join("audit.jsonl");
@@ -1178,6 +1345,26 @@ mod tests {
     }
 
     #[test]
+    fn structured_data_params_preserve_unicode_and_neutralize_controls() {
+        let mut sd = String::from("[oraclemcp@0");
+        push_sd_param(&mut sd, "tool", "oracle_éxecute_工具");
+        push_sd_param(&mut sd, "msg", "line1\nline2\r\u{0007}]\"");
+        sd.push(']');
+
+        assert!(
+            sd.contains("tool=\"oracle_éxecute_工具\""),
+            "valid Unicode should remain readable in structured data: {sd}"
+        );
+        assert!(
+            sd.contains("msg=\"line1 line2 "),
+            "line breaks should be neutralized as spaces: {sd}"
+        );
+        assert!(sd.contains("\\u{7}"), "other controls are escaped: {sd}");
+        assert!(sd.contains("\\]"), "closing bracket is escaped: {sd}");
+        assert!(sd.contains("\\\""), "quote is escaped: {sd}");
+    }
+
+    #[test]
     fn syslog_line_is_rfc5424_with_structured_data() {
         let rec = AuditRecord::chained_signed(
             &draft("DROP TABLE t", "DESTRUCTIVE"),
@@ -1385,6 +1572,11 @@ y"#
             sd,
             r#"[oraclemcp@0 msg="a\\b\"c\]d x y\t\u{0}\u{1b}\u{7f}"]"#
         );
+
+        let mut sd = String::from("[oraclemcp@0");
+        push_sd_param(&mut sd, "unicode", "é工具");
+        sd.push(']');
+        assert_eq!(sd, r#"[oraclemcp@0 unicode="é工具"]"#);
 
         let mut msg = String::new();
         push_syslog_msg_text(&mut msg, "a\\b\"c\r\nx\t\0\u{1b}\u{7f}é工具");

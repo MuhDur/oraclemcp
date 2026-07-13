@@ -214,7 +214,9 @@ mod tests {
     fn security_key_debug_and_error_do_not_expose_material() {
         let sentinel = "qa2-do-not-print-this-key-material";
         let key = HmacSha256Key::new(sentinel.as_bytes().to_vec()).expect("valid key");
-        assert!(!format!("{key:?}").contains(sentinel));
+        let debug = format!("{key:?}");
+        assert_eq!(debug, "HmacSha256Key(***redacted***)");
+        assert!(!debug.contains(sentinel));
         let error = HmacSha256Key::new(b"short-secret".to_vec()).expect_err("short key");
         assert!(!error.to_string().contains("short-secret"));
     }
@@ -289,6 +291,19 @@ mod tests {
         assert!(!hmac_sha256_hex_is_valid(b"k", b"m2", &s));
         assert!(!hmac_sha256_hex_is_valid(b"k", b"m", "sha256:abcd"));
         assert!(!hmac_sha256_hex_is_valid(b"k", b"m", "hmac-sha256:abcd"));
+        let uppercase_hex = format!(
+            "{}{}",
+            HMAC_SHA256_PREFIX,
+            s.strip_prefix(HMAC_SHA256_PREFIX)
+                .expect("canonical prefix")
+                .to_ascii_uppercase()
+        );
+        assert!(!hmac_sha256_hex_is_valid(b"k", b"m", &uppercase_hex));
+        assert!(!hmac_sha256_hex_is_valid(
+            b"k",
+            b"m",
+            "hmac-sha256:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"
+        ));
         assert!(!hmac_sha256_hex_is_valid(
             b"k",
             b"m",

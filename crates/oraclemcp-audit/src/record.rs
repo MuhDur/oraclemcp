@@ -1944,8 +1944,23 @@ mod tests {
         let historical =
             signed_record_for_schema_with_draft(&d, AUDIT_SCHEMA_V5, 1, GENESIS_HASH, &key());
         assert!(historical.sql_preview.contains(sentinel));
-        assert!(!format!("{historical:?}").contains(sentinel));
-        assert!(!format!("{d:?}").contains(sentinel));
+        let record_debug = format!("{historical:?}");
+        assert!(record_debug.contains("AuditRecord"), "{record_debug}");
+        assert!(record_debug.contains("seq"), "{record_debug}");
+        assert!(record_debug.contains("sql_sha256"), "{record_debug}");
+        assert!(record_debug.contains("sql_preview"), "{record_debug}");
+        assert!(record_debug.contains("***redacted***"), "{record_debug}");
+        assert!(!record_debug.contains(sentinel));
+
+        let draft_debug = format!("{d:?}");
+        assert!(draft_debug.contains("AuditEntryDraft"), "{draft_debug}");
+        assert!(draft_debug.contains("sql_sha256"), "{draft_debug}");
+        assert!(
+            draft_debug.contains("sql_normalized_sha256"),
+            "{draft_debug}"
+        );
+        assert!(draft_debug.contains("***redacted***"), "{draft_debug}");
+        assert!(!draft_debug.contains(sentinel));
     }
 
     // ---- K5: normalized-SQL fingerprint (introduced in schema v4) ----

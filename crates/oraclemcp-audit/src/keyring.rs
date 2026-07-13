@@ -166,6 +166,37 @@ mod tests {
     }
 
     #[test]
+    fn keyring_identifier_validator_pins_safe_wire_alphabet() {
+        let max_len = "a".repeat(128);
+        for id in [
+            "active",
+            "old-1",
+            "tenant.alpha_2026",
+            "A0_z.Z-9",
+            max_len.as_str(),
+        ] {
+            validate_key_id(id).expect("safe key id should be accepted");
+        }
+
+        let too_long = "a".repeat(129);
+        for id in [
+            "",
+            " ",
+            "active key",
+            "active/key",
+            "active:key",
+            "ümlaut",
+            too_long.as_str(),
+        ] {
+            assert_eq!(
+                validate_key_id(id),
+                Err(AuditKeyringError::InvalidKeyId),
+                "unsafe key id must fail closed: {id:?}"
+            );
+        }
+    }
+
+    #[test]
     fn debug_never_contains_key_material() {
         let sentinel = b"QA37_KEY_MATERIAL_MUST_STAY_HIDDEN";
         let ring = AuditKeyring::new(
@@ -174,6 +205,9 @@ mod tests {
         )
         .expect("valid ring");
         let debug = format!("{ring:?}");
+        assert!(debug.contains("AuditKeyring"), "{debug}");
+        assert!(debug.contains("active_key_id"), "{debug}");
+        assert!(debug.contains("active"), "{debug}");
         assert!(!debug.contains(std::str::from_utf8(sentinel).unwrap()));
         assert!(debug.contains("***redacted***"));
     }

@@ -616,6 +616,29 @@ mod tests {
     }
 
     #[test]
+    fn anchor_tmp_path_is_hidden_unique_and_same_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let anchor = dir.path().join("head.anchor.json");
+        let first = anchor_tmp_path(&anchor);
+        let second = anchor_tmp_path(&anchor);
+
+        assert_eq!(
+            first.parent(),
+            Some(dir.path()),
+            "atomic anchor temp file must stay beside the anchor"
+        );
+        assert_ne!(first, second, "temp anchor names include a process counter");
+        let filename = first
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("utf-8 temp filename");
+        assert!(
+            filename.starts_with(".head.anchor.json.tmp."),
+            "temp anchor filename should be hidden and stem-derived: {filename}"
+        );
+    }
+
+    #[test]
     fn anchor_mac_preimage_binds_domain_seq_and_hash() {
         let k = key();
         let anchor = ChainAnchor::signed(42, "sha256:head-42", &k);
@@ -718,6 +741,22 @@ mod tests {
             Err(AnchorReaderError::Violation(AnchorViolation::MacMismatch)) => {}
             other => panic!("expected MAC mismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn anchor_reader_error_display_names_read_and_violation_modes() {
+        let read = AnchorReaderError::Read("bad json at byte 7".to_owned()).to_string();
+        assert!(
+            read.contains("audit chain unreadable for anchor check"),
+            "{read}"
+        );
+        assert!(read.contains("bad json at byte 7"), "{read}");
+
+        let violation =
+            AnchorReaderError::Violation(AnchorViolation::UnknownKeyId("missing".to_owned()))
+                .to_string();
+        assert!(violation.contains("unknown key_id"), "{violation}");
+        assert!(violation.contains("missing"), "{violation}");
     }
 
     #[test]
