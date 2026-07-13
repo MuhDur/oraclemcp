@@ -181,6 +181,10 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
+                "allow_plan_table_write": {
+                  "description": "Default false. Must be true, with the active session at READ_WRITE, before max_query_cost may run EXPLAIN PLAN and write PLAN_TABLE for pre-execution cost estimation.",
+                  "type": "boolean"
+                },
                 "as_of": {
                   "description": "Flashback / AS-OF read: run this SELECT against a PAST committed snapshot. Pass a NORMAL SELECT (never hand-written AS OF SQL); the base query is proven read-only first, then bounded in a DBMS_FLASHBACK window (the scn/timestamp is bound, never interpolated). Set exactly one of scn or timestamp. Requires the Oracle FLASHBACK privilege (a missing grant surfaces as ORA-01031).",
                   "properties": {
@@ -233,6 +237,11 @@
                   "minimum": 1,
                   "type": "integer"
                 },
+                "max_query_cost": {
+                  "description": "Optional per-call optimizer-cost ceiling for this oracle_query call. It can only lower the active profile's max_query_cost. When an effective ceiling exists, oracle_query first runs an EXPLAIN PLAN diagnostic write and refuses before execution if the estimated root cost is unavailable or above the ceiling.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
                 "max_result_bytes": {
                   "description": "Maximum compact JSON bytes across row objects in this page (default 10485760, hard cap 26214400; excludes columns, pagination metadata, and the outer MCP envelope).",
                   "maximum": 26214400,
@@ -271,6 +280,10 @@
                 },
                 "numbers_as_float": {
                   "description": "Emit numeric values as JSON numbers where possible. Default false preserves Oracle NUMBER losslessly as strings.",
+                  "type": "boolean"
+                },
+                "read_only_standby": {
+                  "description": "If true, refuse the max_query_cost estimation path because EXPLAIN PLAN writes PLAN_TABLE. Only meaningful when an effective max_query_cost is set. Defaults false.",
                   "type": "boolean"
                 },
                 "sql": {

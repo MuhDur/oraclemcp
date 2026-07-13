@@ -2050,6 +2050,129 @@ fn query_budget_with_cost_limit(
     }
 }
 
+fn query_cost_unavailable(reason: impl Into<String>) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::PolicyDenied,
+        format!(
+            "oracle_query cost gate refused before execution: cost_unavailable ({})",
+            reason.into()
+        ),
+    )
+    .with_suggested_tool("oracle_explain_plan")
+    .with_next_step("refresh optimizer statistics or retry without max_query_cost only if an unbounded read is acceptable")
+}
+
+fn query_cost_exceeded(observed_cost: u64, max_query_cost: u64) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::PolicyDenied,
+        format!(
+            "oracle_query cost gate refused before execution: query_cost_exceeded (estimated total_cost {observed_cost} exceeds max_query_cost {max_query_cost})"
+        ),
+    )
+    .with_next_step("tighten the WHERE clause, add a narrower predicate, or ask for a lower-cardinality page")
+}
+
+struct QueryCostGateCtx<'a> {
+    cx: &'a Cx,
+    conn: &'a dyn OracleConnection,
+    read_only_backstop: &'a mut ReadOnlyBackstop,
+    session: &'a SessionLevelState,
+    request_budget: &'a RequestBudget,
+    quarantine: &'a SyncMutex<Option<ConnectionQuarantine>>,
+}
+
+async fn enforce_query_cost_gate(
+    ctx: QueryCostGateCtx<'_>,
+    args: &QueryArgs,
+    executed_sql: &str,
+    max_query_cost: Option<u64>,
+) -> Result<(), ErrorEnvelope> {
+    let Some(max_query_cost) = max_query_cost else {
+        return Ok(());
+    };
+    ensure_query_cost_plan_write_allowed(args, ctx.session)?;
+    if let Err(error) = ctx
+        .read_only_backstop
+        .clear_before_write(ctx.cx, ctx.conn)
+        .await
+    {
+        let message = format!(
+            "could not end the armed read-only transaction before oracle_query cost estimation; the query was not executed and the session was quarantined: {error}"
+        );
+        mark_connection_quarantined(
+            ctx.quarantine,
+            AuditOutcome::UnknownDiscarded,
+            message.clone(),
+        )?;
+        return Err(
+            quarantined_db_error(QuarantineOutcome::UnknownDiscarded, message).into_envelope(),
+        );
+    }
+    ctx.request_budget
+        .enforce(ctx.cx)
+        .map_err(DbError::into_envelope)?;
+
+    if let Err(primary) = explain_plan(ctx.cx, ctx.conn, executed_sql, args.read_only_standby).await
+    {
+        if let Err(cleanup_err) = rollback_conn_cleanup(ctx.cx, ctx.conn).await {
+            let message = format!(
+                "oracle_query cost estimation failed and PLAN_TABLE rollback cleanup failed: {cleanup_err}"
+            );
+            mark_connection_quarantined(
+                ctx.quarantine,
+                AuditOutcome::UnknownDiscarded,
+                message.clone(),
+            )?;
+            return Err(
+                quarantined_db_error(QuarantineOutcome::UnknownDiscarded, message).into_envelope(),
+            );
+        }
+        return Err(DbError::into_envelope(primary));
+    }
+    ctx.request_budget
+        .enforce(ctx.cx)
+        .map_err(DbError::into_envelope)?;
+
+    let decision = match plan_cost_estimate(ctx.cx, ctx.conn).await {
+        Ok(Some(estimate)) => match estimate.summary.total_cost {
+            Some(total_cost) => match u64::try_from(total_cost) {
+                Ok(observed) if observed <= max_query_cost => Ok(()),
+                Ok(observed) => Err(query_cost_exceeded(observed, max_query_cost)),
+                Err(_) => Err(query_cost_unavailable(format!(
+                    "PLAN_TABLE root total_cost was negative: {total_cost}"
+                ))),
+            },
+            None => Err(query_cost_unavailable(
+                "PLAN_TABLE root total_cost was NULL",
+            )),
+        },
+        Ok(None) => Err(query_cost_unavailable(
+            "PLAN_TABLE returned no scoped plan-root (id=0) row",
+        )),
+        Err(err) => Err(query_cost_unavailable(format!(
+            "PLAN_TABLE cost estimate query failed: {err}"
+        ))),
+    };
+
+    if let Err(cleanup_err) = rollback_conn_cleanup(ctx.cx, ctx.conn).await {
+        let message = format!(
+            "oracle_query cost estimation completed, but PLAN_TABLE rollback cleanup failed: {cleanup_err}"
+        );
+        mark_connection_quarantined(
+            ctx.quarantine,
+            AuditOutcome::UnknownDiscarded,
+            message.clone(),
+        )?;
+        return Err(
+            quarantined_db_error(QuarantineOutcome::UnknownDiscarded, message).into_envelope(),
+        );
+    }
+    ctx.request_budget
+        .enforce(ctx.cx)
+        .map_err(DbError::into_envelope)?;
+    decision
+}
+
 fn query_serialize_options_from_args(args: &QueryArgs) -> SerializeOptions {
     let defaults = SerializeOptions::default();
     SerializeOptions {
@@ -3165,6 +3288,23 @@ fn explain_plan_gate_error(gate: LevelDecision, session: &SessionLevelState) -> 
     )
 }
 
+fn query_cost_plan_gate_error(gate: LevelDecision, session: &SessionLevelState) -> ErrorEnvelope {
+    gate_error(
+        gate,
+        session,
+        &GateErrorLabels {
+            subject: "oracle_query cost gate PLAN_TABLE diagnostic write",
+            step_up_tool: "oracle_set_session_level",
+            step_up_inspect_step: "call oracle_set_session_level without execute=true to preview a READ_WRITE elevation",
+            step_up_elevation_step: "retry oracle_query with allow_plan_table_write=true only after the session is at READ_WRITE",
+            ceiling_step: "choose a profile whose max_level permits READ_WRITE, or remove max_query_cost so oracle_query does not need a PLAN_TABLE diagnostic write",
+            policy_denied_message: "oracle_query cost gate PLAN_TABLE diagnostic write is blocked by policy",
+            internal_message: "oracle_query cost gate produced an unexpected PLAN_TABLE gate decision",
+        },
+        None,
+    )
+}
+
 fn ensure_explain_plan_write_allowed(
     args: &ExplainPlanArgs,
     session: &SessionLevelState,
@@ -3192,6 +3332,36 @@ fn ensure_explain_plan_write_allowed(
         Ok(())
     } else {
         Err(explain_plan_gate_error(gate, session))
+    }
+}
+
+fn ensure_query_cost_plan_write_allowed(
+    args: &QueryArgs,
+    session: &SessionLevelState,
+) -> Result<(), ErrorEnvelope> {
+    if args.read_only_standby {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::PolicyDenied,
+            "oracle_query max_query_cost requires EXPLAIN PLAN, which writes PLAN_TABLE and is disabled on a read-only standby",
+        )
+        .with_next_step("remove max_query_cost for this call/profile, or use DBMS_XPLAN.DISPLAY_CURSOR against an existing cursor"));
+    }
+
+    if !args.allow_plan_table_write {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::PolicyDenied,
+            "oracle_query max_query_cost requires EXPLAIN PLAN, which writes PLAN_TABLE; pass allow_plan_table_write=true only when a diagnostic write is acceptable",
+        )
+        .with_suggested_tool("oracle_set_session_level")
+        .with_next_step("call oracle_preview_sql first if you only need to verify the SQL is read-only")
+        .with_next_step("for primary databases where PLAN_TABLE writes are acceptable, elevate to READ_WRITE and retry oracle_query with allow_plan_table_write=true"));
+    }
+
+    let gate = session.evaluate(Some(OperatingLevel::ReadWrite));
+    if matches!(gate, LevelDecision::Allow) {
+        Ok(())
+    } else {
+        Err(query_cost_plan_gate_error(gate, session))
     }
 }
 
@@ -8425,6 +8595,29 @@ impl OracleDispatcher {
             // reuses the same verdict to surface the identical structured
             // refusal. The arm uses a disjoint &mut split of the guard's fields.
             if prepared.gate.is_ok() {
+                let cost_limit = effective_query_cost_limit(
+                    self.max_query_cost()?,
+                    prepared.args.max_query_cost,
+                );
+                let DispatcherState {
+                    conn,
+                    read_only_backstop,
+                    ..
+                } = &mut *state;
+                enforce_query_cost_gate(
+                    QueryCostGateCtx {
+                        cx,
+                        conn: conn.as_ref(),
+                        read_only_backstop,
+                        session: &scoped_level,
+                        request_budget: &request_budget,
+                        quarantine: &self.quarantine,
+                    },
+                    &prepared.args,
+                    &prepared.executed_sql,
+                    cost_limit,
+                )
+                .await?;
                 if prepared.as_of.is_some() {
                     // K9: a flashback read cannot coexist with the SET
                     // TRANSACTION READ ONLY backstop — Oracle refuses
@@ -8436,13 +8629,8 @@ impl OracleDispatcher {
                     // non-flashback read re-arms SET TRANSACTION READ ONLY on a
                     // fresh transaction (the wrapper rolls back the session, so
                     // any previously-armed read-only transaction is gone).
-                    state.read_only_backstop.disarm();
+                    read_only_backstop.disarm();
                 } else {
-                    let DispatcherState {
-                        conn,
-                        read_only_backstop,
-                        ..
-                    } = &mut *state;
                     // Consult the effective level that governs THIS request
                     // (scoped_level folds in any OAuth scope, which can only
                     // LOWER the level — so this arms at least as often as the
@@ -9645,14 +9833,32 @@ impl OracleDispatcher {
             request_budget.enforce(cx).map_err(DbError::into_envelope)?;
 
             if prepared.gate.is_ok() {
-                if prepared.as_of.is_some() {
-                    state.read_only_backstop.disarm();
-                } else {
-                    let DispatcherState {
-                        conn,
+                let cost_limit = effective_query_cost_limit(
+                    self.max_query_cost()?,
+                    prepared.args.max_query_cost,
+                );
+                let DispatcherState {
+                    conn,
+                    read_only_backstop,
+                    ..
+                } = &mut *state;
+                enforce_query_cost_gate(
+                    QueryCostGateCtx {
+                        cx,
+                        conn: conn.as_ref(),
                         read_only_backstop,
-                        ..
-                    } = &mut *state;
+                        session: &scoped_level,
+                        request_budget: &request_budget,
+                        quarantine: &self.quarantine,
+                    },
+                    &prepared.args,
+                    &prepared.executed_sql,
+                    cost_limit,
+                )
+                .await?;
+                if prepared.as_of.is_some() {
+                    read_only_backstop.disarm();
+                } else {
                     ensure_read_only_backstop_bounded(
                         cx,
                         conn.as_ref(),

@@ -347,6 +347,9 @@ pub fn tool_registry() -> ToolRegistry {
                         "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
                         "items": {}
                     },
+                    "max_query_cost": { "type": "integer", "minimum": 1, "description": "Optional per-call optimizer-cost ceiling for this oracle_query call. It can only lower the active profile's max_query_cost. When an effective ceiling exists, oracle_query first runs an EXPLAIN PLAN diagnostic write and refuses before execution if the estimated root cost is unavailable or above the ceiling." },
+                    "read_only_standby": { "type": "boolean", "description": "If true, refuse the max_query_cost estimation path because EXPLAIN PLAN writes PLAN_TABLE. Only meaningful when an effective max_query_cost is set. Defaults false." },
+                    "allow_plan_table_write": { "type": "boolean", "description": "Default false. Must be true, with the active session at READ_WRITE, before max_query_cost may run EXPLAIN PLAN and write PLAN_TABLE for pre-execution cost estimation." },
                     "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page (incremental fetch). Resuming with it yields the next page byte-identically." },
                     "streaming": { "type": "boolean", "description": "Deliver the result incrementally instead of one inline page. Over HTTP/SSE, scalar/self-contained rowsets emit one `event: row` frame per row; LOB, BFILE, and REF CURSOR values fall back to ordered cursor `event: chunk` frames. Mutually exclusive with export and as_of. Never affects the read-only classifier." },
                     "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows in this page / streamed chunk (default 200, hard cap 5000)." },
@@ -1751,6 +1754,9 @@ mod tests {
                     "max_structured_depth",
                     "numbers_as_float",
                     "timeout_seconds",
+                    "max_query_cost",
+                    "read_only_standby",
+                    "allow_plan_table_write",
                 ],
             ),
             (

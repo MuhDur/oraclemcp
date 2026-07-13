@@ -6075,6 +6075,18 @@ impl OracleConnection for QueryCostQuotaMock {
         if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
             return Ok(rows);
         }
+        let normalized = sql.to_ascii_lowercase();
+        if normalized.contains("dbms_xplan.display") {
+            return Ok(vec![OracleRow {
+                columns: vec![(
+                    "PLAN_TABLE_OUTPUT".to_owned(),
+                    OracleCell::new("VARCHAR2", Some("mock plan".to_owned())),
+                )],
+            }]);
+        }
+        if normalized.contains("from plan_table") {
+            return Ok(vec![plan_cost_row(Some("0"), Some("1"))]);
+        }
         if sql.contains("SELECT 1 FROM dual") {
             let observed = self
                 .state
@@ -6134,14 +6146,15 @@ fn query_cost_limit_is_installed_on_db_boundary_and_cannot_be_widened() {
         Some("dev".to_owned()),
         read_write_level(),
     )
-    .with_max_query_cost(Some(12));
+    .with_max_query_cost(Some(120));
 
     dispatcher
         .dispatch(
             "oracle_query",
             json!({
                 "sql": "SELECT 1 FROM dual",
-                "max_query_cost": 100
+                "max_query_cost": 1_000,
+                "allow_plan_table_write": true
             }),
         )
         .expect("query succeeds with a widened per-call cost request");
@@ -6150,7 +6163,8 @@ fn query_cost_limit_is_installed_on_db_boundary_and_cannot_be_widened() {
             "oracle_query",
             json!({
                 "sql": "SELECT 1 FROM dual",
-                "max_query_cost": 7
+                "max_query_cost": 70,
+                "allow_plan_table_write": true
             }),
         )
         .expect("query succeeds with a lowered per-call cost request");
@@ -6158,13 +6172,235 @@ fn query_cost_limit_is_installed_on_db_boundary_and_cannot_be_widened() {
     let observed = state.observed_costs.lock().expect("observed costs mutex");
     assert_eq!(observed.len(), 2);
     assert!(
-        matches!(observed[0], Some(remaining) if remaining <= 12),
-        "per-call max_query_cost=100 must not widen the profile cap: {observed:?}"
+        matches!(observed[0], Some(remaining) if remaining <= 120),
+        "per-call max_query_cost=1000 must not widen the profile cap: {observed:?}"
     );
     assert!(
-        matches!(observed[1], Some(remaining) if remaining <= 7),
-        "per-call max_query_cost=7 must lower the effective cap: {observed:?}"
+        matches!(observed[1], Some(remaining) if remaining <= 70),
+        "per-call max_query_cost=70 must lower the effective cap: {observed:?}"
     );
+}
+
+fn plan_cost_row(id: Option<&str>, cost: Option<&str>) -> OracleRow {
+    OracleRow {
+        columns: vec![
+            (
+                "ID".to_owned(),
+                OracleCell::new("NUMBER", id.map(str::to_owned)),
+            ),
+            (
+                "COST".to_owned(),
+                OracleCell::new("NUMBER", cost.map(str::to_owned)),
+            ),
+            (
+                "CARDINALITY".to_owned(),
+                OracleCell::new("NUMBER", Some("1".to_owned())),
+            ),
+            (
+                "BYTES".to_owned(),
+                OracleCell::new("NUMBER", Some("8".to_owned())),
+            ),
+        ],
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PlanCostFixture {
+    Root(Option<i64>),
+    NoRoot,
+}
+
+struct QueryCostGateState {
+    root: PlanCostFixture,
+    explain_writes: AtomicUsize,
+    plan_cost_reads: AtomicUsize,
+    actual_reads: AtomicUsize,
+    rollbacks: AtomicUsize,
+}
+
+impl QueryCostGateState {
+    fn new(root: PlanCostFixture) -> Self {
+        Self {
+            root,
+            explain_writes: AtomicUsize::new(0),
+            plan_cost_reads: AtomicUsize::new(0),
+            actual_reads: AtomicUsize::new(0),
+            rollbacks: AtomicUsize::new(0),
+        }
+    }
+}
+
+struct QueryCostGateMock {
+    state: Arc<QueryCostGateState>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for QueryCostGateMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo::default())
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+            return Ok(rows);
+        }
+        let normalized = sql.to_ascii_lowercase();
+        if normalized.contains("dbms_xplan.display") {
+            return Ok(vec![OracleRow {
+                columns: vec![(
+                    "PLAN_TABLE_OUTPUT".to_owned(),
+                    OracleCell::new("VARCHAR2", Some("mock plan".to_owned())),
+                )],
+            }]);
+        }
+        if normalized.contains("from plan_table") {
+            self.state.plan_cost_reads.fetch_add(1, Ordering::SeqCst);
+            return match self.state.root {
+                PlanCostFixture::Root(cost) => Ok(vec![plan_cost_row(
+                    Some("0"),
+                    cost.map(|value| value.to_string()).as_deref(),
+                )]),
+                PlanCostFixture::NoRoot => Ok(vec![plan_cost_row(Some("1"), Some("10"))]),
+            };
+        }
+        if normalized.contains("select 1 from dual") {
+            self.state.actual_reads.fetch_add(1, Ordering::SeqCst);
+            return Ok(vec![OracleRow {
+                columns: vec![(
+                    "VALUE".to_owned(),
+                    OracleCell::new("NUMBER", Some("1".to_owned())),
+                )],
+            }]);
+        }
+        Ok(Vec::new())
+    }
+
+    async fn execute(&self, _cx: &Cx, sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        if sql.starts_with("EXPLAIN PLAN FOR") {
+            self.state.explain_writes.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(0)
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.state.rollbacks.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn query_cost_dispatcher(
+    root: PlanCostFixture,
+    max_query_cost: u64,
+) -> (OracleDispatcher, Arc<QueryCostGateState>) {
+    let state = Arc::new(QueryCostGateState::new(root));
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(QueryCostGateMock {
+            state: Arc::clone(&state),
+        }),
+        Some("dev".to_owned()),
+        read_write_level(),
+    )
+    .with_max_query_cost(Some(max_query_cost));
+    (dispatcher, state)
+}
+
+#[test]
+fn query_cost_gate_requires_explicit_plan_table_opt_in_before_db() {
+    let (dispatcher, state) = query_cost_dispatcher(PlanCostFixture::Root(Some(2)), 50_000);
+    let err = dispatcher
+        .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+        .expect_err("cost gate must not silently write PLAN_TABLE");
+
+    assert_eq!(err.error_class, ErrorClass::PolicyDenied);
+    assert!(err.message.contains("PLAN_TABLE"), "{err:?}");
+    assert_eq!(state.explain_writes.load(Ordering::SeqCst), 0);
+    assert_eq!(state.plan_cost_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(state.actual_reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn query_cost_gate_refuses_over_ceiling_before_select() {
+    let (dispatcher, state) = query_cost_dispatcher(PlanCostFixture::Root(Some(190_000)), 50_000);
+    let err = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "allow_plan_table_write": true
+            }),
+        )
+        .expect_err("cost above ceiling refuses");
+
+    assert_eq!(err.error_class, ErrorClass::PolicyDenied);
+    assert!(err.message.contains("query_cost_exceeded"), "{err:?}");
+    assert_eq!(state.explain_writes.load(Ordering::SeqCst), 1);
+    assert_eq!(state.plan_cost_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(state.actual_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        state.rollbacks.load(Ordering::SeqCst),
+        1,
+        "PLAN_TABLE diagnostic write is rolled back before refusal"
+    );
+}
+
+#[test]
+fn query_cost_gate_allows_under_ceiling_then_selects() {
+    let (dispatcher, state) = query_cost_dispatcher(PlanCostFixture::Root(Some(2)), 50_000);
+    let out = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "allow_plan_table_write": true
+            }),
+        )
+        .expect("cost under ceiling proceeds");
+
+    assert_eq!(out["row_count"], json!(1));
+    assert_eq!(state.explain_writes.load(Ordering::SeqCst), 1);
+    assert_eq!(state.plan_cost_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(state.actual_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn query_cost_gate_refuses_null_or_missing_cost_as_unavailable() {
+    for root in [PlanCostFixture::Root(None), PlanCostFixture::NoRoot] {
+        let (dispatcher, state) = query_cost_dispatcher(root, 50_000);
+        let err = dispatcher
+            .dispatch(
+                "oracle_query",
+                json!({
+                    "sql": "SELECT 1 FROM dual",
+                    "allow_plan_table_write": true
+                }),
+            )
+            .expect_err("missing estimate refuses fail-closed");
+
+        assert_eq!(err.error_class, ErrorClass::PolicyDenied);
+        assert!(err.message.contains("cost_unavailable"), "{err:?}");
+        assert_eq!(state.explain_writes.load(Ordering::SeqCst), 1);
+        assert_eq!(state.plan_cost_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(state.actual_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[test]
