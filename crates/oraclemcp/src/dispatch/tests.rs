@@ -9,6 +9,7 @@ use asupersync::channel::mpsc;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_core::{DispatchCloseReason, DispatchContext, ScopeGrant};
 use oraclemcp_db::{OracleBackend, OracleCell, OracleRow, QueryRowStream, QueryRowStreamStart};
+use oraclemcp_guard::SET_TRANSACTION_READ_ONLY;
 use std::path::{Path, PathBuf};
 use std::sync::Barrier;
 use std::sync::Mutex;
@@ -431,6 +432,15 @@ impl OracleConnection for OneRowMock {
             return Ok(rows);
         }
         let sql_lower = sql.to_ascii_lowercase();
+        if sql_lower.contains("get_system_change_number") || sql_lower.contains("timestamp_to_scn")
+        {
+            return Ok(vec![OracleRow {
+                columns: vec![(
+                    "OBSERVED_SCN".to_owned(),
+                    OracleCell::new("NUMBER", Some("424242".to_owned())),
+                )],
+            }]);
+        }
         if sql_lower.contains("from all_users") {
             return Ok(vec![OracleRow {
                 columns: vec![(
@@ -1404,6 +1414,8 @@ fn args_for(name: &str) -> Value {
             json!({ "owner": "HR", "table": "DOCS", "clob_col": "BODY", "pk_col": "ID", "pk_val": "42" })
         }
         "preview_sql" => json!({ "sql": "SELECT 1 FROM dual" }),
+        "oracle_checkpoint" => json!({ "name": "before_change" }),
+        "oracle_undo_to" => json!({}),
         other => panic!("no test args for {other}"),
     }
 }
@@ -8728,16 +8740,19 @@ mod audit_wiring {
     }
 
     #[test]
-    fn served_read_is_not_audited() {
+    fn served_read_is_audited_with_a_replay_scn() {
         let (auditor, sink) = auditor_with_sink();
         let dispatcher = dispatcher_with(ddl_level(), auditor);
         let _ = dispatcher
             .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
             .expect("read dispatches");
-        assert!(
-            sink.records().is_empty(),
-            "pure reads must not touch the audit chain"
-        );
+        let records = sink.records();
+        assert_eq!(records.len(), 2, "a read logs Pending then Succeeded");
+        assert_eq!(records[0].outcome, AuditOutcome::Pending);
+        assert_eq!(records[1].outcome, AuditOutcome::Succeeded);
+        assert_eq!(records[0].observed_scn, Some(424_242));
+        assert_eq!(records[1].observed_scn, Some(424_242));
+        assert_eq!(records[1].prev_hash, records[0].entry_hash);
     }
 
     #[test]
@@ -8779,13 +8794,15 @@ mod audit_wiring {
         let records = sink.records();
         assert_eq!(
             records.len(),
-            1,
-            "masked read appends exactly one audit record"
+            2,
+            "masked read appends Pending then certificate-bound Succeeded records"
         );
-        let record = &records[0];
+        let record = &records[1];
+        assert_eq!(records[0].outcome, AuditOutcome::Pending);
         assert_eq!(record.tool, "oracle_query");
         assert_eq!(record.danger_level, "READ_ONLY");
         assert_eq!(record.outcome, AuditOutcome::Succeeded);
+        assert_eq!(record.observed_scn, Some(424_242));
         assert_eq!(audit_entry_hash, record.entry_hash);
         assert!(record.hash_is_valid(), "audit certificate is hash-covered");
         let audited = record
@@ -9497,6 +9514,17 @@ mod read_only_backstop_wiring {
             if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
                 return Ok(rows);
             }
+            if sql
+                .to_ascii_lowercase()
+                .contains("get_system_change_number")
+            {
+                return Ok(vec![OracleRow {
+                    columns: vec![(
+                        "OBSERVED_SCN".to_owned(),
+                        OracleCell::new("NUMBER", Some("424242".to_owned())),
+                    )],
+                }]);
+            }
             Ok(vec![OracleRow {
                 columns: vec![(
                     "N".to_owned(),
@@ -9649,6 +9677,8 @@ mod read_only_backstop_wiring {
         assert_eq!(records[1].danger_level, "SAFE");
         assert_eq!(records[0].outcome, AuditOutcome::Pending);
         assert_eq!(records[1].outcome, AuditOutcome::Succeeded);
+        assert_eq!(records[0].observed_scn, Some(424_242));
+        assert_eq!(records[1].observed_scn, Some(424_242));
         assert_eq!(
             records[0].sql_preview,
             "<sql text redacted; see sql_sha256>"
@@ -11701,4 +11731,947 @@ mod qa107_describe_uncertainty {
             .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
             .expect("active primary still serves reads");
     }
+}
+
+// ===========================================================================
+// Arc I — the reversible workspace (bead oraclemcp-epic-09x-alien-6sj8.11.1).
+//
+// `oracle_checkpoint` = SAVEPOINT, `oracle_undo_to` = ROLLBACK TO SAVEPOINT, and
+// `oracle_execute hold=true` leaves DML pending between the two. The tests below
+// pin both halves of the contract: the undo stack behaves as an agent expects,
+// and no path through the open workspace can commit held work.
+// ===========================================================================
+
+/// Every statement the pinned session actually saw, in order.
+fn executed_statements(state: &ExecState) -> Vec<String> {
+    state
+        .executed
+        .lock()
+        .expect("exec mutex")
+        .iter()
+        .map(|(sql, _)| sql.clone())
+        .collect()
+}
+
+fn workspace_dispatcher(state: &Arc<ExecState>) -> OracleDispatcher {
+    OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(state))),
+        Some("dev".to_owned()),
+        read_write_level(),
+    )
+}
+
+/// The bead's acceptance path: checkpoint → exploratory DML → undo. The DML must
+/// stay pending (no COMMIT, no ROLLBACK) between the two, or there would be
+/// nothing for the undo to restore.
+#[test]
+fn checkpoint_then_held_dml_then_undo_walks_the_transaction_back() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+
+    let checkpoint = dispatcher
+        .dispatch("oracle_checkpoint", json!({ "name": "before_change" }))
+        .expect("checkpoint opens the workspace");
+    assert_eq!(checkpoint["checkpoint"], json!("BEFORE_CHANGE"));
+    assert_eq!(checkpoint["statement"], json!("SAVEPOINT BEFORE_CHANGE"));
+    assert_eq!(checkpoint["workspace"]["open"], json!(true));
+    assert_eq!(checkpoint["workspace"]["held_statements"], json!(0));
+
+    let held = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({
+                "sql": "UPDATE employees SET salary = salary * 2 WHERE employee_id = :1",
+                "binds": [100],
+                "hold": true,
+            }),
+        )
+        .expect("reversible DML is held inside the workspace");
+    assert_eq!(held["executed"], json!(true));
+    assert_eq!(held["held"], json!(true));
+    assert_eq!(held["committed"], json!(false));
+    assert_eq!(
+        held["rolled_back"],
+        json!(false),
+        "a held statement must NOT be rolled back — that is what makes it undoable later"
+    );
+    assert_eq!(held["workspace"]["held_statements"], json!(1));
+    assert_eq!(
+        state.commits.load(Ordering::SeqCst),
+        0,
+        "holding never commits"
+    );
+    assert_eq!(
+        state.rollbacks.load(Ordering::SeqCst),
+        0,
+        "holding must not end the transaction, or the savepoint would be erased"
+    );
+
+    let undo = dispatcher
+        .dispatch("oracle_undo_to", json!({ "name": "before_change" }))
+        .expect("undo restores the checkpoint");
+    assert_eq!(undo["undone_to"], json!("BEFORE_CHANGE"));
+    assert_eq!(
+        undo["statement"],
+        json!("ROLLBACK TO SAVEPOINT BEFORE_CHANGE")
+    );
+    assert_eq!(undo["discarded_statements"], json!(1));
+    assert_eq!(undo["released_checkpoints"], json!([]));
+    assert_eq!(
+        undo["workspace"]["held_statements"],
+        json!(0),
+        "the held statement is gone"
+    );
+    assert_eq!(
+        undo["workspace"]["open"],
+        json!(true),
+        "Oracle keeps the savepoint it rolled back to, so the workspace stays open"
+    );
+
+    // The DML carries the usual per-statement audit marker; the two
+    // transaction-control statements are server-generated and are exactly the
+    // fixed templates. The undo is a native *partial* rollback — the workspace
+    // never issues a transaction-wide one.
+    assert_eq!(
+        executed_statements(&state),
+        vec![
+            "SAVEPOINT BEFORE_CHANGE".to_owned(),
+            "/* oraclemcp llm=oraclemcp profile=dev tool=oracle_execute */ \
+             UPDATE employees SET salary = salary * 2 WHERE employee_id = :1"
+                .to_owned(),
+            "ROLLBACK TO SAVEPOINT BEFORE_CHANGE".to_owned(),
+        ],
+    );
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        state.rollbacks.load(Ordering::SeqCst),
+        0,
+        "ROLLBACK TO SAVEPOINT is a statement, never a transaction-ending conn.rollback()"
+    );
+}
+
+/// The stack is labeled-linear: undoing to an earlier checkpoint releases every
+/// checkpoint Oracle erases with it.
+#[test]
+fn undo_releases_the_checkpoints_oracle_erases() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+    let dml = "DELETE FROM staging WHERE id = :1";
+
+    for name in ["first", "second"] {
+        dispatcher
+            .dispatch("oracle_checkpoint", json!({ "name": name }))
+            .expect("checkpoint opens");
+        dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": dml, "binds": [1], "hold": true }),
+            )
+            .expect("held DML");
+    }
+
+    let undo = dispatcher
+        .dispatch("oracle_undo_to", json!({ "name": "FIRST" }))
+        .expect("undo to the first checkpoint");
+    assert_eq!(undo["discarded_statements"], json!(2));
+    assert_eq!(undo["released_checkpoints"], json!(["SECOND"]));
+    assert_eq!(undo["workspace"]["checkpoints"], json!(["FIRST"]));
+    assert_eq!(undo["workspace"]["held_statements"], json!(0));
+}
+
+/// A read inside the workspace observes the held work in the same transaction
+/// and must not end it.
+#[test]
+fn reads_coexist_with_held_work_without_ending_the_transaction() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+    dispatcher
+        .dispatch("oracle_checkpoint", json!({ "name": "cp" }))
+        .expect("checkpoint");
+    dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": "UPDATE t SET c = 1", "hold": true }),
+        )
+        .expect("held DML");
+
+    dispatcher
+        .dispatch("oracle_query", json!({ "sql": "SELECT c FROM t" }))
+        .expect("a read at READ_WRITE inspects the uncommitted change");
+
+    assert_eq!(
+        state.rollbacks.load(Ordering::SeqCst),
+        0,
+        "the read-only backstop must not arm at READ_WRITE and roll the held work away"
+    );
+    let undo = dispatcher
+        .dispatch("oracle_undo_to", json!({ "name": "cp" }))
+        .expect("the workspace survived the read");
+    assert_eq!(undo["discarded_statements"], json!(1));
+}
+
+/// The load-bearing safety property. A COMMIT is transaction-wide: if a held,
+/// ungranted statement could ride another statement's commit, the "never
+/// auto-commit DML" invariant would be defeated by the transaction rather than
+/// by a classifier gap. Every committing path must refuse while work is held —
+/// and refuse *before* consuming the agent's single-use grant.
+#[test]
+fn an_open_workspace_refuses_every_committing_path() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        ddl_level(),
+    );
+    dispatcher
+        .dispatch("oracle_checkpoint", json!({ "name": "cp" }))
+        .expect("checkpoint");
+    dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": "DELETE FROM audit_log", "hold": true }),
+        )
+        .expect("held DML");
+    let baseline = executed_statements(&state).len();
+
+    let commit_sql = "UPDATE settings SET v = 1 WHERE k = 'x'";
+    let confirm = preview_confirm(&dispatcher, commit_sql);
+    let refused = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": commit_sql, "commit": true, "confirm": confirm.clone() }),
+        )
+        .expect_err("a commit would persist the held DELETE without a grant");
+    assert_eq!(refused.error_class, ErrorClass::PolicyDenied);
+    assert_eq!(refused.suggested_tool.as_deref(), Some("oracle_undo_to"));
+
+    // Oracle commits DDL implicitly, so it is the same hole by another door.
+    let ddl_refused = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": "CREATE TABLE t (id NUMBER)", "commit": true }),
+        )
+        .expect_err("implicitly-committing DDL is refused too");
+    assert_eq!(ddl_refused.error_class, ErrorClass::PolicyDenied);
+
+    assert_eq!(
+        state.commits.load(Ordering::SeqCst),
+        0,
+        "nothing was committed"
+    );
+    assert_eq!(
+        executed_statements(&state).len(),
+        baseline,
+        "a refused commit never reaches the database"
+    );
+
+    // The refusal came before the grant was consumed, so once the workspace is
+    // discarded the very same confirmation still works.
+    let discard = dispatcher
+        .dispatch("oracle_undo_to", json!({}))
+        .expect("undo with no name discards the workspace");
+    assert_eq!(discard["statement"], json!("ROLLBACK"));
+    assert_eq!(discard["undone_to"], Value::Null);
+    assert_eq!(discard["discarded_statements"], json!(1));
+    assert_eq!(discard["workspace"]["open"], json!(false));
+
+    let committed = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": commit_sql, "commit": true, "confirm": confirm }),
+        )
+        .expect("the unspent grant still commits on a closed workspace");
+    assert_eq!(committed["committed"], json!(true));
+    assert_eq!(state.commits.load(Ordering::SeqCst), 1);
+}
+
+/// The other transaction-ending operations destroy held work rather than commit
+/// it, so they are refused for honesty: an agent's uncommitted work is never
+/// silently discarded by a diagnostic or a flashback read.
+#[test]
+fn an_open_workspace_refuses_the_paths_that_reset_the_transaction() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+    dispatcher
+        .dispatch("oracle_checkpoint", json!({ "name": "cp" }))
+        .expect("checkpoint");
+
+    for (tool, args) in [
+        (
+            "oracle_explain_plan",
+            json!({ "sql": "SELECT 1 FROM dual", "allow_plan_table_write": true }),
+        ),
+        (
+            "oracle_query",
+            json!({ "sql": "SELECT 1 FROM dual", "as_of": { "scn": 42 } }),
+        ),
+        (
+            "oracle_diff",
+            json!({ "sql": "SELECT 1 FROM dual", "scn_a": 1, "scn_b": 2 }),
+        ),
+    ] {
+        let error = dispatcher
+            .dispatch(tool, args)
+            .expect_err("{tool} rolls the transaction back and must refuse while work is held");
+        assert_eq!(error.error_class, ErrorClass::PolicyDenied, "{tool}");
+        assert_eq!(
+            error.suggested_tool.as_deref(),
+            Some("oracle_undo_to"),
+            "{tool}"
+        );
+    }
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+}
+
+/// `hold` only means something for a statement a checkpoint can actually undo.
+#[test]
+fn hold_refuses_everything_a_checkpoint_could_not_undo() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        ddl_level(),
+    );
+
+    // No checkpoint yet: there is nothing to undo back to.
+    let no_workspace = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": "UPDATE t SET c = 1", "hold": true }),
+        )
+        .expect_err("hold without a checkpoint is refused");
+    assert_eq!(no_workspace.error_class, ErrorClass::InvalidArguments);
+    assert_eq!(
+        no_workspace.suggested_tool.as_deref(),
+        Some("oracle_checkpoint")
+    );
+
+    dispatcher
+        .dispatch("oracle_checkpoint", json!({ "name": "cp" }))
+        .expect("checkpoint");
+    let baseline = executed_statements(&state).len();
+
+    for (sql, why) in [
+        (
+            "CREATE TABLE t (id NUMBER)",
+            "DDL: Oracle commits it implicitly, so no savepoint could undo it",
+        ),
+        (
+            "INSERT INTO orders (id) VALUES (app_seq.NEXTVAL)",
+            "the sequence advance escapes rollback",
+        ),
+    ] {
+        let error = dispatcher
+            .dispatch("oracle_execute", json!({ "sql": sql, "hold": true }))
+            .expect_err(why);
+        assert_eq!(error.error_class, ErrorClass::InvalidArguments, "{why}");
+    }
+
+    let both = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": "UPDATE t SET c = 1", "hold": true, "commit": true }),
+        )
+        .expect_err("hold and commit are opposites");
+    assert_eq!(both.error_class, ErrorClass::InvalidArguments);
+
+    assert_eq!(
+        executed_statements(&state).len(),
+        baseline,
+        "every hold refusal happens before any database I/O"
+    );
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+}
+
+/// The savepoint name is interpolated (Oracle has no bind for it), so the
+/// allowlist is the injection boundary and must hold before any I/O.
+#[test]
+fn checkpoint_names_are_validated_before_any_database_io() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+
+    for name in [
+        "sp; DROP TABLE employees",
+        "sp' OR '1'='1",
+        "\"sp\"",
+        "sp\nCOMMIT",
+        "1sp",
+        "",
+    ] {
+        let error = dispatcher
+            .dispatch("oracle_checkpoint", json!({ "name": name }))
+            .expect_err("an unsafe checkpoint name must never reach Oracle");
+        assert_eq!(error.error_class, ErrorClass::InvalidArguments, "{name:?}");
+    }
+    assert!(
+        executed_statements(&state).is_empty(),
+        "a refused name issues no statement at all"
+    );
+
+    // Names are Oracle identifiers: case-insensitive, so the same checkpoint.
+    dispatcher
+        .dispatch("oracle_checkpoint", json!({ "name": "cp" }))
+        .expect("checkpoint");
+    let duplicate = dispatcher
+        .dispatch("oracle_checkpoint", json!({ "name": "CP" }))
+        .expect_err("re-establishing a live name would move it above the work it protects");
+    assert_eq!(duplicate.error_class, ErrorClass::InvalidArguments);
+
+    let unknown = dispatcher
+        .dispatch("oracle_undo_to", json!({ "name": "never_taken" }))
+        .expect_err("undoing to an unknown checkpoint is refused");
+    assert_eq!(unknown.error_class, ErrorClass::InvalidArguments);
+    assert_eq!(
+        executed_statements(&state),
+        vec!["SAVEPOINT CP".to_owned()],
+        "only the one accepted checkpoint reached the database"
+    );
+}
+
+/// The workspace is a write surface; a READ_ONLY session (or a `protected`
+/// profile that can never leave it) cannot open one.
+#[test]
+fn the_workspace_needs_read_write() {
+    let state = Arc::new(ExecState::default());
+    let read_only = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        SessionLevelState::new(OperatingLevel::ReadWrite, false),
+    );
+    let error = read_only
+        .dispatch("oracle_checkpoint", json!({ "name": "cp" }))
+        .expect_err("an un-elevated session cannot open the workspace");
+    assert_eq!(error.error_class, ErrorClass::OperatingLevelTooLow);
+    assert_eq!(
+        error.suggested_tool.as_deref(),
+        Some("oracle_set_session_level")
+    );
+
+    let protected = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("prod".to_owned()),
+        SessionLevelState::new(OperatingLevel::ReadOnly, true),
+    );
+    let pinned = protected
+        .dispatch("oracle_checkpoint", json!({ "name": "cp" }))
+        .expect_err("a protected profile is pinned at READ_ONLY");
+    assert_eq!(pinned.error_class, ErrorClass::OperatingLevelTooLow);
+    assert!(
+        pinned.message.contains("cannot be raised"),
+        "the refusal must say the ceiling is immutable: {}",
+        pinned.message
+    );
+    assert!(executed_statements(&state).is_empty());
+}
+
+/// Dropping back to READ_ONLY re-arms the read-only backstop, and arming rolls
+/// the transaction back — which erases the savepoints. The workspace must not
+/// keep claiming checkpoints Oracle no longer has.
+#[test]
+fn returning_to_read_only_discards_the_workspace_with_the_transaction() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = workspace_dispatcher(&state);
+    dispatcher
+        .dispatch("oracle_checkpoint", json!({ "name": "cp" }))
+        .expect("checkpoint");
+    dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": "UPDATE t SET c = 1", "hold": true }),
+        )
+        .expect("held DML");
+
+    dispatcher
+        .dispatch("disable_writes", json!({}))
+        .expect("drop back to READ_ONLY");
+    dispatcher
+        .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+        .expect("the next read re-arms the backstop");
+
+    assert!(
+        executed_statements(&state).contains(&SET_TRANSACTION_READ_ONLY.to_owned()),
+        "the backstop re-armed: {:?}",
+        executed_statements(&state)
+    );
+    assert_eq!(
+        state.rollbacks.load(Ordering::SeqCst),
+        1,
+        "arming rolled the transaction back, discarding the held work"
+    );
+
+    let gone = dispatcher
+        .dispatch("oracle_undo_to", json!({ "name": "cp" }))
+        .expect_err("the savepoint went with the transaction");
+    assert!(
+        gone.next_steps.iter().any(|step| step.contains("closed")),
+        "the agent must be told the workspace closed, not silently see an empty stack: {:?}",
+        gone.next_steps
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Arc H / H2 — cross-database `oracle_diff`.
+//
+// Federation adds reach, never admission surface: every guard the caller would
+// meet walking to a second database through `oracle_switch_profile` is met by a
+// cross-database diff too. These tests pin that, and pin the one answer the tool
+// must never give — a confident "no differences" it cannot actually prove.
+// ---------------------------------------------------------------------------
+
+/// One database in a synthetic two-profile fleet.
+struct FleetMock {
+    /// `(ID, VAL)` rows this database returns for the compared SELECT.
+    rows: Vec<(&'static str, &'static str)>,
+    /// When false, the compared object is absent from this database's catalog,
+    /// so the statement cannot be proven read-only *here*.
+    resolves: bool,
+    counts: Arc<TouchCounts>,
+}
+
+impl FleetMock {
+    fn new(rows: Vec<(&'static str, &'static str)>, counts: Arc<TouchCounts>) -> Self {
+        Self {
+            rows,
+            resolves: true,
+            counts,
+        }
+    }
+
+    fn unresolvable(counts: Arc<TouchCounts>) -> Self {
+        Self {
+            rows: Vec::new(),
+            resolves: false,
+            counts,
+        }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for FleetMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            backend: Some(OracleBackend::RustOracle),
+            current_schema: Some("APP".to_owned()),
+            session_user: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let normalized = sql.to_ascii_lowercase();
+        if !self.resolves
+            && normalized.contains("from all_objects")
+            && normalized.contains("object_id, status, edition_name")
+        {
+            // This database has never heard of the object: nothing to prove a
+            // read against.
+            return Ok(Vec::new());
+        }
+        if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+            return Ok(rows);
+        }
+        self.counts.query.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .rows
+            .iter()
+            .map(|(id, val)| OracleRow {
+                columns: vec![
+                    (
+                        "ID".to_owned(),
+                        OracleCell::new("NUMBER", Some((*id).to_owned())),
+                    ),
+                    (
+                        "VAL".to_owned(),
+                        OracleCell::new("VARCHAR2", Some((*val).to_owned())),
+                    ),
+                ],
+            })
+            .collect())
+    }
+
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        Ok(0)
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+const FLEET_CONFIG: &str = r#"
+    default_profile = "prod"
+
+    [[profiles]]
+    name = "prod"
+    connect_string = "prod:1521/svc"
+
+    [[profiles]]
+    name = "staging"
+    connect_string = "staging:1521/svc"
+"#;
+
+/// A fleet whose staging profile masks VAL, so the two databases no longer agree
+/// on what a VAL value even is.
+const FLEET_CONFIG_STAGING_MASKS_VAL: &str = r#"
+    default_profile = "prod"
+
+    [[profiles]]
+    name = "prod"
+    connect_string = "prod:1521/svc"
+
+    [[profiles]]
+    name = "staging"
+    connect_string = "staging:1521/svc"
+
+    [profiles.masking]
+    mask_unknown_default = true
+
+    [[profiles.masking.rules]]
+    column_match = { column = "VAL" }
+    action = "mask"
+"#;
+
+/// What each profile's connector call should produce.
+#[derive(Clone)]
+enum FleetLane {
+    Rows(Vec<(&'static str, &'static str)>),
+    Unresolvable,
+    Unreachable,
+}
+
+/// Build a dispatcher over a synthetic fleet: `connect` is consulted per profile
+/// name, exactly as `oracle_switch_profile`'s connector would be.
+fn fleet_dispatcher(
+    config_toml: &str,
+    exposure: McpExposurePolicy,
+    lanes: Vec<(&'static str, FleetLane)>,
+    connector_calls: Arc<Mutex<Vec<String>>>,
+) -> OracleDispatcher {
+    let config = OracleMcpConfig::from_toml_str(config_toml).expect("fleet config");
+    let drain = ProfileDrainState::from_config(config);
+    let counts = Arc::new(TouchCounts::default());
+    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools_and_stateless(
+        Box::new(OneRowMock),
+        Some("prod".to_owned()),
+        default_read_only_level(),
+        Arc::new(move |_cx, generation| {
+            let profile = generation.profile().to_owned();
+            connector_calls
+                .lock()
+                .expect("connector calls")
+                .push(profile.clone());
+            // Resolve the lane to an owned value before the future: the returned
+            // future may not borrow the connector's captured state.
+            let lane = lanes
+                .iter()
+                .find(|(name, _)| *name == profile)
+                .map(|(_, lane)| lane.clone());
+            let counts = Arc::clone(&counts);
+            Box::pin(async move {
+                match lane {
+                    Some(FleetLane::Rows(rows)) => Ok(session_bundle(FleetMock::new(rows, counts))),
+                    Some(FleetLane::Unresolvable) => {
+                        Ok(session_bundle(FleetMock::unresolvable(counts)))
+                    }
+                    Some(FleetLane::Unreachable) => {
+                        Err(DbError::Connect("ORA-12541: TNS:no listener".to_owned()))
+                    }
+                    None => Err(DbError::Connect(format!(
+                        "no synthetic lane for profile `{profile}`"
+                    ))),
+                }
+            })
+        }),
+        StatelessReadStrategy::none(),
+        CustomToolCatalog::default(),
+        None,
+    )
+    .with_profile_drain_state(drain);
+    // Masked results are refused without a hash-chain binding (Arc M), so a fleet
+    // whose profiles mask anything needs a real audit sink.
+    use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink, SigningKey};
+    struct FleetSink(MemoryAuditSink);
+    impl AuditSink for FleetSink {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            self.0.append(record)
+        }
+        fn flush(&self) -> Result<(), AuditError> {
+            self.0.flush()
+        }
+    }
+    let auditor = Arc::new(oraclemcp_audit::Auditor::new(
+        Box::new(FleetSink(MemoryAuditSink::new())),
+        SigningKey::new("test-key", b"cross-db-diff-test-key-1234567890".to_vec())
+            .expect("valid test key"),
+    ));
+    dispatcher.with_mcp_exposure(exposure).with_auditor(auditor)
+}
+
+fn cross_db_args() -> Value {
+    json!({
+        "sql": "SELECT id, val FROM app.orders ORDER BY id",
+        "profile_a": "prod",
+        "profile_b": "staging",
+        "key": ["ID"],
+    })
+}
+
+#[test]
+fn cross_db_diff_returns_the_exact_delta_and_omits_rows_identical_in_both() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let dispatcher = fleet_dispatcher(
+        FLEET_CONFIG,
+        McpExposurePolicy::AllowAll,
+        vec![
+            (
+                "prod",
+                // ID=1 is identical in both. ID=2 exists only in prod. ID=3 has
+                // drifted. ID=4 exists only in staging.
+                FleetLane::Rows(vec![("1", "same"), ("2", "prod-only"), ("3", "prod-value")]),
+            ),
+            (
+                "staging",
+                FleetLane::Rows(vec![
+                    ("1", "same"),
+                    ("3", "staging-value"),
+                    ("4", "staging-only"),
+                ]),
+            ),
+        ],
+        Arc::clone(&calls),
+    );
+
+    let out = dispatcher
+        .dispatch("oracle_diff", cross_db_args())
+        .expect("cross-database diff succeeds");
+
+    assert_eq!(out["keyed"], json!(true));
+    assert_eq!(out["key_columns"], json!(["ID"]));
+    assert_eq!(
+        out["removed"],
+        json!([{ "ID": "2", "VAL": "prod-only" }]),
+        "a row only prod has must be reported as removed"
+    );
+    assert_eq!(
+        out["added"],
+        json!([{ "ID": "4", "VAL": "staging-only" }]),
+        "a row only staging has must be reported as added"
+    );
+    assert_eq!(out["changed"].as_array().expect("changed").len(), 1);
+    assert_eq!(out["changed"][0]["key"], json!({ "ID": "3" }));
+    assert_eq!(
+        out["changed"][0]["before"],
+        json!({ "ID": "3", "VAL": "prod-value" })
+    );
+    assert_eq!(
+        out["changed"][0]["after"],
+        json!({ "ID": "3", "VAL": "staging-value" })
+    );
+
+    // The row that is identical in both databases is the whole point: it must not
+    // appear anywhere in the delta.
+    let delta = format!("{}{}{}", out["added"], out["removed"], out["changed"]);
+    assert!(
+        !delta.contains("same"),
+        "a row identical in both databases must be absent from the delta, got {delta}"
+    );
+
+    // Provenance: a cross-database delta is uninterpretable without knowing which
+    // database each side was.
+    assert_eq!(out["source_a"]["profile"], json!("prod"));
+    assert_eq!(out["source_b"]["profile"], json!("staging"));
+
+    assert_eq!(
+        &*calls.lock().expect("calls"),
+        &["prod".to_owned(), "staging".to_owned()],
+        "each side is read on its own connection, opened through the profile connector"
+    );
+}
+
+#[test]
+fn cross_db_diff_refuses_an_unreachable_side_instead_of_claiming_no_differences() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let dispatcher = fleet_dispatcher(
+        FLEET_CONFIG,
+        McpExposurePolicy::AllowAll,
+        vec![
+            ("prod", FleetLane::Rows(vec![("1", "same")])),
+            ("staging", FleetLane::Unreachable),
+        ],
+        Arc::clone(&calls),
+    );
+
+    let err = dispatcher
+        .dispatch("oracle_diff", cross_db_args())
+        .expect_err("an unreachable database cannot produce a delta");
+
+    // The dangerous failure mode for a prod-vs-staging tool is a successful,
+    // empty delta: "they agree!". It must fail, and say which side failed.
+    assert!(
+        err.message.contains("side b") && err.message.contains("staging"),
+        "the refusal must name the side and profile that failed: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains("no delta can be reported"),
+        "the refusal must be explicit that no comparison happened: {}",
+        err.message
+    );
+}
+
+#[test]
+fn cross_db_diff_cannot_reach_a_profile_the_server_does_not_expose() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let dispatcher = fleet_dispatcher(
+        FLEET_CONFIG,
+        // E5: staging is not exposed on the MCP surface at all.
+        McpExposurePolicy::AllowList(["prod".to_owned()].into_iter().collect()),
+        vec![
+            ("prod", FleetLane::Rows(vec![("1", "same")])),
+            ("staging", FleetLane::Rows(vec![("1", "leaked")])),
+        ],
+        Arc::clone(&calls),
+    );
+
+    let err = dispatcher
+        .dispatch("oracle_diff", cross_db_args())
+        .expect_err("a hidden profile must not be reachable through a diff");
+
+    assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+    assert!(
+        err.message.contains("not available"),
+        "a hidden profile is refused with the same uniform envelope as a switch: {}",
+        err.message
+    );
+    assert!(
+        !calls.lock().expect("calls").contains(&"staging".to_owned()),
+        "the connector must never run for a non-exposed profile — credentials are \
+         not resolved for a database the caller may not reach"
+    );
+}
+
+#[test]
+fn cross_db_diff_classifies_the_statement_against_each_database_separately() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let dispatcher = fleet_dispatcher(
+        FLEET_CONFIG,
+        McpExposurePolicy::AllowAll,
+        vec![
+            ("prod", FleetLane::Rows(vec![("1", "same")])),
+            // The same SQL text names nothing provable in staging's catalog.
+            ("staging", FleetLane::Unresolvable),
+        ],
+        Arc::clone(&calls),
+    );
+
+    let err = dispatcher
+        .dispatch("oracle_diff", cross_db_args())
+        .expect_err("a statement proven read-only in prod is not thereby proven in staging");
+
+    assert!(
+        err.message.contains("side b") && err.message.contains("staging"),
+        "the refusal must name the database whose catalog could not prove the read: {}",
+        err.message
+    );
+}
+
+#[test]
+fn cross_db_diff_refuses_masked_columns_it_cannot_compare() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let dispatcher = fleet_dispatcher(
+        FLEET_CONFIG_STAGING_MASKS_VAL,
+        McpExposurePolicy::AllowAll,
+        vec![
+            ("prod", FleetLane::Rows(vec![("1", "plaintext")])),
+            ("staging", FleetLane::Rows(vec![("1", "plaintext")])),
+        ],
+        Arc::clone(&calls),
+    );
+
+    let err = dispatcher
+        .dispatch("oracle_diff", cross_db_args())
+        .expect_err("a column masked on one side only cannot be compared");
+
+    assert_eq!(err.error_class, ErrorClass::PolicyDenied);
+    assert!(
+        err.message.contains("VAL"),
+        "the refusal must name the offending column: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains("drifted"),
+        "masking policy drift between the two databases is the reason: {}",
+        err.message
+    );
+    // The rows are in fact identical, so a naive mask-then-compare would have
+    // reported `changed` (plaintext vs `<masked>`) — a delta that is simply
+    // false. Refusing is the only honest answer.
+}
+
+#[test]
+fn diff_needs_either_two_scns_or_two_profiles() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let dispatcher = fleet_dispatcher(
+        FLEET_CONFIG,
+        McpExposurePolicy::AllowAll,
+        vec![("prod", FleetLane::Rows(vec![("1", "same")]))],
+        Arc::clone(&calls),
+    );
+
+    let err = dispatcher
+        .dispatch(
+            "oracle_diff",
+            json!({ "sql": "SELECT id, val FROM app.orders" }),
+        )
+        .expect_err("a diff with neither two SCNs nor two profiles has no two sides");
+    assert!(
+        err.message.contains("scn_a and scn_b") && err.message.contains("profile_a and profile_b"),
+        "the refusal must state both ways to name two sides: {}",
+        err.message
+    );
+
+    let half = dispatcher
+        .dispatch(
+            "oracle_diff",
+            json!({ "sql": "SELECT id, val FROM app.orders", "profile_a": "prod" }),
+        )
+        .expect_err("naming one profile is an incomplete cross-database diff");
+    assert!(
+        half.message.contains("both profile_a and profile_b"),
+        "a half-specified fleet diff must not silently fall back to the active database: {}",
+        half.message
+    );
+
+    let same = dispatcher
+        .dispatch(
+            "oracle_diff",
+            json!({
+                "sql": "SELECT id, val FROM app.orders",
+                "profile_a": "prod",
+                "profile_b": "prod",
+            }),
+        )
+        .expect_err("comparing a database with itself at one point in time is always empty");
+    assert!(
+        same.message.contains("against itself"),
+        "an always-empty delta must be refused, not returned: {}",
+        same.message
+    );
 }

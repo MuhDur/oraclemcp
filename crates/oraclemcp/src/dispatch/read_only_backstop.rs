@@ -121,22 +121,30 @@ impl ReadOnlyBackstop {
     ///
     /// Fail-closed: a failure to apply the statement is propagated (the read is
     /// refused) and the backstop is left disarmed so a retry re-attempts it.
+    ///
+    /// Returns whether it actually asserted the statement. Asserting rolls the
+    /// transaction back, which erases every Oracle savepoint, so the caller must
+    /// drop the reversible workspace's belief when this returns `true` (Arc I).
+    /// This is the path a silently-expired elevation window takes: the level
+    /// falls back to `READ_ONLY`, the next read re-arms, and any uncommitted
+    /// held work is discarded — the existing, correct fail-closed behavior.
     pub(crate) async fn ensure_armed(
         &mut self,
         cx: &Cx,
         conn: &dyn OracleConnection,
         session: &SessionLevelState,
-    ) -> Result<(), ErrorEnvelope> {
+    ) -> Result<bool, ErrorEnvelope> {
         // A silent TTL-window expiry drops the effective level back to
         // READ_ONLY; we read it live on every call so the backstop re-asserts
         // exactly when the session is (again) read-only.
         if session.effective_level() != OperatingLevel::ReadOnly {
-            return Ok(());
+            return Ok(false);
         }
         if self.armed.get() {
-            return Ok(());
+            return Ok(false);
         }
-        self.assert_read_only(cx, conn).await
+        self.assert_read_only(cx, conn).await?;
+        Ok(true)
     }
 
     /// Reset the current transaction, issue `SET TRANSACTION READ ONLY`, and
@@ -163,17 +171,22 @@ impl ReadOnlyBackstop {
     /// spent request budget. Only a successful rollback clears the belief. On
     /// failure the caller must quarantine the session because whether Oracle
     /// crossed the transaction boundary is unknown.
+    ///
+    /// Returns whether it actually rolled back. A disarmed backstop is a no-op —
+    /// it crosses no transaction boundary — so callers that key other
+    /// transaction-scoped state off this (the Arc I savepoint stack) must not
+    /// treat `Ok(false)` as a boundary.
     pub(crate) async fn clear_before_write(
         &self,
         cx: &Cx,
         conn: &dyn OracleConnection,
-    ) -> Result<(), DbError> {
+    ) -> Result<bool, DbError> {
         if !self.armed.get() {
-            return Ok(());
+            return Ok(false);
         }
         super::rollback_conn_cleanup(cx, conn).await?;
         self.armed.set(false);
-        Ok(())
+        Ok(true)
     }
 
     /// Disarm after another path has already established a real transaction

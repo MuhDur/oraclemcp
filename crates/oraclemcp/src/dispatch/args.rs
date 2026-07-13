@@ -95,14 +95,29 @@ pub(super) struct AsOfArg {
 
 #[derive(Deserialize)]
 pub(super) struct DiffArgs {
-    /// A normal SELECT/WITH statement. It is classified once as a read before
-    /// either flashback read runs; SCNs are bound through DBMS_FLASHBACK, not
-    /// interpolated into this SQL.
+    /// A normal SELECT/WITH statement. It is classified as a read against each
+    /// database it runs on, before any read runs; SCNs are bound through
+    /// DBMS_FLASHBACK, not interpolated into this SQL.
     pub(super) sql: String,
     #[serde(default)]
     pub(super) binds: Vec<Value>,
-    pub(super) scn_a: u64,
-    pub(super) scn_b: u64,
+    /// System change number for side A. Required in the single-database
+    /// (time) mode; optional in the cross-database (fleet) mode, where it pins
+    /// side A to a flashback read instead of the current committed state.
+    #[serde(default)]
+    pub(super) scn_a: Option<u64>,
+    /// System change number for side B. See [`DiffArgs::scn_a`].
+    #[serde(default)]
+    pub(super) scn_b: Option<u64>,
+    /// Connection profile for side A. Supplying both `profile_a` and
+    /// `profile_b` selects the cross-database mode: the same proven read runs
+    /// against two databases in the fleet, each classified and masked under its
+    /// own profile.
+    #[serde(default, alias = "db_a")]
+    pub(super) profile_a: Option<String>,
+    /// Connection profile for side B. See [`DiffArgs::profile_a`].
+    #[serde(default, alias = "db_b")]
+    pub(super) profile_b: Option<String>,
     /// Optional key columns used to align rows and report `changed`. When empty,
     /// the dispatcher attempts primary-key inference for one simple local table;
     /// otherwise it falls back to keyless multiset add/remove.
@@ -129,6 +144,21 @@ pub(super) struct PreviewSqlArgs {
     pub(super) sql: String,
 }
 
+/// Arc I: `oracle_checkpoint` — establish a named savepoint on the pinned
+/// session, opening (or extending) the reversible workspace.
+#[derive(Deserialize)]
+pub(super) struct CheckpointArgs {
+    pub(super) name: String,
+}
+
+/// Arc I: `oracle_undo_to` — `ROLLBACK TO SAVEPOINT <name>`, or a full rollback
+/// that discards the whole workspace when `name` is omitted.
+#[derive(Deserialize)]
+pub(super) struct UndoToArgs {
+    #[serde(default, alias = "checkpoint")]
+    pub(super) name: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub(super) struct ExecuteArgs {
     pub(super) sql: String,
@@ -136,6 +166,12 @@ pub(super) struct ExecuteArgs {
     pub(super) binds: Vec<Value>,
     #[serde(default)]
     pub(super) commit: bool,
+    /// Arc I: leave this statement's effect *pending* inside the open reversible
+    /// workspace instead of rolling it back, so a later `oracle_undo_to` can
+    /// walk it back to a checkpoint. Requires a live checkpoint; mutually
+    /// exclusive with `commit`.
+    #[serde(default)]
+    pub(super) hold: bool,
     #[serde(default, alias = "token", alias = "confirmation_token")]
     pub(super) confirm: Option<String>,
     #[serde(default, alias = "dbms_output")]

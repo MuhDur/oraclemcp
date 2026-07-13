@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 53] = [
+pub const TOOL_NAMES: [&str; 55] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -24,6 +24,8 @@ pub const TOOL_NAMES: [&str; 53] = [
     "oracle_diff",
     "oracle_preview_sql",
     "oracle_execute",
+    "oracle_checkpoint",
+    "oracle_undo_to",
     "oracle_compile_object",
     "oracle_create_or_replace",
     "oracle_patch_source",
@@ -212,6 +214,18 @@ fn query_output_schema() -> Value {
     })
 }
 
+fn diff_source_schema(description: &str) -> Value {
+    json!({
+        "type": "object",
+        "description": description,
+        "properties": {
+            "profile": { "type": "string", "description": "Connection profile this side was read from, for a cross-database diff." },
+            "scn": { "type": "integer", "minimum": 1, "description": "System change number this side was read as of, when it was a flashback read." }
+        },
+        "additionalProperties": false
+    })
+}
+
 fn diff_output_schema() -> Value {
     json!({
         "type": "object",
@@ -232,12 +246,12 @@ fn diff_output_schema() -> Value {
             },
             "added": {
                 "type": "array",
-                "description": "Rows present at scn_b but not at scn_a.",
+                "description": "Rows present on side B but not on side A.",
                 "items": row_object_schema()
             },
             "removed": {
                 "type": "array",
-                "description": "Rows present at scn_a but not at scn_b.",
+                "description": "Rows present on side A but not on side B.",
                 "items": row_object_schema()
             },
             "changed": {
@@ -258,8 +272,10 @@ fn diff_output_schema() -> Value {
             "row_count_b": { "type": "integer", "minimum": 0 },
             "truncated": {
                 "type": "boolean",
-                "description": "True when either flashback page hit a row/byte cap before all rows were compared."
+                "description": "True when either compared page hit a row/byte cap before all rows were compared."
             },
+            "source_a": diff_source_schema("Where side A was read from."),
+            "source_b": diff_source_schema("Where side B was read from."),
             "mask_certificates": {
                 "type": "object",
                 "description": "Present when result masking transformed either flashback page: before/after mask-decision certificates with audit entry hashes.",
@@ -269,6 +285,32 @@ fn diff_output_schema() -> Value {
         "required": ["columns", "keyed", "key_columns", "added", "removed", "changed", "row_count_a", "row_count_b", "truncated"],
         "additionalProperties": false
     })
+}
+
+/// The Arc I reversible-workspace tools all report the same workspace view plus
+/// their own per-tool fields.
+fn workspace_output_schema(extra: &[(&str, Value)]) -> Value {
+    let mut properties = json!({
+        "workspace": {
+            "type": "object",
+            "description": "The pinned session's reversible workspace after this call.",
+            "properties": {
+                "open": { "type": "boolean", "description": "True while checkpoints are live. Commits, DDL/Admin, EXPLAIN PLAN cost estimation, and flashback reads are refused until the workspace is closed." },
+                "checkpoints": { "type": "array", "items": { "type": "string" }, "description": "Live checkpoints, oldest first." },
+                "held_statements": { "type": "integer", "minimum": 0, "description": "Uncommitted statements held in the workspace." }
+            },
+            "required": ["open", "checkpoints", "held_statements"],
+            "additionalProperties": false
+        }
+    });
+    let mut required = vec!["workspace"];
+    if let Value::Object(map) = &mut properties {
+        for (key, schema) in extra {
+            map.insert((*key).to_owned(), schema.clone());
+            required.push(key);
+        }
+    }
+    object_schema(properties, &required)
 }
 
 fn explain_plan_output_schema() -> Value {
@@ -449,19 +491,23 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_diff",
             ToolTier::FoundationLiveDb,
-            "Diff one proven read-only SELECT across two Oracle SCNs.",
+            "Diff one proven read-only SELECT across two Oracle SCNs, or across two databases.",
         )
         .with_input_schema(object_schema(
             props_with(
                 json!({
-                    "sql": { "type": "string", "description": "A single read-only SELECT/WITH. The same proven SQL is run twice through DBMS_FLASHBACK at scn_a and scn_b." },
+                    "sql": { "type": "string", "description": "A single read-only SELECT/WITH. The same proven SQL is run on both compared sides; it is classified as a read against each database it runs on." },
                     "binds": {
                         "type": "array",
                         "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
                         "items": {}
                     },
-                    "scn_a": { "type": "integer", "minimum": 1, "description": "Earlier or baseline system change number." },
-                    "scn_b": { "type": "integer", "minimum": 1, "description": "Later or comparison system change number." },
+                    "scn_a": { "type": "integer", "minimum": 1, "description": "System change number for side A. Required with scn_b when comparing one database at two points in time; optional in cross-database mode, where it pins side A to a flashback read instead of the current committed state." },
+                    "scn_b": { "type": "integer", "minimum": 1, "description": "System change number for side B. See scn_a." },
+                    "profile_a": { "type": "string", "description": "Connection profile for side A. Supplying profile_a and profile_b selects cross-database mode: the same proven read runs against two databases (e.g. prod vs staging), each classified against its own catalog and masked under its own egress policy. Only profiles this server exposes can be named." },
+                    "profile_b": { "type": "string", "description": "Connection profile for side B. See profile_a." },
+                    "db_a": { "type": "string", "description": "Alias for profile_a." },
+                    "db_b": { "type": "string", "description": "Alias for profile_b." },
                     "key": {
                         "type": "array",
                         "description": "Optional result-column names used to align rows and report changed[]. If omitted, oracle_diff infers a primary key only for a single resolved local table; otherwise it falls back to keyless add/remove.",
@@ -477,8 +523,8 @@ pub fn tool_registry() -> ToolRegistry {
                         "description": "Alias for key.",
                         "items": { "type": "string" }
                     },
-                    "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows compared from each SCN page (default 200, hard cap 5000)." },
-                    "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 26214400, "description": "Maximum compact JSON bytes per SCN page (default 10485760, hard cap 26214400)." },
+                    "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows compared from each side (default 200, hard cap 5000)." },
+                    "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 26214400, "description": "Maximum compact JSON bytes per compared side (default 10485760, hard cap 26214400)." },
                     "max_col_width": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Compatibility text cap for ordinary text/raw columns. Truncated values are returned as { value, truncated, char_length }." },
                     "max_lob_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum CLOB characters to inline per cell (default 32768)." },
                     "max_blob_bytes": { "type": "integer", "minimum": 1, "maximum": 5242880, "description": "Maximum BLOB bytes to inline per cell as base64 (default 1048576)." },
@@ -486,7 +532,7 @@ pub fn tool_registry() -> ToolRegistry {
                 }),
                 &[timeout_seconds_prop()],
             ),
-            &["sql", "scn_a", "scn_b"],
+            &["sql"],
         ))
         .with_output_schema(diff_output_schema()),
     );
@@ -520,7 +566,8 @@ pub fn tool_registry() -> ToolRegistry {
                         "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
                         "items": {}
                     },
-                    "commit": { "type": "boolean", "description": "Default false rolls back transactional DML, but non-transactional effects such as sequence NEXTVAL persist and still require confirm from oracle_preview_sql. Set true only to commit; DDL/Admin statements require true because Oracle cannot rollback them." }
+                    "commit": { "type": "boolean", "description": "Default false rolls back transactional DML, but non-transactional effects such as sequence NEXTVAL persist and still require confirm from oracle_preview_sql. Set true only to commit; DDL/Admin statements require true because Oracle cannot rollback them." },
+                    "hold": { "type": "boolean", "description": "Default false. Set true to leave this statement's effect pending inside the open reversible workspace instead of rolling it back, so oracle_undo_to can walk it back to a checkpoint. Requires a live oracle_checkpoint, refuses DDL/Admin (Oracle commits those implicitly), and is mutually exclusive with commit. Held work is uncommitted and can only be undone: while the workspace is open every committing operation is refused." }
                 }),
                 &[
                     confirm_trio("Execution confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true and whenever the statement has a non-transactional effect such as sequence NEXTVAL, even with commit=false."),
@@ -530,6 +577,47 @@ pub fn tool_registry() -> ToolRegistry {
             ),
             &["sql"],
         ))
+        .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_checkpoint",
+            ToolTier::FoundationLiveDb,
+            "Establish a named checkpoint (a native Oracle SAVEPOINT) on this session, opening the reversible workspace: oracle_execute with hold=true then leaves DML pending instead of rolling it back, and oracle_undo_to walks it back. Requires READ_WRITE. While the workspace is open the server refuses every operation that would end the transaction — commits, implicitly-committing DDL/Admin, EXPLAIN PLAN cost estimation, and flashback reads — so held work can only ever be undone, never committed by another statement.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "name": { "type": "string", "description": "Checkpoint name: a bare Oracle identifier (a letter followed by letters, digits, or underscores, at most 30 characters). Case-insensitive. Must not already be live on this session." }
+            }),
+            &["name"],
+        ))
+        .with_output_schema(workspace_output_schema(&[
+            ("checkpoint", json!({ "type": "string", "description": "The established checkpoint, upper-cased." })),
+            ("statement", json!({ "type": "string", "description": "The exact SAVEPOINT statement the server issued." })),
+        ]))
+        .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_undo_to",
+            ToolTier::FoundationLiveDb,
+            "Undo the reversible workspace: ROLLBACK TO SAVEPOINT <name> discards every held statement executed after that checkpoint and releases the checkpoints stacked above it, leaving the transaction open. Omit name to discard the whole workspace with a full rollback. Undo never commits anything.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "name": { "type": "string", "description": "Checkpoint to undo to, from oracle_checkpoint. Omit to discard the entire workspace (a full ROLLBACK that undoes every held statement and releases every checkpoint)." },
+                "checkpoint": { "type": "string", "description": "Alias for name." }
+            }),
+            &[],
+        ))
+        .with_output_schema(workspace_output_schema(&[
+            ("undone_to", json!({ "type": ["string", "null"], "description": "The checkpoint rolled back to, or null when the whole workspace was discarded." })),
+            ("statement", json!({ "type": "string", "description": "The exact ROLLBACK statement the server issued." })),
+            ("discarded_statements", json!({ "type": "integer", "minimum": 0, "description": "Held statements whose effects this undo discarded." })),
+            ("released_checkpoints", json!({ "type": "array", "items": { "type": "string" }, "description": "Checkpoints Oracle erased because they were established after the target." })),
+        ]))
         .destructive(),
     );
 
@@ -1473,6 +1561,8 @@ mod tests {
             vec![
                 "oracle_set_session_level",
                 "oracle_execute",
+                "oracle_checkpoint",
+                "oracle_undo_to",
                 "oracle_compile_object",
                 "oracle_create_or_replace",
                 "oracle_patch_source",

@@ -40,18 +40,19 @@ use oraclemcp_core::{
 use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
     AsOf, CatalogInvalidation, DbError, DbRequestQuota, DbmsOutput, DependentObject,
-    DependentsProbe, OracleBackend, OracleBind, OracleCatalogResolverCache, OracleConnection,
-    OracleConnectionInfo, OracleRow, PlanCostEstimate, QuarantineOutcome, QueryCaps, QueryResponse,
-    QueryRowStream, QueryRowStreamStart, ResultColumnMatch, ResultMaskingAction,
-    ResultMaskingCertificate, ResultMaskingDecisionAction, ResultMaskingDecisionSource,
-    ResultMaskingPolicy, ResultMaskingRule, SerializeOptions, StructuredDecodeCaps, compile_errors,
+    DependentsProbe, IncomparableMaskedColumn, MaskComparabilityBreak, OracleBackend, OracleBind,
+    OracleCatalogResolverCache, OracleConnection, OracleConnectionInfo, OracleRow,
+    PlanCostEstimate, QuarantineOutcome, QueryCaps, QueryDiffSource, QueryResponse, QueryRowStream,
+    QueryRowStreamStart, ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate,
+    ResultMaskingDecisionAction, ResultMaskingDecisionSource, ResultMaskingPolicy,
+    ResultMaskingRule, SerializeOptions, StructuredDecodeCaps, compile_errors,
     compile_object_statements, describe_columns, describe_constraints, describe_index,
     describe_trigger, describe_view, diff_query_responses, execute_immediate_audit, explain_plan,
-    find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects, list_schemas,
-    paginated_sql, plan_cost_estimate, plscope_identifiers, plscope_statements,
-    primary_key_columns, probe_dependents, read_lob, read_query, read_query_as_of,
-    read_query_named, resolved_relations_read_purity, sample_rows, search_objects, search_source,
-    serialize_row,
+    find_unused_declarations, get_ddl, get_source, get_sources_by_name,
+    incomparable_masked_columns, list_objects, list_schemas, paginated_sql, plan_cost_estimate,
+    plscope_identifiers, plscope_statements, primary_key_columns, probe_dependents, read_lob,
+    read_query, read_query_as_of, read_query_named, resolved_relations_read_purity, sample_rows,
+    search_objects, search_source, serialize_row,
 };
 use oraclemcp_error::{
     ErrorClass, ErrorEnvelope, OptimizerPlanRow, QueryCostRefusal, ReasonCategory, StructuredReason,
@@ -372,6 +373,11 @@ struct DispatcherState {
     /// least-privilege DB user, A2). Re-asserted at the start of every read
     /// transaction; disarmed by a gated write and reset on a profile switch.
     read_only_backstop: ReadOnlyBackstop,
+    /// Arc I: the pinned session's reversible workspace — the live
+    /// `SAVEPOINT` stack behind `oracle_checkpoint` / `oracle_undo_to`, and the
+    /// held-work count that makes every committing operation refuse while it is
+    /// open. Cleared at every transaction boundary the dispatcher issues.
+    checkpoints: CheckpointWorkspace,
 }
 
 #[derive(Clone, Debug)]
@@ -477,6 +483,7 @@ impl OracleDispatcher {
                 patch_previews: HashMap::new(),
                 catalog_cache: OracleCatalogResolverCache::new(),
                 read_only_backstop: ReadOnlyBackstop::new(),
+                checkpoints: CheckpointWorkspace::new(),
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
@@ -559,6 +566,7 @@ impl OracleDispatcher {
                 patch_previews: HashMap::new(),
                 catalog_cache: OracleCatalogResolverCache::new(),
                 read_only_backstop: ReadOnlyBackstop::new(),
+                checkpoints: CheckpointWorkspace::new(),
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
@@ -768,6 +776,173 @@ impl OracleDispatcher {
         })?;
         *guard = result_masking;
         Ok(())
+    }
+
+    /// Read one side of a cross-database `oracle_diff` from a named profile, on
+    /// a connection opened and closed inside this call.
+    ///
+    /// Arc H adds *reach*, never admission surface. Every guard the caller would
+    /// meet on the way to this database through `oracle_switch_profile` is met
+    /// here, in the same order:
+    ///
+    /// 1. **Exposure (E5).** The profile is admitted through
+    ///    [`ProfileDrainState::admit_mcp_profile`] before its credentials are
+    ///    resolved, so a diff can never reach a profile the caller could not
+    ///    switch to, and a hidden name is refused without revealing that it
+    ///    exists.
+    /// 2. **Its own catalog.** The statement is re-resolved and re-classified
+    ///    against *this* database with a fresh
+    ///    [`OracleCatalogResolverCache`]. The cache key carries no database
+    ///    identity, so reusing the pinned session's cache would resolve this
+    ///    database's SQL against the other one's objects — the same text can name
+    ///    different objects here.
+    /// 3. **Its own egress policy.** Rows are masked under this profile's
+    ///    masking policy, not the active session's.
+    ///
+    /// The connection is transient: it is never installed in `DispatcherState`,
+    /// so the pinned session, its transaction, and its quarantine are untouched.
+    /// It is deliberately *not* wired to `self.quarantine` — a failure on the
+    /// database being compared against must not poison the caller's own session.
+    async fn read_diff_side_from_profile(
+        &self,
+        cx: &Cx,
+        request: DiffSideRequest<'_>,
+    ) -> Result<DiffSideRead, ErrorEnvelope> {
+        let DiffSideRequest {
+            side,
+            profile,
+            sql,
+            binds,
+            caps,
+            scn,
+            serialize_defaults,
+            subject,
+            budget,
+            infer_key,
+        } = request;
+
+        let lease = match self
+            .profile_drain
+            .admit_mcp_profile(profile, self.mcp_exposure.is_exposed(profile))
+        {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            ProfileGenerationAdmission::NotExposed => {
+                return Err(diff_side_failure(
+                    side,
+                    profile,
+                    profile_not_available(profile),
+                ));
+            }
+            ProfileGenerationAdmission::Draining => {
+                return Err(diff_side_failure(
+                    side,
+                    profile,
+                    profile_draining_error(profile),
+                ));
+            }
+        };
+        let Some(connector) = &self.connector else {
+            return Err(diff_side_failure(
+                side,
+                profile,
+                ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "cross-database diff is unavailable in this server instance",
+                )
+                .with_next_step("restart the server with `oraclemcp serve --profile <name>`"),
+            ));
+        };
+        let policy = profile_dispatch_policy(&lease)
+            .map_err(|error| diff_side_failure(side, profile, error))?;
+        let (conn, _stateless) = connector(cx, &lease)
+            .await
+            .map_err(|error| diff_side_failure(side, profile, DbError::into_envelope(error)))?
+            .into_parts();
+
+        let limits = ConnectionLimitGuard::install(
+            cx,
+            conn.as_ref(),
+            None,
+            None,
+            budget.deadline(),
+            Some(budget.db_quota()),
+        )
+        .map_err(|error| diff_side_failure(side, profile, DbError::into_envelope(error)))?;
+
+        // Everything fallible below runs inside this block so the connection's
+        // request limits are always restored, whatever the outcome.
+        let read = async {
+            let observed = ReadUncertaintyConn {
+                inner: conn.as_ref(),
+                quarantine: None,
+            };
+            let executed_sql = with_audit_marker(sql, Some(profile), "oracle_diff");
+            let catalog_cache = OracleCatalogResolverCache::new();
+            let relations =
+                resolve_read_only_relations(cx, &observed, &catalog_cache, &executed_sql).await?;
+            let inferred_key = if infer_key {
+                inferred_diff_key_columns(cx, &observed, &relations).await?
+            } else {
+                Vec::new()
+            };
+            let serialize_opts = SerializeOptions {
+                result_masking: policy.result_masking.clone(),
+                ..serialize_defaults
+            };
+            let mut response = match scn {
+                Some(scn) => {
+                    read_query_as_of(
+                        cx,
+                        &observed,
+                        &executed_sql,
+                        binds,
+                        caps,
+                        0,
+                        &serialize_opts,
+                        &AsOf::Scn(scn),
+                    )
+                    .await
+                }
+                None => {
+                    read_query(
+                        cx,
+                        &observed,
+                        &executed_sql,
+                        binds,
+                        caps,
+                        0,
+                        &serialize_opts,
+                    )
+                    .await
+                }
+            }
+            .map_err(DbError::into_envelope)?;
+            bind_result_masking_audit(
+                cx,
+                &observed,
+                self.auditor.as_deref(),
+                subject,
+                "oracle_diff",
+                &executed_sql,
+                &mut response,
+            )
+            .await?;
+            Ok(DiffSideRead {
+                response,
+                inferred_key,
+            })
+        }
+        .await
+        .map_err(|error| diff_side_failure(side, profile, error));
+
+        // Restore before surfacing the read outcome: a restore failure on a
+        // connection we are about to drop must not mask the real error.
+        let restore = limits
+            .restore()
+            .map_err(|error| diff_side_failure(side, profile, DbError::into_envelope(error)));
+        let read = read?;
+        restore?;
+        Ok(read)
     }
 
     fn connection_quarantine(&self) -> Result<Option<ConnectionQuarantine>, ErrorEnvelope> {
@@ -2323,6 +2498,7 @@ struct QueryCostGateCtx<'a> {
     cx: &'a Cx,
     conn: &'a dyn OracleConnection,
     read_only_backstop: &'a mut ReadOnlyBackstop,
+    checkpoints: &'a CheckpointWorkspace,
     session: &'a SessionLevelState,
     request_budget: &'a RequestBudget,
     quarantine: &'a SyncMutex<Option<ConnectionQuarantine>>,
@@ -2338,6 +2514,13 @@ async fn enforce_query_cost_gate(
         return Ok(());
     };
     ensure_query_cost_plan_write_allowed(args, ctx.session)?;
+    // The cost estimate writes PLAN_TABLE and rolls the transaction back to
+    // clean it up — which would erase the reversible workspace's savepoints and
+    // every statement held above them (Arc I).
+    ensure_workspace_closed(
+        ctx.checkpoints,
+        "oracle_query cost estimation (its PLAN_TABLE cleanup rolls the transaction back)",
+    )?;
     if let Err(error) = ctx
         .read_only_backstop
         .clear_before_write(ctx.cx, ctx.conn)
@@ -3151,6 +3334,7 @@ async fn ensure_read_only_backstop_bounded(
     cx: &Cx,
     conn: &dyn OracleConnection,
     backstop: &mut read_only_backstop::ReadOnlyBackstop,
+    checkpoints: &CheckpointWorkspace,
     level: &SessionLevelState,
     request_budget: &RequestBudget,
     quarantine: &SyncMutex<Option<ConnectionQuarantine>>,
@@ -3166,6 +3350,12 @@ async fn ensure_read_only_backstop_bounded(
     )
     .map_err(DbError::into_envelope)?;
     let result = backstop.ensure_armed(cx, conn, level).await;
+    // Arc I: re-arming rolled the transaction back, so Oracle erased every
+    // savepoint and every held statement with it. Drop the workspace belief
+    // before anything can read it back as still-live.
+    if matches!(result, Ok(true)) {
+        checkpoints.clear();
+    }
     let budget_after = request_budget.enforce(cx).map_err(DbError::into_envelope);
     let restore_error = limits.restore().err();
     if let Err(primary) = result {
@@ -3211,6 +3401,9 @@ use audit_marker::with_audit_marker;
 
 mod read_only_backstop;
 use read_only_backstop::ReadOnlyBackstop;
+
+mod workspace;
+use workspace::CheckpointWorkspace;
 
 mod metadata_cache_key;
 use metadata_cache_key::metadata_cache_key_json;
@@ -3501,6 +3694,224 @@ async fn inferred_diff_key_columns(
     primary_key_columns(cx, metadata_conn, &relation.owner, &relation.name)
         .await
         .map_err(DbError::into_envelope)
+}
+
+/// Which two sides `oracle_diff` compares.
+///
+/// The alignment maths is the same either way; only where each page is read
+/// from changes. Time compares one database against itself at two SCNs; Fleet
+/// compares two databases (Arc H) — the same proven read, classified and masked
+/// independently under each profile.
+enum DiffMode {
+    /// The pinned session at two system change numbers.
+    Time { scn_a: u64, scn_b: u64 },
+    /// Two configured profiles, each optionally pinned to its own SCN.
+    Fleet {
+        profile_a: String,
+        scn_a: Option<u64>,
+        profile_b: String,
+        scn_b: Option<u64>,
+    },
+}
+
+/// One side of a diff, named for refusals and provenance.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DiffSide {
+    A,
+    B,
+}
+
+/// One page of a cross-database diff, to be read from `profile`.
+struct DiffSideRequest<'a> {
+    side: DiffSide,
+    profile: &'a str,
+    sql: &'a str,
+    binds: &'a [OracleBind],
+    caps: QueryCaps,
+    /// Pin this side to a flashback read, or read the current committed state.
+    scn: Option<u64>,
+    /// Serializer options for the call, minus the masking policy: that is taken
+    /// from the side's own profile, never the active session's.
+    serialize_defaults: SerializeOptions,
+    subject: &'a AuditSubject,
+    budget: &'a RequestBudget,
+    /// Infer the row key from this side's primary key. Only side A does this;
+    /// both sides must align on one key, and it is side A's shape that names it.
+    infer_key: bool,
+}
+
+/// What one side of a cross-database diff returned.
+struct DiffSideRead {
+    response: QueryResponse,
+    inferred_key: Vec<String>,
+}
+
+impl DiffSide {
+    fn label(self) -> &'static str {
+        match self {
+            DiffSide::A => "a",
+            DiffSide::B => "b",
+        }
+    }
+}
+
+fn diff_scn_at_least_one(scn: Option<u64>, arg: &str) -> Result<Option<u64>, ErrorEnvelope> {
+    if scn == Some(0) {
+        return Err(invalid_args(format!("oracle_diff {arg} must be >= 1")));
+    }
+    Ok(scn)
+}
+
+/// Decide which two sides the call compares, and reject an ambiguous request.
+///
+/// A half-specified fleet diff is refused rather than silently falling back to a
+/// same-database read: an agent that names one profile clearly meant to compare
+/// two databases, and quietly comparing the active one twice would answer a
+/// question nobody asked.
+fn diff_mode_from_args(args: &DiffArgs) -> Result<DiffMode, ErrorEnvelope> {
+    let scn_a = diff_scn_at_least_one(args.scn_a, "scn_a")?;
+    let scn_b = diff_scn_at_least_one(args.scn_b, "scn_b")?;
+    match (args.profile_a.as_deref(), args.profile_b.as_deref()) {
+        (None, None) => {
+            let (Some(scn_a), Some(scn_b)) = (scn_a, scn_b) else {
+                return Err(invalid_args(
+                    "oracle_diff needs either scn_a and scn_b (compare one database at two SCNs) \
+                     or profile_a and profile_b (compare two databases)",
+                ));
+            };
+            Ok(DiffMode::Time { scn_a, scn_b })
+        }
+        (Some(profile_a), Some(profile_b)) => {
+            let profile_a = profile_a.trim();
+            let profile_b = profile_b.trim();
+            if profile_a.is_empty() || profile_b.is_empty() {
+                return Err(invalid_args(
+                    "oracle_diff profile_a and profile_b must be non-empty profile names",
+                ));
+            }
+            if profile_a.eq_ignore_ascii_case(profile_b) && scn_a == scn_b {
+                return Err(invalid_args(
+                    "oracle_diff was asked to compare a database against itself at the same point \
+                     in time; name two profiles, or two SCNs, so the delta can mean something",
+                ));
+            }
+            Ok(DiffMode::Fleet {
+                profile_a: profile_a.to_owned(),
+                scn_a,
+                profile_b: profile_b.to_owned(),
+                scn_b,
+            })
+        }
+        _ => Err(invalid_args(
+            "oracle_diff cross-database mode needs both profile_a and profile_b",
+        )),
+    }
+}
+
+/// Name the side and profile a cross-database failure came from.
+///
+/// A cross-database diff cannot degrade to a partial answer: if one database is
+/// unreachable there is no delta to report, and an empty delta would assert that
+/// the two databases agree. So the whole call fails, saying exactly which side
+/// failed and why.
+fn diff_side_failure(side: DiffSide, profile: &str, error: ErrorEnvelope) -> ErrorEnvelope {
+    let mut error = error;
+    error.message = format!(
+        "oracle_diff side {} (profile `{profile}`) failed, so no delta can be reported: {}",
+        side.label(),
+        error.message
+    );
+    error
+}
+
+/// Refuse a cross-database diff whose two sides do not return the same columns.
+fn diff_shape_mismatch(
+    profile_a: &str,
+    columns_a: &[String],
+    profile_b: &str,
+    columns_b: &[String],
+) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::InvalidArguments,
+        format!(
+            "oracle_diff cannot compare two databases whose result shapes differ: \
+             `{profile_a}` returned [{}] and `{profile_b}` returned [{}]",
+            columns_a.join(", "),
+            columns_b.join(", "),
+        ),
+    )
+    .with_next_step(
+        "project the columns explicitly in the SELECT so both databases return the same shape, \
+         or reconcile the schema drift between the two profiles",
+    )
+}
+
+/// Render one incomparable column as `COLUMN (why)` for a refusal message.
+fn incomparable_column_detail(entry: &IncomparableMaskedColumn) -> String {
+    let reason = match &entry.reason {
+        MaskComparabilityBreak::ValueDestroyed { action } => format!(
+            "both profiles apply {}, which collapses distinct values",
+            masking_action_label(*action)
+        ),
+        MaskComparabilityBreak::ActionMismatch { a, b } => format!(
+            "masking policy has drifted: `{}` on side a, `{}` on side b",
+            masking_action_label(*a),
+            masking_action_label(*b)
+        ),
+        MaskComparabilityBreak::SaltMismatch { a, b } => match (a, b) {
+            (Some(a), Some(b)) => format!("tokenized under different salts (`{a}` vs `{b}`)"),
+            _ => "tokenized without an active salt on both sides".to_owned(),
+        },
+        MaskComparabilityBreak::DecisionMissing => {
+            "the mask certificate carries no decision for this column".to_owned()
+        }
+        // A masking break we do not have words for yet is still a break: refuse
+        // it rather than describe it away.
+        _ => "the egress mask does not preserve equality for this column".to_owned(),
+    };
+    format!("{} ({reason})", entry.column)
+}
+
+fn masking_action_label(action: ResultMaskingDecisionAction) -> &'static str {
+    match action {
+        ResultMaskingDecisionAction::Pass => "pass",
+        ResultMaskingDecisionAction::Mask => "mask",
+        ResultMaskingDecisionAction::Tokenize => "tokenize",
+        ResultMaskingDecisionAction::Null => "null",
+        _ => "an unrecognized masking action",
+    }
+}
+
+/// Refuse a cross-database diff whose masked columns cannot be soundly compared.
+///
+/// Egress masking is applied per profile, and the diff compares the **masked**
+/// rows — plaintext of a masked column never enters the comparison. That only
+/// proves anything when the masked form preserves equality (both sides pass, or
+/// both tokenize under one salt). Otherwise the honest answer is a refusal: a
+/// `mask`ed column collapses every value to the same marker, so comparing it
+/// would report "unchanged" for rows that really differ.
+fn diff_incomparable_masking(
+    profile_a: &str,
+    profile_b: &str,
+    incomparable: &[IncomparableMaskedColumn],
+) -> ErrorEnvelope {
+    let columns = incomparable
+        .iter()
+        .map(incomparable_column_detail)
+        .collect::<Vec<_>>()
+        .join("; ");
+    ErrorEnvelope::new(
+        ErrorClass::PolicyDenied,
+        format!(
+            "oracle_diff cannot compare masked columns across `{profile_a}` and `{profile_b}`: \
+             the egress mask does not preserve equality for {columns}. A delta over these columns \
+             would be wrong, not merely redacted",
+        ),
+    )
+    .with_next_step(
+        "select only columns both profiles pass through, or give the two profiles one shared \
+         tokenization salt so equal values tokenize equally",
+    )
 }
 
 /// K7: if a refused statement carries inline literals at bind-safe positions,
@@ -4672,6 +5083,9 @@ fn execute_approved_args(
             sql,
             binds: Vec::new(),
             commit,
+            // The compat alias replays a previewed statement; the reversible
+            // workspace is offered on oracle_execute only.
+            hold: false,
             confirm: Some(token),
             capture_dbms_output: args.capture_dbms_output,
             dbms_output_max_lines: args.dbms_output_max_lines,
@@ -4713,6 +5127,7 @@ fn execute_approved_args(
         sql: grant.sql,
         binds: Vec::new(),
         commit,
+        hold: false,
         confirm: Some(token),
         capture_dbms_output: args.capture_dbms_output,
         dbms_output_max_lines: args.dbms_output_max_lines,
@@ -4804,6 +5219,9 @@ struct DbToolCtx<'a> {
     cx: &'a Cx,
     conn: &'a dyn OracleConnection,
     read_only_backstop: &'a ReadOnlyBackstop,
+    /// Arc I: the pinned session's reversible workspace. Every write path
+    /// consults it before committing and clears it at its transaction boundary.
+    checkpoints: &'a CheckpointWorkspace,
     request_budget: RequestBudget,
     active_profile: Option<&'a str>,
     session: &'a SessionLevelState,
@@ -4823,22 +5241,31 @@ struct DbToolCtx<'a> {
 async fn clear_read_only_transaction_before_write(
     ctx: &DbToolCtx<'_>,
 ) -> Result<(), ErrorEnvelope> {
-    if let Err(error) = ctx
+    match ctx
         .read_only_backstop
         .clear_before_write(ctx.cx, ctx.conn)
         .await
     {
-        let message = format!(
-            "could not end the armed read-only transaction before the governed write; the approved statement was not executed and the session was quarantined: {error}"
-        );
-        mark_connection_quarantined(
-            ctx.quarantine,
-            AuditOutcome::UnknownDiscarded,
-            message.clone(),
-        )?;
-        return Err(
-            quarantined_db_error(QuarantineOutcome::UnknownDiscarded, message).into_envelope(),
-        );
+        // A disarmed backstop crosses no transaction boundary — and a held
+        // statement's whole point is to land inside the transaction the
+        // workspace's savepoints live in, so this must not touch them.
+        Ok(false) => {}
+        // It rolled back, so Oracle erased every savepoint with the
+        // transaction (Arc I). The belief must never outlive them.
+        Ok(true) => ctx.checkpoints.clear(),
+        Err(error) => {
+            let message = format!(
+                "could not end the armed read-only transaction before the governed write; the approved statement was not executed and the session was quarantined: {error}"
+            );
+            mark_connection_quarantined(
+                ctx.quarantine,
+                AuditOutcome::UnknownDiscarded,
+                message.clone(),
+            )?;
+            return Err(
+                quarantined_db_error(QuarantineOutcome::UnknownDiscarded, message).into_envelope(),
+            );
+        }
     }
     // The rollback finalizer deliberately has a fresh cleanup budget. Re-check
     // the original request after it completes so a slow transition cannot let
@@ -4846,6 +5273,49 @@ async fn clear_read_only_transaction_before_write(
     ctx.request_budget
         .enforce(ctx.cx)
         .map_err(DbError::into_envelope)
+}
+
+/// Arc I: refuse an operation that would end the pinned transaction while the
+/// reversible workspace is open.
+///
+/// Two different failures hide behind one rule:
+///
+/// - **Safety.** `COMMIT` is transaction-wide. A held statement never passed the
+///   single-use grant (it is reversible, so it does not need one), and Oracle
+///   commits DDL/Admin *implicitly*. Without this refusal, an agent could hold
+///   arbitrary ungranted DML and then ride any confirmed statement's commit into
+///   permanence — the guard's "never auto-commit DML" invariant, defeated by the
+///   transaction's own semantics rather than by a classifier gap.
+/// - **Honesty.** The diagnostic paths whose cleanup rolls the transaction back
+///   (EXPLAIN PLAN / `PLAN_TABLE` cost estimation, the flashback session reset)
+///   would silently destroy held work and erase every savepoint. Refusing beats
+///   discarding an agent's uncommitted work without telling it.
+///
+/// Committing held work needs a gate that re-classifies the exact statements at
+/// commit time (SEC-1); until that lands, the only way out of the workspace is
+/// `oracle_undo_to`.
+fn ensure_workspace_closed(
+    workspace: &CheckpointWorkspace,
+    operation: &str,
+) -> Result<(), ErrorEnvelope> {
+    if !workspace.is_open() {
+        return Ok(());
+    }
+    let held = workspace.held_statements();
+    Err(ErrorEnvelope::new(
+        ErrorClass::PolicyDenied,
+        format!(
+            "{operation} would end the transaction, and the reversible workspace is open with {held} held statement(s) across {} live checkpoint(s); held work is uncommitted and must not be committed or silently discarded by another operation",
+            workspace.view()["checkpoints"]
+                .as_array()
+                .map_or(0, Vec::len)
+        ),
+    )
+    .with_suggested_tool("oracle_undo_to")
+    .with_next_step(
+        "call oracle_undo_to with a checkpoint to walk the held work back, or with no name to discard the whole workspace",
+    )
+    .with_next_step("then retry this call on the closed workspace"))
 }
 
 /// Build an audit draft for a served committing tool at a known danger level.
@@ -5031,10 +5501,31 @@ fn append_audit(
     rows_affected: Option<u64>,
     outcome: AuditOutcome,
 ) -> Result<(), ErrorEnvelope> {
+    append_audit_with_observed_scn(ctx, tool, sql, danger_level, rows_affected, outcome, None)
+}
+
+/// Durably append one audit entry, optionally binding it to an observed read
+/// snapshot. The normal execute paths deliberately pass `None`; only read
+/// paths may supply an SCN.
+fn append_audit_with_observed_scn(
+    ctx: AuditEntryCtx<'_>,
+    tool: &str,
+    sql: &str,
+    danger_level: &str,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+    observed_scn: Option<u64>,
+) -> Result<(), ErrorEnvelope> {
     if let Some(auditor) = ctx.auditor {
         let draft = audit_draft(ctx, tool, sql, danger_level, rows_affected, outcome);
         auditor
-            .append(&draft, audit_timestamp(), true)
+            .append_correlated_with_observed_scn(
+                &draft,
+                audit_timestamp(),
+                true,
+                None,
+                observed_scn,
+            )
             .map_err(audit_error_to_envelope)?;
     }
     Ok(())
@@ -5084,6 +5575,62 @@ fn audit_result_masking_certificate(
     }
 }
 
+/// Durably record one phase of an `oracle_query` read with its replay SCN.
+///
+/// The pending record is written before the data query is issued, so an audit
+/// failure refuses the agent-visible read. The terminal record binds any result
+/// masking certificate to the same replayable snapshot before rows leave the
+/// process.
+fn append_query_read_audit(
+    ctx: AuditEntryCtx<'_>,
+    tool: &str,
+    sql: &str,
+    observed_scn: u64,
+    outcome: AuditOutcome,
+    response: Option<&mut QueryResponse>,
+) -> Result<(), ErrorEnvelope> {
+    let Some(auditor) = ctx.auditor else {
+        return Ok(());
+    };
+    let result_masking = response.as_ref().and_then(|response| {
+        response
+            .mask_certificate
+            .as_ref()
+            .map(audit_result_masking_certificate)
+    });
+    let rows_affected = response.as_ref().map(|response| response.row_count as u64);
+    let draft = AuditEntryDraft {
+        subject: ctx.subject.clone(),
+        db_evidence: ctx.db_evidence.cloned(),
+        cancel: None,
+        result_masking,
+        tool: tool.to_owned(),
+        sql: sql.to_owned(),
+        danger_level: "READ_ONLY".to_owned(),
+        decision: AuditDecision::Allowed,
+        rows_affected,
+        outcome,
+    };
+    let record = auditor
+        .append_correlated_with_observed_scn(
+            &draft,
+            audit_timestamp(),
+            true,
+            None,
+            Some(observed_scn),
+        )
+        .map_err(audit_error_to_envelope)?;
+    if let Some(certificate) = response.and_then(|response| response.mask_certificate.as_mut()) {
+        certificate.audit_entry_hash = Some(record.entry_hash);
+    }
+    Ok(())
+}
+
+/// Bind a masking certificate for read paths that materialize a result before
+/// this dispatcher can establish a replay SCN (for example an export or a
+/// two-sided diff). These paths retain their existing fail-closed certificate
+/// contract; the ordinary `oracle_query` path uses [`append_query_read_audit`]
+/// above, which records both phases with the exact SCN.
 fn append_result_masking_audit(
     ctx: AuditEntryCtx<'_>,
     tool: &str,
@@ -5456,29 +6003,41 @@ impl OracleConnection for ReadUncertaintyConn<'_> {
 }
 
 impl GuardedGeneratedReadConn<'_> {
-    fn before_query(&self, sql: &str) -> Result<String, DbError> {
+    async fn before_query(&self, cx: &Cx, sql: &str) -> Result<(String, Option<u64>), DbError> {
         let danger = ensure_generated_read_sql_allowed(sql).map_err(db_internal_from_envelope)?;
         let danger = audit_danger_string(danger);
-        append_audit(
+        let observed_scn = match self.audit.entry.auditor {
+            Some(_) => Some(AsOf::current_system_change_number(cx, self.inner).await?),
+            None => None,
+        };
+        append_audit_with_observed_scn(
             self.audit.entry,
             self.audit.tool,
             sql,
             &danger,
             None,
             AuditOutcome::Pending,
+            observed_scn,
         )
         .map_err(db_internal_from_envelope)?;
-        Ok(danger)
+        Ok((danger, observed_scn))
     }
 
-    fn after_query(&self, sql: &str, danger: &str, outcome: AuditOutcome) -> Result<(), DbError> {
-        append_audit(
+    fn after_query(
+        &self,
+        sql: &str,
+        danger: &str,
+        outcome: AuditOutcome,
+        observed_scn: Option<u64>,
+    ) -> Result<(), DbError> {
+        append_audit_with_observed_scn(
             self.audit.entry,
             self.audit.tool,
             sql,
             danger,
             None,
             outcome,
+            observed_scn,
         )
         .map_err(db_internal_from_envelope)
     }
@@ -5504,14 +6063,14 @@ impl OracleConnection for GuardedGeneratedReadConn<'_> {
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
-        let danger = self.before_query(sql)?;
+        let (danger, observed_scn) = self.before_query(cx, sql).await?;
         match self.inner.query_rows(cx, sql, binds).await {
             Ok(rows) => {
-                self.after_query(sql, &danger, AuditOutcome::Succeeded)?;
+                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
                 Ok(rows)
             }
             Err(err) => {
-                self.after_query(sql, &danger, AuditOutcome::Failed)?;
+                self.after_query(sql, &danger, AuditOutcome::Failed, observed_scn)?;
                 Err(err)
             }
         }
@@ -5524,18 +6083,18 @@ impl OracleConnection for GuardedGeneratedReadConn<'_> {
         binds: &[OracleBind],
         serialize_opts: &SerializeOptions,
     ) -> Result<Vec<OracleRow>, DbError> {
-        let danger = self.before_query(sql)?;
+        let (danger, observed_scn) = self.before_query(cx, sql).await?;
         match self
             .inner
             .query_rows_with_serialize_options(cx, sql, binds, serialize_opts)
             .await
         {
             Ok(rows) => {
-                self.after_query(sql, &danger, AuditOutcome::Succeeded)?;
+                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
                 Ok(rows)
             }
             Err(err) => {
-                self.after_query(sql, &danger, AuditOutcome::Failed)?;
+                self.after_query(sql, &danger, AuditOutcome::Failed, observed_scn)?;
                 Err(err)
             }
         }
@@ -5547,14 +6106,14 @@ impl OracleConnection for GuardedGeneratedReadConn<'_> {
         sql: &str,
         binds: &[(String, OracleBind)],
     ) -> Result<Vec<OracleRow>, DbError> {
-        let danger = self.before_query(sql)?;
+        let (danger, observed_scn) = self.before_query(cx, sql).await?;
         match self.inner.query_rows_named(cx, sql, binds).await {
             Ok(rows) => {
-                self.after_query(sql, &danger, AuditOutcome::Succeeded)?;
+                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
                 Ok(rows)
             }
             Err(err) => {
-                self.after_query(sql, &danger, AuditOutcome::Failed)?;
+                self.after_query(sql, &danger, AuditOutcome::Failed, observed_scn)?;
                 Err(err)
             }
         }
@@ -5567,18 +6126,18 @@ impl OracleConnection for GuardedGeneratedReadConn<'_> {
         binds: &[(String, OracleBind)],
         serialize_opts: &SerializeOptions,
     ) -> Result<Vec<OracleRow>, DbError> {
-        let danger = self.before_query(sql)?;
+        let (danger, observed_scn) = self.before_query(cx, sql).await?;
         match self
             .inner
             .query_rows_named_with_serialize_options(cx, sql, binds, serialize_opts)
             .await
         {
             Ok(rows) => {
-                self.after_query(sql, &danger, AuditOutcome::Succeeded)?;
+                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
                 Ok(rows)
             }
             Err(err) => {
-                self.after_query(sql, &danger, AuditOutcome::Failed)?;
+                self.after_query(sql, &danger, AuditOutcome::Failed, observed_scn)?;
                 Err(err)
             }
         }
@@ -5590,14 +6149,14 @@ impl OracleConnection for GuardedGeneratedReadConn<'_> {
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Option<OracleRow>, DbError> {
-        let danger = self.before_query(sql)?;
+        let (danger, observed_scn) = self.before_query(cx, sql).await?;
         match self.inner.query_optional_row(cx, sql, binds).await {
             Ok(row) => {
-                self.after_query(sql, &danger, AuditOutcome::Succeeded)?;
+                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
                 Ok(row)
             }
             Err(err) => {
-                self.after_query(sql, &danger, AuditOutcome::Failed)?;
+                self.after_query(sql, &danger, AuditOutcome::Failed, observed_scn)?;
                 Err(err)
             }
         }
@@ -5748,6 +6307,7 @@ fn audit_outcome_label(outcome: AuditOutcome) -> &'static str {
         AuditOutcome::Succeeded => "succeeded",
         AuditOutcome::Failed => "failed",
         AuditOutcome::RolledBack => "rolled_back",
+        AuditOutcome::HeldUncommitted => "held_uncommitted",
         AuditOutcome::DiscardedUncommitted => "discarded_uncommitted",
         AuditOutcome::CommitInDoubt => "commit_in_doubt",
         AuditOutcome::UnknownDiscarded => "unknown_discarded",
@@ -5873,6 +6433,165 @@ fn quarantine_uncertain_optional_diagnostic(
     }
 }
 
+/// The reversible workspace is a *write* surface: it only exists to make DML
+/// undoable, so it needs the same `READ_WRITE` floor the DML does. A `protected`
+/// or `READ_ONLY`-ceilinged profile can never open one.
+fn ensure_workspace_level(session: &SessionLevelState, tool: &str) -> Result<(), ErrorEnvelope> {
+    if session.effective_level() >= OperatingLevel::ReadWrite {
+        return Ok(());
+    }
+    let ceiling = session.effective_ceiling();
+    let mut envelope = ErrorEnvelope::new(
+        ErrorClass::OperatingLevelTooLow,
+        format!(
+            "{tool} needs READ_WRITE — the reversible workspace exists to make DML undoable — and this session is at {}",
+            session.effective_level().as_str()
+        ),
+    );
+    if ceiling < OperatingLevel::ReadWrite {
+        envelope.message.push_str(&format!(
+            "; the profile ceiling {} cannot be raised",
+            ceiling.as_str()
+        ));
+        return Err(envelope);
+    }
+    Err(envelope
+        .with_suggested_tool("oracle_set_session_level")
+        .with_next_step("elevate with oracle_set_session_level to READ_WRITE, then retry"))
+}
+
+/// Run one server-generated transaction-control statement on the pinned session,
+/// bracketed by the same durable pre/post audit records the governed write path
+/// uses. `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` are the statements the classifier
+/// refuses from callers precisely because the server owns them; when the server
+/// issues one, the audit chain must still show it.
+async fn run_workspace_statement(
+    ctx: &DbToolCtx<'_>,
+    tool: &str,
+    statement: &str,
+) -> Result<(), ErrorEnvelope> {
+    let danger = audit_danger_string(DangerLevel::Guarded);
+    let db_evidence = collect_effect_audit_db_evidence(ctx).await?;
+    let audit_entry = AuditEntryCtx {
+        auditor: ctx.audit.auditor,
+        subject: ctx.audit.subject,
+        db_evidence: db_evidence.as_ref(),
+    };
+    append_audit(
+        audit_entry,
+        tool,
+        statement,
+        &danger,
+        None,
+        AuditOutcome::Pending,
+    )?;
+    match execute_conn(ctx.cx, ctx.conn, statement, &[] as &[OracleBind]).await {
+        Ok(_) => {
+            append_terminal_audit(
+                ctx,
+                audit_entry,
+                tool,
+                statement,
+                &danger,
+                None,
+                AuditOutcome::Succeeded,
+            )?;
+            Ok(())
+        }
+        Err(error) => {
+            // An uncertain boundary means we cannot prove whether Oracle moved
+            // the savepoint stack, so the session is no longer trustworthy.
+            let outcome = if error.is_uncertain_session_state() {
+                mark_connection_quarantined(
+                    ctx.quarantine,
+                    AuditOutcome::UnknownDiscarded,
+                    format!("{tool} failed at an uncertain database boundary: {error}"),
+                )?;
+                AuditOutcome::UnknownDiscarded
+            } else {
+                AuditOutcome::Failed
+            };
+            let terminal =
+                append_terminal_audit(ctx, audit_entry, tool, statement, &danger, None, outcome);
+            if outcome == AuditOutcome::Failed {
+                terminal?;
+                return Err(DbError::into_envelope(error));
+            }
+            if let Err(audit_error) = terminal {
+                tracing::error!(error = %audit_error.message, "terminal audit failed after an uncertain workspace statement");
+            }
+            Err(quarantined_db_error(
+                QuarantineOutcome::UnknownDiscarded,
+                format!("{tool} failed at an uncertain database boundary: {error}"),
+            )
+            .into_envelope())
+        }
+    }
+}
+
+/// `oracle_checkpoint` — establish a named `SAVEPOINT` on the pinned session,
+/// opening (or extending) the reversible workspace.
+async fn open_checkpoint(ctx: DbToolCtx<'_>, args: CheckpointArgs) -> Result<Value, ErrorEnvelope> {
+    let name = workspace::validated_checkpoint_name(&args.name)?;
+    ensure_workspace_level(ctx.session, "oracle_checkpoint")?;
+    // Refuse duplicates and the stack cap before any database I/O.
+    ctx.checkpoints.check_can_open(&name)?;
+    // A savepoint is a write on the transaction. If an earlier read left this
+    // session inside `SET TRANSACTION READ ONLY`, end that transaction first —
+    // exactly as the governed write path does — or Oracle refuses the savepoint.
+    clear_read_only_transaction_before_write(&ctx).await?;
+    let statement = workspace::savepoint_statement(&name);
+    run_workspace_statement(&ctx, "oracle_checkpoint", &statement).await?;
+    // Oracle accepted it; only now is the checkpoint real.
+    ctx.checkpoints.commit_open(&name);
+    Ok(json!({
+        "checkpoint": name,
+        "statement": statement,
+        "workspace": ctx.checkpoints.view(),
+        "next_step": "run reversible DML with oracle_execute hold=true, then oracle_undo_to to walk it back",
+    }))
+}
+
+/// `oracle_undo_to` — `ROLLBACK TO SAVEPOINT <name>`, or a full rollback that
+/// discards the whole workspace when no name is given. Undo never commits.
+async fn undo_to_checkpoint(ctx: DbToolCtx<'_>, args: UndoToArgs) -> Result<Value, ErrorEnvelope> {
+    // Deliberately NO operating-level gate. Undo only ever *removes* effects, and
+    // an elevation window can expire while work is held — refusing to let the
+    // agent walk its own uncommitted work back would strand it above a workspace
+    // it can no longer close. Lowering is always safe; that principle holds here.
+    let Some(raw_name) = args.name else {
+        // No target: discard the whole workspace with a full ROLLBACK. This is
+        // the agent's way out — it undoes every held statement and releases
+        // every checkpoint, which is what re-opens the committing paths.
+        let discarded = ctx.checkpoints.held_statements();
+        let released = ctx.checkpoints.view()["checkpoints"].clone();
+        run_workspace_statement(&ctx, "oracle_undo_to", "ROLLBACK").await?;
+        ctx.checkpoints.clear();
+        return Ok(json!({
+            "undone_to": Value::Null,
+            "statement": "ROLLBACK",
+            "discarded_statements": discarded,
+            "released_checkpoints": released,
+            "workspace": ctx.checkpoints.view(),
+            "next_step": "the workspace is closed; committing operations are available again",
+        }));
+    };
+    let name = workspace::validated_checkpoint_name(&raw_name)?;
+    // Plan first: an unknown checkpoint is refused before any database I/O, and
+    // the stack is only truncated once Oracle has accepted the rollback.
+    let summary = ctx.checkpoints.plan_undo_to(&name)?;
+    let statement = workspace::undo_statement(&name);
+    run_workspace_statement(&ctx, "oracle_undo_to", &statement).await?;
+    ctx.checkpoints.commit_undo_to(&name);
+    Ok(json!({
+        "undone_to": name,
+        "statement": statement,
+        "discarded_statements": summary.discarded_statements,
+        "released_checkpoints": summary.released_checkpoints,
+        "workspace": ctx.checkpoints.view(),
+    }))
+}
+
 async fn execute_sql(
     ctx: DbToolCtx<'_>,
     audit_tool: &str,
@@ -5880,10 +6599,14 @@ async fn execute_sql(
 ) -> Result<Value, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
     let completion = if args.commit
+        || args.hold
         || DEFAULT_CLASSIFIER
             .classify(&args.sql)
             .non_transactional_effect
     {
+        // A held statement's effect survives the call inside the open
+        // transaction (Arc I). A late deadline must not discard the fact that it
+        // ran — the workspace, and the agent's undo stack, now depend on it.
         CompletionPolicy::PreserveSuccessfulEffect
     } else {
         CompletionPolicy::EnforceDeadlineAfterBody
@@ -5939,6 +6662,40 @@ async fn execute_sql_inner(
             "use NEXTVAL inside a governed DML or PL/SQL statement, then preview and confirm that exact statement",
         ));
     }
+    // Arc I: hold = "leave this effect pending inside the reversible workspace".
+    // It only means something with a checkpoint to undo to, it can never apply
+    // to a statement Oracle commits implicitly, and it is the opposite of a
+    // commit — each of those is a refusal, before any grant is consumed.
+    if args.hold {
+        if args.commit {
+            return Err(invalid_args(
+                "hold and commit are mutually exclusive: hold leaves the statement pending in the reversible workspace, commit makes it durable",
+            ));
+        }
+        if required_level >= OperatingLevel::Ddl {
+            return Err(invalid_args(
+                "DDL/Admin statements cannot be held: Oracle commits them implicitly, so no checkpoint could undo them",
+            )
+            .with_next_step(
+                "hold is for reversible DML; run DDL with commit=true on a closed workspace",
+            ));
+        }
+        if decision.non_transactional_effect {
+            return Err(invalid_args(
+                "this statement cannot be held: its effect escapes rollback (for example a sequence NEXTVAL), so no checkpoint could undo it",
+            )
+            .with_next_step(
+                "the reversible workspace only holds fully undoable DML; run this statement with commit=true and its confirmation on a closed workspace",
+            ));
+        }
+        if !ctx.checkpoints.is_open() {
+            return Err(invalid_args(
+                "hold requires an open reversible workspace: without a checkpoint there is nothing to undo the held statement back to",
+            )
+            .with_suggested_tool("oracle_checkpoint")
+            .with_next_step("call oracle_checkpoint to establish a checkpoint, then retry with hold=true"));
+        }
+    }
     if required_level >= OperatingLevel::Ddl && !args.commit {
         return Err(ErrorEnvelope::new(
             ErrorClass::ChallengeRequired,
@@ -5946,6 +6703,20 @@ async fn execute_sql_inner(
         )
         .with_suggested_tool("oracle_preview_sql")
         .with_next_step("call oracle_preview_sql and pass execute_confirmation.confirm to oracle_execute with commit=true"));
+    }
+    // A COMMIT is transaction-wide, and Oracle commits DDL/Admin implicitly:
+    // either would durably persist every statement held in an open workspace,
+    // none of which passed the single-use grant. Refuse before the grant is
+    // consumed so a refusal never burns the agent's confirmation.
+    if args.commit || required_level >= OperatingLevel::Ddl {
+        ensure_workspace_closed(
+            ctx.checkpoints,
+            if args.commit {
+                "committing this statement"
+            } else {
+                "this DDL/Admin statement (Oracle commits it implicitly)"
+            },
+        )?;
     }
     // A rollback-preview normally needs no per-statement confirmation because
     // Oracle can undo its effects. Sequence NEXTVAL is the exception: it
@@ -6108,7 +6879,36 @@ async fn execute_sql_inner(
     let rows_affected = match execute_conn(cx, conn, &executed_sql, &binds).await {
         Ok(rows) => rows,
         Err(e) => {
+            // Arc I: a held statement runs inside the agent's open workspace, and
+            // `hold` already refused everything whose effect can escape rollback,
+            // so Oracle's statement-level atomicity has undone this failed
+            // statement completely. The surrounding transaction — its savepoints
+            // and the work held above them — is intact and still the agent's to
+            // undo. A full ROLLBACK here would destroy exactly what the agent
+            // asked us to keep. Only an uncertain DB boundary forces one, because
+            // then we cannot prove what the session did.
+            if args.hold && !e.is_uncertain_session_state() {
+                append_terminal_audit(
+                    &ctx,
+                    audit_entry,
+                    audit_tool,
+                    &executed_sql,
+                    &danger_str,
+                    None,
+                    AuditOutcome::Failed,
+                )?;
+                resolve_write_intent(
+                    &ctx,
+                    write_intent_id.as_deref(),
+                    WriteIntentOutcome::AbortedBeforeExecute,
+                )?;
+                return Err(DbError::into_envelope(e));
+            }
             let rollback = rollback_conn_cleanup(cx, conn).await;
+            if rollback.is_ok() {
+                // The transaction ended, so Oracle erased every savepoint.
+                ctx.checkpoints.clear();
+            }
             let outcome = if rollback.is_ok() && !effect_may_survive_rollback {
                 AuditOutcome::RolledBack
             } else {
@@ -6177,7 +6977,12 @@ async fn execute_sql_inner(
             return Err(DbError::into_envelope(e));
         }
     };
-    if args.commit {
+    if args.hold {
+        // Arc I: the whole point — no COMMIT, no ROLLBACK. The effect stays
+        // pending in the transaction, above the newest checkpoint, until the
+        // agent undoes it (or the session/elevation ends and Oracle discards it).
+        ctx.checkpoints.note_held_statement();
+    } else if args.commit {
         if let Err(e) = commit_conn(cx, conn).await {
             mark_connection_quarantined(
                 ctx.quarantine,
@@ -6230,12 +7035,23 @@ async fn execute_sql_inner(
             .into_envelope());
         }
     }
+    if args.commit || !args.hold {
+        // Either branch above ended the transaction, so Oracle erased every
+        // savepoint. (The committing branch is only reachable on a closed
+        // workspace; the rollback branch closes whatever was open.)
+        ctx.checkpoints.clear();
+    }
 
     // A confirmed non-transactional statement is a successful persistent
     // effect even when the surrounding transaction was rolled back. Recording
-    // it as `RolledBack` would falsely imply that replay is safe.
+    // it as `RolledBack` would falsely imply that replay is safe. A held
+    // statement is neither: it ran, nothing is durable, and nothing has been
+    // undone yet — only the workspace's undo (or the session ending) will
+    // decide, and until then no commit can reach it.
     let outcome = if args.commit || decision.non_transactional_effect {
         AuditOutcome::Succeeded
+    } else if args.hold {
+        AuditOutcome::HeldUncommitted
     } else {
         AuditOutcome::RolledBack
     };
@@ -6291,7 +7107,7 @@ async fn execute_sql_inner(
     let mut response = json!({
         "executed": true,
         "committed": args.commit,
-        "rolled_back": !args.commit,
+        "rolled_back": !args.commit && !args.hold,
         "rows_affected": rows_affected,
         "required_level": required_level,
         "danger": decision.danger,
@@ -6299,6 +7115,13 @@ async fn execute_sql_inner(
         "objects_affected": decision.objects_affected,
         "reason": decision.reason,
     });
+    if args.hold {
+        response["held"] = json!(true);
+        response["workspace"] = ctx.checkpoints.view();
+        response["next_step"] = json!(
+            "the effect is pending and undoable; call oracle_undo_to to walk it back. It cannot be committed while the workspace is open"
+        );
+    }
     if let Some(dbms_output) = dbms_output {
         response["dbms_output"] = dbms_output;
     }
@@ -6518,6 +7341,13 @@ async fn compile_object_inner(
     if !matches!(gate, LevelDecision::Allow) {
         return Err(compile_gate_error(gate, session));
     }
+    // Arc I: Oracle commits DDL implicitly, so this compile would durably
+    // persist every statement held in an open reversible workspace — none of
+    // which passed the single-use grant. Refuse before the grant is consumed.
+    ensure_workspace_closed(
+        ctx.checkpoints,
+        "this compile (Oracle commits DDL implicitly)",
+    )?;
     let raw_confirm = consume_confirmation_grant(ConfirmationGrantRequest {
         material: &audited_sql,
         required_level: OperatingLevel::Ddl,
@@ -7427,6 +8257,12 @@ async fn patch_source_inner(
             "patch confirmation was verified without a required operating level",
         )
     })?;
+    // Arc I: the patch is DDL and Oracle commits it implicitly — it would carry
+    // an open workspace's held, ungranted statements into permanence with it.
+    ensure_workspace_closed(
+        ctx.checkpoints,
+        "this source patch (Oracle commits DDL implicitly)",
+    )?;
     let raw_confirm = consume_confirmation_grant(ConfirmationGrantRequest {
         material: &patched_ddl,
         required_level,
@@ -7752,6 +8588,7 @@ async fn create_or_replace_inner(
             sql: source.clone(),
             binds: Vec::new(),
             commit: true,
+            hold: false,
             confirm: args.confirm,
             capture_dbms_output: false,
             dbms_output_max_lines: None,
@@ -7934,6 +8771,7 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
             sql: ddl,
             binds: Vec::new(),
             commit: true,
+            hold: false,
             confirm: args.confirm,
             capture_dbms_output: false,
             dbms_output_max_lines: None,
@@ -8778,6 +9616,9 @@ impl OracleDispatcher {
                     // transaction is fresh, so re-assert the read-only backstop
                     // on its first read.
                     state.read_only_backstop.reset();
+                    // Arc I: the old physical session (and any uncommitted work
+                    // held in it) is gone with it, so its savepoints are too.
+                    state.checkpoints.clear();
                     if let Value::Object(map) = &mut response {
                         map.insert(
                             "custom_tool_count".to_owned(),
@@ -8960,6 +9801,7 @@ impl OracleDispatcher {
                 cx,
                 conn,
                 read_only_backstop: &state.read_only_backstop,
+                checkpoints: &state.checkpoints,
                 request_budget,
                 active_profile: active_profile.as_deref(),
                 session: &scoped_level,
@@ -8986,6 +9828,7 @@ impl OracleDispatcher {
                 cx,
                 conn,
                 read_only_backstop: &state.read_only_backstop,
+                checkpoints: &state.checkpoints,
                 request_budget,
                 active_profile: active_profile.as_deref(),
                 session: &scoped_level,
@@ -9036,6 +9879,16 @@ impl OracleDispatcher {
                         "streaming and as_of are mutually exclusive: page the flashback read with its cursor",
                     ));
                 }
+                if as_of.is_some() {
+                    // Arc I: DBMS_FLASHBACK cannot be enabled inside a
+                    // transaction, so the flashback read resets the pinned
+                    // session — erasing the reversible workspace's savepoints and
+                    // every statement held above them.
+                    ensure_workspace_closed(
+                        &state.checkpoints,
+                        "an as_of (flashback) read (it resets the session transaction)",
+                    )?;
+                }
                 let executed_sql =
                     with_audit_marker(&parsed.sql, state.active_profile.as_deref(), "oracle_query");
                 let gate = ensure_resolved_read_only(
@@ -9079,6 +9932,7 @@ impl OracleDispatcher {
                 let DispatcherState {
                     conn,
                     read_only_backstop,
+                    checkpoints,
                     ..
                 } = &mut *state;
                 enforce_query_cost_gate(
@@ -9086,6 +9940,7 @@ impl OracleDispatcher {
                         cx,
                         conn: conn.as_ref(),
                         read_only_backstop,
+                        checkpoints,
                         session: &scoped_level,
                         request_budget: &request_budget,
                         quarantine: &self.quarantine,
@@ -9107,6 +9962,9 @@ impl OracleDispatcher {
                     // fresh transaction (the wrapper rolls back the session, so
                     // any previously-armed read-only transaction is gone).
                     read_only_backstop.disarm();
+                    // Arc I: the flashback wrapper rolls the session back, so
+                    // Oracle erased every savepoint with it.
+                    checkpoints.clear();
                 } else {
                     // Consult the effective level that governs THIS request
                     // (scoped_level folds in any OAuth scope, which can only
@@ -9116,6 +9974,7 @@ impl OracleDispatcher {
                         cx,
                         conn.as_ref(),
                         read_only_backstop,
+                        checkpoints,
                         &scoped_level,
                         &request_budget,
                         &self.quarantine,
@@ -9157,12 +10016,14 @@ impl OracleDispatcher {
             let DispatcherState {
                 conn,
                 read_only_backstop,
+                checkpoints,
                 ..
             } = &mut *state;
             ensure_read_only_backstop_bounded(
                 cx,
                 conn.as_ref(),
                 read_only_backstop,
+                checkpoints,
                 &scoped_level,
                 &request_budget,
                 &self.quarantine,
@@ -9262,6 +10123,7 @@ impl OracleDispatcher {
                     cx,
                     conn,
                     read_only_backstop: &state.read_only_backstop,
+                    checkpoints: &state.checkpoints,
                     request_budget,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
@@ -9273,6 +10135,56 @@ impl OracleDispatcher {
                     quarantine: &self.quarantine,
                 };
                 return execute_sql(tool_ctx, "oracle_execute", a).await;
+            }
+            "oracle_checkpoint" => {
+                let a: CheckpointArgs = parse_args(name, args)?;
+                let subject = request_subject.clone();
+                let grant_binding = grant_binding_for_context(&state, context);
+                let audit = AuditCtx {
+                    auditor: self.auditor.as_deref(),
+                    subject: &subject,
+                };
+                let tool_ctx = DbToolCtx {
+                    cx,
+                    conn,
+                    read_only_backstop: &state.read_only_backstop,
+                    checkpoints: &state.checkpoints,
+                    request_budget,
+                    active_profile: state.active_profile.as_deref(),
+                    session: &scoped_level,
+                    execute_grants: &state.execute_grants,
+                    grant_binding: &grant_binding,
+                    write_intents: self.write_intents.as_deref(),
+                    catalog_cache: &state.catalog_cache,
+                    audit,
+                    quarantine: &self.quarantine,
+                };
+                return open_checkpoint(tool_ctx, a).await;
+            }
+            "oracle_undo_to" => {
+                let a: UndoToArgs = parse_args(name, args)?;
+                let subject = request_subject.clone();
+                let grant_binding = grant_binding_for_context(&state, context);
+                let audit = AuditCtx {
+                    auditor: self.auditor.as_deref(),
+                    subject: &subject,
+                };
+                let tool_ctx = DbToolCtx {
+                    cx,
+                    conn,
+                    read_only_backstop: &state.read_only_backstop,
+                    checkpoints: &state.checkpoints,
+                    request_budget,
+                    active_profile: state.active_profile.as_deref(),
+                    session: &scoped_level,
+                    execute_grants: &state.execute_grants,
+                    grant_binding: &grant_binding,
+                    write_intents: self.write_intents.as_deref(),
+                    catalog_cache: &state.catalog_cache,
+                    audit,
+                    quarantine: &self.quarantine,
+                };
+                return undo_to_checkpoint(tool_ctx, a).await;
             }
             "oracle_compile_object" => {
                 let a: CompileObjectArgs = parse_args(name, args)?;
@@ -9286,6 +10198,7 @@ impl OracleDispatcher {
                     cx,
                     conn,
                     read_only_backstop: &state.read_only_backstop,
+                    checkpoints: &state.checkpoints,
                     request_budget,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
@@ -9310,6 +10223,7 @@ impl OracleDispatcher {
                     cx,
                     conn,
                     read_only_backstop: &state.read_only_backstop,
+                    checkpoints: &state.checkpoints,
                     request_budget,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
@@ -9334,6 +10248,7 @@ impl OracleDispatcher {
                     cx,
                     conn,
                     read_only_backstop: &state.read_only_backstop,
+                    checkpoints: &state.checkpoints,
                     request_budget,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
@@ -9387,6 +10302,18 @@ impl OracleDispatcher {
             }
             "oracle_diff" => {
                 let a: DiffArgs = parse_args(name, args)?;
+                let mode = diff_mode_from_args(&a)?;
+                // Arc I: a flashback read resets the pinned session's
+                // transaction, which erases the reversible workspace's savepoints
+                // and every statement held above them. A cross-database diff
+                // reads on its own transient connections and never touches the
+                // pinned session, so it leaves the workspace intact.
+                if matches!(mode, DiffMode::Time { .. }) {
+                    ensure_workspace_closed(
+                        &state.checkpoints,
+                        "oracle_diff (its flashback read resets the session transaction)",
+                    )?;
+                }
                 let timeout_seconds = a.timeout_seconds;
                 let active_profile = state.active_profile.clone();
                 with_call_timeout(
@@ -9397,9 +10324,6 @@ impl OracleDispatcher {
                     timeout_seconds,
                     CompletionPolicy::EnforceDeadlineAfterBody,
                     || async {
-                        if a.scn_a == 0 || a.scn_b == 0 {
-                            return Err(invalid_args("oracle_diff scn_a and scn_b must be >= 1"));
-                        }
                         let read_cx = narrow_to_read_path(cx);
                         dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.diff.before")?;
                         let binds = a
@@ -9408,82 +10332,192 @@ impl OracleDispatcher {
                             .map(json_to_bind)
                             .collect::<Result<Vec<_>, _>>()?;
                         let explicit_key = normalize_diff_key_columns(a.key.clone())?;
-                        let executed_sql = with_audit_marker(
-                            &a.sql,
-                            active_profile.as_deref(),
-                            "oracle_diff",
-                        );
-                        let relations = resolve_read_only_relations(
-                            cx,
-                            &observed_conn,
-                            &state.catalog_cache,
-                            &executed_sql,
-                        )
-                        .await?;
-                        let key_columns = if explicit_key.is_empty() {
-                            inferred_diff_key_columns(cx, &guarded_metadata_conn, &relations)
-                                .await?
-                        } else {
-                            explicit_key
-                        };
                         let caps = diff_query_caps_from_args(&a);
-                        let result_masking = self.result_masking_policy()?;
-                        let serialize_opts = diff_serialize_options_from_args_with_policy(
-                            &a,
-                            result_masking.as_ref(),
-                        );
-                        let read_conn = ReadUncertaintyConn {
-                            inner: conn,
-                            quarantine: Some(&self.quarantine),
+
+                        let (before, after, key_columns, source_a, source_b) = match &mode {
+                            DiffMode::Time { scn_a, scn_b } => {
+                                let executed_sql = with_audit_marker(
+                                    &a.sql,
+                                    active_profile.as_deref(),
+                                    "oracle_diff",
+                                );
+                                let relations = resolve_read_only_relations(
+                                    cx,
+                                    &observed_conn,
+                                    &state.catalog_cache,
+                                    &executed_sql,
+                                )
+                                .await?;
+                                let key_columns = if explicit_key.is_empty() {
+                                    inferred_diff_key_columns(
+                                        cx,
+                                        &guarded_metadata_conn,
+                                        &relations,
+                                    )
+                                    .await?
+                                } else {
+                                    explicit_key
+                                };
+                                let result_masking = self.result_masking_policy()?;
+                                let serialize_opts = diff_serialize_options_from_args_with_policy(
+                                    &a,
+                                    result_masking.as_ref(),
+                                );
+                                let read_conn = ReadUncertaintyConn {
+                                    inner: conn,
+                                    quarantine: Some(&self.quarantine),
+                                };
+                                let mut before = read_query_as_of(
+                                    cx,
+                                    &read_conn,
+                                    &executed_sql,
+                                    &binds,
+                                    caps,
+                                    0,
+                                    &serialize_opts,
+                                    &AsOf::Scn(*scn_a),
+                                )
+                                .await
+                                .map_err(DbError::into_envelope)?;
+                                let mut after = read_query_as_of(
+                                    cx,
+                                    &read_conn,
+                                    &executed_sql,
+                                    &binds,
+                                    caps,
+                                    0,
+                                    &serialize_opts,
+                                    &AsOf::Scn(*scn_b),
+                                )
+                                .await
+                                .map_err(DbError::into_envelope)?;
+                                bind_result_masking_audit(
+                                    cx,
+                                    &read_conn,
+                                    self.auditor.as_deref(),
+                                    &request_subject,
+                                    "oracle_diff",
+                                    &executed_sql,
+                                    &mut before,
+                                )
+                                .await?;
+                                bind_result_masking_audit(
+                                    cx,
+                                    &read_conn,
+                                    self.auditor.as_deref(),
+                                    &request_subject,
+                                    "oracle_diff",
+                                    &executed_sql,
+                                    &mut after,
+                                )
+                                .await?;
+                                (
+                                    before,
+                                    after,
+                                    key_columns,
+                                    QueryDiffSource::scn(*scn_a),
+                                    QueryDiffSource::scn(*scn_b),
+                                )
+                            }
+                            DiffMode::Fleet {
+                                profile_a,
+                                scn_a,
+                                profile_b,
+                                scn_b,
+                            } => {
+                                let serialize_defaults =
+                                    diff_serialize_options_from_args_with_policy(&a, None);
+                                let side_a = self
+                                    .read_diff_side_from_profile(
+                                        cx,
+                                        DiffSideRequest {
+                                            side: DiffSide::A,
+                                            profile: profile_a,
+                                            sql: &a.sql,
+                                            binds: &binds,
+                                            caps,
+                                            scn: *scn_a,
+                                            serialize_defaults: serialize_defaults.clone(),
+                                            subject: &request_subject,
+                                            budget: &final_budget,
+                                            infer_key: explicit_key.is_empty(),
+                                        },
+                                    )
+                                    .await?;
+                                let side_b = self
+                                    .read_diff_side_from_profile(
+                                        cx,
+                                        DiffSideRequest {
+                                            side: DiffSide::B,
+                                            profile: profile_b,
+                                            sql: &a.sql,
+                                            binds: &binds,
+                                            caps,
+                                            scn: *scn_b,
+                                            serialize_defaults,
+                                            subject: &request_subject,
+                                            budget: &final_budget,
+                                            infer_key: false,
+                                        },
+                                    )
+                                    .await?;
+                                let before = side_a.response;
+                                let after = side_b.response;
+                                if !before.columns.is_empty()
+                                    && !after.columns.is_empty()
+                                    && before.columns != after.columns
+                                {
+                                    return Err(diff_shape_mismatch(
+                                        profile_a,
+                                        &before.columns,
+                                        profile_b,
+                                        &after.columns,
+                                    ));
+                                }
+                                // Masked values are only ever tested for equality
+                                // when both sides have rows. With one side empty
+                                // every row of the other is a pure add/remove, so
+                                // no masked value is compared and there is nothing
+                                // to prove sound.
+                                if before.row_count > 0 && after.row_count > 0 {
+                                    let compared = if after.columns.is_empty() {
+                                        &before.columns
+                                    } else {
+                                        &after.columns
+                                    };
+                                    let incomparable = incomparable_masked_columns(
+                                        compared,
+                                        before.mask_certificate.as_ref(),
+                                        after.mask_certificate.as_ref(),
+                                    );
+                                    if !incomparable.is_empty() {
+                                        return Err(diff_incomparable_masking(
+                                            profile_a,
+                                            profile_b,
+                                            &incomparable,
+                                        ));
+                                    }
+                                }
+                                let key_columns = if explicit_key.is_empty() {
+                                    side_a.inferred_key
+                                } else {
+                                    explicit_key
+                                };
+                                (
+                                    before,
+                                    after,
+                                    key_columns,
+                                    QueryDiffSource::profile(profile_a).at_scn(*scn_a),
+                                    QueryDiffSource::profile(profile_b).at_scn(*scn_b),
+                                )
+                            }
                         };
-                        let mut before = read_query_as_of(
-                            cx,
-                            &read_conn,
-                            &executed_sql,
-                            &binds,
-                            caps,
-                            0,
-                            &serialize_opts,
-                            &AsOf::Scn(a.scn_a),
-                        )
-                        .await
-                        .map_err(DbError::into_envelope)?;
-                        let mut after = read_query_as_of(
-                            cx,
-                            &read_conn,
-                            &executed_sql,
-                            &binds,
-                            caps,
-                            0,
-                            &serialize_opts,
-                            &AsOf::Scn(a.scn_b),
-                        )
-                        .await
-                        .map_err(DbError::into_envelope)?;
-                        bind_result_masking_audit(
-                            cx,
-                            &read_conn,
-                            self.auditor.as_deref(),
-                            &request_subject,
-                            "oracle_diff",
-                            &executed_sql,
-                            &mut before,
-                        )
-                        .await?;
-                        bind_result_masking_audit(
-                            cx,
-                            &read_conn,
-                            self.auditor.as_deref(),
-                            &request_subject,
-                            "oracle_diff",
-                            &executed_sql,
-                            &mut after,
-                        )
-                        .await?;
+
                         let before_mask_certificate = before.mask_certificate.clone();
                         let after_mask_certificate = after.mask_certificate.clone();
                         let diff = diff_query_responses(&before, &after, &key_columns)
-                            .map_err(|err| invalid_args(err.to_string()))?;
+                            .map_err(|err| invalid_args(err.to_string()))?
+                            .with_sources(source_a, source_b);
                         dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.diff.after")?;
                         let mut value = serde_json::to_value(diff).map_err(|err| {
                             ErrorEnvelope::new(
@@ -10052,6 +11086,12 @@ impl OracleDispatcher {
                 let a: ExplainPlanArgs = parse_args(name, args)?;
                 ensure_read_only(&a.sql)?;
                 ensure_explain_plan_write_allowed(&a, &scoped_level)?;
+                // Arc I: EXPLAIN PLAN writes PLAN_TABLE and rolls the transaction
+                // back to clean it up, erasing the reversible workspace with it.
+                ensure_workspace_closed(
+                    &state.checkpoints,
+                    "oracle_explain_plan (its PLAN_TABLE cleanup rolls the transaction back)",
+                )?;
                 ensure_resolved_read_only(cx, conn, &state.catalog_cache, &a.sql).await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.before")?;
                 let rows = match explain_plan(cx, conn, &a.sql, a.read_only_standby).await {
@@ -10328,7 +11368,71 @@ impl OracleDispatcher {
                 let result_masking = self.result_masking_policy()?;
                 let serialize_opts =
                     query_serialize_options_from_args_with_policy(&a, result_masking.as_ref());
-                let read = match as_of.as_ref() {
+                let auditor = self.auditor.as_deref();
+                if result_masking.is_some() && auditor.is_none() {
+                    return Err(ErrorEnvelope::new(
+                        ErrorClass::RuntimeStateRequired,
+                        "result masking is active but no audit sink is configured; refusing to return a \
+                         masked result without hash-chain binding",
+                    )
+                    .with_next_step(
+                        "configure audit logging, or disable result masking for this profile",
+                    ));
+                }
+
+                // Arc A3: when an audit sink is configured, capture the SCN
+                // before the data query and persist a Pending record before
+                // the query itself runs. On the normal path this is the first
+                // SELECT in the already-armed read-only transaction, so later
+                // reads share its consistent snapshot. For a structured
+                // timestamp target, resolve Oracle's timestamp mapping once
+                // and execute at that exact SCN instead of recording a lossy
+                // wall-clock hint.
+                let replay_target = if auditor.is_some() {
+                    match as_of.as_ref() {
+                        Some(as_of) => Some(AsOf::Scn(
+                            as_of
+                                .resolve_to_scn(cx, &read_conn)
+                                .await
+                                .map_err(DbError::into_envelope)?,
+                        )),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                let observed_scn = match (auditor, replay_target.as_ref()) {
+                    (Some(_), Some(AsOf::Scn(scn))) => Some(*scn),
+                    (Some(_), Some(AsOf::Timestamp(_))) => unreachable!(
+                        "audited timestamp flashback targets are resolved to SCNs before execution"
+                    ),
+                    (Some(_), None) => Some(
+                        AsOf::current_system_change_number(cx, &read_conn)
+                            .await
+                            .map_err(DbError::into_envelope)?,
+                    ),
+                    (None, _) => None,
+                };
+                let read_audit_evidence =
+                    collect_read_audit_db_evidence(cx, auditor, &read_conn).await?;
+                let read_audit = AuditEntryCtx {
+                    auditor,
+                    subject: &request_subject,
+                    db_evidence: read_audit_evidence.as_ref(),
+                };
+                if let Some(observed_scn) = observed_scn {
+                    append_query_read_audit(
+                        read_audit,
+                        "oracle_query",
+                        &executed_sql,
+                        observed_scn,
+                        AuditOutcome::Pending,
+                        None,
+                    )?;
+                }
+
+                let effective_as_of = replay_target.as_ref().or(as_of.as_ref());
+                let read = match effective_as_of {
                     Some(as_of) => {
                         read_query_as_of(
                             cx,
@@ -10355,17 +11459,32 @@ impl OracleDispatcher {
                         .await
                     }
                 };
-                let mut response = read.map_err(DbError::into_envelope)?;
-                bind_result_masking_audit(
-                    cx,
-                    &read_conn,
-                    self.auditor.as_deref(),
-                    &request_subject,
-                    "oracle_query",
-                    &executed_sql,
-                    &mut response,
-                )
-                .await?;
+                let mut response = match read {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if let Some(observed_scn) = observed_scn {
+                            append_query_read_audit(
+                                read_audit,
+                                "oracle_query",
+                                &executed_sql,
+                                observed_scn,
+                                AuditOutcome::Failed,
+                                None,
+                            )?;
+                        }
+                        return Err(DbError::into_envelope(error));
+                    }
+                };
+                if let Some(observed_scn) = observed_scn {
+                    append_query_read_audit(
+                        read_audit,
+                        "oracle_query",
+                        &executed_sql,
+                        observed_scn,
+                        AuditOutcome::Succeeded,
+                        Some(&mut response),
+                    )?;
+                }
                 let response = serde_json::to_value(response).unwrap_or(Value::Null);
                 Ok(reseal_query_cursor(
                     response,
@@ -10479,6 +11598,7 @@ impl OracleDispatcher {
                 let DispatcherState {
                     conn,
                     read_only_backstop,
+                    checkpoints,
                     ..
                 } = &mut *state;
                 enforce_query_cost_gate(
@@ -10486,6 +11606,7 @@ impl OracleDispatcher {
                         cx,
                         conn: conn.as_ref(),
                         read_only_backstop,
+                        checkpoints,
                         session: &scoped_level,
                         request_budget: &request_budget,
                         quarantine: &self.quarantine,
@@ -10497,11 +11618,15 @@ impl OracleDispatcher {
                 .await?;
                 if prepared.as_of.is_some() {
                     read_only_backstop.disarm();
+                    // Arc I: the flashback wrapper rolls the session back, so
+                    // Oracle erased every savepoint with it.
+                    checkpoints.clear();
                 } else {
                     ensure_read_only_backstop_bounded(
                         cx,
                         conn.as_ref(),
                         read_only_backstop,
+                        checkpoints,
                         &scoped_level,
                         &request_budget,
                         &self.quarantine,
