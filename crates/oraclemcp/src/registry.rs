@@ -15,12 +15,13 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 52] = [
+pub const TOOL_NAMES: [&str; 53] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
     "oracle_set_session_level",
     "oracle_query",
+    "oracle_diff",
     "oracle_preview_sql",
     "oracle_execute",
     "oracle_compile_object",
@@ -206,6 +207,60 @@ fn query_output_schema() -> Value {
     })
 }
 
+fn diff_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "columns": {
+                "type": "array",
+                "description": "Column names in the compared query shape.",
+                "items": { "type": "string" }
+            },
+            "keyed": {
+                "type": "boolean",
+                "description": "True when rows were aligned by explicit/inferred key columns and changed[] is meaningful."
+            },
+            "key_columns": {
+                "type": "array",
+                "description": "Key columns used for row alignment. Empty means keyless multiset diff.",
+                "items": { "type": "string" }
+            },
+            "added": {
+                "type": "array",
+                "description": "Rows present at scn_b but not at scn_a.",
+                "items": row_object_schema()
+            },
+            "removed": {
+                "type": "array",
+                "description": "Rows present at scn_a but not at scn_b.",
+                "items": row_object_schema()
+            },
+            "changed": {
+                "type": "array",
+                "description": "Key-aligned row changes; empty for keyless diffs.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "key": row_object_schema(),
+                        "before": row_object_schema(),
+                        "after": row_object_schema()
+                    },
+                    "required": ["key", "before", "after"],
+                    "additionalProperties": false
+                }
+            },
+            "row_count_a": { "type": "integer", "minimum": 0 },
+            "row_count_b": { "type": "integer", "minimum": 0 },
+            "truncated": {
+                "type": "boolean",
+                "description": "True when either flashback page hit a row/byte cap before all rows were compared."
+            }
+        },
+        "required": ["columns", "keyed", "key_columns", "added", "removed", "changed", "row_count_a", "row_count_b", "truncated"],
+        "additionalProperties": false
+    })
+}
+
 fn explain_plan_output_schema() -> Value {
     json!({
         "type": "object",
@@ -378,6 +433,52 @@ pub fn tool_registry() -> ToolRegistry {
             &["sql"],
         ))
         .with_output_schema(query_output_schema()),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_diff",
+            ToolTier::FoundationLiveDb,
+            "Diff one proven read-only SELECT across two Oracle SCNs.",
+        )
+        .with_input_schema(object_schema(
+            props_with(
+                json!({
+                    "sql": { "type": "string", "description": "A single read-only SELECT/WITH. The same proven SQL is run twice through DBMS_FLASHBACK at scn_a and scn_b." },
+                    "binds": {
+                        "type": "array",
+                        "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
+                        "items": {}
+                    },
+                    "scn_a": { "type": "integer", "minimum": 1, "description": "Earlier or baseline system change number." },
+                    "scn_b": { "type": "integer", "minimum": 1, "description": "Later or comparison system change number." },
+                    "key": {
+                        "type": "array",
+                        "description": "Optional result-column names used to align rows and report changed[]. If omitted, oracle_diff infers a primary key only for a single resolved local table; otherwise it falls back to keyless add/remove.",
+                        "items": { "type": "string" }
+                    },
+                    "keys": {
+                        "type": "array",
+                        "description": "Alias for key.",
+                        "items": { "type": "string" }
+                    },
+                    "key_columns": {
+                        "type": "array",
+                        "description": "Alias for key.",
+                        "items": { "type": "string" }
+                    },
+                    "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows compared from each SCN page (default 200, hard cap 5000)." },
+                    "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 26214400, "description": "Maximum compact JSON bytes per SCN page (default 10485760, hard cap 26214400)." },
+                    "max_col_width": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Compatibility text cap for ordinary text/raw columns. Truncated values are returned as { value, truncated, char_length }." },
+                    "max_lob_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum CLOB characters to inline per cell (default 32768)." },
+                    "max_blob_bytes": { "type": "integer", "minimum": 1, "maximum": 5242880, "description": "Maximum BLOB bytes to inline per cell as base64 (default 1048576)." },
+                    "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible. Default false preserves Oracle NUMBER losslessly as strings." }
+                }),
+                &[timeout_seconds_prop()],
+            ),
+            &["sql", "scn_a", "scn_b"],
+        ))
+        .with_output_schema(diff_output_schema()),
     );
 
     registry.register(
@@ -1475,6 +1576,30 @@ mod tests {
         assert!(
             tool("oracle_execute").output_schema.is_none(),
             "oracle_execute must not inherit the explain-plan output schema"
+        );
+
+        let diff = tool("oracle_diff")
+            .output_schema
+            .as_ref()
+            .expect("oracle_diff declares output_schema");
+        assert_eq!(
+            diff["required"],
+            json!([
+                "columns",
+                "keyed",
+                "key_columns",
+                "added",
+                "removed",
+                "changed",
+                "row_count_a",
+                "row_count_b",
+                "truncated"
+            ])
+        );
+        assert_eq!(diff["properties"]["changed"]["type"], json!("array"));
+        assert_eq!(
+            diff["properties"]["changed"]["items"]["required"],
+            json!(["key", "before", "after"])
         );
     }
 

@@ -94,6 +94,37 @@ pub(super) struct AsOfArg {
 }
 
 #[derive(Deserialize)]
+pub(super) struct DiffArgs {
+    /// A normal SELECT/WITH statement. It is classified once as a read before
+    /// either flashback read runs; SCNs are bound through DBMS_FLASHBACK, not
+    /// interpolated into this SQL.
+    pub(super) sql: String,
+    #[serde(default)]
+    pub(super) binds: Vec<Value>,
+    pub(super) scn_a: u64,
+    pub(super) scn_b: u64,
+    /// Optional key columns used to align rows and report `changed`. When empty,
+    /// the dispatcher attempts primary-key inference for one simple local table;
+    /// otherwise it falls back to keyless multiset add/remove.
+    #[serde(default, alias = "keys", alias = "key_columns")]
+    pub(super) key: Vec<String>,
+    #[serde(default)]
+    pub(super) max_rows: Option<usize>,
+    #[serde(default)]
+    pub(super) max_result_bytes: Option<usize>,
+    #[serde(default)]
+    pub(super) max_lob_chars: Option<usize>,
+    #[serde(default)]
+    pub(super) max_blob_bytes: Option<usize>,
+    #[serde(default)]
+    pub(super) max_col_width: Option<usize>,
+    #[serde(default)]
+    pub(super) numbers_as_float: Option<bool>,
+    #[serde(default)]
+    pub(super) timeout_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct PreviewSqlArgs {
     pub(super) sql: String,
 }

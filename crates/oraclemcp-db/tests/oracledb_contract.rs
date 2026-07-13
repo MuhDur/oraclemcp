@@ -1258,4 +1258,157 @@ mod live {
             assert_eq!(after[0].text("N"), Some("42"));
         });
     }
+
+    #[test]
+    fn live_flashback_diff_synthetic_table_across_scns() {
+        use oraclemcp_db::{
+            AsOf, QueryCaps, diff_query_responses, primary_key_columns, read_query_as_of,
+        };
+        run_with_cx(|cx| async move {
+            let Some(conn) =
+                connect_or_skip(&cx, "live_flashback_diff_synthetic_table_across_scns").await
+            else {
+                return;
+            };
+            let table = format!("ORAMCP_DF_{}", std::process::id());
+            let cleanup_sql = format!("DROP TABLE {table} PURGE");
+            let owner = conn
+                .describe(&cx)
+                .await
+                .ok()
+                .and_then(|info| info.current_schema)
+                .unwrap_or_else(|| {
+                    std::env::var("ORACLEMCP_TEST_USER")
+                        .unwrap_or_else(|_| "system".to_owned())
+                        .to_ascii_uppercase()
+                });
+
+            if let Err(e) = conn
+                .execute(
+                    &cx,
+                    &format!("CREATE TABLE {table} (id NUMBER PRIMARY KEY, val VARCHAR2(30))"),
+                    &[],
+                )
+                .await
+            {
+                eprintln!("[live-xe] SKIP oracle_diff live setup: cannot create table ({e})");
+                return;
+            }
+
+            let test_result: Result<(), DbError> = async {
+                conn.execute(
+                    &cx,
+                    &format!("INSERT INTO {table} (id, val) VALUES (:1, :2)"),
+                    &[OracleBind::I64(1), OracleBind::from("old")],
+                )
+                .await?;
+                conn.execute(
+                    &cx,
+                    &format!("INSERT INTO {table} (id, val) VALUES (:1, :2)"),
+                    &[OracleBind::I64(2), OracleBind::from("gone")],
+                )
+                .await?;
+                conn.commit(&cx).await?;
+
+                let scn_a = conn
+                    .query_rows(
+                        &cx,
+                        "SELECT dbms_flashback.get_system_change_number AS scn FROM dual",
+                        &[],
+                    )
+                    .await?
+                    .first()
+                    .and_then(|row| row.text("SCN"))
+                    .and_then(|scn| scn.parse::<u64>().ok())
+                    .expect("numeric scn_a");
+
+                conn.execute(
+                    &cx,
+                    &format!("UPDATE {table} SET val = :1 WHERE id = :2"),
+                    &[OracleBind::from("new"), OracleBind::I64(1)],
+                )
+                .await?;
+                conn.execute(
+                    &cx,
+                    &format!("DELETE FROM {table} WHERE id = :1"),
+                    &[OracleBind::I64(2)],
+                )
+                .await?;
+                conn.execute(
+                    &cx,
+                    &format!("INSERT INTO {table} (id, val) VALUES (:1, :2)"),
+                    &[OracleBind::I64(3), OracleBind::from("added")],
+                )
+                .await?;
+                conn.commit(&cx).await?;
+
+                let scn_b = conn
+                    .query_rows(
+                        &cx,
+                        "SELECT dbms_flashback.get_system_change_number AS scn FROM dual",
+                        &[],
+                    )
+                    .await?
+                    .first()
+                    .and_then(|row| row.text("SCN"))
+                    .and_then(|scn| scn.parse::<u64>().ok())
+                    .expect("numeric scn_b");
+
+                let key = primary_key_columns(&cx, &conn, &owner, &table).await?;
+                assert_eq!(key, vec!["ID".to_owned()]);
+
+                let sql = format!("SELECT id, val FROM {table} ORDER BY id");
+                let before = read_query_as_of(
+                    &cx,
+                    &conn,
+                    &sql,
+                    &[],
+                    QueryCaps::default(),
+                    0,
+                    &SerializeOptions::default(),
+                    &AsOf::Scn(scn_a),
+                )
+                .await?;
+                let after = read_query_as_of(
+                    &cx,
+                    &conn,
+                    &sql,
+                    &[],
+                    QueryCaps::default(),
+                    0,
+                    &SerializeOptions::default(),
+                    &AsOf::Scn(scn_b),
+                )
+                .await?;
+                let diff = diff_query_responses(&before, &after, &key)
+                    .map_err(|e| DbError::Query(e.to_string()))?;
+
+                assert!(diff.keyed);
+                assert_eq!(diff.changed.len(), 1);
+                assert_eq!(diff.changed[0].key, json!({ "ID": "1" }));
+                assert_eq!(diff.removed, vec![json!({ "ID": "2", "VAL": "gone" })]);
+                assert_eq!(diff.added, vec![json!({ "ID": "3", "VAL": "added" })]);
+                Ok(())
+            }
+            .await;
+
+            let _ = conn.execute(&cx, &cleanup_sql, &[]).await;
+            match test_result {
+                Ok(()) => {}
+                Err(e) => {
+                    let message = e.to_string();
+                    if message.contains("ORA-01031")
+                        || message.contains("ORA-08180")
+                        || message.contains("FLASHBACK")
+                    {
+                        eprintln!(
+                            "[live-xe] SKIP oracle_diff flashback live check (privilege/retention): {e}"
+                        );
+                        return;
+                    }
+                    panic!("oracle_diff live check failed: {e}");
+                }
+            }
+        });
+    }
 }

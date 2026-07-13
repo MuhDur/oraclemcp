@@ -1262,6 +1262,7 @@ fn args_for(name: &str) -> Value {
         "oracle_switch_profile" => json!({ "profile": "other" }),
         "oracle_set_session_level" => json!({ "action": "status" }),
         "oracle_query" => json!({ "sql": "SELECT 1 FROM dual" }),
+        "oracle_diff" => json!({ "sql": "SELECT 1 AS id FROM dual", "scn_a": 1, "scn_b": 2 }),
         "oracle_list_schemas" => json!({ "name_like": "APP%", "limit": 10 }),
         "oracle_schema_inspect" => json!({ "owner": "HR" }),
         "oracle_search_objects" => json!({ "owner": "HR", "detail_level": "names" }),

@@ -10,10 +10,14 @@
 //! identifier positions (schema/table/type in `DBMS_METADATA`, the sampled
 //! table) are validated as simple identifiers, never interpolated raw.
 
+use std::collections::{BTreeMap, VecDeque};
+use std::fmt;
+
 use asupersync::Cx;
 
 use crate::connection::OracleConnection;
 use crate::error::DbError;
+use crate::query::QueryResponse;
 use crate::types::{OracleBind, OracleCell, OracleRow};
 use serde::{Deserialize, Serialize};
 
@@ -1124,6 +1128,262 @@ pub async fn sample_rows(
         .await
 }
 
+/// Ordered primary-key column names for one visible table, or an empty list
+/// when the relation has no primary key visible to the current user. This is a
+/// dictionary read only; owner/table are bound and normalized before lookup.
+pub async fn primary_key_columns(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: &str,
+    table: &str,
+) -> Result<Vec<String>, DbError> {
+    let rows = conn
+        .query_rows(
+            cx,
+            "SELECT cc.column_name \
+             FROM all_constraints c \
+             JOIN all_cons_columns cc \
+               ON cc.owner = c.owner \
+              AND cc.constraint_name = c.constraint_name \
+              AND cc.table_name = c.table_name \
+             WHERE c.owner = :1 \
+               AND c.table_name = :2 \
+               AND c.constraint_type = 'P' \
+             ORDER BY cc.position",
+            &[
+                OracleBind::String(owner.to_ascii_uppercase()),
+                OracleBind::String(table.to_ascii_uppercase()),
+            ],
+        )
+        .await?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.text("COLUMN_NAME").map(str::to_owned))
+        .collect())
+}
+
+/// Semantic diff between two serialized flashback query pages. With key
+/// columns, rows are aligned by that key and value changes are reported as
+/// `changed`; without key columns, rows are treated as a multiset and only
+/// add/remove can be proven.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryDiff {
+    /// Column names in the compared query shape.
+    pub columns: Vec<String>,
+    /// Whether `changed` was computed by row key.
+    pub keyed: bool,
+    /// Key columns used for row alignment, in caller/primary-key order.
+    pub key_columns: Vec<String>,
+    /// Rows present at `scn_b` but not at `scn_a`.
+    pub added: Vec<serde_json::Value>,
+    /// Rows present at `scn_a` but not at `scn_b`.
+    pub removed: Vec<serde_json::Value>,
+    /// Key-aligned rows whose non-key payload changed between the two SCNs.
+    pub changed: Vec<QueryDiffChange>,
+    /// Rows compared from the first page.
+    pub row_count_a: usize,
+    /// Rows compared from the second page.
+    pub row_count_b: usize,
+    /// True when either input page was truncated before all rows were compared.
+    pub truncated: bool,
+}
+
+/// One key-aligned row whose payload changed between the compared SCNs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryDiffChange {
+    /// The key object that aligned the before/after rows.
+    pub key: serde_json::Value,
+    /// Row at the first SCN.
+    pub before: serde_json::Value,
+    /// Row at the second SCN.
+    pub after: serde_json::Value,
+}
+
+/// Why a serialized-row diff could not be computed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueryDiffError {
+    /// A caller-supplied or inferred key column was not present in every row.
+    MissingKeyColumn {
+        /// Missing result-column name.
+        column: String,
+    },
+}
+
+impl fmt::Display for QueryDiffError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            QueryDiffError::MissingKeyColumn { column } => {
+                write!(f, "diff key column `{column}` is not present in every row")
+            }
+        }
+    }
+}
+
+impl std::error::Error for QueryDiffError {}
+
+#[must_use]
+fn response_columns(a: &QueryResponse, b: &QueryResponse) -> Vec<String> {
+    if !b.columns.is_empty() {
+        b.columns.clone()
+    } else {
+        a.columns.clone()
+    }
+}
+
+fn row_cell<'a>(row: &'a serde_json::Value, column: &str) -> Option<&'a serde_json::Value> {
+    let object = row.as_object()?;
+    object.get(column).or_else(|| {
+        object
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(column))
+            .map(|(_, v)| v)
+    })
+}
+
+fn stable_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "null".to_owned())
+}
+
+fn row_signature(row: &serde_json::Value, columns: &[String]) -> String {
+    let projection = serde_json::Value::Array(
+        columns
+            .iter()
+            .map(|column| {
+                serde_json::json!([
+                    column,
+                    row_cell(row, column)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null)
+                ])
+            })
+            .collect(),
+    );
+    stable_json(&projection)
+}
+
+fn key_value(
+    row: &serde_json::Value,
+    key_columns: &[String],
+) -> Result<serde_json::Value, QueryDiffError> {
+    let mut key = serde_json::Map::new();
+    for column in key_columns {
+        let value = row
+            .as_object()
+            .and_then(|_| row_cell(row, column))
+            .cloned()
+            .ok_or_else(|| QueryDiffError::MissingKeyColumn {
+                column: column.clone(),
+            })?;
+        key.insert(column.clone(), value);
+    }
+    Ok(serde_json::Value::Object(key))
+}
+
+fn push_multiset_row(
+    rows: &mut BTreeMap<String, VecDeque<serde_json::Value>>,
+    row: &serde_json::Value,
+    columns: &[String],
+) {
+    rows.entry(row_signature(row, columns))
+        .or_default()
+        .push_back(row.clone());
+}
+
+fn push_keyed_row(
+    rows: &mut BTreeMap<String, VecDeque<(serde_json::Value, serde_json::Value)>>,
+    row: &serde_json::Value,
+    key_columns: &[String],
+) -> Result<(), QueryDiffError> {
+    let key = key_value(row, key_columns)?;
+    rows.entry(stable_json(&key))
+        .or_default()
+        .push_back((key, row.clone()));
+    Ok(())
+}
+
+/// Diff two serialized query responses. Keyed mode aligns by `key_columns` and
+/// emits row-level changes; keyless mode treats each side as a multiset of full
+/// rows and emits add/remove only.
+pub fn diff_query_responses(
+    a: &QueryResponse,
+    b: &QueryResponse,
+    key_columns: &[String],
+) -> Result<QueryDiff, QueryDiffError> {
+    let columns = response_columns(a, b);
+    let keyed = !key_columns.is_empty();
+    if !keyed {
+        let mut after = BTreeMap::<String, VecDeque<serde_json::Value>>::new();
+        for row in &b.rows {
+            push_multiset_row(&mut after, row, &columns);
+        }
+
+        let mut removed = Vec::new();
+        for row in &a.rows {
+            let signature = row_signature(row, &columns);
+            match after.get_mut(&signature).and_then(VecDeque::pop_front) {
+                Some(_) => {}
+                None => removed.push(row.clone()),
+            }
+        }
+        let added = after.into_values().flat_map(VecDeque::into_iter).collect();
+        return Ok(QueryDiff {
+            columns,
+            keyed: false,
+            key_columns: Vec::new(),
+            added,
+            removed,
+            changed: Vec::new(),
+            row_count_a: a.row_count,
+            row_count_b: b.row_count,
+            truncated: a.truncated || b.truncated,
+        });
+    }
+
+    let mut after = BTreeMap::<String, VecDeque<(serde_json::Value, serde_json::Value)>>::new();
+    for row in &b.rows {
+        push_keyed_row(&mut after, row, key_columns)?;
+    }
+
+    let mut removed = Vec::new();
+    let mut changed = Vec::new();
+    for before in &a.rows {
+        let key = key_value(before, key_columns)?;
+        match after
+            .get_mut(&stable_json(&key))
+            .and_then(VecDeque::pop_front)
+        {
+            Some((_, after_row))
+                if row_signature(before, &columns) != row_signature(&after_row, &columns) =>
+            {
+                changed.push(QueryDiffChange {
+                    key,
+                    before: before.clone(),
+                    after: after_row,
+                });
+            }
+            Some(_) => {}
+            None => removed.push(before.clone()),
+        }
+    }
+    let added = after
+        .into_values()
+        .flat_map(VecDeque::into_iter)
+        .map(|(_, row)| row)
+        .collect();
+
+    Ok(QueryDiff {
+        columns,
+        keyed: true,
+        key_columns: key_columns.to_vec(),
+        added,
+        removed,
+        changed,
+        row_count_a: a.row_count,
+        row_count_b: b.row_count,
+        truncated: a.truncated || b.truncated,
+    })
+}
+
 /// Read one CLOB/NCLOB/text value by an equality key, capped by characters.
 ///
 /// The identifiers cannot be bound in Oracle SQL, so each identifier is
@@ -1450,6 +1710,113 @@ mod tests {
         async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
+    }
+
+    fn query_response(rows: Vec<serde_json::Value>) -> QueryResponse {
+        QueryResponse {
+            columns: vec!["ID".to_owned(), "NAME".to_owned(), "QTY".to_owned()],
+            row_count: rows.len(),
+            rows,
+            truncated: false,
+            next_cursor: None,
+            total_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn diff_query_responses_aligns_by_key_and_reports_changes() {
+        let before = query_response(vec![
+            serde_json::json!({ "ID": "1", "NAME": "old", "QTY": "10" }),
+            serde_json::json!({ "ID": "2", "NAME": "gone", "QTY": "20" }),
+        ]);
+        let after = query_response(vec![
+            serde_json::json!({ "ID": "1", "NAME": "new", "QTY": "10" }),
+            serde_json::json!({ "ID": "3", "NAME": "added", "QTY": "30" }),
+        ]);
+
+        let diff = diff_query_responses(&before, &after, &["ID".to_owned()]).expect("diff");
+
+        assert!(diff.keyed);
+        assert_eq!(diff.key_columns, vec!["ID"]);
+        assert_eq!(diff.changed.len(), 1);
+        assert_eq!(diff.changed[0].key, serde_json::json!({ "ID": "1" }));
+        assert_eq!(
+            diff.removed,
+            vec![serde_json::json!({ "ID": "2", "NAME": "gone", "QTY": "20" })]
+        );
+        assert_eq!(
+            diff.added,
+            vec![serde_json::json!({ "ID": "3", "NAME": "added", "QTY": "30" })]
+        );
+    }
+
+    #[test]
+    fn diff_query_responses_without_key_reports_multiset_add_remove_only() {
+        let before = query_response(vec![
+            serde_json::json!({ "ID": "1", "NAME": "same", "QTY": "10" }),
+            serde_json::json!({ "ID": "2", "NAME": "old", "QTY": "20" }),
+        ]);
+        let after = query_response(vec![
+            serde_json::json!({ "ID": "1", "NAME": "same", "QTY": "10" }),
+            serde_json::json!({ "ID": "2", "NAME": "new", "QTY": "20" }),
+        ]);
+
+        let diff = diff_query_responses(&before, &after, &[]).expect("diff");
+
+        assert!(!diff.keyed);
+        assert!(diff.changed.is_empty());
+        assert_eq!(
+            diff.removed,
+            vec![serde_json::json!({ "ID": "2", "NAME": "old", "QTY": "20" })]
+        );
+        assert_eq!(
+            diff.added,
+            vec![serde_json::json!({ "ID": "2", "NAME": "new", "QTY": "20" })]
+        );
+    }
+
+    #[test]
+    fn diff_query_responses_refuses_missing_key_column() {
+        let before = query_response(vec![serde_json::json!({ "ID": "1" })]);
+        let after = query_response(vec![serde_json::json!({ "ID": "1" })]);
+
+        let err = diff_query_responses(&before, &after, &["MISSING".to_owned()])
+            .expect_err("missing key");
+
+        assert_eq!(
+            err,
+            QueryDiffError::MissingKeyColumn {
+                column: "MISSING".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn primary_key_columns_binds_owner_and_table() {
+        let conn = CaptureMock::default();
+        let conn_ref = &conn;
+        run_with_cx(|cx| async move {
+            primary_key_columns(&cx, conn_ref, "app", "orders")
+                .await
+                .expect("pk lookup")
+        });
+        let (sql, binds) = conn
+            .calls
+            .lock()
+            .expect("calls")
+            .first()
+            .cloned()
+            .expect("one call");
+
+        assert!(sql.contains("all_constraints"));
+        assert!(sql.contains("all_cons_columns"));
+        assert_eq!(
+            binds,
+            vec![
+                OracleBind::String("APP".to_owned()),
+                OracleBind::String("ORDERS".to_owned()),
+            ]
+        );
     }
 
     struct SourceMock;

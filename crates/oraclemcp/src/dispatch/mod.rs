@@ -41,11 +41,12 @@ use oraclemcp_db::{
     OracleConnectionInfo, OracleRow, PlanCostEstimate, QuarantineOutcome, QueryCaps,
     QueryRowStream, QueryRowStreamStart, SerializeOptions, StructuredDecodeCaps, compile_errors,
     compile_object_statements, describe_columns, describe_constraints, describe_index,
-    describe_trigger, describe_view, execute_immediate_audit, explain_plan,
+    describe_trigger, describe_view, diff_query_responses, execute_immediate_audit, explain_plan,
     find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects, list_schemas,
-    paginated_sql, plan_cost_estimate, plscope_identifiers, plscope_statements, probe_dependents,
-    read_lob, read_query, read_query_as_of, read_query_named, resolved_relations_read_purity,
-    sample_rows, search_objects, search_source, serialize_row,
+    paginated_sql, plan_cost_estimate, plscope_identifiers, plscope_statements,
+    primary_key_columns, probe_dependents, read_lob, read_query, read_query_as_of,
+    read_query_named, resolved_relations_read_purity, sample_rows, search_objects, search_source,
+    serialize_row,
 };
 use oraclemcp_error::{
     ErrorClass, ErrorEnvelope, OptimizerPlanRow, QueryCostRefusal, ReasonCategory, StructuredReason,
@@ -53,7 +54,8 @@ use oraclemcp_error::{
 use oraclemcp_guard::{
     CatalogObjectKind, CatalogResolver, Classifier, ClassifierConfig, DangerLevel, EscalationError,
     ExecGrantBinding, ExecGrantError, ExecGrantStore, GuardDecision, LevelDecision, ObjectRef,
-    OperatingLevel, Purity, Resolution, SessionLevelState, SideEffectOracle, semantic_read_plan,
+    OperatingLevel, Purity, Resolution, ResolvedObject, SessionLevelState, SideEffectOracle,
+    semantic_read_plan,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -2029,6 +2031,20 @@ fn query_caps_from_args(args: &QueryArgs) -> QueryCaps {
     }
 }
 
+fn diff_query_caps_from_args(args: &DiffArgs) -> QueryCaps {
+    let defaults = QueryCaps::default();
+    QueryCaps {
+        max_rows: args
+            .max_rows
+            .unwrap_or(defaults.max_rows)
+            .clamp(1, MAX_QUERY_MAX_ROWS),
+        max_result_bytes: args
+            .max_result_bytes
+            .unwrap_or(defaults.max_result_bytes)
+            .clamp(1, MAX_QUERY_RESULT_BYTES),
+    }
+}
+
 fn effective_query_cost_limit(
     profile_max_query_cost: Option<u64>,
     per_call_max_query_cost: Option<u64>,
@@ -2325,6 +2341,23 @@ fn query_serialize_options_from_args(args: &QueryArgs) -> SerializeOptions {
             .unwrap_or(defaults.max_blob_bytes)
             .clamp(1, MAX_QUERY_BLOB_BYTES),
         structured_decode_caps: query_structured_decode_caps_from_args(args),
+        ..defaults
+    }
+}
+
+fn diff_serialize_options_from_args(args: &DiffArgs) -> SerializeOptions {
+    let defaults = SerializeOptions::default();
+    SerializeOptions {
+        numbers_as_float: args.numbers_as_float.unwrap_or(defaults.numbers_as_float),
+        max_text_chars: args.max_col_width.map(|n| n.clamp(1, MAX_QUERY_TEXT_CHARS)),
+        max_lob_chars: args
+            .max_lob_chars
+            .unwrap_or(defaults.max_lob_chars)
+            .clamp(1, MAX_QUERY_TEXT_CHARS),
+        max_blob_bytes: args
+            .max_blob_bytes
+            .unwrap_or(defaults.max_blob_bytes)
+            .clamp(1, MAX_QUERY_BLOB_BYTES),
         ..defaults
     }
 }
@@ -3254,6 +3287,17 @@ async fn ensure_resolved_read_only(
     cache: &OracleCatalogResolverCache,
     sql: &str,
 ) -> Result<(), ErrorEnvelope> {
+    resolve_read_only_relations(cx, conn, cache, sql)
+        .await
+        .map(|_| ())
+}
+
+async fn resolve_read_only_relations(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    sql: &str,
+) -> Result<Vec<ResolvedObject>, ErrorEnvelope> {
     ensure_read_only(sql)?;
     let plan = semantic_read_plan(sql)
         .ok_or_else(|| unresolved_semantic_read("query scope is not exactly representable"))?;
@@ -3300,7 +3344,44 @@ async fn ensure_resolved_read_only(
             .with_oracle(Arc::new(ResolvedStatementPurity(purity)))
             .with_statement_unknown_guarded()
             .classify(sql);
-    ensure_read_only_decision(decision).map_err(|error| attach_parameterization_hint(error, sql))
+    ensure_read_only_decision(decision)
+        .map_err(|error| attach_parameterization_hint(error, sql))?;
+    Ok(relations)
+}
+
+fn normalize_diff_key_columns(raw: Vec<String>) -> Result<Vec<String>, ErrorEnvelope> {
+    let mut columns = Vec::<String>::new();
+    for column in raw {
+        let column = column.trim();
+        if column.is_empty() {
+            return Err(invalid_args(
+                "oracle_diff key columns must be non-empty strings",
+            ));
+        }
+        if !columns
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(column))
+        {
+            columns.push(column.to_owned());
+        }
+    }
+    Ok(columns)
+}
+
+async fn inferred_diff_key_columns(
+    cx: &Cx,
+    metadata_conn: &dyn OracleConnection,
+    relations: &[ResolvedObject],
+) -> Result<Vec<String>, ErrorEnvelope> {
+    let [relation] = relations else {
+        return Ok(Vec::new());
+    };
+    if relation.kind != CatalogObjectKind::Table || relation.db_link.is_some() {
+        return Ok(Vec::new());
+    }
+    primary_key_columns(cx, metadata_conn, &relation.owner, &relation.name)
+        .await
+        .map_err(DbError::into_envelope)
 }
 
 /// K7: if a refused statement carries inline literals at bind-safe positions,
@@ -9042,6 +9123,90 @@ impl OracleDispatcher {
                     }
                 }
                 Ok(value)
+            }
+            "oracle_diff" => {
+                let a: DiffArgs = parse_args(name, args)?;
+                let timeout_seconds = a.timeout_seconds;
+                let active_profile = state.active_profile.clone();
+                with_call_timeout(
+                    cx,
+                    conn,
+                    &self.quarantine,
+                    final_budget.clone(),
+                    timeout_seconds,
+                    CompletionPolicy::EnforceDeadlineAfterBody,
+                    || async {
+                        if a.scn_a == 0 || a.scn_b == 0 {
+                            return Err(invalid_args("oracle_diff scn_a and scn_b must be >= 1"));
+                        }
+                        let read_cx = narrow_to_read_path(cx);
+                        dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.diff.before")?;
+                        let binds = a
+                            .binds
+                            .iter()
+                            .map(json_to_bind)
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let explicit_key = normalize_diff_key_columns(a.key.clone())?;
+                        let executed_sql = with_audit_marker(
+                            &a.sql,
+                            active_profile.as_deref(),
+                            "oracle_diff",
+                        );
+                        let relations = resolve_read_only_relations(
+                            cx,
+                            &observed_conn,
+                            &state.catalog_cache,
+                            &executed_sql,
+                        )
+                        .await?;
+                        let key_columns = if explicit_key.is_empty() {
+                            inferred_diff_key_columns(cx, &guarded_metadata_conn, &relations)
+                                .await?
+                        } else {
+                            explicit_key
+                        };
+                        let caps = diff_query_caps_from_args(&a);
+                        let serialize_opts = diff_serialize_options_from_args(&a);
+                        let read_conn = ReadUncertaintyConn {
+                            inner: conn,
+                            quarantine: Some(&self.quarantine),
+                        };
+                        let before = read_query_as_of(
+                            cx,
+                            &read_conn,
+                            &executed_sql,
+                            &binds,
+                            caps,
+                            0,
+                            &serialize_opts,
+                            &AsOf::Scn(a.scn_a),
+                        )
+                        .await
+                        .map_err(DbError::into_envelope)?;
+                        let after = read_query_as_of(
+                            cx,
+                            &read_conn,
+                            &executed_sql,
+                            &binds,
+                            caps,
+                            0,
+                            &serialize_opts,
+                            &AsOf::Scn(a.scn_b),
+                        )
+                        .await
+                        .map_err(DbError::into_envelope)?;
+                        let diff = diff_query_responses(&before, &after, &key_columns)
+                            .map_err(|err| invalid_args(err.to_string()))?;
+                        dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.diff.after")?;
+                        serde_json::to_value(diff).map_err(|err| {
+                            ErrorEnvelope::new(
+                                ErrorClass::Internal,
+                                format!("oracle_diff serialization failed: {err}"),
+                            )
+                        })
+                    },
+                )
+                .await
             }
             "oracle_schema_inspect" => {
                 let a: SchemaInspectArgs = parse_args(name, args)?;

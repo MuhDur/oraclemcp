@@ -399,6 +399,318 @@
               "openWorldHint": false,
               "readOnlyHint": true
             },
+            "description": "Diff one proven read-only SELECT across two Oracle SCNs.",
+            "inputSchema": {
+              "additionalProperties": false,
+              "properties": {
+                "binds": {
+                  "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
+                  "items": {},
+                  "type": "array"
+                },
+                "key": {
+                  "description": "Optional result-column names used to align rows and report changed[]. If omitted, oracle_diff infers a primary key only for a single resolved local table; otherwise it falls back to keyless add/remove.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "key_columns": {
+                  "description": "Alias for key.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "keys": {
+                  "description": "Alias for key.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "max_blob_bytes": {
+                  "description": "Maximum BLOB bytes to inline per cell as base64 (default 1048576).",
+                  "maximum": 5242880,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_col_width": {
+                  "description": "Compatibility text cap for ordinary text/raw columns. Truncated values are returned as { value, truncated, char_length }.",
+                  "maximum": 1000000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_lob_chars": {
+                  "description": "Maximum CLOB characters to inline per cell (default 32768).",
+                  "maximum": 1000000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_result_bytes": {
+                  "description": "Maximum compact JSON bytes per SCN page (default 10485760, hard cap 26214400).",
+                  "maximum": 26214400,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_rows": {
+                  "description": "Maximum rows compared from each SCN page (default 200, hard cap 5000).",
+                  "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "numbers_as_float": {
+                  "description": "Emit numeric values as JSON numbers where possible. Default false preserves Oracle NUMBER losslessly as strings.",
+                  "type": "boolean"
+                },
+                "scn_a": {
+                  "description": "Earlier or baseline system change number.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "scn_b": {
+                  "description": "Later or comparison system change number.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "sql": {
+                  "description": "A single read-only SELECT/WITH. The same proven SQL is run twice through DBMS_FLASHBACK at scn_a and scn_b.",
+                  "type": "string"
+                },
+                "timeout_seconds": {
+                  "description": "Tightens the profile's total request deadline and each Oracle round-trip cap for this tool call. It cannot widen the profile ceiling.",
+                  "maximum": 3600,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "sql",
+                "scn_a",
+                "scn_b"
+              ],
+              "type": "object"
+            },
+            "name": "oracle_diff",
+            "outputSchema": {
+              "additionalProperties": false,
+              "properties": {
+                "added": {
+                  "description": "Rows present at scn_b but not at scn_a.",
+                  "items": {
+                    "additionalProperties": {
+                      "description": "Serialized Oracle cell value. Oracle NUMBER values are strings by default for lossless precision; JSON numbers are used only for binary float/double or numbers_as_float=true.",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "additionalProperties": true,
+                          "type": "object"
+                        },
+                        {
+                          "items": {},
+                          "type": "array"
+                        }
+                      ]
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "changed": {
+                  "description": "Key-aligned row changes; empty for keyless diffs.",
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "after": {
+                        "additionalProperties": {
+                          "description": "Serialized Oracle cell value. Oracle NUMBER values are strings by default for lossless precision; JSON numbers are used only for binary float/double or numbers_as_float=true.",
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "additionalProperties": true,
+                              "type": "object"
+                            },
+                            {
+                              "items": {},
+                              "type": "array"
+                            }
+                          ]
+                        },
+                        "type": "object"
+                      },
+                      "before": {
+                        "additionalProperties": {
+                          "description": "Serialized Oracle cell value. Oracle NUMBER values are strings by default for lossless precision; JSON numbers are used only for binary float/double or numbers_as_float=true.",
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "additionalProperties": true,
+                              "type": "object"
+                            },
+                            {
+                              "items": {},
+                              "type": "array"
+                            }
+                          ]
+                        },
+                        "type": "object"
+                      },
+                      "key": {
+                        "additionalProperties": {
+                          "description": "Serialized Oracle cell value. Oracle NUMBER values are strings by default for lossless precision; JSON numbers are used only for binary float/double or numbers_as_float=true.",
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "additionalProperties": true,
+                              "type": "object"
+                            },
+                            {
+                              "items": {},
+                              "type": "array"
+                            }
+                          ]
+                        },
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "key",
+                      "before",
+                      "after"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "columns": {
+                  "description": "Column names in the compared query shape.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "key_columns": {
+                  "description": "Key columns used for row alignment. Empty means keyless multiset diff.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "keyed": {
+                  "description": "True when rows were aligned by explicit/inferred key columns and changed[] is meaningful.",
+                  "type": "boolean"
+                },
+                "removed": {
+                  "description": "Rows present at scn_a but not at scn_b.",
+                  "items": {
+                    "additionalProperties": {
+                      "description": "Serialized Oracle cell value. Oracle NUMBER values are strings by default for lossless precision; JSON numbers are used only for binary float/double or numbers_as_float=true.",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "additionalProperties": true,
+                          "type": "object"
+                        },
+                        {
+                          "items": {},
+                          "type": "array"
+                        }
+                      ]
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "row_count_a": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "row_count_b": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "truncated": {
+                  "description": "True when either flashback page hit a row/byte cap before all rows were compared.",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "columns",
+                "keyed",
+                "key_columns",
+                "added",
+                "removed",
+                "changed",
+                "row_count_a",
+                "row_count_b",
+                "truncated"
+              ],
+              "type": "object"
+            },
+            "title": "Oracle Diff"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "idempotentHint": true,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
             "description": "Classify a SQL statement and report whether it would pass the active profile/session gate without executing it.",
             "inputSchema": {
               "additionalProperties": false,
