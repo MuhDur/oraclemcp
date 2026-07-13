@@ -2689,9 +2689,42 @@ fn query_base_objects(query: &sqlparser::ast::Query) -> Vec<ObjectRef> {
             TableFactor::Derived { subquery, .. } => {
                 collect_query(subquery, objects, cte_aliases);
             }
-            // Table functions, UNNEST, JSON_TABLE, pivots, etc. name no base
-            // table (or are handled via the UDF/routine consult) — skip.
+            // A parenthesized join — `FROM (a JOIN b ON …)` — names its base
+            // tables through the `TableWithJoins` it wraps, and PIVOT / UNPIVOT /
+            // MATCH_RECOGNIZE name theirs through the factor they decorate. These
+            // fell into the `_` arm below, so the walk returned NO base objects —
+            // and an empty base-object list is read as `Purity::ProvenReadOnly` by
+            // `classify_statement`, which means the engine's `statement_purity`
+            // consult (the trigger / VPD `DBMS_RLS` walk) was never performed and
+            // the read was cleared as Safe without ever being asked about. The DML
+            // walk (`table_factor_carries_dml`) and the qualifier walk
+            // (`collect_factor_qualifiers`) already descend both shapes; this walk
+            // must too, or the strictest possible oracle cannot close the hole
+            // because it is never consulted.
+            TableFactor::NestedJoin {
+                table_with_joins, ..
+            } => {
+                collect_table_with_joins(table_with_joins, objects, cte_aliases);
+            }
+            TableFactor::Pivot { table, .. }
+            | TableFactor::Unpivot { table, .. }
+            | TableFactor::MatchRecognize { table, .. } => {
+                collect_factor(table, objects, cte_aliases);
+            }
+            // Table functions, UNNEST, JSON_TABLE, etc. name no base table (or are
+            // handled via the UDF/routine consult) — skip.
             _ => {}
+        }
+    }
+
+    fn collect_table_with_joins(
+        twj: &sqlparser::ast::TableWithJoins,
+        objects: &mut Vec<ObjectRef>,
+        cte_aliases: &HashSet<String>,
+    ) {
+        collect_factor(&twj.relation, objects, cte_aliases);
+        for join in &twj.joins {
+            collect_factor(&join.relation, objects, cte_aliases);
         }
     }
 
@@ -2703,10 +2736,7 @@ fn query_base_objects(query: &sqlparser::ast::Query) -> Vec<ObjectRef> {
         match body {
             SetExpr::Select(select) => {
                 for twj in &select.from {
-                    collect_factor(&twj.relation, objects, cte_aliases);
-                    for join in &twj.joins {
-                        collect_factor(&join.relation, objects, cte_aliases);
-                    }
+                    collect_table_with_joins(twj, objects, cte_aliases);
                 }
             }
             SetExpr::Query(q) => collect_query(q, objects, cte_aliases),
@@ -4095,6 +4125,30 @@ mod tests {
             DangerLevel::Guarded,
             "a qualified lookalike remains a user-defined routine candidate"
         );
+
+        // The model-position exemption is keyed to the FUNCTION, and a *qualified*
+        // lookalike is not the only lookalike. Dropping an identifier from the
+        // catalog-proof set is a fail-open — it is how a reference the classifier
+        // cannot resolve stops being asked about — so the exemption must belong to
+        // the real, unquoted, unqualified builtin and to nothing else.
+        for sql in [
+            // A user-defined function whose first argument merely looks like a model.
+            "SELECT FOO(LOCAL_ONNX_MODEL) FROM dual",
+            // A QUOTED "VECTOR_EMBEDDING" is a user object that happens to share the
+            // builtin's spelling, not the builtin.
+            "SELECT \"VECTOR_EMBEDDING\"(LOCAL_ONNX_MODEL) FROM dual",
+        ] {
+            let plan = semantic_read_plan(sql).expect("the query still has a semantic plan");
+            assert!(
+                plan.values.iter().any(|name| {
+                    name.parts.len() == 1
+                        && name.parts[0].text.eq_ignore_ascii_case("LOCAL_ONNX_MODEL")
+                }),
+                "only the real unquoted VECTOR_EMBEDDING makes its model argument \
+                 grammar; everywhere else it is an ordinary identifier that still \
+                 needs catalog proof: {sql}"
+            );
+        }
     }
 
     #[test]

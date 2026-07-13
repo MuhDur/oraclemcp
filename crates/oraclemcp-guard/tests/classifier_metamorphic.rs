@@ -942,3 +942,110 @@ fn planted_mutants_are_genuine_loosenings() {
         "MUT-BLOCKWRAP never loosened any corpus input — not a valid mutant"
     );
 }
+
+/// The **test oracle itself** must be able to tell two decisions apart.
+///
+/// Every relation above is asserted with `==` / `assert_eq!` over `GuardDecision`,
+/// which has a hand-written `PartialEq`. That makes the comparison a load-bearing
+/// part of the safety proof rather than a formality: an equality that answered
+/// "equal" too eagerly would not fail a single test in this file — it would
+/// quietly make all of them weaker, because a loosened verdict would still
+/// compare equal to the strict one it replaced.
+///
+/// So pin the contract from the other side: decisions that differ must NOT
+/// compare equal. `danger` alone is not identity — a classifier that matched on
+/// it and shrugged at the rest (the required level, the objects, the reason) is
+/// exactly the eager equality this guards against.
+#[test]
+fn two_decisions_that_differ_are_not_equal() {
+    let classifier = Classifier::default();
+
+    // Same danger, different required level: not equal. (Two SELECTs — or two
+    // DELETEs — would not do here: a decision carries no table list, so statements
+    // of the same class really are the same decision, and the certificate digest
+    // that separates them is deliberately outside the comparison. The level is the
+    // field with teeth, because it is what a session must step up to.)
+    let a = classifier.classify("DELETE FROM orders");
+    let b = classifier.classify("DROP TABLE orders");
+    assert_eq!(
+        a.danger, b.danger,
+        "a delete and a drop are both destructive — so `danger` alone cannot be identity"
+    );
+    assert_ne!(
+        a.required_level, b.required_level,
+        "but they demand different levels: ReadWrite vs Ddl"
+    );
+    assert_ne!(
+        a, b,
+        "so they are different decisions. An equality that stopped at `danger` would \
+         call a ReadWrite verdict equal to the Ddl one it replaced — and every \
+         assert_eq! in this file would stop being able to see the difference"
+    );
+
+    // And a decision is equal to itself — the rule is not vacuously "never equal".
+    assert_eq!(
+        classifier.classify("DELETE FROM orders"),
+        classifier.classify("DELETE FROM orders"),
+        "classification is deterministic: the same statement is the same decision"
+    );
+
+    // A read and a write are never the same decision.
+    assert_ne!(
+        classifier.classify("SELECT * FROM orders"),
+        classifier.classify("DELETE FROM orders"),
+        "a read and a destructive write must never compare equal"
+    );
+}
+
+/// The engine oracle must be consulted for EVERY base object, however the query
+/// spells it.
+///
+/// `query_base_objects` is what hands the `SideEffectOracle` the tables a
+/// statement reads — and `statement_purity` is where a real engine binding does
+/// its trigger / VPD (`DBMS_RLS`) walk. The failure mode is silent and total: a
+/// statement whose base objects the walker fails to COLLECT arrives at the oracle
+/// as an empty list, and an empty list is treated as `ProvenReadOnly` — the
+/// consult is skipped and the statement sails through as Safe. So a collection
+/// walker that misses one syntactic spelling is not a cosmetic bug; it is a hole
+/// the strictest possible oracle cannot close, because it is never asked.
+///
+/// MR3 asserts a stricter oracle never LOOSENS a verdict. This is the companion:
+/// a stricter oracle must actually be REACHED. Each spelling below puts the base
+/// table somewhere a different arm of the walker has to find it — a parenthesized
+/// body, a set operation over parenthesized bodies, a nested (parenthesized) join,
+/// a derived subquery — and every one of them must still come back guarded.
+#[test]
+fn a_stricter_oracle_is_consulted_however_the_base_object_is_spelled() {
+    for sql in [
+        // The plain spelling — the control.
+        "SELECT * FROM orders",
+        // A parenthesized query body owns its own frame: SetExpr::Query.
+        "(SELECT * FROM orders)",
+        // A set operation whose sides are themselves parenthesized bodies.
+        "(SELECT * FROM orders) UNION (SELECT * FROM payments)",
+        // A derived subquery in the FROM.
+        "SELECT * FROM (SELECT * FROM orders)",
+        // A CTE body.
+        "WITH c AS (SELECT * FROM orders) SELECT * FROM c",
+        // A parenthesized (nested) join — and a doubly-parenthesized one, because
+        // the wrapper nests. Both named NO base object before the walker learned
+        // to descend a NestedJoin, so both were cleared Safe without a consult.
+        "SELECT * FROM (orders o JOIN payments p ON o.id = p.id)",
+        "SELECT * FROM ((orders o JOIN payments p ON o.id = p.id))",
+        // PIVOT / UNPIVOT decorate the table they read; the table underneath is
+        // still a base object the engine must be asked about.
+        "SELECT * FROM orders PIVOT (SUM(amt) FOR mth IN ('a'))",
+        "SELECT * FROM orders UNPIVOT (amt FOR mth IN (jan, feb))",
+    ] {
+        let decision = strict_classify(sql);
+        assert_ne!(
+            decision.danger,
+            DangerLevel::Safe,
+            "an oracle that calls EVERY object side-effecting must still have been \
+             ASKED about this statement's base object. A Safe verdict here means the \
+             base-object walk returned nothing, an empty list was read as \
+             ProvenReadOnly, and the purity/VPD consult was skipped entirely: \
+             {sql:?} -> {decision:?}"
+        );
+    }
+}

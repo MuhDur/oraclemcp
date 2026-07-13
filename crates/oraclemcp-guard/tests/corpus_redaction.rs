@@ -11,7 +11,7 @@
 //! of those strings, the test fails and names it.
 
 use oraclemcp_guard::corpus::{
-    CORPUS_RECORD_VERSION, CorpusRecord, CorpusRedactionError, ReasonCategory,
+    CORPUS_RECORD_VERSION, CorpusRecord, CorpusRedactionError, MAX_WHY_CHARS, ReasonCategory,
     classifier_proves_rewrite, dedup_by_content, reclassify_rewrite_at_apply, redact_sql, safe_why,
     validate_redacted_sql,
 };
@@ -328,4 +328,127 @@ fn the_schema_version_is_bound_into_the_content_hash() {
     // A schema change must not silently collide with records written by an older
     // build, so the version is hashed in. Pinning it here makes a bump deliberate.
     assert_eq!(CORPUS_RECORD_VERSION, 1);
+}
+
+#[test]
+fn every_token_class_collapses_to_its_own_fixed_placeholder() {
+    // The tests above prove the output carries no secret. That is necessary but
+    // not sufficient: the redactor's catch-all (`_ => '?'`) means DELETING any
+    // one token arm still yields secret-free output, just a different shape — so
+    // "no secret leaked" cannot tell a working arm from a deleted one, and the
+    // arms were in fact unpinned.
+    //
+    // The contract is stronger than "no secret": each token class collapses to a
+    // SPECIFIC placeholder, and the same name always collapses to the same one.
+    // That is what keeps the corpus legible (`a.x = b.x` still reads as a join)
+    // and what makes dedup_by_content stable across records. Pin the exact
+    // skeleton, so a lost arm is a failing test rather than a silent format drift.
+    let sql = "SELECT a.x, ? FROM orders a JOIN orders b ON a.x = b.x \
+               WHERE a.y = :name AND a.z = :1 AND a.n = 5 AND a.s = 'sec'";
+    let redacted = redact_sql(sql).expect("a lexable statement redacts");
+    assert_eq!(
+        redacted,
+        "SELECT id_1 . id_2 , :? FROM id_3 id_1 JOIN id_3 id_4 ON id_1 . id_2 = id_4 . id_2 \
+         WHERE id_1 . id_5 = :? AND id_1 . id_6 = :? AND id_1 . id_7 = ? AND id_1 . id_8 = '?'",
+        "the redaction contract: a bind (`?`, `:name`, `:1`) becomes `:?` and its \
+         NAME is dropped; a number becomes `?`; a literal becomes `'?'`; structure \
+         punctuation survives; EOF adds nothing; and a repeated identifier reuses \
+         its placeholder (`orders` is id_3 both times, `a` is id_1 throughout)"
+    );
+}
+
+#[test]
+fn the_postcondition_refuses_every_residual_shape_in_text_read_back_from_disk() {
+    // validate_redacted_sql is applied to text READ BACK (a shipped corpus file a
+    // third party may have hand-edited), not only to text we just wrote. On that
+    // path it is the whole defence, so it must reject each residual shape on its
+    // own terms — and name it, because the variant is what tells an operator which
+    // scrub broke.
+    for (residual, expected, why) in [
+        (
+            "SELECT id_1 FROM id_2 WHERE id_3 = $1",
+            CorpusRedactionError::ResidualBind,
+            "a surviving bind placeholder is an unredacted value slot",
+        ),
+        (
+            "SELECT id_1 FROM id_2 WHERE id_3 = 5",
+            CorpusRedactionError::ResidualNumber,
+            "a surviving number is an unredacted value (an account number, a PAN)",
+        ),
+        (
+            "SELECT id_1 FROM id_customer",
+            CorpusRedactionError::ResidualIdentifier,
+            "`id_customer` is a REAL table that merely looks like a placeholder: a \
+             generated placeholder is `id_` + digits and nothing else",
+        ),
+        (
+            "SELECT id_1 FROM id_",
+            CorpusRedactionError::ResidualIdentifier,
+            "`id_` with an empty suffix is not a generated placeholder either",
+        ),
+        (
+            "SELECT '--' FROM id_2",
+            CorpusRedactionError::ResidualComment,
+            "a comment marker is refused on sight, before the tokenizer gets a say \
+             about whether it happens to sit inside a literal",
+        ),
+        (
+            "SELECT '/*' FROM id_2",
+            CorpusRedactionError::ResidualComment,
+            "and the block-comment marker likewise",
+        ),
+        (
+            "SELECT 'x' FROM id_2",
+            CorpusRedactionError::ResidualLiteral,
+            "a string literal that is not the redacted `'?'` is a surviving value",
+        ),
+    ] {
+        assert_eq!(
+            validate_redacted_sql(residual),
+            Err(expected),
+            "the postcondition must refuse {residual:?} as {expected:?}: {why}"
+        );
+    }
+
+    // The mirror: a properly redacted skeleton passes, so the gate is not
+    // vacuously strict (a postcondition that refuses everything proves nothing).
+    for clean in [
+        "SELECT id_1 FROM id_2",
+        "SELECT id_1 FROM id_2 WHERE id_3 = :?",
+        "SELECT id_1 FROM id_2 WHERE id_3 = ?",
+        "SELECT '?' FROM id_2",
+    ] {
+        assert_eq!(
+            validate_redacted_sql(clean),
+            Ok(()),
+            "a redacted skeleton must pass its own postcondition: {clean:?}"
+        );
+    }
+}
+
+#[test]
+fn the_why_field_is_bounded_as_well_as_alphabet_checked() {
+    // The alphabet check above stops a credential being spelled out in `why`. The
+    // LENGTH bound is the other half: `why` is the one free-text field that ships,
+    // so an unbounded one is an unbounded disclosure channel — prose alone can
+    // still describe a customer. Pin both edges of the bound, not just the middle.
+    assert_eq!(
+        safe_why(""),
+        Err(CorpusRedactionError::UnsafeWhy),
+        "an empty `why` carries no lesson and must be refused"
+    );
+    assert_eq!(
+        safe_why("   "),
+        Err(CorpusRedactionError::UnsafeWhy),
+        "whitespace is empty once trimmed"
+    );
+    assert!(
+        safe_why(&"a".repeat(MAX_WHY_CHARS)).is_ok(),
+        "exactly MAX_WHY_CHARS is the longest admissible `why`"
+    );
+    assert_eq!(
+        safe_why(&"a".repeat(MAX_WHY_CHARS + 1)),
+        Err(CorpusRedactionError::UnsafeWhy),
+        "one character past the bound must be refused: the bound is the point"
+    );
 }

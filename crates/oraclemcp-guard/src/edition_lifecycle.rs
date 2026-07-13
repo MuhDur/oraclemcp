@@ -206,4 +206,70 @@ mod tests {
             EditionLifecycleParse::NotEdition
         );
     }
+
+    #[test]
+    fn every_keyword_of_the_create_child_shape_is_load_bearing() {
+        // The tests above vary the ARITY (a missing tail, a trailing token, a
+        // stacked statement). They never vary a keyword while keeping the arity,
+        // so the match guard that spells the shape out — CREATE EDITION <c> AS
+        // CHILD OF <p> — was never actually required to hold: a seven-token
+        // statement could reach `Parsed` on its shape alone.
+        //
+        // This parser IS the edition allow-list (D1). `Parsed` means "a known,
+        // supported lifecycle statement"; `Invalid` means refused. So admitting a
+        // statement we did not actually recognize is a fail-open, and each keyword
+        // must be independently necessary.
+        for sql in [
+            // One keyword wrong, arity intact — one case per conjunct of the guard.
+            "CREATE EDITION child_stage XX CHILD OF base_stage",
+            "CREATE EDITION child_stage AS XX OF base_stage",
+            "CREATE EDITION child_stage AS CHILD XX base_stage",
+            // DROP EDITION also satisfies the `is_edition` pre-check, so a seven
+            // token DROP must not be admitted through the CREATE-child arm.
+            "DROP EDITION child_stage AS CHILD OF base_stage",
+            // A quoted keyword is an identifier, not the keyword it spells.
+            "CREATE EDITION child_stage \"AS\" CHILD OF base_stage",
+        ] {
+            assert_eq!(
+                parse_edition_lifecycle_sql(sql),
+                EditionLifecycleParse::Invalid,
+                "the edition allow-list must refuse a shape it does not recognize: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_parsed_edition_names_are_the_ones_in_the_sql() {
+        // The names are not decoration: they are what a staged change is applied
+        // INTO. A parser that returned a constant (or an empty string) would still
+        // structurally satisfy every assertion above, because those compare the
+        // EditionIdentifier value — nothing ever asked it what it says. Ask it.
+        let EditionLifecycleParse::Parsed(EditionLifecycleSql::CreateChild { child, parent }) =
+            parse_edition_lifecycle_sql("CREATE EDITION app_v2 AS CHILD OF app_v1")
+        else {
+            panic!("the canonical create-child shape must parse");
+        };
+        assert_eq!(
+            child.as_str(),
+            "APP_V2",
+            "the child edition is the one named"
+        );
+        assert_eq!(
+            parent.as_str(),
+            "APP_V1",
+            "and the parent is the one it descends from — targeting the wrong \
+             edition is how a staged change lands in the live one"
+        );
+
+        let EditionLifecycleParse::Parsed(EditionLifecycleSql::Retire { edition, .. }) =
+            parse_edition_lifecycle_sql("DROP EDITION \"Retired v9\"")
+        else {
+            panic!("the canonical retire shape must parse");
+        };
+        assert_eq!(
+            edition.as_str(),
+            "Retired v9",
+            "a quoted identifier keeps its case verbatim"
+        );
+    }
 }
