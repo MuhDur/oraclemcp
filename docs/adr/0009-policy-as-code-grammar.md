@@ -37,20 +37,24 @@ following is the version-one wire shape; N.1 owns its Rust config types and
 loader.
 
 ```toml
-[profiles.production.sql_policy]
+[[profiles]]
+name = "production"
+connect_string = "production:1521/service"
+
+[profiles.sql_policy]
 version = 1
 
-[[profiles.production.sql_policy.rules]]
+[[profiles.sql_policy.rules]]
 id = "deny-payroll-read"
 match = { schema = "HR", object = "PAYROLL", verb = "select" }
 effect = { kind = "deny" }
 
-[[profiles.production.sql_policy.rules]]
+[[profiles.sql_policy.rules]]
 id = "billing-writes-need-admin"
 match = { schema = "BILLING", object = "INVOICES", verb = "update", principal = "oauth:acct-42" }
 effect = { kind = "require_level", level = "ADMIN" }
 
-[[profiles.production.sql_policy.rules]]
+[[profiles.sql_policy.rules]]
 id = "tenant-42-sees-only-tenant-42"
 match = { schema = "APP", object = "ORDERS", verb = "select", principal = "oauth:acct-42" }
 effect = { kind = "require_predicate", sql_fragment = "tenant_id = 42 AND archived_at IS NULL" }

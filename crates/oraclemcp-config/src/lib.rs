@@ -23,7 +23,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use oraclemcp_error as error;
-pub use oraclemcp_guard::OperatingLevel;
+pub use oraclemcp_guard::{
+    OperatingLevel, SQL_POLICY_VERSION, SqlPolicyConfig, SqlPolicyEffectConfig,
+    SqlPolicyMatchConfig, SqlPolicyRuleConfig, SqlPolicyValidationError, SqlPolicyVerb,
+};
 pub use profile::{
     AppContextConfig, ConnectionProfile, DrcpRoutingConfig, DrcpSessionPurity,
     MAX_POOL_ACQUIRE_TIMEOUT_SECS, OciConfig, PoolConfig, PoolMetadata, ProfileMetadata,
@@ -1110,6 +1113,15 @@ impl OracleMcpConfig {
             if let Some(masking) = &prof.masking {
                 masking.validate(&prof.name)?;
             }
+            if let Some(sql_policy) = &prof.sql_policy {
+                sql_policy
+                    .validate()
+                    .map_err(|error| ConfigError::InvalidSqlPolicy {
+                        profile: prof.name.clone(),
+                        field: error.field,
+                        reason: error.reason,
+                    })?;
+            }
             if let Some(entries) = &prof.app_context {
                 AppContextConfig::validate_list(&prof.name, entries)?;
             }
@@ -1401,6 +1413,7 @@ fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionP
         && before.proxy_auth == after.proxy_auth
         && before.app_context == after.app_context
         && before.masking == after.masking
+        && before.sql_policy == after.sql_policy
 }
 
 /// Configuration load / validation error.
@@ -1521,6 +1534,17 @@ pub enum ConfigError {
         field: &'static str,
         /// Validation failure.
         reason: &'static str,
+    },
+    /// Profile-scoped Arc N SQL policy is malformed or could loosen the base
+    /// classifier verdict.
+    #[error("connection profile `{profile}` has invalid sql_policy.{field}: {reason}")]
+    InvalidSqlPolicy {
+        /// Profile containing the rejected policy.
+        profile: String,
+        /// Policy-relative field, including a rule index when applicable.
+        field: String,
+        /// Non-secret, actionable rejection reason.
+        reason: String,
     },
     /// Native HTTP transport configuration is malformed.
     #[error("invalid {field}: {reason}")]

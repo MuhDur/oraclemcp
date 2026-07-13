@@ -282,6 +282,17 @@ fn render_profile_block(synth_profile: &SynthesizedProfile) -> String {
                 sections.push_str("# action = \"mask\"\n");
                 sections.push_str("# tag = \"pii.email\"\n");
             }
+            "sql_policy" => {
+                push_help(&mut sections, fd.help);
+                sections.push_str("# [profiles.sql_policy]\n");
+                sections.push_str("# version = 1\n");
+                sections.push_str("# [[profiles.sql_policy.rules]]\n");
+                sections.push_str("# id = \"deny-payroll-read\"\n");
+                sections.push_str(
+                    "# match = { schema = \"HR\", object = \"PAYROLL\", verb = \"select\" }\n",
+                );
+                sections.push_str("# effect = { kind = \"deny\" }\n");
+            }
             _ => {}
         }
     }

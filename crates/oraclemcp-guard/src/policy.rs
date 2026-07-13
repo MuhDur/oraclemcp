@@ -5,12 +5,313 @@
 //! unlocked by an allow-once token. Schema is resolved by the caller from the
 //! parsed `ObjectName` (or `SYS_CONTEXT('USERENV','CURRENT_SCHEMA')`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use crate::levels::DangerLevel;
+use crate::levels::{DangerLevel, OperatingLevel};
+
+/// The only SQL-policy grammar version accepted by this build.
+pub const SQL_POLICY_VERSION: u32 = 1;
+
+/// A versioned, profile-scoped Arc N policy configuration.
+///
+/// This is deliberately only the parsed and validated grammar. The evaluator
+/// arrives in N2; keeping the grammar in the guard crate gives the loader and
+/// evaluator one tightening-only contract to share.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SqlPolicyConfig {
+    /// Version of the declarative policy grammar.
+    pub version: u32,
+    /// Ordered policy rules. Matching rules compose; this order is retained for
+    /// later audit and predicate rendering, never allow/else precedence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<SqlPolicyRuleConfig>,
+}
+
+impl SqlPolicyConfig {
+    /// Validate the version-one grammar before a policy can enter the runtime.
+    ///
+    /// The return type identifies the exact policy-relative field so the
+    /// profile loader can report an actionable, profile-scoped configuration
+    /// error without accepting a malformed restriction as a silent no-op.
+    pub fn validate(&self) -> Result<(), SqlPolicyValidationError> {
+        if self.version != SQL_POLICY_VERSION {
+            return Err(SqlPolicyValidationError::new(
+                "version",
+                format!(
+                    "must be {SQL_POLICY_VERSION}; unknown policy grammar versions are refused"
+                ),
+            ));
+        }
+
+        let mut ids = BTreeSet::new();
+        for (index, rule) in self.rules.iter().enumerate() {
+            rule.validate(index)?;
+            if !ids.insert(rule.id.as_str()) {
+                return Err(SqlPolicyValidationError::new(
+                    format!("rules[{index}].id"),
+                    "must be unique within one sql_policy",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One declarative Arc N rule.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SqlPolicyRuleConfig {
+    /// Non-secret stable rule identifier, retained by later audit/certificates.
+    pub id: String,
+    /// Conjunctive semantic selectors.
+    #[serde(rename = "match")]
+    pub match_clause: SqlPolicyMatchConfig,
+    /// The only structurally tightening effects the grammar can express.
+    pub effect: SqlPolicyEffectConfig,
+}
+
+impl SqlPolicyRuleConfig {
+    fn validate(&self, index: usize) -> Result<(), SqlPolicyValidationError> {
+        let prefix = format!("rules[{index}]");
+        if !valid_rule_id(&self.id) {
+            return Err(SqlPolicyValidationError::new(
+                format!("{prefix}.id"),
+                "must be 1..=128 ASCII letters, digits, `_`, `-`, or `.`, beginning with a letter or digit",
+            ));
+        }
+        self.match_clause.validate(&prefix)?;
+        if let SqlPolicyEffectConfig::RequirePredicate { sql_fragment } = &self.effect {
+            self.match_clause.validate_predicate_target(&prefix)?;
+            if !valid_policy_predicate(sql_fragment) {
+                return Err(SqlPolicyValidationError::new(
+                    format!("{prefix}.effect.sql_fragment"),
+                    "must be a comment-free, semicolon-free conjunction of simple row-filter atoms; functions, subqueries, binds, and OR are not permitted",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Semantic selectors for one Arc N rule. Omitted selectors match every value
+/// for that dimension; an empty table is therefore a deliberate global
+/// tightening rule.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SqlPolicyMatchConfig {
+    /// Optional resolved Oracle owner/schema selector.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    /// Optional resolved object selector, valid only together with `schema`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
+    /// Optional top-level verb supplied by the classifier, never by a tool arg.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verb: Option<SqlPolicyVerb>,
+    /// Optional exact server-derived stable principal key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
+}
+
+impl SqlPolicyMatchConfig {
+    fn validate(&self, prefix: &str) -> Result<(), SqlPolicyValidationError> {
+        for (field, value) in [("schema", &self.schema), ("object", &self.object)] {
+            if let Some(value) = value
+                && !valid_oracle_identifier(value)
+            {
+                return Err(SqlPolicyValidationError::new(
+                    format!("{prefix}.match.{field}"),
+                    "must be one Oracle identifier; dots, globs, regexes, and empty values are not permitted",
+                ));
+            }
+        }
+        if self.object.is_some() && self.schema.is_none() {
+            return Err(SqlPolicyValidationError::new(
+                format!("{prefix}.match.object"),
+                "requires match.schema so the target relation is exact",
+            ));
+        }
+        if let Some(principal) = &self.principal
+            && !valid_principal_key(principal)
+        {
+            return Err(SqlPolicyValidationError::new(
+                format!("{prefix}.match.principal"),
+                "must be an exact server-derived key such as oauth:<stable-id> or mtls:<fingerprint>",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_predicate_target(&self, prefix: &str) -> Result<(), SqlPolicyValidationError> {
+        if self.schema.is_none() || self.object.is_none() {
+            return Err(SqlPolicyValidationError::new(
+                format!("{prefix}.match"),
+                "RequirePredicate requires exact match.schema and match.object selectors",
+            ));
+        }
+        if !matches!(
+            self.verb,
+            Some(SqlPolicyVerb::Select | SqlPolicyVerb::Update | SqlPolicyVerb::Delete)
+        ) {
+            return Err(SqlPolicyValidationError::new(
+                format!("{prefix}.match.verb"),
+                "RequirePredicate requires verb = select, update, or delete",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Top-level statement verbs that Arc N may match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SqlPolicyVerb {
+    /// A query-shaped SELECT or WITH statement.
+    Select,
+    /// An INSERT statement.
+    Insert,
+    /// An UPDATE statement.
+    Update,
+    /// A DELETE statement.
+    Delete,
+    /// A MERGE statement.
+    Merge,
+    /// A DDL statement.
+    Ddl,
+    /// An ADMIN/DCL statement.
+    Admin,
+    /// A PL/SQL block or stored-program invocation.
+    Plsql,
+    /// An ALTER SESSION statement.
+    AlterSession,
+}
+
+/// The complete set of policy effects. There is deliberately no `Allow`,
+/// override, or classifier-configuration variant, making a loosening effect
+/// unrepresentable in a successfully loaded policy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SqlPolicyEffectConfig {
+    /// Refuse the matched statement.
+    Deny,
+    /// Add an operating-level floor; N2 will compose it with the base level by
+    /// taking the maximum, never by replacement.
+    RequireLevel {
+        /// Minimum operating level imposed by this rule.
+        level: OperatingLevel,
+    },
+    /// Add a static conjunctive row filter after AST placement and mandatory
+    /// reclassification in N3.
+    RequirePredicate {
+        /// Restricted Oracle boolean predicate defined by ADR 0009.
+        sql_fragment: String,
+    },
+}
+
+/// A load-time SQL-policy grammar failure with the policy-relative field and a
+/// non-secret, actionable reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SqlPolicyValidationError {
+    /// Policy-relative field, such as `rules[0].match.object`.
+    pub field: String,
+    /// Why the field is rejected.
+    pub reason: String,
+}
+
+impl SqlPolicyValidationError {
+    fn new(field: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            reason: reason.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for SqlPolicyValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid sql_policy.{}: {}", self.field, self.reason)
+    }
+}
+
+impl std::error::Error for SqlPolicyValidationError {}
+
+fn valid_rule_id(value: &str) -> bool {
+    let mut chars = value.bytes();
+    matches!(chars.next(), Some(byte) if byte.is_ascii_alphanumeric())
+        && value.len() <= 128
+        && chars.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn valid_oracle_identifier(value: &str) -> bool {
+    if value.is_empty() || value.len() > 128 {
+        return false;
+    }
+    if value.starts_with('"') || value.ends_with('"') {
+        if !value.starts_with('"') || !value.ends_with('"') || value.len() == 2 {
+            return false;
+        }
+        let inner = &value[1..value.len() - 1];
+        let mut chars = inner.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch.is_control() {
+                return false;
+            }
+            if ch == '"' && chars.next_if_eq(&'"').is_none() {
+                return false;
+            }
+        }
+        return true;
+    }
+    let mut chars = value.bytes();
+    matches!(chars.next(), Some(byte) if byte.is_ascii_alphabetic())
+        && chars.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'#'))
+}
+
+fn valid_principal_key(value: &str) -> bool {
+    let Some((kind, stable_id)) = value.split_once(':') else {
+        return false;
+    };
+    !kind.is_empty()
+        && !stable_id.is_empty()
+        && kind
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && value.bytes().all(|byte| {
+            byte.is_ascii_graphic() && !matches!(byte, b'*' | b'?' | b'[' | b']' | b'\\')
+        })
+}
+
+fn valid_policy_predicate(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty()
+        || value.contains([';', '\n', '\r'])
+        || value.contains("--")
+        || value.contains("/*")
+        || value.contains("*/")
+    {
+        return false;
+    }
+    policy_predicate_pattern().is_match(value)
+}
+
+fn policy_predicate_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        let identifier = r#"(?:[A-Za-z][A-Za-z0-9_$#]*|\"(?:[^\"]|\"\")+\")"#;
+        let column = format!(r"(?:{identifier}\.)?{identifier}");
+        let value = r"(?:[+-]?(?:\d+(?:\.\d*)?|\.\d+)|'(?:[^']|'')*'|NULL)";
+        let atom = format!(
+            r"(?:{column}\s*(?:=|<>|!=|<=|>=|<|>|LIKE)\s*{value}|{column}\s+IS\s+(?:NOT\s+)?NULL)"
+        );
+        Regex::new(&format!(r"(?i)^(?:{atom})(?:\s+AND\s+(?:{atom}))*$"))
+            .expect("policy predicate grammar regex is valid")
+    })
+}
 
 /// The default posture for a schema with no explicit rule.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -187,6 +488,66 @@ mod tests {
                 ..Default::default()
             }),
         )
+    }
+
+    fn deny_rule(id: &str) -> SqlPolicyRuleConfig {
+        SqlPolicyRuleConfig {
+            id: id.to_owned(),
+            match_clause: SqlPolicyMatchConfig {
+                schema: Some("HR".to_owned()),
+                object: Some("PAYROLL".to_owned()),
+                verb: Some(SqlPolicyVerb::Select),
+                principal: None,
+            },
+            effect: SqlPolicyEffectConfig::Deny,
+        }
+    }
+
+    #[test]
+    fn sql_policy_validation_requires_versioned_unique_tightening_rules() {
+        let duplicate = SqlPolicyConfig {
+            version: SQL_POLICY_VERSION,
+            rules: vec![deny_rule("deny-payroll"), deny_rule("deny-payroll")],
+        };
+        assert!(matches!(
+            duplicate.validate(),
+            Err(SqlPolicyValidationError { field, reason })
+                if field == "rules[1].id" && reason.contains("unique")
+        ));
+
+        let unknown_version = SqlPolicyConfig {
+            version: SQL_POLICY_VERSION + 1,
+            rules: vec![deny_rule("deny-payroll")],
+        };
+        assert!(matches!(
+            unknown_version.validate(),
+            Err(SqlPolicyValidationError { field, reason })
+                if field == "version" && reason.contains("unknown policy grammar")
+        ));
+    }
+
+    #[test]
+    fn sql_policy_predicates_need_an_exact_safe_target() {
+        let policy = SqlPolicyConfig {
+            version: SQL_POLICY_VERSION,
+            rules: vec![SqlPolicyRuleConfig {
+                id: "tenant-filter".to_owned(),
+                match_clause: SqlPolicyMatchConfig {
+                    schema: Some("APP".to_owned()),
+                    object: Some("ORDERS".to_owned()),
+                    verb: Some(SqlPolicyVerb::Merge),
+                    principal: None,
+                },
+                effect: SqlPolicyEffectConfig::RequirePredicate {
+                    sql_fragment: "tenant_id = 42".to_owned(),
+                },
+            }],
+        };
+        assert!(matches!(
+            policy.validate(),
+            Err(SqlPolicyValidationError { field, reason })
+                if field == "rules[0].match.verb" && reason.contains("select, update, or delete")
+        ));
     }
 
     #[test]

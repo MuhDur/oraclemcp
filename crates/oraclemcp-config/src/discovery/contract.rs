@@ -98,7 +98,7 @@ pub const TOP_LEVEL_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
 /// Per-profile [`crate::ConnectionProfile`] field dispositions (design spec §C.2).
 ///
 /// Enumerates every serde field of `ConnectionProfile`
-/// (`crates/oraclemcp-config/src/profile.rs`, 29 serde fields).
+/// (`crates/oraclemcp-config/src/profile.rs`, 30 serde fields).
 /// The schema-drift test asserts this list matches the struct's serde surface
 /// exactly.
 pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
@@ -243,6 +243,11 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         help: "[profiles.masking] result egress masking policy; mask_unknown_default must stay true unless complete catalog tagging is configured.",
     },
     FieldDisposition {
+        field: "sql_policy",
+        disposition: Disposition::Commented,
+        help: "[profiles.sql_policy] Arc N admission policy; only deny, level-floor, and static predicate tightening effects are valid.",
+    },
+    FieldDisposition {
         field: "base",
         disposition: Disposition::Commented,
         help: "Name of a profile to inherit unset fields from (shallow-merge).",
@@ -273,7 +278,7 @@ mod tests {
     use crate::{
         AppContextConfig, AuditConfig, ConnectionProfile, DrcpRoutingConfig, HttpConfig, OciConfig,
         OperatingLevel, OracleMcpConfig, PoolConfig, ProxyAuthConfig, ResultMaskingConfig,
-        SessionIdentityConfig,
+        SessionIdentityConfig, SqlPolicyConfig,
     };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
@@ -324,6 +329,10 @@ mod tests {
             proxy_auth: Some(ProxyAuthConfig::default()),
             app_context: Some(vec![AppContextConfig::default()]),
             masking: Some(ResultMaskingConfig::default()),
+            sql_policy: Some(SqlPolicyConfig {
+                version: 1,
+                rules: Vec::new(),
+            }),
             base: Some("base_profile".to_owned()),
         }
     }
@@ -357,11 +366,11 @@ mod tests {
             actual.difference(&documented).collect::<Vec<_>>(),
             documented.difference(&actual).collect::<Vec<_>>(),
         );
-        // The spec fixes the count at 29.
+        // The spec fixes the count at 30.
         assert_eq!(
             CONNECTION_PROFILE_FIELD_DISPOSITIONS.len(),
-            29,
-            "the design spec fixes ConnectionProfile at 29 serde fields"
+            30,
+            "the design spec fixes ConnectionProfile at 30 serde fields"
         );
     }
 

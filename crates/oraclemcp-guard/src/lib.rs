@@ -37,7 +37,11 @@ pub use exec_grant::{ExecGrantBinding, ExecGrantError, ExecGrantStore};
 pub use levels::{
     BlockReason, DangerLevel, EscalationError, LevelDecision, OperatingLevel, SessionLevelState,
 };
-pub use policy::{DefaultMode, PolicyDecision, SchemaPolicy, SchemaPolicyRaw, SchemaPolicySet};
+pub use policy::{
+    DefaultMode, PolicyDecision, SQL_POLICY_VERSION, SchemaPolicy, SchemaPolicyRaw,
+    SchemaPolicySet, SqlPolicyConfig, SqlPolicyEffectConfig, SqlPolicyMatchConfig,
+    SqlPolicyRuleConfig, SqlPolicyValidationError, SqlPolicyVerb,
+};
 pub use purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
 pub use resolver::{
     CatalogGeneration, CatalogObjectKind, CatalogResolver, QuoteSemantics, RawName, RawNamePart,

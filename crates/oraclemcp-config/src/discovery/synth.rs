@@ -254,6 +254,7 @@ pub fn synthesize_profiles(
             proxy_auth: None,
             app_context: None,
             masking: None,
+            sql_policy: None,
             base: None,
         };
 

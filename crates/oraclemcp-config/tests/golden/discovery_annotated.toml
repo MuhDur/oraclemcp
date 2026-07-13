@@ -111,6 +111,13 @@ default_level = "READ_ONLY"
 # column_match = { column = "EMAIL" }
 # action = "mask"
 # tag = "pii.email"
+# [profiles.sql_policy] Arc N admission policy; only deny, level-floor, and static predicate tightening effects are valid.
+# [profiles.sql_policy]
+# version = 1
+# [[profiles.sql_policy.rules]]
+# id = "deny-payroll-read"
+# match = { schema = "HR", object = "PAYROLL", verb = "select" }
+# effect = { kind = "deny" }
 
 [[profiles]]
 # Unverified until you export ORACLE_PRIMARY_TCPS_PASSWORD and run `oraclemcp doctor --online`.
@@ -190,3 +197,10 @@ default_level = "READ_ONLY"
 # column_match = { column = "EMAIL" }
 # action = "mask"
 # tag = "pii.email"
+# [profiles.sql_policy] Arc N admission policy; only deny, level-floor, and static predicate tightening effects are valid.
+# [profiles.sql_policy]
+# version = 1
+# [[profiles.sql_policy.rules]]
+# id = "deny-payroll-read"
+# match = { schema = "HR", object = "PAYROLL", verb = "select" }
+# effect = { kind = "deny" }

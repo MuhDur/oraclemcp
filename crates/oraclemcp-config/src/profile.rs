@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use oraclemcp_guard::OperatingLevel;
+use oraclemcp_guard::{OperatingLevel, SqlPolicyConfig};
 use serde::{Deserialize, Serialize};
 
 use crate::ConfigError;
@@ -759,6 +759,10 @@ pub struct ConnectionProfile {
     /// Optional profile-scoped result masking policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub masking: Option<ResultMaskingConfig>,
+    /// Optional Arc N SQL admission policy. Its grammar is validated at config
+    /// load and can express only Deny/RequireLevel/RequirePredicate effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sql_policy: Option<SqlPolicyConfig>,
     /// Name of a profile to inherit unset fields from (shallow-merge).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
@@ -772,6 +776,7 @@ impl std::fmt::Debug for ConnectionProfile {
         let trusted_statement_count = self.trusted_session_statements.as_ref().map(Vec::len);
         let app_context_count = self.app_context.as_ref().map(Vec::len);
         let masking_rule_count = self.masking.as_ref().map(|masking| masking.rules.len());
+        let sql_policy_rule_count = self.sql_policy.as_ref().map(|policy| policy.rules.len());
         f.debug_struct("ConnectionProfile")
             .field("name", &self.name)
             .field("description", &self.description)
@@ -803,6 +808,7 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("proxy_auth", &self.proxy_auth)
             .field("app_context_count", &app_context_count)
             .field("masking_rule_count", &masking_rule_count)
+            .field("sql_policy_rule_count", &sql_policy_rule_count)
             .field("base", &self.base)
             .finish()
     }
@@ -898,6 +904,7 @@ impl ConnectionProfile {
             proxy_auth,
             app_context,
             masking,
+            sql_policy,
         );
     }
 
@@ -1067,6 +1074,7 @@ pub fn resolve_inheritance(profiles: &mut [ConnectionProfile]) -> Result<(), Con
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oraclemcp_guard::SqlPolicyEffectConfig;
 
     fn p(name: &str) -> ConnectionProfile {
         ConnectionProfile {
@@ -1098,8 +1106,106 @@ mod tests {
             proxy_auth: None,
             app_context: None,
             masking: None,
+            sql_policy: None,
             base: None,
         }
+    }
+
+    #[test]
+    fn sql_policy_toml_loads_only_tightening_effects() {
+        let cfg = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "policy"
+            connect_string = "policy:1521/svc"
+
+            [profiles.sql_policy]
+            version = 1
+
+            [[profiles.sql_policy.rules]]
+            id = "deny-payroll-read"
+            match = { schema = "HR", object = "PAYROLL", verb = "select" }
+            effect = { kind = "deny" }
+
+            [[profiles.sql_policy.rules]]
+            id = "billing-writes-need-admin"
+            match = { schema = "BILLING", object = "INVOICES", verb = "update", principal = "oauth:acct-42" }
+            effect = { kind = "require_level", level = "ADMIN" }
+
+            [[profiles.sql_policy.rules]]
+            id = "tenant-42-only"
+            match = { schema = "APP", object = "ORDERS", verb = "select", principal = "oauth:acct-42" }
+            effect = { kind = "require_predicate", sql_fragment = "tenant_id = 42 AND archived_at IS NULL" }
+            "#,
+        )
+        .expect("the complete tightening-only policy grammar loads");
+
+        let policy = cfg.profiles[0]
+            .sql_policy
+            .as_ref()
+            .expect("profile retains its sql policy");
+        assert_eq!(policy.version, 1);
+        assert_eq!(policy.rules.len(), 3);
+        assert!(matches!(
+            policy.rules[0].effect,
+            SqlPolicyEffectConfig::Deny
+        ));
+        assert!(matches!(
+            policy.rules[1].effect,
+            SqlPolicyEffectConfig::RequireLevel {
+                level: OperatingLevel::Admin
+            }
+        ));
+        assert!(matches!(
+            policy.rules[2].effect,
+            SqlPolicyEffectConfig::RequirePredicate { .. }
+        ));
+    }
+
+    #[test]
+    fn sql_policy_rejects_looseners_and_malformed_predicates_at_load() {
+        let loosening = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "policy"
+            connect_string = "policy:1521/svc"
+
+            [profiles.sql_policy]
+            version = 1
+
+            [[profiles.sql_policy.rules]]
+            id = "attempted-allow"
+            match = {}
+            effect = { kind = "allow" }
+            "#,
+        )
+        .expect_err("allow is not a policy effect");
+        assert!(
+            loosening.to_string().contains("allow"),
+            "the loader names the rejected loosening effect: {loosening}"
+        );
+
+        let malformed = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "policy"
+            connect_string = "policy:1521/svc"
+
+            [profiles.sql_policy]
+            version = 1
+
+            [[profiles.sql_policy.rules]]
+            id = "unsafe-tenant-filter"
+            match = { schema = "APP", object = "ORDERS", verb = "select" }
+            effect = { kind = "require_predicate", sql_fragment = "tenant_id = 42 OR 1 = 1" }
+            "#,
+        )
+        .expect_err("OR predicates could turn a filter into a bypass");
+        assert!(matches!(
+            malformed,
+            ConfigError::InvalidSqlPolicy { ref field, ref reason, .. }
+                if field == "rules[0].effect.sql_fragment" && reason.contains("conjunction")
+        ));
     }
 
     #[test]
