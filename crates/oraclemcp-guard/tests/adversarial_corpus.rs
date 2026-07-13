@@ -9,6 +9,11 @@
 //! Pairs with the `fuzz/` cargo-fuzz target (never-panic + fail-closed on
 //! arbitrary input) and the never-panic test below (runs in stable CI).
 
+use oraclemcp_guard::policy::{
+    PolicyDenialReason, PolicyTightening, SQL_POLICY_VERSION, SqlPolicyConfig,
+    SqlPolicyEffectConfig, SqlPolicyEvaluationContext, SqlPolicyMatchConfig, SqlPolicyRuleConfig,
+    SqlPolicyVerb,
+};
 use oraclemcp_guard::{Classifier, ClassifierConfig, DangerLevel};
 
 /// Served/strict-mode corpus (beads .82 + .102). Each entry is a statement the
@@ -445,6 +450,41 @@ fn corpus_is_never_underclassified() {
         "fail-closed violations:\n{}",
         failures.join("\n")
     );
+}
+
+#[test]
+fn policy_composition_corpus_never_loosens_a_classifier_refusal() {
+    // Arc N (N2): even a matching rule that narrows other statements cannot
+    // turn a base-classifier refusal into a dispatchable `Narrow` outcome.
+    let base =
+        Classifier::default().classify("BEGIN EXECUTE IMMEDIATE 'DROP TABLE app.orders'; END;");
+    let policy = SqlPolicyConfig {
+        version: SQL_POLICY_VERSION,
+        rules: vec![SqlPolicyRuleConfig {
+            id: "operator-read-floor".to_owned(),
+            match_clause: SqlPolicyMatchConfig {
+                schema: Some("APP".to_owned()),
+                object: Some("ORDERS".to_owned()),
+                verb: Some(SqlPolicyVerb::Select),
+                principal: Some("oauth:operator-7".to_owned()),
+            },
+            effect: SqlPolicyEffectConfig::RequireLevel {
+                level: oraclemcp_guard::OperatingLevel::ReadWrite,
+            },
+        }],
+    };
+    let context = SqlPolicyEvaluationContext::new(
+        Some("APP".to_owned()),
+        Some("ORDERS".to_owned()),
+        SqlPolicyVerb::Select,
+        Some("oauth:operator-7".to_owned()),
+    );
+
+    assert!(matches!(
+        policy.evaluate(&base, &context),
+        PolicyTightening::Deny(denial)
+            if denial.reason == PolicyDenialReason::BaseClassifierRefused
+    ));
 }
 
 #[test]

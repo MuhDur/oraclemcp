@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::classifier::GuardDecision;
 use crate::levels::{DangerLevel, OperatingLevel};
 
 /// The only SQL-policy grammar version accepted by this build.
@@ -211,6 +212,272 @@ pub enum SqlPolicyEffectConfig {
         /// Restricted Oracle boolean predicate defined by ADR 0009.
         sql_fragment: String,
     },
+}
+
+/// Server-derived semantic facts to which a loaded Arc N policy is applied.
+///
+/// `schema` and `object` must be resolved Oracle identities, not tool-supplied
+/// string hints. An absent value simply cannot satisfy a rule that selects that
+/// dimension. `principal` is likewise a stable server-derived identity key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SqlPolicyEvaluationContext {
+    /// Resolved owning schema, when the statement has one exact target.
+    pub schema: Option<String>,
+    /// Resolved object name, when the statement has one exact target.
+    pub object: Option<String>,
+    /// Top-level verb established by classification, never a caller assertion.
+    pub verb: SqlPolicyVerb,
+    /// Stable server-derived principal key, if authentication supplied one.
+    pub principal: Option<String>,
+}
+
+impl SqlPolicyEvaluationContext {
+    /// Construct a context from already-resolved, server-derived facts.
+    #[must_use]
+    pub fn new(
+        schema: Option<String>,
+        object: Option<String>,
+        verb: SqlPolicyVerb,
+        principal: Option<String>,
+    ) -> Self {
+        Self {
+            schema,
+            object,
+            verb,
+            principal,
+        }
+    }
+}
+
+/// The one exact relation to which a policy predicate may be attached in N3.
+///
+/// Keeping the target in the proof makes it impossible for the rewrite stage
+/// to guess which relation a static row filter was meant to narrow.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlPolicyPredicateTarget {
+    /// Canonical policy schema selector.
+    pub schema: String,
+    /// Canonical policy object selector.
+    pub object: String,
+    /// The only statement verb to which the predicate applies.
+    pub verb: SqlPolicyVerb,
+}
+
+/// One proof-carrying static predicate narrowing retained for N3 rewrite and
+/// later verdict/audit certificates.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlPolicyPredicate {
+    /// Stable identifier of the rule that introduced this predicate.
+    pub rule_id: String,
+    /// Exact relation and verb the predicate is allowed to constrain.
+    pub target: SqlPolicyPredicateTarget,
+    /// Validated static conjunction from the loaded policy.
+    pub sql_fragment: String,
+}
+
+/// Why policy composition refused a base statement.
+///
+/// This is intentionally a closed, redacted vocabulary: neither a raw SQL
+/// string nor an operator-provided free-form reason becomes an authorization
+/// proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PolicyDenialReason {
+    /// The base classifier already returned `Forbidden`.
+    BaseClassifierRefused,
+    /// The supplied base decision lacked a required operating level.
+    IncompleteBaseDecision,
+    /// The policy was not a successfully loadable tightening-only grammar.
+    InvalidPolicy,
+    /// One or more matching declarative rules explicitly deny the statement.
+    MatchingDenyRule,
+    /// Matching predicates did not name one identical exact target relation.
+    PredicateTargetConflict,
+}
+
+/// A proof-carrying Arc N denial.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyDenial {
+    /// Stable failure category for audit/certification consumers.
+    pub reason: PolicyDenialReason,
+    /// Every matching rule considered before this denial was returned.
+    pub matched_rule_ids: Vec<String>,
+}
+
+/// A proof-carrying monotone narrowing of a non-forbidden base decision.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyNarrowing {
+    /// The classifier's already-required level; policy never lowers it.
+    pub base_required_level: OperatingLevel,
+    /// The final floor after taking the maximum of all matched level rules.
+    pub required_level: OperatingLevel,
+    /// Static predicate constraints, in declaration order, for N3 to rewrite
+    /// and re-classify before any execution.
+    pub predicates: Vec<SqlPolicyPredicate>,
+    /// Stable identifiers of all matched narrowing rules, in declaration order.
+    pub matched_rule_ids: Vec<String>,
+}
+
+impl PolicyNarrowing {
+    /// The policy identity: it adds no restriction and grants no authority.
+    #[must_use]
+    pub fn identity(base_required_level: OperatingLevel) -> Self {
+        Self {
+            base_required_level,
+            required_level: base_required_level,
+            predicates: Vec::new(),
+            matched_rule_ids: Vec::new(),
+        }
+    }
+
+    /// Whether this result added no policy constraint to the base decision.
+    #[must_use]
+    pub fn is_identity(&self) -> bool {
+        self.required_level == self.base_required_level
+            && self.predicates.is_empty()
+            && self.matched_rule_ids.is_empty()
+    }
+}
+
+/// The complete Arc N policy outcome.
+///
+/// There is deliberately no `Allow` outcome. A [`PolicyNarrowing`] only
+/// describes restrictions applied to a base classifier decision; dispatch must
+/// still apply that decision's level gate and all later safety checks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PolicyTightening {
+    /// Refuse the operation before dispatch.
+    Deny(PolicyDenial),
+    /// Preserve the base decision while adding zero or more restrictions.
+    Narrow(PolicyNarrowing),
+}
+
+impl SqlPolicyConfig {
+    /// Compose this loaded policy with a classifier decision as `base AND
+    /// policy`.
+    ///
+    /// The base classifier is checked first, so no declarative rule can turn a
+    /// refused statement into a dispatchable one. Every successful result
+    /// carries the base level plus the exact matched rule identifiers and
+    /// predicates needed by later certificate and rewrite stages.
+    #[must_use]
+    pub fn evaluate(
+        &self,
+        base: &GuardDecision,
+        context: &SqlPolicyEvaluationContext,
+    ) -> PolicyTightening {
+        if base.danger == DangerLevel::Forbidden {
+            return policy_deny(PolicyDenialReason::BaseClassifierRefused, Vec::new());
+        }
+        let Some(base_required_level) = base.required_level else {
+            return policy_deny(PolicyDenialReason::IncompleteBaseDecision, Vec::new());
+        };
+        if self.validate().is_err() {
+            return policy_deny(PolicyDenialReason::InvalidPolicy, Vec::new());
+        }
+
+        let mut narrowing = PolicyNarrowing::identity(base_required_level);
+        let mut deny_matched = false;
+        let mut predicate_target = None;
+
+        for rule in &self.rules {
+            if !rule_matches_context(rule, context) {
+                continue;
+            }
+            narrowing.matched_rule_ids.push(rule.id.clone());
+            match &rule.effect {
+                SqlPolicyEffectConfig::Deny => deny_matched = true,
+                SqlPolicyEffectConfig::RequireLevel { level } => {
+                    narrowing.required_level = narrowing.required_level.max(*level);
+                }
+                SqlPolicyEffectConfig::RequirePredicate { sql_fragment } => {
+                    let Some(target) = SqlPolicyPredicateTarget::from_rule(rule) else {
+                        return policy_deny(
+                            PolicyDenialReason::InvalidPolicy,
+                            narrowing.matched_rule_ids,
+                        );
+                    };
+                    if let Some(expected) = &predicate_target
+                        && expected != &target
+                    {
+                        return policy_deny(
+                            PolicyDenialReason::PredicateTargetConflict,
+                            narrowing.matched_rule_ids,
+                        );
+                    }
+                    predicate_target = Some(target.clone());
+                    narrowing.predicates.push(SqlPolicyPredicate {
+                        rule_id: rule.id.clone(),
+                        target,
+                        sql_fragment: sql_fragment.clone(),
+                    });
+                }
+            }
+        }
+
+        if deny_matched {
+            return policy_deny(
+                PolicyDenialReason::MatchingDenyRule,
+                narrowing.matched_rule_ids,
+            );
+        }
+        PolicyTightening::Narrow(narrowing)
+    }
+}
+
+impl SqlPolicyPredicateTarget {
+    fn from_rule(rule: &SqlPolicyRuleConfig) -> Option<Self> {
+        let SqlPolicyEffectConfig::RequirePredicate { .. } = rule.effect else {
+            return None;
+        };
+        Some(Self {
+            schema: canonical_policy_identifier(rule.match_clause.schema.as_deref()?),
+            object: canonical_policy_identifier(rule.match_clause.object.as_deref()?),
+            verb: rule.match_clause.verb?,
+        })
+    }
+}
+
+fn policy_deny(reason: PolicyDenialReason, matched_rule_ids: Vec<String>) -> PolicyTightening {
+    PolicyTightening::Deny(PolicyDenial {
+        reason,
+        matched_rule_ids,
+    })
+}
+
+fn rule_matches_context(rule: &SqlPolicyRuleConfig, context: &SqlPolicyEvaluationContext) -> bool {
+    let matcher = &rule.match_clause;
+    optional_identifier_matches(matcher.schema.as_deref(), context.schema.as_deref())
+        && optional_identifier_matches(matcher.object.as_deref(), context.object.as_deref())
+        && matcher.verb.is_none_or(|verb| verb == context.verb)
+        && matcher
+            .principal
+            .as_deref()
+            .is_none_or(|principal| context.principal.as_deref() == Some(principal))
+}
+
+fn optional_identifier_matches(selector: Option<&str>, actual: Option<&str>) -> bool {
+    selector.is_none_or(|selector| {
+        actual.is_some_and(|actual| policy_identifier_matches(selector, actual))
+    })
+}
+
+fn policy_identifier_matches(selector: &str, actual: &str) -> bool {
+    if selector.starts_with('"') {
+        unquote_policy_identifier(selector).is_some_and(|quoted| quoted == actual)
+    } else {
+        selector.eq_ignore_ascii_case(actual)
+    }
+}
+
+fn canonical_policy_identifier(selector: &str) -> String {
+    unquote_policy_identifier(selector).unwrap_or_else(|| selector.to_ascii_uppercase())
+}
+
+fn unquote_policy_identifier(selector: &str) -> Option<String> {
+    selector
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .map(|inner| inner.replace("\"\"", "\""))
 }
 
 /// A load-time SQL-policy grammar failure with the policy-relative field and a
@@ -478,6 +745,7 @@ fn deny(schema: &str, reason: &str) -> PolicyDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classifier::Classifier;
 
     fn permissive(schema: &str) -> SchemaPolicySet {
         SchemaPolicySet::new().with_schema(
@@ -547,6 +815,116 @@ mod tests {
             policy.validate(),
             Err(SqlPolicyValidationError { field, reason })
                 if field == "rules[0].match.verb" && reason.contains("select, update, or delete")
+        ));
+    }
+
+    fn operator_policy() -> SqlPolicyConfig {
+        SqlPolicyConfig {
+            version: SQL_POLICY_VERSION,
+            rules: vec![
+                SqlPolicyRuleConfig {
+                    id: "operator-level-floor".to_owned(),
+                    match_clause: SqlPolicyMatchConfig {
+                        schema: Some("APP".to_owned()),
+                        object: Some("ORDERS".to_owned()),
+                        verb: Some(SqlPolicyVerb::Select),
+                        principal: Some("oauth:operator-7".to_owned()),
+                    },
+                    effect: SqlPolicyEffectConfig::RequireLevel {
+                        level: OperatingLevel::ReadWrite,
+                    },
+                },
+                SqlPolicyRuleConfig {
+                    id: "operator-tenant-filter".to_owned(),
+                    match_clause: SqlPolicyMatchConfig {
+                        schema: Some("APP".to_owned()),
+                        object: Some("ORDERS".to_owned()),
+                        verb: Some(SqlPolicyVerb::Select),
+                        principal: Some("oauth:operator-7".to_owned()),
+                    },
+                    effect: SqlPolicyEffectConfig::RequirePredicate {
+                        sql_fragment: "tenant_id = 7".to_owned(),
+                    },
+                },
+            ],
+        }
+    }
+
+    fn operator_context() -> SqlPolicyEvaluationContext {
+        SqlPolicyEvaluationContext::new(
+            Some("APP".to_owned()),
+            Some("ORDERS".to_owned()),
+            SqlPolicyVerb::Select,
+            Some("oauth:operator-7".to_owned()),
+        )
+    }
+
+    #[test]
+    fn sql_policy_composes_as_base_and_policy_without_allowing() {
+        let base = Classifier::default().classify("SELECT * FROM app.orders");
+        assert_eq!(base.required_level, Some(OperatingLevel::ReadOnly));
+
+        let result = operator_policy().evaluate(&base, &operator_context());
+        let PolicyTightening::Narrow(narrowing) = result else {
+            panic!("a valid narrowing policy must not deny the admitted base read");
+        };
+        assert_eq!(narrowing.base_required_level, OperatingLevel::ReadOnly);
+        assert_eq!(narrowing.required_level, OperatingLevel::ReadWrite);
+        assert_eq!(
+            narrowing.matched_rule_ids,
+            vec!["operator-level-floor", "operator-tenant-filter"]
+        );
+        assert_eq!(narrowing.predicates.len(), 1);
+        assert_eq!(
+            narrowing.predicates[0].target,
+            SqlPolicyPredicateTarget {
+                schema: "APP".to_owned(),
+                object: "ORDERS".to_owned(),
+                verb: SqlPolicyVerb::Select,
+            }
+        );
+        assert_eq!(narrowing.predicates[0].sql_fragment, "tenant_id = 7");
+    }
+
+    #[test]
+    fn sql_policy_never_admits_a_base_classifier_refusal() {
+        let base =
+            Classifier::default().classify("BEGIN EXECUTE IMMEDIATE 'DROP TABLE app.orders'; END;");
+        assert_eq!(base.danger, DangerLevel::Forbidden);
+
+        assert_eq!(
+            operator_policy().evaluate(&base, &operator_context()),
+            PolicyTightening::Deny(PolicyDenial {
+                reason: PolicyDenialReason::BaseClassifierRefused,
+                matched_rule_ids: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn matching_deny_wins_over_other_tightening_rules() {
+        let mut policy = operator_policy();
+        policy.rules.push(SqlPolicyRuleConfig {
+            id: "operator-deny".to_owned(),
+            match_clause: SqlPolicyMatchConfig {
+                schema: Some("APP".to_owned()),
+                object: Some("ORDERS".to_owned()),
+                verb: Some(SqlPolicyVerb::Select),
+                principal: Some("oauth:operator-7".to_owned()),
+            },
+            effect: SqlPolicyEffectConfig::Deny,
+        });
+        let base = Classifier::default().classify("SELECT * FROM app.orders");
+        assert!(matches!(
+            policy.evaluate(&base, &operator_context()),
+            PolicyTightening::Deny(PolicyDenial {
+                reason: PolicyDenialReason::MatchingDenyRule,
+                matched_rule_ids,
+            }) if matched_rule_ids == vec![
+                "operator-level-floor",
+                "operator-tenant-filter",
+                "operator-deny",
+            ]
         ));
     }
 
