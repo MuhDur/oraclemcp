@@ -5334,6 +5334,7 @@ mod tests {
             .expect("step to ReadWrite");
         for sql in [
             "ALTER SESSION SET CURRENT_SCHEMA = hr",
+            "ALTER SESSION SET EDITION = app_release_v2",
             "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'",
             "ALTER SESSION SET PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL, STATEMENTS:ALL'",
             "/* oraclemcp audit */ ALTER/**/SESSION SET NLS_DATE_FORMAT/**/=/**/'YYYY'",
@@ -5374,6 +5375,7 @@ mod tests {
             "ALTER SESSION DISABLE GUARD",
             "ALTER SESSION ENABLE COMMIT IN PROCEDURE",
             "ALTER/**/SESSION SET CURRENT_SCHEMA=HR/**/SQL_TRACE=TRUE",
+            "ALTER SESSION SET EDITION = app_release_v2 SQL_TRACE = TRUE",
             "/* oraclemcp audit */ ALTER SESSION SET CONTAINER = CDB$ROOT",
         ];
 

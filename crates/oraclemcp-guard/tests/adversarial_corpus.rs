@@ -413,7 +413,18 @@ const CORPUS: &[(&str, DangerLevel)] = &[
         "WITH a AS (SELECT 1 x FROM dual) SELECT * FROM (WITH b AS (SELECT 1 y FROM dual) UPDATE t SET v=1)",
         DangerLevel::Guarded,
     ),
-    // --- QA100 .83: raw non-allowlisted ALTER SESSION must be Forbidden before
+    // --- D1 / QA100 .83: EDITION is the one reviewed session-state widening.
+    // It remains Guarded/READ_WRITE because it survives rollback; a trailing
+    // disallowed parameter must remain Forbidden before the operator allow-list.
+    (
+        "ALTER SESSION SET EDITION = app_release_v2",
+        DangerLevel::Guarded,
+    ),
+    (
+        "ALTER SESSION SET EDITION = app_release_v2 SQL_TRACE = TRUE",
+        DangerLevel::Forbidden,
+    ),
+    // Raw non-allowlisted ALTER SESSION must be Forbidden before
     // the operator allow-list, never fall through parse-failure to READ_WRITE.
     // Session state (container, trace, events, hidden params) persists across
     // DML rollback, so it must be governed by the shared session-setting policy. ---
@@ -457,6 +468,27 @@ fn corpus_is_never_underclassified() {
         "fail-closed violations:\n{}",
         failures.join("\n")
     );
+}
+
+#[test]
+fn edition_allowlist_corpus_pins_exact_guard_and_refusal() {
+    let classifier = Classifier::default();
+    for (sql, expected) in [
+        (
+            "ALTER SESSION SET EDITION = app_release_v2",
+            DangerLevel::Guarded,
+        ),
+        (
+            "ALTER SESSION SET EDITION = app_release_v2 SQL_TRACE = TRUE",
+            DangerLevel::Forbidden,
+        ),
+    ] {
+        assert_eq!(
+            classifier.classify(sql).danger,
+            expected,
+            "D1 must widen exactly EDITION, never a mixed ALTER SESSION statement: {sql:?}"
+        );
+    }
 }
 
 #[test]
