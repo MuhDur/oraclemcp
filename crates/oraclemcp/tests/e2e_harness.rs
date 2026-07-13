@@ -247,6 +247,101 @@ fn time_diff_e2e_dry_run_uses_omcpb_and_reports_a_pass() {
     );
 }
 
+/// The reversible-workspace matrix (Arc I) must be reachable from the runner and
+/// must schedule its own build, exactly like every other live scenario. Without
+/// this test and its `run_all.sh` entry the script would sit on disk being
+/// nobody's coverage: it was written, landed, and then never executed anywhere.
+#[test]
+fn reversible_e2e_dry_run_uses_omcpb_and_reports_a_pass() {
+    let root = repo_root();
+    let output = Command::new("bash")
+        .arg(root.join("scripts/e2e/reversible.sh"))
+        .args(["--log", "--dry-run", "--lane", "xe18"])
+        .current_dir(&root)
+        .env("ORACLEMCP_E2E_SEED", "4242")
+        .env(
+            "ORACLEMCP_E2E_ARTIFACT_DIR",
+            root.join("target/e2e-contract"),
+        )
+        .env("ORACLEMCP_LIVE_XE", "1")
+        .env("ORACLE_MATRIX_XE18_USER", "e2e_test")
+        .env("ORACLE_MATRIX_XE18_PASSWORD", "not-used-in-dry-run")
+        .output()
+        .expect("run reversible dry-run");
+    assert!(
+        output.status.success(),
+        "reversible dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    let command_messages = events
+        .iter()
+        .filter(|event| event["event"] == "command_start")
+        .filter_map(|event| event["message"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        command_messages
+            .iter()
+            .any(|message| message.contains("omcpb build -p oraclemcp --bin oraclemcp")),
+        "reversible dry-run did not schedule the omcpb package build: {command_messages:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "reversible"),
+        "missing passing reversible completion: {events:?}"
+    );
+}
+
+/// A scenario that is not in `run_all.sh` never runs in the sweep, so "we have an
+/// e2e for that" quietly stops being true. Pin the registration itself: every
+/// scenario script in scripts/e2e/ is either dispatched by the runner or is a
+/// deliberately release/operator-gated script that carries its own harness test
+/// here. Nothing is allowed to be neither.
+#[test]
+fn every_e2e_scenario_script_is_reachable_from_the_runner_or_its_own_test() {
+    let root = repo_root();
+    let runner =
+        std::fs::read_to_string(root.join("scripts/e2e/run_all.sh")).expect("read run_all.sh");
+    let harness = std::fs::read_to_string(root.join("crates/oraclemcp/tests/e2e_harness.rs"))
+        .expect("read e2e_harness.rs");
+
+    // Release/operator gates: run from the release suites and pinned by their own
+    // dry-run tests above, deliberately not part of the standard sweep.
+    let gated = ["hardening_acceptance.sh", "real_adb_tcps_signoff.sh"];
+    // The runner and the shared library are not scenarios.
+    let infra = ["run_all.sh", "lib.sh"];
+
+    let mut orphans = Vec::new();
+    for entry in std::fs::read_dir(root.join("scripts/e2e")).expect("read scripts/e2e") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("sh") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("script name")
+            .to_owned();
+        if infra.contains(&name.as_str()) || gated.contains(&name.as_str()) {
+            continue;
+        }
+        let dispatched = runner.contains(&format!("scripts/e2e/{name}"));
+        let self_tested = harness.contains(&format!("scripts/e2e/{name}"));
+        if !dispatched && !self_tested {
+            orphans.push(name);
+        }
+    }
+    assert!(
+        orphans.is_empty(),
+        "e2e scripts that no runner and no test ever execute — they are not coverage, \
+         they are files: {orphans:?}"
+    );
+}
+
 #[test]
 fn clean_machine_e2e_dry_run_schedules_h5_contract() {
     let root = repo_root();
