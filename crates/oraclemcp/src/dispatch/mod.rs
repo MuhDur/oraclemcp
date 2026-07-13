@@ -68,8 +68,9 @@ use oraclemcp_error::{
 use oraclemcp_guard::{
     CatalogObjectKind, CatalogResolver, Classifier, ClassifierConfig, DangerLevel, EscalationError,
     ExecGrantBinding, ExecGrantError, ExecGrantStore, GuardDecision, LevelDecision, ObjectRef,
-    OperatingLevel, Purity, Resolution, ResolvedObject, SessionLevelState, SideEffectOracle,
-    VerdictCertificate, semantic_read_plan,
+    OperatingLevel, PolicyGate, PolicyGateAdmission, PolicyGateDenial, PolicyGateRequest, Purity,
+    Resolution, ResolvedObject, SessionLevelState, SideEffectOracle, SqlPolicyConfig,
+    VerdictCertificate, enforce_sql_policy, semantic_read_plan,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -249,6 +250,8 @@ struct ProfileDispatchPolicy {
     request_timeout: Option<Duration>,
     max_query_cost: Option<u64>,
     result_masking: Option<ResultMaskingPolicy>,
+    /// Arc N: the profile's tightening-only SQL policy, if it carries one.
+    sql_policy: Option<SqlPolicyConfig>,
 }
 
 struct PreparedProfileSwitch {
@@ -260,6 +263,7 @@ struct PreparedProfileSwitch {
     request_timeout: Option<Duration>,
     max_query_cost: Option<u64>,
     result_masking: Option<ResultMaskingPolicy>,
+    sql_policy: Option<SqlPolicyConfig>,
     custom_catalog: CustomToolCatalog,
     response: Value,
 }
@@ -278,6 +282,7 @@ fn standalone_read_only_policy() -> ProfileDispatchPolicy {
         request_timeout: Some(DEFAULT_REQUEST_TIMEOUT),
         max_query_cost: None,
         result_masking: None,
+        sql_policy: None,
     }
 }
 
@@ -357,6 +362,9 @@ fn profile_dispatch_policy(
         request_timeout: profile_request_timeout(profile.call_timeout_seconds),
         max_query_cost: profile.max_query_cost,
         result_masking: result_masking_policy_from_profile(profile),
+        // Arc N: a configured policy now GOVERNS this profile's dispatch path.
+        // It is validated at config load and can only ever restrict.
+        sql_policy: profile.sql_policy.clone(),
     })
 }
 
@@ -390,6 +398,12 @@ struct DispatcherState {
     conn: Box<dyn OracleConnection>,
     stateless_conn: Option<Box<dyn OracleConnection>>,
     active_profile: Option<String>,
+    /// Arc N: the pinned session's `CURRENT_SCHEMA`, resolved once from the
+    /// connection itself. A policy rule names a schema, so the schema a statement
+    /// is matched against must be server-derived — a caller that could assert its
+    /// own schema could dodge the very rule that names it. Cleared on a profile
+    /// switch, because the new session has its own.
+    current_schema: Option<String>,
     profile_generation: Option<ProfileGenerationLease>,
     level: SessionLevelState,
     custom_catalog: ActiveCustomCatalog,
@@ -848,6 +862,9 @@ pub struct OracleDispatcher {
     request_timeout: SyncMutex<Option<Duration>>,
     max_query_cost: SyncMutex<Option<u64>>,
     result_masking: SyncMutex<Option<ResultMaskingPolicy>>,
+    /// Arc N: the active profile's tightening-only SQL policy. Read on every
+    /// guarded statement; a policy that is configured is a policy that governs.
+    sql_policy: SyncMutex<Option<SqlPolicyConfig>>,
     quarantine: SyncMutex<Option<ConnectionQuarantine>>,
     connector: Option<Arc<ProfileConnector>>,
     custom_loader: Option<Arc<CustomToolLoader>>,
@@ -949,6 +966,7 @@ impl OracleDispatcher {
                 conn,
                 stateless_conn: None,
                 active_profile,
+                current_schema: None,
                 profile_generation,
                 level,
                 custom_catalog: ActiveCustomCatalog::new(1, CustomToolCatalog::default()),
@@ -964,6 +982,7 @@ impl OracleDispatcher {
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
             result_masking: SyncMutex::new(None),
+            sql_policy: SyncMutex::new(None),
             quarantine: SyncMutex::new(None),
             connector: None,
             custom_loader: None,
@@ -1034,6 +1053,7 @@ impl OracleDispatcher {
                 conn,
                 stateless_conn: stateless.conn,
                 active_profile,
+                current_schema: None,
                 profile_generation,
                 level,
                 custom_catalog: ActiveCustomCatalog::new(1, custom_catalog),
@@ -1049,6 +1069,7 @@ impl OracleDispatcher {
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
             result_masking: SyncMutex::new(None),
+            sql_policy: SyncMutex::new(None),
             quarantine: SyncMutex::new(None),
             connector: Some(connector),
             custom_loader,
@@ -1267,6 +1288,36 @@ impl OracleDispatcher {
             )
         })?;
         *guard = result_masking;
+        Ok(())
+    }
+
+    /// Install a profile's Arc N SQL policy on this lane (tests + profile switch).
+    #[must_use]
+    pub fn with_sql_policy(self, sql_policy: Option<SqlPolicyConfig>) -> Self {
+        let _ = self.set_sql_policy(sql_policy);
+        self
+    }
+
+    fn sql_policy(&self) -> Result<Option<SqlPolicyConfig>, ErrorEnvelope> {
+        self.sql_policy
+            .lock()
+            .map(|guard| guard.clone())
+            .map_err(|err| {
+                ErrorEnvelope::new(
+                    ErrorClass::Internal,
+                    format!("sql-policy mutex lock failed: {err}"),
+                )
+            })
+    }
+
+    fn set_sql_policy(&self, sql_policy: Option<SqlPolicyConfig>) -> Result<(), ErrorEnvelope> {
+        let mut guard = self.sql_policy.lock().map_err(|err| {
+            ErrorEnvelope::new(
+                ErrorClass::Internal,
+                format!("sql-policy mutex lock failed: {err}"),
+            )
+        })?;
+        *guard = sql_policy;
         Ok(())
     }
 
@@ -5446,12 +5497,16 @@ fn set_session_level(
 fn execute_confirmation_json(
     decision: &GuardDecision,
     gate: &LevelDecision,
+    required_level: Option<OperatingLevel>,
     confirm: Option<&str>,
 ) -> Value {
     if decision.query_effect_requires_fetch {
         return Value::Null;
     }
-    let Some(required_level) = decision.required_level else {
+    // The level the grant is minted at, which is the classifier's composed with
+    // any Arc N floor — never the classifier's alone, or a policy that raised the
+    // bar would hand out a grant that can never be consumed.
+    let Some(required_level) = required_level else {
         return Value::Null;
     };
     let Some(confirm) = confirm else {
@@ -5609,6 +5664,104 @@ struct GateErrorLabels {
 // `decision` is Some only on the execute path, where a Forbidden gate carries a
 // classifier reason and safe-alternative; the compile path never produces a
 // Forbidden gate, so it passes None and Forbidden falls through to PolicyDenied.
+/// Arc N: a policy refusal.
+///
+/// The proof rides on the envelope in exactly the shape the operator console
+/// already parses, so the policy badge lights up with no client change. A policy
+/// can only ever restrict, so no confirmation token and no elevation can override
+/// this — saying otherwise in the next step would be a lie.
+fn policy_denied_envelope(denial: &PolicyGateDenial) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::PolicyDenied,
+        format!(
+            "the active profile's SQL policy denied this statement ({})",
+            denial.reason.as_str()
+        ),
+    )
+    .with_structured_reason(
+        StructuredReason::new(ReasonCategory::PolicyDenied)
+            .with_policy_tightening(denial.attachment()),
+    )
+    .with_next_step(
+        "a profile policy can only restrict: no confirmation token and no elevation overrides it",
+    )
+}
+
+/// Apply the active profile's policy to an already-classified statement.
+///
+/// The single place dispatch consults Arc N. `Deny` refuses here, before the
+/// statement can reach the level gate or the database; `Narrow` returns the
+/// composed level, the re-classified candidate to run (SEC-1), and the proof to
+/// attach to the response.
+fn apply_sql_policy(
+    sql_policy: Option<&SqlPolicyConfig>,
+    current_schema: Option<&str>,
+    principal: Option<&str>,
+    base: &GuardDecision,
+    sql: &str,
+) -> Result<PolicyGateAdmission, ErrorEnvelope> {
+    // The classifier already refused this statement. Its refusal stands on its
+    // own and is returned unchanged: relabelling it POLICY_DENIED would credit the
+    // wrong control, and would say a policy refused a statement even on a profile
+    // that has none. The policy cannot admit it either way — the decision below is
+    // still `Forbidden`, and every caller refuses on that before it reads a level.
+    if base.danger == DangerLevel::Forbidden {
+        return Ok(PolicyGateAdmission {
+            effective_sql: None,
+            effective_decision: base.clone(),
+            // Never consulted: `required_level` is `None` on a forbidden decision,
+            // so each caller has already refused by the time a level is read. It
+            // can only ever be composed with `max()`, which cannot lower anything.
+            required_level: OperatingLevel::ReadOnly,
+            danger: base.danger,
+            attachment: None,
+        });
+    }
+    match enforce_sql_policy(&PolicyGateRequest {
+        classifier: &DEFAULT_CLASSIFIER,
+        policy: sql_policy,
+        base,
+        sql,
+        current_schema,
+        principal,
+    }) {
+        PolicyGate::Denied(denial) => Err(policy_denied_envelope(&denial)),
+        PolicyGate::Admitted(admission) => Ok(*admission),
+    }
+}
+
+/// The preview's view of the policy. A statement the CLASSIFIER refused keeps the
+/// classifier's refusal — the preview must say "forbidden", not "policy denied",
+/// or it would credit the wrong control (and would say a policy refused it on a
+/// profile that has none).
+fn apply_preview_sql_policy(
+    sql_policy: Option<&SqlPolicyConfig>,
+    current_schema: Option<&str>,
+    binding: &ExecGrantBinding,
+    base: &GuardDecision,
+    sql: &str,
+) -> PolicyGate {
+    if base.danger == DangerLevel::Forbidden {
+        return PolicyGate::Admitted(Box::new(PolicyGateAdmission {
+            effective_sql: None,
+            effective_decision: base.clone(),
+            // Never consulted: a forbidden decision has no required level, so the
+            // preview's gate reports the classifier's refusal before reading one.
+            required_level: OperatingLevel::ReadOnly,
+            danger: base.danger,
+            attachment: None,
+        }));
+    }
+    enforce_sql_policy(&PolicyGateRequest {
+        classifier: &DEFAULT_CLASSIFIER,
+        policy: sql_policy,
+        base,
+        sql,
+        current_schema,
+        principal: Some(binding.subject_id.as_str()),
+    })
+}
+
 fn gate_error(
     gate: LevelDecision,
     session: &SessionLevelState,
@@ -5954,6 +6107,12 @@ struct DbToolCtx<'a> {
     grant_binding: &'a ExecGrantBinding,
     write_intents: Option<&'a WriteIntentLog>,
     catalog_cache: &'a OracleCatalogResolverCache,
+    /// Arc N: the active profile's tightening-only policy, applied to every
+    /// guarded statement on this path.
+    sql_policy: Option<&'a SqlPolicyConfig>,
+    /// The session's server-derived `CURRENT_SCHEMA`, used to qualify an
+    /// unqualified policy target. Never a tool argument.
+    current_schema: Option<&'a str>,
     audit: AuditCtx<'a>,
     quarantine: &'a SyncMutex<Option<ConnectionQuarantine>>,
 }
@@ -7662,13 +7821,35 @@ async fn execute_sql_inner(
     let active_profile = ctx.active_profile;
     let session = ctx.session;
     let audit = ctx.audit;
-    let decision = DEFAULT_CLASSIFIER.classify(&args.sql);
+    let base = DEFAULT_CLASSIFIER.classify(&args.sql);
+    // Arc N: base AND policy. A deny refuses HERE — before the level gate, before
+    // a grant can be consumed, before the database is touched. A narrow raises the
+    // level the gate must satisfy and, when it carries predicates, hands back a
+    // candidate that has already re-entered the classifier (SEC-1): that candidate
+    // is what runs, not the bytes the caller sent. A policy cannot widen anything:
+    // there is no Allow outcome to return.
+    let policy = apply_sql_policy(
+        ctx.sql_policy,
+        ctx.current_schema,
+        Some(ctx.grant_binding.subject_id.as_str()),
+        &base,
+        &args.sql,
+    )?;
+    let decision = policy.effective_decision.clone();
     let gate = decision.gate(session);
     if !matches!(gate, LevelDecision::Allow) {
         return Err(execute_gate_error(&decision, gate, session));
     }
 
-    let required_level = decision.required_level.ok_or_else(|| {
+    // Two different levels, and conflating them is a bug:
+    //   `statement_level` is what the statement IS — it decides what ORACLE does
+    //     with it (DDL commits implicitly and cannot be rollback-previewed);
+    //   `required_level` is what the session must HAVE — the classifier's level
+    //     raised by any policy floor. It decides AUTHORIZATION: the gate and the
+    //     single-use grant.
+    // A policy floor of DDL on an UPDATE means "only a DDL-cleared caller may run
+    // this UPDATE" — it does not make the UPDATE un-rollbackable.
+    let statement_level = decision.required_level.ok_or_else(|| {
         ErrorEnvelope::new(
             ErrorClass::ForbiddenStatement,
             format!(
@@ -7677,7 +7858,15 @@ async fn execute_sql_inner(
             ),
         )
     })?;
-    if required_level <= OperatingLevel::ReadOnly {
+    let required_level = statement_level.max(policy.required_level);
+    // The policy floor can sit ABOVE the level the classifier's own gate just
+    // proved, so the composed level is gated too. This is the only place the floor
+    // becomes authority-bearing, and it can only ever raise the bar.
+    let composed_gate = session.evaluate(Some(required_level));
+    if !matches!(composed_gate, LevelDecision::Allow) {
+        return Err(execute_gate_error(&decision, composed_gate, session));
+    }
+    if statement_level <= OperatingLevel::ReadOnly {
         return Err(invalid_args(
             "oracle_execute is for non-read statements; use oracle_query for SELECT/WITH",
         )
@@ -7701,7 +7890,7 @@ async fn execute_sql_inner(
                 "hold and commit are mutually exclusive: hold leaves the statement pending in the reversible workspace, commit makes it durable",
             ));
         }
-        if required_level >= OperatingLevel::Ddl {
+        if statement_level >= OperatingLevel::Ddl {
             return Err(invalid_args(
                 "DDL/Admin statements cannot be held: Oracle commits them implicitly, so no checkpoint could undo them",
             )
@@ -7725,7 +7914,7 @@ async fn execute_sql_inner(
             .with_next_step("call oracle_checkpoint to establish a checkpoint, then retry with hold=true"));
         }
     }
-    if required_level >= OperatingLevel::Ddl && !args.commit {
+    if statement_level >= OperatingLevel::Ddl && !args.commit {
         return Err(ErrorEnvelope::new(
             ErrorClass::ChallengeRequired,
             "DDL/Admin statements cannot be rollback-previewed by Oracle; commit=true and confirm are required",
@@ -7737,7 +7926,7 @@ async fn execute_sql_inner(
     // either would durably persist every statement held in an open workspace,
     // none of which passed the single-use grant. Refuse before the grant is
     // consumed so a refusal never burns the agent's confirmation.
-    if args.commit || required_level >= OperatingLevel::Ddl {
+    if args.commit || statement_level >= OperatingLevel::Ddl {
         ensure_workspace_closed(
             ctx.checkpoints,
             if args.commit {
@@ -7780,7 +7969,12 @@ async fn execute_sql_inner(
     // additionally assert that here — defense in depth — and fail closed on any
     // divergence so a marker can never change what runs. The marked text is what
     // we execute AND what the audit log records (A8 digest covers the real text).
-    let executed_sql = with_audit_marker(&args.sql, active_profile, audit_tool);
+    // When the policy added predicates, the rewritten candidate is what executes
+    // and what the audit records. The grant above stayed bound to the statement
+    // the AGENT previewed and submitted; the narrowing is a server-side
+    // tightening applied after it, and the caller never saw the rewritten text.
+    let policy_sql = policy.effective_sql.as_deref().unwrap_or(args.sql.as_str());
+    let executed_sql = with_audit_marker(policy_sql, active_profile, audit_tool);
     if DEFAULT_CLASSIFIER.classify(&executed_sql) != decision {
         return Err(ErrorEnvelope::new(
             ErrorClass::Internal,
@@ -7896,9 +8090,9 @@ async fn execute_sql_inner(
     // the adapter observes an error after the wire response. Treat that class
     // like explicit non-transactional effects for outcome accounting.
     let effect_may_survive_rollback =
-        decision.non_transactional_effect || required_level >= OperatingLevel::Ddl;
+        decision.non_transactional_effect || statement_level >= OperatingLevel::Ddl;
     let invalidation = catalog_invalidation_for_sql(&args.sql);
-    if required_level >= OperatingLevel::Ddl || invalidation != CatalogInvalidation::Ddl {
+    if statement_level >= OperatingLevel::Ddl || invalidation != CatalogInvalidation::Ddl {
         // Invalidate before the wire call. Oracle DDL can commit implicitly and
         // session-context changes take effect on the live connection; an
         // adapter error may leave either effect uncertain. Waiting for success
@@ -8157,6 +8351,11 @@ async fn execute_sql_inner(
         response["next_step"] = json!(
             "the transaction was rolled back, but this statement's effect persists anyway — treat it as applied, not undone"
         );
+    }
+    if let Some(tightening) = policy.attachment.clone() {
+        // The proof of what the policy took away, in the shape the operator
+        // console already parses.
+        response["policy"] = tightening;
     }
     if args.hold {
         response["held"] = json!(true);
@@ -9779,6 +9978,8 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
             active_profile,
             ctx.execute_grants,
             ctx.grant_binding,
+            ctx.sql_policy,
+            ctx.current_schema,
         );
         if let Value::Object(map) = &mut preview {
             map.insert("preview".to_owned(), json!(true));
@@ -9892,9 +10093,56 @@ fn preview_sql(
     active_profile: Option<&str>,
     grants: &ExecGrantStore,
     binding: &ExecGrantBinding,
+    sql_policy: Option<&SqlPolicyConfig>,
+    current_schema: Option<&str>,
 ) -> Value {
-    let decision = DEFAULT_CLASSIFIER.classify(sql);
-    let gate = decision.gate(session);
+    let base = DEFAULT_CLASSIFIER.classify(sql);
+    // Arc N runs at PREVIEW too, and it has to: the grant is minted here, at the
+    // required level. If a policy floor raised that level and preview did not know
+    // it, the grant would be issued below the bar and refused at execute — the
+    // agent could never obtain a usable one. A denied statement mints NOTHING.
+    let admission = match apply_preview_sql_policy(sql_policy, current_schema, binding, &base, sql)
+    {
+        PolicyGate::Denied(denial) => {
+            return json!({
+                "danger": base.danger,
+                "required_level": base.required_level,
+                "allowed_on_read_only": false,
+                "session_level": session.effective_level(),
+                "profile_ceiling": session.effective_ceiling(),
+                "protected": session.is_protected(),
+                "gate_decision": "blocked",
+                "blocked_reason": {
+                    "type": "policy_denied",
+                    "reason": denial.reason.as_str(),
+                    "matched_rule_ids": denial.matched_rule_ids,
+                },
+                "step_up_target": Value::Null,
+                "objects_affected": base.objects_affected,
+                "reason": format!(
+                    "the active profile's SQL policy denied this statement ({})",
+                    denial.reason.as_str()
+                ),
+                "safe_alternative": Value::Null,
+                // No grant: previewing a statement the policy forbids must not
+                // hand out authority to run it.
+                "execute_confirmation": Value::Null,
+                "next_actions": Value::Array(Vec::new()),
+                "policy": denial.attachment(),
+            });
+        }
+        PolicyGate::Admitted(admission) => *admission,
+    };
+    let decision = admission.effective_decision.clone();
+    let policy_attachment = admission.attachment.clone();
+    // The composed level: the classifier's, raised by any policy floor.
+    let required_level = decision
+        .required_level
+        .map(|level| level.max(admission.required_level));
+    let gate = match required_level {
+        Some(level) => session.evaluate(Some(level)),
+        None => decision.gate(session),
+    };
     let (gate_decision, blocked_reason, step_up_target) = match gate {
         LevelDecision::Allow => ("allow", Value::Null, Value::Null),
         LevelDecision::RequireStepUp { target } => ("require_step_up", Value::Null, json!(target)),
@@ -9916,7 +10164,7 @@ fn preview_sql(
         }
         _ => ("unknown", Value::Null, Value::Null),
     };
-    let execute_confirm = match (decision.required_level, &gate) {
+    let execute_confirm = match (required_level, &gate) {
         (Some(level), LevelDecision::Allow) if level > OperatingLevel::ReadOnly => {
             if decision.query_effect_requires_fetch {
                 None
@@ -9939,9 +10187,9 @@ fn preview_sql(
         _ => None,
     };
 
-    json!({
+    let mut preview = json!({
         "danger": decision.danger,
-        "required_level": decision.required_level,
+        "required_level": required_level,
         "allowed_on_read_only": matches!(
             decision.gate(&SessionLevelState::new(OperatingLevel::ReadOnly, false)),
             LevelDecision::Allow
@@ -9958,10 +10206,15 @@ fn preview_sql(
         "execute_confirmation": execute_confirmation_json(
             &decision,
             &gate,
+            required_level,
             execute_confirm.as_deref(),
         ),
         "next_actions": preview_next_actions(sql, &decision, &gate, execute_confirm.as_deref()),
-    })
+    });
+    if let Some(tightening) = policy_attachment {
+        preview["policy"] = tightening;
+    }
+    preview
 }
 
 fn connection_info_json(
@@ -10179,6 +10432,9 @@ struct QueryPrepared {
     /// classifier input or the executed SQL text — the proven `executed_sql`
     /// runs unchanged inside a `DBMS_FLASHBACK` session window when this is set.
     as_of: Option<AsOf>,
+    /// Arc N: the proof of what the profile's policy took away, attached to the
+    /// response so a client (and the operator console) can see that it applied.
+    policy: Option<Value>,
 }
 
 /// Canonical export ownership copied out of the request context before the
@@ -10591,6 +10847,7 @@ impl OracleDispatcher {
                 request_timeout: new_policy.request_timeout,
                 max_query_cost: new_policy.max_query_cost,
                 result_masking: new_policy.result_masking,
+                sql_policy: new_policy.sql_policy,
                 custom_catalog: new_custom_catalog,
                 response,
             };
@@ -10606,6 +10863,7 @@ impl OracleDispatcher {
             let old_request_timeout = self.request_timeout()?;
             let old_max_query_cost = self.max_query_cost()?;
             let old_result_masking = self.result_masking_policy()?;
+            let old_sql_policy = self.sql_policy()?;
             let PreparedProfileSwitch {
                 profile,
                 profile_generation,
@@ -10615,6 +10873,7 @@ impl OracleDispatcher {
                 request_timeout,
                 max_query_cost,
                 result_masking,
+                sql_policy,
                 custom_catalog,
                 mut response,
             } = prepared;
@@ -10644,10 +10903,21 @@ impl OracleDispatcher {
                         let _ = self.set_max_query_cost(old_max_query_cost);
                         return Err(err);
                     }
+                    // Arc N: the new profile's policy is installed inside the same
+                    // generation-locked commit as its level and masking, so a lane
+                    // can never run one profile's statements under another
+                    // profile's policy.
+                    if let Err(err) = self.set_sql_policy(sql_policy) {
+                        let _ = self.set_request_timeout(old_request_timeout);
+                        let _ = self.set_max_query_cost(old_max_query_cost);
+                        let _ = self.set_result_masking_policy(old_result_masking);
+                        return Err(err);
+                    }
                     if let Err(err) = self.clear_connection_quarantine() {
                         let _ = self.set_request_timeout(old_request_timeout);
                         let _ = self.set_max_query_cost(old_max_query_cost);
                         let _ = self.set_result_masking_policy(old_result_masking);
+                        let _ = self.set_sql_policy(old_sql_policy);
                         return Err(err);
                     }
                     let profile_generation =
@@ -10660,6 +10930,9 @@ impl OracleDispatcher {
                     state.conn = conn;
                     state.stateless_conn = stateless_conn;
                     state.active_profile = Some(profile.clone());
+                    // The new physical session has its own CURRENT_SCHEMA; the old
+                    // one must never qualify a policy target on it.
+                    state.current_schema = None;
                     retired_generation = state.profile_generation.replace(profile_generation);
                     state.level = level;
                     state.custom_catalog = custom_catalog;
@@ -10731,6 +11004,20 @@ impl OracleDispatcher {
         // any arm can mint/consume authority or mutate lane-local state.
         request_budget.enforce(cx).map_err(DbError::into_envelope)?;
         let request_subject = audit_subject(context, &self.default_audit_subject);
+        // Arc N: the active profile's tightening-only policy governs every guarded
+        // statement below. A policy rule names a schema, so the schema it is
+        // matched against is resolved from the CONNECTION, once per session — a
+        // caller that could assert its own schema could dodge the rule naming it.
+        // The round trip is paid only by a lane that actually has a policy.
+        let sql_policy = self.sql_policy()?;
+        if sql_policy.is_some() && state.current_schema.is_none() {
+            let described = describe_conn(cx, state.conn.as_ref())
+                .await
+                .ok()
+                .and_then(|info| info.current_schema);
+            state.current_schema = described.map(|schema| schema.to_ascii_uppercase());
+        }
+        let current_schema = state.current_schema.clone();
         let scoped_level = scoped_session_level(&state.level, context);
         let scoped = context.scope_grant().is_some();
         if tool != "oracle_list_profiles"
@@ -10840,6 +11127,8 @@ impl OracleDispatcher {
                 state.active_profile.as_deref(),
                 &state.execute_grants,
                 &binding,
+                sql_policy.as_ref(),
+                current_schema.as_deref(),
             );
             remember_execute_approved_token(&mut state, &a.sql, &preview);
             return Ok(preview);
@@ -10867,6 +11156,8 @@ impl OracleDispatcher {
                 grant_binding: &grant_binding,
                 write_intents: self.write_intents.as_deref(),
                 catalog_cache: &state.catalog_cache,
+                sql_policy: sql_policy.as_ref(),
+                current_schema: current_schema.as_deref(),
                 audit,
                 quarantine: &self.quarantine,
             };
@@ -10894,6 +11185,8 @@ impl OracleDispatcher {
                 grant_binding: &grant_binding,
                 write_intents: self.write_intents.as_deref(),
                 catalog_cache: &state.catalog_cache,
+                sql_policy: sql_policy.as_ref(),
+                current_schema: current_schema.as_deref(),
                 audit,
                 quarantine: &self.quarantine,
             };
@@ -10947,8 +11240,25 @@ impl OracleDispatcher {
                         "an as_of (flashback) read (it resets the session transaction)",
                     )?;
                 }
+                // Arc N on the read path. A deny refuses the read here; a
+                // predicate narrowing REWRITES it — that is what row-level policy
+                // IS — and the rewritten candidate has already re-entered the
+                // classifier (SEC-1). The candidate is then re-marked and put
+                // through the SAME semantic read gate as any other statement, so a
+                // rewrite can never widen what the read path admits.
+                let policy = apply_sql_policy(
+                    sql_policy.as_ref(),
+                    current_schema.as_deref(),
+                    context.principal_key(),
+                    &DEFAULT_CLASSIFIER.classify(&parsed.sql),
+                    &parsed.sql,
+                )?;
+                let policy_sql = policy
+                    .effective_sql
+                    .clone()
+                    .unwrap_or_else(|| parsed.sql.clone());
                 let executed_sql =
-                    with_audit_marker(&parsed.sql, state.active_profile.as_deref(), "oracle_query");
+                    with_audit_marker(&policy_sql, state.active_profile.as_deref(), "oracle_query");
                 let classified = ensure_resolved_read_only(
                     cx,
                     state.conn.as_ref(),
@@ -10966,6 +11276,7 @@ impl OracleDispatcher {
                     gate,
                     verdict_certificate,
                     as_of,
+                    policy: policy.attachment.clone(),
                 }
             };
             request_budget = query_budget_with_cost_limit(
@@ -11058,7 +11369,8 @@ impl OracleDispatcher {
                 scopes: context.scope_grant().map(|grant| grant.0.clone()),
             };
             let conn: &dyn OracleConnection = state.conn.as_ref();
-            return self
+            let policy_attachment = prepared.policy.clone();
+            let mut response = self
                 .run_prepared_query(
                     cx,
                     PreparedQueryRuntime {
@@ -11070,7 +11382,12 @@ impl OracleDispatcher {
                     },
                     prepared,
                 )
-                .await;
+                .await?;
+            // The proof of what the policy took away rides on the read it governed.
+            if let (Some(tightening), Value::Object(map)) = (policy_attachment, &mut response) {
+                map.insert("policy".to_owned(), tightening);
+            }
+            return Ok(response);
         }
         let generated_read = generated_read_tool(tool);
         if generated_read
@@ -11194,6 +11511,8 @@ impl OracleDispatcher {
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
+                    sql_policy: sql_policy.as_ref(),
+                    current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
                 };
@@ -11219,6 +11538,8 @@ impl OracleDispatcher {
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
+                    sql_policy: sql_policy.as_ref(),
+                    current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
                 };
@@ -11244,6 +11565,8 @@ impl OracleDispatcher {
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
+                    sql_policy: sql_policy.as_ref(),
+                    current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
                 };
@@ -11269,6 +11592,8 @@ impl OracleDispatcher {
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
+                    sql_policy: sql_policy.as_ref(),
+                    current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
                 };
@@ -11294,6 +11619,8 @@ impl OracleDispatcher {
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
+                    sql_policy: sql_policy.as_ref(),
+                    current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
                 };
@@ -11319,6 +11646,8 @@ impl OracleDispatcher {
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
+                    sql_policy: sql_policy.as_ref(),
+                    current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
                 };
@@ -11344,6 +11673,8 @@ impl OracleDispatcher {
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
+                    sql_policy: sql_policy.as_ref(),
+                    current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
                 };
@@ -12509,6 +12840,7 @@ impl OracleDispatcher {
             gate,
             verdict_certificate,
             as_of,
+            policy: _,
         } = prepared;
         let timeout_seconds = a.timeout_seconds;
         let exports = self.exports.clone();
@@ -12814,6 +13146,18 @@ impl OracleDispatcher {
             let mut state = self.state.lock(cx).await.map_err(|_| {
                 ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
             })?;
+            // Arc N: the streaming read is governed by the same policy as the
+            // buffered one. A read that escaped the policy just by asking for SSE
+            // delivery would be a hole the size of the whole feature.
+            let sql_policy = self.sql_policy()?;
+            if sql_policy.is_some() && state.current_schema.is_none() {
+                let described = describe_conn(cx, state.conn.as_ref())
+                    .await
+                    .ok()
+                    .and_then(|info| info.current_schema);
+                state.current_schema = described.map(|schema| schema.to_ascii_uppercase());
+            }
+            let current_schema = state.current_schema.clone();
             let scoped_level = scoped_session_level(&state.level, context);
             if let Some(active_profile) = state.active_profile.as_deref() {
                 match state.profile_generation.as_ref() {
@@ -12847,8 +13191,25 @@ impl OracleDispatcher {
                         "streaming and as_of are mutually exclusive: page the flashback read with its cursor",
                     ));
                 }
+                // Arc N on the read path. A deny refuses the read here; a
+                // predicate narrowing REWRITES it — that is what row-level policy
+                // IS — and the rewritten candidate has already re-entered the
+                // classifier (SEC-1). The candidate is then re-marked and put
+                // through the SAME semantic read gate as any other statement, so a
+                // rewrite can never widen what the read path admits.
+                let policy = apply_sql_policy(
+                    sql_policy.as_ref(),
+                    current_schema.as_deref(),
+                    context.principal_key(),
+                    &DEFAULT_CLASSIFIER.classify(&parsed.sql),
+                    &parsed.sql,
+                )?;
+                let policy_sql = policy
+                    .effective_sql
+                    .clone()
+                    .unwrap_or_else(|| parsed.sql.clone());
                 let executed_sql =
-                    with_audit_marker(&parsed.sql, state.active_profile.as_deref(), "oracle_query");
+                    with_audit_marker(&policy_sql, state.active_profile.as_deref(), "oracle_query");
                 let classified = ensure_resolved_read_only(
                     cx,
                     state.conn.as_ref(),
@@ -12866,6 +13227,7 @@ impl OracleDispatcher {
                     gate,
                     verdict_certificate,
                     as_of,
+                    policy: policy.attachment.clone(),
                 }
             };
             request_budget = query_budget_with_cost_limit(
@@ -12922,16 +13284,24 @@ impl OracleDispatcher {
 
             let active_profile = state.active_profile.clone();
             let conn: &dyn OracleConnection = state.conn.as_ref();
-            self.prepare_query_stream_delivery(cx, conn, request_budget, active_profile, prepared)
-                .await?
+            let policy_attachment = prepared.policy.clone();
+            let delivery = self
+                .prepare_query_stream_delivery(cx, conn, request_budget, active_profile, prepared)
+                .await?;
+            (delivery, policy_attachment)
         };
+        let (delivery, policy_attachment) = delivery;
 
-        match delivery {
+        let mut response = match delivery {
             QueryStreamDelivery::Rows(plan) => self.drive_query_row_stream(cx, *plan, frames).await,
             QueryStreamDelivery::Chunked(response) => {
                 Self::emit_chunked_stream_frames(cx, response, frames).await
             }
+        }?;
+        if let (Some(tightening), Value::Object(map)) = (policy_attachment, &mut response) {
+            map.insert("policy".to_owned(), tightening);
         }
+        Ok(response)
     }
 
     async fn prepare_query_stream_delivery(
@@ -12948,6 +13318,7 @@ impl OracleDispatcher {
             gate,
             verdict_certificate: _,
             as_of,
+            policy: _,
         } = prepared;
         dispatch_checkpoint(cx, "oraclemcp.dispatch.query.row_stream.before")?;
         gate?;

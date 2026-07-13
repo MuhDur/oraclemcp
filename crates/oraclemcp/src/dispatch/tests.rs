@@ -910,6 +910,9 @@ impl OracleConnection for DescribeFailingMock {
 #[derive(Default)]
 struct ExecState {
     executed: Mutex<Vec<(String, Vec<OracleBind>)>>,
+    /// Every read that actually reached Oracle. A row-level policy is only
+    /// enforced if its predicate is in the SQL the database sees.
+    queried: Mutex<Vec<String>>,
     execute_error: Mutex<Option<DbError>>,
     diagnostics: Mutex<Vec<OracleRow>>,
     dbms_output: Mutex<DbmsOutput>,
@@ -1178,6 +1181,11 @@ impl OracleConnection for ExecRecordingMock {
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        self.state
+            .queried
+            .lock()
+            .expect("query mutex")
+            .push(sql.to_owned());
         if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
             return Ok(rows);
         }
@@ -13784,4 +13792,266 @@ fn a_rolled_back_statement_that_escapes_rollback_is_labeled_cannot_undo() {
     assert_eq!(plain["rolled_back"], json!(true));
     assert!(plain.get("cannot_undo").is_none());
     assert!(plain.get("fully_reverted").is_none());
+}
+
+// ===========================================================================
+// Arc N — a configured policy actually GOVERNS dispatch (bead oraclemcp-uhyc).
+//
+// The evaluator existed and nothing called it: a profile could carry a deny rule
+// and the server would neither honour it nor say that it had not. These tests
+// pin the four properties that make it real, and they are the reason the guard's
+// tighten-only contract is worth anything on the dispatch path.
+// ===========================================================================
+
+use oraclemcp_guard::{
+    SqlPolicyConfig, SqlPolicyEffectConfig, SqlPolicyMatchConfig, SqlPolicyRuleConfig,
+    SqlPolicyVerb,
+};
+
+fn policy_rule(
+    id: &str,
+    verb: SqlPolicyVerb,
+    effect: SqlPolicyEffectConfig,
+) -> SqlPolicyRuleConfig {
+    SqlPolicyRuleConfig {
+        id: id.to_owned(),
+        match_clause: SqlPolicyMatchConfig {
+            schema: Some("APP".to_owned()),
+            object: Some("EMPLOYEES".to_owned()),
+            verb: Some(verb),
+            principal: None,
+        },
+        effect,
+    }
+}
+
+fn sql_policy(rules: Vec<SqlPolicyRuleConfig>) -> SqlPolicyConfig {
+    SqlPolicyConfig { version: 1, rules }
+}
+
+/// The mocks describe `current_schema = "APP"`, which is where the policy's
+/// server-derived schema comes from — never from a tool argument.
+fn policed_dispatcher(state: &Arc<ExecState>, policy: SqlPolicyConfig) -> OracleDispatcher {
+    OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(state))),
+        Some("dev".to_owned()),
+        read_write_level(),
+    )
+    .with_sql_policy(Some(policy))
+}
+
+/// A configured Deny actually refuses at dispatch — before the level gate, before
+/// a grant is consumed, before the database is touched — and the response carries
+/// the proof in the shape the operator console already parses.
+#[test]
+fn a_configured_deny_rule_refuses_the_statement_at_dispatch() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = policed_dispatcher(
+        &state,
+        sql_policy(vec![policy_rule(
+            "no-prod-deletes",
+            SqlPolicyVerb::Delete,
+            SqlPolicyEffectConfig::Deny,
+        )]),
+    );
+
+    let error = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": "DELETE FROM app.employees WHERE id = 1", "commit": false }),
+        )
+        .expect_err("a configured deny rule must refuse");
+    assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+    let tightening = error
+        .structured_reason
+        .as_ref()
+        .and_then(|reason| reason.policy_tightening.clone())
+        .expect("the refusal carries the ADR-0009 proof");
+    assert_eq!(tightening["Deny"]["reason"], json!("matching_deny_rule"));
+    assert_eq!(
+        tightening["Deny"]["matched_rule_ids"],
+        json!(["no-prod-deletes"])
+    );
+    assert!(
+        state.executed.lock().expect("exec mutex").is_empty(),
+        "a denied statement never reaches the database"
+    );
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+}
+
+/// A Narrow raises the required level, and the raised level is the one the gate
+/// enforces: a session that satisfies the CLASSIFIER's level but not the policy's
+/// floor is refused.
+#[test]
+fn a_narrow_raises_the_required_level_and_the_raised_level_is_gated() {
+    let state = Arc::new(ExecState::default());
+    // The classifier calls this UPDATE READ_WRITE; the policy floors it at DDL.
+    let policy = sql_policy(vec![policy_rule(
+        "employees-need-ddl",
+        SqlPolicyVerb::Update,
+        SqlPolicyEffectConfig::RequireLevel {
+            level: OperatingLevel::Ddl,
+        },
+    )]);
+    let sql = "UPDATE app.employees SET name = name WHERE id = 1";
+
+    // A READ_WRITE session clears the classifier but NOT the policy floor.
+    let read_write = policed_dispatcher(&state, policy.clone());
+    let refused = read_write
+        .dispatch("oracle_execute", json!({ "sql": sql }))
+        .expect_err("the policy floor is above this session's level");
+    assert_eq!(refused.error_class, ErrorClass::OperatingLevelTooLow);
+    assert!(
+        state.executed.lock().expect("exec mutex").is_empty(),
+        "the floor is enforced before the database is touched"
+    );
+
+    // A DDL session satisfies the floor, and the response reports what the policy
+    // took away: the level it narrowed FROM and the level it narrowed TO.
+    let ddl = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        ddl_level(),
+    )
+    .with_sql_policy(Some(policy));
+    let out = ddl
+        .dispatch("oracle_execute", json!({ "sql": sql }))
+        .expect("a DDL session clears the policy floor");
+    assert_eq!(
+        out["required_level"],
+        json!("DDL"),
+        "the RAISED level governs"
+    );
+    let narrow = &out["policy"]["Narrow"];
+    assert_eq!(narrow["base_required_level"], json!("READ_WRITE"));
+    assert_eq!(narrow["required_level"], json!("DDL"));
+    assert_eq!(narrow["matched_rule_ids"], json!(["employees-need-ddl"]));
+}
+
+/// A predicate rule REWRITES the read and the rewritten candidate re-enters the
+/// classifier (SEC-1). Row-level policy is only real if the WHERE clause actually
+/// reaches Oracle — reporting it would not be enforcing it.
+#[test]
+fn a_predicate_rule_rewrites_the_read_that_reaches_the_database() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = policed_dispatcher(
+        &state,
+        sql_policy(vec![policy_rule(
+            "tenant-scope",
+            SqlPolicyVerb::Select,
+            SqlPolicyEffectConfig::RequirePredicate {
+                sql_fragment: "tenant_id = 42".to_owned(),
+            },
+        )]),
+    );
+
+    let out = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "SELECT id FROM app.employees" }),
+        )
+        .expect("a narrowed read still runs");
+    let narrow = &out["policy"]["Narrow"];
+    assert_eq!(narrow["predicates"][0]["rule_id"], json!("tenant-scope"));
+    assert_eq!(
+        narrow["predicates"][0]["sql_fragment"],
+        json!("tenant_id = 42")
+    );
+
+    let queried = state.queried.lock().expect("query mutex").clone();
+    assert!(
+        queried
+            .iter()
+            .any(|sql| sql.contains("tenant_id = 42") && sql.to_uppercase().contains("WHERE")),
+        "the predicate must reach Oracle — a policy that is reported but not \
+         applied is not enforced: {queried:?}"
+    );
+}
+
+/// A policy can never admit what the base classifier refuses. It is a
+/// restriction; it has no power to grant.
+#[test]
+fn a_policy_can_never_admit_what_the_classifier_refuses() {
+    let state = Arc::new(ExecState::default());
+    // A rule that matches nothing here, and could only ever tighten anyway.
+    let dispatcher = policed_dispatcher(
+        &state,
+        sql_policy(vec![policy_rule(
+            "irrelevant",
+            SqlPolicyVerb::Select,
+            SqlPolicyEffectConfig::RequireLevel {
+                level: OperatingLevel::ReadOnly,
+            },
+        )]),
+    );
+
+    let error = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": "BEGIN EXECUTE IMMEDIATE 'DROP TABLE t'; END;", "commit": true }),
+        )
+        .expect_err("the classifier refuses this, and no policy can undo that");
+    assert!(
+        matches!(
+            error.error_class,
+            ErrorClass::ForbiddenStatement | ErrorClass::PolicyDenied
+        ),
+        "unexpected class {:?}",
+        error.error_class
+    );
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
+}
+
+/// A policy evaluation error REFUSES. A policy that failed to load is not a
+/// policy that does not apply — running unpoliced because the operator's
+/// restriction did not parse is the whole bug this bead exists to close.
+#[test]
+fn a_policy_evaluation_error_refuses_rather_than_falling_open() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        read_write_level(),
+    )
+    // An unknown grammar version: this policy cannot be evaluated.
+    .with_sql_policy(Some(SqlPolicyConfig {
+        version: 99,
+        rules: Vec::new(),
+    }));
+
+    let error = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": "UPDATE app.employees SET name = name WHERE id = 1" }),
+        )
+        .expect_err("an unevaluatable policy must refuse, never fall open");
+    assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+    let tightening = error
+        .structured_reason
+        .as_ref()
+        .and_then(|reason| reason.policy_tightening.clone())
+        .expect("the refusal carries its proof");
+    assert_eq!(tightening["Deny"]["reason"], json!("invalid_policy"));
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
+}
+
+/// With no policy configured nothing changes, and the response makes no claim:
+/// silence is not a clean bill of health, and the console renders it as
+/// "not reported" rather than "no policy applied".
+#[test]
+fn no_policy_configured_leaves_the_response_and_the_statement_untouched() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+    let out = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": "UPDATE app.employees SET name = name WHERE id = 1" }),
+        )
+        .expect("an unpoliced profile behaves exactly as before");
+    assert_eq!(out["executed"], json!(true));
+    assert!(out.get("policy").is_none(), "no policy, no claim");
 }
