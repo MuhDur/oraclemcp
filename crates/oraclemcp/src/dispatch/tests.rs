@@ -35,9 +35,20 @@ fn session_bundle(conn: impl OracleConnection + 'static) -> ProfileConnectionBun
     ProfileConnectionBundle::new(Box::new(conn), None)
 }
 
-#[derive(Default)]
 struct SemanticGuardState {
     caller_queries: AtomicUsize,
+    compatible: Mutex<Option<String>>,
+    embedding_models: Mutex<Vec<String>>,
+}
+
+impl Default for SemanticGuardState {
+    fn default() -> Self {
+        Self {
+            caller_queries: AtomicUsize::new(0),
+            compatible: Mutex::new(Some("23.4.0.0.0".to_owned())),
+            embedding_models: Mutex::new(vec!["LOCAL_ONNX_MODEL".to_owned()]),
+        }
+    }
 }
 
 struct SemanticGuardMock {
@@ -149,6 +160,31 @@ impl OracleConnection for SemanticGuardMock {
         if normalized.contains("from session_roles") {
             return Ok(Vec::new());
         }
+        if normalized.contains("from v$parameter") && normalized.contains("compatible") {
+            let compatible = self
+                .state
+                .compatible
+                .lock()
+                .expect("semantic capability lock")
+                .clone();
+            return Ok(compatible
+                .as_deref()
+                .map(|value| semantic_row(&[("COMPATIBLE", Some(value))]))
+                .into_iter()
+                .collect());
+        }
+        if normalized.contains("from user_mining_models") {
+            let models = self
+                .state
+                .embedding_models
+                .lock()
+                .expect("semantic model lock")
+                .clone();
+            return Ok(models
+                .iter()
+                .map(|model| semantic_row(&[("MODEL_NAME", Some(model.as_str()))]))
+                .collect());
+        }
         if normalized.contains("from all_objects") {
             let name = string_bind(binds, 1).unwrap_or_default();
             let kind = match name {
@@ -181,8 +217,8 @@ impl OracleConnection for SemanticGuardMock {
         }
         if normalized.contains("from all_tab_columns") && normalized.contains("table_name = :2") {
             let column = string_bind(binds, 2).unwrap_or_default();
-            return Ok((column == "ID")
-                .then(|| semantic_row(&[("COLUMN_NAME", Some("ID")), ("COLUMN_ID", Some("1"))]))
+            return Ok((matches!(column, "ID" | "EMBEDDING"))
+                .then(|| semantic_row(&[("COLUMN_NAME", Some(column)), ("COLUMN_ID", Some("1"))]))
                 .into_iter()
                 .collect());
         }
@@ -235,6 +271,96 @@ fn served_read_gate_executes_only_exact_plain_table_columns() {
         )
         .expect("exact table column is proven read-only");
     assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn semantic_text_search_requires_both_capabilities_before_a_read_can_escape() {
+    let (dispatcher, state) = semantic_dispatcher();
+    let response = dispatcher
+        .dispatch(
+            "oracle_semantic_search",
+            json!({
+                "over": {"table": "ORDERS", "column": "EMBEDDING"},
+                "query_text": "synthetic local embedding request",
+                "k": 1,
+            }),
+        )
+        .expect("exactly one compatible local ONNX model admits the generated read");
+    assert_eq!(response["metric"], json!("COSINE"));
+    assert_eq!(response["k"], json!(1));
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
+
+    state
+        .compatible
+        .lock()
+        .expect("semantic capability lock")
+        .replace("21.0.0.0.0".to_owned());
+    let refusal = dispatcher
+        .dispatch(
+            "oracle_semantic_search",
+            json!({
+                "over": {"table": "ORDERS", "column": "EMBEDDING"},
+                "query_text": "must not silently fall back",
+            }),
+        )
+        .expect_err("pre-23.4 COMPATIBLE refuses text embedding before the read");
+    assert_eq!(refusal.error_class, ErrorClass::RuntimeStateRequired);
+    assert_eq!(
+        refusal
+            .structured_reason
+            .as_ref()
+            .and_then(|reason| reason.offending_construct.as_deref()),
+        Some("requires_23ai")
+    );
+    assert_eq!(
+        state.caller_queries.load(Ordering::SeqCst),
+        1,
+        "the capability refusal never executes a caller-visible query"
+    );
+}
+
+#[test]
+fn raw_query_cannot_claim_the_local_embedding_exception() {
+    let (dispatcher, state) = semantic_dispatcher();
+    let error = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({
+                "sql": "SELECT t.id FROM app.orders t ORDER BY VECTOR_DISTANCE(t.embedding, VECTOR_EMBEDDING(LOCAL_ONNX_MODEL USING :1), COSINE) FETCH FIRST :2 ROWS ONLY",
+                "binds": ["caller supplied text", 1],
+            }),
+        )
+        .expect_err("raw oracle_query must not inherit the local-model proof");
+    assert_eq!(error.error_class, ErrorClass::OperatingLevelTooLow);
+    assert_eq!(
+        state.caller_queries.load(Ordering::SeqCst),
+        0,
+        "the unproven raw embedding expression never reaches Oracle"
+    );
+}
+
+#[test]
+fn semantic_text_search_refuses_an_absent_or_ambiguous_local_model() {
+    let (dispatcher, state) = semantic_dispatcher();
+    *state.embedding_models.lock().expect("semantic model lock") = Vec::new();
+    let refusal = dispatcher
+        .dispatch(
+            "oracle_semantic_search",
+            json!({
+                "over": {"table": "ORDERS", "column": "EMBEDDING"},
+                "query_text": "must not use a client-side model",
+            }),
+        )
+        .expect_err("no local ONNX model refuses text embedding");
+    assert_eq!(refusal.error_class, ErrorClass::RuntimeStateRequired);
+    assert_eq!(
+        refusal
+            .structured_reason
+            .as_ref()
+            .and_then(|reason| reason.offending_construct.as_deref()),
+        Some("no_in_db_model")
+    );
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0);
 }
 
 #[test]

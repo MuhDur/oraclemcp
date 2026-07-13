@@ -64,7 +64,8 @@ use oraclemcp_db::{
     orient_recent_ddl, orient_schema, paginated_sql, plan_cost_estimate, plscope_identifiers,
     plscope_statements, primary_key_columns, probe_dependents, read_lob, read_query,
     read_query_as_of, read_query_named, resolved_relations_read_purity, sample_rows,
-    search_objects, search_source, semantic_search_query, serialize_row,
+    search_objects, search_source, semantic_search_query, semantic_search_text_query,
+    serialize_row,
 };
 use oraclemcp_error::{
     ErrorClass, ErrorEnvelope, OptimizerPlanRow, QueryCostRefusal, ReasonCategory, StructuredReason,
@@ -148,6 +149,19 @@ const MAX_SEMANTIC_SEARCH_K: usize = 1_000;
 /// either the driver or Oracle. Covers current embedding dimensions generously
 /// while keeping one request bounded.
 const MAX_SEMANTIC_SEARCH_VECTOR_DIMENSIONS: usize = 16_384;
+/// Hard cap on query text accepted by the in-database embedding expression.
+/// This bounds one request before it reaches either the driver or the model.
+const MAX_SEMANTIC_SEARCH_TEXT_CHARS: usize = 32_768;
+/// Fixed capability probe. `COMPATIBLE`, not the marketing/server banner, is
+/// the governing contract for the SQL vector-embedding grammar.
+const SEMANTIC_SEARCH_COMPATIBLE_SQL: &str =
+    "SELECT value AS compatible FROM v$parameter WHERE name = 'compatible'";
+/// Read at most two candidates: zero proves no local model, two proves the
+/// unconfigured server-side selection would be ambiguous. The tool never
+/// accepts a model name from a caller.
+const SEMANTIC_SEARCH_ONNX_MODEL_SQL: &str = "SELECT model_name FROM user_mining_models \
+     WHERE mining_function = 'EMBEDDING' AND algorithm = 'ONNX' \
+     ORDER BY model_name FETCH FIRST 2 ROWS ONLY";
 /// Default temporary session elevation window for `oracle_set_session_level`.
 const DEFAULT_SESSION_LEVEL_TTL_SECONDS: u64 = 900;
 /// Hard cap for one temporary session elevation window.
@@ -3193,6 +3207,88 @@ fn query_caps_from_args(args: &QueryArgs) -> QueryCaps {
 struct SemanticSearchResponseMetadata {
     metric: &'static str,
     k: usize,
+    /// `query_text` is admitted only after `semantic_search_text_model` proves
+    /// a single local model. It is the sole signal that permits the narrow
+    /// classifier exception for server-constructed VECTOR_EMBEDDING syntax.
+    verified_local_vector_embedding: bool,
+}
+
+/// Return whether an Oracle `COMPATIBLE` value reaches the minimum 23.4
+/// contract for in-database `VECTOR_EMBEDDING`. Values we cannot parse are not
+/// evidence of support.
+fn compatible_supports_in_database_embedding(value: &str) -> bool {
+    let mut components = value.trim().split('.');
+    let Some(major) = components.next().and_then(|part| part.parse::<u16>().ok()) else {
+        return false;
+    };
+    let Some(minor) = components.next().and_then(|part| part.parse::<u16>().ok()) else {
+        return false;
+    };
+    major > 23 || (major == 23 && minor >= 4)
+}
+
+/// Build a typed, fail-closed semantic-search capability refusal. The stable
+/// `offending_construct` token lets MCP clients branch without scraping prose.
+fn semantic_search_capability_refusal(
+    capability: &'static str,
+    message: impl Into<String>,
+    next_step: &'static str,
+) -> ErrorEnvelope {
+    ErrorEnvelope::new(ErrorClass::RuntimeStateRequired, message)
+        .with_next_step(next_step)
+        .with_structured_reason(
+            StructuredReason::new(ReasonCategory::Other)
+                .with_offending_construct(capability)
+                .with_minimal_rewrite("supply query_vector for a caller-provided local vector"),
+        )
+}
+
+/// Prove the two preconditions for text embedding and return the single
+/// dictionary-derived ONNX model name. A failed/insufficient probe is a typed
+/// refusal; the server never falls back to client embedding or a full scan.
+async fn semantic_search_text_model(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+) -> Result<String, ErrorEnvelope> {
+    let compatible = conn
+        .query_rows(cx, SEMANTIC_SEARCH_COMPATIBLE_SQL, &[])
+        .await
+        .ok()
+        .and_then(|rows| {
+            rows.into_iter()
+                .next()
+                .and_then(|row| row.text("COMPATIBLE").map(str::to_owned))
+        });
+    if !compatible
+        .as_deref()
+        .is_some_and(compatible_supports_in_database_embedding)
+    {
+        return Err(semantic_search_capability_refusal(
+            "requires_23ai",
+            "oracle_semantic_search query_text requires Oracle COMPATIBLE >= 23.4; the active profile did not prove that capability",
+            "use a 23.4-or-newer compatible profile, or supply query_vector",
+        ));
+    }
+
+    let models = conn
+        .query_rows(cx, SEMANTIC_SEARCH_ONNX_MODEL_SQL, &[])
+        .await
+        .ok()
+        .map(|rows| {
+            rows.into_iter()
+                .filter_map(|row| row.text("MODEL_NAME").map(str::trim).map(str::to_owned))
+                .filter(|name| oraclemcp_db::is_simple_identifier(name))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let [model] = models.as_slice() else {
+        return Err(semantic_search_capability_refusal(
+            "no_in_db_model",
+            "oracle_semantic_search query_text requires exactly one visible local ONNX embedding model; none or an ambiguous set was proven",
+            "load one ONNX embedding model into the active schema, or supply query_vector",
+        ));
+    };
+    Ok(model.clone())
 }
 
 /// Turn the constrained semantic-search request into the same internally-owned
@@ -3225,28 +3321,25 @@ async fn semantic_search_as_query_args(
             "omit filter for vector-only retrieval, or use the future validated hybrid-retrieval tool",
         ));
     }
-    if has_text {
-        return Err(ErrorEnvelope::new(
-            ErrorClass::RuntimeStateRequired,
-            "oracle_semantic_search query_text requires a verified in-database embedding model; no model capability has been proven for this profile",
-        )
-        .with_next_step(
-            "supply query_vector, or configure a verified in-database model once the 23ai capability probe is available",
-        ));
+    if let Some(query_text) = args.query_text.as_deref() {
+        let trimmed = query_text.trim();
+        if trimmed.is_empty() || trimmed.chars().count() > MAX_SEMANTIC_SEARCH_TEXT_CHARS {
+            return Err(invalid_args(format!(
+                "query_text must contain 1..={MAX_SEMANTIC_SEARCH_TEXT_CHARS} characters",
+            )));
+        }
     }
-
-    let vector = args
-        .query_vector
-        .expect("query_vector is present when the one-of validation accepts it");
-    if vector.is_empty() || vector.len() > MAX_SEMANTIC_SEARCH_VECTOR_DIMENSIONS {
-        return Err(invalid_args(format!(
-            "query_vector must contain 1..={MAX_SEMANTIC_SEARCH_VECTOR_DIMENSIONS} finite dimensions",
-        )));
-    }
-    if vector.iter().any(|value| !value.is_finite()) {
-        return Err(invalid_args(
-            "query_vector dimensions must be finite numbers",
-        ));
+    if let Some(vector) = args.query_vector.as_deref() {
+        if vector.is_empty() || vector.len() > MAX_SEMANTIC_SEARCH_VECTOR_DIMENSIONS {
+            return Err(invalid_args(format!(
+                "query_vector must contain 1..={MAX_SEMANTIC_SEARCH_VECTOR_DIMENSIONS} finite dimensions",
+            )));
+        }
+        if vector.iter().any(|value| !value.is_finite()) {
+            return Err(invalid_args(
+                "query_vector dimensions must be finite numbers",
+            ));
+        }
     }
     let k = args
         .k
@@ -3265,21 +3358,32 @@ async fn semantic_search_as_query_args(
     let (owner, table) =
         owner_and_name_arg(cx, conn, args.over.owner, args.over.table, "table").await?;
     let column = args.over.column.trim();
-    let sql =
-        semantic_search_query(&owner, &table, column, metric).map_err(DbError::into_envelope)?;
-    let vector_literal = format!(
-        "[{}]",
-        vector
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(",")
-    );
+    let (sql, embedding_bind) = if let Some(query_text) = args.query_text.as_deref() {
+        let model = semantic_search_text_model(cx, conn).await?;
+        let sql = semantic_search_text_query(&owner, &table, column, &model, metric)
+            .map_err(DbError::into_envelope)?;
+        (sql, Value::String(query_text.trim().to_owned()))
+    } else {
+        let vector = args
+            .query_vector
+            .expect("query_vector is present when the one-of validation accepts it");
+        let sql = semantic_search_query(&owner, &table, column, metric)
+            .map_err(DbError::into_envelope)?;
+        let vector_literal = format!(
+            "[{}]",
+            vector
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        (sql, Value::String(vector_literal))
+    };
 
     Ok((
         QueryArgs {
             sql,
-            binds: vec![Value::String(vector_literal), json!(k)],
+            binds: vec![embedding_bind, json!(k)],
             cursor: None,
             max_rows: Some(k),
             max_result_bytes: None,
@@ -3304,6 +3408,7 @@ async fn semantic_search_as_query_args(
         SemanticSearchResponseMetadata {
             metric: metric.as_sql(),
             k,
+            verified_local_vector_embedding: has_text,
         },
     ))
 }
@@ -4692,13 +4797,52 @@ async fn ensure_resolved_read_only(
         .map(|(_, decision)| decision)
 }
 
+/// The text-embedding tool reaches this only after it has proven the local
+/// 23ai capability and constructed the SQL itself. Raw `oracle_query` never
+/// invokes this path, so a caller cannot turn VECTOR_EMBEDDING into a generic
+/// read escape hatch.
+async fn ensure_resolved_read_only_with_verified_local_vector_embedding(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    sql: &str,
+) -> Result<GuardDecision, ErrorEnvelope> {
+    resolve_read_only_relations_with_verified_local_vector_embedding(cx, conn, cache, sql)
+        .await
+        .map(|(_, decision)| decision)
+}
+
 async fn resolve_read_only_relations(
     cx: &Cx,
     conn: &dyn OracleConnection,
     cache: &OracleCatalogResolverCache,
     sql: &str,
 ) -> Result<(Vec<ResolvedObject>, GuardDecision), ErrorEnvelope> {
-    ensure_read_only(sql)?;
+    resolve_read_only_relations_inner(cx, conn, cache, sql, false).await
+}
+
+async fn resolve_read_only_relations_with_verified_local_vector_embedding(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    sql: &str,
+) -> Result<(Vec<ResolvedObject>, GuardDecision), ErrorEnvelope> {
+    resolve_read_only_relations_inner(cx, conn, cache, sql, true).await
+}
+
+async fn resolve_read_only_relations_inner(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    sql: &str,
+    verified_local_vector_embedding: bool,
+) -> Result<(Vec<ResolvedObject>, GuardDecision), ErrorEnvelope> {
+    let initial = if verified_local_vector_embedding {
+        DEFAULT_CLASSIFIER.classify_verified_local_vector_embedding(sql)
+    } else {
+        DEFAULT_CLASSIFIER.classify(sql)
+    };
+    ensure_read_only_decision(initial).map_err(|error| attach_parameterization_hint(error, sql))?;
     let plan = semantic_read_plan(sql)
         .ok_or_else(|| unresolved_semantic_read("query scope is not exactly representable"))?;
     cache.invalidate(CatalogInvalidation::SemanticProofRefresh);
@@ -4739,11 +4883,15 @@ async fn resolve_read_only_relations(
             "a relation can invoke an unproven view, policy, or virtual-column dependency",
         ));
     }
-    let decision =
+    let classifier =
         Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded())
             .with_oracle(Arc::new(ResolvedStatementPurity(purity)))
-            .with_statement_unknown_guarded()
-            .classify(sql);
+            .with_statement_unknown_guarded();
+    let decision = if verified_local_vector_embedding {
+        classifier.classify_verified_local_vector_embedding(sql)
+    } else {
+        classifier.classify(sql)
+    };
     ensure_read_only_decision(decision.clone())
         .map_err(|error| attach_parameterization_hint(error, sql))?;
     Ok((relations, decision))
@@ -11699,6 +11847,9 @@ impl OracleDispatcher {
                 } else {
                     (parse_args::<QueryArgs>(name, args)?, None)
                 };
+                let verified_local_vector_embedding = semantic_metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.verified_local_vector_embedding);
                 // K9: validate the STRUCTURED as_of one-of and build the
                 // flashback target BEFORE any classification or I/O (both-set /
                 // empty -> typed refusal). The base SELECT below is classified
@@ -11736,11 +11887,16 @@ impl OracleDispatcher {
                 // classifier (SEC-1). The candidate is then re-marked and put
                 // through the SAME semantic read gate as any other statement, so a
                 // rewrite can never widen what the read path admits.
+                let base_decision = if verified_local_vector_embedding {
+                    DEFAULT_CLASSIFIER.classify_verified_local_vector_embedding(&parsed.sql)
+                } else {
+                    DEFAULT_CLASSIFIER.classify(&parsed.sql)
+                };
                 let policy = apply_sql_policy(
                     sql_policy.as_ref(),
                     current_schema.as_deref(),
                     context.principal_key(),
-                    &DEFAULT_CLASSIFIER.classify(&parsed.sql),
+                    &base_decision,
                     &parsed.sql,
                 )?;
                 let policy_sql = policy
@@ -11749,13 +11905,23 @@ impl OracleDispatcher {
                     .unwrap_or_else(|| parsed.sql.clone());
                 let executed_sql =
                     with_audit_marker(&policy_sql, state.active_profile.as_deref(), audit_tool);
-                let classified = ensure_resolved_read_only(
-                    cx,
-                    state.conn.as_ref(),
-                    &state.catalog_cache,
-                    &executed_sql,
-                )
-                .await;
+                let classified = if verified_local_vector_embedding {
+                    ensure_resolved_read_only_with_verified_local_vector_embedding(
+                        cx,
+                        state.conn.as_ref(),
+                        &state.catalog_cache,
+                        &executed_sql,
+                    )
+                    .await
+                } else {
+                    ensure_resolved_read_only(
+                        cx,
+                        state.conn.as_ref(),
+                        &state.catalog_cache,
+                        &executed_sql,
+                    )
+                    .await
+                };
                 let (gate, verdict_certificate) = match classified {
                     Ok(decision) => (Ok(()), Some(decision.verdict_certificate().clone())),
                     Err(error) => (Err(error), None),

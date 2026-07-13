@@ -99,6 +99,42 @@ pub fn semantic_search_query(
     ))
 }
 
+/// Build the bounded text-embedding SQL shape used by
+/// `oracle_semantic_search` after the dispatcher has proved the selected model
+/// is a local ONNX embedding model on a compatible 23ai database.
+///
+/// The model name is dictionary-derived, never accepted from the caller. It is
+/// still validated as a simple identifier before it reaches the SQL grammar.
+/// The source text and top-k count remain positional binds (`:1`, `:2`).
+pub fn semantic_search_text_query(
+    owner: &str,
+    table: &str,
+    column: &str,
+    model: &str,
+    metric: SemanticSearchMetric,
+) -> Result<String, DbError> {
+    for (label, value) in [
+        ("owner", owner),
+        ("table", table),
+        ("column", column),
+        ("model", model),
+    ] {
+        if !is_simple_identifier(value) {
+            return Err(DbError::Query(format!(
+                "invalid semantic-search {label} identifier: {value:?}"
+            )));
+        }
+    }
+    Ok(format!(
+        "SELECT t.* FROM {}.{} t ORDER BY VECTOR_DISTANCE(t.{}, VECTOR_EMBEDDING({} USING :1), {}) FETCH FIRST :2 ROWS ONLY",
+        owner.to_ascii_uppercase(),
+        table.to_ascii_uppercase(),
+        column.to_ascii_uppercase(),
+        model.to_ascii_uppercase(),
+        metric.as_sql(),
+    ))
+}
+
 /// The `DBMS_METADATA` object types we expose (validated allowlist).
 const DDL_OBJECT_TYPES: &[&str] = &[
     "TABLE",
@@ -2506,6 +2542,34 @@ mod tests {
                 SemanticSearchMetric::Dot,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn semantic_search_text_query_uses_only_a_dictionary_safe_model_identifier() {
+        let query = semantic_search_text_query(
+            "hr",
+            "documents",
+            "embedding",
+            "local_onnx_model",
+            SemanticSearchMetric::Dot,
+        )
+        .expect("a dictionary-derived simple model name builds text embedding SQL");
+        assert_eq!(
+            query,
+            "SELECT t.* FROM HR.DOCUMENTS t ORDER BY VECTOR_DISTANCE(t.EMBEDDING, \
+             VECTOR_EMBEDDING(LOCAL_ONNX_MODEL USING :1), DOT) FETCH FIRST :2 ROWS ONLY"
+        );
+        assert!(
+            semantic_search_text_query(
+                "HR",
+                "DOCUMENTS",
+                "EMBEDDING",
+                "model); DROP TABLE documents",
+                SemanticSearchMetric::Cosine,
+            )
+            .is_err(),
+            "a model name cannot inject into the VECTOR_EMBEDDING grammar"
         );
     }
 

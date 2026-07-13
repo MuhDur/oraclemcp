@@ -31,9 +31,11 @@
 //! `ProvenReadOnly` is classified ≥ `Guarded`. The batch danger is the max over
 //! statements; any `Forbidden` sub-statement rejects the whole batch.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -123,6 +125,22 @@ pub const VERDICT_CERTIFICATE_CLASSIFIER_VERSION: &str = concat!(
 
 const CERTIFICATE_CORE_HASH_DOMAIN: &str = "oraclemcp:verdict-certificate-core:v1\n";
 const CERTIFICATE_TERMINAL_RULE_ID: &str = "R16";
+
+/// `sqlparser`'s Oracle dialect does not yet parse Oracle 23ai's
+/// `VECTOR_EMBEDDING(model USING :bind)` grammar. This recognizes only the
+/// builtin's unqualified, identifier-and-positional-bind form and presents an
+/// equivalent comma-argument form to the parser. Everything outside that
+/// narrow shape remains unparseable and therefore fail-closed.
+static VECTOR_EMBEDDING_USING_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\bVECTOR_EMBEDDING\s*\(\s*([A-Z][A-Z0-9_$#]{0,29})\s+USING\s+(:[1-9][0-9]*)\s*\)",
+    )
+    .expect("VECTOR_EMBEDDING parser-normalization regex is valid")
+});
+
+fn normalize_vector_embedding_for_parser(sql: &str) -> Cow<'_, str> {
+    VECTOR_EMBEDDING_USING_RE.replace_all(sql, "VECTOR_EMBEDDING($1, $2)")
+}
 
 impl VerdictCertificate {
     fn from_decision(sql: &str, decision: &GuardDecision) -> Self {
@@ -1479,7 +1497,7 @@ impl StatementClass {
 /// Known Oracle SQL built-in functions that are pure (never trigger the UDF
 /// purity consult). Anything *not* here that is called as `ident(` is treated
 /// as a user-defined function → consult the oracle (default `Unknown`).
-fn is_builtin_function(name: &str) -> bool {
+fn is_builtin_function(name: &str, verified_local_vector_embedding: bool) -> bool {
     const BUILTINS: &[&str] = &[
         "count",
         "sum",
@@ -1539,7 +1557,9 @@ fn is_builtin_function(name: &str) -> bool {
         "cardinality",
         "vector_distance",
     ];
-    BUILTINS.contains(&name.to_ascii_lowercase().as_str())
+    let name = name.to_ascii_lowercase();
+    BUILTINS.contains(&name.as_str())
+        || (verified_local_vector_embedding && name == "vector_embedding")
 }
 
 /// Keyword-collision identifiers that, when used as a **bare** `name(` call, are
@@ -1567,7 +1587,7 @@ fn is_routine_name_keyword(name: &str) -> bool {
 /// Token-based UDF detection: an identifier (optionally `schema.`-qualified)
 /// immediately followed by `(` that is not a known built-in is a candidate
 /// user-defined function call. Fail-closed: over-detection only adds Guarded.
-fn user_defined_calls(sql: &str) -> Vec<ObjectRef> {
+fn user_defined_calls(sql: &str, verified_local_vector_embedding: bool) -> Vec<ObjectRef> {
     let dialect = OracleDialect {};
     let Ok(tokens) = Tokenizer::new(&dialect, sql).tokenize() else {
         return Vec::new();
@@ -1629,7 +1649,7 @@ fn user_defined_calls(sql: &str) -> Vec<ObjectRef> {
             // module's own stated invariant ("a schema-qualified name is never
             // skipped") and the earlier keyword-named-UDF fix (oracle-ajm2); the
             // qualified-builtin subcase was the remaining gap (oracle-b6yl.2).
-            if is_qualified || !is_builtin_function(&fname) {
+            if is_qualified || !is_builtin_function(&fname, verified_local_vector_embedding) {
                 calls.push(ObjectRef::new(schema, fname));
             }
         }
@@ -2355,6 +2375,10 @@ struct SemanticValueVisitor {
     /// data identifier, but this must not suppress an identically named column
     /// elsewhere in the same query.
     vector_metric_expressions: Vec<*const Expr>,
+    /// The first `VECTOR_EMBEDDING` argument is a server-owned model grammar
+    /// identifier. It is never caller SQL on the governed surface; treating it
+    /// as a column would make the resolver prove a fictitious data dependency.
+    vector_embedding_model_expressions: Vec<*const Expr>,
 }
 
 impl Visitor for SemanticValueVisitor {
@@ -2366,10 +2390,20 @@ impl Visitor for SemanticValueVisitor {
         {
             self.vector_metric_expressions.push(metric as *const Expr);
         }
+        if let Expr::Function(function) = expr
+            && let Some(model) = vector_embedding_model_expr(function)
+        {
+            self.vector_embedding_model_expressions
+                .push(model as *const Expr);
+        }
         if self
             .vector_metric_expressions
             .iter()
             .any(|metric| std::ptr::eq(*metric, expr as *const Expr))
+            || self
+                .vector_embedding_model_expressions
+                .iter()
+                .any(|model| std::ptr::eq(*model, expr as *const Expr))
         {
             return ControlFlow::Continue(());
         }
@@ -2399,6 +2433,17 @@ impl Visitor for SemanticValueVisitor {
                 .expect("VECTOR_DISTANCE metric was registered before its arguments");
             self.vector_metric_expressions.remove(position);
         }
+        if let Expr::Function(function) = expr
+            && let Some(model) = vector_embedding_model_expr(function)
+        {
+            let model = model as *const Expr;
+            let position = self
+                .vector_embedding_model_expressions
+                .iter()
+                .rposition(|active| std::ptr::eq(*active, model))
+                .expect("VECTOR_EMBEDDING model was registered before its arguments");
+            self.vector_embedding_model_expressions.remove(position);
+        }
         ControlFlow::Continue(())
     }
 }
@@ -2423,6 +2468,28 @@ fn vector_distance_metric_expr(function: &Function) -> Option<&Expr> {
         return None;
     };
     is_vector_distance_metric(identifier).then_some(metric)
+}
+
+/// Return the exact dictionary-derived model identifier in a bare,
+/// unqualified `VECTOR_EMBEDDING(model USING :bind)` call. The inner source
+/// remains an ordinary expression and is still visited/proven normally.
+fn vector_embedding_model_expr(function: &Function) -> Option<&Expr> {
+    let [name] = function.name.0.as_slice() else {
+        return None;
+    };
+    let name = name.as_ident()?;
+    if name.quote_style.is_some() || !name.value.eq_ignore_ascii_case("VECTOR_EMBEDDING") {
+        return None;
+    }
+    let FunctionArguments::List(arguments) = &function.args else {
+        return None;
+    };
+    let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(model @ Expr::Identifier(identifier)))) =
+        arguments.args.first()
+    else {
+        return None;
+    };
+    (identifier.quote_style.is_none()).then_some(model)
 }
 
 fn is_vector_distance_metric(metric: &Ident) -> bool {
@@ -2519,7 +2586,8 @@ fn simple_statement_relation(factor: &TableFactor) -> Option<StatementRelation> 
 /// resolver can represent them without alias leakage.
 #[must_use]
 pub fn semantic_read_plan(sql: &str) -> Option<SemanticReadPlan> {
-    let statements = Parser::parse_sql(&OracleDialect {}, sql).ok()?;
+    let parser_sql = normalize_vector_embedding_for_parser(sql);
+    let statements = Parser::parse_sql(&OracleDialect {}, &parser_sql).ok()?;
     let [sqlparser::ast::Statement::Query(query)] = statements.as_slice() else {
         return None;
     };
@@ -2540,6 +2608,7 @@ pub fn semantic_read_plan(sql: &str) -> Option<SemanticReadPlan> {
     let mut visitor = SemanticValueVisitor {
         values: Vec::new(),
         vector_metric_expressions: Vec::new(),
+        vector_embedding_model_expressions: Vec::new(),
     };
     let _ = query.visit(&mut visitor);
     let mut seen_values = HashSet::new();
@@ -2816,10 +2885,12 @@ fn classify_statement(
     sql: &str,
     oracle: &dyn SideEffectOracle,
     modes: StrictModes,
+    verified_local_vector_embedding: bool,
 ) -> StatementClass {
     use sqlparser::ast::Statement;
     let dialect = OracleDialect {};
-    let parsed = match Parser::parse_sql(&dialect, sql) {
+    let parser_sql = normalize_vector_embedding_for_parser(sql);
+    let parsed = match Parser::parse_sql(&dialect, &parser_sql) {
         Ok(stmts) if stmts.len() == 1 => stmts.into_iter().next().expect("len 1"),
         // Unparseable or unexpectedly multi → fail-closed. Before settling on the
         // ReadWrite default, run a leading admin/DCL verb scan over the
@@ -2925,7 +2996,7 @@ fn classify_statement(
             }
             // SELECT/WITH: Safe only if it calls no unproven user-defined
             // function (R15). Any UDF not ProvenReadOnly → Guarded.
-            let calls = user_defined_calls(sql);
+            let calls = user_defined_calls(sql, verified_local_vector_embedding);
             let all_proven = calls
                 .iter()
                 .all(|c| oracle.routine_purity(c).permits_safe());
@@ -3245,7 +3316,7 @@ fn block_interior_floor(
         {
             continue;
         }
-        let class = classify_statement(&seg, oracle, modes);
+        let class = classify_statement(&seg, oracle, modes, false);
         if let Some(level) = class.required {
             acc = Some(match acc {
                 Some((d, l)) => (d.max(class.danger), l.max(level)),
@@ -3326,7 +3397,22 @@ impl Classifier {
     /// attach the certificate built from this exact final decision.
     #[must_use]
     pub fn classify(&self, sql: &str) -> GuardDecision {
-        let decision = self.classify_raw(sql);
+        let decision = self.classify_raw(sql, false);
+        let certificate = VerdictCertificate::from_decision(sql, &decision);
+        decision.with_verdict_certificate(certificate)
+    }
+
+    /// Classify a server-constructed `VECTOR_EMBEDDING` read after the caller
+    /// has separately proven the exact local 23ai ONNX-model capability. This
+    /// is deliberately opt-in: ordinary caller SQL must use [`Self::classify`]
+    /// and therefore continues to treat `VECTOR_EMBEDDING` as an unproven UDF.
+    ///
+    /// The method does not authorize an arbitrary user model or filter. The
+    /// only production caller constructs the query from a dictionary-derived
+    /// model identifier and bind-only caller input before invoking this path.
+    #[must_use]
+    pub fn classify_verified_local_vector_embedding(&self, sql: &str) -> GuardDecision {
+        let decision = self.classify_raw(sql, true);
         let certificate = VerdictCertificate::from_decision(sql, &decision);
         decision.with_verdict_certificate(certificate)
     }
@@ -3334,7 +3420,7 @@ impl Classifier {
     /// Classification implementation before the response/audit witness is
     /// attached. Keeping this private makes it impossible for callers to obtain
     /// an enforced decision without the certificate from the same call.
-    fn classify_raw(&self, sql: &str) -> GuardDecision {
+    fn classify_raw(&self, sql: &str, verified_local_vector_embedding: bool) -> GuardDecision {
         let trimmed = sql.trim();
         if trimmed.is_empty() {
             return GuardDecision {
@@ -3647,13 +3733,25 @@ impl Classifier {
         // Classify each statement; the batch danger is the max, and any
         // Forbidden sub-statement rejects the whole batch.
         let classes: Vec<StatementClass> = if shape.statement_count <= 1 {
-            vec![classify_statement(sql, self.oracle.as_ref(), self.modes())]
+            vec![classify_statement(
+                sql,
+                self.oracle.as_ref(),
+                self.modes(),
+                verified_local_vector_embedding,
+            )]
         } else {
             // Multi-statement pure SQL: let the parser split, classify each.
             match Parser::parse_sql(&OracleDialect {}, sql) {
                 Ok(stmts) => stmts
                     .iter()
-                    .map(|s| classify_statement(&s.to_string(), self.oracle.as_ref(), self.modes()))
+                    .map(|s| {
+                        classify_statement(
+                            &s.to_string(),
+                            self.oracle.as_ref(),
+                            self.modes(),
+                            verified_local_vector_embedding,
+                        )
+                    })
                     .collect(),
                 Err(_) => vec![StatementClass::forbidden()],
             }
@@ -3756,7 +3854,7 @@ mod tests {
     }
 
     fn classify_one_statement(sql: &str) -> StatementClass {
-        classify_statement(sql, &UnknownOracle, StrictModes::default())
+        classify_statement(sql, &UnknownOracle, StrictModes::default(), false)
     }
 
     fn oracle_tokens(sql: &str) -> Vec<Token> {
@@ -3876,6 +3974,28 @@ mod tests {
             }),
             "unreviewed metric spelling must remain a resolved value dependency"
         );
+
+        // The exemption is keyed to the FUNCTION as much as to the metric. Dropping
+        // an identifier from the catalog-proof set is a fail-open — it is how a
+        // reference the classifier cannot resolve stops being asked about — so it
+        // must apply to the real, unquoted Oracle builtin and to nothing else.
+        for sql in [
+            // A user-defined function that merely takes a metric-shaped argument.
+            "SELECT FOO(d.embedding, '[1,0,0]', COSINE) AS distance FROM docs d",
+            // A QUOTED "VECTOR_DISTANCE" is a user object that happens to share the
+            // builtin's spelling, not the builtin (see is_semantic_builtin_identifier).
+            "SELECT \"VECTOR_DISTANCE\"(d.embedding, '[1,0,0]', COSINE) AS distance FROM docs d",
+        ] {
+            let plan = semantic_read_plan(sql).expect("query still has a semantic plan");
+            assert!(
+                plan.values.iter().any(|name| {
+                    name.parts.len() == 1 && name.parts[0].text.eq_ignore_ascii_case("COSINE")
+                }),
+                "only the real unquoted VECTOR_DISTANCE makes its metric grammar; \
+                 everywhere else COSINE is an ordinary identifier that still needs \
+                 catalog proof: {sql}"
+            );
+        }
     }
 
     #[test]
@@ -3941,6 +4061,40 @@ mod tests {
         );
         assert_eq!(d.danger, DangerLevel::Safe);
         assert_eq!(d.required_level, Some(OperatingLevel::ReadOnly));
+    }
+
+    #[test]
+    fn vector_embedding_is_safe_only_as_the_unqualified_sql_builtin() {
+        let sql = "SELECT VECTOR_DISTANCE(d.embedding, VECTOR_EMBEDDING(LOCAL_ONNX_MODEL USING :1), COSINE) FROM docs d";
+        let d = classify(sql);
+        assert_eq!(d.danger, DangerLevel::Guarded, "{d:?}");
+        let d = Classifier::default().classify_verified_local_vector_embedding(sql);
+        assert_eq!(d.danger, DangerLevel::Safe, "{d:?}");
+        let plan = semantic_read_plan(sql)
+            .expect("the generated text-embedding query has an exact semantic plan");
+        assert!(
+            plan.values.iter().any(|name| {
+                name.parts.len() == 2
+                    && name.parts[0].text.eq_ignore_ascii_case("d")
+                    && name.parts[1].text.eq_ignore_ascii_case("embedding")
+            }),
+            "the vector column remains a catalog-proven dependency"
+        );
+        assert!(
+            !plan.values.iter().any(|name| {
+                name.parts.len() == 1 && name.parts[0].text.eq_ignore_ascii_case("LOCAL_ONNX_MODEL")
+            }),
+            "the dictionary-proven model is SQL grammar, not a row/column dependency"
+        );
+        assert_eq!(
+            Classifier::default()
+                .classify_verified_local_vector_embedding(
+                    "SELECT app.VECTOR_EMBEDDING(x) FROM dual"
+                )
+                .danger,
+            DangerLevel::Guarded,
+            "a qualified lookalike remains a user-defined routine candidate"
+        );
     }
 
     #[test]
@@ -6906,7 +7060,10 @@ mod tests {
 
     #[test]
     fn user_defined_calls_preserves_schema_on_qualified_calls() {
-        let calls = user_defined_calls("SELECT billing.purge_old_rows(x), ROUND(x) FROM dual");
+        let calls = user_defined_calls(
+            "SELECT billing.purge_old_rows(x), ROUND(x) FROM dual",
+            false,
+        );
         assert!(
             calls.iter().any(|call| {
                 call.schema.as_deref() == Some("billing")
@@ -6914,8 +7071,10 @@ mod tests {
             }),
             "schema-qualified UDF should preserve schema and routine name: {calls:?}"
         );
-        let later_calls =
-            user_defined_calls("SELECT id, status, billing.purge_old_rows(x) FROM dual");
+        let later_calls = user_defined_calls(
+            "SELECT id, status, billing.purge_old_rows(x) FROM dual",
+            false,
+        );
         assert!(
             later_calls.iter().any(|call| {
                 call.schema.as_deref() == Some("billing")

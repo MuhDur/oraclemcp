@@ -533,7 +533,7 @@ pub fn tool_registry() -> ToolRegistry {
                         "additionalProperties": false
                     },
                     "query_vector": { "type": "array", "minItems": 1, "maxItems": 16384, "description": "Numeric query vector. Exactly one of query_vector or query_text is required in this tool generation.", "items": { "type": "number" } },
-                    "query_text": { "type": "string", "description": "Reserved for verified in-database embedding models. Refused until the profile capability probe proves a model; use query_vector meanwhile." },
+                    "query_text": { "type": "string", "minLength": 1, "maxLength": 32768, "description": "Embedded only by exactly one visible local ONNX model after COMPATIBLE >= 23.4 is proven. Otherwise returns typed requires_23ai or no_in_db_model; it never falls back to client embedding." },
                     "k": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Top-k result count (default 10, hard cap 1000)." },
                     "metric": { "type": "string", "enum": ["COSINE", "EUCLIDEAN", "DOT"], "description": "VECTOR_DISTANCE metric (default COSINE)." },
                     "filter": { "type": "string", "description": "Reserved for the validated hybrid-retrieval surface; non-empty values are refused rather than accepted as raw SQL." }

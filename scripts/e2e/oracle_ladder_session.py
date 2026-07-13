@@ -450,6 +450,37 @@ class Ladder:
             )
             return {"server_version": version}
 
+        def semantic_text_capability_is_typed_and_fail_closed():
+            # This is deliberately a served MCP call, not a unit-level probe.
+            # On the pre-23.4 lanes it must stop at the COMPATIBLE gate with the
+            # machine-readable `requires_23ai` token; it must never fall back to
+            # client embedding or a table scan. FREE 23ai may instead reach the
+            # second gate and report that no local ONNX model is installed.
+            result = self.session.call(
+                "oracle_semantic_search",
+                {
+                    "over": {"table": "DUAL", "column": "DUMMY"},
+                    "query_text": "synthetic governed-rag capability probe",
+                    "k": 1,
+                },
+            )
+            content = structured(result)
+            require(
+                result.get("isError") is True
+                and content.get("error_class") == "RUNTIME_STATE_REQUIRED",
+                "query_text capability gap returns a typed refusal, never a silent fallback",
+                content,
+            )
+            token = ((content.get("structured_reason") or {}).get("offending_construct"))
+            is_23ai_lane = self.args.server_version_regex.lstrip("^").startswith("23")
+            expected = {"requires_23ai", "no_in_db_model"} if is_23ai_lane else {"requires_23ai"}
+            require(
+                token in expected,
+                "semantic text refusal identifies the exact missing capability",
+                {"token": token, "expected": sorted(expected), "content": content},
+            )
+            return {"capability_refusal": token}
+
         def read_only_arithmetic():
             rows = self.query_rows("SELECT 42 AS answer, 'ladder' AS tag FROM dual")
             require(rows and rows[0].get("ANSWER") == "42", "numeric literal round-trips", rows)
@@ -1448,6 +1479,10 @@ class Ladder:
         steps = [
             ("session_initialize", session_initialize),
             ("read_only_server_version", read_only_server_version),
+            (
+                "semantic_text_capability_is_typed_and_fail_closed",
+                semantic_text_capability_is_typed_and_fail_closed,
+            ),
             ("read_only_arithmetic", read_only_arithmetic),
             ("read_only_write_refused", read_only_write_refused),
             (
