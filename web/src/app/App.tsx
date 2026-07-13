@@ -1084,7 +1084,7 @@ function SessionLevelControlPanel({
       ? sessionLevelSummary(result.response)
       : null;
   const inputClass =
-    "h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 text-sm text-[var(--om-text)] outline-none focus:border-[var(--om-gold)] focus:ring-2 focus:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
+    "h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 text-sm text-[var(--om-text)] outline-none focus-visible:border-[var(--om-gold)] focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
   const labelClass = "mb-2 block text-sm font-semibold text-[var(--om-text)]";
   return (
     <ConsolePanel>
@@ -1914,7 +1914,11 @@ function ConfigPage(): React.ReactElement {
                   type="button"
                   variant="secondary"
                   disabled={busy}
-                  onClick={() => rollbackMutation.mutate(applyOutcome.outcome.rollback_id)}
+                  onClick={() => {
+                    if (window.confirm("Roll back the applied configuration change?")) {
+                      rollbackMutation.mutate(applyOutcome.outcome.rollback_id);
+                    }
+                  }}
                 >
                   <RotateCcw className="size-4" aria-hidden="true" />
                   Rollback
@@ -3360,9 +3364,9 @@ function ConsoleFact({
 // zinc/emerald defaults the rest of the console still uses.
 const OM_LABEL = "mb-2 block text-sm font-semibold text-[var(--om-text)]";
 const OM_INPUT =
-  "h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 text-sm text-[var(--om-text)] outline-none focus:border-[var(--om-gold)] focus:ring-2 focus:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
+  "h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 text-sm text-[var(--om-text)] outline-none focus-visible:border-[var(--om-gold)] focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
 const OM_TEXTAREA =
-  "w-full resize-y rounded-md border border-[var(--om-border)] bg-[var(--om-bg)] p-3 font-mono text-sm leading-6 text-[var(--om-text)] outline-none focus:border-[var(--om-gold)] focus:ring-2 focus:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
+  "w-full resize-y rounded-md border border-[var(--om-border)] bg-[var(--om-bg)] p-3 font-mono text-sm leading-6 text-[var(--om-text)] outline-none focus-visible:border-[var(--om-gold)] focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
 const OM_CHECKBOX = "size-4 rounded border-[var(--om-border)] accent-[var(--om-gold)]";
 const OM_CHECK_LABEL = "flex min-h-9 items-center gap-2 text-sm font-semibold text-[var(--om-text)]";
 const OM_CODE = "overflow-auto rounded-md bg-[var(--om-bg)] p-3 text-xs leading-5 text-[var(--om-text)]";
@@ -7504,7 +7508,13 @@ function UndoTreePanel({
           type="button"
           variant="ghost"
           disabled={!session || pending || !model.open}
-          onClick={() => undo.mutate(undefined)}
+          onClick={() => {
+            if (
+              window.confirm("Discard the workspace? This drops all held, uncommitted statements.")
+            ) {
+              undo.mutate(undefined);
+            }
+          }}
         >
           Discard workspace
         </Button>
