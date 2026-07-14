@@ -2813,4 +2813,279 @@ mod tests {
             self.0.flush()
         }
     }
+
+    // === GATE-SEAL residue kills ===
+
+    // Build a matching (signed record, bound verdict certificate) pair so the
+    // certificate-persistence sinks can be exercised directly.
+    fn record_with_bound_cert() -> (AuditRecord, BoundAuditVerdictCertificate) {
+        let d = draft("SELECT 1 FROM dual", "GUARDED");
+        let stmt_digest = crate::sha256_hex(d.sql.as_bytes());
+        let step = crate::AuditVerdictDerivationStep::new(
+            crate::AuditVerdictRuleId::R16,
+            crate::AuditVerdictConstruct::FinalSafe,
+        )
+        .expect("registered derivation step");
+        let cert = AuditVerdictCertificate::new(
+            "audit-policy-v1".to_owned(),
+            vec![step],
+            Some(crate::AuditVerdictOperatingLevel::ReadOnly),
+            None,
+            stmt_digest,
+            crate::AuditVerdict::Safe,
+        )
+        .expect("valid verdict certificate");
+        let core_hash = cert.core_hash();
+        let record =
+            AuditRecord::chained_signed_correlated_with_observed_scn_and_certificate_core_hash(
+                &d,
+                1,
+                GENESIS_HASH,
+                "t0".to_owned(),
+                &test_key(),
+                None,
+                None,
+                Some(core_hash),
+            );
+        let bound = cert.bind_to_record(&record).expect("bind cert to record");
+        (record, bound)
+    }
+
+    // L137: `is_canonical_sha256` must reject a `sha256:` value whose hex body is
+    // not exactly 64 chars even when every char is lowercase hex (the `&&`
+    // mutated to `||` would accept it).
+    #[test]
+    fn residue_verdict_core_hash_rejects_wrong_length_all_hex() {
+        let auditor = Auditor::new(Box::new(MemoryAuditSink::new()), test_key());
+        let bad = format!("sha256:{}", "a".repeat(63));
+        let result = auditor.append_correlated_with_observed_scn_and_certificate_core_hash(
+            &draft("SELECT 1", "GUARDED"),
+            "t0".to_owned(),
+            false,
+            None,
+            None,
+            Some(bad.as_str()),
+        );
+        assert!(
+            matches!(result, Err(AuditError::InvalidVerdictCertificateCoreHash)),
+            "a 63-char all-hex body is not canonical sha256; got {result:?}"
+        );
+    }
+
+    // L139: `is_canonical_sha256` must reject uppercase hex (the per-byte
+    // `is_ascii_hexdigit() && !is_ascii_uppercase()` mutated to `||` would accept
+    // uppercase, and would also accept non-hex chars).
+    #[test]
+    fn residue_verdict_core_hash_rejects_uppercase_hex() {
+        let auditor = Auditor::new(Box::new(MemoryAuditSink::new()), test_key());
+        let bad = format!("sha256:{}", "A".repeat(64));
+        let result = auditor.append_correlated_with_observed_scn_and_certificate_core_hash(
+            &draft("SELECT 1", "GUARDED"),
+            "t0".to_owned(),
+            false,
+            None,
+            None,
+            Some(bad.as_str()),
+        );
+        assert!(
+            matches!(result, Err(AuditError::InvalidVerdictCertificateCoreHash)),
+            "uppercase hex is not canonical sha256; got {result:?}"
+        );
+    }
+
+    // L156: the trait-default `append_with_verdict_certificate` must REFUSE
+    // (persistence unsupported), never silently succeed. `SharedSink` inherits
+    // the default.
+    #[test]
+    fn residue_default_verdict_persistence_is_refused() {
+        let (record, bound) = record_with_bound_cert();
+        let sink = SharedSink(Arc::new(MemoryAuditSink::new()));
+        let result = sink.append_with_verdict_certificate(&record, &bound);
+        assert!(
+            matches!(
+                result,
+                Err(AuditError::VerdictCertificatePersistenceUnsupported)
+            ),
+            "a sink without certificate persistence must refuse; got {result:?}"
+        );
+    }
+
+    // L270: `reject_unsafe_existing` must propagate a non-NotFound stat error
+    // (the guard mutated to `true` would treat any error as "absent → ok").
+    #[test]
+    fn residue_reject_unsafe_existing_propagates_non_notfound() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"x").expect("seed regular file");
+        let under_file = file.join("child"); // stat -> ENOTDIR (not NotFound)
+        assert!(
+            reject_unsafe_existing(&under_file).is_err(),
+            "a non-NotFound inspection error must fail closed, not be treated as absent"
+        );
+    }
+
+    // L381: `fsync_parent_dir` maps an empty parent to "." (a relative
+    // single-component path has an empty-string parent); the guard mutated to
+    // `true` would instead try to open the empty path and fail.
+    #[cfg(unix)]
+    #[test]
+    fn residue_fsync_parent_dir_uses_dot_for_empty_parent() {
+        assert!(
+            fsync_parent_dir(Path::new("residue-single-component-name")).is_ok(),
+            "an empty parent must resolve to \".\" and fsync successfully"
+        );
+    }
+
+    // L447: `FileAuditSink::open` fsyncs the parent directory when EITHER the log
+    // OR its lock sidecar is newly created (`||`). The `&&` mutant would skip the
+    // fsync when only one of them is new.
+    #[cfg(unix)]
+    #[test]
+    fn residue_open_fsyncs_parent_when_only_lock_is_new() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        // Pre-create the audit log (regular file) so `audit_pre_existing` is
+        // true but the lock sidecar is still absent -> `false || true`.
+        std::fs::write(&path, b"").expect("pre-create audit log");
+        let before = PARENT_DIR_FSYNCS.with(std::cell::Cell::get);
+        let _sink = FileAuditSink::open(&path).expect("open");
+        let after = PARENT_DIR_FSYNCS.with(std::cell::Cell::get);
+        assert_eq!(
+            after - before,
+            1,
+            "creating only the lock sidecar must still fsync the parent directory"
+        );
+    }
+
+    // L504: `FileAuditSink::append_with_verdict_certificate` must actually write
+    // the cert-bearing record (the FnValue `Ok(())` mutant writes nothing).
+    #[test]
+    fn residue_file_sink_persists_verdict_certificate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let sink = FileAuditSink::open(&path).expect("open");
+        let (record, bound) = record_with_bound_cert();
+        sink.append_with_verdict_certificate(&record, &bound)
+            .expect("append with cert");
+        let contents = std::fs::read_to_string(&path).expect("read back");
+        assert!(
+            contents.contains("verdict_certificate"),
+            "the certificate-bearing record must be durably written"
+        );
+    }
+
+    // L539 + L561: `MemoryAuditSink::append_with_verdict_certificate` must record
+    // the record AND its certificate, and `certificates()` must return them.
+    #[test]
+    fn residue_memory_sink_records_verdict_certificate() {
+        let sink = MemoryAuditSink::new();
+        let (record, bound) = record_with_bound_cert();
+        sink.append_with_verdict_certificate(&record, &bound)
+            .expect("append with cert");
+        assert_eq!(sink.records().len(), 1, "the record must be recorded");
+        assert_eq!(
+            sink.certificates(),
+            vec![Some(bound)],
+            "the aligned certificate slot must hold the bound certificate"
+        );
+    }
+
+    // L634: `analyze_resume_log` must propagate a non-NotFound open error (the
+    // guard mutated to `true` would swallow it as "fresh genesis").
+    #[test]
+    fn residue_analyze_resume_log_propagates_non_notfound() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"x").expect("seed regular file");
+        let under_file = file.join("child");
+        assert!(
+            analyze_resume_log(&under_file, &[]).is_err(),
+            "a non-NotFound open error must refuse resume, not seed a fresh chain"
+        );
+    }
+
+    // Multi-record resume regression: a valid 2-record chain resumes to its last
+    // record. (Note: the `index += 1` at sink.rs L672 is only fed to
+    // `ChainVerifier::observe` as the discarded `Broken.index` diagnostic — the
+    // chain itself verifies via the verifier's internal prev_hash/prev_seq state,
+    // so `index`'s value is not observable here; the `*= 1` mutant is equivalent.)
+    #[test]
+    fn residue_analyze_resume_log_verifies_multiple_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        {
+            let auditor =
+                Auditor::new(Box::new(FileAuditSink::open(&path).expect("open")), test_key());
+            auditor
+                .append(&draft("SELECT 1", "GUARDED"), "t1".to_owned(), true)
+                .expect("append 1");
+            auditor
+                .append(&draft("SELECT 2", "GUARDED"), "t2".to_owned(), true)
+                .expect("append 2");
+        }
+        let tail = analyze_resume_log(&path, &[test_key()])
+            .expect("a valid 2-record chain must resume")
+            .expect("non-empty tail");
+        assert_eq!(tail.seq, 2, "the resume tail must be the last record");
+    }
+
+    // L724: `find_entry_hash_at_seq` must propagate a non-NotFound open error.
+    #[test]
+    fn residue_find_entry_hash_at_seq_propagates_non_notfound() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"x").expect("seed regular file");
+        let under_file = file.join("child");
+        assert!(
+            find_entry_hash_at_seq(&under_file, 1).is_err(),
+            "a non-NotFound open error must surface, not be reported as truncation"
+        );
+    }
+
+    struct RejectingSubmitter;
+    impl crate::RekorSubmitter for RejectingSubmitter {
+        fn submit(
+            &self,
+            _head: &crate::AuditChainHead,
+        ) -> Result<crate::RekorAnchorReceipt, crate::RekorSubmitError> {
+            Err(crate::RekorSubmitError::Rejected)
+        }
+    }
+
+    // L1183 (`> 0` -> `== 0` / `< 0`) and L1184 (drop `!`): a flush after at least
+    // one record must enqueue the head to the Rekor anchor. A non-durable append
+    // advances the seq without the durable-path enqueue, isolating the flush-path
+    // enqueue.
+    #[test]
+    fn residue_flush_enqueues_rekor_head_after_a_record() {
+        let anchor =
+            crate::AsyncRekorAnchor::new(Box::new(RejectingSubmitter), 8).expect("anchor");
+        let auditor = Auditor::new(Box::new(MemoryAuditSink::new()), test_key())
+            .with_rekor_anchor(anchor.clone());
+        auditor
+            .append(&draft("SELECT 1", "GUARDED"), "t0".to_owned(), false)
+            .expect("non-durable append");
+        auditor.flush().expect("flush");
+        assert_eq!(
+            anchor.status().enqueued,
+            1,
+            "a flush after one record must enqueue exactly one Rekor head"
+        );
+    }
+
+    // L1183 (`> 0` -> `>= 0`): a flush with NO records (seq == 0) must NOT enqueue
+    // a Rekor head.
+    #[test]
+    fn residue_flush_before_any_record_does_not_enqueue_rekor() {
+        let anchor =
+            crate::AsyncRekorAnchor::new(Box::new(RejectingSubmitter), 8).expect("anchor");
+        let auditor = Auditor::new(Box::new(MemoryAuditSink::new()), test_key())
+            .with_rekor_anchor(anchor.clone());
+        auditor.flush().expect("empty flush");
+        assert_eq!(
+            anchor.status().enqueued,
+            0,
+            "an empty chain (seq == 0) must not enqueue a Rekor head"
+        );
+    }
 }
