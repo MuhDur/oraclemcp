@@ -352,7 +352,12 @@ mod kani_proofs {
     }
 
     fn level_rank(level: OperatingLevel) -> u8 {
-        const LEVELS: [OperatingLevel; 4] = OperatingLevel::all();
+        const LEVELS: [OperatingLevel; 4] = [
+            OperatingLevel::ReadOnly,
+            OperatingLevel::ReadWrite,
+            OperatingLevel::Ddl,
+            OperatingLevel::Admin,
+        ];
         LEVELS
             .iter()
             .position(|candidate| *candidate == level)
@@ -364,7 +369,18 @@ mod kani_proofs {
         let a = level_from_index(kani::any());
         let b = level_from_index(kani::any());
         let c = level_from_index(kani::any());
+        let reaches_strict_lattice_span =
+            a == OperatingLevel::ReadOnly && b == OperatingLevel::Admin;
 
+        kani::cover!(
+            reaches_strict_lattice_span,
+            "operating-level proof reaches READ_ONLY < ADMIN"
+        );
+        if reaches_strict_lattice_span {
+            assert_eq!(level_rank(a), 0);
+            assert_eq!(level_rank(b), 3);
+            assert!(a < b);
+        }
         assert!(a <= b || b <= a);
         assert_eq!(a <= b, level_rank(a) <= level_rank(b));
         assert_eq!(a.min(b), if a <= b { a } else { b });
@@ -391,6 +407,10 @@ mod kani_proofs {
         let danger = danger_from_index(kani::any());
         let required = danger.default_required_level();
 
+        kani::cover!(
+            danger == DangerLevel::Forbidden && required.is_none(),
+            "danger proof reaches forbidden statements with no dispatchable level"
+        );
         match danger {
             DangerLevel::Safe => assert_eq!(required, Some(OperatingLevel::ReadOnly)),
             DangerLevel::Guarded => {
@@ -418,7 +438,36 @@ mod kani_proofs {
             assert!(session.set_current_level(requested_current).is_err());
         }
 
-        match session.evaluate(Some(required)) {
+        let decision = session.evaluate(Some(required));
+        kani::cover!(
+            matches!(decision, LevelDecision::Allow),
+            "session gate proof reaches allow"
+        );
+        kani::cover!(
+            matches!(decision, LevelDecision::RequireStepUp { .. }),
+            "session gate proof reaches step-up"
+        );
+        kani::cover!(
+            matches!(
+                decision,
+                LevelDecision::Blocked {
+                    reason: BlockReason::ExceedsCeiling { .. }
+                }
+            ),
+            "session gate proof reaches ceiling block"
+        );
+        let forbidden_decision = session.evaluate(None);
+        kani::cover!(
+            matches!(
+                forbidden_decision,
+                LevelDecision::Blocked {
+                    reason: BlockReason::Forbidden
+                }
+            ),
+            "session gate proof reaches forbidden block"
+        );
+
+        match decision {
             LevelDecision::Allow => {
                 assert!(required <= session.effective_ceiling());
                 assert!(required <= session.effective_level());
@@ -445,7 +494,7 @@ mod kani_proofs {
         }
 
         assert_eq!(
-            session.evaluate(None),
+            forbidden_decision,
             LevelDecision::Blocked {
                 reason: BlockReason::Forbidden,
             }
