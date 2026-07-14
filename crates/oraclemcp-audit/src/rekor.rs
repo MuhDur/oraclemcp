@@ -561,6 +561,99 @@ mod tests {
     }
 
     #[test]
+    fn validate_proof_shape_rejects_bounds_and_encoding() {
+        let mut zero_tree_size = receipt_for(head());
+        zero_tree_size.proof.tree_size = 0;
+        assert_eq!(
+            zero_tree_size.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MalformedProof),
+            "zero Merkle tree_size must be rejected"
+        );
+
+        let mut index_out_of_range = receipt_for(head());
+        index_out_of_range.proof.tree_size = 2;
+        index_out_of_range.proof.log_index = 3;
+        assert_eq!(
+            index_out_of_range.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MalformedProof),
+            "log_index must be within [0, tree_size)"
+        );
+
+        let mut malformed_root = receipt_for(head());
+        malformed_root.proof.root_hash = "00".repeat(63);
+        assert_eq!(
+            malformed_root.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MalformedProof),
+            "truncated root hash must be rejected"
+        );
+
+        let mut malformed_sibling = receipt_for(head());
+        malformed_sibling.proof.hashes = vec!["zz".repeat(32)];
+        assert_eq!(
+            malformed_sibling.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MalformedProof),
+            "malformed sibling hash must be rejected"
+        );
+
+        let mut oversized_body = receipt_for(head());
+        oversized_body.proof.entry_body = vec![0_u8; MAX_REKOR_ENTRY_BODY_BYTES + 1];
+        assert_eq!(
+            oversized_body.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MalformedProof),
+            "oversized entry body must be rejected"
+        );
+
+        let mut too_many_hashes = receipt_for(head());
+        too_many_hashes
+            .proof
+            .hashes
+            .resize(MAX_REKOR_PROOF_HASHES + 1, "aa".to_owned());
+        assert_eq!(
+            too_many_hashes.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MalformedProof),
+            "too many sibling hashes must be rejected"
+        );
+    }
+
+    #[test]
+    fn inclusion_root_reconstructs_expected_root_for_tree_size_six() {
+        let leaves = [
+            rekor_leaf_hash(b"leaf-0"),
+            rekor_leaf_hash(b"leaf-1"),
+            rekor_leaf_hash(b"leaf-2"),
+            rekor_leaf_hash(b"leaf-3"),
+            rekor_leaf_hash(b"leaf-4"),
+            rekor_leaf_hash(b"leaf-5"),
+        ];
+        let h01 = rekor_node_hash(leaves[0], leaves[1]);
+        let h23 = rekor_node_hash(leaves[2], leaves[3]);
+        let h45 = rekor_node_hash(leaves[4], leaves[5]);
+        let h0123 = rekor_node_hash(h01, h23);
+        let expected_root = rekor_node_hash(h0123, h45);
+
+        let proof_for_0 = vec![hex_of(leaves[1]), hex_of(h23), hex_of(h45)];
+        assert_eq!(
+            inclusion_root(leaves[0], 0, 6, &proof_for_0),
+            Ok(expected_root),
+            "index 0 in tree size 6 must reconstruct the expected root"
+        );
+
+        let proof_for_4 = vec![hex_of(leaves[5]), hex_of(h0123)];
+        assert_eq!(
+            inclusion_root(leaves[4], 4, 6, &proof_for_4),
+            Ok(expected_root),
+            "index 4 in right subtree of size 6 must reconstruct root"
+        );
+
+        let proof_for_5 = vec![hex_of(leaves[4]), hex_of(h0123)];
+        assert_eq!(
+            inclusion_root(leaves[5], 5, 6, &proof_for_5),
+            Ok(expected_root),
+            "index 5 in right subtree of size 6 must reconstruct root"
+        );
+    }
+
+    #[test]
     fn largest_power_of_two_less_than_matches_expected_boundaries() {
         assert_eq!(largest_power_of_two_less_than(1), 0);
         assert_eq!(largest_power_of_two_less_than(2), 1);
@@ -570,6 +663,8 @@ mod tests {
         assert_eq!(largest_power_of_two_less_than(6), 4);
         assert_eq!(largest_power_of_two_less_than(9), 8);
         assert_eq!(largest_power_of_two_less_than(17), 16);
+        assert_eq!(largest_power_of_two_less_than(1_u64 << 63), 1_u64 << 63);
+        assert_eq!(largest_power_of_two_less_than(u64::MAX), 1_u64 << 63);
     }
 
     struct BlockingOutage {
