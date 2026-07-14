@@ -4745,8 +4745,7 @@ mod tests {
         // Guarded.
         let strict =
             Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
-        let d = strict
-            .classify("SELECT d.run_ddl FROM (dual d JOIN dual e ON 1 = 1)");
+        let d = strict.classify("SELECT d.run_ddl FROM (dual d JOIN dual e ON 1 = 1)");
         assert_eq!(
             d.danger,
             DangerLevel::Safe,
@@ -4761,8 +4760,9 @@ mod tests {
         // collector arm can turn `jt.a` into an unresolved callable.
         let strict =
             Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
-        let d =
-            strict.classify("SELECT jt.a FROM json_docs d, JSON_TABLE(d.doc, '$' COLUMNS(a NUMBER PATH '$.a')) jt");
+        let d = strict.classify(
+            "SELECT jt.a FROM json_docs d, JSON_TABLE(d.doc, '$' COLUMNS(a NUMBER PATH '$.a')) jt",
+        );
         assert_eq!(
             d.danger,
             DangerLevel::Safe,
@@ -4793,7 +4793,9 @@ mod tests {
         // A nested-join wrapper must still detect a smuggled UPDATE body under its
         // FROM arm; dropping the NestedJoin collector branch can downgrade a smuggled
         // write to Safe.
-        let d = classify("SELECT * FROM ((dual d JOIN dual e ON 1 = 1) JOIN (UPDATE t SET x = 1) w ON 1 = 1)");
+        let d = classify(
+            "SELECT * FROM ((dual d JOIN dual e ON 1 = 1) JOIN (UPDATE t SET x = 1) w ON 1 = 1)",
+        );
         assert_eq!(
             d.danger,
             DangerLevel::Guarded,
@@ -4827,8 +4829,7 @@ mod tests {
     fn package_body_initialization_matches_quoted_end_name() {
         // begin_matches_final_end must still identify the package initializer's
         // closing END when members use quoted identifiers.
-        let sql =
-            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE \"Q\" IS BEGIN NULL; END \"Q\"; BEGIN NULL; END p;";
+        let sql = "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE \"Q\" IS BEGIN NULL; END \"Q\"; BEGIN NULL; END p;";
         let tokens = oracle_tokens(sql);
         let unit = stored_unit_create(sql).expect("package body should be recognized");
         let final_end = stored_unit_final_end(&tokens, &unit).expect("final END should be found");
@@ -4836,8 +4837,14 @@ mod tests {
 
         assert!(begin_matches_final_end(&tokens, init_begin, final_end));
         let shape = analyze_batch(sql);
-        assert!(shape.balanced, "quoted package body should balance: {shape:?}");
-        assert_eq!(shape.statement_count, 1, "package init must be a single unit: {shape:?}");
+        assert!(
+            shape.balanced,
+            "quoted package body should balance: {shape:?}"
+        );
+        assert_eq!(
+            shape.statement_count, 1,
+            "package init must be a single unit: {shape:?}"
+        );
 
         let d = classify(sql);
         assert_eq!(d.danger, DangerLevel::Destructive);
@@ -5038,6 +5045,8 @@ mod tests {
             "SELECT 1 FROM dual UNION SELECT * FROM (DELETE FROM t)",
             "SELECT * FROM a JOIN (UPDATE t SET x=1) b ON a.id=b.id",
             "SELECT * FROM (MERGE INTO t USING s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.v=s.v)",
+            "SELECT * FROM a JOIN (MERGE INTO t USING s ON (a.id=s.id) \
+             WHEN MATCHED THEN UPDATE SET x=1) j ON a.id=j.id",
         ] {
             assert!(
                 carries_dml(sql),
