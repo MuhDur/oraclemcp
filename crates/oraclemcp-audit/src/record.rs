@@ -2513,252 +2513,252 @@ mod tests {
         ));
     }
 
-#[test]
-fn is_canonical_sha256_rejects_non_canonical_inputs() {
-    assert!(is_canonical_sha256(&format!("sha256:{}", "a".repeat(64))));
-    assert!(!is_canonical_sha256(""));
-    assert!(!is_canonical_sha256("sha256"));
-    assert!(!is_canonical_sha256("sha256:"));
-    assert!(!is_canonical_sha256(&format!("sha256:{}", "f".repeat(63))));
-    assert!(!is_canonical_sha256(&format!("sha256:{}", "A".repeat(64))));
-    assert!(!is_canonical_sha256(&format!("SHA256:{}", "a".repeat(64))));
-    assert!(!is_canonical_sha256(&format!("md5:{}", "a".repeat(64))));
-}
+    #[test]
+    fn is_canonical_sha256_rejects_non_canonical_inputs() {
+        assert!(is_canonical_sha256(&format!("sha256:{}", "a".repeat(64))));
+        assert!(!is_canonical_sha256(""));
+        assert!(!is_canonical_sha256("sha256"));
+        assert!(!is_canonical_sha256("sha256:"));
+        assert!(!is_canonical_sha256(&format!("sha256:{}", "f".repeat(63))));
+        assert!(!is_canonical_sha256(&format!("sha256:{}", "A".repeat(64))));
+        assert!(!is_canonical_sha256(&format!("SHA256:{}", "a".repeat(64))));
+        assert!(!is_canonical_sha256(&format!("md5:{}", "a".repeat(64))));
+    }
 
-#[test]
-fn is_canonical_sha256_rejects_non_hex_character() {
-    assert!(!is_canonical_sha256(&format!("sha256:{}", "g".repeat(64))));
-}
+    #[test]
+    fn is_canonical_sha256_rejects_non_hex_character() {
+        assert!(!is_canonical_sha256(&format!("sha256:{}", "g".repeat(64))));
+    }
 
-#[test]
-fn matches_record_rejects_core_hash_mismatch() {
-    let mut record = AuditRecord::chained_unsigned(
-        &draft(),
-        3,
-        GENESIS_HASH,
-        "2026-06-01T00:00:00Z".to_owned(),
-    );
-    let certificate = verdict_certificate(&record.sql_sha256);
-    record.verdict_certificate_core_hash = Some(certificate.core_hash());
-    let bound = certificate
-        .clone()
-        .bind_to_record(&record)
-        .expect("binding ok");
+    #[test]
+    fn matches_record_rejects_core_hash_mismatch() {
+        let mut record = AuditRecord::chained_unsigned(
+            &draft(),
+            3,
+            GENESIS_HASH,
+            "2026-06-01T00:00:00Z".to_owned(),
+        );
+        let certificate = verdict_certificate(&record.sql_sha256);
+        record.verdict_certificate_core_hash = Some(certificate.core_hash());
+        let bound = certificate
+            .clone()
+            .bind_to_record(&record)
+            .expect("binding ok");
 
-    let mut bad_core_hash = record.clone();
-    bad_core_hash.verdict_certificate_core_hash = Some(format!("sha256:{}", "f".repeat(64)));
-    assert!(
-        !bound.matches_record(&bad_core_hash),
-        "core hash drift must break certificate binding"
-    );
-}
+        let mut bad_core_hash = record.clone();
+        bad_core_hash.verdict_certificate_core_hash = Some(format!("sha256:{}", "f".repeat(64)));
+        assert!(
+            !bound.matches_record(&bad_core_hash),
+            "core hash drift must break certificate binding"
+        );
+    }
 
-#[test]
-fn matches_record_rejects_entry_hash_mismatch() {
-    let mut record = AuditRecord::chained_unsigned(
-        &draft(),
-        3,
-        GENESIS_HASH,
-        "2026-06-01T00:00:00Z".to_owned(),
-    );
-    let certificate = verdict_certificate(&record.sql_sha256);
-    record.verdict_certificate_core_hash = Some(certificate.core_hash());
-    let bound = certificate
-        .clone()
-        .bind_to_record(&record)
-        .expect("binding ok");
+    #[test]
+    fn matches_record_rejects_entry_hash_mismatch() {
+        let mut record = AuditRecord::chained_unsigned(
+            &draft(),
+            3,
+            GENESIS_HASH,
+            "2026-06-01T00:00:00Z".to_owned(),
+        );
+        let certificate = verdict_certificate(&record.sql_sha256);
+        record.verdict_certificate_core_hash = Some(certificate.core_hash());
+        let bound = certificate
+            .clone()
+            .bind_to_record(&record)
+            .expect("binding ok");
 
-    let mut bad_entry_hash = record.clone();
-    bad_entry_hash.entry_hash = format!("sha256:{}", "0".repeat(64));
-    assert!(
-        !bound.matches_record(&bad_entry_hash),
-        "entry hash drift must break certificate binding"
-    );
-}
+        let mut bad_entry_hash = record.clone();
+        bad_entry_hash.entry_hash = format!("sha256:{}", "0".repeat(64));
+        assert!(
+            !bound.matches_record(&bad_entry_hash),
+            "entry hash drift must break certificate binding"
+        );
+    }
 
-#[test]
-fn matches_record_rejects_statement_digest_mismatch() {
-    let mut record = AuditRecord::chained_unsigned(
-        &draft(),
-        3,
-        GENESIS_HASH,
-        "2026-06-01T00:00:00Z".to_owned(),
-    );
-    let certificate = verdict_certificate(&record.sql_sha256);
-    record.verdict_certificate_core_hash = Some(certificate.core_hash());
-    let bound = certificate
-        .clone()
-        .bind_to_record(&record)
-        .expect("binding ok");
+    #[test]
+    fn matches_record_rejects_statement_digest_mismatch() {
+        let mut record = AuditRecord::chained_unsigned(
+            &draft(),
+            3,
+            GENESIS_HASH,
+            "2026-06-01T00:00:00Z".to_owned(),
+        );
+        let certificate = verdict_certificate(&record.sql_sha256);
+        record.verdict_certificate_core_hash = Some(certificate.core_hash());
+        let bound = certificate
+            .clone()
+            .bind_to_record(&record)
+            .expect("binding ok");
 
-    let mut bad_stmt_hash = record.clone();
-    bad_stmt_hash.sql_sha256 = format!("sha256:{}", "0".repeat(64));
-    assert!(
-        !bound.matches_record(&bad_stmt_hash),
-        "statement hash drift must break certificate binding"
-    );
-}
+        let mut bad_stmt_hash = record.clone();
+        bad_stmt_hash.sql_sha256 = format!("sha256:{}", "0".repeat(64));
+        assert!(
+            !bound.matches_record(&bad_stmt_hash),
+            "statement hash drift must break certificate binding"
+        );
+    }
 
-#[test]
-fn schema_hashes_for_legacy_compatibility_include_optional_v7_v8_v9_fields() {
-    let d = draft();
-    let sql_sha256 = sha256_hex(d.sql.as_bytes());
-    let sql_normalized_sha256 = normalized_sql_sha256(&d.sql);
-    let agent_identity = d.subject.legacy_agent_identity();
+    #[test]
+    fn schema_hashes_for_legacy_compatibility_include_optional_v7_v8_v9_fields() {
+        let d = draft();
+        let sql_sha256 = sha256_hex(d.sql.as_bytes());
+        let sql_normalized_sha256 = normalized_sql_sha256(&d.sql);
+        let agent_identity = d.subject.legacy_agent_identity();
 
-    let no_correlation = compute_entry_hash_v7(
-        1,
-        "2026-07-01T00:00:00Z",
-        &agent_identity,
-        &d.subject,
-        None,
-        None,
-        None,
-        &d.tool,
-        &sql_sha256,
-        &sql_normalized_sha256,
-        REDACTED_SQL_PREVIEW,
-        &d.danger_level,
-        d.decision,
-        d.rows_affected,
-        d.outcome,
-        GENESIS_HASH,
-    );
-    let with_correlation = compute_entry_hash_v7(
-        1,
-        "2026-07-01T00:00:00Z",
-        &agent_identity,
-        &d.subject,
-        None,
-        None,
-        Some(&AuditCorrelation::attempt("sha256:1234")),
-        &d.tool,
-        &sql_sha256,
-        &sql_normalized_sha256,
-        REDACTED_SQL_PREVIEW,
-        &d.danger_level,
-        d.decision,
-        d.rows_affected,
-        d.outcome,
-        GENESIS_HASH,
-    );
-    assert_ne!(
-        no_correlation, with_correlation,
-        "correlation must alter the v7 canonical preimage"
-    );
-    assert!(with_correlation.starts_with("sha256:"));
-    assert_eq!(with_correlation.len(), "sha256:".len() + 64);
+        let no_correlation = compute_entry_hash_v7(
+            1,
+            "2026-07-01T00:00:00Z",
+            &agent_identity,
+            &d.subject,
+            None,
+            None,
+            None,
+            &d.tool,
+            &sql_sha256,
+            &sql_normalized_sha256,
+            REDACTED_SQL_PREVIEW,
+            &d.danger_level,
+            d.decision,
+            d.rows_affected,
+            d.outcome,
+            GENESIS_HASH,
+        );
+        let with_correlation = compute_entry_hash_v7(
+            1,
+            "2026-07-01T00:00:00Z",
+            &agent_identity,
+            &d.subject,
+            None,
+            None,
+            Some(&AuditCorrelation::attempt("sha256:1234")),
+            &d.tool,
+            &sql_sha256,
+            &sql_normalized_sha256,
+            REDACTED_SQL_PREVIEW,
+            &d.danger_level,
+            d.decision,
+            d.rows_affected,
+            d.outcome,
+            GENESIS_HASH,
+        );
+        assert_ne!(
+            no_correlation, with_correlation,
+            "correlation must alter the v7 canonical preimage"
+        );
+        assert!(with_correlation.starts_with("sha256:"));
+        assert_eq!(with_correlation.len(), "sha256:".len() + 64);
 
-    let result_masking = AuditResultMaskingCertificate {
-        schema_version: 1,
-        profile: None,
-        policy_id: "sha256:policy".to_owned(),
-        decisions: vec![AuditResultMaskingColumnDecision {
-            column: "NAME".to_owned(),
-            oracle_type: "VARCHAR2".to_owned(),
-            action: AuditResultMaskingAction::Mask,
-            source: AuditResultMaskingSource::Rule,
-            rule_index: None,
-            rule_tag: None,
-            salt_id: None,
-        }],
-    };
+        let result_masking = AuditResultMaskingCertificate {
+            schema_version: 1,
+            profile: None,
+            policy_id: "sha256:policy".to_owned(),
+            decisions: vec![AuditResultMaskingColumnDecision {
+                column: "NAME".to_owned(),
+                oracle_type: "VARCHAR2".to_owned(),
+                action: AuditResultMaskingAction::Mask,
+                source: AuditResultMaskingSource::Rule,
+                rule_index: None,
+                rule_tag: None,
+                salt_id: None,
+            }],
+        };
 
-    let no_result_masking = compute_entry_hash_v8(
-        1,
-        "2026-07-01T00:00:00Z",
-        &agent_identity,
-        &d.subject,
-        None,
-        None,
-        None,
-        None,
-        &d.tool,
-        &sql_sha256,
-        &sql_normalized_sha256,
-        REDACTED_SQL_PREVIEW,
-        &d.danger_level,
-        d.decision,
-        d.rows_affected,
-        d.outcome,
-        GENESIS_HASH,
-    );
-    let with_result_masking = compute_entry_hash_v8(
-        1,
-        "2026-07-01T00:00:00Z",
-        &agent_identity,
-        &d.subject,
-        None,
-        None,
-        None,
-        Some(&result_masking),
-        &d.tool,
-        &sql_sha256,
-        &sql_normalized_sha256,
-        REDACTED_SQL_PREVIEW,
-        &d.danger_level,
-        d.decision,
-        d.rows_affected,
-        d.outcome,
-        GENESIS_HASH,
-    );
-    assert_ne!(
-        no_result_masking, with_result_masking,
-        "result-masking must alter the v8 canonical preimage"
-    );
-    assert!(with_result_masking.starts_with("sha256:"));
-    assert_eq!(with_result_masking.len(), "sha256:".len() + 64);
+        let no_result_masking = compute_entry_hash_v8(
+            1,
+            "2026-07-01T00:00:00Z",
+            &agent_identity,
+            &d.subject,
+            None,
+            None,
+            None,
+            None,
+            &d.tool,
+            &sql_sha256,
+            &sql_normalized_sha256,
+            REDACTED_SQL_PREVIEW,
+            &d.danger_level,
+            d.decision,
+            d.rows_affected,
+            d.outcome,
+            GENESIS_HASH,
+        );
+        let with_result_masking = compute_entry_hash_v8(
+            1,
+            "2026-07-01T00:00:00Z",
+            &agent_identity,
+            &d.subject,
+            None,
+            None,
+            None,
+            Some(&result_masking),
+            &d.tool,
+            &sql_sha256,
+            &sql_normalized_sha256,
+            REDACTED_SQL_PREVIEW,
+            &d.danger_level,
+            d.decision,
+            d.rows_affected,
+            d.outcome,
+            GENESIS_HASH,
+        );
+        assert_ne!(
+            no_result_masking, with_result_masking,
+            "result-masking must alter the v8 canonical preimage"
+        );
+        assert!(with_result_masking.starts_with("sha256:"));
+        assert_eq!(with_result_masking.len(), "sha256:".len() + 64);
 
-    let no_observed_scn = compute_entry_hash_v9(
-        1,
-        "2026-07-01T00:00:00Z",
-        &agent_identity,
-        &d.subject,
-        None,
-        None,
-        None,
-        None,
-        None,
-        &d.tool,
-        &sql_sha256,
-        &sql_normalized_sha256,
-        REDACTED_SQL_PREVIEW,
-        &d.danger_level,
-        d.decision,
-        d.rows_affected,
-        d.outcome,
-        GENESIS_HASH,
-    );
-    let with_observed_scn = compute_entry_hash_v9(
-        1,
-        "2026-07-01T00:00:00Z",
-        &agent_identity,
-        &d.subject,
-        None,
-        None,
-        None,
-        None,
-        Some(99),
-        &d.tool,
-        &sql_sha256,
-        &sql_normalized_sha256,
-        REDACTED_SQL_PREVIEW,
-        &d.danger_level,
-        d.decision,
-        d.rows_affected,
-        d.outcome,
-        GENESIS_HASH,
-    );
-    assert_ne!(
-        no_observed_scn, with_observed_scn,
-        "observed SCN must alter the v9 canonical preimage"
-    );
-    assert!(with_observed_scn.starts_with("sha256:"));
-    assert_eq!(with_observed_scn.len(), "sha256:".len() + 64);
-}
+        let no_observed_scn = compute_entry_hash_v9(
+            1,
+            "2026-07-01T00:00:00Z",
+            &agent_identity,
+            &d.subject,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &d.tool,
+            &sql_sha256,
+            &sql_normalized_sha256,
+            REDACTED_SQL_PREVIEW,
+            &d.danger_level,
+            d.decision,
+            d.rows_affected,
+            d.outcome,
+            GENESIS_HASH,
+        );
+        let with_observed_scn = compute_entry_hash_v9(
+            1,
+            "2026-07-01T00:00:00Z",
+            &agent_identity,
+            &d.subject,
+            None,
+            None,
+            None,
+            None,
+            Some(99),
+            &d.tool,
+            &sql_sha256,
+            &sql_normalized_sha256,
+            REDACTED_SQL_PREVIEW,
+            &d.danger_level,
+            d.decision,
+            d.rows_affected,
+            d.outcome,
+            GENESIS_HASH,
+        );
+        assert_ne!(
+            no_observed_scn, with_observed_scn,
+            "observed SCN must alter the v9 canonical preimage"
+        );
+        assert!(with_observed_scn.starts_with("sha256:"));
+        assert_eq!(with_observed_scn.len(), "sha256:".len() + 64);
+    }
 
-#[test]
-fn verdict_certificate_core_hash_tracks_core_content() {
+    #[test]
+    fn verdict_certificate_core_hash_tracks_core_content() {
         let base = verdict_certificate(&format!("sha256:{}", "a".repeat(64)));
         let base_hash = base.core_hash();
         let mut changed = base.clone();

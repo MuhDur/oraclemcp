@@ -673,6 +673,14 @@ mod tests {
     }
 
     #[test]
+    fn rekor_limits_match_intended_contract_bounds() {
+        assert_eq!(DEFAULT_REKOR_QUEUE_CAPACITY, 8);
+        assert_eq!(MAX_REKOR_ENTRY_BODY_BYTES, 16 * 1024);
+        assert_eq!(MAX_REKOR_PROOF_HASHES, 128);
+        assert_eq!(MAX_REKOR_CHECKPOINT_BYTES, 16 * 1024);
+    }
+
+    #[test]
     fn validate_proof_shape_rejects_missing_required_proof_fields() {
         let mut missing_entry_uuid = receipt_for(head());
         missing_entry_uuid.proof.entry_uuid.clear();
@@ -683,7 +691,10 @@ mod tests {
         );
 
         let mut missing_signed_entry_timestamp = receipt_for(head());
-        missing_signed_entry_timestamp.proof.signed_entry_timestamp.clear();
+        missing_signed_entry_timestamp
+            .proof
+            .signed_entry_timestamp
+            .clear();
         assert_eq!(
             missing_signed_entry_timestamp.verify_offline(&TestCheckpointVerifier),
             Err(RekorProofError::MalformedProof),
@@ -743,7 +754,11 @@ mod tests {
 
     #[test]
     fn inclusion_root_reconstructs_expected_roots_for_tree_size_three() {
-        let leaves = [rekor_leaf_hash(b"leaf-0"), rekor_leaf_hash(b"leaf-1"), rekor_leaf_hash(b"leaf-2")];
+        let leaves = [
+            rekor_leaf_hash(b"leaf-0"),
+            rekor_leaf_hash(b"leaf-1"),
+            rekor_leaf_hash(b"leaf-2"),
+        ];
         let h01 = rekor_node_hash(leaves[0], leaves[1]);
         let expected_root = rekor_node_hash(h01, leaves[2]);
 
@@ -859,6 +874,55 @@ mod tests {
             Err(RekorProofError::MalformedProof),
             "too many sibling hashes must be rejected"
         );
+    }
+
+    #[test]
+    fn validate_proof_shape_accepts_exactly_bound_size_limits() {
+        let mut proof_boundary = receipt_for(head()).proof;
+        proof_boundary.entry_body = vec![b'a'; MAX_REKOR_ENTRY_BODY_BYTES];
+        proof_boundary.hashes = vec!["00".repeat(32); MAX_REKOR_PROOF_HASHES];
+        proof_boundary.checkpoint = "x".repeat(MAX_REKOR_CHECKPOINT_BYTES);
+        assert_eq!(
+            validate_proof_shape(&proof_boundary),
+            Ok(()),
+            "boundary-sized proof payloads should still be accepted"
+        );
+
+        let mut oversized_hash = receipt_for(head()).proof;
+        oversized_hash.hashes = vec!["00".repeat(32); MAX_REKOR_PROOF_HASHES + 1];
+        assert_eq!(
+            validate_proof_shape(&oversized_hash),
+            Err(RekorProofError::MalformedProof),
+            "proofs beyond the hash limit must be rejected"
+        );
+    }
+
+    #[test]
+    fn parse_sha256_hex_accepts_canonical_input_and_rejects_malformed_lengths() {
+        let valid = "ab".repeat(32);
+        assert!(
+            parse_sha256_hex(&valid).is_some(),
+            "canonical hex should parse"
+        );
+        assert!(
+            parse_sha256_hex(&"ab".repeat(63)).is_none(),
+            "short hex must be rejected"
+        );
+        assert!(
+            parse_sha256_hex(&"ab".repeat(65)).is_none(),
+            "long hex must be rejected"
+        );
+        assert!(
+            parse_sha256_hex(&("g".repeat(64))).is_none(),
+            "non-hex character must be rejected"
+        );
+    }
+
+    #[test]
+    fn contains_ascii_searches_for_exact_byte_windows() {
+        let body = b"{\"artifact_hash\":\"sha256:beef\"}".as_slice();
+        assert!(contains_ascii(body, "artifact_hash"));
+        assert!(!contains_ascii(body, "missing_token"));
     }
 
     #[test]
