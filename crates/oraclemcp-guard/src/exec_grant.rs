@@ -481,4 +481,53 @@ mod tests {
             "the furthest-from-expiry grant is never the eviction target"
         );
     }
+
+    #[test]
+    fn clear_invalidates_unconsumed_grants() {
+        let store = ExecGrantStore::new();
+        let b = binding();
+        let token = store.issue(SQL, b.clone(), OperatingLevel::ReadWrite, TTL);
+
+        store.clear();
+
+        assert_eq!(
+            store.consume(&token, SQL, &b, OperatingLevel::ReadWrite),
+            Err(ExecGrantError::Unknown)
+        );
+    }
+
+    #[test]
+    fn purge_expired_reports_only_expired_entries_and_preserves_liveness() {
+        let store = ExecGrantStore::new();
+        let b = binding();
+        let live = store.issue(SQL, b.clone(), OperatingLevel::ReadWrite, TTL);
+
+        {
+            let mut entries = store.entries.lock().expect("poisoned");
+            entries.insert(
+                "expired-1".to_string(),
+                Entry {
+                    sql_digest: sql_digest("SELECT 1"),
+                    binding: b.clone(),
+                    granted_level: OperatingLevel::ReadWrite,
+                    deadline: MonotonicDeadline::already_expired(),
+                },
+            );
+            entries.insert(
+                "expired-2".to_string(),
+                Entry {
+                    sql_digest: sql_digest("SELECT 2"),
+                    binding: b.clone(),
+                    granted_level: OperatingLevel::ReadWrite,
+                    deadline: MonotonicDeadline::already_expired(),
+                },
+            );
+        }
+
+        assert_eq!(store.purge_expired(), 2);
+        assert_eq!(
+            store.consume(&live, SQL, &b, OperatingLevel::ReadWrite),
+            Ok(OperatingLevel::ReadWrite)
+        );
+    }
 }

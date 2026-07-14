@@ -550,3 +550,262 @@ fn validate_entry(entry: &BundleEntry) -> Result<(), IncidentManifestError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAFE_WHY: &str = "the guard refused the operation and recorded the manifest";
+    const SUBJECT_PREFIX: &str = "subject-sha256:";
+    const DIGEST_PREFIX: &str = "sha256:";
+
+    fn valid_subject_id() -> String {
+        format!("{SUBJECT_PREFIX}{}", "a".repeat(64))
+    }
+
+    fn valid_entry_digest() -> String {
+        format!("{DIGEST_PREFIX}{}", "a".repeat(64))
+    }
+
+    fn build_identity() -> BuildIdentity {
+        BuildIdentity {
+            server: "oraclemcp/0.9.0".to_owned(),
+            classifier: "oraclemcp-guard/0.9.0;registry=1".to_owned(),
+            driver: "oracledb/0.8.2".to_owned(),
+        }
+    }
+
+    fn capture_request<'a>(
+        statement: &'a str,
+        why: &'a str,
+        lanes: &'a [CapturedLane],
+        entries: &'a [BundleEntry],
+    ) -> IncidentCapture<'a> {
+        IncidentCapture {
+            trigger: IncidentTrigger::Refusal,
+            seed: 0x5eed_0000_0000_0001,
+            statement: Some(statement),
+            captured_verdict: None,
+            why,
+            lanes,
+            build: build_identity(),
+            entries,
+        }
+    }
+
+    fn lanes(count: usize) -> Vec<CapturedLane> {
+        (0..count)
+            .map(|idx| CapturedLane {
+                lane_id: format!("lane-{idx}"),
+                subject_id_hash: valid_subject_id(),
+            })
+            .collect()
+    }
+
+    fn cassette_entries(count: usize) -> Vec<BundleEntry> {
+        (0..count)
+            .map(|idx| BundleEntry {
+                kind: BundleEntryKind::Cassette,
+                path: format!("cassettes/lane-{idx}.jsonl"),
+                sha256: valid_entry_digest(),
+                bytes: 1,
+            })
+            .collect()
+    }
+
+    fn valid_capture_result(count_lanes: usize, count_entries: usize) -> IncidentManifest {
+        let lanes = lanes(count_lanes);
+        let entries = cassette_entries(count_entries);
+        IncidentManifest::capture(capture_request(
+            "SELECT 1 FROM dual",
+            SAFE_WHY,
+            &lanes,
+            &entries,
+        ))
+        .expect("a bounded capture is admissible")
+    }
+
+    #[test]
+    fn capture_rejects_too_many_lanes_before_accepting_any_entry() {
+        let lanes = lanes(MAX_CAPTURED_LANES + 1);
+        let entries = vec![BundleEntry {
+            kind: BundleEntryKind::RedactedConfig,
+            path: "config.redacted.toml".to_owned(),
+            sha256: valid_entry_digest(),
+            bytes: 1,
+        }];
+
+        let error = IncidentManifest::capture(capture_request(
+            "SELECT 1 FROM dual",
+            SAFE_WHY,
+            &lanes,
+            &entries,
+        ))
+        .unwrap_err();
+
+        assert_eq!(error, IncidentManifestError::TooLarge);
+    }
+
+    #[test]
+    fn capture_rejects_too_many_entries_before_binding_grant_outcome() {
+        let lanes = lanes(1);
+        let mut entries = cassette_entries(MAX_BUNDLE_ENTRIES + 1);
+        let extra = BundleEntry {
+            kind: BundleEntryKind::RedactedConfig,
+            path: "config.redacted.toml".to_string(),
+            sha256: valid_entry_digest(),
+            bytes: 1,
+        };
+        entries.push(extra);
+
+        let error = IncidentManifest::capture(capture_request(
+            "SELECT 1 FROM dual",
+            SAFE_WHY,
+            &lanes,
+            &entries,
+        ))
+        .unwrap_err();
+
+        assert_eq!(error, IncidentManifestError::TooLarge);
+    }
+
+    #[test]
+    fn capture_allows_exact_limit_vectors() {
+        assert!(
+            valid_capture_result(MAX_CAPTURED_LANES, 1)
+                .content_id()
+                .starts_with("sha256:")
+        );
+        assert!(
+            valid_capture_result(1, MAX_BUNDLE_ENTRIES)
+                .content_id()
+                .starts_with("sha256:")
+        );
+    }
+
+    #[test]
+    fn from_json_rejects_schema_version_mismatch() {
+        let manifest = valid_capture_result(1, 1);
+        let mut json: serde_json::Value =
+            serde_json::from_str(&manifest.to_json()).expect("manifest is valid JSON");
+        json["schema_version"] = serde_json::Value::from(INCIDENT_MANIFEST_VERSION + 1);
+
+        let tampered = serde_json::to_string(&json).expect("can serialize tampered manifest");
+        assert_eq!(
+            IncidentManifest::from_json(&tampered).unwrap_err(),
+            IncidentManifestError::Malformed
+        );
+    }
+
+    #[test]
+    fn from_json_rejects_too_many_lanes_or_entries_beyond_schema_caps() {
+        let manifest = valid_capture_result(1, 1);
+        let mut json: serde_json::Value =
+            serde_json::from_str(&manifest.to_json()).expect("manifest is valid JSON");
+        let lanes = json["lanes"].as_array_mut().expect("lanes are present");
+        for _ in lanes.len()..=MAX_CAPTURED_LANES {
+            lanes.push(lanes[0].clone());
+        }
+        let too_many_lanes = serde_json::to_string(&json).expect("serialize overfull lanes");
+        assert_eq!(
+            IncidentManifest::from_json(&too_many_lanes).unwrap_err(),
+            IncidentManifestError::TooLarge
+        );
+
+        let mut json: serde_json::Value =
+            serde_json::from_str(&manifest.to_json()).expect("manifest is valid JSON");
+        let entries = json["entries"].as_array_mut().expect("entries are present");
+        while entries.len() <= MAX_BUNDLE_ENTRIES {
+            entries.push(entries[0].clone());
+        }
+        let too_many_entries = serde_json::to_string(&json).expect("serialize overfull entries");
+        assert_eq!(
+            IncidentManifest::from_json(&too_many_entries).unwrap_err(),
+            IncidentManifestError::TooLarge
+        );
+    }
+
+    #[test]
+    fn validate_subject_id_hash_rejects_64_char_nonhex_inputs() {
+        let non_hex_subject = format!("{SUBJECT_PREFIX}{}", "g".repeat(64));
+        assert_eq!(
+            validate_subject_id_hash(&non_hex_subject),
+            Err(IncidentManifestError::UnsafeSubjectId)
+        );
+        assert_eq!(
+            validate_subject_id_hash("sha256:"),
+            Err(IncidentManifestError::UnsafeSubjectId)
+        );
+    }
+
+    #[test]
+    fn validate_subject_id_hash_accepts_both_hash_prefixes() {
+        let hashed_subject = format!("{SUBJECT_PREFIX}{}", "a".repeat(64));
+        assert_eq!(validate_subject_id_hash(&hashed_subject), Ok(()));
+        assert_eq!(
+            validate_subject_id_hash(&format!("sha256:{}", "a".repeat(64))),
+            Ok(())
+        );
+        assert_eq!(
+            validate_subject_id_hash(&format!("subject-sha256:{}", "a".repeat(63))),
+            Err(IncidentManifestError::UnsafeSubjectId)
+        );
+    }
+
+    #[test]
+    fn validate_digest_rejects_invalid_shape_even_if_prefix_is_sha256() {
+        assert_eq!(
+            validate_digest(&format!("{DIGEST_PREFIX}{}", "g".repeat(64))),
+            Err(IncidentManifestError::InvalidDigest)
+        );
+        assert_eq!(
+            validate_digest("md5:"),
+            Err(IncidentManifestError::InvalidDigest)
+        );
+    }
+
+    #[test]
+    fn validate_digest_rejects_wrong_length_or_uppercase_hashes() {
+        assert_eq!(
+            validate_digest(&format!("{DIGEST_PREFIX}{}", "a".repeat(63))),
+            Err(IncidentManifestError::InvalidDigest)
+        );
+        assert_eq!(
+            validate_digest(&format!("{DIGEST_PREFIX}{}", "A".repeat(64))),
+            Err(IncidentManifestError::InvalidDigest)
+        );
+    }
+
+    #[test]
+    fn validate_version_honors_length_and_shape_bounds() {
+        let at_capacity = format!("pkg/{}", "1".repeat(92));
+        assert_eq!(validate_version(&at_capacity), Ok(()));
+
+        let too_long = format!("pkg/{}", "1".repeat(93));
+        assert_eq!(
+            validate_version(&too_long),
+            Err(IncidentManifestError::UnsafeVersion)
+        );
+
+        assert_eq!(
+            validate_version("pkg/name"),
+            Err(IncidentManifestError::UnsafeVersion)
+        );
+    }
+
+    #[test]
+    fn validate_version_rejects_empty_and_invalid_attribute_shapes() {
+        assert_eq!(
+            validate_version(""),
+            Err(IncidentManifestError::UnsafeVersion)
+        );
+        assert_eq!(
+            validate_version("pkg/1;invalid-attr"),
+            Err(IncidentManifestError::UnsafeVersion)
+        );
+        assert_eq!(
+            validate_version("pkg/1;flag="),
+            Err(IncidentManifestError::UnsafeVersion)
+        );
+    }
+}

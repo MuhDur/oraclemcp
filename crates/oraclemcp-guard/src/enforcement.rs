@@ -426,4 +426,16 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn alter_session_policy_rejects_empty_set_clause_as_forbidden() {
+        assert_eq!(alter_session_policy("ALTER SESSION SET "), Some(false));
+    }
+
+    #[test]
+    fn alter_session_allowlist_permits_quoted_values_with_reserved_chars() {
+        assert!(is_allowed_alter_session(
+            "ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY=MM' "
+        ));
+    }
 }

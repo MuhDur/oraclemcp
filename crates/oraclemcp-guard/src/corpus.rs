@@ -503,3 +503,44 @@ pub fn safe_why(why: &str) -> Result<String, CorpusRedactionError> {
     }
     Ok(trimmed.to_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_sql_collapses_non_word_literal_flavors_to_placeholder() {
+        let hex = redact_sql("SELECT X'414243' FROM dual").expect("hex input is redactable");
+        assert!(
+            hex.contains("?"),
+            "hex payload must be replaced by a redaction placeholder: {hex:?}"
+        );
+        assert!(
+            !hex.contains("414243"),
+            "raw hex never reaches disk: {hex:?}"
+        );
+
+        let national =
+            redact_sql("SELECT N'abc' FROM dual").expect("national string is redactable");
+        assert!(
+            national.contains("?"),
+            "national string must be redacted, not persisted: {national:?}"
+        );
+        assert!(
+            !national.contains("abc"),
+            "raw literal text must be replaced: {national:?}"
+        );
+    }
+
+    #[test]
+    fn validate_redacted_sql_rejects_non_whitelisted_literal_shapes() {
+        assert_eq!(
+            validate_redacted_sql("SELECT id_1 FROM id_2 WHERE id_3 = X'414243'"),
+            Err(CorpusRedactionError::ResidualLiteral)
+        );
+        assert_eq!(
+            validate_redacted_sql("SELECT id_1 FROM id_2 WHERE id_3 = N'abc'"),
+            Err(CorpusRedactionError::ResidualLiteral)
+        );
+    }
+}
