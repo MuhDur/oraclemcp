@@ -4017,6 +4017,22 @@ mod tests {
     }
 
     #[test]
+    fn classify_reason_category_distinguishes_multi_vs_single_forbidden() {
+        // Single-statement forbidden batches keep `Other`; multi-statement forbidden
+        // batches move to `MultiStatementBatch` in `classify_raw`.
+        let single = classify("SELECT 1 FROM dual GRANT DBA TO scott");
+        assert_eq!(single.danger, DangerLevel::Forbidden);
+        assert_eq!(single.reason_category, Some(ReasonCategory::Other));
+
+        let multi = classify("SELECT 1 FROM dual GRANT DBA TO scott; SELECT 1 FROM dual");
+        assert_eq!(multi.danger, DangerLevel::Forbidden);
+        assert_eq!(
+            multi.reason_category,
+            Some(ReasonCategory::MultiStatementBatch)
+        );
+    }
+
+    #[test]
     fn select_calling_udf_is_guarded_not_safe() {
         // The headline fail-open the old predicate had: a function call in a
         // SELECT may DML. With the default Unknown oracle it must be Guarded.
@@ -7291,6 +7307,16 @@ mod tests {
         assert!(
             segments[1].to_ascii_uppercase().contains("DELETE FROM T"),
             "outer body DELETE is split as its own segment: {segments:?}"
+        );
+    }
+
+    #[test]
+    fn block_interior_segments_labeled_block_reports_empty_or_unrecognized_body_offender() {
+        let d = classify("<<loop>> BEGIN NULL; END; END;");
+        assert_eq!(d.danger, DangerLevel::Forbidden);
+        assert_eq!(
+            d.offending_construct.as_deref(),
+            Some("empty or unrecognized PL/SQL body")
         );
     }
 
