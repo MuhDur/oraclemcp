@@ -473,6 +473,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inclusion_root_and_proof_shape_reject_malformed_paths() {
+        let leaf_hash = rekor_leaf_hash(b"leaf");
+        let sibling = [3_u8; 32];
+        let hashes = vec![hex_of(sibling)];
+        assert_eq!(
+            inclusion_root(leaf_hash, 0, 2, &hashes),
+            Ok(rekor_node_hash(leaf_hash, sibling))
+        );
+        assert_eq!(
+            inclusion_root(leaf_hash, 1, 2, &hashes),
+            Ok(rekor_node_hash(sibling, leaf_hash))
+        );
+        assert_eq!(
+            inclusion_root(leaf_hash, 0, 2, &[]),
+            Err(RekorProofError::MalformedProof)
+        );
+
+        let mut malformed = receipt_for(head());
+        malformed.proof.log_id = "too-short".to_owned();
+        assert_eq!(
+            malformed.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MalformedProof)
+        );
+    }
+
     struct BlockingOutage {
         started: Arc<AtomicBool>,
         gate: Arc<(StdMutex<bool>, Condvar)>,

@@ -2191,6 +2191,23 @@ mod tests {
         SigningKey::new("k1", b"0123456789abcdef0123456789abcdef".to_vec()).expect("valid test key")
     }
 
+    fn verdict_certificate(stmt_digest: &str) -> AuditVerdictCertificate {
+        let derivation_step = AuditVerdictDerivationStep::new(
+            AuditVerdictRuleId::R16,
+            AuditVerdictConstruct::FinalSafe,
+        )
+        .expect("registered derivation step");
+        AuditVerdictCertificate::new(
+            "audit-policy-v1".to_owned(),
+            vec![derivation_step],
+            Some(AuditVerdictOperatingLevel::ReadOnly),
+            None,
+            stmt_digest.to_owned(),
+            AuditVerdict::Safe,
+        )
+        .expect("valid verdict certificate")
+    }
+
     fn v5_preimage_for(draft: &AuditEntryDraft, rows_affected: Option<u64>) -> Vec<u8> {
         let sql_sha256 = sha256_hex(draft.sql.as_bytes());
         let sql_normalized_sha256 = normalized_sql_sha256(&draft.sql);
@@ -2494,6 +2511,98 @@ mod tests {
             SigningKey::new("x".repeat(129), vec![0x5a; 32]),
             Err(SigningKeyError::InvalidKeyId)
         ));
+    }
+
+    #[test]
+    fn is_canonical_sha256_rejects_non_canonical_inputs() {
+        assert!(is_canonical_sha256(&format!("sha256:{}", "a".repeat(64))));
+        assert!(!is_canonical_sha256("sha256:"));
+        assert!(!is_canonical_sha256(&format!("sha256:{}", "f".repeat(63))));
+        assert!(!is_canonical_sha256(&format!("sha256:{}", "A".repeat(64))));
+        assert!(!is_canonical_sha256(&format!("md5:{}", "a".repeat(64))));
+    }
+
+    #[test]
+    fn verdict_certificate_core_hash_tracks_core_content() {
+        let base = verdict_certificate(&format!("sha256:{}", "a".repeat(64)));
+        let base_hash = base.core_hash();
+        let mut changed = base.clone();
+        changed.verdict = AuditVerdict::Guarded;
+        let changed_hash = changed.core_hash();
+        assert_ne!(base_hash, changed_hash);
+        assert_eq!(base_hash.len(), 71);
+        assert_eq!(base_hash.as_bytes().first(), Some(&b's'));
+    }
+
+    #[test]
+    fn bind_to_record_rejects_record_drift_and_binds_matching_records_only() {
+        let mut record = AuditRecord::chained_unsigned(
+            &draft(),
+            1,
+            GENESIS_HASH,
+            "2026-06-01T00:00:00Z".to_owned(),
+        );
+        let certificate = verdict_certificate(&record.sql_sha256);
+        let core_hash = certificate.core_hash();
+        record.verdict_certificate_core_hash = Some(core_hash.clone());
+        let bound = certificate
+            .clone()
+            .bind_to_record(&record)
+            .expect("certificate should bind to matching record");
+        assert!(bound.matches_record(&record));
+        assert_eq!(bound.bound_audit_hash, record.entry_hash);
+
+        let mut wrong_digest_record = record.clone();
+        wrong_digest_record.sql_sha256 = format!("sha256:{}", "b".repeat(64));
+        assert_eq!(
+            certificate.clone().bind_to_record(&wrong_digest_record),
+            Err(AuditVerdictCertificateError::AuditSqlDigestMismatch)
+        );
+
+        let mut wrong_core_hash_record = record.clone();
+        wrong_core_hash_record.verdict_certificate_core_hash =
+            Some(format!("sha256:{}", "b".repeat(64)));
+        assert_eq!(
+            certificate.clone().bind_to_record(&wrong_core_hash_record),
+            Err(AuditVerdictCertificateError::AuditCoreHashMismatch)
+        );
+
+        let mut non_canonical_entry_hash = record;
+        non_canonical_entry_hash.entry_hash = format!("sha256:{}", "c".repeat(63));
+        assert_eq!(
+            certificate.bind_to_record(&non_canonical_entry_hash),
+            Err(AuditVerdictCertificateError::InvalidAuditEntryHash)
+        );
+    }
+
+    #[test]
+    fn bound_certificate_does_not_match_different_record_or_binding() {
+        let mut record = AuditRecord::chained_unsigned(
+            &draft(),
+            2,
+            GENESIS_HASH,
+            "2026-06-01T00:00:00Z".to_owned(),
+        );
+        let certificate = verdict_certificate(&record.sql_sha256);
+        record.verdict_certificate_core_hash = Some(certificate.core_hash());
+        let bound = certificate
+            .clone()
+            .bind_to_record(&record)
+            .expect("binding ok");
+
+        let mut bad_record = record.clone();
+        bad_record.sql_sha256 = format!("sha256:{}", "d".repeat(64));
+        assert!(
+            !bound.matches_record(&bad_record),
+            "different statement digest must not match bound certificate"
+        );
+
+        let mut bad_bound = bound.clone();
+        bad_bound.bound_audit_hash = format!("sha256:{}", "e".repeat(64));
+        assert!(
+            !bad_bound.matches_record(&record),
+            "binding hash mutation must invalidate matches_record"
+        );
     }
 
     #[test]
