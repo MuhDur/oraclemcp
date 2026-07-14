@@ -1371,6 +1371,166 @@ mod tests {
     }
 
     #[test]
+    fn policy_rewrite_rejects_query_rewrite_when_predicate_target_verbs_mismatch() {
+        let classifier = Classifier::default();
+        let original = "SELECT * FROM hr.emp";
+        let base = classifier.classify(original);
+        let narrowing = PolicyNarrowing {
+            base_required_level: base.required_level.unwrap(),
+            required_level: base.required_level.unwrap(),
+            predicates: vec![SqlPolicyPredicate {
+                rule_id: "tenant-filter".to_owned(),
+                target: SqlPolicyPredicateTarget {
+                    schema: "HR".to_owned(),
+                    object: "EMP".to_owned(),
+                    verb: SqlPolicyVerb::Update,
+                },
+                sql_fragment: "tenant_id = 7".to_owned(),
+            }],
+            matched_rule_ids: vec!["tenant-filter".to_owned()],
+        };
+        let update_context = SqlPolicyEvaluationContext::new(
+            Some("HR".to_owned()),
+            Some("EMP".to_owned()),
+            SqlPolicyVerb::Update,
+            None,
+        );
+
+        assert!(matches!(
+            rewrite_predicates_and_reclassify(
+                &classifier,
+                &base,
+                original,
+                &update_context,
+                &narrowing,
+            ),
+            PolicyPredicateRewrite::Deny(PolicyRewriteDenial {
+                reason: PolicyRewriteDenialReason::UnsupportedStatementShape,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn policy_rewrite_rejects_update_rewrite_when_predicate_target_verbs_mismatch() {
+        let classifier = Classifier::default();
+        let original = "UPDATE hr.emp SET id = 7 WHERE dept = 2";
+        let base = classifier.classify(original);
+        let narrowing = PolicyNarrowing {
+            base_required_level: base.required_level.unwrap(),
+            required_level: base.required_level.unwrap(),
+            predicates: vec![SqlPolicyPredicate {
+                rule_id: "tenant-filter".to_owned(),
+                target: SqlPolicyPredicateTarget {
+                    schema: "HR".to_owned(),
+                    object: "EMP".to_owned(),
+                    verb: SqlPolicyVerb::Select,
+                },
+                sql_fragment: "tenant_id = 7".to_owned(),
+            }],
+            matched_rule_ids: vec!["tenant-filter".to_owned()],
+        };
+        let select_context = SqlPolicyEvaluationContext::new(
+            Some("HR".to_owned()),
+            Some("EMP".to_owned()),
+            SqlPolicyVerb::Select,
+            None,
+        );
+
+        assert!(matches!(
+            rewrite_predicates_and_reclassify(
+                &classifier,
+                &base,
+                original,
+                &select_context,
+                &narrowing,
+            ),
+            PolicyPredicateRewrite::Deny(PolicyRewriteDenial {
+                reason: PolicyRewriteDenialReason::UnsupportedStatementShape,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn policy_rewrite_rejects_delete_rewrite_when_predicate_target_verbs_mismatch() {
+        let classifier = Classifier::default();
+        let original = "DELETE FROM hr.emp WHERE id = 7";
+        let base = classifier.classify(original);
+        let narrowing = PolicyNarrowing {
+            base_required_level: base.required_level.unwrap(),
+            required_level: base.required_level.unwrap(),
+            predicates: vec![SqlPolicyPredicate {
+                rule_id: "tenant-filter".to_owned(),
+                target: SqlPolicyPredicateTarget {
+                    schema: "HR".to_owned(),
+                    object: "EMP".to_owned(),
+                    verb: SqlPolicyVerb::Select,
+                },
+                sql_fragment: "tenant_id = 7".to_owned(),
+            }],
+            matched_rule_ids: vec!["tenant-filter".to_owned()],
+        };
+        let select_context = SqlPolicyEvaluationContext::new(
+            Some("HR".to_owned()),
+            Some("EMP".to_owned()),
+            SqlPolicyVerb::Select,
+            None,
+        );
+
+        assert!(matches!(
+            rewrite_predicates_and_reclassify(
+                &classifier,
+                &base,
+                original,
+                &select_context,
+                &narrowing,
+            ),
+            PolicyPredicateRewrite::Deny(PolicyRewriteDenial {
+                reason: PolicyRewriteDenialReason::UnsupportedStatementShape,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn policy_predicate_rewrite_supports_one_part_table_targets() {
+        let classifier = Classifier::default();
+        let original = "SELECT id FROM orders";
+        let base = classifier.classify(original);
+        let narrowing = PolicyNarrowing {
+            base_required_level: base.required_level.unwrap(),
+            required_level: base.required_level.unwrap(),
+            predicates: vec![SqlPolicyPredicate {
+                rule_id: "tenant-filter".to_owned(),
+                target: SqlPolicyPredicateTarget {
+                    schema: "APP".to_owned(),
+                    object: "ORDERS".to_owned(),
+                    verb: SqlPolicyVerb::Select,
+                },
+                sql_fragment: "tenant_id = 7".to_owned(),
+            }],
+            matched_rule_ids: vec!["tenant-filter".to_owned()],
+        };
+        let context = SqlPolicyEvaluationContext::new(
+            Some("APP".to_owned()),
+            Some("ORDERS".to_owned()),
+            SqlPolicyVerb::Select,
+            None,
+        );
+
+        let rewritten =
+            rewrite_predicates_and_reclassify(&classifier, &base, original, &context, &narrowing);
+        let PolicyPredicateRewrite::Reclassified(rewritten) = rewritten else {
+            panic!("policy rewrite should support unqualified base schema/table references");
+        };
+
+        assert!(rewritten.sql.contains("tenant_id = 7"));
+        assert_eq!(rewritten.final_required_level, OperatingLevel::ReadOnly);
+        assert_eq!(rewritten.final_danger, base.danger);
+    }
+
+    #[test]
     fn system_schemas_are_always_deny_all() {
         let set = SchemaPolicySet::new();
         for sys in ["SYS", "SYSTEM", "sysaux"] {
