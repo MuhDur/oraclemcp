@@ -2583,10 +2583,20 @@ mod tests {
     }
 
     #[test]
+    fn valid_oracle_identifier_rejects_empty_identifier() {
+        assert!(!valid_oracle_identifier(""));
+    }
+
+    #[test]
     fn valid_principal_key_accepts_stable_shape() {
         assert!(valid_principal_key("oauth:operator-7"));
         assert!(!valid_principal_key("oauth"));
         assert!(!valid_principal_key("oauth:bad*id"));
+    }
+
+    #[test]
+    fn valid_principal_key_rejects_empty_kind_prefix() {
+        assert!(!valid_principal_key(":operator-7"));
     }
 
     #[test]
@@ -2608,6 +2618,11 @@ mod tests {
     #[test]
     fn policy_predicate_rejects_block_comment_marker_in_quoted_literal() {
         assert!(!valid_policy_predicate("tenant_id = 'a/*b'"));
+    }
+
+    #[test]
+    fn policy_predicate_rejects_multiline_literals() {
+        assert!(!valid_policy_predicate("tenant_id = 'a\nb'"));
     }
 
     #[test]
