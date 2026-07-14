@@ -6347,6 +6347,12 @@ mod tests {
     }
 
     #[test]
+    fn stored_body_final_end_name_shadowing_stays_fail_closed() {
+        let sql = "CREATE OR REPLACE PACKAGE BODY pkg AS END pkg; pkg";
+        assert_eq!(classify(sql).danger, DangerLevel::Forbidden, "{sql}");
+    }
+
+    #[test]
     fn nested_package_body_begin_is_fail_closed() {
         let sql = "CREATE PACKAGE BODY pkg AS PROCEDURE a IS PROCEDURE b IS BEGIN BEGIN END; END b; END pkg;";
         // A nested BEGIN in an inner member body must not be balanced by the
