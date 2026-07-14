@@ -547,6 +547,16 @@ mod tests {
         }
     }
 
+    struct EmptyBodySubmitter;
+
+    impl RekorSubmitter for EmptyBodySubmitter {
+        fn submit(&self, head: &AuditChainHead) -> Result<RekorAnchorReceipt, RekorSubmitError> {
+            let mut receipt = receipt_for(head.clone());
+            receipt.proof.entry_body = Vec::new();
+            Ok(receipt)
+        }
+    }
+
     #[test]
     fn async_status_surfaces_queue_progress_and_successful_anchor_counts() {
         let anchor = AsyncRekorAnchor::new(Box::new(AcceptingSubmitter), 1).expect("worker starts");
@@ -602,6 +612,27 @@ mod tests {
             assert!(
                 Instant::now() < deadline,
                 "worker should reject mismatched-head receipt"
+            );
+            thread::yield_now();
+            status = anchor.status();
+        }
+
+        assert_eq!(status.anchored, 0);
+        assert_eq!(status.failed, 1);
+        assert!(status.latest_receipt.is_none());
+    }
+
+    #[test]
+    fn run_worker_rejects_receipts_with_empty_entry_body() {
+        let anchor = AsyncRekorAnchor::new(Box::new(EmptyBodySubmitter), 1).expect("worker starts");
+
+        anchor.enqueue(head());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut status = anchor.status();
+        while status.anchored == 0 && status.failed == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "worker should reject a receipt missing the entry body"
             );
             thread::yield_now();
             status = anchor.status();
@@ -707,6 +738,33 @@ mod tests {
             inclusion_root(leaves[4], 4, 5, &[]),
             Err(RekorProofError::MalformedProof),
             "truncated proof must fail for index 4 / tree size 5"
+        );
+    }
+
+    #[test]
+    fn inclusion_root_reconstructs_expected_roots_for_tree_size_three() {
+        let leaves = [rekor_leaf_hash(b"leaf-0"), rekor_leaf_hash(b"leaf-1"), rekor_leaf_hash(b"leaf-2")];
+        let h01 = rekor_node_hash(leaves[0], leaves[1]);
+        let expected_root = rekor_node_hash(h01, leaves[2]);
+
+        let proof_for_index_0 = vec![hex_of(leaves[1]), hex_of(leaves[2])];
+        assert_eq!(
+            inclusion_root(leaves[0], 0, 3, &proof_for_index_0),
+            Ok(expected_root),
+            "index 0 in tree size 3 should reconstruct expected root"
+        );
+
+        let proof_for_index_2 = vec![hex_of(h01)];
+        assert_eq!(
+            inclusion_root(leaves[2], 2, 3, &proof_for_index_2),
+            Ok(expected_root),
+            "index 2 in tree size 3 should reconstruct expected root"
+        );
+
+        assert_eq!(
+            inclusion_root(leaves[2], 3, 3, &proof_for_index_2),
+            Err(RekorProofError::MalformedProof),
+            "index outside tree-size should be rejected"
         );
     }
 

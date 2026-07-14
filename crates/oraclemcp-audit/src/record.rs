@@ -2526,6 +2526,11 @@ fn is_canonical_sha256_rejects_non_canonical_inputs() {
 }
 
 #[test]
+fn is_canonical_sha256_rejects_non_hex_character() {
+    assert!(!is_canonical_sha256(&format!("sha256:{}", "g".repeat(64))));
+}
+
+#[test]
 fn matches_record_rejects_core_hash_mismatch() {
     let mut record = AuditRecord::chained_unsigned(
         &draft(),
@@ -2545,6 +2550,52 @@ fn matches_record_rejects_core_hash_mismatch() {
     assert!(
         !bound.matches_record(&bad_core_hash),
         "core hash drift must break certificate binding"
+    );
+}
+
+#[test]
+fn matches_record_rejects_entry_hash_mismatch() {
+    let mut record = AuditRecord::chained_unsigned(
+        &draft(),
+        3,
+        GENESIS_HASH,
+        "2026-06-01T00:00:00Z".to_owned(),
+    );
+    let certificate = verdict_certificate(&record.sql_sha256);
+    record.verdict_certificate_core_hash = Some(certificate.core_hash());
+    let bound = certificate
+        .clone()
+        .bind_to_record(&record)
+        .expect("binding ok");
+
+    let mut bad_entry_hash = record.clone();
+    bad_entry_hash.entry_hash = format!("sha256:{}", "0".repeat(64));
+    assert!(
+        !bound.matches_record(&bad_entry_hash),
+        "entry hash drift must break certificate binding"
+    );
+}
+
+#[test]
+fn matches_record_rejects_statement_digest_mismatch() {
+    let mut record = AuditRecord::chained_unsigned(
+        &draft(),
+        3,
+        GENESIS_HASH,
+        "2026-06-01T00:00:00Z".to_owned(),
+    );
+    let certificate = verdict_certificate(&record.sql_sha256);
+    record.verdict_certificate_core_hash = Some(certificate.core_hash());
+    let bound = certificate
+        .clone()
+        .bind_to_record(&record)
+        .expect("binding ok");
+
+    let mut bad_stmt_hash = record.clone();
+    bad_stmt_hash.sql_sha256 = format!("sha256:{}", "0".repeat(64));
+    assert!(
+        !bound.matches_record(&bad_stmt_hash),
+        "statement hash drift must break certificate binding"
     );
 }
 
