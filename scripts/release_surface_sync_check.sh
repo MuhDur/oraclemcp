@@ -230,13 +230,12 @@ if ! grep -F "## [$version]" CHANGELOG.md >/dev/null; then
   fail "CHANGELOG.md missing ## [$version] entry"
 fi
 
-if ! grep -F "e.g. $version or v$version" install.sh >/dev/null; then
-  fail "install.sh help must show e.g. $version or v$version"
-fi
-
-if ! grep -F "ghcr.io/muhdur/oraclemcp:$version" README.md >/dev/null; then
-  fail "README.md must mention ghcr.io/muhdur/oraclemcp:$version"
-fi
+# Install-EXAMPLE surfaces (README curl/docker/self-update one-liners, install.sh
+# `--version` help text, docs/*.md docker pins) are intentionally version-AGNOSTIC:
+# they track the "latest" published release (installer `latest` default, docker
+# `:latest`), NOT the in-development workspace version, so a fresh clone of `main`
+# never advertises an unpublished version. They are deliberately NOT sync-checked
+# here. See docs/release-surfaces.md.
 
 health_fixture="${ORACLEMCP_RELEASE_SURFACE_SYNC_HEALTH_PATH:-$ROOT/tests/fixtures/ui/operator-v1/health.json}"
 health_version="$(jq -r '.data.liveness.version' "$health_fixture")"

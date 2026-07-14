@@ -1475,6 +1475,13 @@ fn rollback_runbook_dry_run_covers_release_surfaces() {
 
 #[test]
 fn release_surface_sync_check_passes_on_workspace() {
+    // Invariant (D3.1): every WORKSPACE-pinned release surface matches the single
+    // workspace version. User-facing install/pull EXAMPLES (README curl/docker/
+    // self-update one-liners, install.sh `--version` help, docs/*.md docker pins)
+    // are version-agnostic (`latest`) and are intentionally NOT sync-checked — the
+    // invariant lives in scripts/release_surface_sync_check.sh; this test asserts
+    // that script passes on the workspace. See docs/release-surfaces.md.
+    //
     // The surface-sync check verifies the built dashboard SBOM, so it requires
     // `web/dist/` to have been produced by a dashboard build. The authoritative
     // gate is the `release-metadata-sync` CI job (which downloads the built

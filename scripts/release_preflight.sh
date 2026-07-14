@@ -115,17 +115,14 @@ image_identifier="$(jq -r '.packages[] | select(.registryType == "oci") | .ident
 [ "$image_identifier" = "ghcr.io/muhdur/oraclemcp:$version" ] ||
   fail "server.json OCI image '$image_identifier' does not match ghcr.io/muhdur/oraclemcp:$version"
 
-if ! grep -F "ghcr.io/muhdur/oraclemcp:$version" README.md >/dev/null; then
-  fail "README.md does not mention ghcr.io/muhdur/oraclemcp:$version"
-fi
-
-if ! grep -F "e.g. $version or v$version" install.sh >/dev/null; then
-  fail "install.sh help does not show the current release version example"
-fi
-
+# Install-EXAMPLE surfaces (README curl/docker/self-update one-liners, install.sh
+# `--version` help text, docs/*.md docker pins) are version-AGNOSTIC (`latest`) by
+# design, so they are NOT pinned to the workspace $version. The stale-numeric-tag
+# guard below therefore scans only source / workflow / manifest surfaces — where a
+# hardcoded numeric image tag would be a genuine bug. See docs/release-surfaces.md.
 stale_image_refs="$(
   grep -RInE 'ghcr\.io/muhdur/oraclemcp:[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' \
-    README.md server.json docs/hardening.md docs/operations.md crates/oraclemcp/src .github/workflows Dockerfile 2>/dev/null |
+    server.json crates/oraclemcp/src .github/workflows Dockerfile 2>/dev/null |
     grep -Fv "ghcr.io/muhdur/oraclemcp:$version" || true
 )"
 if [ -n "$stale_image_refs" ]; then

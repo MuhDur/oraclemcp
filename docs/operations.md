@@ -62,14 +62,14 @@ The default entrypoint serves MCP over stdio:
 
 ```sh
 # Tool surface only — no database. Safe to inspect anywhere.
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.9.0
+docker run -i --rm ghcr.io/muhdur/oraclemcp:latest
 
 # Against a configured profile. Mount a read-only profiles config and pass the
 # credential the profile's credential_ref expects.
 docker run -i --rm \
   -v "$HOME/.config/oraclemcp:/root/.config/oraclemcp:ro" \
   -e ORACLE_APP_PASSWORD \
-  ghcr.io/muhdur/oraclemcp:0.9.0
+  ghcr.io/muhdur/oraclemcp:latest
 ```
 
 `--allow-no-auth` is baked into the default `CMD` because, over stdio, the
@@ -79,8 +79,8 @@ that assumption over to the HTTP transport (see §4).
 To verify what you are about to run before wiring it into a client:
 
 ```sh
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.9.0 info       # version, tools, transports
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.9.0 --json doctor
+docker run -i --rm ghcr.io/muhdur/oraclemcp:latest info       # version, tools, transports
+docker run -i --rm ghcr.io/muhdur/oraclemcp:latest --json doctor
 ```
 
 The optional PL/SQL intelligence image uses the same runtime contract, but the
@@ -135,7 +135,7 @@ spec:
         fsGroup: 65532
       containers:
         - name: oraclemcp
-          image: ghcr.io/muhdur/oraclemcp:0.9.0
+          image: ghcr.io/muhdur/oraclemcp:X.Y.Z   # pin an immutable released version, not :latest
           args:
             - serve
             - --listen
