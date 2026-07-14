@@ -911,4 +911,122 @@ mod tests {
             other => panic!("expected a broken record deep in the log, got {other:?}"),
         }
     }
+
+    // === GATE-SEAL residue kills ===
+
+    // L275: `JsonlError`'s `Display` must render its message; the FnValue
+    // `Ok(Default::default())` mutant would print nothing.
+    #[test]
+    fn residue_jsonl_error_display_renders_message() {
+        let e = JsonlError::Io(io::Error::new(io::ErrorKind::Other, "diskfail"));
+        assert!(
+            e.to_string().contains("audit log read error"),
+            "Display must render the error, got {:?}",
+            e.to_string()
+        );
+    }
+
+    // A `BufRead` that returns one error from `fill_buf`, then clean EOF. Lets the
+    // Interrupted-retry branch be exercised deterministically without hanging.
+    struct ErrThenEof {
+        kind: io::ErrorKind,
+        fired: bool,
+    }
+    impl io::Read for ErrThenEof {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+    impl io::BufRead for ErrThenEof {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if self.fired {
+                Ok(&[])
+            } else {
+                self.fired = true;
+                Err(io::Error::from(self.kind))
+            }
+        }
+        fn consume(&mut self, _amt: usize) {}
+    }
+
+    // L347 (guard `== Interrupted` -> `true`, and `==` -> `!=`): a NON-interrupted
+    // read error must surface as an I/O error, never be retried into a clean EOF.
+    #[test]
+    fn residue_read_physical_line_propagates_non_interrupted_io_error() {
+        let mut reader = JsonlReader::new(ErrThenEof {
+            kind: io::ErrorKind::Other,
+            fired: false,
+        });
+        assert!(
+            matches!(reader.next_record(), Err(JsonlError::Io(_))),
+            "a non-interrupted read error must fail closed, not retry to EOF"
+        );
+    }
+
+    // L347 (guard `== Interrupted` -> `false`, and `==` -> `!=`): an Interrupted
+    // read error must be retried (transparently), yielding a clean EOF here.
+    #[test]
+    fn residue_read_physical_line_retries_interrupted_io_error() {
+        let mut reader = JsonlReader::new(ErrThenEof {
+            kind: io::ErrorKind::Interrupted,
+            fired: false,
+        });
+        assert!(
+            matches!(reader.next_record(), Ok(None)),
+            "an EINTR must be retried and then reach a clean end of input"
+        );
+    }
+
+    // L319 (`slice.len() - 1` -> `+ 1`): a CRLF line drops the trailing '\r'; the
+    // `+ 1` mutant would index one past the slice and panic.
+    #[test]
+    fn residue_next_record_handles_crlf_line_ending() {
+        let rec = &signed_chain(1)[0];
+        let mut data = serde_json::to_string(rec).expect("serialize");
+        data.push_str("\r\n");
+        let mut reader = JsonlReader::new(io::Cursor::new(data.into_bytes()));
+        let got = reader
+            .next_record()
+            .expect("a CRLF-terminated record parses")
+            .expect("some record");
+        assert_eq!(got.seq, rec.seq, "the CR must be stripped and the record parsed");
+    }
+
+    // L361 (`>` -> `==`, and `+` -> `*`): a single oversized chunk (delivered
+    // whole by `Cursor`, so `self.line.len()` is 0 at the check) must be capped
+    // with the size-limit error. `==` never matches `MAX + 5`; `*` yields `0`.
+    #[test]
+    fn residue_read_physical_line_caps_a_single_oversized_chunk() {
+        let mut data = "a".repeat(MAX_AUDIT_LINE_LEN + 5);
+        data.push('\n');
+        let mut reader = JsonlReader::new(io::Cursor::new(data.into_bytes()));
+        match reader.next_record() {
+            Err(JsonlError::Malformed(e)) => assert!(
+                e.message.contains("exceeds"),
+                "an oversized single chunk must be capped by the size limit, got {e}"
+            ),
+            other => panic!("expected an oversized-line size error, got {other:?}"),
+        }
+    }
+
+    // L361 (`>` -> `>=`): a line of EXACTLY MAX bytes is within the limit and must
+    // parse; the `>=` mutant would reject it at the boundary.
+    #[test]
+    fn residue_read_physical_line_accepts_a_line_exactly_at_the_limit() {
+        let rec = &signed_chain(1)[0];
+        let json = serde_json::to_string(rec).expect("serialize");
+        assert!(json.len() < MAX_AUDIT_LINE_LEN, "fixture fits under the cap");
+        // Leading whitespace (serde-insignificant) pads the line to exactly MAX
+        // bytes without changing the parsed record.
+        let mut line = " ".repeat(MAX_AUDIT_LINE_LEN - json.len());
+        line.push_str(&json);
+        assert_eq!(line.len(), MAX_AUDIT_LINE_LEN, "line is exactly at the cap");
+        line.push('\n');
+        let mut reader = JsonlReader::new(io::Cursor::new(line.into_bytes()));
+        let got = reader
+            .next_record()
+            .expect("a line exactly at the cap is within the limit")
+            .expect("some record");
+        assert_eq!(got.seq, rec.seq);
+    }
 }
