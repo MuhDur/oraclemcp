@@ -38,6 +38,7 @@ expected_packages=(
   oraclemcp-auth
   oraclemcp-telemetry
   oraclemcp-core
+  oraclemcp-verifier
   oraclemcp
 )
 
@@ -71,6 +72,10 @@ declare -A allowed_deps=(
   [oraclemcp-auth]="oraclemcp-audit oraclemcp-error oraclemcp-guard"
   [oraclemcp-telemetry]="oraclemcp-error"
   [oraclemcp-core]="oraclemcp-audit oraclemcp-auth oraclemcp-config oraclemcp-db oraclemcp-error oraclemcp-guard oraclemcp-telemetry"
+  # Standalone certificate verifier: re-runs the guard Classifier and re-checks
+  # the audit binding, so it depends on the two domain crates by design. It is a
+  # leaf consumer (no adapter deps), NOT itself a domain crate.
+  [oraclemcp-verifier]="oraclemcp-audit oraclemcp-guard"
   [oraclemcp]="oraclemcp-audit oraclemcp-auth oraclemcp-config oraclemcp-core oraclemcp-db oraclemcp-error oraclemcp-guard oraclemcp-telemetry"
 )
 
