@@ -1395,6 +1395,77 @@ mod tests {
     }
 
     #[test]
+    fn validate_predicate_target_requires_object_when_schema_provided() {
+        let policy = SqlPolicyConfig {
+            version: SQL_POLICY_VERSION,
+            rules: vec![SqlPolicyRuleConfig {
+                id: "tenant-filter".to_owned(),
+                match_clause: SqlPolicyMatchConfig {
+                    schema: Some("APP".to_owned()),
+                    object: None,
+                    verb: Some(SqlPolicyVerb::Select),
+                    principal: None,
+                },
+                effect: SqlPolicyEffectConfig::RequirePredicate {
+                    sql_fragment: "tenant_id = 7".to_owned(),
+                },
+            }],
+        };
+        assert!(matches!(
+            policy.validate(),
+            Err(SqlPolicyValidationError { field, reason })
+                if field == "rules[0].match" && reason.contains("requires")
+        ));
+    }
+
+    #[test]
+    fn policy_evaluate_rejects_require_predicate_target_conflict() {
+        let policy = SqlPolicyConfig {
+            version: SQL_POLICY_VERSION,
+            rules: vec![
+                SqlPolicyRuleConfig {
+                    id: "tenant-filter".to_owned(),
+                    match_clause: SqlPolicyMatchConfig {
+                        schema: Some("APP".to_owned()),
+                        object: Some("ORDERS".to_owned()),
+                        verb: Some(SqlPolicyVerb::Select),
+                        principal: None,
+                    },
+                    effect: SqlPolicyEffectConfig::RequirePredicate {
+                        sql_fragment: "tenant_id = 7".to_owned(),
+                    },
+                },
+                SqlPolicyRuleConfig {
+                    id: "tenant-filter-case".to_owned(),
+                    match_clause: SqlPolicyMatchConfig {
+                        schema: Some("\"App\"".to_owned()),
+                        object: Some("\"Orders\"".to_owned()),
+                        verb: Some(SqlPolicyVerb::Select),
+                        principal: None,
+                    },
+                    effect: SqlPolicyEffectConfig::RequirePredicate {
+                        sql_fragment: "tenant_id = 9".to_owned(),
+                    },
+                },
+            ],
+        };
+        let base = Classifier::default().classify("SELECT id FROM app.orders");
+        let context = SqlPolicyEvaluationContext::new(
+            Some("App".to_owned()),
+            Some("Orders".to_owned()),
+            SqlPolicyVerb::Select,
+            None,
+        );
+        assert!(matches!(
+            policy.evaluate(&base, &context),
+            PolicyTightening::Deny(PolicyDenial {
+                reason: PolicyDenialReason::PredicateTargetConflict,
+                matched_rule_ids,
+            }) if matched_rule_ids == vec!["tenant-filter", "tenant-filter-case"],
+        ));
+    }
+
+    #[test]
     fn policy_evaluate_allows_multiple_require_predicates_for_same_target() {
         let policy = SqlPolicyConfig {
             version: SQL_POLICY_VERSION,
@@ -1468,6 +1539,69 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_statement_ast_update_target_table_mismatch_is_unsupported_shape() {
+        let dialect = OracleDialect {};
+        let mut statements = Parser::parse_sql(&dialect, "UPDATE hr.emp SET status = 'OPEN'")
+            .unwrap_or_else(|_| {
+                panic!("valid update should parse for policy rewrite test");
+            });
+        let mut statement = statements.pop().expect("one update statement");
+        let target = SqlPolicyPredicateTarget {
+            schema: "HR".to_owned(),
+            object: "ORDERS".to_owned(),
+            verb: SqlPolicyVerb::Update,
+        };
+
+        assert!(
+            rewrite_statement_ast(
+                &mut statement,
+                &target,
+                parse_policy_predicate("tenant_id = 7").unwrap()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rewrite_statement_ast_rejects_unqualified_target_name_mismatch() {
+        let classifier = Classifier::default();
+        let base = classifier.classify("SELECT id FROM app.orders");
+        let narrowing = PolicyNarrowing {
+            base_required_level: base.required_level.unwrap(),
+            required_level: base.required_level.unwrap(),
+            predicates: vec![SqlPolicyPredicate {
+                rule_id: "tenant-filter".to_owned(),
+                target: SqlPolicyPredicateTarget {
+                    schema: "APP".to_owned(),
+                    object: "ORDERS".to_owned(),
+                    verb: SqlPolicyVerb::Select,
+                },
+                sql_fragment: "tenant_id = 7".to_owned(),
+            }],
+            matched_rule_ids: vec!["tenant-filter".to_owned()],
+        };
+
+        assert!(matches!(
+            rewrite_predicates_and_reclassify(
+                &classifier,
+                &base,
+                "SELECT id FROM audits",
+                &SqlPolicyEvaluationContext::new(
+                    Some("APP".to_owned()),
+                    Some("ORDERS".to_owned()),
+                    SqlPolicyVerb::Select,
+                    None
+                ),
+                &narrowing
+            ),
+            PolicyPredicateRewrite::Deny(PolicyRewriteDenial {
+                reason: PolicyRewriteDenialReason::UnsupportedStatementShape,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn rewrite_statement_ast_update_target_verb_mismatch_is_unsupported_shape() {
         let dialect = OracleDialect {};
         let mut statements = Parser::parse_sql(&dialect, "UPDATE hr.emp SET status = 'OPEN'")
@@ -1479,6 +1613,30 @@ mod tests {
             schema: "HR".to_owned(),
             object: "EMP".to_owned(),
             verb: SqlPolicyVerb::Select,
+        };
+
+        assert!(
+            rewrite_statement_ast(
+                &mut statement,
+                &target,
+                parse_policy_predicate("tenant_id = 7").unwrap()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rewrite_statement_ast_delete_target_table_mismatch_is_unsupported_shape() {
+        let dialect = OracleDialect {};
+        let mut statements = Parser::parse_sql(&dialect, "DELETE FROM hr.emp WHERE id = 7")
+            .unwrap_or_else(|_| {
+                panic!("valid delete should parse for policy rewrite test");
+            });
+        let mut statement = statements.pop().expect("one delete statement");
+        let target = SqlPolicyPredicateTarget {
+            schema: "HR".to_owned(),
+            object: "ORDERS".to_owned(),
+            verb: SqlPolicyVerb::Delete,
         };
 
         assert!(
@@ -1551,6 +1709,47 @@ mod tests {
             ),
             PolicyPredicateRewrite::Deny(PolicyRewriteDenial {
                 reason: PolicyRewriteDenialReason::UnsupportedStatementShape,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn policy_rewrite_rejects_target_context_verb_mismatch_for_update_statement() {
+        let classifier = Classifier::default();
+        let original = "UPDATE hr.emp SET id = 7 WHERE dept = 2";
+        let base = classifier.classify(original);
+        let narrowing = PolicyNarrowing {
+            base_required_level: base.required_level.unwrap(),
+            required_level: base.required_level.unwrap(),
+            predicates: vec![SqlPolicyPredicate {
+                rule_id: "tenant-filter".to_owned(),
+                target: SqlPolicyPredicateTarget {
+                    schema: "HR".to_owned(),
+                    object: "EMP".to_owned(),
+                    verb: SqlPolicyVerb::Update,
+                },
+                sql_fragment: "tenant_id = 7".to_owned(),
+            }],
+            matched_rule_ids: vec!["tenant-filter".to_owned()],
+        };
+        let select_context = SqlPolicyEvaluationContext::new(
+            Some("HR".to_owned()),
+            Some("EMP".to_owned()),
+            SqlPolicyVerb::Select,
+            None,
+        );
+
+        assert!(matches!(
+            rewrite_predicates_and_reclassify(
+                &classifier,
+                &base,
+                original,
+                &select_context,
+                &narrowing,
+            ),
+            PolicyPredicateRewrite::Deny(PolicyRewriteDenial {
+                reason: PolicyRewriteDenialReason::TargetContextMismatch,
                 ..
             })
         ));
@@ -2329,8 +2528,24 @@ mod tests {
     }
 
     #[test]
+    fn valid_oracle_identifier_rejects_quoted_empties_and_bare_quotes() {
+        assert!(!valid_oracle_identifier("\"\""));
+        assert!(!valid_oracle_identifier("\"Order"));
+        assert!(!valid_oracle_identifier("Order\""));
+        assert!(valid_oracle_identifier("\"Order\""));
+    }
+
+    #[test]
     fn valid_principal_key_accepts_stable_shape() {
         assert!(valid_principal_key("oauth:operator-7"));
+        assert!(!valid_principal_key("oauth"));
+        assert!(!valid_principal_key("oauth:bad*id"));
+    }
+
+    #[test]
+    fn policy_predicate_rejects_empty_or_whitespace() {
+        assert!(!valid_policy_predicate(""));
+        assert!(!valid_policy_predicate("   "));
     }
 
     #[test]

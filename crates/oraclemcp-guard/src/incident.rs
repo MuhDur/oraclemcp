@@ -726,6 +726,16 @@ mod tests {
     }
 
     #[test]
+    fn from_json_accepts_exact_schema_limits_for_lanes_and_entries() {
+        let manifest = valid_capture_result(MAX_CAPTURED_LANES, MAX_BUNDLE_ENTRIES);
+        let json = manifest.to_json();
+        assert_eq!(
+            IncidentManifest::from_json(&json).expect("manifest at limits must round-trip"),
+            manifest
+        );
+    }
+
+    #[test]
     fn validate_subject_id_hash_rejects_64_char_nonhex_inputs() {
         let non_hex_subject = format!("{SUBJECT_PREFIX}{}", "g".repeat(64));
         assert_eq!(
