@@ -2459,6 +2459,96 @@ mod tests {
     }
 
     #[test]
+    fn flush_after_a_failed_fsync_refuses_due_to_poisoned_state() {
+        let sink = Arc::new(FlushFailsOnceSink::default());
+        let anchor_path = tempfile::tempdir()
+            .expect("tempdir")
+            .path()
+            .join("audit.anchor");
+        let sink = SharedFlakySink(sink);
+        let auditor = Auditor::new(Box::new(sink), test_key()).with_head_anchor(&anchor_path);
+
+        let first = auditor.append(
+            &draft("DELETE FROM t WHERE id=1", "GUARDED"),
+            "t0".to_owned(),
+            true,
+        );
+        assert!(
+            matches!(first, Err(AuditError::Io(_))),
+            "durable fsync failure must be observable"
+        );
+        assert_eq!(
+            load_anchor(&anchor_path).expect("load"),
+            None,
+            "anchor must stay absent after a failed durable flush"
+        );
+
+        let second = auditor.flush();
+        assert!(
+            matches!(second, Err(AuditError::Poisoned)),
+            "poisoned flush must fail closed, not clear a failed fsync window"
+        );
+    }
+
+    #[test]
+    fn find_entry_hash_at_seq_handles_present_and_missing_sequences() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let missing_path = dir.path().join("missing.jsonl");
+        let auditor = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open durable audit log")),
+            test_key(),
+        );
+        let first = auditor
+            .append(&draft("SELECT 1 FROM dual", "SAFE"), "t0".to_owned(), true)
+            .expect("append one");
+        let second = auditor
+            .append(&draft("SELECT 2 FROM dual", "SAFE"), "t1".to_owned(), true)
+            .expect("append two");
+        assert_eq!(
+            find_entry_hash_at_seq(&missing_path, 1).expect("missing file"),
+            None,
+            "absent file should report no hash"
+        );
+        assert_eq!(
+            find_entry_hash_at_seq(&path, 1).expect("seq one"),
+            Some(first.entry_hash),
+            "the matching sequence hash should be returned"
+        );
+        assert_eq!(
+            find_entry_hash_at_seq(&path, 2).expect("seq two"),
+            Some(second.entry_hash),
+            "the second sequence hash should be returned"
+        );
+        assert_eq!(
+            find_entry_hash_at_seq(&path, 3).expect("missing seq"),
+            None,
+            "absent sequence must return None"
+        );
+    }
+
+    #[test]
+    fn find_entry_hash_at_seq_refuses_malformed_lines() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        std::fs::write(&path, "{bad json\n").expect("write malformed jsonl body");
+
+        let err = match find_entry_hash_at_seq(&path, 1) {
+            Ok(_) => panic!("malformed JSONL must fail this lookup"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot re-read audit log"),
+            "malformed line must surface as a resume-style refusal: {msg}"
+        );
+        assert!(
+            msg.contains("anchored") || msg.contains("malformed audit record"),
+            "failure should describe malformed replay input: {msg}"
+        );
+    }
+
+    #[test]
     fn flush_before_any_record_does_not_write_head_anchor() {
         let dir = tempfile::tempdir().expect("tempdir");
         let anchor_path = dir.path().join("audit.jsonl.anchor");

@@ -702,6 +702,82 @@ mod tests {
         assert!(msg.contains(&err.message), "{msg}");
     }
 
+    #[test]
+    fn read_physical_line_advances_between_records_without_silently_skipping_bytes() {
+        let records = signed_chain(2);
+        let first = serde_json::to_string(&records[0]).expect("serialize first");
+        let second = serde_json::to_string(&records[1]).expect("serialize second");
+        let body = format!("{first}\n{second}\n");
+        let mut reader = JsonlReader::new(io::BufReader::new(io::Cursor::new(&body)));
+
+        assert!(reader.read_physical_line().expect("first raw line"));
+        assert_eq!(reader.line, first.as_bytes());
+        reader.line.clear();
+        assert!(reader.read_physical_line().expect("second raw line"));
+        assert_eq!(reader.line, second.as_bytes());
+        assert!(!reader.read_physical_line().expect("eof"));
+    }
+
+    #[test]
+    fn read_physical_line_rejects_truncated_or_malformed_lines_with_precise_offsets() {
+        let good = serde_json::to_string(&signed_chain(1)[0]).expect("serialize");
+        let malformed = format!("{good}\n{{bad-json}}\n");
+        let mut malformed_reader =
+            JsonlReader::new(io::BufReader::new(io::Cursor::new(&malformed)));
+        assert!(
+            malformed_reader
+                .next_record()
+                .expect("first record")
+                .expect("first record")
+                .seq
+                > 0
+        );
+        match malformed_reader.next_record() {
+            Err(JsonlError::Malformed(e)) => {
+                assert_eq!(e.line, 2);
+                assert!(e.message.contains("key must be a string"), "{e:?}");
+            }
+            other => panic!("malformed line must be rejected, got {other:?}"),
+        }
+
+        let truncated = format!("{good}\n{{\"seq\":");
+        let mut truncated_reader =
+            JsonlReader::new(io::BufReader::new(io::Cursor::new(&truncated)));
+        assert!(
+            truncated_reader
+                .next_record()
+                .expect("first record")
+                .expect("first record")
+                .seq
+                > 0
+        );
+        match truncated_reader.next_record() {
+            Err(JsonlError::Malformed(e)) => assert_eq!(e.line, 2),
+            other => panic!("torn line must be rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_physical_line_rejects_oversized_lines_without_unbounded_allocation() {
+        let mut oversized_reader = JsonlReader::new(io::BufReader::new(InfiniteByte(b'a')));
+        match oversized_reader.read_physical_line() {
+            Err(JsonlError::Malformed(e)) => {
+                assert_eq!(e.line, 1);
+                assert!(e.message.contains("exceeds"), "{e}");
+            }
+            other => panic!("oversized line must be rejected, got {other:?}"),
+        }
+
+        let mut over_limit = String::with_capacity(MAX_AUDIT_LINE_LEN + 2);
+        over_limit.push_str(&"a".repeat(MAX_AUDIT_LINE_LEN + 1));
+        over_limit.push('\n');
+        let mut reader = JsonlReader::new(io::BufReader::new(io::Cursor::new(over_limit)));
+        match reader.read_physical_line() {
+            Err(JsonlError::Malformed(_)) => {}
+            other => panic!("bounded capped read must reject over-limit lines, got {other:?}"),
+        }
+    }
+
     // --- Streaming verification (bead oraclemcp-qa100 .29) ---
 
     fn body_of(records: &[AuditRecord]) -> String {

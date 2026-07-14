@@ -312,6 +312,30 @@ mod tests {
     }
 
     #[test]
+    fn hex_verify_rejects_noncanonical_length_or_characters() {
+        let signature = hmac_sha256_hex(b"qa35-key", b"SELECT * FROM users");
+        assert!(hmac_sha256_hex_is_valid(
+            b"qa35-key",
+            b"SELECT * FROM users",
+            &signature
+        ));
+
+        let short = format!("hmac-sha256:{}", &signature["hmac-sha256:".len()..43]);
+        assert!(!hmac_sha256_hex_is_valid(
+            b"qa35-key",
+            b"SELECT * FROM users",
+            &short
+        ));
+
+        let invalid = format!("hmac-sha256:{}", "z".repeat(64));
+        assert!(!hmac_sha256_hex_is_valid(
+            b"qa35-key",
+            b"SELECT * FROM users",
+            &invalid
+        ));
+    }
+
+    #[test]
     fn ct_eq_matches_and_rejects() {
         assert!(ct_eq(b"abc", b"abc"));
         assert!(!ct_eq(b"abc", b"abd"));

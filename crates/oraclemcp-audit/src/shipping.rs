@@ -568,7 +568,9 @@ fn push_sd_param(sd: &mut String, key: &str, value: &str) {
 mod tests {
     use super::*;
     use crate::record::{
-        AuditCorrelation, AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, SigningKey,
+        AuditCorrelation, AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, AuditVerdict,
+        AuditVerdictCertificate, AuditVerdictConstruct, AuditVerdictDerivationStep,
+        AuditVerdictOperatingLevel, AuditVerdictRuleId, BoundAuditVerdictCertificate, SigningKey,
         compute_entry_hash_v1,
     };
     use crate::sink::{Auditor, MemoryAuditSink};
@@ -820,6 +822,101 @@ mod tests {
             1,
             "the forward failure is counted, not lost or fatal"
         );
+    }
+
+    #[test]
+    fn append_with_verdict_certificate_is_buffered_and_forwarded_after_local_fsync() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Local {
+            append_calls: Arc<AtomicUsize>,
+            with_calls: Arc<AtomicUsize>,
+            flushed: Arc<AtomicBool>,
+        }
+
+        impl AuditSink for Local {
+            fn append(&self, _r: &AuditRecord) -> Result<(), crate::sink::AuditError> {
+                self.append_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+
+            fn append_with_verdict_certificate(
+                &self,
+                _r: &AuditRecord,
+                _certificate: &BoundAuditVerdictCertificate,
+            ) -> Result<(), crate::sink::AuditError> {
+                self.with_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+
+            fn flush(&self) -> Result<(), crate::sink::AuditError> {
+                self.flushed.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let append_calls = Arc::new(AtomicUsize::new(0));
+        let with_calls = Arc::new(AtomicUsize::new(0));
+        let flushed = Arc::new(AtomicBool::new(false));
+        let local = Local {
+            append_calls: Arc::clone(&append_calls),
+            with_calls: Arc::clone(&with_calls),
+            flushed: Arc::clone(&flushed),
+        };
+        let forward = Arc::new(CapturingForwarder::default());
+        let sink =
+            ShippingAuditSink::new(Box::new(local), Box::new(SharedForwarder(forward.clone())));
+
+        let derivation = AuditVerdictDerivationStep::new(
+            AuditVerdictRuleId::R16,
+            AuditVerdictConstruct::FinalSafe,
+        )
+        .expect("registered derivation");
+        let mut record = AuditRecord::chained_signed(
+            &draft("DELETE FROM users", "DESTRUCTIVE"),
+            1,
+            crate::record::GENESIS_HASH,
+            "t-cf".to_owned(),
+            &key(),
+        );
+        let certificate = AuditVerdictCertificate::new(
+            "policy-1".to_owned(),
+            vec![derivation],
+            Some(AuditVerdictOperatingLevel::ReadOnly),
+            None,
+            record.sql_sha256.clone(),
+            AuditVerdict::Safe,
+        )
+        .expect("valid verdict certificate");
+        record.verdict_certificate_core_hash = Some(certificate.core_hash());
+        let bound = certificate
+            .bind_to_record(&record)
+            .expect("certificate must match record");
+
+        sink.append_with_verdict_certificate(&record, &bound)
+            .expect("append with verdict certificate");
+        assert_eq!(
+            append_calls.load(Ordering::SeqCst),
+            0,
+            "verdict path must not route through append"
+        );
+        assert_eq!(
+            with_calls.load(Ordering::SeqCst),
+            1,
+            "verdict certificate path must execute append_with_verdict_certificate"
+        );
+        assert_eq!(
+            forward.records().len(),
+            0,
+            "local-only path must not ship before local durability"
+        );
+        assert!(!flushed.load(Ordering::SeqCst));
+
+        sink.flush().expect("durable flush");
+        assert!(flushed.load(Ordering::SeqCst));
+        assert_eq!(forward.records().len(), 1);
+        assert_eq!(forward.records()[0].seq, 1);
     }
 
     #[test]

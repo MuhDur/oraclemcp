@@ -1156,4 +1156,122 @@ mod tests {
             "unexpected recovery error: {error}"
         );
     }
+
+    #[test]
+    fn acknowledge_advances_delivery_counters_without_off_by_one() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cfg = config(directory.path(), "ack-counters");
+        let path_one = record_path(directory.path(), 1);
+        let path_two = record_path(directory.path(), 2);
+        write_new_file(
+            &path_one,
+            &serde_json::to_vec(&record(1)).expect("serialize record one"),
+        )
+        .expect("seed first queued record");
+        write_new_file(
+            &path_two,
+            &serde_json::to_vec(&record(2)).expect("serialize record two"),
+        )
+        .expect("seed second queued record");
+
+        let shared = Shared {
+            config: cfg,
+            queue: Mutex::new(BTreeMap::from_iter([
+                (1, path_one.clone()),
+                (2, path_two.clone()),
+            ])),
+            wake: Condvar::new(),
+            stopping: AtomicBool::new(false),
+            pending: AtomicU64::new(2),
+            delivered: AtomicU64::new(0),
+            failures: AtomicU64::new(0),
+            overflowed: AtomicU64::new(0),
+        };
+
+        assert_eq!(
+            shared.status().pending_records,
+            2,
+            "setup confirms both records are queued"
+        );
+        acknowledge(&shared, 1, &path_one).expect("ack sequence 1");
+        assert_eq!(
+            shared.status().pending_records,
+            1,
+            "pending should decrement by one exactly once"
+        );
+        assert_eq!(
+            shared.status().delivered_records,
+            1,
+            "delivered should increment by one exactly once"
+        );
+
+        acknowledge(&shared, 2, &path_two).expect("ack sequence 2");
+        assert_eq!(
+            shared.status().pending_records,
+            0,
+            "second ack should drain the queue"
+        );
+        assert_eq!(
+            shared.status().delivered_records,
+            2,
+            "two successful acks should increment delivered twice"
+        );
+        assert!(
+            !path_one.exists(),
+            "acked record should be removed from durable queue path"
+        );
+        assert!(
+            !path_two.exists(),
+            "acked record should be removed from durable queue path"
+        );
+    }
+
+    #[test]
+    fn acknowledge_unknown_seq_is_rejected_or_noops_without_counter_corruption() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cfg = config(directory.path(), "ack-unknown");
+        let known_path = record_path(directory.path(), 1);
+        let unknown_seq_path = record_path(directory.path(), 99);
+        write_new_file(
+            &known_path,
+            &serde_json::to_vec(&record(1)).expect("serialize known record"),
+        )
+        .expect("seed known queued record");
+        write_new_file(
+            &unknown_seq_path,
+            &serde_json::to_vec(&record(99)).expect("serialize unknown sequence"),
+        )
+        .expect("seed unknown sequence file");
+
+        let shared = Shared {
+            config: cfg,
+            queue: Mutex::new(BTreeMap::from_iter([(1u64, known_path.clone())])),
+            wake: Condvar::new(),
+            stopping: AtomicBool::new(false),
+            pending: AtomicU64::new(1),
+            delivered: AtomicU64::new(0),
+            failures: AtomicU64::new(0),
+            overflowed: AtomicU64::new(0),
+        };
+        let before = shared.status();
+
+        assert!(acknowledge(&shared, 99, &unknown_seq_path).is_ok());
+        let after = shared.status();
+        assert_eq!(
+            after.pending_records, before.pending_records,
+            "unknown sequence must not reduce pending"
+        );
+        assert_eq!(
+            after.delivered_records, before.delivered_records,
+            "unknown sequence must not increase delivered"
+        );
+        assert!(
+            !unknown_seq_path.exists(),
+            "acknowledging an unknown sequence cannot silently keep a durable queue file"
+        );
+        assert!(
+            known_path.exists(),
+            "known queued records remain queued when unknown seq is acknowledged"
+        );
+    }
 }
