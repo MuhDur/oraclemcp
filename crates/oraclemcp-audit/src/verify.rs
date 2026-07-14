@@ -989,7 +989,10 @@ mod tests {
             .next_record()
             .expect("a CRLF-terminated record parses")
             .expect("some record");
-        assert_eq!(got.seq, rec.seq, "the CR must be stripped and the record parsed");
+        assert_eq!(
+            got.seq, rec.seq,
+            "the CR must be stripped and the record parsed"
+        );
     }
 
     // L361 (`>` -> `==`, and `+` -> `*`): a single oversized chunk (delivered
@@ -1015,7 +1018,10 @@ mod tests {
     fn residue_read_physical_line_accepts_a_line_exactly_at_the_limit() {
         let rec = &signed_chain(1)[0];
         let json = serde_json::to_string(rec).expect("serialize");
-        assert!(json.len() < MAX_AUDIT_LINE_LEN, "fixture fits under the cap");
+        assert!(
+            json.len() < MAX_AUDIT_LINE_LEN,
+            "fixture fits under the cap"
+        );
         // Leading whitespace (serde-insignificant) pads the line to exactly MAX
         // bytes without changing the parsed record.
         let mut line = " ".repeat(MAX_AUDIT_LINE_LEN - json.len());

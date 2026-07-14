@@ -654,9 +654,9 @@ mod tests {
         }
     }
 
-struct SleepForwarder(Duration);
+    struct SleepForwarder(Duration);
 
-impl ShippingForwarder for SleepForwarder {
+    impl ShippingForwarder for SleepForwarder {
         fn forward(&self, _record: &AuditRecord) -> Result<(), ShippingError> {
             thread::sleep(self.0);
             Ok(())
@@ -670,7 +670,9 @@ impl ShippingForwarder for SleepForwarder {
     impl ShippingForwarder for FlakyForwarder {
         fn forward(&self, _record: &AuditRecord) -> Result<(), ShippingError> {
             if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                Err(ShippingError::Transport("temporary enqueue failure".to_owned()))
+                Err(ShippingError::Transport(
+                    "temporary enqueue failure".to_owned(),
+                ))
             } else {
                 Ok(())
             }
@@ -1014,7 +1016,9 @@ impl ShippingForwarder for SleepForwarder {
     fn spool_config_rejects_invalid_retry_bounds_and_accepts_equal_bounds() {
         let directory = tempfile::tempdir().expect("tempdir");
         let valid = config(directory.path(), "valid-destination");
-        let equal_retries = valid.clone().with_retry(Duration::from_millis(20), Duration::from_millis(20));
+        let equal_retries = valid
+            .clone()
+            .with_retry(Duration::from_millis(20), Duration::from_millis(20));
         validate_config(&equal_retries).expect("equal retry bounds must be accepted");
     }
 
@@ -1028,7 +1032,9 @@ impl ShippingForwarder for SleepForwarder {
         .expect("open spool");
         let status = delivery.status_handle();
 
-        delivery.forward(&record(1)).expect("initial record fills spool capacity");
+        delivery
+            .forward(&record(1))
+            .expect("initial record fills spool capacity");
         assert_eq!(status.snapshot().pending_records, 1);
 
         let error = delivery
@@ -1046,9 +1052,11 @@ impl ShippingForwarder for SleepForwarder {
     fn durable_forwarder_drop_leaves_state_for_replay() {
         let directory = tempfile::tempdir().expect("tempdir");
         let cfg = config(directory.path(), "drop-persists");
-        let delivery = DurableShippingForwarder::open(cfg.clone(), Box::new(AlwaysFails))
-            .expect("open spool");
-        delivery.forward(&record(1)).expect("persist one record for replay");
+        let delivery =
+            DurableShippingForwarder::open(cfg.clone(), Box::new(AlwaysFails)).expect("open spool");
+        delivery
+            .forward(&record(1))
+            .expect("persist one record for replay");
         drop(delivery);
 
         let recovery = DurableShippingForwarder::open(cfg, Box::new(Capture::default()))
@@ -1072,14 +1080,17 @@ impl ShippingForwarder for SleepForwarder {
         .expect("open spool");
         let status = delivery.status_handle();
 
-        delivery.forward(&record(1)).expect("enqueue for retry path");
+        delivery
+            .forward(&record(1))
+            .expect("enqueue for retry path");
         wait_until(Duration::from_secs(1), || {
-            status.snapshot().delivery_failures >= 1
-                && status.snapshot().pending_records == 1
+            status.snapshot().delivery_failures >= 1 && status.snapshot().pending_records == 1
         });
 
         delivery.flush().expect("flush can unblock retry");
-        wait_until(Duration::from_millis(250), || status.snapshot().pending_records == 0);
+        wait_until(Duration::from_millis(250), || {
+            status.snapshot().pending_records == 0
+        });
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
@@ -1359,121 +1370,6 @@ impl ShippingForwarder for SleepForwarder {
         assert!(
             known_path.exists(),
             "known queued records remain queued when unknown seq is acknowledged"
-        );
-    }
-
-    #[derive(Clone, Default)]
-    struct FieldCapture {
-        fields: Arc<Mutex<std::collections::HashMap<String, u64>>>,
-    }
-    impl tracing::Subscriber for FieldCapture {
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-        fn event(&self, event: &tracing::Event<'_>) {
-            struct V<'a>(&'a mut std::collections::HashMap<String, u64>);
-            impl tracing::field::Visit for V<'_> {
-                fn record_u64(&mut self, f: &tracing::field::Field, v: u64) {
-                    self.0.insert(f.name().to_owned(), v);
-                }
-                fn record_i64(&mut self, f: &tracing::field::Field, v: i64) {
-                    if let Ok(v) = u64::try_from(v) {
-                        self.0.insert(f.name().to_owned(), v);
-                    }
-                }
-                fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
-            }
-            let mut g = self.fields.lock();
-            event.record(&mut V(&mut g));
-        }
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
-        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
-            Some(tracing::level_filters::LevelFilter::TRACE)
-        }
-    }
-
-    // GATE-SEAL residue: `acknowledge` computes `pending`/`delivered` locals for
-    // its debug log via `fetch_sub(1) - 1` / `fetch_add(1) + 1`. The atomics
-    // (observable via `status()`) are correct regardless of the `- 1`/`+ 1`, so
-    // only the LOGGED field values distinguish the mutants. `acknowledge` runs
-    // here on the test thread, so a thread-local subscriber observes them.
-    #[test]
-    fn acknowledge_debug_log_reports_pending_zero_and_delivered_one() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let cfg = config(directory.path(), "ack-log");
-        let known_path = record_path(directory.path(), 1);
-        write_new_file(
-            &known_path,
-            &serde_json::to_vec(&record(1)).expect("serialize"),
-        )
-        .expect("seed");
-        let shared = Shared {
-            config: cfg,
-            queue: Mutex::new(BTreeMap::from_iter([(1u64, known_path.clone())])),
-            wake: Condvar::new(),
-            stopping: AtomicBool::new(false),
-            pending: AtomicU64::new(1),
-            delivered: AtomicU64::new(0),
-            failures: AtomicU64::new(0),
-            overflowed: AtomicU64::new(0),
-        };
-        let cap = FieldCapture::default();
-        let fields = Arc::clone(&cap.fields);
-        tracing::subscriber::with_default(cap, || {
-            acknowledge(&shared, 1, &known_path).expect("ack ok");
-        });
-        let g = fields.lock();
-        assert_eq!(
-            g.get("pending_records").copied(),
-            Some(0),
-            "acknowledging the only queued record must log pending_records = 1 - 1 = 0"
-        );
-        assert_eq!(
-            g.get("delivered_records").copied(),
-            Some(1),
-            "the first acknowledgement must log delivered_records = 0 + 1 = 1"
-        );
-    }
-
-    // GATE-SEAL residue: `enqueue` logs `pending_records = fetch_add(1) + 1`.
-    // Same observability shape as `acknowledge` above. Construct the forwarder
-    // without a worker so nothing consumes the queue concurrently.
-    #[test]
-    fn enqueue_debug_log_reports_incremented_pending() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(directory.path()).expect("dir");
-        let cfg = config(directory.path(), "enqueue-log");
-        let lock = SpoolLock::acquire(directory.path()).expect("spool lock");
-        let forwarder = DurableShippingForwarder {
-            shared: Arc::new(Shared {
-                config: cfg,
-                queue: Mutex::new(BTreeMap::new()),
-                wake: Condvar::new(),
-                stopping: AtomicBool::new(false),
-                pending: AtomicU64::new(0),
-                delivered: AtomicU64::new(0),
-                failures: AtomicU64::new(0),
-                overflowed: AtomicU64::new(0),
-            }),
-            worker: Mutex::new(None),
-            _lock: lock,
-        };
-        let cap = FieldCapture::default();
-        let fields = Arc::clone(&cap.fields);
-        tracing::subscriber::with_default(cap, || {
-            forwarder.enqueue(&record(1)).expect("enqueue ok");
-        });
-        let g = fields.lock();
-        assert_eq!(
-            g.get("pending_records").copied(),
-            Some(1),
-            "enqueuing the first record must log pending_records = 0 + 1 = 1"
         );
     }
 

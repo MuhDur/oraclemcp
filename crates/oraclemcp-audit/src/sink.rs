@@ -3014,8 +3014,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("audit.jsonl");
         {
-            let auditor =
-                Auditor::new(Box::new(FileAuditSink::open(&path).expect("open")), test_key());
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open")),
+                test_key(),
+            );
             auditor
                 .append(&draft("SELECT 1", "GUARDED"), "t1".to_owned(), true)
                 .expect("append 1");
@@ -3058,8 +3060,7 @@ mod tests {
     // enqueue.
     #[test]
     fn residue_flush_enqueues_rekor_head_after_a_record() {
-        let anchor =
-            crate::AsyncRekorAnchor::new(Box::new(RejectingSubmitter), 8).expect("anchor");
+        let anchor = crate::AsyncRekorAnchor::new(Box::new(RejectingSubmitter), 8).expect("anchor");
         let auditor = Auditor::new(Box::new(MemoryAuditSink::new()), test_key())
             .with_rekor_anchor(anchor.clone());
         auditor
@@ -3077,8 +3078,7 @@ mod tests {
     // a Rekor head.
     #[test]
     fn residue_flush_before_any_record_does_not_enqueue_rekor() {
-        let anchor =
-            crate::AsyncRekorAnchor::new(Box::new(RejectingSubmitter), 8).expect("anchor");
+        let anchor = crate::AsyncRekorAnchor::new(Box::new(RejectingSubmitter), 8).expect("anchor");
         let auditor = Auditor::new(Box::new(MemoryAuditSink::new()), test_key())
             .with_rekor_anchor(anchor.clone());
         auditor.flush().expect("empty flush");
