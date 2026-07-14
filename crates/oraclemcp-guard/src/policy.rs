@@ -1190,6 +1190,38 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn validate_predicate_target_rejects_schema_only_for_require_predicate() {
+        let rule = SqlPolicyMatchConfig {
+            verb: Some(SqlPolicyVerb::Select),
+            principal: None,
+            schema: Some("APP".to_owned()),
+            object: None,
+        };
+        assert!(matches!(
+            rule.validate_predicate_target("rules[0]"),
+            Err(SqlPolicyValidationError { field, reason })
+                if field == "rules[0].match"
+                    && reason.contains("RequirePredicate requires exact match.schema and match.object selectors")
+        ));
+    }
+
+    #[test]
+    fn validate_predicate_target_rejects_object_only_for_require_predicate() {
+        let rule = SqlPolicyMatchConfig {
+            verb: Some(SqlPolicyVerb::Select),
+            principal: None,
+            schema: None,
+            object: Some("ORDERS".to_owned()),
+        };
+        assert!(matches!(
+            rule.validate_predicate_target("rules[0]"),
+            Err(SqlPolicyValidationError { field, reason })
+                if field == "rules[0].match"
+                    && reason.contains("RequirePredicate requires exact match.schema and match.object selectors")
+        ));
+    }
+
     fn operator_policy() -> SqlPolicyConfig {
         SqlPolicyConfig {
             version: SQL_POLICY_VERSION,
