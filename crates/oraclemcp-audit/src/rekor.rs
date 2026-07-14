@@ -632,6 +632,43 @@ mod tests {
     }
 
     #[test]
+    fn manifest_bytes_is_stable_and_schema_versioned() {
+        let bytes = head().manifest_bytes();
+        assert_eq!(
+            bytes,
+            b"{\"schema_version\":1,\"audit_seq\":7,\"audit_entry_hash\":\"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}"
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn validate_proof_shape_rejects_missing_required_proof_fields() {
+        let mut missing_entry_uuid = receipt_for(head());
+        missing_entry_uuid.proof.entry_uuid.clear();
+        assert_eq!(
+            missing_entry_uuid.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MalformedProof),
+            "missing entry_uuid must be rejected"
+        );
+
+        let mut missing_signed_entry_timestamp = receipt_for(head());
+        missing_signed_entry_timestamp.proof.signed_entry_timestamp.clear();
+        assert_eq!(
+            missing_signed_entry_timestamp.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MalformedProof),
+            "missing signed_entry_timestamp must be rejected"
+        );
+
+        let mut missing_checkpoint = receipt_for(head());
+        missing_checkpoint.proof.checkpoint.clear();
+        assert_eq!(
+            missing_checkpoint.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MalformedProof),
+            "missing checkpoint must be rejected"
+        );
+    }
+
+    #[test]
     fn inclusion_root_reconstructs_expected_roots_for_non_power_of_two_trees() {
         let leaves = [
             rekor_leaf_hash(b"leaf-0"),
@@ -670,6 +707,34 @@ mod tests {
             inclusion_root(leaves[4], 4, 5, &[]),
             Err(RekorProofError::MalformedProof),
             "truncated proof must fail for index 4 / tree size 5"
+        );
+    }
+
+    #[test]
+    fn inclusion_root_reconstructs_expected_roots_for_power_of_two_trees() {
+        let leaves = [rekor_leaf_hash(b"leaf-0"), rekor_leaf_hash(b"leaf-1")];
+        let expected_root = rekor_node_hash(leaves[0], leaves[1]);
+
+        assert_eq!(
+            inclusion_root(leaves[0], 0, 2, &vec![hex_of(leaves[1])]),
+            Ok(expected_root),
+            "index 0 in tree size 2 must reconstruct the expected root"
+        );
+        assert_eq!(
+            inclusion_root(leaves[1], 1, 2, &vec![hex_of(leaves[0])]),
+            Ok(expected_root),
+            "index 1 in tree size 2 must reconstruct the expected root"
+        );
+
+        assert_eq!(
+            inclusion_root(leaves[0], 0, 1, &[]),
+            Ok(leaves[0]),
+            "tree size 1 must return the leaf hash"
+        );
+        assert_eq!(
+            inclusion_root(leaves[0], 0, 1, &vec![hex_of(leaves[1])]),
+            Err(RekorProofError::MalformedProof),
+            "malformed single-leaf proofs with siblings must be rejected"
         );
     }
 
