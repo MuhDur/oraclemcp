@@ -1361,4 +1361,202 @@ impl ShippingForwarder for SleepForwarder {
             "known queued records remain queued when unknown seq is acknowledged"
         );
     }
+
+    #[derive(Clone, Default)]
+    struct FieldCapture {
+        fields: Arc<Mutex<std::collections::HashMap<String, u64>>>,
+    }
+    impl tracing::Subscriber for FieldCapture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct V<'a>(&'a mut std::collections::HashMap<String, u64>);
+            impl tracing::field::Visit for V<'_> {
+                fn record_u64(&mut self, f: &tracing::field::Field, v: u64) {
+                    self.0.insert(f.name().to_owned(), v);
+                }
+                fn record_i64(&mut self, f: &tracing::field::Field, v: i64) {
+                    if let Ok(v) = u64::try_from(v) {
+                        self.0.insert(f.name().to_owned(), v);
+                    }
+                }
+                fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+            }
+            let mut g = self.fields.lock();
+            event.record(&mut V(&mut g));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+            Some(tracing::level_filters::LevelFilter::TRACE)
+        }
+    }
+
+    // GATE-SEAL residue: `acknowledge` computes `pending`/`delivered` locals for
+    // its debug log via `fetch_sub(1) - 1` / `fetch_add(1) + 1`. The atomics
+    // (observable via `status()`) are correct regardless of the `- 1`/`+ 1`, so
+    // only the LOGGED field values distinguish the mutants. `acknowledge` runs
+    // here on the test thread, so a thread-local subscriber observes them.
+    #[test]
+    fn acknowledge_debug_log_reports_pending_zero_and_delivered_one() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cfg = config(directory.path(), "ack-log");
+        let known_path = record_path(directory.path(), 1);
+        write_new_file(
+            &known_path,
+            &serde_json::to_vec(&record(1)).expect("serialize"),
+        )
+        .expect("seed");
+        let shared = Shared {
+            config: cfg,
+            queue: Mutex::new(BTreeMap::from_iter([(1u64, known_path.clone())])),
+            wake: Condvar::new(),
+            stopping: AtomicBool::new(false),
+            pending: AtomicU64::new(1),
+            delivered: AtomicU64::new(0),
+            failures: AtomicU64::new(0),
+            overflowed: AtomicU64::new(0),
+        };
+        let cap = FieldCapture::default();
+        let fields = Arc::clone(&cap.fields);
+        tracing::subscriber::with_default(cap, || {
+            acknowledge(&shared, 1, &known_path).expect("ack ok");
+        });
+        let g = fields.lock();
+        assert_eq!(
+            g.get("pending_records").copied(),
+            Some(0),
+            "acknowledging the only queued record must log pending_records = 1 - 1 = 0"
+        );
+        assert_eq!(
+            g.get("delivered_records").copied(),
+            Some(1),
+            "the first acknowledgement must log delivered_records = 0 + 1 = 1"
+        );
+    }
+
+    // GATE-SEAL residue: `enqueue` logs `pending_records = fetch_add(1) + 1`.
+    // Same observability shape as `acknowledge` above. Construct the forwarder
+    // without a worker so nothing consumes the queue concurrently.
+    #[test]
+    fn enqueue_debug_log_reports_incremented_pending() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(directory.path()).expect("dir");
+        let cfg = config(directory.path(), "enqueue-log");
+        let lock = SpoolLock::acquire(directory.path()).expect("spool lock");
+        let forwarder = DurableShippingForwarder {
+            shared: Arc::new(Shared {
+                config: cfg,
+                queue: Mutex::new(BTreeMap::new()),
+                wake: Condvar::new(),
+                stopping: AtomicBool::new(false),
+                pending: AtomicU64::new(0),
+                delivered: AtomicU64::new(0),
+                failures: AtomicU64::new(0),
+                overflowed: AtomicU64::new(0),
+            }),
+            worker: Mutex::new(None),
+            _lock: lock,
+        };
+        let cap = FieldCapture::default();
+        let fields = Arc::clone(&cap.fields);
+        tracing::subscriber::with_default(cap, || {
+            forwarder.enqueue(&record(1)).expect("enqueue ok");
+        });
+        let g = fields.lock();
+        assert_eq!(
+            g.get("pending_records").copied(),
+            Some(1),
+            "enqueuing the first record must log pending_records = 0 + 1 = 1"
+        );
+    }
+
+    // GATE-SEAL residue: `recover_pending` compares a recovered `.tmp` against an
+    // already-promoted final record. Identical content must dedupe (remove the
+    // tmp and recover cleanly); the `!=` guard mutated to `==` would instead
+    // REJECT identical content as a conflict.
+    #[test]
+    fn recover_pending_dedupes_a_temp_matching_its_promoted_final() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let bytes = serde_json::to_vec(&record(7)).expect("serialize");
+        let final_path = record_path(directory.path(), 7);
+        let tmp_path = temp_record_path(directory.path(), 7);
+        std::fs::write(&final_path, &bytes).expect("seed final");
+        std::fs::write(&tmp_path, &bytes).expect("seed identical tmp");
+        let pending = recover_pending(directory.path())
+            .expect("identical temp+final content must recover cleanly, not conflict");
+        assert!(
+            !tmp_path.exists(),
+            "an identical temporary must be deduped away during recovery"
+        );
+        assert!(
+            pending.contains_key(&7),
+            "the promoted final record must be recovered as pending"
+        );
+    }
+
+    // GATE-SEAL residue: `load_overflow` maps a NotFound read to `Ok(None)` but
+    // must PROPAGATE any other read error. The guard mutated to `true` would
+    // swallow a non-NotFound error as "no overflow".
+    #[test]
+    fn load_overflow_propagates_non_notfound_read_errors() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        // Make `overflow.json` a directory: `std::fs::read` then fails with an
+        // error whose kind is NOT NotFound.
+        std::fs::create_dir(directory.path().join("overflow.json")).expect("mkdir overflow.json");
+        assert!(
+            load_overflow(directory.path()).is_err(),
+            "a non-NotFound read error must propagate, not be treated as absent overflow"
+        );
+    }
+
+    // GATE-SEAL residue: `sync_directory` fsyncs a directory handle; the FnValue
+    // mutant replaces the body with `Ok(())`. The error path is reachable by
+    // pointing it at a directory that cannot be opened.
+    #[cfg(unix)]
+    #[test]
+    fn sync_directory_reports_failure_for_an_unopenable_directory() {
+        let missing = std::path::Path::new("/proc/self/nonexistent-audit-dir-xyzzy");
+        assert!(
+            sync_directory(missing).is_err(),
+            "fsync of an unopenable directory must surface the open error"
+        );
+    }
+
+    // GATE-SEAL residue: `Drop for DurableShippingForwarder` calls `shutdown()`,
+    // which signals and JOINS the worker; a no-op drop leaves the worker parked
+    // forever. When the worker returns it drops the boxed destination, so an
+    // observable destination `Drop` proves the join happened.
+    #[test]
+    fn drop_shuts_down_and_joins_the_worker() {
+        struct DropSignal(Arc<AtomicBool>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        impl ShippingForwarder for DropSignal {
+            fn forward(&self, _record: &AuditRecord) -> Result<(), ShippingError> {
+                Ok(())
+            }
+        }
+        let directory = tempfile::tempdir().expect("tempdir");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let forwarder = DurableShippingForwarder::open(
+            config(directory.path(), "drop-join"),
+            Box::new(DropSignal(Arc::clone(&dropped))),
+        )
+        .expect("open spool");
+        drop(forwarder);
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "dropping the forwarder must join the worker, which drops the destination"
+        );
+    }
 }
