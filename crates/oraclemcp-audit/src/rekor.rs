@@ -474,6 +474,20 @@ mod tests {
     }
 
     #[test]
+    fn receipt_rejects_a_valid_proof_bound_to_a_different_head() {
+        let mut receipt = receipt_for(head());
+        receipt.head = AuditChainHead {
+            seq: 8,
+            entry_hash: "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                .to_owned(),
+        };
+        assert_eq!(
+            receipt.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::HeadNotBoundToEntry)
+        );
+    }
+
+    #[test]
     fn inclusion_root_and_proof_shape_reject_malformed_paths() {
         let leaf_hash = rekor_leaf_hash(b"leaf");
         let sibling = [3_u8; 32];
@@ -497,6 +511,105 @@ mod tests {
             malformed.verify_offline(&TestCheckpointVerifier),
             Err(RekorProofError::MalformedProof)
         );
+    }
+
+    struct AcceptingSubmitter;
+
+    impl RekorSubmitter for AcceptingSubmitter {
+        fn submit(&self, head: &AuditChainHead) -> Result<RekorAnchorReceipt, RekorSubmitError> {
+            Ok(receipt_for(head.clone()))
+        }
+    }
+
+    struct MalformedSubmitter;
+
+    impl RekorSubmitter for MalformedSubmitter {
+        fn submit(&self, head: &AuditChainHead) -> Result<RekorAnchorReceipt, RekorSubmitError> {
+            let mut receipt = receipt_for(head.clone());
+            receipt.proof.root_hash =
+                "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz".to_owned();
+            Ok(receipt)
+        }
+    }
+
+    struct WrongHeadSubmitter;
+
+    impl RekorSubmitter for WrongHeadSubmitter {
+        fn submit(&self, head: &AuditChainHead) -> Result<RekorAnchorReceipt, RekorSubmitError> {
+            let mut receipt = receipt_for(head.clone());
+            receipt.head = AuditChainHead {
+                seq: head.seq + 1,
+                entry_hash:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
+            };
+            Ok(receipt)
+        }
+    }
+
+    #[test]
+    fn async_status_surfaces_queue_progress_and_successful_anchor_counts() {
+        let anchor = AsyncRekorAnchor::new(Box::new(AcceptingSubmitter), 1).expect("worker starts");
+
+        anchor.enqueue(head());
+        let mut status = anchor.status();
+        assert_eq!(status.enqueued, 1);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while status.anchored == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "worker should process a valid receipt"
+            );
+            thread::yield_now();
+            status = anchor.status();
+        }
+
+        assert_eq!(status.anchored, 1);
+        assert_eq!(status.failed, 0);
+        assert_eq!(status.dropped, 0);
+    }
+
+    #[test]
+    fn run_worker_does_not_anchor_malformed_receipts() {
+        let anchor = AsyncRekorAnchor::new(Box::new(MalformedSubmitter), 1).expect("worker starts");
+
+        anchor.enqueue(head());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut status = anchor.status();
+        while status.anchored == 0 && status.failed == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "worker should reject malformed receipt"
+            );
+            thread::yield_now();
+            status = anchor.status();
+        }
+
+        assert_eq!(status.anchored, 0);
+        assert_eq!(status.failed, 1);
+        assert!(status.latest_receipt.is_none());
+    }
+
+    #[test]
+    fn run_worker_rejects_receipts_for_mismatched_head() {
+        let anchor = AsyncRekorAnchor::new(Box::new(WrongHeadSubmitter), 1).expect("worker starts");
+
+        anchor.enqueue(head());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut status = anchor.status();
+        while status.anchored == 0 && status.failed == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "worker should reject mismatched-head receipt"
+            );
+            thread::yield_now();
+            status = anchor.status();
+        }
+
+        assert_eq!(status.anchored, 0);
+        assert_eq!(status.failed, 1);
+        assert!(status.latest_receipt.is_none());
     }
 
     #[test]
