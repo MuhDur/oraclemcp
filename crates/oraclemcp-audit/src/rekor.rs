@@ -499,6 +499,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn validate_proof_shape_rejects_noncanonical_and_extra_large_payloads() {
+        let mut malformed = receipt_for(head());
+        malformed.proof.log_id = "g".repeat(64);
+        assert_eq!(
+            malformed.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MalformedProof),
+            "non-hex log_id must be rejected"
+        );
+
+        let mut bad_checkpoint = receipt_for(head());
+        bad_checkpoint.proof.checkpoint = "X".repeat(17_000);
+        assert_eq!(
+            bad_checkpoint.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MalformedProof),
+            "oversized checkpoint must be rejected"
+        );
+    }
+
+    #[test]
+    fn inclusion_root_reconstructs_expected_roots_for_non_power_of_two_trees() {
+        let leaves = [
+            rekor_leaf_hash(b"leaf-0"),
+            rekor_leaf_hash(b"leaf-1"),
+            rekor_leaf_hash(b"leaf-2"),
+            rekor_leaf_hash(b"leaf-3"),
+            rekor_leaf_hash(b"leaf-4"),
+        ];
+        let h01 = rekor_node_hash(leaves[0], leaves[1]);
+        let h23 = rekor_node_hash(leaves[2], leaves[3]);
+        let h0123 = rekor_node_hash(h01, h23);
+        let expected_root = rekor_node_hash(h0123, leaves[4]);
+
+        let proof_for_0 = vec![hex_of(leaves[1]), hex_of(h23), hex_of(leaves[4])];
+        assert_eq!(
+            inclusion_root(leaves[0], 0, 5, &proof_for_0),
+            Ok(expected_root),
+            "index 0 in tree size 5 must reconstruct the expected root"
+        );
+
+        let proof_for_2 = vec![hex_of(leaves[3]), hex_of(h01), hex_of(leaves[4])];
+        assert_eq!(
+            inclusion_root(leaves[2], 2, 5, &proof_for_2),
+            Ok(expected_root),
+            "index 2 in tree size 5 must reconstruct the expected root"
+        );
+
+        let proof_for_4 = vec![hex_of(h0123)];
+        assert_eq!(
+            inclusion_root(leaves[4], 4, 5, &proof_for_4),
+            Ok(expected_root),
+            "index 4 (rightmost singleton) in tree size 5 must reconstruct root"
+        );
+
+        assert_eq!(
+            inclusion_root(leaves[4], 4, 5, &[]),
+            Err(RekorProofError::MalformedProof),
+            "truncated proof must fail for index 4 / tree size 5"
+        );
+    }
+
+    #[test]
+    fn largest_power_of_two_less_than_matches_expected_boundaries() {
+        assert_eq!(largest_power_of_two_less_than(1), 0);
+        assert_eq!(largest_power_of_two_less_than(2), 1);
+        assert_eq!(largest_power_of_two_less_than(3), 2);
+        assert_eq!(largest_power_of_two_less_than(4), 2);
+        assert_eq!(largest_power_of_two_less_than(5), 4);
+        assert_eq!(largest_power_of_two_less_than(6), 4);
+        assert_eq!(largest_power_of_two_less_than(9), 8);
+        assert_eq!(largest_power_of_two_less_than(17), 16);
+    }
+
     struct BlockingOutage {
         started: Arc<AtomicBool>,
         gate: Arc<(StdMutex<bool>, Condvar)>,
