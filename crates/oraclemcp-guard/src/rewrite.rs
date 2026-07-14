@@ -393,4 +393,50 @@ mod tests {
         let hint = suggest_parameterized_form(sql).expect("bindable literal present");
         assert_eq!(hint, "SELECT *\n  FROM t -- note\n  WHERE id = :id");
     }
+
+    #[test]
+    fn binds_like_patterns_by_column_name() {
+        let hint = suggest_parameterized_form("SELECT * FROM t WHERE name LIKE 'prefix%'")
+            .expect("bindable LIKE pattern present");
+        assert_eq!(hint, "SELECT * FROM t WHERE name LIKE :name");
+    }
+
+    #[test]
+    fn does_not_bind_rhs_identifiers() {
+        let hint = suggest_parameterized_form("SELECT * FROM hr.employees WHERE id = user_id");
+        assert_eq!(hint, None);
+    }
+
+    #[test]
+    fn does_not_bind_function_call_literals() {
+        let sql = "SELECT LPAD(name, 4, 'x') FROM dual";
+        assert_eq!(suggest_parameterized_form(sql), None);
+    }
+
+    #[test]
+    fn keeps_underscore_in_bind_name() {
+        let hint = suggest_parameterized_form("SELECT * FROM t WHERE user_name = 1")
+            .expect("bindable identifier literal pair is present");
+        assert_eq!(hint, "SELECT * FROM t WHERE user_name = :user_name");
+    }
+
+    #[test]
+    fn preserves_offsets_for_utf8_on_the_previous_line() {
+        let sql = "-- αbeta\nSELECT * FROM t WHERE id = 7";
+        let hint = suggest_parameterized_form(sql).expect("bindable literal present");
+        assert_eq!(hint, "-- αbeta\nSELECT * FROM t WHERE id = :id");
+    }
+
+    #[test]
+    fn line_offsets_reject_zero_width_spans() {
+        let sql = "SELECT id FROM hr.employees";
+        let tokens = Tokenizer::new(&OracleDialect, sql)
+            .tokenize_with_location()
+            .expect("tokenizable sql");
+        let mut span = tokens[0].span;
+        span.end = span.start;
+
+        let offsets = LineOffsets::new(sql);
+        assert_eq!(offsets.byte_range(span), None);
+    }
 }

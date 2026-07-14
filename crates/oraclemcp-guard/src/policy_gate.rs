@@ -940,11 +940,117 @@ mod tests {
 
         assert!(
             StatementPolicyFacts::derive(
-                "MERGE INTO hr.employees t USING x s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.n = 1",
+            "MERGE INTO hr.employees t USING x s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.n = 1",
                 Some("HR"),
             )
             .is_none(),
             "a non-query statement without a policy verb remains unprovable"
         );
+    }
+
+    fn gate_with_schema(
+        classifier: &Classifier,
+        policy: Option<&SqlPolicyConfig>,
+        base: &GuardDecision,
+        sql: &str,
+        current_schema: Option<&str>,
+    ) -> PolicyGate {
+        enforce_sql_policy(&PolicyGateRequest {
+            classifier,
+            policy,
+            base,
+            sql,
+            current_schema,
+            principal: Some("oauth:subject-1"),
+        })
+    }
+
+    #[test]
+    fn schema_only_targeting_policies_refuse_unresolvable_schema_if_context_is_unknown() {
+        let classifier = classifier();
+        let sql = "SELECT * FROM employees";
+        let base = classifier.classify(sql);
+        let configured = policy(vec![rule(
+            "hr-schema-floor",
+            SqlPolicyMatchConfig {
+                schema: Some("HR".to_owned()),
+                object: None,
+                verb: Some(SqlPolicyVerb::Select),
+                principal: None,
+            },
+            SqlPolicyEffectConfig::RequireLevel {
+                level: OperatingLevel::ReadWrite,
+            },
+        )]);
+
+        let PolicyGate::Denied(denial) =
+            gate_with_schema(&classifier, Some(&configured), &base, sql, None)
+        else {
+            panic!("a schema-only target selector cannot resolve without CURRENT_SCHEMA")
+        };
+
+        assert_eq!(
+            denial.reason,
+            PolicyGateDenialReason::UnresolvedPolicyTarget,
+            "missing schema should fail closed"
+        );
+        assert_eq!(denial.matched_rule_ids, Vec::<String>::new());
+    }
+
+    #[test]
+    fn policy_selects_a_target_when_only_schema_is_declared() {
+        let classifier = classifier();
+        let sql = "SELECT * FROM hr.employees";
+        let base = classifier.classify(sql);
+        let configured = policy(vec![rule(
+            "hr-schema-floor",
+            SqlPolicyMatchConfig {
+                schema: Some("HR".to_owned()),
+                object: None,
+                verb: Some(SqlPolicyVerb::Select),
+                principal: None,
+            },
+            SqlPolicyEffectConfig::RequireLevel {
+                level: OperatingLevel::ReadWrite,
+            },
+        )]);
+
+        // With CURRENT_SCHEMA known, the same policy can resolve the target and
+        // therefore still narrow the base decision.
+        let PolicyGate::Admitted(admission) =
+            gate_with_schema(&classifier, Some(&configured), &base, sql, Some("HR"))
+        else {
+            panic!("schema-only selection is a valid schema-level policy target");
+        };
+        assert_eq!(admission.required_level, OperatingLevel::ReadWrite);
+        assert_eq!(
+            admission.required_level,
+            admission.required_level.max(OperatingLevel::ReadOnly)
+        );
+    }
+
+    #[test]
+    fn rewrite_reason_preserves_predicate_conflict_denial() {
+        assert_eq!(
+            rewrite_reason(PolicyRewriteDenialReason::BaseClassifierRefused),
+            PolicyGateDenialReason::BaseClassifierRefused
+        );
+        assert_eq!(
+            rewrite_reason(PolicyRewriteDenialReason::PredicateTargetConflict),
+            PolicyGateDenialReason::PredicateTargetConflict
+        );
+    }
+
+    #[test]
+    fn select_joins_do_not_infer_exact_targets() {
+        let facts = StatementPolicyFacts::derive(
+            "SELECT e.id FROM hr.employees JOIN hr.departments ON e.department_id = hr.departments.id",
+            Some("HR"),
+        )
+        .expect("join statements parse");
+
+        assert_eq!(facts.verb, SqlPolicyVerb::Select);
+        assert_eq!(facts.schema, None);
+        assert_eq!(facts.object, None);
     }
 }
