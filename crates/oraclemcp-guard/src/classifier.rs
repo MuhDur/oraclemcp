@@ -4738,6 +4738,113 @@ mod tests {
     }
 
     #[test]
+    fn parenless_qualified_callable_scope_reuses_nested_join_inner_aliases() {
+        // A nested join without an outer alias must keep inner aliases in scope.
+        // If the nested-join collector arm is dropped, `d.run_ddl` becomes an
+        // unresolved paren-less call and incorrectly gates a plain column read to
+        // Guarded.
+        let strict =
+            Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
+        let d = strict
+            .classify("SELECT d.run_ddl FROM (dual d JOIN dual e ON 1 = 1)");
+        assert_eq!(
+            d.danger,
+            DangerLevel::Safe,
+            "inner aliases of nested joins must stay visible under strict paren-less guards"
+        );
+        assert_eq!(d.required_level, Some(OperatingLevel::ReadOnly));
+    }
+
+    #[test]
+    fn parenless_qualified_callable_scope_reuses_json_table_alias() {
+        // JSON_TABLE exposes aliases like a relation factor; dropping that
+        // collector arm can turn `jt.a` into an unresolved callable.
+        let strict =
+            Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
+        let d =
+            strict.classify("SELECT jt.a FROM json_docs d, JSON_TABLE(d.doc, '$' COLUMNS(a NUMBER PATH '$.a')) jt");
+        assert_eq!(
+            d.danger,
+            DangerLevel::Safe,
+            "JSON_TABLE alias `jt` should be visible to dotted identifiers under strict guard"
+        );
+        assert_eq!(d.required_level, Some(OperatingLevel::ReadOnly));
+    }
+
+    #[test]
+    fn parenless_qualified_callable_scope_reuses_xml_table_alias() {
+        // TABLE-producing factor aliases must remain visible scope qualifiers for
+        // paren-less resolution; otherwise base reads in strict mode downgrade.
+        let strict =
+            Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
+        let d = strict.classify(
+            "SELECT xt.a FROM xml_docs d, XMLTABLE('/r' PASSING d.doc COLUMNS a NUMBER PATH '.') xt",
+        );
+        assert_eq!(
+            d.danger,
+            DangerLevel::Safe,
+            "XMLTABLE alias `xt` must stay in scope for .102-guarded dotted references"
+        );
+        assert_eq!(d.required_level, Some(OperatingLevel::ReadOnly));
+    }
+
+    #[test]
+    fn nested_join_carries_dml_body() {
+        // A nested-join wrapper must still detect a smuggled UPDATE body under its
+        // FROM arm; dropping the NestedJoin collector branch can downgrade a smuggled
+        // write to Safe.
+        let d = classify("SELECT * FROM ((dual d JOIN dual e ON 1 = 1) JOIN (UPDATE t SET x = 1) w ON 1 = 1)");
+        assert_eq!(
+            d.danger,
+            DangerLevel::Guarded,
+            "nested-join DML body must stay write-tiered"
+        );
+        assert_eq!(
+            d.required_level,
+            Some(OperatingLevel::ReadWrite),
+            "nested-join DML body must stay ReadWrite"
+        );
+    }
+
+    #[test]
+    fn derived_from_subquery_dml_is_tiered_read_write() {
+        // A DML-bearing derived FROM factor must remain write-tiered; losing
+        // that branch can false-classify it as Safe.
+        let d = classify("SELECT * FROM (UPDATE t SET x = 1)");
+        assert_eq!(
+            d.danger,
+            DangerLevel::Guarded,
+            "smuggled UPDATE in a derived FROM factor must not be Safe"
+        );
+        assert_eq!(
+            d.required_level,
+            Some(OperatingLevel::ReadWrite),
+            "smuggled derived DML must stay behind the write gate"
+        );
+    }
+
+    #[test]
+    fn package_body_initialization_matches_quoted_end_name() {
+        // begin_matches_final_end must still identify the package initializer's
+        // closing END when members use quoted identifiers.
+        let sql =
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE \"Q\" IS BEGIN NULL; END \"Q\"; BEGIN NULL; END p;";
+        let tokens = oracle_tokens(sql);
+        let unit = stored_unit_create(sql).expect("package body should be recognized");
+        let final_end = stored_unit_final_end(&tokens, &unit).expect("final END should be found");
+        let init_begin = nth_unquoted_word(&tokens, "BEGIN", 1);
+
+        assert!(begin_matches_final_end(&tokens, init_begin, final_end));
+        let shape = analyze_batch(sql);
+        assert!(shape.balanced, "quoted package body should balance: {shape:?}");
+        assert_eq!(shape.statement_count, 1, "package init must be a single unit: {shape:?}");
+
+        let d = classify(sql);
+        assert_eq!(d.danger, DangerLevel::Destructive);
+        assert_eq!(d.required_level, Some(OperatingLevel::Ddl));
+    }
+
+    #[test]
     fn served_strict_is_fully_fail_closed_over_unproven_reads() {
         // Bead .82 containment: `served_strict` additionally tightens
         // statement-level `Unknown` purity, so under the default `UnknownOracle`
