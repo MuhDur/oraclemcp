@@ -367,6 +367,13 @@ mod tests {
     }
 
     #[test]
+    fn binds_multi_row_values_literals_positionally() {
+        let hint = suggest_parameterized_form("INSERT INTO t VALUES (1, 'x'), (2, 'y')")
+            .expect("bindable multi-row VALUES list present");
+        assert_eq!(hint, "INSERT INTO t VALUES (:p1, :p2), (:p3, :p4)");
+    }
+
+    #[test]
     fn caps_the_number_of_binds() {
         let mut sql = String::from("SELECT * FROM t WHERE ");
         for i in 0..15 {
