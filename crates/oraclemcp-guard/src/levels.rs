@@ -332,30 +332,31 @@ mod kani_proofs {
     use super::*;
 
     fn level_from_index(index: u8) -> OperatingLevel {
-        match index % 4 {
-            0 => OperatingLevel::ReadOnly,
-            1 => OperatingLevel::ReadWrite,
-            2 => OperatingLevel::Ddl,
-            _ => OperatingLevel::Admin,
-        }
+        const LEVELS: [OperatingLevel; 4] = [
+            OperatingLevel::ReadOnly,
+            OperatingLevel::ReadWrite,
+            OperatingLevel::Ddl,
+            OperatingLevel::Admin,
+        ];
+        LEVELS[(index % 4) as usize]
     }
 
     fn danger_from_index(index: u8) -> DangerLevel {
-        match index % 4 {
-            0 => DangerLevel::Safe,
-            1 => DangerLevel::Guarded,
-            2 => DangerLevel::Destructive,
-            _ => DangerLevel::Forbidden,
-        }
+        const DANGERS: [DangerLevel; 4] = [
+            DangerLevel::Safe,
+            DangerLevel::Guarded,
+            DangerLevel::Destructive,
+            DangerLevel::Forbidden,
+        ];
+        DANGERS[(index % 4) as usize]
     }
 
     fn level_rank(level: OperatingLevel) -> u8 {
-        match level {
-            OperatingLevel::ReadOnly => 0,
-            OperatingLevel::ReadWrite => 1,
-            OperatingLevel::Ddl => 2,
-            OperatingLevel::Admin => 3,
-        }
+        const LEVELS: [OperatingLevel; 4] = OperatingLevel::all();
+        LEVELS
+            .iter()
+            .position(|candidate| *candidate == level)
+            .map_or(0, |value| value as u8)
     }
 
     #[kani::proof]

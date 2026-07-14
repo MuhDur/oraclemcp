@@ -955,11 +955,10 @@ fn begin_matches_final_end(tokens: &[Token], begin_idx: usize, final_end_idx: us
                     }
                     "END" => {
                         depth -= 1;
-                        if depth == 0 {
-                            return idx == final_end_idx;
-                        }
-                        if depth < 0 {
-                            return false;
+                        match depth.cmp(&0) {
+                            std::cmp::Ordering::Equal => return idx == final_end_idx,
+                            std::cmp::Ordering::Less => return false,
+                            std::cmp::Ordering::Greater => {}
                         }
                         expecting_close = true;
                     }
@@ -1264,11 +1263,15 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
                     .quote_style
                     .is_none()
                     .then(|| w.value.to_ascii_uppercase());
-                let is_matching_stored_unit_end_name = stored_unit_closed
+                let is_matching_stored_unit_end_name = if stored_unit_closed
                     && !stored_unit_end_name_seen
                     && !stored_unit_terminated
-                    && identifier_key(token)
-                        == stored_unit.as_ref().map(|unit| unit.end_name.clone());
+                {
+                    let unit_name = stored_unit.as_ref().map(|unit| unit.end_name.clone());
+                    identifier_key(token) == unit_name
+                } else {
+                    false
+                };
                 if is_matching_stored_unit_end_name {
                     stored_unit_end_name_seen = true;
                     expecting_close = false;
@@ -1281,18 +1284,27 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
                 // structural effect, so a re-opening `BEGIN` (a second stacked
                 // block) is caught too; a stray top-level `END` is already a desync
                 // via `went_negative`.
-                if (block_body_opened && depth == 0) || stored_unit_closed {
+                if matches!((block_body_opened, depth), (true, 0)) {
+                    saw_top_level_after_block_close = true;
+                }
+                if stored_unit_closed {
                     saw_top_level_after_block_close = true;
                 }
                 match keyword.as_deref() {
                     Some("BEGIN") => {
-                        let package_initialization_begin = is_package_body
-                            && depth == 1
-                            && !package_initialization_opened
-                            && package_subprogram_headers.is_empty()
-                            && stored_unit_final_end.is_some_and(|final_end_idx| {
-                                begin_matches_final_end(&tokens, token_idx, final_end_idx)
-                            });
+                        let mut package_initialization_begin = false;
+                        if is_package_body
+                            && let (1, false, true) = (
+                                depth,
+                                package_initialization_opened,
+                                package_subprogram_headers.is_empty(),
+                            )
+                        {
+                            package_initialization_begin =
+                                stored_unit_final_end.is_some_and(|final_end_idx| {
+                                    begin_matches_final_end(&tokens, token_idx, final_end_idx)
+                                });
+                        }
                         if package_initialization_begin {
                             package_initialization_opened = true;
                         } else {
@@ -1316,7 +1328,11 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
                         expecting_close = false;
                     }
                     Some("END") => {
-                        let closes_stored_unit = stored_unit.is_some() && depth == 1;
+                        let closes_stored_unit = if depth == 1 {
+                            stored_unit.is_some()
+                        } else {
+                            false
+                        };
                         depth -= 1;
                         if depth < 0 {
                             went_negative = true;
@@ -1424,7 +1440,7 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
             // `expecting_close` and (defensively) does not count as statement
             // content so a lone `/` after a closed block stays a clean terminator.
             Token::Div => {
-                if stored_unit_closed && !stored_unit_terminated {
+                if matches!((stored_unit_closed, !stored_unit_terminated), (true, true)) {
                     saw_top_level_after_block_close = true;
                 }
                 expecting_close = false;
@@ -1433,7 +1449,10 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
                 // Any other significant token (punctuation, operator, literal,
                 // number, string) at depth 0 after a block body has opened and
                 // closed is trailing top-level SQL after `END` (oracle-lokg.1).
-                if (block_body_opened && depth == 0) || stored_unit_closed {
+                if matches!((block_body_opened, depth), (true, 0)) {
+                    saw_top_level_after_block_close = true;
+                }
+                if stored_unit_closed {
                     saw_top_level_after_block_close = true;
                 }
                 expecting_close = false;
@@ -1769,15 +1788,38 @@ fn is_reviewed_dbms_output_statement(segment: &str) -> bool {
         .iter()
         .filter(|token| !matches!(token, Token::Whitespace(_)))
         .collect();
-    if toks.len() < 7
-        || !matches!(toks[0], Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("SYS"))
-        || !matches!(toks[1], Token::Period)
-        || !matches!(toks[2], Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("DBMS_OUTPUT"))
-        || !matches!(toks[3], Token::Period)
-        || !matches!(toks[4], Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("PUT_LINE"))
-        || !matches!(toks[5], Token::LParen)
-        || !matches!(toks[toks.len() - 1], Token::RParen)
-    {
+    if toks.len() < 7 {
+        return false;
+    }
+
+    if !matches!(
+        toks[0],
+        Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("SYS")
+    ) {
+        return false;
+    }
+    if !matches!(toks[1], Token::Period) {
+        return false;
+    }
+    if !matches!(
+        toks[2],
+        Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("DBMS_OUTPUT")
+    ) {
+        return false;
+    }
+    if !matches!(toks[3], Token::Period) {
+        return false;
+    }
+    if !matches!(
+        toks[4],
+        Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("PUT_LINE")
+    ) {
+        return false;
+    }
+    if !matches!(toks[5], Token::LParen) {
+        return false;
+    }
+    if !matches!(toks[toks.len() - 1], Token::RParen) {
         return false;
     }
 
@@ -1813,7 +1855,10 @@ fn unanalyzable_plsql_construct(sql: &str) -> Option<&'static str> {
         return None;
     }
     let shape = analyze_batch(sql);
-    if !shape.balanced || shape.saw_top_level_after_block_close {
+    if !shape.balanced {
+        return None;
+    }
+    if shape.saw_top_level_after_block_close {
         return None;
     }
 
@@ -2537,17 +2582,27 @@ fn raw_name_from_idents(parts: &[Ident], role: SyntacticRole) -> Option<RawName>
     }
     let mut raw_parts = parts.iter().map(raw_name_part).collect::<Vec<_>>();
     let mut db_link = None;
-    if let Some(last) = raw_parts.last_mut()
-        && last.quoting == QuoteSemantics::Unquoted
-        && let Some((name, link)) = last.text.split_once('@')
-    {
-        if name.is_empty() || link.is_empty() || link.contains('@') {
-            return None;
+    if let Some(last) = raw_parts.last_mut() {
+        match last.quoting {
+            QuoteSemantics::Unquoted => {
+                if let Some((name, link)) = last.text.split_once('@') {
+                    if name.is_empty() {
+                        return None;
+                    }
+                    if link.is_empty() {
+                        return None;
+                    }
+                    if link.contains('@') {
+                        return None;
+                    }
+                    let name = name.to_owned();
+                    let link = link.to_owned();
+                    last.text = name;
+                    db_link = Some(RawNamePart::unquoted(link));
+                }
+            }
+            QuoteSemantics::Quoted => {}
         }
-        let name = name.to_owned();
-        let link = link.to_owned();
-        last.text = name;
-        db_link = Some(RawNamePart::unquoted(link));
     }
     let mut name = RawName::new(raw_parts, role);
     name.db_link = db_link;
@@ -4058,6 +4113,8 @@ mod tests {
         assert!(
             raw_name_from_idents(&[Ident::new("HR@PROD@X")], SyntacticRole::FromFactor).is_none()
         );
+        assert!(raw_name_from_idents(&[Ident::new("HR@")], SyntacticRole::FromFactor).is_none());
+        assert!(raw_name_from_idents(&[Ident::new("@PROD")], SyntacticRole::FromFactor).is_none());
     }
 
     #[test]

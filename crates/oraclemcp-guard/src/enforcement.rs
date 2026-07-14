@@ -90,20 +90,23 @@ pub(crate) fn alter_session_policy(stmt: &str) -> Option<bool> {
         return None;
     }
 
-    Some(
-        normalize_significant_tokens(stmt).is_some_and(|normalized| {
-            let upper = normalized.to_ascii_uppercase();
-            let Some(rest) = upper.strip_prefix("ALTER SESSION SET ") else {
-                return false;
-            };
-            match alter_session_params(rest) {
-                Some(params) if !params.is_empty() => params
-                    .iter()
-                    .all(|p| ALTER_SESSION_ALLOWLIST.contains(&p.as_str())),
-                _ => false,
-            }
-        }),
-    )
+    let allowed = normalize_significant_tokens(stmt).is_some_and(|normalized| {
+        let upper = normalized.to_ascii_uppercase();
+        let Some(rest) = upper.strip_prefix("ALTER SESSION SET ") else {
+            return false;
+        };
+        let Some(params) = alter_session_params(rest) else {
+            return false;
+        };
+        if params.is_empty() {
+            return false;
+        }
+        params
+            .iter()
+            .all(|p| ALTER_SESSION_ALLOWLIST.contains(&p.as_str()))
+    });
+
+    Some(allowed)
 }
 
 /// Read the first two executable bare words while ignoring whitespace and SQL
@@ -239,7 +242,13 @@ fn alter_session_params(rest: &str) -> Option<Vec<String>> {
                 // A bare word: run of non-whitespace, non-`=`, non-quote chars.
                 let mut word = String::new();
                 while let Some(&w) = chars.peek() {
-                    if w.is_whitespace() || w == '=' || w == '\'' {
+                    if w.is_whitespace() {
+                        break;
+                    }
+                    if w == '=' {
+                        break;
+                    }
+                    if w == '\'' {
                         break;
                     }
                     word.push(w);

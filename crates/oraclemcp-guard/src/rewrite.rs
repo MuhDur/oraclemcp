@@ -60,84 +60,93 @@ pub fn suggest_parameterized_form(sql: &str) -> Option<String> {
 
         // Open/close bind-list contexts. The kind is decided by the token that
         // introduced the parenthesis (IN / VALUES), captured from `prev_sig`.
-        match token {
-            Token::LParen => {
-                let kind = match &prev_sig {
-                    Some(Token::Word(w)) if w.keyword == Keyword::IN => ParenKind::InList,
-                    Some(Token::Word(w)) if w.keyword == Keyword::VALUES => ParenKind::ValuesList,
-                    // A fresh VALUES row: `VALUES (…),(…)` — the comma sits at
-                    // the top level between rows.
-                    Some(Token::Comma) if values_active && paren_stack.is_empty() => {
-                        ParenKind::ValuesList
-                    }
-                    _ => ParenKind::Other,
-                };
-                paren_stack.push(kind);
-                prev_sig = Some(token.clone());
-                continue;
-            }
-            Token::RParen => {
-                paren_stack.pop();
-                prev_sig = Some(token.clone());
-                continue;
-            }
-            _ => {}
+        if matches!(token, Token::LParen) {
+            let kind = if let Some(Token::Word(w)) = &prev_sig {
+                if w.keyword == Keyword::IN {
+                    ParenKind::InList
+                } else if w.keyword == Keyword::VALUES {
+                    ParenKind::ValuesList
+                } else {
+                    ParenKind::Other
+                }
+            } else if values_active
+                && paren_stack.is_empty()
+                && matches!(prev_sig, Some(Token::Comma))
+            {
+                ParenKind::ValuesList
+            } else {
+                ParenKind::Other
+            };
+            paren_stack.push(kind);
+            prev_sig = Some(token.clone());
+            continue;
+        }
+        if matches!(token, Token::RParen) {
+            paren_stack.pop();
+            prev_sig = Some(token.clone());
+            continue;
+        }
+        if matches!(token, Token::Word(w) if w.keyword == Keyword::VALUES) {
+            // A VALUES clause has no single-column operand; fall back to `p{n}`.
+            values_active = true;
+            operand_name = None;
         }
 
         // Capture the left operand of a value-position operator so the bind can
         // be named after the column it constrains. The operand is the token
         // *before* this operator (the current `prev_sig`).
-        match token {
+        if matches!(
+            token,
             Token::Eq
-            | Token::DoubleEq
-            | Token::Neq
-            | Token::Lt
-            | Token::Gt
-            | Token::LtEq
-            | Token::GtEq => operand_name = unquoted_ident(prev_sig.as_ref()),
-            Token::Word(w) => match w.keyword {
-                Keyword::IN | Keyword::BETWEEN | Keyword::LIKE => {
-                    operand_name = unquoted_ident(prev_sig.as_ref());
-                }
-                // A VALUES row has no single column operand; fall back to `p{n}`.
-                Keyword::VALUES => {
-                    values_active = true;
-                    operand_name = None;
-                }
-                _ => {}
-            },
-            _ => {}
+                | Token::DoubleEq
+                | Token::Neq
+                | Token::Lt
+                | Token::Gt
+                | Token::LtEq
+                | Token::GtEq
+        ) {
+            operand_name = unquoted_ident(prev_sig.as_ref());
+        } else if let Token::Word(w) = token
+            && matches!(w.keyword, Keyword::IN | Keyword::BETWEEN | Keyword::LIKE)
+        {
+            operand_name = unquoted_ident(prev_sig.as_ref());
         }
 
         if is_bindable_literal(token) && edits.len() < MAX_BINDS {
-            let bindable = match &prev_sig {
+            let bindable = if matches!(
+                prev_sig.as_ref(),
                 Some(
                     Token::Eq
-                    | Token::DoubleEq
-                    | Token::Neq
-                    | Token::Lt
-                    | Token::Gt
-                    | Token::LtEq
-                    | Token::GtEq,
-                ) => true,
-                Some(Token::Word(w)) if w.keyword == Keyword::LIKE => true,
-                Some(Token::Word(w)) if w.keyword == Keyword::BETWEEN => {
+                        | Token::DoubleEq
+                        | Token::Neq
+                        | Token::Lt
+                        | Token::Gt
+                        | Token::LtEq
+                        | Token::GtEq
+                )
+            ) {
+                true
+            } else if let Some(Token::Word(w)) = prev_sig.as_ref() {
+                if w.keyword == Keyword::LIKE {
+                    true
+                } else if w.keyword == Keyword::BETWEEN {
                     between_and_pending = true;
                     true
-                }
-                Some(Token::Word(w)) if w.keyword == Keyword::AND && between_and_pending => {
+                } else if w.keyword == Keyword::AND && between_and_pending {
                     between_and_pending = false;
                     true
+                } else {
+                    false
                 }
+            } else if matches!(prev_sig.as_ref(), Some(Token::LParen | Token::Comma)) {
                 // Inside an IN-list or a VALUES row (first element after `(`, or
                 // any element after a `,`).
-                Some(Token::LParen | Token::Comma) => {
-                    matches!(
-                        paren_stack.last(),
-                        Some(ParenKind::InList | ParenKind::ValuesList)
-                    )
-                }
-                _ => false,
+                matches!(
+                    paren_stack.last(),
+                    Some(ParenKind::InList | ParenKind::ValuesList)
+                )
+            } else {
+                false
             };
 
             if bindable && let Some((start, end)) = offsets.byte_range(tws.span) {
@@ -212,7 +221,7 @@ impl BindNamer {
     }
 
     fn next(&mut self, column: Option<&str>) -> String {
-        self.counter += 1;
+        self.counter = self.counter.saturating_add(1);
         let base = column
             .map(sanitize_bind_name)
             .filter(|s| !s.is_empty())
@@ -223,7 +232,7 @@ impl BindNamer {
         // Collision (e.g. `a = 1 OR a = 2`): disambiguate with the counter.
         let mut candidate = format!("{base}_{}", self.counter);
         while !self.used.insert(candidate.clone()) {
-            self.counter += 1;
+            self.counter = self.counter.saturating_add(1);
             candidate = format!("{base}_{}", self.counter);
         }
         candidate
@@ -272,19 +281,18 @@ impl<'a> LineOffsets<'a> {
         // Advance `col_idx` characters from the line start, counting bytes so
         // the result always lands on a UTF-8 boundary.
         let rest = self.source.get(line_start..)?;
-        let mut byte = line_start;
         for (n, (offset, _ch)) in rest.char_indices().enumerate() {
             if n == col_idx {
-                byte = line_start + offset;
-                return Some(byte);
+                if let Some(byte) = line_start.checked_add(offset) {
+                    return Some(byte);
+                }
+                return None;
             }
-            byte = line_start + offset;
         }
         // Column one past the final character on the line (span end).
         if col_idx == rest.chars().count() {
             return Some(self.source.len());
         }
-        let _ = byte;
         None
     }
 
