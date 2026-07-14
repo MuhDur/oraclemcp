@@ -654,12 +654,26 @@ mod tests {
         }
     }
 
-    struct SleepForwarder(Duration);
+struct SleepForwarder(Duration);
 
-    impl ShippingForwarder for SleepForwarder {
+impl ShippingForwarder for SleepForwarder {
         fn forward(&self, _record: &AuditRecord) -> Result<(), ShippingError> {
             thread::sleep(self.0);
             Ok(())
+        }
+    }
+
+    struct FlakyForwarder {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl ShippingForwarder for FlakyForwarder {
+        fn forward(&self, _record: &AuditRecord) -> Result<(), ShippingError> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(ShippingError::Transport("temporary enqueue failure".to_owned()))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -994,6 +1008,79 @@ mod tests {
         assert!(sink.flush().is_err());
         assert_eq!(status.snapshot().pending_records, 0);
         assert!(!record_path(directory.path(), 1).exists());
+    }
+
+    #[test]
+    fn spool_config_rejects_invalid_retry_bounds_and_accepts_equal_bounds() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let valid = config(directory.path(), "valid-destination");
+        let equal_retries = valid.clone().with_retry(Duration::from_millis(20), Duration::from_millis(20));
+        validate_config(&equal_retries).expect("equal retry bounds must be accepted");
+    }
+
+    #[test]
+    fn forwarder_enqueue_rejects_records_when_capacity_is_exact() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let delivery = DurableShippingForwarder::open(
+            config(directory.path(), "capacity-boundary").with_max_records(1),
+            Box::new(AlwaysFails),
+        )
+        .expect("open spool");
+        let status = delivery.status_handle();
+
+        delivery.forward(&record(1)).expect("initial record fills spool capacity");
+        assert_eq!(status.snapshot().pending_records, 1);
+
+        let error = delivery
+            .forward(&record(2))
+            .expect_err("second record must fail at exact capacity boundary");
+        assert!(
+            error.to_string().contains("spool is full"),
+            "unexpected enqueue overflow error: {error}"
+        );
+        assert_eq!(status.snapshot().pending_records, 1);
+        assert!(!record_path(directory.path(), 2).exists());
+    }
+
+    #[test]
+    fn durable_forwarder_drop_leaves_state_for_replay() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cfg = config(directory.path(), "drop-persists");
+        let delivery = DurableShippingForwarder::open(cfg.clone(), Box::new(AlwaysFails))
+            .expect("open spool");
+        delivery.forward(&record(1)).expect("persist one record for replay");
+        drop(delivery);
+
+        let recovery = DurableShippingForwarder::open(cfg, Box::new(Capture::default()))
+            .expect("drop must release lock");
+        assert_eq!(recovery.status_handle().snapshot().pending_records, 1);
+        assert!(record_path(directory.path(), 1).exists());
+    }
+
+    #[test]
+    fn flush_wakes_worker_out_of_retry_backoff() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let cfg = config(directory.path(), "flush-wakes")
+            .with_retry(Duration::from_millis(800), Duration::from_millis(800));
+        let delivery = DurableShippingForwarder::open(
+            cfg,
+            Box::new(FlakyForwarder {
+                attempts: Arc::clone(&attempts),
+            }),
+        )
+        .expect("open spool");
+        let status = delivery.status_handle();
+
+        delivery.forward(&record(1)).expect("enqueue for retry path");
+        wait_until(Duration::from_secs(1), || {
+            status.snapshot().delivery_failures >= 1
+                && status.snapshot().pending_records == 1
+        });
+
+        delivery.flush().expect("flush can unblock retry");
+        wait_until(Duration::from_millis(250), || status.snapshot().pending_records == 0);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
     #[test]
