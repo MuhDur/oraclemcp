@@ -4061,6 +4061,19 @@ mod tests {
     }
 
     #[test]
+    fn raw_name_from_idents_does_not_parse_dblink_shape_from_quoted_identifiers() {
+        let name = raw_name_from_idents(
+            &[Ident::with_quote('"', "HR@PROD")],
+            SyntacticRole::FromFactor,
+        )
+        .expect("quoted identifiers remain exact relation members");
+        assert_eq!(name.parts.len(), 1);
+        assert_eq!(name.parts[0].text, "HR@PROD");
+        assert_eq!(name.parts[0].quoting, QuoteSemantics::Quoted);
+        assert!(name.db_link.is_none());
+    }
+
+    #[test]
     fn select_calling_udf_is_guarded_not_safe() {
         // The headline fail-open the old predicate had: a function call in a
         // SELECT may DML. With the default Unknown oracle it must be Guarded.
