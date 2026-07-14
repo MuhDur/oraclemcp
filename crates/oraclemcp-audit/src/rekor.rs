@@ -663,7 +663,7 @@ mod tests {
         assert_eq!(largest_power_of_two_less_than(6), 4);
         assert_eq!(largest_power_of_two_less_than(9), 8);
         assert_eq!(largest_power_of_two_less_than(17), 16);
-        assert_eq!(largest_power_of_two_less_than(1_u64 << 63), 1_u64 << 63);
+        assert_eq!(largest_power_of_two_less_than(1_u64 << 63), 1_u64 << 62);
         assert_eq!(largest_power_of_two_less_than(u64::MAX), 1_u64 << 63);
     }
 
