@@ -1003,6 +1003,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn statement_facts_deny_update_with_from_clause_shaping() {
+        assert_eq!(
+            StatementPolicyFacts::derive(
+                "UPDATE hr.emp SET id = id + 1 FROM hr.orders o WHERE hr.emp.id = o.id",
+                Some("HR")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn statement_facts_deny_delete_using_clause_shaping() {
+        assert_eq!(
+            StatementPolicyFacts::derive(
+                "DELETE FROM hr.emp e USING hr.orders o WHERE e.id = o.id",
+                Some("HR")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn statement_facts_do_not_assume_delete_targets_with_joins() {
+        assert_eq!(
+            StatementPolicyFacts::derive(
+                "DELETE FROM hr.emp e JOIN hr.orders o ON e.id = o.id",
+                Some("HR")
+            ),
+            None
+        );
+    }
+
     fn gate_with_schema(
         classifier: &Classifier,
         policy: Option<&SqlPolicyConfig>,
