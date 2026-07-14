@@ -157,4 +157,12 @@ mod tests {
         store.issue("b", Duration::from_secs(3600));
         assert_eq!(store.purge_expired(), 1);
     }
+
+    #[test]
+    fn purge_keeps_fresh_tokens() {
+        let store = AllowOnceStore::new();
+        store.issue("a", Duration::from_secs(3600));
+        store.issue("b", Duration::from_secs(3600));
+        assert_eq!(store.purge_expired(), 0);
+    }
 }

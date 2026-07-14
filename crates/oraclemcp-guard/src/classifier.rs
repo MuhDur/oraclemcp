@@ -4722,6 +4722,22 @@ mod tests {
     }
 
     #[test]
+    fn parenless_qualified_callable_scope_reuses_nested_join_aliases() {
+        // A nested-join alias must be collected for query scope; dropping that
+        // arm can convert a column qualifier into a false-safe callable outcome.
+        let strict =
+            Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
+        let d = strict
+            .classify("SELECT app_admin.run_ddl FROM (dual d JOIN dual e ON 1 = 1) app_admin");
+        assert_eq!(
+            d.danger,
+            DangerLevel::Safe,
+            "nested-join aliases are in-scope relation qualifiers for paren-less calls"
+        );
+        assert_eq!(d.required_level, Some(OperatingLevel::ReadOnly));
+    }
+
+    #[test]
     fn served_strict_is_fully_fail_closed_over_unproven_reads() {
         // Bead .82 containment: `served_strict` additionally tightens
         // statement-level `Unknown` purity, so under the default `UnknownOracle`
