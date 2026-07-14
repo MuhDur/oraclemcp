@@ -1738,6 +1738,75 @@ mod tests {
     }
 
     #[test]
+    fn policy_rewrite_rejects_multi_statement_input_for_predicate_rewrite() {
+        let classifier = Classifier::default();
+        let original = "SELECT id FROM app.orders WHERE status = 'OPEN'; SELECT id FROM app.orders WHERE status = 'CLOSED'";
+        let base = classifier.classify(original);
+        let base_required_level = base.required_level.unwrap_or(OperatingLevel::ReadOnly);
+        let narrowing = PolicyNarrowing {
+            base_required_level,
+            required_level: base_required_level,
+            predicates: vec![SqlPolicyPredicate {
+                rule_id: "tenant-filter".to_owned(),
+                target: SqlPolicyPredicateTarget {
+                    schema: "APP".to_owned(),
+                    object: "ORDERS".to_owned(),
+                    verb: SqlPolicyVerb::Select,
+                },
+                sql_fragment: "tenant_id = 7".to_owned(),
+            }],
+            matched_rule_ids: vec!["tenant-filter".to_owned()],
+        };
+
+        assert!(matches!(
+            rewrite_predicates_and_reclassify(
+                &classifier,
+                &base,
+                original,
+                &operator_context(),
+                &narrowing,
+            ),
+            PolicyPredicateRewrite::Deny(PolicyRewriteDenial {
+                reason: PolicyRewriteDenialReason::OriginalParseFailed,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn policy_rewrite_rewrites_two_part_schema_qualified_select_targets() {
+        let classifier = Classifier::default();
+        let base = classifier.classify("SELECT id FROM app.orders WHERE status = 'OPEN'");
+        let rewritten = rewrite_predicates_and_reclassify(
+            &classifier,
+            &base,
+            "SELECT id FROM app.orders WHERE status = 'OPEN'",
+            &operator_context(),
+            &predicate_narrowing("tenant_id = 7"),
+        );
+
+        let PolicyPredicateRewrite::Reclassified(rewritten) = rewritten else {
+            panic!("a schema-qualified one-table SELECT should remain rewritable");
+        };
+        assert_eq!(base.required_level, Some(OperatingLevel::ReadOnly));
+        assert_eq!(
+            rewritten.final_required_level,
+            base.required_level.unwrap_or(OperatingLevel::ReadOnly)
+        );
+        assert!(
+            rewritten
+                .sql
+                .contains("WHERE (status = 'OPEN') AND (tenant_id = 7)")
+        );
+        assert!(
+            rewritten
+                .sql
+                .to_ascii_lowercase()
+                .contains("from app.orders")
+        );
+    }
+
+    #[test]
     fn policy_rewrite_rejects_quoted_schema_schema_case_mismatch() {
         let classifier = Classifier::default();
         let base = classifier.classify("SELECT id FROM app.orders");
