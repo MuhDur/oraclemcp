@@ -533,6 +533,21 @@ mod tests {
     }
 
     #[test]
+    fn redact_sql_removes_comments_entirely() {
+        let redacted = redact_sql("SELECT id -- user-id: 1234\nFROM dual")
+            .expect("commented SQL is still a valid token stream");
+        assert!(
+            !redacted.contains("--"),
+            "comments must never survive redaction output: {redacted:?}"
+        );
+        assert!(
+            !redacted.contains("1234"),
+            "commented secrets must never remain in redacted output: {redacted:?}"
+        );
+        assert_eq!(redacted, "SELECT ID FROM DUAL");
+    }
+
+    #[test]
     fn validate_redacted_sql_rejects_non_whitelisted_literal_shapes() {
         assert_eq!(
             validate_redacted_sql("SELECT id_1 FROM id_2 WHERE id_3 = X'414243'"),
@@ -541,6 +556,18 @@ mod tests {
         assert_eq!(
             validate_redacted_sql("SELECT id_1 FROM id_2 WHERE id_3 = N'abc'"),
             Err(CorpusRedactionError::ResidualLiteral)
+        );
+    }
+
+    #[test]
+    fn validate_redacted_sql_rejects_comments() {
+        assert_eq!(
+            validate_redacted_sql("SELECT id_1 FROM id_2 -- blocked\nWHERE id_1 = id_2"),
+            Err(CorpusRedactionError::ResidualComment)
+        );
+        assert_eq!(
+            validate_redacted_sql("SELECT id_1 FROM id_2 /* blocked */ WHERE id_1 = id_2"),
+            Err(CorpusRedactionError::ResidualComment)
         );
     }
 }

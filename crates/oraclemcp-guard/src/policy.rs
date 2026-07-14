@@ -1175,6 +1175,21 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn validate_predicate_target_requires_schema_and_object_exactly_together() {
+        let rule = SqlPolicyMatchConfig {
+            verb: Some(SqlPolicyVerb::Select),
+            principal: None,
+            schema: None,
+            object: None,
+        };
+        assert!(matches!(
+            rule.validate_predicate_target("rules[0]"),
+            Err(SqlPolicyValidationError { field, reason })
+                if field == "rules[0].match" && reason.contains("RequirePredicate requires")
+        ));
+    }
+
     fn operator_policy() -> SqlPolicyConfig {
         SqlPolicyConfig {
             version: SQL_POLICY_VERSION,

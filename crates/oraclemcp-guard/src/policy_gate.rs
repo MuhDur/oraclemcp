@@ -987,6 +987,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn statement_facts_do_not_assume_aliased_updates_are_exactly_targeted() {
+        assert_eq!(
+            StatementPolicyFacts::derive("UPDATE hr.emp e SET id = 1 WHERE e.id = 2", Some("HR")),
+            None
+        );
+    }
+
+    #[test]
+    fn statement_facts_do_not_assume_aliased_deletes_are_exactly_targeted() {
+        assert_eq!(
+            StatementPolicyFacts::derive("DELETE FROM hr.emp e WHERE e.id = 2", Some("HR")),
+            None
+        );
+    }
+
     fn gate_with_schema(
         classifier: &Classifier,
         policy: Option<&SqlPolicyConfig>,
