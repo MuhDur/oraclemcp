@@ -5037,6 +5037,7 @@ mod tests {
             "SELECT * FROM (SELECT * FROM (DELETE FROM t))",
             "SELECT 1 FROM dual UNION SELECT * FROM (DELETE FROM t)",
             "SELECT * FROM a JOIN (UPDATE t SET x=1) b ON a.id=b.id",
+            "SELECT * FROM (MERGE INTO t USING s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.v=s.v)",
         ] {
             assert!(
                 carries_dml(sql),
