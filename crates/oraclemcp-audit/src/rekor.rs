@@ -674,6 +674,16 @@ mod tests {
     }
 
     #[test]
+    fn rekor_leaf_hash_is_domain_separated_by_zero_prefix() {
+        let expected = sha256_bytes(&[&[0], b"leaf"]);
+        assert_eq!(
+            rekor_leaf_hash(b"leaf"),
+            expected,
+            "leaf hashes must remain tagged as zero-prefix RFC-6962 leaves"
+        );
+    }
+
+    #[test]
     fn validate_proof_shape_rejects_bounds_and_encoding() {
         let mut zero_tree_size = receipt_for(head());
         zero_tree_size.proof.tree_size = 0;
