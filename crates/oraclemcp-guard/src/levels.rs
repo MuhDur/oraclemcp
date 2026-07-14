@@ -585,4 +585,178 @@ mod tests {
         );
         assert_eq!(DangerLevel::Forbidden.default_required_level(), None);
     }
+
+    #[test]
+    fn parse_known_levels_and_guard_decisions_are_consistent() {
+        let session = SessionLevelState::new(OperatingLevel::Admin, false);
+
+        let read_only = OperatingLevel::parse("  read_only ");
+        let read_write = OperatingLevel::parse("READ_WRITE");
+        let ddl = OperatingLevel::parse("ddl");
+        let admin = OperatingLevel::parse("ADMIN");
+
+        assert_eq!(read_only, Some(OperatingLevel::ReadOnly));
+        assert_eq!(read_write, Some(OperatingLevel::ReadWrite));
+        assert_eq!(ddl, Some(OperatingLevel::Ddl));
+        assert_eq!(admin, Some(OperatingLevel::Admin));
+
+        assert_eq!(session.evaluate(read_only), LevelDecision::Allow);
+        assert_eq!(
+            session.evaluate(read_write),
+            LevelDecision::RequireStepUp {
+                target: OperatingLevel::ReadWrite
+            }
+        );
+        assert_eq!(
+            session.evaluate(ddl),
+            LevelDecision::RequireStepUp {
+                target: OperatingLevel::Ddl
+            }
+        );
+        assert_eq!(
+            session.evaluate(admin),
+            LevelDecision::RequireStepUp {
+                target: OperatingLevel::Admin
+            }
+        );
+    }
+
+    #[test]
+    fn parse_unknown_level_is_forbidden_decision() {
+        let session = SessionLevelState::new(OperatingLevel::Admin, false);
+        let required = OperatingLevel::parse("MAYBE_A_LEVEL");
+
+        assert_eq!(required, None);
+        assert_eq!(
+            session.evaluate(required),
+            LevelDecision::Blocked {
+                reason: BlockReason::Forbidden
+            }
+        );
+    }
+
+    #[test]
+    fn all_levels_are_complete_and_ordered_for_gate_checks() {
+        let ladder = OperatingLevel::all();
+        let session = SessionLevelState::new(OperatingLevel::Admin, false);
+
+        assert_eq!(
+            ladder,
+            [
+                OperatingLevel::ReadOnly,
+                OperatingLevel::ReadWrite,
+                OperatingLevel::Ddl,
+                OperatingLevel::Admin
+            ]
+        );
+        assert_eq!(session.evaluate(Some(ladder[0])), LevelDecision::Allow);
+        assert_eq!(
+            session.evaluate(Some(ladder[1])),
+            LevelDecision::RequireStepUp {
+                target: OperatingLevel::ReadWrite
+            }
+        );
+        assert_eq!(
+            session.evaluate(Some(ladder[2])),
+            LevelDecision::RequireStepUp {
+                target: OperatingLevel::Ddl
+            }
+        );
+        assert_eq!(
+            session.evaluate(Some(ladder[3])),
+            LevelDecision::RequireStepUp {
+                target: OperatingLevel::Admin
+            }
+        );
+    }
+
+    #[test]
+    fn display_uses_expected_wire_tokens() {
+        assert_eq!(format!("{}", OperatingLevel::ReadOnly), "READ_ONLY");
+        assert_eq!(format!("{}", OperatingLevel::ReadWrite), "READ_WRITE");
+        assert_eq!(format!("{}", OperatingLevel::Ddl), "DDL");
+        assert_eq!(format!("{}", OperatingLevel::Admin), "ADMIN");
+    }
+
+    #[test]
+    fn profile_ceiling_and_protection_state_are_accurate() {
+        let protected = SessionLevelState::new(OperatingLevel::ReadOnly, true);
+        let regular = SessionLevelState::new(OperatingLevel::Ddl, false);
+
+        assert!(protected.is_protected());
+        assert!(!regular.is_protected());
+        assert_eq!(protected.max_level(), OperatingLevel::ReadOnly);
+        assert_eq!(regular.max_level(), OperatingLevel::Ddl);
+    }
+
+    #[test]
+    fn escalate_window_grants_exact_ceiling_target() {
+        let mut session = SessionLevelState::new(OperatingLevel::Ddl, false);
+        assert_eq!(
+            session.evaluate(Some(OperatingLevel::Ddl)),
+            LevelDecision::RequireStepUp {
+                target: OperatingLevel::Ddl
+            }
+        );
+        assert_eq!(
+            session.escalate_window(OperatingLevel::Ddl, Duration::from_secs(600)),
+            Ok(())
+        );
+        assert_eq!(
+            session.evaluate(Some(OperatingLevel::Ddl)),
+            LevelDecision::Allow
+        );
+    }
+
+    #[test]
+    fn dropping_elevation_restores_gate_outcome() {
+        let mut session = SessionLevelState::new(OperatingLevel::Admin, false);
+        session
+            .escalate_window(OperatingLevel::ReadWrite, Duration::from_secs(600))
+            .expect("elevation granted");
+        assert_eq!(
+            session.evaluate(Some(OperatingLevel::ReadWrite)),
+            LevelDecision::Allow
+        );
+        session.drop_elevation();
+        assert!(!session.has_active_elevation());
+        assert_eq!(session.effective_level(), OperatingLevel::ReadOnly);
+        assert_eq!(
+            session.evaluate(Some(OperatingLevel::ReadWrite)),
+            LevelDecision::RequireStepUp {
+                target: OperatingLevel::ReadWrite
+            }
+        );
+    }
+
+    #[cfg(kani)]
+    mod kani_survivor_tests {
+        use super::super::kani_proofs::*;
+
+        #[test]
+        fn level_from_index_and_danger_from_index_are_well_ordered() {
+            assert_eq!(level_from_index(0), OperatingLevel::ReadOnly);
+            assert_eq!(level_from_index(1), OperatingLevel::ReadWrite);
+            assert_eq!(level_from_index(2), OperatingLevel::Ddl);
+            assert_eq!(level_from_index(3), OperatingLevel::Admin);
+            assert_eq!(danger_from_index(0), DangerLevel::Safe);
+            assert_eq!(danger_from_index(1), DangerLevel::Guarded);
+            assert_eq!(danger_from_index(2), DangerLevel::Destructive);
+            assert_eq!(danger_from_index(3), DangerLevel::Forbidden);
+        }
+
+        #[test]
+        fn index_mapping_mutation_canaries() {
+            assert_eq!(level_from_index(6), OperatingLevel::Ddl);
+            assert_eq!(danger_from_index(6), DangerLevel::Destructive);
+            assert_eq!(level_from_index(0), OperatingLevel::ReadOnly);
+            assert_eq!(danger_from_index(0), DangerLevel::Safe);
+        }
+
+        #[test]
+        fn level_rank_matches_known_floor_values() {
+            assert_eq!(level_rank(OperatingLevel::ReadOnly), 0);
+            assert_eq!(level_rank(OperatingLevel::ReadWrite), 1);
+        }
+    }
 }
