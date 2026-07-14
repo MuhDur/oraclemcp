@@ -6347,6 +6347,19 @@ mod tests {
     }
 
     #[test]
+    fn nested_package_body_begin_is_fail_closed() {
+        let sql = "CREATE PACKAGE BODY pkg AS PROCEDURE a IS PROCEDURE b IS BEGIN BEGIN END; END b; END pkg;";
+        // A nested BEGIN in an inner member body must not be balanced by the
+        // package final END, so this remains a fail-closed construct.
+        let shape = analyze_batch(sql);
+        assert!(
+            !shape.balanced,
+            "nested member-begin shape must stay fail-closed: {shape:?}"
+        );
+        assert_eq!(classify(sql).danger, DangerLevel::Forbidden, "{sql}");
+    }
+
+    #[test]
     fn analyze_batch_distinguishes_package_body_header_states() {
         let initialization = analyze_batch(
             "CREATE OR REPLACE PACKAGE BODY p AS BEGIN IF TRUE THEN NULL; END IF; END p;",
