@@ -792,6 +792,45 @@ mod tests {
         assert!(admission.required_level >= OperatingLevel::ReadOnly);
     }
 
+    #[test]
+    fn one_part_select_table_is_rewritable_when_current_schema_resolves_target() {
+        let classifier = classifier();
+        let sql = "SELECT id FROM orders";
+        let base = classifier.classify(sql);
+        let configured = policy(vec![rule(
+            "tenant-scope",
+            SqlPolicyMatchConfig {
+                schema: Some("APP".to_owned()),
+                object: Some("ORDERS".to_owned()),
+                verb: Some(SqlPolicyVerb::Select),
+                principal: None,
+            },
+            SqlPolicyEffectConfig::RequirePredicate {
+                sql_fragment: "id > 0".to_owned(),
+            },
+        )]);
+
+        let outcome = enforce_sql_policy(&PolicyGateRequest {
+            classifier: &classifier,
+            policy: Some(&configured),
+            base: &base,
+            sql,
+            current_schema: Some("APP"),
+            principal: Some("oauth:subject-1"),
+        });
+        let PolicyGate::Admitted(admission) = outcome else {
+            panic!("an unqualified target should rewrite through the production path");
+        };
+        let effective = admission
+            .effective_sql
+            .expect("the rewrites must run through a fresh candidate SQL");
+        assert!(effective.contains("id > 0"));
+        assert!(
+            effective.contains("WHERE"),
+            "policy rewrite must materialize a predicate in AST output: {effective}"
+        );
+    }
+
     /// A policy that selects a schema/object cannot be proven against a statement
     /// whose target is not provable — so the statement is refused, not admitted
     /// against a guess. A deny rule that silently fails to match is a policy that
