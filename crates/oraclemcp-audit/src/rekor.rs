@@ -898,6 +898,57 @@ mod tests {
     }
 
     #[test]
+    fn validate_proof_shape_directly_rejects_out_of_range_log_index() {
+        // validate_proof_shape must reject log_index >= tree_size on its OWN — the
+        // full verify_offline pipeline also catches this downstream in
+        // inclusion_root, so a pipeline-level test masks a regression in this
+        // shape guard. Assert the direct contract so the check stays enforced.
+        let mut at_bound = receipt_for(head()).proof;
+        at_bound.tree_size = 5;
+        at_bound.log_index = 5; // == tree_size, i.e. outside [0, tree_size)
+        assert_eq!(
+            validate_proof_shape(&at_bound),
+            Err(RekorProofError::MalformedProof),
+            "log_index == tree_size must be rejected by validate_proof_shape"
+        );
+
+        let mut beyond = receipt_for(head()).proof;
+        beyond.tree_size = 2;
+        beyond.log_index = 7;
+        assert_eq!(
+            validate_proof_shape(&beyond),
+            Err(RekorProofError::MalformedProof),
+            "log_index > tree_size must be rejected by validate_proof_shape"
+        );
+    }
+
+    #[test]
+    fn rekor_node_hash_matches_rfc6962_known_answer() {
+        // RFC 6962 interior node hash = SHA-256(0x01 || left || right). Pin it
+        // against an INDEPENDENTLY computed digest (raw Sha256, not the function
+        // under test) so a constant-returning mutant is caught — the inclusion
+        // tests derive their expected root via rekor_node_hash itself (circular).
+        let left = [0x11_u8; 32];
+        let right = [0x22_u8; 32];
+        let expected: [u8; 32] = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update([0x01_u8]);
+            h.update(left);
+            h.update(right);
+            h.finalize().into()
+        };
+        assert_eq!(
+            rekor_node_hash(left, right),
+            expected,
+            "rekor_node_hash must equal SHA-256(0x01 || left || right)"
+        );
+        // Guard against the specific constant mutants ([0;32] / [1;32]).
+        assert_ne!(rekor_node_hash(left, right), [0_u8; 32]);
+        assert_ne!(rekor_node_hash(left, right), [1_u8; 32]);
+    }
+
+    #[test]
     fn parse_sha256_hex_accepts_canonical_input_and_rejects_malformed_lengths() {
         let valid = "ab".repeat(32);
         assert!(
