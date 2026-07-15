@@ -1059,7 +1059,12 @@ mod tests {
             .expect("persist one record for replay");
         drop(delivery);
 
-        let recovery = DurableShippingForwarder::open(cfg, Box::new(Capture::default()))
+        // Recover with a non-delivering backend: a delivering one (Capture) would
+        // drain the recovered record on the worker thread — decrementing pending
+        // and deleting the spool file — before these assertions run, which raced
+        // under parallel load. AlwaysFails keeps the record durably queued so the
+        // "left for replay" state is observed deterministically.
+        let recovery = DurableShippingForwarder::open(cfg, Box::new(AlwaysFails))
             .expect("drop must release lock");
         assert_eq!(recovery.status_handle().snapshot().pending_records, 1);
         assert!(record_path(directory.path(), 1).exists());
