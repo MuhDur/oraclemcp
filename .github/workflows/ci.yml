@@ -485,6 +485,12 @@ jobs:
     name: PL/SQL intelligence feature matrix
     needs: web-build
     runs-on: ubuntu-latest
+    # The plsql-intelligence feature is defined only on the `oraclemcp` crate, so
+    # `-p oraclemcp` exercises the whole feature surface; `--workspace` merely
+    # recompiled every other crate's test targets under a second feature set,
+    # which blew up compile + memory on the 2-core runner (multi-hour, cache-cold
+    # thrashing). Bounded so a cold run can never run away again.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
         with:
@@ -497,7 +503,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo test --workspace --all-targets --features plsql-intelligence
+      - run: cargo test -p oraclemcp --all-targets --features plsql-intelligence
       - name: Assert all eight PL/SQL tools are registered
         # Single source of truth for the advertised tool surface, runnable
         # offline (`bash scripts/plsql_feature_lane_check.sh`) so the lane is
