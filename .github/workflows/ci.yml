@@ -542,6 +542,22 @@ jobs:
       # CI supplies a prebuilt binary to the harness. Local execution keeps the
       # harness on omcpb, which owns target isolation, memory caps, and the pin.
       - run: cargo build -p oraclemcp --bin oraclemcp --features dashboard-bundle
+      - name: Grant DBMS_FLASHBACK to the 23ai app user for SCN capture
+        # The governed read path captures the snapshot SCN via
+        # DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER (V$DATABASE only as a fallback).
+        # The gvenzl app user has neither by default, so every governed read on
+        # this lane fails closed (ORA-00904 then ORA-00942). Grant the capability
+        # the design expects. Synthetic disposable CI DB; the SYSTEM password is
+        # the committed fixture value in this job's service env.
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check oracledb
+          python3 -c "
+          import oracledb
+          c = oracledb.connect(user='system', password='E2EOracle23', dsn='localhost:1522/FREEPDB1')
+          c.cursor().execute('GRANT EXECUTE ON DBMS_FLASHBACK TO E2E_ORACLE')
+          c.commit()
+          print('granted EXECUTE ON DBMS_FLASHBACK to E2E_ORACLE')
+          "
       - name: 23ai matrix lane and VECTOR_DISTANCE smoke
         env:
           ORACLEMCP_LIVE_XE: "1"
