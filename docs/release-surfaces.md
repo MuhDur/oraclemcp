@@ -12,7 +12,7 @@ table).
 The expected workspace version is always read from `cargo metadata` (all nine
 `oraclemcp-*` workspace packages share one version). The `oracledb` /
 `oracledb-protocol` driver pins are exact `=X.Y.Z` pins on the **separately
-versioned** driver release train (currently `=0.8.2`); the sync check verifies
+versioned** driver release train (currently `=0.8.3`); the sync check verifies
 each driver pin against the driver's own version, not the workspace version.
 
 | Surface | Path / check |
@@ -55,5 +55,5 @@ there is correct by design.
 
 Note: `README.md`, `docs/operations.md`, and the workflow/manifest files still
 appear in the inventory table's driver-provenance row — that row tracks the
-pinned **driver** version string (e.g. `oracledb 0.8.2`), which is unrelated to
+pinned **driver** version string (e.g. `oracledb 0.8.3`), which is unrelated to
 these install-example tags.

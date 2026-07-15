@@ -58,7 +58,7 @@ const ALL_PLAINTEXT: &[&str] = &[ALICE_EMAIL, BOB_EMAIL, ALICE_SSN, BOB_SSN, CAR
 /// SELECT ... FROM dual, so the identical statement runs on every lane.
 ///
 /// Deliberately an inline view rather than the more natural `WITH staff AS (…)`:
-/// the pinned `oracledb` 0.8.2 driver decides a statement is a query by looking
+/// the pinned `oracledb` 0.8.3 driver decides a statement is a query by looking
 /// for a literal leading `SELECT` keyword (`statement_is_query`), so a CTE-led
 /// query is sent down the non-query path and comes back ORA-00900. That is a
 /// real driver gap (the guard admits CTE reads), filed separately; it is not

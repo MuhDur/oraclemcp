@@ -5249,7 +5249,7 @@ fn run_incident_capture(robot_json: bool, args: IncidentCaptureCliArgs) -> ExitC
         build: BuildIdentity {
             server: format!("oraclemcp/{}", env!("CARGO_PKG_VERSION")),
             classifier: format!("oraclemcp-guard/{};registry=1", env!("CARGO_PKG_VERSION")),
-            driver: "oracledb/0.8.2".to_owned(),
+            driver: format!("oracledb/{}", oraclemcp_db::DRIVER_VERSION),
         },
         // The live server owns durable audit-tail collection. This standalone
         // command intentionally creates a self-describing empty projection,

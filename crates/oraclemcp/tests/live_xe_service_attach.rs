@@ -520,7 +520,7 @@ fn live_xe_service_attachs_mcp_status_and_dashboard_without_mocks() {
 /// Oracle's query path and return a row through the public MCP service. It is
 /// intentionally held ignored until an operator-approved crates.io `oracledb`
 /// release includes the driver-side query-path fix; this repository remains
-/// pinned to `=0.8.2` until then.
+/// pinned to `=0.8.3` until then.
 #[test]
 #[ignore = "blocked on an operator-approved crates.io oracledb release with the CTE query-path fix; then set ORACLEMCP_LIVE_XE=1 and ORACLEMCP_TEST_* (23ai Free: localhost:1522/FREEPDB1)"]
 fn live_xe_cte_query_returns_rows_through_mcp_after_driver_release() {

@@ -10,7 +10,7 @@ Accepted (0.4.0).
 in. The workspace has no stable MSRV because **asupersync 0.3.5** — the async
 runtime the transport and DB seam run on — uses nightly-only language features
 (`#![feature(try_trait_v2)]` and `try_trait_v2_residual`). The pinned `oracledb`
-0.8.2 driver itself is **stable-clean**: it is *not* the reason for the nightly
+0.8.3 driver itself is **stable-clean**: it is *not* the reason for the nightly
 pin. Asupersync is pre-1.0 and still moving, and `try_trait_v2` is unstable.
 
 We could chase a stable MSRV by forking the runtime, vendoring patched

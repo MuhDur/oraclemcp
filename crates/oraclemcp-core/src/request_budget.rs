@@ -26,7 +26,7 @@
 //!   teardown can still run after the request deadline or cancellation has
 //!   fired, but can never itself run away.
 //!
-//! Against the pinned `oracledb` 0.8.2 driver the budget composes with the
+//! Against the pinned `oracledb` 0.8.3 driver the budget composes with the
 //! adapter's per-call timeout: the seam maps this budget's deadline onto the
 //! driver's `execute_raw` timeout (see `crates/oraclemcp-db/src/connection.rs`).
 //!

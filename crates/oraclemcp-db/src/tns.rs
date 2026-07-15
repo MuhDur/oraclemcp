@@ -19,7 +19,7 @@
 //! This module deliberately depends on the underlying **`oracledb-protocol`**
 //! crate directly and imports via the `oracledb_protocol::` path, which does NOT
 //! match that seam pattern (the `_` breaks the adjacency the pattern requires).
-//! `oracledb-protocol` is pinned to `=0.8.2`, the exact version `oracledb 0.8.2`
+//! `oracledb-protocol` is pinned to `=0.8.3`, the exact version `oracledb 0.8.3`
 //! already resolves, and is pure encode/decode (no async runtime), so the driver
 //! seam stays confined to `connection.rs` and the engine-free boundary holds.
 //! The `seam_smoke` test below asserts this module names no driver-crate `::`

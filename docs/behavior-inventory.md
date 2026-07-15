@@ -12,7 +12,7 @@ query text.
 | --- | --- | --- |
 | Workspace | Cargo workspace with 9 crates plus `oraclemcp` binary, `resolver = "2"`, edition 2024, pinned nightly `nightly-2026-05-11`, and no stable MSRV on the thin-native line. | `Cargo.toml`, `rust-toolchain.toml` |
 | Safety posture | Every crate forbids unsafe code; raw SQL safety is centered on `oraclemcp-guard`. | `Cargo.toml`, crate roots, `AGENTS.md` |
-| Current release line | All `oraclemcp-*` package versions and `server.json` are aligned on the workspace release, while the independently-versioned thin driver/protocol pins are exact at 0.8.2. | `Cargo.toml`, crate `Cargo.toml` files, `server.json`, `Cargo.lock` |
+| Current release line | All `oraclemcp-*` package versions and `server.json` are aligned on the workspace release, while the independently-versioned thin driver/protocol pins are exact at 0.8.3. | `Cargo.toml`, crate `Cargo.toml` files, `server.json`, `Cargo.lock` |
 | Current DB mode | Default build includes live Oracle support through the pure-Rust `oracledb` thin driver. | `README.md`, `crates/oraclemcp-db/Cargo.toml` |
 | Current runtime/transport | Native stdio and native Streamable HTTP live in `oraclemcp-core`; dispatch receives explicit Asupersync `Cx` contexts; Tokio, `rmcp`, Axum, Hyper, ODPI-C, and `r2d2` are absent from the current manifests and lockfile. | `crates/oraclemcp-core/src/server.rs`, `crates/oraclemcp-core/src/http/mod.rs`, `Cargo.lock`, `Cargo.toml` |
 | Current bead state | Repo-local `.beads/` contains the migration graph and W-series release hardening work. | `br list --json`, `bv --robot-triage` |
@@ -134,10 +134,10 @@ query text.
 
 ## Thin Driver Release Dependency Decision
 
-Verified on 2026-07-13:
+Verified on 2026-07-15:
 
-- `Cargo.lock` resolves the published `oracledb = 0.8.2` and
-  `oracledb-protocol = 0.8.2` crates from crates.io.
+- `Cargo.lock` resolves the published `oracledb = 0.8.3` and
+  `oracledb-protocol = 0.8.3` crates from crates.io.
 - The published driver exposes the pure-Rust native-async thin connection path
   used by the current `Cx`-first async DB trait boundary.
 - The local `/home/durakovic/projects/rust-oracledb` checkout is a normal
@@ -147,7 +147,7 @@ Verified on 2026-07-13:
 
 Decision:
 
-- `oraclemcp` consumes `oracledb = 0.8.2` from crates.io, declared in the
+- `oraclemcp` consumes `oracledb = 0.8.3` from crates.io, declared in the
   workspace dependency table with `default-features = false`.
 - No vendoring is used. No releaseable `oraclemcp` crate may depend on
   `/home/durakovic/projects/rust-oracledb` or any other external local path.

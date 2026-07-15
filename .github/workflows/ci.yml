@@ -271,7 +271,7 @@ jobs:
       - run: bash scripts/release_acceptance_ci_suite.sh --skip-feature-powerset
 
   # The thin-native line is pinned to nightly because asupersync requires
-  # nightly-only language features (oracledb 0.8.2 is stable-clean). This is a
+  # nightly-only language features (oracledb 0.8.3 is stable-clean). This is a
   # build-only ratchet separate from the test job so toolchain installation
   # failures stay obvious.
   pinned-nightly:
