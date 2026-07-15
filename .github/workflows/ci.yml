@@ -139,8 +139,16 @@ jobs:
       # Coverage is unchanged — every feature combo still runs.
       - name: Free disk space for the feature powerset
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
-            /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          # The 22-combo x (check+clippy+test) x --all-targets build outgrew the
+          # earlier cleanup and hit "No space left on device" again on the last
+          # combo, so free the full set of preinstalled toolchains we do not use
+          # (~35GB). rustup installs to ~/.cargo/~/.rustup, not hostedtoolcache,
+          # so removing the tool cache is safe here.
+          sudo rm -rf \
+            /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android \
+            /opt/hostedtoolcache /usr/share/swift /usr/lib/jvm \
+            /usr/local/share/powershell /usr/share/miniconda \
+            /usr/local/lib/node_modules 2>/dev/null || true
           sudo docker image prune --all --force 2>/dev/null || true
           df -h /
       - uses: actions/download-artifact@v8
