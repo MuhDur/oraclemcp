@@ -207,6 +207,26 @@ fn default_refusal_corpus_path() -> PathBuf {
         .map(|home| home.join(".local/state/oraclemcp/corpus/refusals.jsonl"))
         .unwrap_or_else(|| PathBuf::from("oraclemcp-refusal-corpus.jsonl"))
 }
+
+/// Export a redacted refusal corpus as a deterministic, deduplicated,
+/// re-validated dataset. `source` defaults to the served corpus the dispatcher
+/// appends to ([`default_refusal_corpus_path`]). This is the operator surface
+/// behind `oraclemcp refusal-corpus export`; the corpus writer, redaction, and
+/// tamper checks stay inside the guard/dispatch boundary, so the caller only
+/// sees a count or a human-readable refusal. Returns the number of unique
+/// records written on success.
+pub fn export_refusal_corpus(
+    source: Option<&std::path::Path>,
+    destination: &std::path::Path,
+) -> Result<usize, String> {
+    let source_path =
+        source.map_or_else(default_refusal_corpus_path, std::path::Path::to_path_buf);
+    RefusalCorpusWriter::new(source_path)
+        .export_dataset(destination)
+        .map(|export| export.record_count)
+        .map_err(|error| error.to_string())
+}
+
 /// Hard cap on remembered source patch previews in one server process.
 const MAX_PATCH_PREVIEWS: usize = 128;
 /// Each orient snapshot is four bounded dictionary reads; cap retained profiles,

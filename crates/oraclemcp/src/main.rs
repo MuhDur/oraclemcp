@@ -284,6 +284,12 @@ enum Command {
         #[command(subcommand)]
         command: IncidentCommand,
     },
+    /// Export the accumulated redacted refusal corpus as a shippable dataset.
+    #[command(name = "refusal-corpus", alias = "refusal_corpus")]
+    RefusalCorpus {
+        #[command(subcommand)]
+        command: RefusalCorpusCommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -310,6 +316,25 @@ enum IncidentCommand {
     Capture(IncidentCaptureCliArgs),
     /// Re-classify a verified bundle under its recorded LabRuntime seed.
     Replay(IncidentReplayCliArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum RefusalCorpusCommand {
+    /// Export the corpus as deterministic, deduplicated, re-validated JSONL.
+    Export(RefusalCorpusExportCliArgs),
+}
+
+#[derive(Args, Debug)]
+struct RefusalCorpusExportCliArgs {
+    /// Destination file for the exported dataset. It must differ from the source
+    /// corpus path; a malformed or tampered corpus aborts the export instead of
+    /// shipping a best-effort dataset.
+    #[arg(long)]
+    out: PathBuf,
+    /// Source corpus state file to export. Defaults to the served corpus the
+    /// dispatcher appends to ($XDG_STATE_HOME/oraclemcp/corpus/refusals.jsonl).
+    #[arg(long)]
+    corpus: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -681,6 +706,9 @@ fn main() -> ExitCode {
         Command::Incident { command } => match command {
             IncidentCommand::Capture(args) => run_incident_capture(robot_json, args),
             IncidentCommand::Replay(args) => run_incident_replay(robot_json, args),
+        },
+        Command::RefusalCorpus { command } => match command {
+            RefusalCorpusCommand::Export(args) => run_refusal_corpus_export(robot_json, args),
         },
     }
 }
@@ -5172,6 +5200,36 @@ fn audit_verification_keyring_from_sources(
 /// Capture an offline-replayable bundle without trusting the artifact as an
 /// authorization source. The raw statement remains in process only long enough
 /// for the Arc J redactor and the capture gate to prove it cannot reach disk.
+fn run_refusal_corpus_export(robot_json: bool, args: RefusalCorpusExportCliArgs) -> ExitCode {
+    match oraclemcp::dispatch::export_refusal_corpus(args.corpus.as_deref(), &args.out) {
+        Ok(records) => {
+            let payload = serde_json::json!({
+                "kind": "oraclemcp_refusal_corpus_export",
+                "destination": args.out.display().to_string(),
+                "records": records,
+            });
+            let output = if robot_json {
+                payload.to_string()
+            } else {
+                format!(
+                    "exported {records} redacted refusal record(s) to {}",
+                    args.out.display()
+                )
+            };
+            stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
+        }
+        Err(message) => {
+            emit_command_error(
+                robot_json,
+                "refusal-corpus export",
+                "ORACLEMCP_REFUSAL_CORPUS_EXPORT_REFUSED",
+                &message,
+            );
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn run_incident_capture(robot_json: bool, args: IncidentCaptureCliArgs) -> ExitCode {
     if args.bundle.exists() {
         emit_command_error(
