@@ -553,7 +553,7 @@ jobs:
           python3 -m pip install --quiet --disable-pip-version-check oracledb
           python3 -c "
           import oracledb
-          c = oracledb.connect(user='system', password='E2EOracle23', dsn='localhost:1522/FREEPDB1')
+          c = oracledb.connect(user='sys', password='E2EOracle23', dsn='localhost:1522/FREEPDB1', mode=oracledb.AUTH_MODE_SYSDBA)
           c.cursor().execute('GRANT EXECUTE ON DBMS_FLASHBACK TO E2E_ORACLE')
           c.commit()
           print('granted EXECUTE ON DBMS_FLASHBACK to E2E_ORACLE')
