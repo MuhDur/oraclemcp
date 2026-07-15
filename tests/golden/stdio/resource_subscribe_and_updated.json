@@ -404,6 +404,228 @@
               "openWorldHint": false,
               "readOnlyHint": true
             },
+            "description": "Run a bounded, fail-closed 23ai vector search through the same policy, semantic-resolution, masking, and audit path as oracle_query.",
+            "inputSchema": {
+              "additionalProperties": false,
+              "properties": {
+                "filter": {
+                  "additionalProperties": false,
+                  "description": "Optional governed hybrid predicate. Only equality is supported: the server validates column as a simple identifier and binds value; raw SQL, OR/IN fragments, and caller-provided operators are refused.",
+                  "properties": {
+                    "column": {
+                      "description": "One local table column to constrain.",
+                      "type": "string"
+                    },
+                    "value": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "One scalar value bound into the equality predicate; never SQL text."
+                    }
+                  },
+                  "required": [
+                    "column",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                "k": {
+                  "description": "Top-k result count (default 10, hard cap 1000).",
+                  "maximum": 1000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "metric": {
+                  "description": "VECTOR_DISTANCE metric (default COSINE).",
+                  "enum": [
+                    "COSINE",
+                    "EUCLIDEAN",
+                    "DOT"
+                  ],
+                  "type": "string"
+                },
+                "over": {
+                  "additionalProperties": false,
+                  "description": "The local table and VECTOR column to search. Identifiers must be simple unquoted names and are live-resolved before execution.",
+                  "properties": {
+                    "column": {
+                      "description": "VECTOR column used only for distance ordering.",
+                      "type": "string"
+                    },
+                    "owner": {
+                      "description": "Optional schema owner; defaults to the current schema.",
+                      "type": "string"
+                    },
+                    "table": {
+                      "description": "Table containing the VECTOR column.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "table",
+                    "column"
+                  ],
+                  "type": "object"
+                },
+                "query_text": {
+                  "description": "Embedded only by exactly one visible local ONNX model after COMPATIBLE >= 23.4 is proven. Otherwise returns typed requires_23ai or no_in_db_model; it never falls back to client embedding.",
+                  "maxLength": 32768,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "query_vector": {
+                  "description": "Numeric query vector. Exactly one of query_vector or query_text is required in this tool generation.",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 16384,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "timeout_seconds": {
+                  "description": "Tightens the profile's total request deadline and each Oracle round-trip cap for this tool call. It cannot widen the profile ceiling.",
+                  "maximum": 3600,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "over"
+              ],
+              "type": "object"
+            },
+            "name": "oracle_semantic_search",
+            "outputSchema": {
+              "additionalProperties": true,
+              "properties": {
+                "columns": {
+                  "description": "Column names in select-list order.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "export": {
+                  "additionalProperties": true,
+                  "description": "Present when export=true: metadata for the materialized oracle-export://{id} resource, readable only by the originating principal under the exact scope grant.",
+                  "type": "object"
+                },
+                "inlined": {
+                  "description": "False when the result was materialized as an export resource (export=true) rather than inlined.",
+                  "type": "boolean"
+                },
+                "k": {
+                  "maximum": 1000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "mask_certificate": {
+                  "additionalProperties": true,
+                  "description": "Present when result masking transformed the page: proof-carrying per-column mask decisions plus the audit entry hash binding those decisions into the audit chain.",
+                  "type": "object"
+                },
+                "metric": {
+                  "enum": [
+                    "COSINE",
+                    "EUCLIDEAN",
+                    "DOT"
+                  ],
+                  "type": "string"
+                },
+                "next_cursor": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "next_step": {
+                  "type": "string"
+                },
+                "resource_link": {
+                  "additionalProperties": true,
+                  "description": "Present when export=true: an MCP resource_link to the export, to fetch via resources/read.",
+                  "type": "object"
+                },
+                "row_count": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "rows": {
+                  "description": "Serialized rows keyed by column name. NUMBER cells are strings unless numbers_as_float=true.",
+                  "items": {
+                    "additionalProperties": {
+                      "description": "Serialized Oracle cell value. Oracle NUMBER values are strings by default for lossless precision; JSON numbers are used only for binary float/double or numbers_as_float=true.",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "additionalProperties": true,
+                          "type": "object"
+                        },
+                        {
+                          "items": {},
+                          "type": "array"
+                        }
+                      ]
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "total_bytes": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "truncated": {
+                  "type": "boolean"
+                },
+                "used_index": {
+                  "description": "Null when this bounded read did not inspect an execution plan; never inferred from a requested index.",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "columns",
+                "row_count",
+                "metric",
+                "k",
+                "used_index"
+              ],
+              "type": "object"
+            },
+            "title": "Oracle Semantic Search"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "idempotentHint": true,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
             "description": "Diff one proven read-only SELECT across two Oracle SCNs, or across two databases.",
             "inputSchema": {
               "additionalProperties": false,
@@ -867,7 +1089,7 @@
               "openWorldHint": false,
               "readOnlyHint": true
             },
-            "description": "Unified read-only object search/inspection with a detail_level. names=identifiers only; summary=+column count, comments, and the optimizer ALL_TABLES.NUM_ROWS row-count ESTIMATE (gathered statistics, never COUNT(*) — may be stale, reported via stats_stale/last_analyzed); standard (default)=+columns; full=+indexes. Returns {count, results, truncated}. Owner/type/name filters are bound; quoted/case-sensitive identifiers are matched verbatim.",
+            "description": "Unified read-only object search/inspection with a detail_level. names=identifiers only; summary=+column count, comments, and the optimizer ALL_TABLES.NUM_ROWS row-count ESTIMATE (gathered statistics, never COUNT(*) — may be stale, reported via stats_stale/last_analyzed); standard (default)=+columns; full=+indexes. fleet=true searches the names-only index across MCP-visible profiles, applying each source profile's egress policy before merge and returning no profile roster or profile counts. Returns {count, results, truncated}. Owner/type/name filters are bound; quoted/case-sensitive identifiers are matched verbatim.",
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
@@ -884,6 +1106,10 @@
                     "full"
                   ],
                   "type": "string"
+                },
+                "fleet": {
+                  "description": "Search the egress-safe unified fleet catalog. Fleet mode requires detail_level=names, applies each profile's own result-masking policy before aggregation, and intentionally returns no profile roster or profile-count metadata.",
+                  "type": "boolean"
                 },
                 "limit": {
                   "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows.",
@@ -1413,6 +1639,44 @@
             },
             "name": "oracle_top_queries",
             "title": "Oracle Top Queries"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "idempotentHint": true,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "description": "Read-only historical optimizer plan and relative-cost timeline from AWR snapshots for one SQL ID. Requires a licensed Oracle Diagnostics Pack; when the license probe cannot prove DIAGNOSTIC access it returns a typed refusal before touching DBA_HIST_*.",
+            "inputSchema": {
+              "additionalProperties": false,
+              "properties": {
+                "max_points": {
+                  "description": "Maximum AWR snapshot observations to return (default 100, capped at 1000).",
+                  "maximum": 1000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "sql_id": {
+                  "description": "The 13-character Oracle SQL ID to inspect.",
+                  "maxLength": 13,
+                  "minLength": 13,
+                  "type": "string"
+                },
+                "timeout_seconds": {
+                  "description": "Tightens the profile's total request deadline and each Oracle round-trip cap for this tool call. It cannot widen the profile ceiling.",
+                  "maximum": 3600,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "sql_id"
+              ],
+              "type": "object"
+            },
+            "name": "oracle_plan_timeline",
+            "title": "Oracle Plan Timeline"
           },
           {
             "annotations": {
