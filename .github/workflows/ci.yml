@@ -16,7 +16,10 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR runs, but let a main run finish so Swatinem/rust-cache
+  # can SAVE the build cache. Cancelling main mid-run (as rapid pushes did) left
+  # caches cold and made the heavy plsql/ANTLR compile take hours every time.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   web-build:
@@ -75,6 +78,10 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy -p oraclemcp-core --all-targets --features dashboard-bundle -- -D warnings
       - run: cargo clippy -p oraclemcp --all-targets --features dashboard-bundle -- -D warnings
@@ -95,6 +102,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo test --workspace --all-targets
         run: |
           set -euo pipefail
@@ -102,7 +113,17 @@ jobs:
           cargo test --workspace --all-targets 2>&1 | tee target/ci-logs/cargo-test.log
       - run: bash scripts/oraclemcp_concurrency_lint.sh --test-output target/ci-logs/cargo-test.log
       - run: cargo test --workspace --doc
-      - run: cargo test -p oraclemcp-core --features dashboard-bundle dashboard
+      # Runtime coverage of the optional feature interactions. The feature-powerset
+      # job is now a compile+lint gate only (clippy over the powerset), so the
+      # actual test behaviour under dashboard-bundle / mimalloc is exercised here.
+      # Scoped to --lib/--bins on purpose: the dashboard-bundle runtime tests are
+      # lib unit tests (core src/http/tests_stores.rs) and mimalloc only swaps the
+      # allocator in main.rs, so this covers the feature-gated behaviour. Using
+      # --all-targets would additionally re-run the feature-IRRELEVANT integration
+      # tests (the ~100s build-state-sensitive trybuild capability_compile_fail and
+      # the omcpb-dependent e2e_harness) under these features for no added signal.
+      - run: cargo test -p oraclemcp-core --lib --features dashboard-bundle
+      - run: cargo test -p oraclemcp --lib --bins --features dashboard-bundle,mimalloc
       # Golden-artifact discipline (D6.3d): CI VERIFIES goldens and never
       # regenerates them. A drift is a real regression, so UPDATE_GOLDENS must
       # never be set here and the golden suites must match the committed
@@ -124,26 +145,22 @@ jobs:
     name: feature powerset (cargo hack)
     needs: web-build
     runs-on: ubuntu-latest
-    # 3-pass cargo-hack (check+clippy+test) over the feature powerset is heavy
-    # and grows with the codebase; it hit the old 30min cap as the IAM/doctor/
-    # explain surfaces landed. Raised for headroom.
-    timeout-minutes: 50
+    # Compile + lint gate only: `cargo hack clippy` over the feature powerset of
+    # the three feature-owning crates (oraclemcp-db / -core / oraclemcp). The
+    # prior 3-pass (check+clippy+test) x --workspace x --all-targets was ~50min;
+    # clippy already type-checks + compiles, and per-combo runtime behaviour is
+    # covered by the default `test` job's dashboard-bundle / mimalloc runs.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      # The 22-combo x (check+clippy+test) x --all-targets build accretes a large
-      # shared target/ dir that exceeded the ubuntu-latest ~14GB disk once the K10
-      # streaming surface landed (job failed with "No space left on device"). Free
-      # the preinstalled toolchains we don't use (~25GB) before the heavy build.
-      # Coverage is unchanged — every feature combo still runs.
+      # Even the narrowed clippy powerset accretes a shared target/ dir; free the
+      # preinstalled toolchains we don't use so a large combo can't hit "No space
+      # left on device". rustup installs to ~/.cargo + ~/.rustup, not
+      # hostedtoolcache, so removing the tool cache is safe here.
       - name: Free disk space for the feature powerset
         run: |
-          # The 22-combo x (check+clippy+test) x --all-targets build outgrew the
-          # earlier cleanup and hit "No space left on device" again on the last
-          # combo, so free the full set of preinstalled toolchains we do not use
-          # (~35GB). rustup installs to ~/.cargo/~/.rustup, not hostedtoolcache,
-          # so removing the tool cache is safe here.
           sudo rm -rf \
             /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android \
             /opt/hostedtoolcache /usr/share/swift /usr/lib/jvm \
@@ -160,6 +177,10 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
         with:
           tool: cargo-hack
@@ -176,6 +197,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: bash scripts/oraclemcp_ergonomics_lint.sh
 
   installer:
@@ -196,6 +221,10 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install installer lint tools
         run: |
           sudo apt-get update
@@ -276,6 +305,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: bash scripts/release_acceptance_ci_suite.sh --skip-feature-powerset
 
   # The thin-native line is pinned to nightly because asupersync requires
@@ -298,6 +331,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build --workspace
       - run: cargo build -p oraclemcp --features dashboard-bundle
 
@@ -332,6 +369,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.toolchain }}
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo +${{ matrix.toolchain }} build --workspace
       - run: cargo +${{ matrix.toolchain }} test --workspace --all-targets
 
@@ -346,6 +386,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Ensure the docs build; intra-doc-link lints are not gated (some target
       # feature-gated items that are absent in the default-feature doc build).
       - run: cargo doc --workspace --no-deps
@@ -408,6 +452,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
         with:
           tool: cargo-public-api,cargo-semver-checks
@@ -475,6 +523,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build -p oraclemcp --features dashboard-bundle
 
   # The optional PL/SQL-intelligence distribution must remain independently
@@ -503,6 +555,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test -p oraclemcp --all-targets --features plsql-intelligence
       - name: Assert all eight PL/SQL tools are registered
         # Single source of truth for the advertised tool surface, runnable
@@ -545,6 +601,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # CI supplies a prebuilt binary to the harness. Local execution keeps the
       # harness on omcpb, which owns target isolation, memory caps, and the pin.
       - run: cargo build -p oraclemcp --bin oraclemcp --features dashboard-bundle
@@ -602,6 +662,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
         with:
           tool: cargo-fuzz

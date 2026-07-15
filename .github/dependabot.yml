@@ -11,3 +11,9 @@ updates:
     labels:
       - dependencies
       - github-actions
+    # One grouped PR per week instead of one full CI run per action bump.
+    # SHA-pinned action updates make coarser bisection an acceptable trade.
+    groups:
+      github-actions-weekly:
+        patterns:
+          - "*"

@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
-# Curated feature-powerset gate for release CI.
+# Curated feature-powerset gate: a COMPILE + LINT gate, not a test gate.
 #
-# Current Cargo features that belong in the always-on PR matrix:
-#   - default/no features
-#   - dashboard-bundle (dashboard API is always compiled; the bundle feature
-#     embeds the web/dist artifact that CI builds first)
+# Scope: only the three crates that actually define optional features
+#   - oraclemcp        (dashboard-bundle, mimalloc, live-xe, plsql-intelligence)
+#   - oraclemcp-core   (dashboard-bundle)
+#   - oraclemcp-db     (live-xe, test-utils)
+# `--workspace` re-iterated every featureless crate under every combination for
+# no added coverage. `cargo clippy` already type-checks + compiles, so the prior
+# separate `cargo hack check` and `cargo hack test` passes were redundant here:
+# runtime behaviour is covered by the default `cargo test` job (which explicitly
+# adds the dashboard-bundle and dashboard-bundle,mimalloc interactions).
 #
 # Excluded deliberately:
-#   - live-xe: requires external Oracle credentials and is covered by live gates
+#   - live-xe: requires external Oracle credentials, covered by live gates
 #   - plsql-intelligence: optional engine variant, built by distribution jobs
+#   - default: currently empty for these crates; excluding it avoids redundant
+#     with/without-default combinations. Re-add it here if `default` ever gains
+#     members.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,20 +33,19 @@ need cargo
 need cargo-hack
 
 common=(
-  --workspace
+  -p oraclemcp-db
+  -p oraclemcp-core
+  -p oraclemcp
   --feature-powerset
   --exclude-features
-  live-xe,plsql-intelligence
+  live-xe,plsql-intelligence,default
   --all-targets
 )
 
-echo "oraclemcp-feature-powerset: cargo hack check"
-cargo hack check "${common[@]}"
-
+# clippy compiles + type-checks every target under every feature combination,
+# so a single clippy pass subsumes the old `cargo hack check`. Runtime behaviour
+# is covered by the default `cargo test` job, not re-run per combo here.
 echo "oraclemcp-feature-powerset: cargo hack clippy"
 cargo hack clippy "${common[@]}" -- -D warnings
-
-echo "oraclemcp-feature-powerset: cargo hack test"
-cargo hack test "${common[@]}"
 
 echo "oraclemcp-feature-powerset: OK — curated feature powerset is green."
