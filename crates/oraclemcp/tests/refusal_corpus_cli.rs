@@ -43,9 +43,7 @@ fn exports_an_empty_corpus_as_zero_records() {
     assert_eq!(payload["records"], 0);
     assert!(out.exists(), "export writes the destination file");
     assert!(
-        fs::read_to_string(&out)
-            .expect("read export")
-            .is_empty(),
+        fs::read_to_string(&out).expect("read export").is_empty(),
         "an empty corpus exports an empty dataset"
     );
 }

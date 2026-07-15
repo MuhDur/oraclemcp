@@ -219,8 +219,7 @@ pub fn export_refusal_corpus(
     source: Option<&std::path::Path>,
     destination: &std::path::Path,
 ) -> Result<usize, String> {
-    let source_path =
-        source.map_or_else(default_refusal_corpus_path, std::path::Path::to_path_buf);
+    let source_path = source.map_or_else(default_refusal_corpus_path, std::path::Path::to_path_buf);
     RefusalCorpusWriter::new(source_path)
         .export_dataset(destination)
         .map(|export| export.record_count)
