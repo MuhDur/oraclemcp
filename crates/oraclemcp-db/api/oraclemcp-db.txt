@@ -3,6 +3,9 @@ pub use oraclemcp_db::error_envelope
 pub enum oraclemcp_db::AsOf
 pub oraclemcp_db::AsOf::Scn(u64)
 pub oraclemcp_db::AsOf::Timestamp(alloc::string::String)
+impl oraclemcp_db::AsOf
+pub async fn oraclemcp_db::AsOf::current_system_change_number(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<u64, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::AsOf::resolve_to_scn(&self, &asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<u64, oraclemcp_db::DbError>
 impl core::clone::Clone for oraclemcp_db::AsOf
 pub fn oraclemcp_db::AsOf::clone(&self) -> oraclemcp_db::AsOf
 impl core::cmp::Eq for oraclemcp_db::AsOf
@@ -541,6 +544,63 @@ pub type oraclemcp_db::ConnectFailureKind::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ConnectFailureKind where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ConnectFailureKind where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::ConnectFailureKind::vzip(self) -> V
+pub enum oraclemcp_db::CqnNotificationOutcome
+pub oraclemcp_db::CqnNotificationOutcome::Closed
+pub oraclemcp_db::CqnNotificationOutcome::Event(oraclemcp_db::CqnDriverNotification)
+pub oraclemcp_db::CqnNotificationOutcome::TimedOut
+impl core::clone::Clone for oraclemcp_db::CqnNotificationOutcome
+pub fn oraclemcp_db::CqnNotificationOutcome::clone(&self) -> oraclemcp_db::CqnNotificationOutcome
+impl core::cmp::Eq for oraclemcp_db::CqnNotificationOutcome
+impl core::cmp::PartialEq for oraclemcp_db::CqnNotificationOutcome
+pub fn oraclemcp_db::CqnNotificationOutcome::eq(&self, &oraclemcp_db::CqnNotificationOutcome) -> bool
+impl core::fmt::Debug for oraclemcp_db::CqnNotificationOutcome
+pub fn oraclemcp_db::CqnNotificationOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::CqnNotificationOutcome
+impl core::marker::StructuralPartialEq for oraclemcp_db::CqnNotificationOutcome
+impl core::marker::Freeze for oraclemcp_db::CqnNotificationOutcome
+impl core::marker::Send for oraclemcp_db::CqnNotificationOutcome
+impl core::marker::Sync for oraclemcp_db::CqnNotificationOutcome
+impl core::marker::Unpin for oraclemcp_db::CqnNotificationOutcome
+impl core::marker::UnsafeUnpin for oraclemcp_db::CqnNotificationOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::CqnNotificationOutcome
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::CqnNotificationOutcome
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::CqnNotificationOutcome where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::CqnNotificationOutcome where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::CqnNotificationOutcome where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CqnNotificationOutcome::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::CqnNotificationOutcome where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::CqnNotificationOutcome where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::CqnNotificationOutcome where U: core::convert::From<T>
+pub fn oraclemcp_db::CqnNotificationOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::CqnNotificationOutcome where U: core::convert::Into<T>
+pub type oraclemcp_db::CqnNotificationOutcome::Error = core::convert::Infallible
+pub fn oraclemcp_db::CqnNotificationOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::CqnNotificationOutcome where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::CqnNotificationOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::CqnNotificationOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::CqnNotificationOutcome where T: core::clone::Clone
+pub type oraclemcp_db::CqnNotificationOutcome::Owned = T
+pub fn oraclemcp_db::CqnNotificationOutcome::clone_into(&self, &mut T)
+pub fn oraclemcp_db::CqnNotificationOutcome::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::CqnNotificationOutcome
+impl<T> core::any::Any for oraclemcp_db::CqnNotificationOutcome where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::CqnNotificationOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::CqnNotificationOutcome where T: ?core::marker::Sized
+pub fn oraclemcp_db::CqnNotificationOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::CqnNotificationOutcome where T: ?core::marker::Sized
+pub fn oraclemcp_db::CqnNotificationOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::CqnNotificationOutcome where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::CqnNotificationOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::CqnNotificationOutcome
+pub fn oraclemcp_db::CqnNotificationOutcome::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CqnNotificationOutcome
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CqnNotificationOutcome
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CqnNotificationOutcome
+impl<T> typenum::type_operators::Same for oraclemcp_db::CqnNotificationOutcome
+pub type oraclemcp_db::CqnNotificationOutcome::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CqnNotificationOutcome where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CqnNotificationOutcome where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::CqnNotificationOutcome::vzip(self) -> V
 #[non_exhaustive] pub enum oraclemcp_db::DbError
 pub oraclemcp_db::DbError::BackendNotCompiled
 pub oraclemcp_db::DbError::BackendNotCompiled::backend: oraclemcp_db::OracleBackend
@@ -573,6 +633,8 @@ pub fn oraclemcp_db::DbError::into_envelope(self) -> oraclemcp_error::ErrorEnvel
 pub fn oraclemcp_db::DbError::is_uncertain_session_state(&self) -> bool
 impl core::clone::Clone for oraclemcp_db::DbError
 pub fn oraclemcp_db::DbError::clone(&self) -> oraclemcp_db::DbError
+impl core::convert::From<oraclemcp_db::DbError> for oraclemcp_db::NativeRedactionApplyError
+pub fn oraclemcp_db::NativeRedactionApplyError::from(oraclemcp_db::DbError) -> Self
 impl core::error::Error for oraclemcp_db::DbError
 impl core::fmt::Debug for oraclemcp_db::DbError
 pub fn oraclemcp_db::DbError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -812,6 +874,7 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DictionaryTier where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::DictionaryTier::vzip(self) -> V
 #[non_exhaustive] pub enum oraclemcp_db::FlashbackRefusalKind
+pub oraclemcp_db::FlashbackRefusalKind::CapabilityUnavailable
 pub oraclemcp_db::FlashbackRefusalKind::DefinitionChanged
 pub oraclemcp_db::FlashbackRefusalKind::NotFlashbackable
 pub oraclemcp_db::FlashbackRefusalKind::RetentionExceeded
@@ -951,6 +1014,73 @@ pub type oraclemcp_db::HealthSubcheck::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::HealthSubcheck where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::HealthSubcheck where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::HealthSubcheck::vzip(self) -> V
+#[non_exhaustive] pub enum oraclemcp_db::MaskComparabilityBreak
+pub oraclemcp_db::MaskComparabilityBreak::ActionMismatch
+pub oraclemcp_db::MaskComparabilityBreak::ActionMismatch::a: oraclemcp_db::ResultMaskingDecisionAction
+pub oraclemcp_db::MaskComparabilityBreak::ActionMismatch::b: oraclemcp_db::ResultMaskingDecisionAction
+pub oraclemcp_db::MaskComparabilityBreak::DecisionMissing
+pub oraclemcp_db::MaskComparabilityBreak::SaltMismatch
+pub oraclemcp_db::MaskComparabilityBreak::SaltMismatch::a: core::option::Option<alloc::string::String>
+pub oraclemcp_db::MaskComparabilityBreak::SaltMismatch::b: core::option::Option<alloc::string::String>
+pub oraclemcp_db::MaskComparabilityBreak::ValueDestroyed
+pub oraclemcp_db::MaskComparabilityBreak::ValueDestroyed::action: oraclemcp_db::ResultMaskingDecisionAction
+impl core::clone::Clone for oraclemcp_db::MaskComparabilityBreak
+pub fn oraclemcp_db::MaskComparabilityBreak::clone(&self) -> oraclemcp_db::MaskComparabilityBreak
+impl core::cmp::Eq for oraclemcp_db::MaskComparabilityBreak
+impl core::cmp::PartialEq for oraclemcp_db::MaskComparabilityBreak
+pub fn oraclemcp_db::MaskComparabilityBreak::eq(&self, &oraclemcp_db::MaskComparabilityBreak) -> bool
+impl core::fmt::Debug for oraclemcp_db::MaskComparabilityBreak
+pub fn oraclemcp_db::MaskComparabilityBreak::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::MaskComparabilityBreak
+impl serde_core::ser::Serialize for oraclemcp_db::MaskComparabilityBreak
+pub fn oraclemcp_db::MaskComparabilityBreak::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::MaskComparabilityBreak
+pub fn oraclemcp_db::MaskComparabilityBreak::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::MaskComparabilityBreak
+impl core::marker::Send for oraclemcp_db::MaskComparabilityBreak
+impl core::marker::Sync for oraclemcp_db::MaskComparabilityBreak
+impl core::marker::Unpin for oraclemcp_db::MaskComparabilityBreak
+impl core::marker::UnsafeUnpin for oraclemcp_db::MaskComparabilityBreak
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::MaskComparabilityBreak
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::MaskComparabilityBreak
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::MaskComparabilityBreak where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::MaskComparabilityBreak where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::MaskComparabilityBreak where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::MaskComparabilityBreak::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::MaskComparabilityBreak where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::MaskComparabilityBreak where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::MaskComparabilityBreak where U: core::convert::From<T>
+pub fn oraclemcp_db::MaskComparabilityBreak::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::MaskComparabilityBreak where U: core::convert::Into<T>
+pub type oraclemcp_db::MaskComparabilityBreak::Error = core::convert::Infallible
+pub fn oraclemcp_db::MaskComparabilityBreak::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::MaskComparabilityBreak where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::MaskComparabilityBreak::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::MaskComparabilityBreak::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::MaskComparabilityBreak where T: core::clone::Clone
+pub type oraclemcp_db::MaskComparabilityBreak::Owned = T
+pub fn oraclemcp_db::MaskComparabilityBreak::clone_into(&self, &mut T)
+pub fn oraclemcp_db::MaskComparabilityBreak::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::MaskComparabilityBreak
+impl<T> core::any::Any for oraclemcp_db::MaskComparabilityBreak where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::MaskComparabilityBreak::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::MaskComparabilityBreak where T: ?core::marker::Sized
+pub fn oraclemcp_db::MaskComparabilityBreak::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::MaskComparabilityBreak where T: ?core::marker::Sized
+pub fn oraclemcp_db::MaskComparabilityBreak::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::MaskComparabilityBreak where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::MaskComparabilityBreak::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::MaskComparabilityBreak
+pub fn oraclemcp_db::MaskComparabilityBreak::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::MaskComparabilityBreak
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::MaskComparabilityBreak where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::MaskComparabilityBreak
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::MaskComparabilityBreak
+impl<T> typenum::type_operators::Same for oraclemcp_db::MaskComparabilityBreak
+pub type oraclemcp_db::MaskComparabilityBreak::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::MaskComparabilityBreak where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::MaskComparabilityBreak where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::MaskComparabilityBreak::vzip(self) -> V
 #[non_exhaustive] pub enum oraclemcp_db::MaskingPolicyError
 pub oraclemcp_db::MaskingPolicyError::EmptySaltId
 pub oraclemcp_db::MaskingPolicyError::SaltTooShort
@@ -1013,6 +1143,250 @@ pub type oraclemcp_db::MaskingPolicyError::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::MaskingPolicyError where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::MaskingPolicyError where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::MaskingPolicyError::vzip(self) -> V
+#[non_exhaustive] pub enum oraclemcp_db::NativeRedactionApplyError
+pub oraclemcp_db::NativeRedactionApplyError::Database(oraclemcp_db::DbError)
+pub oraclemcp_db::NativeRedactionApplyError::InvalidPolicy(oraclemcp_db::NativeRedactionPolicyError)
+pub oraclemcp_db::NativeRedactionApplyError::RequiresAdvancedSecurity(&'static str)
+impl core::convert::From<oraclemcp_db::DbError> for oraclemcp_db::NativeRedactionApplyError
+pub fn oraclemcp_db::NativeRedactionApplyError::from(oraclemcp_db::DbError) -> Self
+impl core::convert::From<oraclemcp_db::NativeRedactionPolicyError> for oraclemcp_db::NativeRedactionApplyError
+pub fn oraclemcp_db::NativeRedactionApplyError::from(oraclemcp_db::NativeRedactionPolicyError) -> Self
+impl core::error::Error for oraclemcp_db::NativeRedactionApplyError
+pub fn oraclemcp_db::NativeRedactionApplyError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for oraclemcp_db::NativeRedactionApplyError
+pub fn oraclemcp_db::NativeRedactionApplyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_db::NativeRedactionApplyError
+pub fn oraclemcp_db::NativeRedactionApplyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for oraclemcp_db::NativeRedactionApplyError
+impl core::marker::Send for oraclemcp_db::NativeRedactionApplyError
+impl core::marker::Sync for oraclemcp_db::NativeRedactionApplyError
+impl core::marker::Unpin for oraclemcp_db::NativeRedactionApplyError
+impl core::marker::UnsafeUnpin for oraclemcp_db::NativeRedactionApplyError
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::NativeRedactionApplyError
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::NativeRedactionApplyError
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::NativeRedactionApplyError where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::NativeRedactionApplyError where T: 'a
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::NativeRedactionApplyError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::NativeRedactionApplyError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::NativeRedactionApplyError where U: core::convert::From<T>
+pub fn oraclemcp_db::NativeRedactionApplyError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::NativeRedactionApplyError where U: core::convert::Into<T>
+pub type oraclemcp_db::NativeRedactionApplyError::Error = core::convert::Infallible
+pub fn oraclemcp_db::NativeRedactionApplyError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::NativeRedactionApplyError where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::NativeRedactionApplyError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::NativeRedactionApplyError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for oraclemcp_db::NativeRedactionApplyError where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionApplyError::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::NativeRedactionApplyError
+impl<T> core::any::Any for oraclemcp_db::NativeRedactionApplyError where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionApplyError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::NativeRedactionApplyError where T: ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionApplyError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::NativeRedactionApplyError where T: ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionApplyError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for oraclemcp_db::NativeRedactionApplyError
+pub fn oraclemcp_db::NativeRedactionApplyError::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::NativeRedactionApplyError
+impl<T> tracing::instrument::Instrument for oraclemcp_db::NativeRedactionApplyError
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::NativeRedactionApplyError
+impl<T> typenum::type_operators::Same for oraclemcp_db::NativeRedactionApplyError
+pub type oraclemcp_db::NativeRedactionApplyError::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::NativeRedactionApplyError where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::NativeRedactionApplyError where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::NativeRedactionApplyError::vzip(self) -> V
+pub enum oraclemcp_db::NativeRedactionAvailability
+pub oraclemcp_db::NativeRedactionAvailability::Available
+pub oraclemcp_db::NativeRedactionAvailability::RequiresAdvancedSecurity
+impl oraclemcp_db::NativeRedactionAvailability
+pub const fn oraclemcp_db::NativeRedactionAvailability::note(self) -> &'static str
+impl core::clone::Clone for oraclemcp_db::NativeRedactionAvailability
+pub fn oraclemcp_db::NativeRedactionAvailability::clone(&self) -> oraclemcp_db::NativeRedactionAvailability
+impl core::cmp::Eq for oraclemcp_db::NativeRedactionAvailability
+impl core::cmp::PartialEq for oraclemcp_db::NativeRedactionAvailability
+pub fn oraclemcp_db::NativeRedactionAvailability::eq(&self, &oraclemcp_db::NativeRedactionAvailability) -> bool
+impl core::default::Default for oraclemcp_db::NativeRedactionAvailability
+pub fn oraclemcp_db::NativeRedactionAvailability::default() -> oraclemcp_db::NativeRedactionAvailability
+impl core::fmt::Debug for oraclemcp_db::NativeRedactionAvailability
+pub fn oraclemcp_db::NativeRedactionAvailability::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::NativeRedactionAvailability
+impl core::marker::StructuralPartialEq for oraclemcp_db::NativeRedactionAvailability
+impl serde_core::ser::Serialize for oraclemcp_db::NativeRedactionAvailability
+pub fn oraclemcp_db::NativeRedactionAvailability::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::NativeRedactionAvailability
+pub fn oraclemcp_db::NativeRedactionAvailability::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::NativeRedactionAvailability
+impl core::marker::Send for oraclemcp_db::NativeRedactionAvailability
+impl core::marker::Sync for oraclemcp_db::NativeRedactionAvailability
+impl core::marker::Unpin for oraclemcp_db::NativeRedactionAvailability
+impl core::marker::UnsafeUnpin for oraclemcp_db::NativeRedactionAvailability
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::NativeRedactionAvailability
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::NativeRedactionAvailability
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::NativeRedactionAvailability where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::NativeRedactionAvailability where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::NativeRedactionAvailability where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionAvailability::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::NativeRedactionAvailability where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::NativeRedactionAvailability where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::NativeRedactionAvailability where U: core::convert::From<T>
+pub fn oraclemcp_db::NativeRedactionAvailability::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::NativeRedactionAvailability where U: core::convert::Into<T>
+pub type oraclemcp_db::NativeRedactionAvailability::Error = core::convert::Infallible
+pub fn oraclemcp_db::NativeRedactionAvailability::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::NativeRedactionAvailability where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::NativeRedactionAvailability::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::NativeRedactionAvailability::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::NativeRedactionAvailability where T: core::clone::Clone
+pub type oraclemcp_db::NativeRedactionAvailability::Owned = T
+pub fn oraclemcp_db::NativeRedactionAvailability::clone_into(&self, &mut T)
+pub fn oraclemcp_db::NativeRedactionAvailability::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::NativeRedactionAvailability
+impl<T> core::any::Any for oraclemcp_db::NativeRedactionAvailability where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionAvailability::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::NativeRedactionAvailability where T: ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionAvailability::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::NativeRedactionAvailability where T: ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionAvailability::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::NativeRedactionAvailability where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::NativeRedactionAvailability::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::NativeRedactionAvailability
+pub fn oraclemcp_db::NativeRedactionAvailability::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::NativeRedactionAvailability
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::NativeRedactionAvailability where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::NativeRedactionAvailability
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::NativeRedactionAvailability
+impl<T> typenum::type_operators::Same for oraclemcp_db::NativeRedactionAvailability
+pub type oraclemcp_db::NativeRedactionAvailability::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::NativeRedactionAvailability where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::NativeRedactionAvailability where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::NativeRedactionAvailability::vzip(self) -> V
+pub enum oraclemcp_db::NativeRedactionGate
+pub oraclemcp_db::NativeRedactionGate::Disabled
+pub oraclemcp_db::NativeRedactionGate::Ready
+pub oraclemcp_db::NativeRedactionGate::RequiresAdvancedSecurity
+impl oraclemcp_db::NativeRedactionGate
+pub const fn oraclemcp_db::NativeRedactionGate::note(self) -> &'static str
+pub const fn oraclemcp_db::NativeRedactionGate::permits_application(self) -> bool
+impl core::clone::Clone for oraclemcp_db::NativeRedactionGate
+pub fn oraclemcp_db::NativeRedactionGate::clone(&self) -> oraclemcp_db::NativeRedactionGate
+impl core::cmp::Eq for oraclemcp_db::NativeRedactionGate
+impl core::cmp::PartialEq for oraclemcp_db::NativeRedactionGate
+pub fn oraclemcp_db::NativeRedactionGate::eq(&self, &oraclemcp_db::NativeRedactionGate) -> bool
+impl core::fmt::Debug for oraclemcp_db::NativeRedactionGate
+pub fn oraclemcp_db::NativeRedactionGate::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::NativeRedactionGate
+impl core::marker::StructuralPartialEq for oraclemcp_db::NativeRedactionGate
+impl serde_core::ser::Serialize for oraclemcp_db::NativeRedactionGate
+pub fn oraclemcp_db::NativeRedactionGate::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::NativeRedactionGate
+pub fn oraclemcp_db::NativeRedactionGate::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::NativeRedactionGate
+impl core::marker::Send for oraclemcp_db::NativeRedactionGate
+impl core::marker::Sync for oraclemcp_db::NativeRedactionGate
+impl core::marker::Unpin for oraclemcp_db::NativeRedactionGate
+impl core::marker::UnsafeUnpin for oraclemcp_db::NativeRedactionGate
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::NativeRedactionGate
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::NativeRedactionGate
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::NativeRedactionGate where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::NativeRedactionGate where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::NativeRedactionGate where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionGate::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::NativeRedactionGate where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::NativeRedactionGate where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::NativeRedactionGate where U: core::convert::From<T>
+pub fn oraclemcp_db::NativeRedactionGate::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::NativeRedactionGate where U: core::convert::Into<T>
+pub type oraclemcp_db::NativeRedactionGate::Error = core::convert::Infallible
+pub fn oraclemcp_db::NativeRedactionGate::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::NativeRedactionGate where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::NativeRedactionGate::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::NativeRedactionGate::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::NativeRedactionGate where T: core::clone::Clone
+pub type oraclemcp_db::NativeRedactionGate::Owned = T
+pub fn oraclemcp_db::NativeRedactionGate::clone_into(&self, &mut T)
+pub fn oraclemcp_db::NativeRedactionGate::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::NativeRedactionGate
+impl<T> core::any::Any for oraclemcp_db::NativeRedactionGate where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionGate::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::NativeRedactionGate where T: ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionGate::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::NativeRedactionGate where T: ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionGate::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::NativeRedactionGate where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::NativeRedactionGate::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::NativeRedactionGate
+pub fn oraclemcp_db::NativeRedactionGate::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::NativeRedactionGate
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::NativeRedactionGate where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::NativeRedactionGate
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::NativeRedactionGate
+impl<T> typenum::type_operators::Same for oraclemcp_db::NativeRedactionGate
+pub type oraclemcp_db::NativeRedactionGate::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::NativeRedactionGate where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::NativeRedactionGate where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::NativeRedactionGate::vzip(self) -> V
+#[non_exhaustive] pub enum oraclemcp_db::NativeRedactionPolicyError
+pub oraclemcp_db::NativeRedactionPolicyError::InvalidIdentifier
+pub oraclemcp_db::NativeRedactionPolicyError::InvalidIdentifier::field: &'static str
+impl core::clone::Clone for oraclemcp_db::NativeRedactionPolicyError
+pub fn oraclemcp_db::NativeRedactionPolicyError::clone(&self) -> oraclemcp_db::NativeRedactionPolicyError
+impl core::cmp::Eq for oraclemcp_db::NativeRedactionPolicyError
+impl core::cmp::PartialEq for oraclemcp_db::NativeRedactionPolicyError
+pub fn oraclemcp_db::NativeRedactionPolicyError::eq(&self, &oraclemcp_db::NativeRedactionPolicyError) -> bool
+impl core::convert::From<oraclemcp_db::NativeRedactionPolicyError> for oraclemcp_db::NativeRedactionApplyError
+pub fn oraclemcp_db::NativeRedactionApplyError::from(oraclemcp_db::NativeRedactionPolicyError) -> Self
+impl core::error::Error for oraclemcp_db::NativeRedactionPolicyError
+impl core::fmt::Debug for oraclemcp_db::NativeRedactionPolicyError
+pub fn oraclemcp_db::NativeRedactionPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_db::NativeRedactionPolicyError
+pub fn oraclemcp_db::NativeRedactionPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::NativeRedactionPolicyError
+impl core::marker::Freeze for oraclemcp_db::NativeRedactionPolicyError
+impl core::marker::Send for oraclemcp_db::NativeRedactionPolicyError
+impl core::marker::Sync for oraclemcp_db::NativeRedactionPolicyError
+impl core::marker::Unpin for oraclemcp_db::NativeRedactionPolicyError
+impl core::marker::UnsafeUnpin for oraclemcp_db::NativeRedactionPolicyError
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::NativeRedactionPolicyError
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::NativeRedactionPolicyError
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::NativeRedactionPolicyError where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::NativeRedactionPolicyError where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::NativeRedactionPolicyError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionPolicyError::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::NativeRedactionPolicyError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::NativeRedactionPolicyError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::NativeRedactionPolicyError where U: core::convert::From<T>
+pub fn oraclemcp_db::NativeRedactionPolicyError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::NativeRedactionPolicyError where U: core::convert::Into<T>
+pub type oraclemcp_db::NativeRedactionPolicyError::Error = core::convert::Infallible
+pub fn oraclemcp_db::NativeRedactionPolicyError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::NativeRedactionPolicyError where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::NativeRedactionPolicyError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::NativeRedactionPolicyError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::NativeRedactionPolicyError where T: core::clone::Clone
+pub type oraclemcp_db::NativeRedactionPolicyError::Owned = T
+pub fn oraclemcp_db::NativeRedactionPolicyError::clone_into(&self, &mut T)
+pub fn oraclemcp_db::NativeRedactionPolicyError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for oraclemcp_db::NativeRedactionPolicyError where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionPolicyError::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::NativeRedactionPolicyError
+impl<T> core::any::Any for oraclemcp_db::NativeRedactionPolicyError where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionPolicyError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::NativeRedactionPolicyError where T: ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionPolicyError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::NativeRedactionPolicyError where T: ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionPolicyError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::NativeRedactionPolicyError where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::NativeRedactionPolicyError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::NativeRedactionPolicyError
+pub fn oraclemcp_db::NativeRedactionPolicyError::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::NativeRedactionPolicyError
+impl<T> tracing::instrument::Instrument for oraclemcp_db::NativeRedactionPolicyError
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::NativeRedactionPolicyError
+impl<T> typenum::type_operators::Same for oraclemcp_db::NativeRedactionPolicyError
+pub type oraclemcp_db::NativeRedactionPolicyError::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::NativeRedactionPolicyError where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::NativeRedactionPolicyError where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::NativeRedactionPolicyError::vzip(self) -> V
 #[non_exhaustive] pub enum oraclemcp_db::OciError
 pub oraclemcp_db::OciError::InvalidAdbConnectString(alloc::string::String)
 pub oraclemcp_db::OciError::TokenExpired
@@ -1294,7 +1668,7 @@ pub type oraclemcp_db::QuarantineOutcome::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::QuarantineOutcome where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::QuarantineOutcome where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::QuarantineOutcome::vzip(self) -> V
-pub enum oraclemcp_db::QueryDiffError
+#[non_exhaustive] pub enum oraclemcp_db::QueryDiffError
 pub oraclemcp_db::QueryDiffError::MissingKeyColumn
 pub oraclemcp_db::QueryDiffError::MissingKeyColumn::column: alloc::string::String
 impl core::clone::Clone for oraclemcp_db::QueryDiffError
@@ -1789,6 +2163,66 @@ pub type oraclemcp_db::SearchDetailLevel::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SearchDetailLevel where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::SearchDetailLevel where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::SearchDetailLevel::vzip(self) -> V
+pub enum oraclemcp_db::SemanticSearchMetric
+pub oraclemcp_db::SemanticSearchMetric::Cosine
+pub oraclemcp_db::SemanticSearchMetric::Dot
+pub oraclemcp_db::SemanticSearchMetric::Euclidean
+impl oraclemcp_db::SemanticSearchMetric
+pub const fn oraclemcp_db::SemanticSearchMetric::as_sql(self) -> &'static str
+pub fn oraclemcp_db::SemanticSearchMetric::parse(core::option::Option<&str>) -> core::option::Option<Self>
+impl core::clone::Clone for oraclemcp_db::SemanticSearchMetric
+pub fn oraclemcp_db::SemanticSearchMetric::clone(&self) -> oraclemcp_db::SemanticSearchMetric
+impl core::cmp::Eq for oraclemcp_db::SemanticSearchMetric
+impl core::cmp::PartialEq for oraclemcp_db::SemanticSearchMetric
+pub fn oraclemcp_db::SemanticSearchMetric::eq(&self, &oraclemcp_db::SemanticSearchMetric) -> bool
+impl core::fmt::Debug for oraclemcp_db::SemanticSearchMetric
+pub fn oraclemcp_db::SemanticSearchMetric::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::SemanticSearchMetric
+impl core::marker::StructuralPartialEq for oraclemcp_db::SemanticSearchMetric
+impl core::marker::Freeze for oraclemcp_db::SemanticSearchMetric
+impl core::marker::Send for oraclemcp_db::SemanticSearchMetric
+impl core::marker::Sync for oraclemcp_db::SemanticSearchMetric
+impl core::marker::Unpin for oraclemcp_db::SemanticSearchMetric
+impl core::marker::UnsafeUnpin for oraclemcp_db::SemanticSearchMetric
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::SemanticSearchMetric
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::SemanticSearchMetric
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::SemanticSearchMetric where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::SemanticSearchMetric where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::SemanticSearchMetric where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::SemanticSearchMetric::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::SemanticSearchMetric where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::SemanticSearchMetric where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::SemanticSearchMetric where U: core::convert::From<T>
+pub fn oraclemcp_db::SemanticSearchMetric::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::SemanticSearchMetric where U: core::convert::Into<T>
+pub type oraclemcp_db::SemanticSearchMetric::Error = core::convert::Infallible
+pub fn oraclemcp_db::SemanticSearchMetric::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::SemanticSearchMetric where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::SemanticSearchMetric::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::SemanticSearchMetric::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::SemanticSearchMetric where T: core::clone::Clone
+pub type oraclemcp_db::SemanticSearchMetric::Owned = T
+pub fn oraclemcp_db::SemanticSearchMetric::clone_into(&self, &mut T)
+pub fn oraclemcp_db::SemanticSearchMetric::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::SemanticSearchMetric
+impl<T> core::any::Any for oraclemcp_db::SemanticSearchMetric where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::SemanticSearchMetric::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::SemanticSearchMetric where T: ?core::marker::Sized
+pub fn oraclemcp_db::SemanticSearchMetric::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::SemanticSearchMetric where T: ?core::marker::Sized
+pub fn oraclemcp_db::SemanticSearchMetric::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::SemanticSearchMetric where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::SemanticSearchMetric::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::SemanticSearchMetric
+pub fn oraclemcp_db::SemanticSearchMetric::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::SemanticSearchMetric
+impl<T> tracing::instrument::Instrument for oraclemcp_db::SemanticSearchMetric
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::SemanticSearchMetric
+impl<T> typenum::type_operators::Same for oraclemcp_db::SemanticSearchMetric
+pub type oraclemcp_db::SemanticSearchMetric::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SemanticSearchMetric where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::SemanticSearchMetric where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::SemanticSearchMetric::vzip(self) -> V
 pub enum oraclemcp_db::SessionPurity
 pub oraclemcp_db::SessionPurity::New
 pub oraclemcp_db::SessionPurity::Reuse
@@ -2732,6 +3166,121 @@ pub type oraclemcp_db::CloudStatus::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CloudStatus where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CloudStatus where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::CloudStatus::vzip(self) -> V
+pub struct oraclemcp_db::CqnDriverNotification
+impl oraclemcp_db::CqnDriverNotification
+pub const fn oraclemcp_db::CqnDriverNotification::for_registration(u64) -> Self
+pub const fn oraclemcp_db::CqnDriverNotification::registration_id(self) -> u64
+impl core::clone::Clone for oraclemcp_db::CqnDriverNotification
+pub fn oraclemcp_db::CqnDriverNotification::clone(&self) -> oraclemcp_db::CqnDriverNotification
+impl core::cmp::Eq for oraclemcp_db::CqnDriverNotification
+impl core::cmp::PartialEq for oraclemcp_db::CqnDriverNotification
+pub fn oraclemcp_db::CqnDriverNotification::eq(&self, &oraclemcp_db::CqnDriverNotification) -> bool
+impl core::fmt::Debug for oraclemcp_db::CqnDriverNotification
+pub fn oraclemcp_db::CqnDriverNotification::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::CqnDriverNotification
+impl core::marker::StructuralPartialEq for oraclemcp_db::CqnDriverNotification
+impl core::marker::Freeze for oraclemcp_db::CqnDriverNotification
+impl core::marker::Send for oraclemcp_db::CqnDriverNotification
+impl core::marker::Sync for oraclemcp_db::CqnDriverNotification
+impl core::marker::Unpin for oraclemcp_db::CqnDriverNotification
+impl core::marker::UnsafeUnpin for oraclemcp_db::CqnDriverNotification
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::CqnDriverNotification
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::CqnDriverNotification
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::CqnDriverNotification where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::CqnDriverNotification where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::CqnDriverNotification where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CqnDriverNotification::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::CqnDriverNotification where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::CqnDriverNotification where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::CqnDriverNotification where U: core::convert::From<T>
+pub fn oraclemcp_db::CqnDriverNotification::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::CqnDriverNotification where U: core::convert::Into<T>
+pub type oraclemcp_db::CqnDriverNotification::Error = core::convert::Infallible
+pub fn oraclemcp_db::CqnDriverNotification::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::CqnDriverNotification where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::CqnDriverNotification::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::CqnDriverNotification::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::CqnDriverNotification where T: core::clone::Clone
+pub type oraclemcp_db::CqnDriverNotification::Owned = T
+pub fn oraclemcp_db::CqnDriverNotification::clone_into(&self, &mut T)
+pub fn oraclemcp_db::CqnDriverNotification::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::CqnDriverNotification
+impl<T> core::any::Any for oraclemcp_db::CqnDriverNotification where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::CqnDriverNotification::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::CqnDriverNotification where T: ?core::marker::Sized
+pub fn oraclemcp_db::CqnDriverNotification::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::CqnDriverNotification where T: ?core::marker::Sized
+pub fn oraclemcp_db::CqnDriverNotification::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::CqnDriverNotification where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::CqnDriverNotification::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::CqnDriverNotification
+pub fn oraclemcp_db::CqnDriverNotification::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CqnDriverNotification
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CqnDriverNotification
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CqnDriverNotification
+impl<T> typenum::type_operators::Same for oraclemcp_db::CqnDriverNotification
+pub type oraclemcp_db::CqnDriverNotification::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CqnDriverNotification where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CqnDriverNotification where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::CqnDriverNotification::vzip(self) -> V
+pub struct oraclemcp_db::CqnQueryRegistration
+impl oraclemcp_db::CqnQueryRegistration
+pub const fn oraclemcp_db::CqnQueryRegistration::new(u64, u64) -> Self
+pub const fn oraclemcp_db::CqnQueryRegistration::query_id(self) -> u64
+pub const fn oraclemcp_db::CqnQueryRegistration::registration_id(self) -> u64
+impl core::clone::Clone for oraclemcp_db::CqnQueryRegistration
+pub fn oraclemcp_db::CqnQueryRegistration::clone(&self) -> oraclemcp_db::CqnQueryRegistration
+impl core::cmp::Eq for oraclemcp_db::CqnQueryRegistration
+impl core::cmp::PartialEq for oraclemcp_db::CqnQueryRegistration
+pub fn oraclemcp_db::CqnQueryRegistration::eq(&self, &oraclemcp_db::CqnQueryRegistration) -> bool
+impl core::fmt::Debug for oraclemcp_db::CqnQueryRegistration
+pub fn oraclemcp_db::CqnQueryRegistration::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::CqnQueryRegistration
+impl core::marker::StructuralPartialEq for oraclemcp_db::CqnQueryRegistration
+impl core::marker::Freeze for oraclemcp_db::CqnQueryRegistration
+impl core::marker::Send for oraclemcp_db::CqnQueryRegistration
+impl core::marker::Sync for oraclemcp_db::CqnQueryRegistration
+impl core::marker::Unpin for oraclemcp_db::CqnQueryRegistration
+impl core::marker::UnsafeUnpin for oraclemcp_db::CqnQueryRegistration
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::CqnQueryRegistration
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::CqnQueryRegistration
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::CqnQueryRegistration where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::CqnQueryRegistration where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::CqnQueryRegistration where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CqnQueryRegistration::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::CqnQueryRegistration where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::CqnQueryRegistration where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::CqnQueryRegistration where U: core::convert::From<T>
+pub fn oraclemcp_db::CqnQueryRegistration::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::CqnQueryRegistration where U: core::convert::Into<T>
+pub type oraclemcp_db::CqnQueryRegistration::Error = core::convert::Infallible
+pub fn oraclemcp_db::CqnQueryRegistration::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::CqnQueryRegistration where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::CqnQueryRegistration::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::CqnQueryRegistration::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::CqnQueryRegistration where T: core::clone::Clone
+pub type oraclemcp_db::CqnQueryRegistration::Owned = T
+pub fn oraclemcp_db::CqnQueryRegistration::clone_into(&self, &mut T)
+pub fn oraclemcp_db::CqnQueryRegistration::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::CqnQueryRegistration
+impl<T> core::any::Any for oraclemcp_db::CqnQueryRegistration where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::CqnQueryRegistration::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::CqnQueryRegistration where T: ?core::marker::Sized
+pub fn oraclemcp_db::CqnQueryRegistration::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::CqnQueryRegistration where T: ?core::marker::Sized
+pub fn oraclemcp_db::CqnQueryRegistration::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::CqnQueryRegistration where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::CqnQueryRegistration::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::CqnQueryRegistration
+pub fn oraclemcp_db::CqnQueryRegistration::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CqnQueryRegistration
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CqnQueryRegistration
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CqnQueryRegistration
+impl<T> typenum::type_operators::Same for oraclemcp_db::CqnQueryRegistration
+pub type oraclemcp_db::CqnQueryRegistration::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CqnQueryRegistration where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CqnQueryRegistration where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::CqnQueryRegistration::vzip(self) -> V
 pub struct oraclemcp_db::DbRequestQuota
 impl oraclemcp_db::DbRequestQuota
 pub fn oraclemcp_db::DbRequestQuota::consume_checkpoint(&self, &'static str) -> core::result::Result<(), oraclemcp_db::DbError>
@@ -3222,6 +3771,66 @@ pub type oraclemcp_db::IamToken::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::IamToken where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::IamToken where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::IamToken::vzip(self) -> V
+pub struct oraclemcp_db::IncomparableMaskedColumn
+pub oraclemcp_db::IncomparableMaskedColumn::column: alloc::string::String
+pub oraclemcp_db::IncomparableMaskedColumn::reason: oraclemcp_db::MaskComparabilityBreak
+impl core::clone::Clone for oraclemcp_db::IncomparableMaskedColumn
+pub fn oraclemcp_db::IncomparableMaskedColumn::clone(&self) -> oraclemcp_db::IncomparableMaskedColumn
+impl core::cmp::Eq for oraclemcp_db::IncomparableMaskedColumn
+impl core::cmp::PartialEq for oraclemcp_db::IncomparableMaskedColumn
+pub fn oraclemcp_db::IncomparableMaskedColumn::eq(&self, &oraclemcp_db::IncomparableMaskedColumn) -> bool
+impl core::fmt::Debug for oraclemcp_db::IncomparableMaskedColumn
+pub fn oraclemcp_db::IncomparableMaskedColumn::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::IncomparableMaskedColumn
+impl serde_core::ser::Serialize for oraclemcp_db::IncomparableMaskedColumn
+pub fn oraclemcp_db::IncomparableMaskedColumn::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::IncomparableMaskedColumn
+pub fn oraclemcp_db::IncomparableMaskedColumn::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::IncomparableMaskedColumn
+impl core::marker::Send for oraclemcp_db::IncomparableMaskedColumn
+impl core::marker::Sync for oraclemcp_db::IncomparableMaskedColumn
+impl core::marker::Unpin for oraclemcp_db::IncomparableMaskedColumn
+impl core::marker::UnsafeUnpin for oraclemcp_db::IncomparableMaskedColumn
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::IncomparableMaskedColumn
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::IncomparableMaskedColumn
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::IncomparableMaskedColumn where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::IncomparableMaskedColumn where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::IncomparableMaskedColumn where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::IncomparableMaskedColumn::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::IncomparableMaskedColumn where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::IncomparableMaskedColumn where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::IncomparableMaskedColumn where U: core::convert::From<T>
+pub fn oraclemcp_db::IncomparableMaskedColumn::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::IncomparableMaskedColumn where U: core::convert::Into<T>
+pub type oraclemcp_db::IncomparableMaskedColumn::Error = core::convert::Infallible
+pub fn oraclemcp_db::IncomparableMaskedColumn::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::IncomparableMaskedColumn where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::IncomparableMaskedColumn::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::IncomparableMaskedColumn::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::IncomparableMaskedColumn where T: core::clone::Clone
+pub type oraclemcp_db::IncomparableMaskedColumn::Owned = T
+pub fn oraclemcp_db::IncomparableMaskedColumn::clone_into(&self, &mut T)
+pub fn oraclemcp_db::IncomparableMaskedColumn::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::IncomparableMaskedColumn
+impl<T> core::any::Any for oraclemcp_db::IncomparableMaskedColumn where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::IncomparableMaskedColumn::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::IncomparableMaskedColumn where T: ?core::marker::Sized
+pub fn oraclemcp_db::IncomparableMaskedColumn::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::IncomparableMaskedColumn where T: ?core::marker::Sized
+pub fn oraclemcp_db::IncomparableMaskedColumn::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::IncomparableMaskedColumn where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::IncomparableMaskedColumn::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::IncomparableMaskedColumn
+pub fn oraclemcp_db::IncomparableMaskedColumn::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::IncomparableMaskedColumn
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::IncomparableMaskedColumn where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::IncomparableMaskedColumn
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::IncomparableMaskedColumn
+impl<T> typenum::type_operators::Same for oraclemcp_db::IncomparableMaskedColumn
+pub type oraclemcp_db::IncomparableMaskedColumn::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::IncomparableMaskedColumn where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::IncomparableMaskedColumn where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::IncomparableMaskedColumn::vzip(self) -> V
 pub struct oraclemcp_db::IndexDescription
 pub oraclemcp_db::IndexDescription::columns: alloc::vec::Vec<oraclemcp_db::OracleRow>
 pub oraclemcp_db::IndexDescription::expressions: alloc::vec::Vec<oraclemcp_db::OracleRow>
@@ -3590,6 +4199,70 @@ pub type oraclemcp_db::MigrationStep::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::MigrationStep where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::MigrationStep where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::MigrationStep::vzip(self) -> V
+pub struct oraclemcp_db::NativeRedactionPolicy
+impl oraclemcp_db::NativeRedactionPolicy
+pub fn oraclemcp_db::NativeRedactionPolicy::column_name(&self) -> &str
+pub fn oraclemcp_db::NativeRedactionPolicy::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, oraclemcp_db::NativeRedactionPolicyError>
+pub fn oraclemcp_db::NativeRedactionPolicy::object_name(&self) -> &str
+pub fn oraclemcp_db::NativeRedactionPolicy::object_schema(&self) -> &str
+pub fn oraclemcp_db::NativeRedactionPolicy::policy_name(&self) -> &str
+impl core::clone::Clone for oraclemcp_db::NativeRedactionPolicy
+pub fn oraclemcp_db::NativeRedactionPolicy::clone(&self) -> oraclemcp_db::NativeRedactionPolicy
+impl core::cmp::Eq for oraclemcp_db::NativeRedactionPolicy
+impl core::cmp::PartialEq for oraclemcp_db::NativeRedactionPolicy
+pub fn oraclemcp_db::NativeRedactionPolicy::eq(&self, &oraclemcp_db::NativeRedactionPolicy) -> bool
+impl core::fmt::Debug for oraclemcp_db::NativeRedactionPolicy
+pub fn oraclemcp_db::NativeRedactionPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::NativeRedactionPolicy
+impl serde_core::ser::Serialize for oraclemcp_db::NativeRedactionPolicy
+pub fn oraclemcp_db::NativeRedactionPolicy::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::NativeRedactionPolicy
+pub fn oraclemcp_db::NativeRedactionPolicy::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::NativeRedactionPolicy
+impl core::marker::Send for oraclemcp_db::NativeRedactionPolicy
+impl core::marker::Sync for oraclemcp_db::NativeRedactionPolicy
+impl core::marker::Unpin for oraclemcp_db::NativeRedactionPolicy
+impl core::marker::UnsafeUnpin for oraclemcp_db::NativeRedactionPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::NativeRedactionPolicy
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::NativeRedactionPolicy
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::NativeRedactionPolicy where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::NativeRedactionPolicy where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::NativeRedactionPolicy where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionPolicy::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::NativeRedactionPolicy where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::NativeRedactionPolicy where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::NativeRedactionPolicy where U: core::convert::From<T>
+pub fn oraclemcp_db::NativeRedactionPolicy::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::NativeRedactionPolicy where U: core::convert::Into<T>
+pub type oraclemcp_db::NativeRedactionPolicy::Error = core::convert::Infallible
+pub fn oraclemcp_db::NativeRedactionPolicy::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::NativeRedactionPolicy where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::NativeRedactionPolicy::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::NativeRedactionPolicy::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::NativeRedactionPolicy where T: core::clone::Clone
+pub type oraclemcp_db::NativeRedactionPolicy::Owned = T
+pub fn oraclemcp_db::NativeRedactionPolicy::clone_into(&self, &mut T)
+pub fn oraclemcp_db::NativeRedactionPolicy::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::NativeRedactionPolicy
+impl<T> core::any::Any for oraclemcp_db::NativeRedactionPolicy where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionPolicy::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::NativeRedactionPolicy where T: ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionPolicy::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::NativeRedactionPolicy where T: ?core::marker::Sized
+pub fn oraclemcp_db::NativeRedactionPolicy::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::NativeRedactionPolicy where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::NativeRedactionPolicy::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::NativeRedactionPolicy
+pub fn oraclemcp_db::NativeRedactionPolicy::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::NativeRedactionPolicy
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::NativeRedactionPolicy where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::NativeRedactionPolicy
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::NativeRedactionPolicy
+impl<T> typenum::type_operators::Same for oraclemcp_db::NativeRedactionPolicy
+pub type oraclemcp_db::NativeRedactionPolicy::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::NativeRedactionPolicy where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::NativeRedactionPolicy where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::NativeRedactionPolicy::vzip(self) -> V
 pub struct oraclemcp_db::OracleCatalogResolver
 impl oraclemcp_db::OracleCatalogResolver
 pub fn oraclemcp_db::OracleCatalogResolver::is_empty(&self) -> bool
@@ -4201,6 +4874,7 @@ pub fn oraclemcp_db::OraclePool::describe<'life0, 'life1, 'async_trait>(&'life0 
 pub fn oraclemcp_db::OraclePool::enable_dbms_output<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, core::option::Option<u32>) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::OraclePool::execute<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<u64, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
 pub fn oraclemcp_db::OraclePool::flashback_disable<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OraclePool::open_cqn_notification_receiver<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::boxed::Box<dyn oraclemcp_db::CqnNotificationReceiver>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::OraclePool::ping<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::OraclePool::query_bounded_page<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], oraclemcp_db::QueryCaps, usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::QueryResponse>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
 pub fn oraclemcp_db::OraclePool::query_bounded_page_named<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)], oraclemcp_db::QueryCaps, usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::QueryResponse>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
@@ -4211,12 +4885,14 @@ pub fn oraclemcp_db::OraclePool::query_rows_named<'life0, 'life1, 'life2, 'life3
 pub fn oraclemcp_db::OraclePool::query_rows_named_with_serialize_options<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)], &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
 pub fn oraclemcp_db::OraclePool::query_rows_with_serialize_options<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
 pub fn oraclemcp_db::OraclePool::read_dbms_output<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, usize, usize) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::DbmsOutput, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OraclePool::register_cqn_query<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::CqnQueryRegistration, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
 pub fn oraclemcp_db::OraclePool::request_deadline(&self, &asupersync::cx::cx::Cx) -> core::result::Result<core::option::Option<asupersync::types::id::Time>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::OraclePool::request_quota(&self, &asupersync::cx::cx::Cx) -> core::result::Result<core::option::Option<oraclemcp_db::DbRequestQuota>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::OraclePool::rollback<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::OraclePool::set_call_timeout(&self, core::option::Option<core::time::Duration>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::OraclePool::set_request_deadline(&self, &asupersync::cx::cx::Cx, core::option::Option<asupersync::types::id::Time>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::OraclePool::set_request_quota(&self, &asupersync::cx::cx::Cx, core::option::Option<oraclemcp_db::DbRequestQuota>) -> core::result::Result<(), oraclemcp_db::DbError>
+pub fn oraclemcp_db::OraclePool::unregister_cqn_query<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 impl core::marker::Freeze for oraclemcp_db::OraclePool
 impl core::marker::Send for oraclemcp_db::OraclePool
 impl core::marker::Sync for oraclemcp_db::OraclePool
@@ -4452,6 +5128,322 @@ pub type oraclemcp_db::OracleSessionIdentity::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleSessionIdentity where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleSessionIdentity where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::OracleSessionIdentity::vzip(self) -> V
+pub struct oraclemcp_db::OrientForeignKey
+pub oraclemcp_db::OrientForeignKey::child_owner: alloc::string::String
+pub oraclemcp_db::OrientForeignKey::child_table: alloc::string::String
+pub oraclemcp_db::OrientForeignKey::columns: alloc::vec::Vec<oraclemcp_db::OrientForeignKeyColumn>
+pub oraclemcp_db::OrientForeignKey::constraint_name: alloc::string::String
+pub oraclemcp_db::OrientForeignKey::parent_owner: alloc::string::String
+pub oraclemcp_db::OrientForeignKey::parent_table: alloc::string::String
+impl core::clone::Clone for oraclemcp_db::OrientForeignKey
+pub fn oraclemcp_db::OrientForeignKey::clone(&self) -> oraclemcp_db::OrientForeignKey
+impl core::cmp::Eq for oraclemcp_db::OrientForeignKey
+impl core::cmp::PartialEq for oraclemcp_db::OrientForeignKey
+pub fn oraclemcp_db::OrientForeignKey::eq(&self, &oraclemcp_db::OrientForeignKey) -> bool
+impl core::fmt::Debug for oraclemcp_db::OrientForeignKey
+pub fn oraclemcp_db::OrientForeignKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::OrientForeignKey
+impl serde_core::ser::Serialize for oraclemcp_db::OrientForeignKey
+pub fn oraclemcp_db::OrientForeignKey::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::OrientForeignKey
+pub fn oraclemcp_db::OrientForeignKey::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::OrientForeignKey
+impl core::marker::Send for oraclemcp_db::OrientForeignKey
+impl core::marker::Sync for oraclemcp_db::OrientForeignKey
+impl core::marker::Unpin for oraclemcp_db::OrientForeignKey
+impl core::marker::UnsafeUnpin for oraclemcp_db::OrientForeignKey
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OrientForeignKey
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OrientForeignKey
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OrientForeignKey where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OrientForeignKey where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::OrientForeignKey where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::OrientForeignKey::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OrientForeignKey where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OrientForeignKey where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OrientForeignKey where U: core::convert::From<T>
+pub fn oraclemcp_db::OrientForeignKey::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OrientForeignKey where U: core::convert::Into<T>
+pub type oraclemcp_db::OrientForeignKey::Error = core::convert::Infallible
+pub fn oraclemcp_db::OrientForeignKey::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OrientForeignKey where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OrientForeignKey::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OrientForeignKey::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OrientForeignKey where T: core::clone::Clone
+pub type oraclemcp_db::OrientForeignKey::Owned = T
+pub fn oraclemcp_db::OrientForeignKey::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OrientForeignKey::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OrientForeignKey
+impl<T> core::any::Any for oraclemcp_db::OrientForeignKey where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OrientForeignKey::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OrientForeignKey where T: ?core::marker::Sized
+pub fn oraclemcp_db::OrientForeignKey::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OrientForeignKey where T: ?core::marker::Sized
+pub fn oraclemcp_db::OrientForeignKey::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OrientForeignKey where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OrientForeignKey::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OrientForeignKey
+pub fn oraclemcp_db::OrientForeignKey::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OrientForeignKey
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OrientForeignKey where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OrientForeignKey
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OrientForeignKey
+impl<T> typenum::type_operators::Same for oraclemcp_db::OrientForeignKey
+pub type oraclemcp_db::OrientForeignKey::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OrientForeignKey where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OrientForeignKey where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OrientForeignKey::vzip(self) -> V
+pub struct oraclemcp_db::OrientForeignKeyColumn
+pub oraclemcp_db::OrientForeignKeyColumn::child_column: alloc::string::String
+pub oraclemcp_db::OrientForeignKeyColumn::parent_column: alloc::string::String
+pub oraclemcp_db::OrientForeignKeyColumn::position: usize
+impl core::clone::Clone for oraclemcp_db::OrientForeignKeyColumn
+pub fn oraclemcp_db::OrientForeignKeyColumn::clone(&self) -> oraclemcp_db::OrientForeignKeyColumn
+impl core::cmp::Eq for oraclemcp_db::OrientForeignKeyColumn
+impl core::cmp::PartialEq for oraclemcp_db::OrientForeignKeyColumn
+pub fn oraclemcp_db::OrientForeignKeyColumn::eq(&self, &oraclemcp_db::OrientForeignKeyColumn) -> bool
+impl core::fmt::Debug for oraclemcp_db::OrientForeignKeyColumn
+pub fn oraclemcp_db::OrientForeignKeyColumn::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::OrientForeignKeyColumn
+impl serde_core::ser::Serialize for oraclemcp_db::OrientForeignKeyColumn
+pub fn oraclemcp_db::OrientForeignKeyColumn::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::OrientForeignKeyColumn
+pub fn oraclemcp_db::OrientForeignKeyColumn::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::OrientForeignKeyColumn
+impl core::marker::Send for oraclemcp_db::OrientForeignKeyColumn
+impl core::marker::Sync for oraclemcp_db::OrientForeignKeyColumn
+impl core::marker::Unpin for oraclemcp_db::OrientForeignKeyColumn
+impl core::marker::UnsafeUnpin for oraclemcp_db::OrientForeignKeyColumn
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OrientForeignKeyColumn
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OrientForeignKeyColumn
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OrientForeignKeyColumn where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OrientForeignKeyColumn where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::OrientForeignKeyColumn where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::OrientForeignKeyColumn::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OrientForeignKeyColumn where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OrientForeignKeyColumn where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OrientForeignKeyColumn where U: core::convert::From<T>
+pub fn oraclemcp_db::OrientForeignKeyColumn::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OrientForeignKeyColumn where U: core::convert::Into<T>
+pub type oraclemcp_db::OrientForeignKeyColumn::Error = core::convert::Infallible
+pub fn oraclemcp_db::OrientForeignKeyColumn::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OrientForeignKeyColumn where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OrientForeignKeyColumn::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OrientForeignKeyColumn::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OrientForeignKeyColumn where T: core::clone::Clone
+pub type oraclemcp_db::OrientForeignKeyColumn::Owned = T
+pub fn oraclemcp_db::OrientForeignKeyColumn::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OrientForeignKeyColumn::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OrientForeignKeyColumn
+impl<T> core::any::Any for oraclemcp_db::OrientForeignKeyColumn where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OrientForeignKeyColumn::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OrientForeignKeyColumn where T: ?core::marker::Sized
+pub fn oraclemcp_db::OrientForeignKeyColumn::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OrientForeignKeyColumn where T: ?core::marker::Sized
+pub fn oraclemcp_db::OrientForeignKeyColumn::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OrientForeignKeyColumn where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OrientForeignKeyColumn::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OrientForeignKeyColumn
+pub fn oraclemcp_db::OrientForeignKeyColumn::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OrientForeignKeyColumn
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OrientForeignKeyColumn where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OrientForeignKeyColumn
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OrientForeignKeyColumn
+impl<T> typenum::type_operators::Same for oraclemcp_db::OrientForeignKeyColumn
+pub type oraclemcp_db::OrientForeignKeyColumn::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OrientForeignKeyColumn where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OrientForeignKeyColumn where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OrientForeignKeyColumn::vzip(self) -> V
+pub struct oraclemcp_db::OrientHotObject
+pub oraclemcp_db::OrientHotObject::changes_since_last_stats: i64
+pub oraclemcp_db::OrientHotObject::deletes: i64
+pub oraclemcp_db::OrientHotObject::drop_segments: i64
+pub oraclemcp_db::OrientHotObject::inserts: i64
+pub oraclemcp_db::OrientHotObject::last_modified: core::option::Option<alloc::string::String>
+pub oraclemcp_db::OrientHotObject::object_name: alloc::string::String
+pub oraclemcp_db::OrientHotObject::object_type: alloc::string::String
+pub oraclemcp_db::OrientHotObject::owner: alloc::string::String
+pub oraclemcp_db::OrientHotObject::truncated: bool
+pub oraclemcp_db::OrientHotObject::updates: i64
+impl core::clone::Clone for oraclemcp_db::OrientHotObject
+pub fn oraclemcp_db::OrientHotObject::clone(&self) -> oraclemcp_db::OrientHotObject
+impl core::cmp::Eq for oraclemcp_db::OrientHotObject
+impl core::cmp::PartialEq for oraclemcp_db::OrientHotObject
+pub fn oraclemcp_db::OrientHotObject::eq(&self, &oraclemcp_db::OrientHotObject) -> bool
+impl core::fmt::Debug for oraclemcp_db::OrientHotObject
+pub fn oraclemcp_db::OrientHotObject::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::OrientHotObject
+impl serde_core::ser::Serialize for oraclemcp_db::OrientHotObject
+pub fn oraclemcp_db::OrientHotObject::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::OrientHotObject
+pub fn oraclemcp_db::OrientHotObject::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::OrientHotObject
+impl core::marker::Send for oraclemcp_db::OrientHotObject
+impl core::marker::Sync for oraclemcp_db::OrientHotObject
+impl core::marker::Unpin for oraclemcp_db::OrientHotObject
+impl core::marker::UnsafeUnpin for oraclemcp_db::OrientHotObject
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OrientHotObject
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OrientHotObject
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OrientHotObject where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OrientHotObject where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::OrientHotObject where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::OrientHotObject::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OrientHotObject where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OrientHotObject where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OrientHotObject where U: core::convert::From<T>
+pub fn oraclemcp_db::OrientHotObject::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OrientHotObject where U: core::convert::Into<T>
+pub type oraclemcp_db::OrientHotObject::Error = core::convert::Infallible
+pub fn oraclemcp_db::OrientHotObject::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OrientHotObject where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OrientHotObject::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OrientHotObject::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OrientHotObject where T: core::clone::Clone
+pub type oraclemcp_db::OrientHotObject::Owned = T
+pub fn oraclemcp_db::OrientHotObject::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OrientHotObject::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OrientHotObject
+impl<T> core::any::Any for oraclemcp_db::OrientHotObject where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OrientHotObject::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OrientHotObject where T: ?core::marker::Sized
+pub fn oraclemcp_db::OrientHotObject::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OrientHotObject where T: ?core::marker::Sized
+pub fn oraclemcp_db::OrientHotObject::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OrientHotObject where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OrientHotObject::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OrientHotObject
+pub fn oraclemcp_db::OrientHotObject::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OrientHotObject
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OrientHotObject where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OrientHotObject
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OrientHotObject
+impl<T> typenum::type_operators::Same for oraclemcp_db::OrientHotObject
+pub type oraclemcp_db::OrientHotObject::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OrientHotObject where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OrientHotObject where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OrientHotObject::vzip(self) -> V
+pub struct oraclemcp_db::OrientRecentDdlObject
+pub oraclemcp_db::OrientRecentDdlObject::last_ddl_time: core::option::Option<alloc::string::String>
+pub oraclemcp_db::OrientRecentDdlObject::object_name: alloc::string::String
+pub oraclemcp_db::OrientRecentDdlObject::object_type: alloc::string::String
+pub oraclemcp_db::OrientRecentDdlObject::owner: alloc::string::String
+impl core::clone::Clone for oraclemcp_db::OrientRecentDdlObject
+pub fn oraclemcp_db::OrientRecentDdlObject::clone(&self) -> oraclemcp_db::OrientRecentDdlObject
+impl core::cmp::Eq for oraclemcp_db::OrientRecentDdlObject
+impl core::cmp::PartialEq for oraclemcp_db::OrientRecentDdlObject
+pub fn oraclemcp_db::OrientRecentDdlObject::eq(&self, &oraclemcp_db::OrientRecentDdlObject) -> bool
+impl core::fmt::Debug for oraclemcp_db::OrientRecentDdlObject
+pub fn oraclemcp_db::OrientRecentDdlObject::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::OrientRecentDdlObject
+impl serde_core::ser::Serialize for oraclemcp_db::OrientRecentDdlObject
+pub fn oraclemcp_db::OrientRecentDdlObject::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::OrientRecentDdlObject
+pub fn oraclemcp_db::OrientRecentDdlObject::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::OrientRecentDdlObject
+impl core::marker::Send for oraclemcp_db::OrientRecentDdlObject
+impl core::marker::Sync for oraclemcp_db::OrientRecentDdlObject
+impl core::marker::Unpin for oraclemcp_db::OrientRecentDdlObject
+impl core::marker::UnsafeUnpin for oraclemcp_db::OrientRecentDdlObject
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OrientRecentDdlObject
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OrientRecentDdlObject
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OrientRecentDdlObject where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OrientRecentDdlObject where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::OrientRecentDdlObject where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::OrientRecentDdlObject::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OrientRecentDdlObject where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OrientRecentDdlObject where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OrientRecentDdlObject where U: core::convert::From<T>
+pub fn oraclemcp_db::OrientRecentDdlObject::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OrientRecentDdlObject where U: core::convert::Into<T>
+pub type oraclemcp_db::OrientRecentDdlObject::Error = core::convert::Infallible
+pub fn oraclemcp_db::OrientRecentDdlObject::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OrientRecentDdlObject where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OrientRecentDdlObject::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OrientRecentDdlObject::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OrientRecentDdlObject where T: core::clone::Clone
+pub type oraclemcp_db::OrientRecentDdlObject::Owned = T
+pub fn oraclemcp_db::OrientRecentDdlObject::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OrientRecentDdlObject::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OrientRecentDdlObject
+impl<T> core::any::Any for oraclemcp_db::OrientRecentDdlObject where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OrientRecentDdlObject::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OrientRecentDdlObject where T: ?core::marker::Sized
+pub fn oraclemcp_db::OrientRecentDdlObject::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OrientRecentDdlObject where T: ?core::marker::Sized
+pub fn oraclemcp_db::OrientRecentDdlObject::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OrientRecentDdlObject where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OrientRecentDdlObject::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OrientRecentDdlObject
+pub fn oraclemcp_db::OrientRecentDdlObject::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OrientRecentDdlObject
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OrientRecentDdlObject where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OrientRecentDdlObject
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OrientRecentDdlObject
+impl<T> typenum::type_operators::Same for oraclemcp_db::OrientRecentDdlObject
+pub type oraclemcp_db::OrientRecentDdlObject::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OrientRecentDdlObject where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OrientRecentDdlObject where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OrientRecentDdlObject::vzip(self) -> V
+pub struct oraclemcp_db::OrientSchemaObject
+pub oraclemcp_db::OrientSchemaObject::object_name: alloc::string::String
+pub oraclemcp_db::OrientSchemaObject::object_type: alloc::string::String
+pub oraclemcp_db::OrientSchemaObject::owner: alloc::string::String
+impl core::clone::Clone for oraclemcp_db::OrientSchemaObject
+pub fn oraclemcp_db::OrientSchemaObject::clone(&self) -> oraclemcp_db::OrientSchemaObject
+impl core::cmp::Eq for oraclemcp_db::OrientSchemaObject
+impl core::cmp::PartialEq for oraclemcp_db::OrientSchemaObject
+pub fn oraclemcp_db::OrientSchemaObject::eq(&self, &oraclemcp_db::OrientSchemaObject) -> bool
+impl core::fmt::Debug for oraclemcp_db::OrientSchemaObject
+pub fn oraclemcp_db::OrientSchemaObject::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::OrientSchemaObject
+impl serde_core::ser::Serialize for oraclemcp_db::OrientSchemaObject
+pub fn oraclemcp_db::OrientSchemaObject::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::OrientSchemaObject
+pub fn oraclemcp_db::OrientSchemaObject::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::OrientSchemaObject
+impl core::marker::Send for oraclemcp_db::OrientSchemaObject
+impl core::marker::Sync for oraclemcp_db::OrientSchemaObject
+impl core::marker::Unpin for oraclemcp_db::OrientSchemaObject
+impl core::marker::UnsafeUnpin for oraclemcp_db::OrientSchemaObject
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OrientSchemaObject
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OrientSchemaObject
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OrientSchemaObject where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OrientSchemaObject where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::OrientSchemaObject where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::OrientSchemaObject::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OrientSchemaObject where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OrientSchemaObject where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OrientSchemaObject where U: core::convert::From<T>
+pub fn oraclemcp_db::OrientSchemaObject::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OrientSchemaObject where U: core::convert::Into<T>
+pub type oraclemcp_db::OrientSchemaObject::Error = core::convert::Infallible
+pub fn oraclemcp_db::OrientSchemaObject::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OrientSchemaObject where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OrientSchemaObject::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OrientSchemaObject::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OrientSchemaObject where T: core::clone::Clone
+pub type oraclemcp_db::OrientSchemaObject::Owned = T
+pub fn oraclemcp_db::OrientSchemaObject::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OrientSchemaObject::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OrientSchemaObject
+impl<T> core::any::Any for oraclemcp_db::OrientSchemaObject where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OrientSchemaObject::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OrientSchemaObject where T: ?core::marker::Sized
+pub fn oraclemcp_db::OrientSchemaObject::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OrientSchemaObject where T: ?core::marker::Sized
+pub fn oraclemcp_db::OrientSchemaObject::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OrientSchemaObject where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OrientSchemaObject::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OrientSchemaObject
+pub fn oraclemcp_db::OrientSchemaObject::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OrientSchemaObject
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OrientSchemaObject where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OrientSchemaObject
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OrientSchemaObject
+impl<T> typenum::type_operators::Same for oraclemcp_db::OrientSchemaObject
+pub type oraclemcp_db::OrientSchemaObject::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OrientSchemaObject where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OrientSchemaObject where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OrientSchemaObject::vzip(self) -> V
 pub struct oraclemcp_db::ParsedHealthRequest
 pub oraclemcp_db::ParsedHealthRequest::subchecks: alloc::vec::Vec<oraclemcp_db::HealthSubcheck>
 pub oraclemcp_db::ParsedHealthRequest::unknown: alloc::vec::Vec<alloc::string::String>
@@ -4699,6 +5691,131 @@ pub type oraclemcp_db::PlanCostSummary::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PlanCostSummary where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PlanCostSummary where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::PlanCostSummary::vzip(self) -> V
+pub struct oraclemcp_db::PlanCostTimeline
+pub oraclemcp_db::PlanCostTimeline::note: alloc::string::String
+pub oraclemcp_db::PlanCostTimeline::points: alloc::vec::Vec<oraclemcp_db::PlanCostTimelinePoint>
+pub oraclemcp_db::PlanCostTimeline::sql_id: alloc::string::String
+impl core::clone::Clone for oraclemcp_db::PlanCostTimeline
+pub fn oraclemcp_db::PlanCostTimeline::clone(&self) -> oraclemcp_db::PlanCostTimeline
+impl core::cmp::Eq for oraclemcp_db::PlanCostTimeline
+impl core::cmp::PartialEq for oraclemcp_db::PlanCostTimeline
+pub fn oraclemcp_db::PlanCostTimeline::eq(&self, &oraclemcp_db::PlanCostTimeline) -> bool
+impl core::fmt::Debug for oraclemcp_db::PlanCostTimeline
+pub fn oraclemcp_db::PlanCostTimeline::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::PlanCostTimeline
+impl serde_core::ser::Serialize for oraclemcp_db::PlanCostTimeline
+pub fn oraclemcp_db::PlanCostTimeline::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::PlanCostTimeline
+pub fn oraclemcp_db::PlanCostTimeline::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::PlanCostTimeline
+impl core::marker::Send for oraclemcp_db::PlanCostTimeline
+impl core::marker::Sync for oraclemcp_db::PlanCostTimeline
+impl core::marker::Unpin for oraclemcp_db::PlanCostTimeline
+impl core::marker::UnsafeUnpin for oraclemcp_db::PlanCostTimeline
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::PlanCostTimeline
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::PlanCostTimeline
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::PlanCostTimeline where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::PlanCostTimeline where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::PlanCostTimeline where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostTimeline::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::PlanCostTimeline where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::PlanCostTimeline where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::PlanCostTimeline where U: core::convert::From<T>
+pub fn oraclemcp_db::PlanCostTimeline::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::PlanCostTimeline where U: core::convert::Into<T>
+pub type oraclemcp_db::PlanCostTimeline::Error = core::convert::Infallible
+pub fn oraclemcp_db::PlanCostTimeline::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::PlanCostTimeline where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::PlanCostTimeline::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::PlanCostTimeline::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::PlanCostTimeline where T: core::clone::Clone
+pub type oraclemcp_db::PlanCostTimeline::Owned = T
+pub fn oraclemcp_db::PlanCostTimeline::clone_into(&self, &mut T)
+pub fn oraclemcp_db::PlanCostTimeline::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::PlanCostTimeline
+impl<T> core::any::Any for oraclemcp_db::PlanCostTimeline where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostTimeline::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::PlanCostTimeline where T: ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostTimeline::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::PlanCostTimeline where T: ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostTimeline::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::PlanCostTimeline where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::PlanCostTimeline::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::PlanCostTimeline
+pub fn oraclemcp_db::PlanCostTimeline::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PlanCostTimeline
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::PlanCostTimeline where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::PlanCostTimeline
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PlanCostTimeline
+impl<T> typenum::type_operators::Same for oraclemcp_db::PlanCostTimeline
+pub type oraclemcp_db::PlanCostTimeline::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PlanCostTimeline where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PlanCostTimeline where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::PlanCostTimeline::vzip(self) -> V
+pub struct oraclemcp_db::PlanCostTimelinePoint
+pub oraclemcp_db::PlanCostTimelinePoint::instance_number: i64
+pub oraclemcp_db::PlanCostTimelinePoint::optimizer_cost: core::option::Option<i64>
+pub oraclemcp_db::PlanCostTimelinePoint::plan_hash_value: i64
+pub oraclemcp_db::PlanCostTimelinePoint::snapshot_begin_time: core::option::Option<alloc::string::String>
+pub oraclemcp_db::PlanCostTimelinePoint::snapshot_end_time: core::option::Option<alloc::string::String>
+pub oraclemcp_db::PlanCostTimelinePoint::snapshot_id: i64
+impl core::clone::Clone for oraclemcp_db::PlanCostTimelinePoint
+pub fn oraclemcp_db::PlanCostTimelinePoint::clone(&self) -> oraclemcp_db::PlanCostTimelinePoint
+impl core::cmp::Eq for oraclemcp_db::PlanCostTimelinePoint
+impl core::cmp::PartialEq for oraclemcp_db::PlanCostTimelinePoint
+pub fn oraclemcp_db::PlanCostTimelinePoint::eq(&self, &oraclemcp_db::PlanCostTimelinePoint) -> bool
+impl core::fmt::Debug for oraclemcp_db::PlanCostTimelinePoint
+pub fn oraclemcp_db::PlanCostTimelinePoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::PlanCostTimelinePoint
+impl serde_core::ser::Serialize for oraclemcp_db::PlanCostTimelinePoint
+pub fn oraclemcp_db::PlanCostTimelinePoint::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::PlanCostTimelinePoint
+pub fn oraclemcp_db::PlanCostTimelinePoint::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::PlanCostTimelinePoint
+impl core::marker::Send for oraclemcp_db::PlanCostTimelinePoint
+impl core::marker::Sync for oraclemcp_db::PlanCostTimelinePoint
+impl core::marker::Unpin for oraclemcp_db::PlanCostTimelinePoint
+impl core::marker::UnsafeUnpin for oraclemcp_db::PlanCostTimelinePoint
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::PlanCostTimelinePoint
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::PlanCostTimelinePoint
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::PlanCostTimelinePoint where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::PlanCostTimelinePoint where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::PlanCostTimelinePoint where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostTimelinePoint::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::PlanCostTimelinePoint where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::PlanCostTimelinePoint where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::PlanCostTimelinePoint where U: core::convert::From<T>
+pub fn oraclemcp_db::PlanCostTimelinePoint::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::PlanCostTimelinePoint where U: core::convert::Into<T>
+pub type oraclemcp_db::PlanCostTimelinePoint::Error = core::convert::Infallible
+pub fn oraclemcp_db::PlanCostTimelinePoint::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::PlanCostTimelinePoint where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::PlanCostTimelinePoint::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::PlanCostTimelinePoint::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::PlanCostTimelinePoint where T: core::clone::Clone
+pub type oraclemcp_db::PlanCostTimelinePoint::Owned = T
+pub fn oraclemcp_db::PlanCostTimelinePoint::clone_into(&self, &mut T)
+pub fn oraclemcp_db::PlanCostTimelinePoint::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::PlanCostTimelinePoint
+impl<T> core::any::Any for oraclemcp_db::PlanCostTimelinePoint where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostTimelinePoint::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::PlanCostTimelinePoint where T: ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostTimelinePoint::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::PlanCostTimelinePoint where T: ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostTimelinePoint::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::PlanCostTimelinePoint where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::PlanCostTimelinePoint::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::PlanCostTimelinePoint
+pub fn oraclemcp_db::PlanCostTimelinePoint::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PlanCostTimelinePoint
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::PlanCostTimelinePoint where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::PlanCostTimelinePoint
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PlanCostTimelinePoint
+impl<T> typenum::type_operators::Same for oraclemcp_db::PlanCostTimelinePoint
+pub type oraclemcp_db::PlanCostTimelinePoint::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PlanCostTimelinePoint where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PlanCostTimelinePoint where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::PlanCostTimelinePoint::vzip(self) -> V
 pub struct oraclemcp_db::PlscopeIdentifier
 pub oraclemcp_db::PlscopeIdentifier::col: i64
 pub oraclemcp_db::PlscopeIdentifier::line: i64
@@ -5248,7 +6365,11 @@ pub oraclemcp_db::QueryDiff::keyed: bool
 pub oraclemcp_db::QueryDiff::removed: alloc::vec::Vec<serde_json::value::Value>
 pub oraclemcp_db::QueryDiff::row_count_a: usize
 pub oraclemcp_db::QueryDiff::row_count_b: usize
+pub oraclemcp_db::QueryDiff::source_a: oraclemcp_db::QueryDiffSource
+pub oraclemcp_db::QueryDiff::source_b: oraclemcp_db::QueryDiffSource
 pub oraclemcp_db::QueryDiff::truncated: bool
+impl oraclemcp_db::QueryDiff
+pub fn oraclemcp_db::QueryDiff::with_sources(self, oraclemcp_db::QueryDiffSource, oraclemcp_db::QueryDiffSource) -> Self
 impl core::clone::Clone for oraclemcp_db::QueryDiff
 pub fn oraclemcp_db::QueryDiff::clone(&self) -> oraclemcp_db::QueryDiff
 impl core::cmp::Eq for oraclemcp_db::QueryDiff
@@ -5367,10 +6488,77 @@ pub type oraclemcp_db::QueryDiffChange::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::QueryDiffChange where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::QueryDiffChange where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::QueryDiffChange::vzip(self) -> V
+pub struct oraclemcp_db::QueryDiffSource
+pub oraclemcp_db::QueryDiffSource::profile: core::option::Option<alloc::string::String>
+pub oraclemcp_db::QueryDiffSource::scn: core::option::Option<u64>
+impl oraclemcp_db::QueryDiffSource
+pub fn oraclemcp_db::QueryDiffSource::at_scn(self, core::option::Option<u64>) -> Self
+pub fn oraclemcp_db::QueryDiffSource::profile(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oraclemcp_db::QueryDiffSource::scn(u64) -> Self
+impl core::clone::Clone for oraclemcp_db::QueryDiffSource
+pub fn oraclemcp_db::QueryDiffSource::clone(&self) -> oraclemcp_db::QueryDiffSource
+impl core::cmp::Eq for oraclemcp_db::QueryDiffSource
+impl core::cmp::PartialEq for oraclemcp_db::QueryDiffSource
+pub fn oraclemcp_db::QueryDiffSource::eq(&self, &oraclemcp_db::QueryDiffSource) -> bool
+impl core::default::Default for oraclemcp_db::QueryDiffSource
+pub fn oraclemcp_db::QueryDiffSource::default() -> oraclemcp_db::QueryDiffSource
+impl core::fmt::Debug for oraclemcp_db::QueryDiffSource
+pub fn oraclemcp_db::QueryDiffSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::QueryDiffSource
+impl serde_core::ser::Serialize for oraclemcp_db::QueryDiffSource
+pub fn oraclemcp_db::QueryDiffSource::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::QueryDiffSource
+pub fn oraclemcp_db::QueryDiffSource::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::QueryDiffSource
+impl core::marker::Send for oraclemcp_db::QueryDiffSource
+impl core::marker::Sync for oraclemcp_db::QueryDiffSource
+impl core::marker::Unpin for oraclemcp_db::QueryDiffSource
+impl core::marker::UnsafeUnpin for oraclemcp_db::QueryDiffSource
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::QueryDiffSource
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::QueryDiffSource
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::QueryDiffSource where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::QueryDiffSource where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::QueryDiffSource where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::QueryDiffSource::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::QueryDiffSource where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::QueryDiffSource where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::QueryDiffSource where U: core::convert::From<T>
+pub fn oraclemcp_db::QueryDiffSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::QueryDiffSource where U: core::convert::Into<T>
+pub type oraclemcp_db::QueryDiffSource::Error = core::convert::Infallible
+pub fn oraclemcp_db::QueryDiffSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::QueryDiffSource where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::QueryDiffSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::QueryDiffSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::QueryDiffSource where T: core::clone::Clone
+pub type oraclemcp_db::QueryDiffSource::Owned = T
+pub fn oraclemcp_db::QueryDiffSource::clone_into(&self, &mut T)
+pub fn oraclemcp_db::QueryDiffSource::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::QueryDiffSource
+impl<T> core::any::Any for oraclemcp_db::QueryDiffSource where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::QueryDiffSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::QueryDiffSource where T: ?core::marker::Sized
+pub fn oraclemcp_db::QueryDiffSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::QueryDiffSource where T: ?core::marker::Sized
+pub fn oraclemcp_db::QueryDiffSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::QueryDiffSource where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::QueryDiffSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::QueryDiffSource
+pub fn oraclemcp_db::QueryDiffSource::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::QueryDiffSource
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::QueryDiffSource where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::QueryDiffSource
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::QueryDiffSource
+impl<T> typenum::type_operators::Same for oraclemcp_db::QueryDiffSource
+pub type oraclemcp_db::QueryDiffSource::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::QueryDiffSource where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::QueryDiffSource where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::QueryDiffSource::vzip(self) -> V
 pub struct oraclemcp_db::QueryResponse
 pub oraclemcp_db::QueryResponse::columns: alloc::vec::Vec<alloc::string::String>
 pub oraclemcp_db::QueryResponse::mask_certificate: core::option::Option<oraclemcp_db::ResultMaskingCertificate>
 pub oraclemcp_db::QueryResponse::next_cursor: core::option::Option<alloc::string::String>
+pub oraclemcp_db::QueryResponse::observed_scn: core::option::Option<u64>
 pub oraclemcp_db::QueryResponse::row_count: usize
 pub oraclemcp_db::QueryResponse::rows: alloc::vec::Vec<serde_json::value::Value>
 pub oraclemcp_db::QueryResponse::total_bytes: usize
@@ -5874,6 +7062,7 @@ pub oraclemcp_db::ResultMaskingPolicy::token_salt: core::option::Option<oraclemc
 impl oraclemcp_db::ResultMaskingPolicy
 pub fn oraclemcp_db::ResultMaskingPolicy::certificate_for_row(&self, &oraclemcp_db::OracleRow) -> core::option::Option<oraclemcp_db::ResultMaskingCertificate>
 pub fn oraclemcp_db::ResultMaskingPolicy::new(alloc::vec::Vec<oraclemcp_db::ResultMaskingRule>, bool) -> Self
+pub fn oraclemcp_db::ResultMaskingPolicy::transforms_filter_column(&self, core::option::Option<&str>, core::option::Option<&str>, &str) -> bool
 pub fn oraclemcp_db::ResultMaskingPolicy::with_profile(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oraclemcp_db::ResultMaskingPolicy::with_token_salt(self, oraclemcp_db::ProfileMaskingSalt) -> Self
 impl core::clone::Clone for oraclemcp_db::ResultMaskingPolicy
@@ -6001,6 +7190,7 @@ pub fn oraclemcp_db::RustOracleConnection::describe<'life0, 'life1, 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::enable_dbms_output<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, core::option::Option<u32>) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::execute<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<u64, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::flashback_disable<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::RustOracleConnection::open_cqn_notification_receiver<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::boxed::Box<dyn oraclemcp_db::CqnNotificationReceiver>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::ping<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::query_bounded_page<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], oraclemcp_db::QueryCaps, usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::QueryResponse>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::query_bounded_page_named<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)], oraclemcp_db::QueryCaps, usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::QueryResponse>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
@@ -6011,12 +7201,14 @@ pub fn oraclemcp_db::RustOracleConnection::query_rows_named<'life0, 'life1, 'lif
 pub fn oraclemcp_db::RustOracleConnection::query_rows_named_with_serialize_options<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)], &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::query_rows_with_serialize_options<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::read_dbms_output<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, usize, usize) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::DbmsOutput, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::RustOracleConnection::register_cqn_query<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::CqnQueryRegistration, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::request_deadline(&self, &asupersync::cx::cx::Cx) -> core::result::Result<core::option::Option<asupersync::types::id::Time>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::RustOracleConnection::request_quota(&self, &asupersync::cx::cx::Cx) -> core::result::Result<core::option::Option<oraclemcp_db::DbRequestQuota>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::RustOracleConnection::rollback<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::set_call_timeout(&self, core::option::Option<core::time::Duration>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::RustOracleConnection::set_request_deadline(&self, &asupersync::cx::cx::Cx, core::option::Option<asupersync::types::id::Time>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::RustOracleConnection::set_request_quota(&self, &asupersync::cx::cx::Cx, core::option::Option<oraclemcp_db::DbRequestQuota>) -> core::result::Result<(), oraclemcp_db::DbError>
+pub fn oraclemcp_db::RustOracleConnection::unregister_cqn_query<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 impl !core::marker::Freeze for oraclemcp_db::RustOracleConnection
 impl core::marker::Send for oraclemcp_db::RustOracleConnection
 impl core::marker::Sync for oraclemcp_db::RustOracleConnection
@@ -6494,6 +7686,7 @@ impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::SerializeOptions where V
 pub fn oraclemcp_db::SerializeOptions::vzip(self) -> V
 pub struct oraclemcp_db::ServerFeatures
 pub oraclemcp_db::ServerFeatures::edition: core::option::Option<alloc::string::String>
+pub oraclemcp_db::ServerFeatures::native_redaction: oraclemcp_db::NativeRedactionAvailability
 pub oraclemcp_db::ServerFeatures::partitioning: core::option::Option<bool>
 pub oraclemcp_db::ServerFeatures::protocol_version: core::option::Option<u16>
 pub oraclemcp_db::ServerFeatures::sdu: core::option::Option<usize>
@@ -6507,6 +7700,7 @@ pub oraclemcp_db::ServerFeatures::supports_vector: core::option::Option<bool>
 pub oraclemcp_db::ServerFeatures::version: core::option::Option<oraclemcp_db::ServerVersion>
 impl oraclemcp_db::ServerFeatures
 pub fn oraclemcp_db::ServerFeatures::from_probe(core::option::Option<(u8, u8, u8, u8, u8)>, usize, bool, bool, core::option::Option<alloc::string::String>, core::option::Option<bool>, core::option::Option<u16>, core::option::Option<bool>) -> Self
+pub fn oraclemcp_db::ServerFeatures::with_native_redaction(self, oraclemcp_db::NativeRedactionAvailability) -> Self
 impl core::clone::Clone for oraclemcp_db::ServerFeatures
 pub fn oraclemcp_db::ServerFeatures::clone(&self) -> oraclemcp_db::ServerFeatures
 impl core::cmp::Eq for oraclemcp_db::ServerFeatures
@@ -7541,10 +8735,15 @@ pub const oraclemcp_db::JSON_MIN_MAJOR: u8
 pub const oraclemcp_db::MASKED_RESULT_VALUE: &str
 pub const oraclemcp_db::MAX_CATALOG_NAMES: usize
 pub const oraclemcp_db::MIN_PROFILE_MASKING_SALT_BYTES: usize
+pub const oraclemcp_db::NATIVE_REDACTION_ADD_POLICY_SQL: &str
+pub const oraclemcp_db::NATIVE_REDACTION_OPTION_SQL: &str
 pub const oraclemcp_db::ORACLE_CELL_STRUCTURED_CONTRACT_VERSION: u16
 pub const oraclemcp_db::PLAN_COST_ESTIMATE_NOTE: &str
+pub const oraclemcp_db::PLAN_COST_TIMELINE_NOTE: &str
 pub const oraclemcp_db::SODA_MIN_MAJOR: u8
 pub const oraclemcp_db::VECTOR_MIN_MAJOR: u8
+pub trait oraclemcp_db::CqnNotificationReceiver
+pub fn oraclemcp_db::CqnNotificationReceiver::next_notification<'life0, 'life1, 'async_trait>(&'life0 mut self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::CqnNotificationOutcome, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub trait oraclemcp_db::IamTokenSource
 pub fn oraclemcp_db::IamTokenSource::fetch(&self) -> core::result::Result<oraclemcp_db::IamToken, oraclemcp_db::OciError>
 pub trait oraclemcp_db::OracleConnection: core::marker::Send + core::marker::Sync
@@ -7556,6 +8755,7 @@ pub fn oraclemcp_db::OracleConnection::describe<'life0, 'life1, 'async_trait>(&'
 pub fn oraclemcp_db::OracleConnection::enable_dbms_output<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, core::option::Option<u32>) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::OracleConnection::execute<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<u64, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
 pub fn oraclemcp_db::OracleConnection::flashback_disable<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OracleConnection::open_cqn_notification_receiver<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::boxed::Box<dyn oraclemcp_db::CqnNotificationReceiver>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::OracleConnection::ping<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::OracleConnection::query_bounded_page<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], oraclemcp_db::QueryCaps, usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::QueryResponse>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
 pub fn oraclemcp_db::OracleConnection::query_bounded_page_named<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)], oraclemcp_db::QueryCaps, usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::QueryResponse>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
@@ -7566,12 +8766,14 @@ pub fn oraclemcp_db::OracleConnection::query_rows_named<'life0, 'life1, 'life2, 
 pub fn oraclemcp_db::OracleConnection::query_rows_named_with_serialize_options<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)], &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
 pub fn oraclemcp_db::OracleConnection::query_rows_with_serialize_options<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
 pub fn oraclemcp_db::OracleConnection::read_dbms_output<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, usize, usize) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::DbmsOutput, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OracleConnection::register_cqn_query<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::CqnQueryRegistration, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
 pub fn oraclemcp_db::OracleConnection::request_deadline(&self, &asupersync::cx::cx::Cx) -> core::result::Result<core::option::Option<asupersync::types::id::Time>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::OracleConnection::request_quota(&self, &asupersync::cx::cx::Cx) -> core::result::Result<core::option::Option<oraclemcp_db::DbRequestQuota>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::OracleConnection::rollback<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::OracleConnection::set_call_timeout(&self, core::option::Option<core::time::Duration>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::OracleConnection::set_request_deadline(&self, &asupersync::cx::cx::Cx, core::option::Option<asupersync::types::id::Time>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::OracleConnection::set_request_quota(&self, &asupersync::cx::cx::Cx, core::option::Option<oraclemcp_db::DbRequestQuota>) -> core::result::Result<(), oraclemcp_db::DbError>
+pub fn oraclemcp_db::OracleConnection::unregister_cqn_query<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 impl oraclemcp_db::OracleConnection for oraclemcp_db::OraclePool
 pub fn oraclemcp_db::OraclePool::backend(&self) -> oraclemcp_db::OracleBackend
 pub fn oraclemcp_db::OraclePool::call_routine<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleRoutineArg]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::ExecuteOutcome, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
@@ -7581,6 +8783,7 @@ pub fn oraclemcp_db::OraclePool::describe<'life0, 'life1, 'async_trait>(&'life0 
 pub fn oraclemcp_db::OraclePool::enable_dbms_output<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, core::option::Option<u32>) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::OraclePool::execute<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<u64, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
 pub fn oraclemcp_db::OraclePool::flashback_disable<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OraclePool::open_cqn_notification_receiver<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::boxed::Box<dyn oraclemcp_db::CqnNotificationReceiver>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::OraclePool::ping<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::OraclePool::query_bounded_page<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], oraclemcp_db::QueryCaps, usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::QueryResponse>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
 pub fn oraclemcp_db::OraclePool::query_bounded_page_named<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)], oraclemcp_db::QueryCaps, usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::QueryResponse>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
@@ -7591,12 +8794,14 @@ pub fn oraclemcp_db::OraclePool::query_rows_named<'life0, 'life1, 'life2, 'life3
 pub fn oraclemcp_db::OraclePool::query_rows_named_with_serialize_options<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)], &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
 pub fn oraclemcp_db::OraclePool::query_rows_with_serialize_options<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
 pub fn oraclemcp_db::OraclePool::read_dbms_output<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, usize, usize) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::DbmsOutput, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OraclePool::register_cqn_query<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::CqnQueryRegistration, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
 pub fn oraclemcp_db::OraclePool::request_deadline(&self, &asupersync::cx::cx::Cx) -> core::result::Result<core::option::Option<asupersync::types::id::Time>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::OraclePool::request_quota(&self, &asupersync::cx::cx::Cx) -> core::result::Result<core::option::Option<oraclemcp_db::DbRequestQuota>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::OraclePool::rollback<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::OraclePool::set_call_timeout(&self, core::option::Option<core::time::Duration>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::OraclePool::set_request_deadline(&self, &asupersync::cx::cx::Cx, core::option::Option<asupersync::types::id::Time>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::OraclePool::set_request_quota(&self, &asupersync::cx::cx::Cx, core::option::Option<oraclemcp_db::DbRequestQuota>) -> core::result::Result<(), oraclemcp_db::DbError>
+pub fn oraclemcp_db::OraclePool::unregister_cqn_query<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 impl oraclemcp_db::OracleConnection for oraclemcp_db::RustOracleConnection
 pub fn oraclemcp_db::RustOracleConnection::backend(&self) -> oraclemcp_db::OracleBackend
 pub fn oraclemcp_db::RustOracleConnection::call_routine<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleRoutineArg]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::ExecuteOutcome, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
@@ -7606,6 +8811,7 @@ pub fn oraclemcp_db::RustOracleConnection::describe<'life0, 'life1, 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::enable_dbms_output<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, core::option::Option<u32>) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::execute<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<u64, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::flashback_disable<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::RustOracleConnection::open_cqn_notification_receiver<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::boxed::Box<dyn oraclemcp_db::CqnNotificationReceiver>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::ping<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::query_bounded_page<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], oraclemcp_db::QueryCaps, usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::QueryResponse>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::query_bounded_page_named<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)], oraclemcp_db::QueryCaps, usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::QueryResponse>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
@@ -7616,12 +8822,15 @@ pub fn oraclemcp_db::RustOracleConnection::query_rows_named<'life0, 'life1, 'lif
 pub fn oraclemcp_db::RustOracleConnection::query_rows_named_with_serialize_options<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)], &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::query_rows_with_serialize_options<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::read_dbms_output<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, usize, usize) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::DbmsOutput, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::RustOracleConnection::register_cqn_query<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::CqnQueryRegistration, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::request_deadline(&self, &asupersync::cx::cx::Cx) -> core::result::Result<core::option::Option<asupersync::types::id::Time>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::RustOracleConnection::request_quota(&self, &asupersync::cx::cx::Cx) -> core::result::Result<core::option::Option<oraclemcp_db::DbRequestQuota>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::RustOracleConnection::rollback<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::set_call_timeout(&self, core::option::Option<core::time::Duration>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::RustOracleConnection::set_request_deadline(&self, &asupersync::cx::cx::Cx, core::option::Option<asupersync::types::id::Time>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::RustOracleConnection::set_request_quota(&self, &asupersync::cx::cx::Cx, core::option::Option<oraclemcp_db::DbRequestQuota>) -> core::result::Result<(), oraclemcp_db::DbError>
+pub fn oraclemcp_db::RustOracleConnection::unregister_cqn_query<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub async fn oraclemcp_db::apply_native_redaction_policy(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, bool, bool, &oraclemcp_db::NativeRedactionPolicy) -> core::result::Result<(), oraclemcp_db::NativeRedactionApplyError>
 pub fn oraclemcp_db::assemble_cost_estimate(&[oraclemcp_db::OracleRow]) -> core::option::Option<oraclemcp_db::PlanCostEstimate>
 pub fn oraclemcp_db::base64_encode(&[u8]) -> alloc::string::String
 pub fn oraclemcp_db::buffer_cache_hit_ratio_sql() -> (&'static str, alloc::string::String)
@@ -7655,26 +8864,35 @@ pub async fn oraclemcp_db::explain_plan(&asupersync::cx::cx::Cx, &dyn oraclemcp_
 pub async fn oraclemcp_db::extract_catalog_rowsets<C: oraclemcp_db::OracleConnection + ?core::marker::Sized>(&asupersync::cx::cx::Cx, &C, &oraclemcp_db::CatalogExtractRequest) -> core::result::Result<oraclemcp_db::CatalogExtractReport, oraclemcp_db::DbError>
 pub fn oraclemcp_db::extract_hints(&str) -> oraclemcp_db::TnsDescriptorHints
 pub fn oraclemcp_db::find_unused_declarations(&[oraclemcp_db::PlscopeIdentifier]) -> alloc::vec::Vec<alloc::string::String>
+pub const fn oraclemcp_db::gate_native_redaction(bool, bool, oraclemcp_db::NativeRedactionAvailability) -> oraclemcp_db::NativeRedactionGate
 pub async fn oraclemcp_db::get_ddl(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, &str) -> core::result::Result<core::option::Option<alloc::string::String>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::get_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, &str, usize) -> core::result::Result<oraclemcp_db::SourceText, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::get_sources_by_name(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::SourceText>, oraclemcp_db::DbError>
+pub fn oraclemcp_db::incomparable_masked_columns(&[alloc::string::String], core::option::Option<&oraclemcp_db::ResultMaskingCertificate>, core::option::Option<&oraclemcp_db::ResultMaskingCertificate>) -> alloc::vec::Vec<oraclemcp_db::IncomparableMaskedColumn>
 pub fn oraclemcp_db::invalid_objects_sql(oraclemcp_db::ViewTier) -> (&'static str, alloc::string::String)
 pub fn oraclemcp_db::is_ddl_object_type(&str) -> bool
+pub fn oraclemcp_db::is_simple_identifier(&str) -> bool
 pub async fn oraclemcp_db::list_objects(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, core::option::Option<&str>, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::list_schemas(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::list_source_types(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::migration_plan(&oraclemcp_db::SchemaDiff) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::MigrationStep>, oraclemcp_db::SchemaDiffError>
 pub fn oraclemcp_db::normalize_source_object_type(&str) -> core::option::Option<&'static str>
 pub fn oraclemcp_db::oracle_driver_compiled() -> bool
+pub async fn oraclemcp_db::orient_fks(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OrientForeignKey>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::orient_hot_objects(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OrientHotObject>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::orient_recent_ddl(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OrientRecentDdlObject>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::orient_schema(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OrientSchemaObject>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::paginated_sql(&str, usize, usize) -> alloc::string::String
 pub fn oraclemcp_db::parse_health_request(&str) -> oraclemcp_db::ParsedHealthRequest
 pub fn oraclemcp_db::parse_tnsnames_dir(&std::path::Path) -> core::result::Result<oraclemcp_db::TnsParseResult, oraclemcp_db::TnsParseError>
 pub async fn oraclemcp_db::plan_cost_estimate(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<core::option::Option<oraclemcp_db::PlanCostEstimate>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::plan_cost_timeline(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, u32) -> core::result::Result<oraclemcp_db::PlanCostTimeline, oraclemcp_error::ErrorEnvelope>
 pub async fn oraclemcp_db::plscope_identifiers(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::PlscopeIdentifier>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::plscope_statements(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::PlscopeStatement>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::preflight(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<oraclemcp_db::PreflightReport, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::primary_key_columns(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::probe_dependents(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> oraclemcp_db::DependentsProbe
+pub async fn oraclemcp_db::probe_native_redaction(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<oraclemcp_db::NativeRedactionAvailability, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::probe_privileges(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> oraclemcp_db::PrivilegeProfile
 pub async fn oraclemcp_db::probe_write_posture(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, bool) -> oraclemcp_db::WritePosture
 pub async fn oraclemcp_db::read_catalog_resolve_context(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, oraclemcp_guard::resolver::CatalogGeneration, oraclemcp_guard::resolver::StatementScope) -> core::result::Result<oraclemcp_guard::resolver::ResolveCtx, oraclemcp_db::DbError>
@@ -7696,6 +8914,10 @@ pub async fn oraclemcp_db::search_objects(&asupersync::cx::cx::Cx, &dyn oraclemc
 pub async fn oraclemcp_db::search_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, &str, core::option::Option<&str>, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::select_diagnostics_source(bool, bool) -> oraclemcp_db::DiagnosticsSource
 pub fn oraclemcp_db::selected_endpoint_uses_tcps(&oraclemcp_db::OracleConnectOptions) -> core::result::Result<bool, oraclemcp_db::DbError>
+pub fn oraclemcp_db::semantic_search_query(&str, &str, &str, oraclemcp_db::SemanticSearchMetric) -> core::result::Result<alloc::string::String, oraclemcp_db::DbError>
+pub fn oraclemcp_db::semantic_search_query_with_filter(&str, &str, &str, &str, oraclemcp_db::SemanticSearchMetric, usize) -> core::result::Result<alloc::string::String, oraclemcp_db::DbError>
+pub fn oraclemcp_db::semantic_search_text_query(&str, &str, &str, &str, oraclemcp_db::SemanticSearchMetric) -> core::result::Result<alloc::string::String, oraclemcp_db::DbError>
+pub fn oraclemcp_db::semantic_search_text_query_with_filter(&str, &str, &str, &str, &str, oraclemcp_db::SemanticSearchMetric, usize) -> core::result::Result<alloc::string::String, oraclemcp_db::DbError>
 pub fn oraclemcp_db::sequence_ceiling_sql(oraclemcp_db::ViewTier, u8) -> (&'static str, alloc::string::String)
 pub fn oraclemcp_db::serialize_cell(&oraclemcp_db::OracleCell, &oraclemcp_db::SerializeOptions) -> serde_json::value::Value
 pub fn oraclemcp_db::serialize_row(&oraclemcp_db::OracleRow, &oraclemcp_db::SerializeOptions) -> serde_json::value::Value

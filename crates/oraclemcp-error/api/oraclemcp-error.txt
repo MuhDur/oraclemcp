@@ -8,6 +8,7 @@ pub oraclemcp_error::ErrorClass::AtCapacity
 pub oraclemcp_error::ErrorClass::Busy
 pub oraclemcp_error::ErrorClass::ChallengeRequired
 pub oraclemcp_error::ErrorClass::ConnectionFailed
+pub oraclemcp_error::ErrorClass::FlashbackCapabilityUnavailable
 pub oraclemcp_error::ErrorClass::FlashbackDefinitionChanged
 pub oraclemcp_error::ErrorClass::FlashbackNotFlashbackable
 pub oraclemcp_error::ErrorClass::FlashbackRetentionExceeded
@@ -124,8 +125,11 @@ pub oraclemcp_error::ReasonCategory::BlockListed
 pub oraclemcp_error::ReasonCategory::CostBudgetExceeded
 pub oraclemcp_error::ReasonCategory::DynamicSql
 pub oraclemcp_error::ReasonCategory::MultiStatementBatch
+pub oraclemcp_error::ReasonCategory::NotEditionable
+pub oraclemcp_error::ReasonCategory::OneChildEdition
 pub oraclemcp_error::ReasonCategory::Other
 pub oraclemcp_error::ReasonCategory::PlSqlBlock
+pub oraclemcp_error::ReasonCategory::PolicyDenied
 pub oraclemcp_error::ReasonCategory::RequiresHigherLevel
 pub oraclemcp_error::ReasonCategory::TransactionControl
 pub oraclemcp_error::ReasonCategory::UnbalancedBlock
@@ -341,12 +345,14 @@ pub struct oraclemcp_error::StructuredReason
 pub oraclemcp_error::StructuredReason::category: oraclemcp_error::ReasonCategory
 pub oraclemcp_error::StructuredReason::minimal_rewrite: core::option::Option<alloc::string::String>
 pub oraclemcp_error::StructuredReason::offending_construct: core::option::Option<alloc::string::String>
+pub oraclemcp_error::StructuredReason::policy_tightening: core::option::Option<serde_json::value::Value>
 pub oraclemcp_error::StructuredReason::query_cost_refusal: core::option::Option<oraclemcp_error::QueryCostRefusal>
 pub oraclemcp_error::StructuredReason::required_level: core::option::Option<alloc::string::String>
 impl oraclemcp_error::StructuredReason
 pub fn oraclemcp_error::StructuredReason::new(oraclemcp_error::ReasonCategory) -> Self
 pub fn oraclemcp_error::StructuredReason::with_minimal_rewrite(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oraclemcp_error::StructuredReason::with_offending_construct(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oraclemcp_error::StructuredReason::with_policy_tightening(self, serde_json::value::Value) -> Self
 pub fn oraclemcp_error::StructuredReason::with_query_cost_refusal(self, oraclemcp_error::QueryCostRefusal) -> Self
 pub fn oraclemcp_error::StructuredReason::with_required_level(self, impl core::convert::Into<alloc::string::String>) -> Self
 impl core::clone::Clone for oraclemcp_error::StructuredReason
