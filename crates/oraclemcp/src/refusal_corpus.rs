@@ -112,7 +112,7 @@ impl RefusalCorpusWriter {
         &self,
         destination: &Path,
     ) -> Result<CorpusExport, RefusalCorpusError> {
-        if self.path.as_ref() == destination {
+        if paths_resolve_to_same_file(self.path.as_ref(), destination) {
             return Err(RefusalCorpusError::ExportPathAliasesState);
         }
         let _guard = self
@@ -266,6 +266,34 @@ fn open_private_append_file(path: &Path) -> io::Result<File> {
         }
     }
     Ok(file)
+}
+
+/// True if `a` and `b` name the same filesystem location, even through different
+/// spellings (`./`, `..`, a symlink, or absolute-vs-relative). A plain `==` is
+/// not enough: it would let `--out ./corpus/refusals.jsonl` alias the source
+/// `corpus/refusals.jsonl` and clobber the live append-only state with the
+/// public export. The destination usually does not exist yet, so an unresolved
+/// path is canonicalized through its parent directory plus file name. Falls back
+/// to syntactic equality only when neither side can be resolved.
+fn paths_resolve_to_same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    fn resolved(path: &Path) -> Option<PathBuf> {
+        if let Ok(canonical) = path.canonicalize() {
+            return Some(canonical);
+        }
+        let file_name = path.file_name()?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        parent.canonicalize().ok().map(|dir| dir.join(file_name))
+    }
+    match (resolved(a), resolved(b)) {
+        (Some(ra), Some(rb)) => ra == rb,
+        _ => false,
+    }
 }
 
 fn read_validated_records(path: &Path) -> Result<Vec<CorpusRecord>, RefusalCorpusError> {

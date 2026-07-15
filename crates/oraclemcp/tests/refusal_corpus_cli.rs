@@ -84,3 +84,33 @@ fn refuses_a_tampered_corpus_instead_of_shipping_best_effort() {
         "a tampered corpus must not produce any dataset"
     );
 }
+
+#[test]
+fn refuses_a_differently_spelled_alias_of_the_source() {
+    let temp = tempfile::tempdir().expect("temporary fixture directory");
+    let dir = temp.path().join("corpus");
+    fs::create_dir_all(&dir).expect("create corpus dir");
+    let corpus = dir.join("refusals.jsonl");
+    fs::write(&corpus, "").expect("seed empty corpus state");
+    // `dir/../corpus/refusals.jsonl` names the same file as `corpus` but is not
+    // string-equal. A syntactic guard would let this clobber the live state with
+    // the public export; the filesystem-identity guard must still refuse it.
+    let aliased_out = dir.join("..").join("corpus").join("refusals.jsonl");
+
+    let output = export(&corpus, &aliased_out);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a differently-spelled alias of the source must be refused: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let error: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("refusal is structured JSON");
+    assert_eq!(error["code"], "ORACLEMCP_REFUSAL_CORPUS_EXPORT_REFUSED");
+    // The live append-only corpus must be untouched by a refused export.
+    assert_eq!(
+        fs::read_to_string(&corpus).expect("read corpus"),
+        "",
+        "a refused export must not overwrite the source corpus"
+    );
+}
