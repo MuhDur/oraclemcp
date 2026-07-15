@@ -88,7 +88,7 @@ fn wait_child_with_timeout(mut child: std::process::Child, timeout: Duration) ->
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            let status = child.wait().expect("reap killed child");
+            let _ = child.wait();
             let stdout = stdout_reader.join().unwrap_or_default();
             let stderr = stderr_reader.join().unwrap_or_default();
             panic!(
