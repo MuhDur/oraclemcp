@@ -789,12 +789,12 @@ mod tests {
         let expected_root = rekor_node_hash(leaves[0], leaves[1]);
 
         assert_eq!(
-            inclusion_root(leaves[0], 0, 2, &vec![hex_of(leaves[1])]),
+            inclusion_root(leaves[0], 0, 2, &[hex_of(leaves[1])]),
             Ok(expected_root),
             "index 0 in tree size 2 must reconstruct the expected root"
         );
         assert_eq!(
-            inclusion_root(leaves[1], 1, 2, &vec![hex_of(leaves[0])]),
+            inclusion_root(leaves[1], 1, 2, &[hex_of(leaves[0])]),
             Ok(expected_root),
             "index 1 in tree size 2 must reconstruct the expected root"
         );
@@ -805,7 +805,7 @@ mod tests {
             "tree size 1 must return the leaf hash"
         );
         assert_eq!(
-            inclusion_root(leaves[0], 0, 1, &vec![hex_of(leaves[1])]),
+            inclusion_root(leaves[0], 0, 1, &[hex_of(leaves[1])]),
             Err(RekorProofError::MalformedProof),
             "malformed single-leaf proofs with siblings must be rejected"
         );

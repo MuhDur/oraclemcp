@@ -918,7 +918,7 @@ mod tests {
     // `Ok(Default::default())` mutant would print nothing.
     #[test]
     fn residue_jsonl_error_display_renders_message() {
-        let e = JsonlError::Io(io::Error::new(io::ErrorKind::Other, "diskfail"));
+        let e = JsonlError::Io(io::Error::other("diskfail"));
         assert!(
             e.to_string().contains("audit log read error"),
             "Display must render the error, got {:?}",

@@ -699,7 +699,7 @@ impl HttpSessionLifecycle for StaticLaneLifecycle {
 /// cancel route terminated the right lane with the right reason.
 #[derive(Debug, Default)]
 struct CancelRecordingLifecycle {
-    closed: std::sync::Mutex<Vec<(String, String, DispatchCloseReason)>>,
+    closed: parking_lot::Mutex<Vec<(String, String, DispatchCloseReason)>>,
 }
 
 impl HttpSessionLifecycle for CancelRecordingLifecycle {
@@ -717,7 +717,7 @@ impl HttpSessionLifecycle for CancelRecordingLifecycle {
         principal_key: &str,
         reason: DispatchCloseReason,
     ) -> bool {
-        self.closed.lock().expect("cancel lock").push((
+        self.closed.lock().push((
             session_id.to_owned(),
             principal_key.to_owned(),
             reason,
@@ -795,7 +795,7 @@ fn operator_lane_cancel_invalidates_the_mcp_session_and_replay_buffer() {
 
     // The lane close still happened, and the MCP session is now fully invalid:
     // the session store dropped it and its replay buffer is gone.
-    assert_eq!(lifecycle.closed.lock().expect("cancel lock").len(), 1);
+    assert_eq!(lifecycle.closed.lock().len(), 1);
     assert!(
         !sessions.remove(session_id),
         "operator cancel must have already removed the HTTP session"
@@ -849,7 +849,7 @@ fn operator_lane_cancel_is_operator_gated_and_audited() {
         serde_json::json!("operator_authority_required")
     );
     assert!(
-        lifecycle.closed.lock().expect("cancel lock").is_empty(),
+        lifecycle.closed.lock().is_empty(),
         "unauthorized cancel must not terminate any lane"
     );
     assert!(
@@ -869,7 +869,7 @@ fn operator_lane_cancel_is_operator_gated_and_audited() {
     assert_eq!(body["data"]["reason"], serde_json::json!("operator_cancel"));
 
     {
-        let closed = lifecycle.closed.lock().expect("cancel lock");
+        let closed = lifecycle.closed.lock();
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0].0, "mcp-session:lane-a");
         assert_eq!(closed[0].1, "principal:subject-sha256:abc");
@@ -895,7 +895,7 @@ fn operator_lane_cancel_is_operator_gated_and_audited() {
         serde_json::json!("operator_lane_not_found")
     );
     assert_eq!(
-        lifecycle.closed.lock().expect("cancel lock").len(),
+        lifecycle.closed.lock().len(),
         1,
         "unknown lane must not terminate anything"
     );
@@ -994,7 +994,7 @@ fn terminal_audit_failure_surfaces_indeterminate_after_control_side_effect() {
         value.starts_with("sha256:") && value.len() == "sha256:".len() + 64
     }));
     assert_eq!(
-        lifecycle.closed.lock().expect("cancel lock").len(),
+        lifecycle.closed.lock().len(),
         1,
         "the response must not falsely claim rollback after the side effect"
     );

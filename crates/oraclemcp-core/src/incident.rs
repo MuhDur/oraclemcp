@@ -326,6 +326,9 @@ pub fn replay_bundle(dir: &Path) -> Result<IncidentReplayReport, IncidentReplayE
     let mut runtime = LabRuntimeTarget::create_runtime(config);
     let replay_dir = dir.to_path_buf();
 
+    // block-on-boundary: `replay_bundle` is a synchronous command entry point; it
+    // drives the async bundle replay to completion on a dedicated, seeded lab
+    // runtime and is never itself invoked from within another async context.
     let report = LabRuntimeTarget::block_on(&mut runtime, async move {
         replay_verified_bundle(&replay_dir, manifest)
     });

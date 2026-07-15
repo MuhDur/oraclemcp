@@ -1181,7 +1181,7 @@ fn local_doctor_and_authorized_operator_use_transport_reserve_under_saturation()
     let cancel = request(addr, &cancel_request);
     assert!(cancel.starts_with("HTTP/1.1 200 OK"), "{cancel}");
     assert_eq!(
-        lifecycle.closed.lock().expect("cancel lock").as_slice(),
+        lifecycle.closed.lock().as_slice(),
         &[(
             "mcp-session:lane-a".to_owned(),
             "principal:subject-sha256:abc".to_owned(),

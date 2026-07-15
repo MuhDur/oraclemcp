@@ -108,6 +108,11 @@ impl RefusalCorpusWriter {
     /// hash and sorts by that hash, so the same valid state always yields the
     /// same bytes. A malformed or tampered source record aborts the export
     /// without producing a best-effort dataset.
+    // arc-j J3 built and unit-tested this reproducible corpus export (see the
+    // `export_*` tests below), but it is not yet wired to a production surface
+    // (CLI subcommand / MCP tool), so it is dead in the non-test `oraclemcp`
+    // lib build. Allowed until the export command is wired; do not delete.
+    #[allow(dead_code)]
     pub(crate) fn export_dataset(
         &self,
         destination: &Path,
@@ -142,6 +147,7 @@ impl RefusalCorpusWriter {
 
 /// Stable metadata returned by a completed corpus export.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // staged with export_dataset (tested, not yet wired to prod)
 pub(crate) struct CorpusExport {
     /// Number of unique, validated redacted records written to the dataset.
     pub(crate) record_count: usize,
@@ -152,6 +158,7 @@ pub(crate) enum RefusalCorpusError {
     Redaction(CorpusRedactionError),
     Io(io::Error),
     LockPoisoned,
+    #[allow(dead_code)] // only constructed by the staged export_dataset path
     ExportPathAliasesState,
 }
 
@@ -268,6 +275,7 @@ fn open_private_append_file(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+#[allow(dead_code)] // staged with export_dataset (tested, not yet wired to prod)
 fn read_validated_records(path: &Path) -> Result<Vec<CorpusRecord>, RefusalCorpusError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
@@ -277,10 +285,7 @@ fn read_validated_records(path: &Path) -> Result<Vec<CorpusRecord>, RefusalCorpu
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     }
-    let state = match fs::read_to_string(path) {
-        Ok(state) => state,
-        Err(error) => return Err(error.into()),
-    };
+    let state = fs::read_to_string(path)?;
     state
         .lines()
         .map(CorpusRecord::from_jsonl_line)
@@ -288,6 +293,7 @@ fn read_validated_records(path: &Path) -> Result<Vec<CorpusRecord>, RefusalCorpu
         .map_err(Into::into)
 }
 
+#[allow(dead_code)] // staged with export_dataset (tested, not yet wired to prod)
 fn write_public_export(path: &Path, contents: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
