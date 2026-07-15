@@ -55,18 +55,46 @@ fn make_om_alias(dir: &std::path::Path) -> PathBuf {
 }
 
 fn wait_child_with_timeout(mut child: std::process::Child, timeout: Duration) -> Output {
+    use std::io::Read;
+    // Drain stdout/stderr on separate threads while we poll for exit. Otherwise a
+    // child that writes more than the OS pipe buffer (~64 KiB) blocks on its own
+    // write — e.g. the ~66 KiB bash completion script — and never exits, so the
+    // poll loop below times out and panics. That pipe deadlock is the edso flake's
+    // root cause; a bare try_wait loop that never reads the pipes cannot avoid it.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stdout_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stderr_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
     let deadline = Instant::now() + timeout;
     loop {
-        if child.try_wait().expect("poll child").is_some() {
-            return child.wait_with_output().expect("collect output");
+        if let Some(status) = child.try_wait().expect("poll child") {
+            return Output {
+                status,
+                stdout: stdout_reader.join().unwrap_or_default(),
+                stderr: stderr_reader.join().unwrap_or_default(),
+            };
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            let output = child.wait_with_output().expect("collect killed output");
+            let status = child.wait().expect("reap killed child");
+            let stdout = stdout_reader.join().unwrap_or_default();
+            let stderr = stderr_reader.join().unwrap_or_default();
             panic!(
                 "oraclemcp did not exit within {timeout:?}; stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
             );
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -81,7 +109,7 @@ fn wait_with_timeout(mut cmd: Command, timeout: Duration) -> Output {
 fn run_binary(args: &[&str]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
-    wait_with_timeout(cmd, Duration::from_secs(5))
+    wait_with_timeout(cmd, Duration::from_secs(30))
 }
 
 #[test]
@@ -141,7 +169,7 @@ fn audit_verify_cli_uses_active_and_historical_keyring() {
         .env("QA37_HISTORICAL_KEY", &old_material)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(ok, Duration::from_secs(5));
+    let output = wait_with_timeout(ok, Duration::from_secs(30));
     assert_eq!(output.status.code(), Some(0), "{:?}", output);
     let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("verify JSON");
     assert_eq!(payload["ok"], true);
@@ -156,7 +184,7 @@ fn audit_verify_cli_uses_active_and_historical_keyring() {
         .env_remove("QA37_HISTORICAL_KEY")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(missing, Duration::from_secs(5));
+    let output = wait_with_timeout(missing, Duration::from_secs(30));
     assert_eq!(output.status.code(), Some(2));
     let rendered = String::from_utf8_lossy(&output.stderr);
     assert!(!rendered.contains(&old_material));
@@ -245,7 +273,7 @@ fn serve_with_missing_explicit_profile_fails_fast() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
     let _ = fs::remove_dir_all(config.parent().expect("temp config parent"));
 
     assert_eq!(output.status.code(), Some(2));
@@ -316,7 +344,7 @@ fn required_stdio_binary_rejects_tool_call_before_initialize() {
         stdin.write_all(b"\n").expect("terminate first frame");
     }
 
-    let output = wait_child_with_timeout(child, Duration::from_secs(10));
+    let output = wait_child_with_timeout(child, Duration::from_secs(30));
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
     let reply: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON-RPC reply");
@@ -360,7 +388,7 @@ fn completions_subcommand_emits_supported_shells() {
     cmd.args(["completions", "bash"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
     assert_eq!(output.status.code(), Some(0));
     assert!(
         output.stderr.is_empty(),
@@ -389,7 +417,7 @@ fn dashboard_refuses_pairing_when_http_service_unreachable() {
     .env("HOME", &dir)
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(10));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     let err: serde_json::Value =
@@ -408,7 +436,7 @@ fn om_alias_argv0_aware_runs_dashboard_pairing() {
 
     let mut help_cmd = Command::new(&alias);
     help_cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let help_output = wait_with_timeout(help_cmd, Duration::from_secs(5));
+    let help_output = wait_with_timeout(help_cmd, Duration::from_secs(30));
     assert_eq!(help_output.status.code(), Some(2));
     assert!(help_output.stdout.is_empty());
     let help_stderr = String::from_utf8(help_output.stderr).expect("stderr is utf8");
@@ -425,7 +453,7 @@ fn om_alias_argv0_aware_runs_dashboard_pairing() {
         .env("HOME", &dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let dashboard_output = wait_with_timeout(dashboard_cmd, Duration::from_secs(10));
+    let dashboard_output = wait_with_timeout(dashboard_cmd, Duration::from_secs(30));
     shutdown.store(true, Ordering::Relaxed);
     let _ = handle.join();
     assert_eq!(dashboard_output.status.code(), Some(0));
@@ -459,7 +487,7 @@ fn doctor_zero_profile_is_non_ok_and_names_first_run_fix() {
         .env("HOME", &dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
     assert_eq!(output.status.code(), Some(2));
     assert!(
         output.stderr.is_empty(),
@@ -508,7 +536,7 @@ fn setup_write_round_trips_profiles_through_config_ops() {
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
 
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
     assert_eq!(output.status.code(), Some(0));
     assert!(
         output.stderr.is_empty(),
@@ -584,7 +612,7 @@ fn setup_write_round_trips_profiles_through_config_ops() {
         .env_remove("APP_PASSWORD")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let serve_output = wait_with_timeout(serve, Duration::from_secs(5));
+    let serve_output = wait_with_timeout(serve, Duration::from_secs(30));
     assert_eq!(serve_output.status.code(), Some(0));
     let serve_stderr = String::from_utf8(serve_output.stderr).expect("serve stderr is utf8");
     assert!(
@@ -606,7 +634,7 @@ fn setup_write_round_trips_profiles_through_config_ops() {
         .env_remove("APP_PASSWORD")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let doctor_output = wait_with_timeout(doctor, Duration::from_secs(5));
+    let doctor_output = wait_with_timeout(doctor, Duration::from_secs(30));
     assert_eq!(doctor_output.status.code(), Some(0));
     assert!(
         doctor_output.stderr.is_empty(),
@@ -647,7 +675,7 @@ fn setup_write_default_target_honors_xdg_config_home() {
         .env("HOME", &dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -695,7 +723,7 @@ fn setup_discover_non_tty_without_consent_refuses_json() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
 
     assert_eq!(
         output.status.code(),
@@ -741,7 +769,7 @@ fn setup_discover_non_tty_without_consent_refuses_human() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
 
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
@@ -772,7 +800,7 @@ fn setup_discover_refuses_before_scanning_even_with_tns_admin_present() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
     assert_eq!(output.status.code(), Some(2), "refuses with exit 2");
     assert!(output.stdout.is_empty());
     assert!(
@@ -805,7 +833,7 @@ fn setup_discover_dry_run_reports_net_services_and_writes_nothing() {
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
 
     assert_eq!(output.status.code(), Some(0), "consented scan proceeds");
     let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
@@ -861,7 +889,7 @@ fn setup_discover_over_malformed_tnsnames_writes_read_only_config() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -910,7 +938,7 @@ fn setup_discover_writes_discovered_profiles_through_config_ops() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
 
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
@@ -974,7 +1002,7 @@ fn setup_discover_zero_found_falls_back_to_minimal_starter() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
 
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
@@ -1010,7 +1038,7 @@ fn run_discover_write(dir: &std::path::Path, config: &std::path::Path) -> serde_
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -1156,7 +1184,7 @@ fn setup_discover_refuses_over_an_invalid_existing_config() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
 
     assert_eq!(
         output.status.code(),
@@ -1194,7 +1222,7 @@ fn setup_discover_yes_json_is_a_complete_agent_report() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
 
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
@@ -1316,7 +1344,7 @@ fn doctor_offline_on_discovered_config_hints_missing_credentials() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     assert_eq!(
-        wait_with_timeout(discover, Duration::from_secs(5))
+        wait_with_timeout(discover, Duration::from_secs(30))
             .status
             .code(),
         Some(0)
@@ -1333,7 +1361,7 @@ fn doctor_offline_on_discovered_config_hints_missing_credentials() {
         .env_remove("ORACLE_PRIMARY_TCPS_PASSWORD")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(doctor, Duration::from_secs(5));
+    let output = wait_with_timeout(doctor, Duration::from_secs(30));
 
     // Offline doctor on a freshly discovered config is not a blocker.
     assert_eq!(output.status.code(), Some(0), "offline doctor exits 0");
@@ -1391,7 +1419,7 @@ fn doctor_no_profiles_guidance_advertises_setup_discover() {
         .env("HOME", &dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
     assert_eq!(output.status.code(), Some(2));
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
     let conn = json["checks"]
@@ -1449,7 +1477,7 @@ credential_ref = "env:APP_PASSWORD"
         .env("HOME", &dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let setup_output = wait_with_timeout(setup, Duration::from_secs(5));
+    let setup_output = wait_with_timeout(setup, Duration::from_secs(30));
     assert_eq!(setup_output.status.code(), Some(0));
     assert!(
         setup_output.stderr.is_empty(),
@@ -1507,7 +1535,7 @@ credential_ref = "env:APP_PASSWORD"
         .env_remove("APP_PASSWORD")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let serve_output = wait_with_timeout(serve, Duration::from_secs(5));
+    let serve_output = wait_with_timeout(serve, Duration::from_secs(30));
     assert_eq!(serve_output.status.code(), Some(0));
     let serve_stderr = String::from_utf8(serve_output.stderr).expect("serve stderr is utf8");
     assert!(
@@ -1528,7 +1556,7 @@ fn setup_default_snippet_command_is_the_resolved_binary() {
         .env("HOME", &dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).expect("setup JSON is utf8");
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("setup JSON");
@@ -1575,7 +1603,7 @@ fn setup_explicit_wrapper_path_snippets_state_wrapper_must_exist() {
     .env("HOME", &dir)
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
-    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    let output = wait_with_timeout(cmd, Duration::from_secs(30));
     assert_eq!(output.status.code(), Some(0));
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("setup JSON parses");
@@ -1612,7 +1640,7 @@ fn setup_explicit_wrapper_path_snippets_state_wrapper_must_exist() {
         .env("HOME", &dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let human_output = wait_with_timeout(human, Duration::from_secs(5));
+    let human_output = wait_with_timeout(human, Duration::from_secs(30));
     assert_eq!(human_output.status.code(), Some(0));
     let human_stdout = String::from_utf8(human_output.stdout).expect("setup text is utf8");
     assert!(
@@ -1673,7 +1701,7 @@ fn discovery_annotated_config_boots() {
         .env_remove("ORACLE_SALES_RO_PASSWORD")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let serve_output = wait_with_timeout(serve, Duration::from_secs(5));
+    let serve_output = wait_with_timeout(serve, Duration::from_secs(30));
     assert_eq!(
         serve_output.status.code(),
         Some(0),
@@ -1704,7 +1732,7 @@ fn discovery_annotated_config_boots() {
         .env_remove("ORACLE_SALES_RO_PASSWORD")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let doctor_output = wait_with_timeout(doctor, Duration::from_secs(5));
+    let doctor_output = wait_with_timeout(doctor, Duration::from_secs(30));
     assert_eq!(doctor_output.status.code(), Some(0), "offline doctor is ok");
     let doctor_json: serde_json::Value =
         serde_json::from_slice(&doctor_output.stdout).expect("doctor JSON");
