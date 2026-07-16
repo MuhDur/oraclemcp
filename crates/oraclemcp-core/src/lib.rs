@@ -1,4 +1,12 @@
 #![recursion_limit = "256"]
+// Windows only, for `MetadataExt::number_of_links` (rust-lang/rust#63010), which
+// `file_store` needs to refuse a hard-linked service lock (bead oraclemcp-7oaa).
+// It is the Windows counterpart of the stable `unix::fs::MetadataExt::nlink`
+// used for the same refusal, and there is no stable std equivalent. This adds no
+// nightly requirement: the whole line is already pinned to nightly for
+// asupersync (see rust-toolchain.toml). It is `cfg_attr`-gated so nothing
+// changes for non-Windows builds.
+#![cfg_attr(windows, feature(windows_by_handle))]
 #![forbid(unsafe_code)]
 // ErrorEnvelope is the deliberate agent-facing error payload (§8.2); it is the
 // `Err` of the dispatch contract throughout this crate. Boxing every

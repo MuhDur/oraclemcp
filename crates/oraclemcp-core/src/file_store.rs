@@ -18,6 +18,13 @@ use thiserror::Error;
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+// The Windows `custom_flags` lives on a different trait of the same name, so the
+// no-follow opens below need it in scope too (bead oraclemcp-7oaa). No CI job
+// compiles this crate for Windows -- the target is built only at release-tag
+// time -- so a missing import here would surface as a broken release, not a red
+// PR.
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 
 const APP_STATE_DIR: &str = "oraclemcp";
 const SERVICE_LOCK_FILE: &str = ".service.lock";
@@ -368,6 +375,8 @@ impl FileStore {
         options.read(true).write(true);
         #[cfg(unix)]
         options.custom_flags(libc::O_NOFOLLOW);
+        #[cfg(windows)]
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
         let mut file = options
             .open(&path)
             .map_err(|e| private_open_error(&path, &e))?;
@@ -596,11 +605,38 @@ fn harden_private_dir(_path: &Path, _meta: fs::Metadata) -> Result<()> {
 
 fn create_new_private_file(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
+    // `create_new` is `O_EXCL`: it refuses to open an existing path at all,
+    // including a pre-planted link, so it needs no no-follow flag on either
+    // platform.
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
     options.open(path)
 }
+
+/// Open the reparse point itself instead of walking through it — the Windows
+/// stand-in for `O_NOFOLLOW` (bead oraclemcp-7oaa).
+///
+/// Deliberately a literal rather than a `windows-sys` import, which is where
+/// this departs from the `libc::O_NOFOLLOW` precedent, and the reason is not
+/// laziness: `O_NOFOLLOW` genuinely differs per Unix (`0x20000` on Linux,
+/// `0x100` on macOS/BSD), so hardcoding it there really is fragile. The Win32
+/// file flags are one frozen ABI, identical on every Windows target and
+/// architecture, and `windows-sys` is already carried at two versions in the
+/// lock — a third copy for two integers is a worse trade than a documented
+/// constant. std's `OpenOptionsExt`/`MetadataExt` remain the platform-specific
+/// safe API doing the actual work.
+///
+/// <https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-createfilew>
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+/// Set on a file whose contents are a reparse point (symlink, junction, mount
+/// point), i.e. exactly what must never be accepted as a service-owned file.
+///
+/// <https://learn.microsoft.com/windows/win32/fileio/file-attribute-constants>
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 /// Open the service-lock sidecar without ever following a link (bead
 /// oraclemcp-siry).
@@ -612,6 +648,15 @@ fn create_new_private_file(path: &Path) -> std::io::Result<File> {
 /// acquisition into an arbitrary truncate of any file this UID can write.
 ///
 /// `custom_flags` is a safe API, so `#![forbid(unsafe_code)]` still holds.
+///
+/// Windows (bead oraclemcp-7oaa) has no `O_NOFOLLOW`, but
+/// `FILE_FLAG_OPEN_REPARSE_POINT` is the analogue that matters here: it makes
+/// the open return a handle to the *reparse point itself* instead of walking
+/// through it. That is what keeps the refusal honest — without the flag the
+/// open silently follows the link, [`authenticate_private_file`] would then stat
+/// the **victim** (which looks like a perfectly ordinary lone regular file), and
+/// the caller would truncate it. Opening the link rather than its target is what
+/// makes the reparse-point check below able to see anything at all.
 fn open_private_lock_file(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
@@ -619,6 +664,10 @@ fn open_private_lock_file(path: &Path) -> std::io::Result<File> {
     {
         options.mode(0o600);
         options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
     options.open(path)
 }
@@ -657,6 +706,39 @@ fn authenticate_private_file(file: &File, path: &Path) -> Result<()> {
                 "{} has {links} hard links; a service-owned file must be a lone regular file",
                 path.display()
             )));
+        }
+    }
+    // Windows (bead oraclemcp-7oaa). `is_file()` above does not cover either of
+    // these: a file symlink opened with `FILE_FLAG_OPEN_REPARSE_POINT` still
+    // reports as a file, and a hard link IS a regular file — it just happens to
+    // be the victim's.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(FileStoreError::UnsafePath(format!(
+                "{} is a reparse point; a service-owned file must be a lone regular file",
+                path.display()
+            )));
+        }
+        match meta.number_of_links() {
+            Some(1) => {}
+            Some(links) => {
+                return Err(FileStoreError::UnsafePath(format!(
+                    "{} has {links} hard links; a service-owned file must be a lone regular file",
+                    path.display()
+                )));
+            }
+            // Refuse rather than assume. `File::metadata` documents `Some` for a
+            // handle-backed stat, so `None` means we could not authenticate this
+            // descriptor at all — and an unverifiable sidecar is exactly what
+            // must not be truncated or appended to.
+            None => {
+                return Err(FileStoreError::UnsafePath(format!(
+                    "{} did not report a link count; a service-owned file must be provably a lone regular file",
+                    path.display()
+                )));
+            }
         }
     }
     Ok(())
@@ -698,6 +780,10 @@ fn open_append_private_file(path: &Path) -> std::io::Result<File> {
     {
         options.mode(0o600);
         options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
     options.open(path)
 }
@@ -1332,6 +1418,106 @@ mod tests {
         assert!(
             matches!(error, FileStoreError::UnsafePath(_)),
             "a fifo sidecar is a path-safety refusal, not generic io: {error:?}"
+        );
+    }
+
+    // Windows counterpart of the refusals above (bead oraclemcp-7oaa). Same
+    // attack, different primitive: a reparse point instead of a symlink, and a
+    // hard link that — unlike the symlink — needs NO privilege to plant, which
+    // makes it the more reachable of the two on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn service_lock_refuses_a_hard_linked_sidecar_without_touching_the_target() {
+        let root = test_root("win-lock-hardlink");
+        let store = FileStore::open(root.clone()).expect("store");
+        let victim = root.join("victim.txt");
+        fs::write(&victim, VICTIM_BYTES).expect("plant victim");
+        let lock_path = root.join(SERVICE_LOCK_FILE);
+        let _ = fs::remove_file(&lock_path);
+        // NTFS hard links need no privilege and no Developer Mode: this is
+        // plantable by any same-user actor who can write the state directory.
+        fs::hard_link(&victim, &lock_path).expect("plant hard-linked sidecar");
+
+        let error = match store.acquire_service_owner("attacked-owner") {
+            Ok(_) => panic!("a hard-linked lock sidecar must be refused on Windows"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, FileStoreError::UnsafePath(_)),
+            "a hard-linked sidecar is a path-safety refusal, not generic io: {error:?}"
+        );
+        assert_eq!(
+            fs::read(&victim).expect("victim still readable"),
+            VICTIM_BYTES,
+            "a shared file must never be truncated or written"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn service_lock_refuses_a_reparse_point_sidecar_without_touching_the_target() {
+        let root = test_root("win-lock-reparse");
+        let store = FileStore::open(root.clone()).expect("store");
+        let victim = root.join("victim.txt");
+        fs::write(&victim, VICTIM_BYTES).expect("plant victim");
+        let lock_path = root.join(SERVICE_LOCK_FILE);
+        let _ = fs::remove_file(&lock_path);
+
+        // Creating a file symlink needs SeCreateSymbolicLinkPrivilege or
+        // Developer Mode. Skipping when we cannot plant one keeps the suite
+        // honest on a stock runner -- but the privilege default is NOT the
+        // boundary this refusal rests on, which is exactly why the hard-link
+        // test above carries the load.
+        if std::os::windows::fs::symlink_file(&victim, &lock_path).is_err() {
+            eprintln!(
+                "SKIP service_lock_refuses_a_reparse_point_sidecar: this runner cannot create \
+                 a file symlink (no SeCreateSymbolicLinkPrivilege / Developer Mode)"
+            );
+            return;
+        }
+
+        let error = match store.acquire_service_owner("attacked-owner") {
+            Ok(_) => panic!("a reparse-point lock sidecar must be refused on Windows"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, FileStoreError::UnsafePath(_)),
+            "a reparse-point sidecar is a path-safety refusal, not generic io: {error:?}"
+        );
+        assert_eq!(
+            fs::read(&victim).expect("victim still readable"),
+            VICTIM_BYTES,
+            "the reparse-point target must never be truncated or written"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jsonl_append_refuses_a_hard_linked_target_without_writing_it() {
+        // The append path (bead oraclemcp-em39) carries audit-chain records, so
+        // a followed link would append service records into the victim. Same
+        // Windows gap as the lock sidecar, same refusal.
+        let store = FileStore::open(test_root("win-jsonl-append-hardlink")).expect("store");
+        let lock = store.acquire_service_owner("test").expect("lock");
+        let id = StoreId::from_safe_segment("metrics").expect("id");
+        let path = store.path_for("metrics", &id, "jsonl").expect("path");
+        ensure_private_dir(path.parent().expect("parent")).expect("metrics dir");
+        let victim = store.root().join("victim.txt");
+        fs::write(&victim, VICTIM_BYTES).expect("plant victim");
+        fs::hard_link(&victim, &path).expect("plant hard-linked jsonl target");
+
+        let error = match store.append_jsonl(&lock, "metrics", &id, b"{\"seq\":1}") {
+            Ok(_) => panic!("a hard-linked jsonl target must be refused on Windows"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, FileStoreError::UnsafePath(_)),
+            "a hard-linked append target is a path-safety refusal: {error:?}"
+        );
+        assert_eq!(
+            fs::read(&victim).expect("victim readable"),
+            VICTIM_BYTES,
+            "service records must never be appended into a shared file"
         );
     }
 
