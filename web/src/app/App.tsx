@@ -7205,6 +7205,12 @@ function WorkbenchPage(): React.ReactElement {
   const sqlGuard = useUnsavedChangesGuard(
     sql.trim().length > 0 && sql.trim() !== WORKBENCH_SQL_SEED
   );
+  const [commitAcknowledged, setCommitAcknowledged] = React.useState(false);
+  // An acknowledgement is about this exact statement on this exact lane. Edit
+  // either and it must be re-earned, never inherited by different SQL.
+  React.useEffect(() => {
+    setCommitAcknowledged(false);
+  }, [sql, laneId, mode]);
   const [changesetJson, setChangesetJson] = React.useState(
     '{\n  "objects": [],\n  "unclassified_files": []\n}'
   );
@@ -7437,13 +7443,33 @@ function WorkbenchPage(): React.ReactElement {
               <Button
                 type="button"
                 variant="primary"
-                disabled={!canSubmit || mode !== "dml_preview_confirm" || !confirmReady}
+                disabled={
+                  !canSubmit ||
+                  mode !== "dml_preview_confirm" ||
+                  !confirmReady ||
+                  !commitAcknowledged
+                }
                 onClick={() => action.mutate("commit")}
               >
                 <CheckCircle2 className="size-4" aria-hidden="true" />
                 Commit
               </Button>
             </div>
+            {mode === "dml_preview_confirm" ? (
+              // The grant auto-fills from the preview, so a populated confirm
+              // field is not a decision. Name the durable effect and make the
+              // operator agree to it; the server-side grant is still the gate.
+              <label className={cn(OM_CHECK_LABEL, "mt-3")}>
+                <input
+                  className={OM_CHECKBOX}
+                  type="checkbox"
+                  checked={commitAcknowledged}
+                  onChange={(event) => setCommitAcknowledged(event.target.checked)}
+                />
+                I reviewed this DML and intend to commit it durably to{" "}
+                {laneId || "the selected lane"}
+              </label>
+            ) : null}
           </div>
         </ConsolePanel>
 

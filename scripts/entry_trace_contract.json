@@ -26,6 +26,26 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/check_mutation_result.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/check_mutation_result.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/check_release_surface_versions.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/check_resource_budget.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/ci_taxonomy.py",
       "kind": "entry_point",
       "trace": "required-quality"
@@ -161,6 +181,11 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/release_surface_manifest.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/release_surface_sync_check.sh",
       "kind": "entry_point",
       "trace": "required-quality"
@@ -171,12 +196,32 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/resource_budget.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/secret_scan.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },
     {
       "path": "scripts/sensitive_data_lint.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/test_check_mutation_result.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/test_verify_release_exact_sha.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/test_verify_required_local.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },
@@ -197,6 +242,26 @@
     },
     {
       "path": "scripts/validate_npm_publish_input.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/verify_release_exact_sha.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/verify_release_exact_sha.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/verify_required_local.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/verify_required_local.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },
