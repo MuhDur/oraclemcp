@@ -6089,6 +6089,8 @@ struct DoctorProfileContext {
     /// near-expiry diagnostic and never rendered). `None` unless the profile uses
     /// IAM-token auth and a token was resolved from its env/file source.
     iam_token: Option<String>,
+    /// Resolved wallet password for the online wallet-posture probe only.
+    wallet_password: Option<String>,
 }
 
 impl DoctorProfileContext {
@@ -6110,6 +6112,7 @@ impl DoctorProfileContext {
             sensitive_values: Vec::new(),
             credential_env_hint: None,
             iam_token: None,
+            wallet_password: None,
         }
     }
 }
@@ -6241,6 +6244,7 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
         // Offline metadata inspection never resolves a token (offline-no-secrets
         // invariant); the IAM near-expiry check runs on the --online path.
         iam_token: None,
+        wallet_password: None,
     }
 }
 
@@ -6313,6 +6317,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             sensitive_values: Vec::new(),
             credential_env_hint: None,
             iam_token: None,
+            wallet_password: None,
         },
         Err(e) => DoctorProfileContext {
             conn: None,
@@ -6331,6 +6336,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             sensitive_values: Vec::new(),
             credential_env_hint: None,
             iam_token: None,
+            wallet_password: None,
         },
     }
 }
@@ -6369,6 +6375,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
     // Capture the resolved IAM token BEFORE `resolved` is moved into the connect
     // attempt, so the near-expiry diagnostic works even when the connect fails.
     let iam_token = resolved.opts.iam_token.clone();
+    let wallet_password = resolved.opts.wallet_password.clone();
     match block_on_connect(|cx| async move { try_open_runtime_connections(&cx, resolved).await }) {
         Ok(connections) => {
             let connection_strategy =
@@ -6392,6 +6399,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
                 // hint does not apply.
                 credential_env_hint: None,
                 iam_token,
+                wallet_password,
             }
         }
         Err(e) => DoctorProfileContext {
@@ -6411,6 +6419,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
             sensitive_values,
             credential_env_hint: None,
             iam_token,
+            wallet_password,
         },
     }
 }
@@ -6434,13 +6443,13 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
         tns_admin: std::env::var("TNS_ADMIN").ok(),
         wallet_location: profile_ctx.wallet_location,
         // Offline-by-default invariant: profile metadata inspection never
-        // resolves a secret. The B2.1 wallet-posture probe therefore runs
-        // WITHOUT a resolved wallet password here; an encrypted ewallet.pem
-        // surfaces the honest `PasswordRequired` posture (or a cwallet.sso
-        // fallthrough) rather than resolving `wallet_password_ref`. The finer
-        // `KeyDecrypt` distinction is available to callers that already hold a
-        // resolved password (the probe accepts one).
-        wallet_password: None,
+        // resolves a secret. Online mode carries only the already-resolved
+        // wallet password into the transient posture probe.
+        wallet_password: if online {
+            profile_ctx.wallet_password
+        } else {
+            None
+        },
         // Transient: only the JWT `exp` is read for the near-expiry diagnostic;
         // the token value is never rendered or serialized.
         iam_token: profile_ctx.iam_token,
