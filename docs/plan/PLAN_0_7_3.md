@@ -100,6 +100,11 @@ tests, cassettes, fixtures, beads, commit messages, docs, or this plan.
 - Pure-Rust thin TNS/TTC driver; passes **2462/2578** of python-oracledb's own
   thin-mode suite (116 skips all proven forced by thin-mode contract, 0 hiding a
   defect, 0 regressions). API frozen, conformance clean.
+  > *As-of note (added 2026-07-16, bead `oraclemcp-udu6`; this plan is retained
+  > as history).* That count is **as of 2026-06-22T18:28:26Z, driver SHA
+  > `b4a0cd3e`** (`rust-oracledb/docs/qualification/1.0.0-rc.1/SUMMARY.md`) and
+  > has not been re-derived since — do not read it as a current measurement of a
+  > later driver. See `PLAN_0_8_x_ALIEN.md` §4-GT for the corrected row.
 - 20 cargo-fuzz targets, differential fuzz oracle vs python-oracledb, BoundedReader
   OOM-closed by construction.
 - Version-matrix gate live: xe11 (refusal lane) / xe18 / xe21 / free23.
