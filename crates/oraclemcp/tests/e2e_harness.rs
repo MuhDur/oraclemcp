@@ -1386,7 +1386,7 @@ fn oci_adb_terraform_dry_run_wires_explicit_teardown() {
         "real ADB TCPS password and IAM signoff",
     ] {
         assert!(
-            command_messages.iter().any(|message| *message == expected),
+            command_messages.contains(&expected),
             "OCI ADB Terraform dry-run did not schedule {expected}: {command_messages:?}"
         );
     }
