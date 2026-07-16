@@ -986,6 +986,48 @@ fn scoped_principal_cannot_act_as_operator_without_allowlist_and_operator_action
     );
 }
 
+#[test]
+fn oauth_scope_is_forwarded_to_operator_action_dispatch() {
+    let token = jwt_with_scope("oracle:read");
+    let principal_key = oauth_principal_key_from_validated_token(&token);
+    let (auditor, _sink) = operator_auditor();
+    let cfg = HttpTransportConfig {
+        oauth: Some(accepting_oauth_enforcement(Vec::new())),
+        operator_auditor: Some(auditor),
+        operator_authority: OperatorAuthorityPolicy {
+            allow_loopback_owner: false,
+            local_owner_stable_id: "process-owner".to_owned(),
+            allowed_subjects: vec![principal_key],
+        },
+        ..Default::default()
+    };
+    let body = serde_json::json!({
+        "tool": "oracle_query",
+        "arguments": { "sql": "SELECT 1 FROM dual" },
+    });
+    let request = HttpRequest::new(
+        "POST",
+        "/operator/v1/actions/execute",
+        [
+            ("host", "127.0.0.1"),
+            ("content-type", "application/json"),
+            ("accept", "application/json"),
+            ("authorization", &format!("Bearer {token}")),
+        ],
+        body.to_string().into_bytes(),
+    )
+    .with_peer_loopback(true);
+
+    let response = handle_http_request(&scope_echo_server(), &cfg, request);
+    assert_eq!(response.status, 200);
+    let response = response_json(&response);
+    assert_eq!(
+        response["data"]["mcp_response"]["result"]["structuredContent"]["scopes"],
+        serde_json::json!(["oracle:read"]),
+        "an allowlisted operator OAuth principal remains subject to its scope ceiling"
+    );
+}
+
 // ===================================================================
 // K10 — streaming query results over SSE (the streaming assembly)
 // ===================================================================

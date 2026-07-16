@@ -278,9 +278,9 @@ use stores::{
 };
 // Reached by the inline test module through `use super::*`.
 use operator::{
-    OperatorRouteKind, begin_operator_audit, complete_operator_audit, handle_operator_api_route,
-    operator_authority_required_response, operator_route_kind, operator_route_panicked_response,
-    prefixed_sha256_hex, refresh_active_lane_metrics,
+    OperatorRequestContext, OperatorRouteKind, begin_operator_audit, complete_operator_audit,
+    handle_operator_api_route, operator_authority_required_response, operator_route_kind,
+    operator_route_panicked_response, prefixed_sha256_hex, refresh_active_lane_metrics,
 };
 pub use serve::{
     close_http_principal_sessions, serve_control_https_until, serve_http, serve_http_until,
@@ -1017,6 +1017,13 @@ fn handle_http_exchange(
             let principal_key = authenticated
                 .as_ref()
                 .map(|auth| auth.principal_key.as_str());
+            // OAuth scopes are an upper bound on every dispatch that this
+            // request can reach.  The operator API eventually forwards tool
+            // actions through the same dispatcher as /mcp, so preserve the
+            // validated grant through that forwarding boundary as well.
+            let scope_grant = authenticated
+                .as_ref()
+                .and_then(|auth| auth.scope_grant.as_ref());
             if let Some(response) =
                 enforce_dashboard_operator_auth(config, &request, principal_key.is_some())
             {
@@ -1062,7 +1069,10 @@ fn handle_http_exchange(
                     &operator_subject,
                     operator_route,
                     operator_audit.seq,
-                    dashboard_browser,
+                    OperatorRequestContext {
+                        dashboard_browser,
+                        scope_grant,
+                    },
                 )
             }))
             .unwrap_or_else(|_| operator_route_panicked_response());

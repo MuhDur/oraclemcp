@@ -651,6 +651,13 @@ pub(super) enum OperatorRouteKind {
     NotFound,
 }
 
+/// Request-level constraints which must survive every operator forwarding path.
+#[derive(Clone, Copy)]
+pub(super) struct OperatorRequestContext<'a> {
+    pub(super) dashboard_browser: bool,
+    pub(super) scope_grant: Option<&'a ScopeGrant>,
+}
+
 pub(super) fn operator_route_kind(path: &str) -> OperatorRouteKind {
     match path {
         OPERATOR_API_PREFIX => OperatorRouteKind::Index,
@@ -746,7 +753,7 @@ pub(super) fn handle_operator_api_route(
     operator_subject: &AuditSubject,
     route: OperatorRouteKind,
     operator_audit_seq: u64,
-    dashboard_browser: bool,
+    request_context: OperatorRequestContext<'_>,
 ) -> HttpResponse {
     if route == OperatorRouteKind::NotFound {
         return operator_not_found_response(request);
@@ -787,7 +794,7 @@ pub(super) fn handle_operator_api_route(
             request,
             operator_subject,
             route,
-            dashboard_browser,
+            request_context.dashboard_browser,
         ),
         OperatorRouteKind::ChangeProposalsList
         | OperatorRouteKind::ChangeProposalsDetail
@@ -799,7 +806,7 @@ pub(super) fn handle_operator_api_route(
             operator_subject,
             route,
             operator_audit_seq,
-            dashboard_browser,
+            request_context,
         ),
         OperatorRouteKind::EditionProposalsList
         | OperatorRouteKind::EditionProposalsDraft
@@ -812,7 +819,7 @@ pub(super) fn handle_operator_api_route(
             operator_subject,
             route,
             operator_audit_seq,
-            dashboard_browser,
+            request_context,
         ),
         OperatorRouteKind::SchemaDiff => handle_operator_schema_diff_route(request),
         OperatorRouteKind::SourceHistoryList | OperatorRouteKind::SourceHistoryRevert => {
@@ -834,7 +841,7 @@ pub(super) fn handle_operator_api_route(
             operator_subject,
             route,
             operator_audit_seq,
-            dashboard_browser,
+            request_context,
         ),
         OperatorRouteKind::NotFound => unreachable!("handled above"),
     }
@@ -1401,7 +1408,7 @@ fn handle_operator_change_proposal_route(
     operator_subject: &AuditSubject,
     route: OperatorRouteKind,
     operator_audit_seq: u64,
-    dashboard_browser: bool,
+    request_context: OperatorRequestContext<'_>,
 ) -> HttpResponse {
     let Some(store) = config.change_proposals.as_ref() else {
         return operator_json_response(
@@ -1521,7 +1528,8 @@ fn handle_operator_change_proposal_route(
                 original_request: request,
                 operator_subject,
                 operator_audit_seq,
-                dashboard_browser,
+                dashboard_browser: request_context.dashboard_browser,
+                scope_grant: request_context.scope_grant,
             };
             operator_json_response(
                 200,
@@ -1546,7 +1554,7 @@ fn handle_operator_edition_proposal_route(
     operator_subject: &AuditSubject,
     route: OperatorRouteKind,
     operator_audit_seq: u64,
-    dashboard_browser: bool,
+    request_context: OperatorRequestContext<'_>,
 ) -> HttpResponse {
     let Some(store) = config.change_proposals.as_ref() else {
         return operator_json_response(
@@ -1646,7 +1654,8 @@ fn handle_operator_edition_proposal_route(
                 original_request: request,
                 operator_subject,
                 operator_audit_seq,
-                dashboard_browser,
+                dashboard_browser: request_context.dashboard_browser,
+                scope_grant: request_context.scope_grant,
             };
             let flip = if route == OperatorRouteKind::EditionProposalsMerge {
                 EditionDefaultFlip::Merge
@@ -1909,6 +1918,7 @@ struct ChangeProposalApplyContext<'a> {
     operator_subject: &'a AuditSubject,
     operator_audit_seq: u64,
     dashboard_browser: bool,
+    scope_grant: Option<&'a ScopeGrant>,
 }
 
 fn apply_change_proposal(
@@ -2064,7 +2074,10 @@ fn forward_operator_action(
         context.operator_subject,
         OperatorRouteKind::ActionExecute,
         context.operator_audit_seq,
-        context.dashboard_browser,
+        OperatorRequestContext {
+            dashboard_browser: context.dashboard_browser,
+            scope_grant: context.scope_grant,
+        },
     )
 }
 
@@ -3692,7 +3705,7 @@ fn handle_operator_action_route(
     operator_subject: &AuditSubject,
     route: OperatorRouteKind,
     operator_audit_seq: u64,
-    dashboard_browser: bool,
+    request_context: OperatorRequestContext<'_>,
 ) -> HttpResponse {
     if !content_type_is_json(request) {
         return empty_response(415);
@@ -3721,7 +3734,7 @@ fn handle_operator_action_route(
     if route == OperatorRouteKind::ActionPreview {
         force_preview_mode(tool, &mut arguments);
     }
-    if dashboard_browser
+    if request_context.dashboard_browser
         && let Some(data) = dashboard_workbench_release_gate(route, tool, &arguments)
     {
         return operator_json_response(403, &request.path, data);
@@ -3751,7 +3764,10 @@ fn handle_operator_action_route(
         | OperatorIdempotencyBegin::Conflict(response) => return response,
     };
     let operator_key;
-    let mut context = DispatchContext::default();
+    let mut context = request_context
+        .scope_grant
+        .map(DispatchContext::with_scope_grant)
+        .unwrap_or_default();
     if let Some(binding) = binding.as_ref() {
         context = context
             .with_http_session_id(&binding.mcp_session_id)
