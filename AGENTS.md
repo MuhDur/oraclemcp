@@ -4,10 +4,10 @@ Operating rules for agents working in this repository.
 
 **oraclemcp** is an unofficial, engine-free, safe-by-default Oracle Database
 [MCP](https://modelcontextprotocol.io) server in pure Rust: a small Cargo
-workspace of 8 `oraclemcp-*` library crates plus the `oraclemcp` binary. It is
-the lean half of a two-binary family; the full PL/SQL intelligence superset
-lives in [plsql-intelligence](https://github.com/MuhDur/plsql-intelligence) as
-`plsql-mcp`. Independent open-source project; not affiliated with Oracle.
+workspace of 8 `oraclemcp-*` library crates plus the `oraclemcp` binary. Its
+optional `plsql-intelligence` feature embeds the PL/SQL engine for offline
+tools; the separate `plsql-mcp` server is deprecated. Independent open-source
+project; not affiliated with Oracle.
 
 ## RULE 1 - ABSOLUTE
 
