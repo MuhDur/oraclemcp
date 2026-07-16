@@ -2409,9 +2409,16 @@ const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
- * Keep Tab focus inside a modal for as long as it is mounted, and hand focus
- * back to whatever opened it on close. `aria-modal` tells assistive tech the
- * rest of the page is inert; without a trap that is a promise we do not keep.
+ * Own a modal's whole focus lifecycle: remember what opened it, move focus
+ * inside, keep Tab within it, and hand focus back on close. `aria-modal` tells
+ * assistive tech the rest of the page is inert; without a trap that is a
+ * promise we do not keep.
+ *
+ * The hook does the initial focus itself, and the dialog's controls must NOT
+ * use `autoFocus`. React applies `autoFocus` during commit, before a passive
+ * effect runs — so a dialog that autofocused its own control would leave this
+ * effect reading that control as the "invoker", and focus would never return
+ * to the trigger.
  */
 function useModalFocus<T extends HTMLElement>(): React.RefObject<T | null> {
   const ref = React.useRef<T | null>(null);
@@ -2421,6 +2428,8 @@ function useModalFocus<T extends HTMLElement>(): React.RefObject<T | null> {
       return;
     }
     const invoker = document.activeElement as HTMLElement | null;
+    const firstFocusable = node.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
+    firstFocusable?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Tab") {
         return;
@@ -2525,7 +2534,10 @@ export function ConfirmDialog({
         </h3>
         <p className="mt-2 text-sm text-[var(--om-text-muted)]">{body}</p>
         <div className="mt-4 flex flex-wrap gap-2">
-          <Button type="button" variant="secondary" disabled={busy} onClick={onCancel} autoFocus>
+          {/* No autoFocus: useModalFocus moves focus here itself, after it has
+              recorded the trigger to return focus to. Cancel is first, so the
+              safe choice is what receives focus. */}
+          <Button type="button" variant="secondary" disabled={busy} onClick={onCancel}>
             Cancel
           </Button>
           <Button type="button" variant="primary" disabled={busy} onClick={onConfirm}>
@@ -2596,10 +2608,11 @@ function ClientCredentialConfirmationDialog({
         </p>
         <label className="mt-3 block">
           <span className={OM_LABEL}>Type the exact client ID to confirm</span>
+          {/* No autoFocus: useModalFocus focuses this (the first focusable)
+              itself, after recording the trigger to return focus to. */}
           <input
             className={cn(OM_INPUT, "font-mono")}
             value={typedClientId}
-            autoFocus
             autoComplete="off"
             spellCheck={false}
             onChange={(event) => onTypedClientId(event.target.value)}

@@ -66,6 +66,14 @@ describe("the console's own confirmation dialog", () => {
     expect(markup).toContain("Cancel<");
   });
 
+  it("carries no autoFocus, so focus can be returned to the trigger", () => {
+    // React applies autoFocus during commit, before a passive effect runs. A
+    // dialog that autofocused its own control would leave useModalFocus reading
+    // that control as the "invoker", and focus would never return to whatever
+    // opened the dialog. The hook does the initial focus itself instead.
+    expect(markup).not.toContain("autofocus");
+  });
+
   it("renders the busy state instead of re-arming the confirm", () => {
     const busy = renderToStaticMarkup(
       <ConfirmDialog
