@@ -1073,6 +1073,44 @@ ORACLE_MATRIX_FREE23_USER=<lab-user> ORACLE_MATRIX_FREE23_PASSWORD=<lab-pw> \
 bash scripts/e2e/oracle_version_matrix.sh --log
 ```
 
+**Flashback (AS-OF / SCN-diff) lane coverage.** `DBMS_FLASHBACK` ships and is
+`VALID` on XE 18c, XE 21c *and* FREE 23ai — it is **not** a 23ai-only feature and
+not a licensed one. What a stock gvenzl lane lacks is the **grant**, so an
+ungranted lane exercises only the typed *refusal* path. Grant it per lane to
+cover the positive replay path. The grant must come from `SYS`: `SYSTEM` cannot
+grant on a `SYS`-owned package and fails `ORA-01031`.
+
+```sh
+# Per lane, once. Replace <lab-user> with the lane's DB user.
+docker exec -i oracle-xe18 sqlplus -S -L 'sys/<pw>@localhost:1521/XEPDB1 as sysdba' \
+  <<<'GRANT EXECUTE ON SYS.DBMS_FLASHBACK TO <lab-user>;'
+```
+
+Both postures are supported and asserted, so neither is a silent gap:
+
+| Lane state | What the suite proves |
+| --- | --- |
+| **Granted** | The real flashback replay: an audited SCN replays the same committed rows. |
+| **Not granted** | A typed, version-aware refusal (`capability_unavailable`, naming the observed server version) — never a silent degrade to a current read. |
+
+Verify a lane is granted before expecting the positive path:
+
+```sh
+docker exec -i oracle-xe21 sqlplus -S -L '<lab-user>/<lab-pw>@localhost:1521/XEPDB1' <<'EOF'
+DECLARE n NUMBER;
+BEGIN
+  n := DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER;
+  DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(n);
+  DBMS_FLASHBACK.DISABLE;
+END;
+/
+EOF
+```
+
+`PLS-00201: identifier 'DBMS_FLASHBACK' must be declared` means the grant is
+missing (that lane will take the refusal path), **not** that the version lacks
+the package.
+
 `ORACLE_MATRIX_<LANE>_DSN` overrides the default `localhost` ports and
 `--lane xe18|xe21|free23` runs a subset while debugging (the release gate
 requires all three green). The script refuses production-looking DSNs/users,
