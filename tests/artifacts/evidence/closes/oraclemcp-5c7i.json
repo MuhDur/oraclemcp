@@ -1,0 +1,39 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-16T13:21:50Z",
+  "bead_id": "oraclemcp-5c7i",
+  "scope": {
+    "summary": "Historical close backfill for oraclemcp-5c7i: Executed the real 18c/21c/23ai matrix and reported the tri-state result honestly: xe18 PASS, xe21 FAIL due to documented Oracle PGA-memory errors, free23 PASS.",
+    "in_scope": [
+      "the recorded close claim for oraclemcp-5c7i"
+    ],
+    "out_of_scope": [
+      "Re-running the historical implementation or live database claim."
+    ]
+  },
+  "source": {
+    "sha": "29c0fea2e68d3fcadbb684406545ceb991fe0248",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "historical-close-backfill-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The original close did not retain a machine-readable exact-SHA proof or live artifact; this backfill records that limitation instead of inventing one.",
+    "Readiness is intentionally not-ready pending an exact-SHA proof producer."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
