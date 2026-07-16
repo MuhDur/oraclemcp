@@ -41,6 +41,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CLOSES_DIR = ROOT / "tests" / "artifacts" / "evidence" / "closes"
+LOCAL_REPOSITORY = "oraclemcp"
 
 _spec = importlib.util.spec_from_file_location(
     "validate_evidence", ROOT / "scripts" / "validate_evidence.py"
@@ -142,15 +143,9 @@ def _scan_reason(bead: dict) -> list:
     return findings
 
 
-def _audit_document(path: Path) -> list:
-    """Hard checks on one bead-close-evidence/v1 document."""
+def _audit_document_payload(bead_id: str, doc: dict) -> list:
+    """Hard checks on one parsed bead-close-evidence/v1 document."""
     findings: list = []
-    bead_id = path.stem
-
-    try:
-        doc = json.loads(path.read_text())
-    except json.JSONDecodeError as exc:
-        return [Finding("hard", bead_id, "MALFORMED_JSON", str(exc))]
 
     for f in _ve.validate_doc(doc):
         findings.append(
@@ -160,6 +155,16 @@ def _audit_document(path: Path) -> list:
         # The contract rejected it; deeper checks would index into a document
         # that is not the shape they assume.
         return findings
+
+    if doc["repo"] != LOCAL_REPOSITORY:
+        findings.append(
+            Finding(
+                "hard",
+                bead_id,
+                "E_REPO_MISMATCH",
+                f"close evidence declares repo {doc['repo']!r}, expected {LOCAL_REPOSITORY!r}",
+            )
+        )
 
     if doc["bead_id"] != bead_id:
         findings.append(
@@ -204,6 +209,26 @@ def _audit_document(path: Path) -> list:
             )
 
     return findings
+
+
+def _audit_document(path: Path) -> list:
+    """Load and hard-check one bead-close-evidence/v1 document."""
+    try:
+        doc = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        return [Finding("hard", path.stem, "MALFORMED_JSON", str(exc))]
+    return _audit_document_payload(path.stem, doc)
+
+
+def self_test() -> int:
+    """Pin local-repository binding without creating or mutating an artifact."""
+    fixture = ROOT / "schemas" / "evidence" / "fixtures" / "valid" / "bead-close-evidence.json"
+    foreign_doc = json.loads(fixture.read_text())
+    findings = _audit_document_payload("foreign-close", foreign_doc)
+    if not any(f.code == "E_REPO_MISMATCH" for f in findings):
+        print("audit: self-test failed: foreign close evidence was accepted", file=sys.stderr)
+        return 1
+    return 0
 
 
 TEMPLATE = {
@@ -317,6 +342,8 @@ def main() -> int:
 
     if args.template:
         return template(args.template)
+    if self_test() != 0:
+        return 1
     return audit(args.strict)
 
 
