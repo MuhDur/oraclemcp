@@ -542,6 +542,34 @@ mod tests {
     }
 
     #[test]
+    fn effective_level_is_clamped_by_a_later_scope_narrowing() {
+        // `effective_level()` is not only an input to `evaluate()`, which checks
+        // the ceiling itself. Callers gate directly on it — `ensure_workspace_level`
+        // opens the reversible *write* workspace on `effective_level() >=
+        // READ_WRITE` and never re-checks the ceiling on that path, and the
+        // read-only backstop arms only while it reads READ_ONLY. So the clamp is
+        // load-bearing, not defence-in-depth: without it a token narrowed to
+        // `oracle:read` would still look elevated to those callers.
+        let mut state = SessionLevelState::new(OperatingLevel::Ddl, false);
+        state
+            .escalate_window(OperatingLevel::Ddl, Duration::from_secs(900))
+            .expect("profile permits DDL before any scope narrowing");
+        assert_eq!(state.effective_level(), OperatingLevel::Ddl);
+
+        // The next request presents an oracle:read token.
+        state.apply_scope_ceiling(OperatingLevel::ReadOnly);
+        assert_eq!(
+            state.effective_level(),
+            OperatingLevel::ReadOnly,
+            "a live elevation window must not outrank a narrowed scope"
+        );
+        assert!(
+            state.has_active_elevation(),
+            "the window is still live — it is the clamp, not expiry, doing the work"
+        );
+    }
+
+    #[test]
     fn protected_ceiling_blocks_escalation_entirely() {
         let mut s = SessionLevelState::new(OperatingLevel::ReadOnly, true);
         // A write needs READ_WRITE, which exceeds the READ_ONLY ceiling: hard
