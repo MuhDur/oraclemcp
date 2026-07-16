@@ -96,11 +96,6 @@
       "trace": "required-quality"
     },
     {
-      "path": "scripts/migrate_mutation_result.py",
-      "kind": "entry_point",
-      "trace": "required-quality"
-    },
-    {
       "path": "scripts/mutation_safety_gate.sh",
       "kind": "entry_point",
       "trace": "required-quality"
