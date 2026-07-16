@@ -232,11 +232,11 @@ impl FileStore {
         write_metadata: impl FnOnce(&mut File, &str) -> std::io::Result<()>,
     ) -> Result<ServiceOwner> {
         let path = self.root.join(SERVICE_LOCK_FILE);
-        let mut file = open_private_lock_file(&path).map_err(|e| lock_open_error(&path, &e))?;
+        let mut file = open_private_lock_file(&path).map_err(|e| private_open_error(&path, &e))?;
         // Authenticate the sidecar before anything touches it: the descriptor is
         // truncated below, so a linked or special-file sidecar must be refused
         // while that is still harmless.
-        authenticate_lock_file(&file, &path)?;
+        authenticate_private_file(&file, &path)?;
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => return Err(FileStoreError::Locked),
@@ -361,11 +361,17 @@ impl FileStore {
             fsync_dir(&dir)?;
         }
 
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
+        // No-follow, then authenticate the descriptor: tail repair shortens this
+        // file with `set_len`, so a followed link would shorten a file of the
+        // attacker's choosing (bead oraclemcp-em39).
+        let mut options = OpenOptions::new();
+        options.read(true).write(true);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW);
+        let mut file = options
             .open(&path)
-            .map_err(|e| FileStoreError::Io(e.to_string()))?;
+            .map_err(|e| private_open_error(&path, &e))?;
+        authenticate_private_file(&file, &path)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
             .map_err(|e| FileStoreError::Io(e.to_string()))?;
@@ -406,7 +412,10 @@ impl FileStore {
         let path = self.path_for(collection, id, "jsonl")?;
         let created = !path.exists();
         let mut file =
-            open_append_private_file(&path).map_err(|e| FileStoreError::Io(e.to_string()))?;
+            open_append_private_file(&path).map_err(|e| private_open_error(&path, &e))?;
+        // Authenticate before the first write: a linked or special-file target
+        // must be refused while refusing is still harmless.
+        authenticate_private_file(&file, &path)?;
         file.write_all(record)
             .and_then(|()| file.write_all(b"\n"))
             .and_then(|()| file.sync_all())
@@ -614,18 +623,22 @@ fn open_private_lock_file(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
-/// Refuse a lock sidecar that is not a lone regular file.
+/// Refuse a service-owned file that is not a lone regular file (beads
+/// oraclemcp-siry, oraclemcp-em39).
 ///
 /// This authenticates the **open descriptor**, never the path: `fstat` on the
 /// fd we already hold cannot be swapped underneath us, so there is no window
 /// between inspection and use.
 ///
 /// `O_NOFOLLOW` already refused a symlink, but it does not refuse a hard link
-/// or a special file. A pre-planted hard link would share an inode with a
-/// victim file, so truncating "our" lock would truncate theirs; a FIFO or
-/// device would divert the write entirely. Both are refused as `UnsafePath`
-/// rather than acted on.
-fn authenticate_lock_file(file: &File, path: &Path) -> Result<()> {
+/// or a special file. A pre-planted hard link shares an inode with a victim
+/// file, so writing "ours" writes theirs; a FIFO or device diverts the write
+/// entirely. Both are refused as `UnsafePath` rather than acted on.
+///
+/// `nlink == 1` is safe for every file this store owns: they are created with
+/// `O_EXCL`, nothing here hard-links them, and `service restore` already
+/// refuses a hard-linked bundle.
+fn authenticate_private_file(file: &File, path: &Path) -> Result<()> {
     let meta = file
         .metadata()
         .map_err(|e| FileStoreError::Io(format!("cannot inspect {}: {e}", path.display())))?;
@@ -641,7 +654,7 @@ fn authenticate_lock_file(file: &File, path: &Path) -> Result<()> {
         let links = meta.nlink();
         if links != 1 {
             return Err(FileStoreError::UnsafePath(format!(
-                "{} has {links} hard links; a lock sidecar must be a lone regular file",
+                "{} has {links} hard links; a service-owned file must be a lone regular file",
                 path.display()
             )));
         }
@@ -651,14 +664,14 @@ fn authenticate_lock_file(file: &File, path: &Path) -> Result<()> {
 
 /// Map a refused no-follow open onto the fail-closed [`FileStoreError`].
 ///
-/// `ELOOP` here means the sidecar existed and was a symlink, which is a
+/// `ELOOP` here means the path existed and was a symlink, which is a
 /// path-safety refusal, not an ordinary I/O fault — surfacing it as `Io` would
 /// bury an attack signal in transient-error noise.
-fn lock_open_error(path: &Path, error: &std::io::Error) -> FileStoreError {
+fn private_open_error(path: &Path, error: &std::io::Error) -> FileStoreError {
     #[cfg(unix)]
     if error.raw_os_error() == Some(libc::ELOOP) {
         return FileStoreError::UnsafePath(format!(
-            "{} is a symlink; a lock sidecar must be a lone regular file",
+            "{} is a symlink; a service-owned file must be a lone regular file",
             path.display()
         ));
     }
@@ -672,11 +685,20 @@ fn write_service_lock_metadata(file: &mut File, owner: &str) -> std::io::Result<
     writeln!(file, "owner={owner:?}")
 }
 
+/// Open a service-owned JSONL file for append without following a link (bead
+/// oraclemcp-em39).
+///
+/// Same class as the lock sidecar: the caller appends to this descriptor, so a
+/// followed link would append service records — including audit chain records —
+/// into a file of the attacker's choosing.
 fn open_append_private_file(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.append(true).create(true);
     #[cfg(unix)]
-    options.mode(0o600);
+    {
+        options.mode(0o600);
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
     options.open(path)
 }
 
@@ -1355,5 +1377,94 @@ mod tests {
         }
         stop.store(true, Ordering::Relaxed);
         swapper.join().expect("swapper thread joins");
+    }
+
+    // Bead oraclemcp-em39. siry hardened the lock sidecar; the same
+    // link-following class lived on the data path. These assert the victim's
+    // bytes SURVIVE — a refusal that still appended or shortened would be a
+    // passing test and a live bug.
+
+    #[cfg(unix)]
+    #[test]
+    fn jsonl_append_refuses_a_symlinked_target_without_writing_it() {
+        let store = FileStore::open(test_root("jsonl-append-symlink")).expect("store");
+        let lock = store.acquire_service_owner("test").expect("lock");
+        let id = StoreId::from_safe_segment("metrics").expect("id");
+        let path = store.path_for("metrics", &id, "jsonl").expect("path");
+        ensure_private_dir(path.parent().expect("parent")).expect("metrics dir");
+        let victim = store.root().join("victim.txt");
+        fs::write(&victim, VICTIM_BYTES).expect("plant victim");
+        std::os::unix::fs::symlink(&victim, &path).expect("plant symlinked jsonl");
+
+        let error = match store.append_jsonl(&lock, "metrics", &id, b"{\"seq\":1}") {
+            Ok(_) => panic!("a symlinked jsonl target must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, FileStoreError::UnsafePath(_)),
+            "a symlinked append target is a path-safety refusal: {error:?}"
+        );
+        assert_eq!(
+            fs::read(&victim).expect("victim readable"),
+            VICTIM_BYTES,
+            "service records must never be appended into a symlink target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn jsonl_append_refuses_a_hard_linked_target_without_writing_it() {
+        let store = FileStore::open(test_root("jsonl-append-hardlink")).expect("store");
+        let lock = store.acquire_service_owner("test").expect("lock");
+        let id = StoreId::from_safe_segment("metrics").expect("id");
+        let path = store.path_for("metrics", &id, "jsonl").expect("path");
+        ensure_private_dir(path.parent().expect("parent")).expect("metrics dir");
+        let victim = store.root().join("victim.txt");
+        fs::write(&victim, VICTIM_BYTES).expect("plant victim");
+        fs::hard_link(&victim, &path).expect("plant hard-linked jsonl");
+
+        let error = match store.append_jsonl(&lock, "metrics", &id, b"{\"seq\":1}") {
+            Ok(_) => panic!("a hard-linked jsonl target must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, FileStoreError::UnsafePath(_)),
+            "a hard-linked append target is a path-safety refusal: {error:?}"
+        );
+        assert_eq!(
+            fs::read(&victim).expect("victim readable"),
+            VICTIM_BYTES,
+            "a shared inode must never receive service records"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn jsonl_recovery_refuses_a_symlinked_target_without_shortening_it() {
+        let store = FileStore::open(test_root("jsonl-recover-symlink")).expect("store");
+        let lock = store.acquire_service_owner("test").expect("lock");
+        let id = StoreId::from_safe_segment("metrics").expect("id");
+        let path = store.path_for("metrics", &id, "jsonl").expect("path");
+        ensure_private_dir(path.parent().expect("parent")).expect("metrics dir");
+        let victim = store.root().join("victim.txt");
+        // A torn tail is what makes recovery call set_len; without the fix that
+        // shortening lands on the victim.
+        fs::write(&victim, b"{\"seq\":1}\n{\"seq\":2}").expect("plant victim");
+        let before = fs::read(&victim).expect("victim readable");
+        std::os::unix::fs::symlink(&victim, &path).expect("plant symlinked jsonl");
+
+        let error = match store.recover_jsonl(&lock, "metrics", &id) {
+            Ok(_) => panic!("a symlinked recovery target must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, FileStoreError::UnsafePath(_)),
+            "a symlinked recovery target is a path-safety refusal: {error:?}"
+        );
+        assert_eq!(
+            fs::read(&victim).expect("victim readable"),
+            before,
+            "tail repair must never shorten a symlink target"
+        );
     }
 }
