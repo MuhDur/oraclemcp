@@ -1774,9 +1774,14 @@ mod live {
         });
     }
 
+    /// Seconds to let a freshly created table settle before its SCN is used as
+    /// a flashback target. Oracle's SCN->time mapping is ~3s granular; 8s clears
+    /// it with margin without making the live lane meaningfully slower.
+    const FLASHBACK_DDL_SETTLE_SECONDS: u64 = 8;
+
     #[test]
     fn live_observed_scn_replays_the_committed_read_snapshot() {
-        use oraclemcp_db::{AsOf, QueryCaps, read_query_as_of};
+        use oraclemcp_db::{AsOf, FlashbackRefusalKind, QueryCaps, read_query_as_of};
         run_with_cx(|cx| async move {
             let Some(conn) =
                 connect_or_skip(&cx, "live_observed_scn_replays_the_committed_read_snapshot").await
@@ -1798,6 +1803,14 @@ mod live {
                 );
                 return;
             }
+
+            // Oracle refuses a flashback read whose target SCN sits at (or too
+            // close to) the target's own CREATE: it maps SCN->time through
+            // SMON_SCN_TIME at ~3s granularity and raises ORA-01466 rather than
+            // risk reading data under a definition it cannot prove. Settle past
+            // that window so the replay below exercises the REAL flashback path
+            // instead of reporting a definition_changed refusal on every run.
+            std::thread::sleep(std::time::Duration::from_secs(FLASHBACK_DDL_SETTLE_SECONDS));
 
             let result: Result<(), DbError> = async {
                 conn.execute(
@@ -1853,17 +1866,66 @@ mod live {
             let _ = conn.execute(&cx, &cleanup_sql, &[]).await;
             match result {
                 Ok(()) => {}
+                // A target that cannot serve flashback to THIS profile must
+                // still REFUSE on contract, so this is an assertion rather than
+                // a skip. Verified live: 18c/21c/23ai all ship DBMS_FLASHBACK
+                // VALID, and the refusal below is a missing EXECUTE grant, not
+                // a version gap — so the refusal must never say "wrong version"
+                // and must never silently degrade into a current read.
+                Err(DbError::FlashbackRefusal {
+                    kind: FlashbackRefusalKind::CapabilityUnavailable,
+                    message,
+                    ..
+                }) => {
+                    assert!(
+                        message.contains("database version"),
+                        "a capability refusal must name the observed server version so an \
+                         operator can tell a grant gap from a version gap; got: {message}"
+                    );
+                    eprintln!(
+                        "[live-xe] observed-SCN replay REFUSED as contracted \
+                         (capability_unavailable, version named): {message}"
+                    );
+                }
+                // Retention/undo pressure is genuinely environmental: the SCN
+                // aged out of the window between capture and replay.
+                Err(DbError::FlashbackRefusal {
+                    kind: FlashbackRefusalKind::RetentionExceeded,
+                    message,
+                    ..
+                }) => {
+                    eprintln!("[live-xe] SKIP observed-SCN replay (retention): {message}");
+                }
+                // The settle above normally clears ORA-01466, but a loaded or
+                // slow target can still land inside Oracle's SCN->time
+                // granularity. The product refused correctly and typed it, so
+                // this is environmental rather than a contract break.
+                Err(DbError::FlashbackRefusal {
+                    kind: FlashbackRefusalKind::DefinitionChanged,
+                    message,
+                    ..
+                }) => {
+                    eprintln!(
+                        "[live-xe] SKIP observed-SCN replay (fresh-DDL definition window): \
+                         {message}"
+                    );
+                }
                 Err(error) => {
                     let message = error.to_string();
-                    if message.contains("ORA-01031")
-                        || message.contains("ORA-08180")
-                        || message.contains("FLASHBACK")
-                    {
-                        eprintln!(
-                            "[live-xe] SKIP observed-SCN replay (privilege/retention): {error}"
-                        );
+                    // Missing the FLASHBACK object privilege is environmental,
+                    // but it must not arrive as an untyped string either.
+                    if message.contains("ORA-01031") {
+                        eprintln!("[live-xe] SKIP observed-SCN replay (privilege): {error}");
                         return;
                     }
+                    // Anything flashback-shaped that is NOT a typed refusal is
+                    // the regression this test exists to catch: the old skip
+                    // matched on the bare word "FLASHBACK" and swallowed it.
+                    assert!(
+                        !message.to_ascii_uppercase().contains("FLASHBACK"),
+                        "a flashback failure must surface as a typed \
+                         DbError::FlashbackRefusal, never as an untyped error: {error}"
+                    );
                     panic!("observed-SCN replay live check failed: {error}");
                 }
             }

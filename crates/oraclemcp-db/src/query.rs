@@ -206,10 +206,18 @@ impl AsOf {
         let rows = match conn.query_rows(cx, CURRENT_SCN_SQL, &[]).await {
             Ok(rows) => rows,
             // 23ai accepts the package expression above only without
-            // parentheses. XE 18c/21c do not expose that expression at all,
-            // but expose the same server-owned SCN through V$DATABASE. Keep
-            // the fallback narrow: a privilege, connection, or any other
-            // error stays fail-closed instead of becoming a second attempt.
+            // parentheses. ORA-00904 here means the expression did not resolve
+            // for THIS session — verified live (18c/21c/23ai) to be a missing
+            // EXECUTE grant on SYS.DBMS_FLASHBACK rather than a version gap:
+            // the package is present and VALID on every version in the matrix
+            // and the expression works once granted. V$DATABASE.CURRENT_SCN is
+            // the same server-owned quantity (both track the live SCN in
+            // lockstep; neither pins to the transaction snapshot), so reading
+            // it instead preserves the observed-SCN meaning exactly. Keep the
+            // fallback narrow: a privilege, connection, or any other error
+            // stays fail-closed instead of becoming a second attempt. A
+            // profile that reaches the fallback still cannot REPLAY: the
+            // as-of path needs DBMS_FLASHBACK itself and refuses, typed, there.
             Err(error) if current_scn_expression_is_unavailable(&error) => {
                 conn.query_rows(cx, LEGACY_CURRENT_SCN_SQL, &[]).await?
             }
