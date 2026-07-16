@@ -167,6 +167,14 @@ expression: rendered
             "description": "Opt into larger capped ARRAY/JSON/VECTOR structured decode limits. Default false keeps safe caps.",
             "type": "boolean"
           },
+          "format": {
+            "description": "Inline result format. json (default) returns rows; arrow returns base64 Arrow IPC in arrow_ipc_b64 after the identical masking and audit path. Arrow and export/streaming are mutually exclusive.",
+            "enum": [
+              "json",
+              "arrow"
+            ],
+            "type": "string"
+          },
           "limit": {
             "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows.",
             "maximum": 5000,
@@ -263,6 +271,18 @@ expression: rendered
       "output_schema": {
         "additionalProperties": true,
         "properties": {
+          "arrow_cell_encoding": {
+            "description": "Arrow cell encoding used by arrow_ipc_b64. Decode each UTF-8 value as a JSON literal to recover the same value as JSON mode.",
+            "enum": [
+              "json_utf8_literal_v1"
+            ],
+            "type": "string"
+          },
+          "arrow_ipc_b64": {
+            "contentEncoding": "base64",
+            "description": "Base64 Apache Arrow IPC stream for the already-masked, audit-bound result page. Each UTF-8 cell is a JSON literal; see arrow_cell_encoding.",
+            "type": "string"
+          },
           "columns": {
             "description": "Column names in select-list order.",
             "items": {
@@ -274,6 +294,13 @@ expression: rendered
             "additionalProperties": true,
             "description": "Present when export=true: metadata for the materialized oracle-export://{id} resource, readable only by the originating principal under the exact scope grant.",
             "type": "object"
+          },
+          "format": {
+            "description": "Present as arrow when oracle_query was requested with format=arrow. In that form rows is omitted and the governed page is carried in arrow_ipc_b64.",
+            "enum": [
+              "arrow"
+            ],
+            "type": "string"
           },
           "inlined": {
             "description": "False when the result was materialized as an export resource (export=true) rather than inlined.",
@@ -464,6 +491,18 @@ expression: rendered
       "output_schema": {
         "additionalProperties": true,
         "properties": {
+          "arrow_cell_encoding": {
+            "description": "Arrow cell encoding used by arrow_ipc_b64. Decode each UTF-8 value as a JSON literal to recover the same value as JSON mode.",
+            "enum": [
+              "json_utf8_literal_v1"
+            ],
+            "type": "string"
+          },
+          "arrow_ipc_b64": {
+            "contentEncoding": "base64",
+            "description": "Base64 Apache Arrow IPC stream for the already-masked, audit-bound result page. Each UTF-8 cell is a JSON literal; see arrow_cell_encoding.",
+            "type": "string"
+          },
           "columns": {
             "description": "Column names in select-list order.",
             "items": {
@@ -475,6 +514,13 @@ expression: rendered
             "additionalProperties": true,
             "description": "Present when export=true: metadata for the materialized oracle-export://{id} resource, readable only by the originating principal under the exact scope grant.",
             "type": "object"
+          },
+          "format": {
+            "description": "Present as arrow when oracle_query was requested with format=arrow. In that form rows is omitted and the governed page is carried in arrow_ipc_b64.",
+            "enum": [
+              "arrow"
+            ],
+            "type": "string"
           },
           "inlined": {
             "description": "False when the result was materialized as an export resource (export=true) rather than inlined.",
@@ -2737,6 +2783,18 @@ expression: rendered
       "output_schema": {
         "additionalProperties": true,
         "properties": {
+          "arrow_cell_encoding": {
+            "description": "Arrow cell encoding used by arrow_ipc_b64. Decode each UTF-8 value as a JSON literal to recover the same value as JSON mode.",
+            "enum": [
+              "json_utf8_literal_v1"
+            ],
+            "type": "string"
+          },
+          "arrow_ipc_b64": {
+            "contentEncoding": "base64",
+            "description": "Base64 Apache Arrow IPC stream for the already-masked, audit-bound result page. Each UTF-8 cell is a JSON literal; see arrow_cell_encoding.",
+            "type": "string"
+          },
           "columns": {
             "description": "Column names in select-list order.",
             "items": {
@@ -2748,6 +2806,13 @@ expression: rendered
             "additionalProperties": true,
             "description": "Present when export=true: metadata for the materialized oracle-export://{id} resource, readable only by the originating principal under the exact scope grant.",
             "type": "object"
+          },
+          "format": {
+            "description": "Present as arrow when oracle_query was requested with format=arrow. In that form rows is omitted and the governed page is carried in arrow_ipc_b64.",
+            "enum": [
+              "arrow"
+            ],
+            "type": "string"
           },
           "inlined": {
             "description": "False when the result was materialized as an export resource (export=true) rather than inlined.",
