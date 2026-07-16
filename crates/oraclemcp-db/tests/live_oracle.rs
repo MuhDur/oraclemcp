@@ -110,6 +110,24 @@ async fn connect_or_skip(
     }
 }
 
+/// Whether this target may legitimately refuse the thin driver's QUERY-level
+/// CQN registration (`ORA-29970`).
+///
+/// Only a pre-23ai line may. The CQN tests assert that *23ai accepts* that
+/// registration, so a 23ai refusal must reach that assertion and fail rather
+/// than skip past it. Fail closed on an unknown or unparseable version: an
+/// unrecognised server does not earn the exemption.
+async fn may_refuse_query_level_cqn(cx: &Cx, conn: &RustOracleConnection) -> bool {
+    let major = conn
+        .describe(cx)
+        .await
+        .ok()
+        .and_then(|info| info.server_version)
+        .and_then(|version| version.split('.').next()?.parse::<u32>().ok())
+        .unwrap_or(0);
+    major != 0 && major < 23
+}
+
 fn env_or_skip(test_name: &str, name: &str) -> Option<String> {
     match std::env::var(name) {
         Ok(value) => Some(value),
@@ -644,6 +662,7 @@ fn live_cqn_query_registration_is_predicate_bound_and_cleanupable() {
         conn.commit(&cx).await.expect("commit fixture rows");
 
         let query = format!("SELECT id FROM {TABLE} WHERE id = :1");
+        let may_refuse_cqn = may_refuse_query_level_cqn(&cx, &conn).await;
         let registration = match conn
             .register_cqn_query(&cx, &query, &[OracleBind::I64(1)])
             .await
@@ -658,9 +677,9 @@ fn live_cqn_query_registration_is_predicate_bound_and_cleanupable() {
                     .await;
                 return;
             }
-            Err(DbError::Query(message)) if message.contains("ORA-29970") => {
+            Err(DbError::Query(message)) if may_refuse_cqn && message.contains("ORA-29970") => {
                 eprintln!(
-                    "[live-xe] SKIP {test_name}: this Oracle line rejects the thin driver's QUERY-level CQN registration ({message})"
+                    "[live-xe] SKIP {test_name}: this pre-23ai Oracle line rejects the thin driver's QUERY-level CQN registration ({message})"
                 );
                 let _ = conn
                     .execute(&cx, &format!("DROP TABLE {TABLE} PURGE"), &[])
@@ -717,6 +736,7 @@ fn live_cqn_query_callback_is_event_only_within_the_ten_second_ceiling() {
         conn.commit(&cx).await.expect("commit fixture row");
 
         let query = format!("SELECT id FROM {TABLE} WHERE id = :1");
+        let may_refuse_cqn = may_refuse_query_level_cqn(&cx, &conn).await;
         let registration = match conn
             .register_cqn_query(&cx, &query, &[OracleBind::I64(1)])
             .await
@@ -731,9 +751,9 @@ fn live_cqn_query_callback_is_event_only_within_the_ten_second_ceiling() {
                     .await;
                 return;
             }
-            Err(DbError::Query(message)) if message.contains("ORA-29970") => {
+            Err(DbError::Query(message)) if may_refuse_cqn && message.contains("ORA-29970") => {
                 eprintln!(
-                    "[live-xe] SKIP {test_name}: this Oracle line rejects the thin driver's QUERY-level CQN registration ({message})"
+                    "[live-xe] SKIP {test_name}: this pre-23ai Oracle line rejects the thin driver's QUERY-level CQN registration ({message})"
                 );
                 let _ = conn
                     .execute(&cx, &format!("DROP TABLE {TABLE} PURGE"), &[])
