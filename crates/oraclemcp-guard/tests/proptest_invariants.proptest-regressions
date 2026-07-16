@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c1a574913bd8a9f56e696bfc9a0c8332023cee80ebcc1b11f2ac897fc530ec64 # shrinks to scenario = PolicyScenario { sql: "INSERT INTO app.orders (id) VALUES (7)", context: SqlPolicyEvaluationContext { schema: Some("APP"), object: Some("ORDERS"), verb: Insert, principal: None } }, base_seeds = [], extra_seeds = [RuleSeed { schema: None, object: None, verb: None, principal: None, effect: RequireLevel(ReadOnly) }], position = 0
+cc 7cb48e84c4d40b602b7db62c7f82fe9d30391feaeef683285a4fd451b06f7054 # shrinks to scenario = PolicyScenario { sql: "DROP TABLE app.orders", context: SqlPolicyEvaluationContext { schema: Some("APP"), object: Some("ORDERS"), verb: Ddl, principal: None } }, seeds = [RuleSeed { schema: None, object: None, verb: None, principal: None, effect: RequireLevel(ReadOnly) }]
