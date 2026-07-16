@@ -1368,7 +1368,7 @@ fn real_adb_signoff_dry_run_schedules_wallet_and_iam_doctor_paths() {
         "token_env = \"ADB_IAM_TOKEN\"",
         "env -i",
         "run_real_adb_doctor",
-        "ORACLEMCP_REAL_ADB_USE_SNI:-false",
+        "ORACLEMCP_REAL_ADB_USE_SNI:-true",
     ] {
         assert!(
             harness.contains(expected),
@@ -1447,10 +1447,11 @@ fn oci_adb_terraform_dry_run_wires_explicit_teardown() {
         "oracle_set_session_level",
         "oracle_preview_sql",
         "\"oracle_execute\"",
-        "wallet_use_sni=false",
+        "wallet_use_sni=true",
         "ORACLEMCP_REAL_ADB_USE_SNI=\"$wallet_use_sni\"",
         "provider_connect_string",
         "wallet_high_target",
+        "TRANSPORT_CONNECT_TIMEOUT=60",
         "openssl s_client",
         "adb_server_certificate",
         "wait_for_adb_tcps",

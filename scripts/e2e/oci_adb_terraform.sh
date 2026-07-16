@@ -337,6 +337,20 @@ descriptor = text[start:end]
 if not re.search(r"\(PROTOCOL\s*=\s*TCPS\s*\)", descriptor, re.I):
     raise SystemExit("wallet HIGH connect descriptor is not TCPS")
 
+# A full DESCRIPTION descriptor owns its transport settings.  The server
+# deliberately rejects the profile-level connect_timeout_seconds in this case,
+# so add the bounded connect timeout to the descriptor itself.  Replace an
+# existing scalar rather than producing ambiguous duplicate settings.
+transport_timeout = re.compile(
+    r"\(TRANSPORT_CONNECT_TIMEOUT\s*=\s*[0-9]+\s*\)", re.I
+)
+if transport_timeout.search(descriptor):
+    descriptor = transport_timeout.sub("(TRANSPORT_CONNECT_TIMEOUT=60)", descriptor)
+else:
+    descriptor = descriptor[:-1] + "(TRANSPORT_CONNECT_TIMEOUT=60))"
+if len(transport_timeout.findall(descriptor)) != 1:
+    raise SystemExit("wallet HIGH descriptor has an ambiguous transport connect timeout")
+
 def value(name: str) -> str:
     match = re.search(r"\(" + name + r"\s*=\s*([^)\s]+)\s*\)", descriptor, re.I)
     if match is None:
@@ -350,7 +364,15 @@ if not re.fullmatch(r"[A-Za-z0-9.-]+", host):
 if not re.fullmatch(r"[1-9][0-9]{0,4}", port) or int(port) > 65535:
     raise SystemExit("wallet HIGH port is invalid")
 
-json.dump({"descriptor": descriptor, "host": host, "port": int(port)}, sys.stdout)
+json.dump(
+    {
+        "descriptor": descriptor,
+        "host": host,
+        "port": int(port),
+        "transport_connect_timeout": 60,
+    },
+    sys.stdout,
+)
 PY
 then
   admin_connect_string="$(jq -r '.descriptor' "$wallet_high_target")"
@@ -374,11 +396,9 @@ fi
 
 # `ssl_server_dn_match` remains true even when a modern wallet omits an
 # explicit DN: then the driver performs the stricter host/SAN match against
-# this descriptor's DNS-safe HOST. Oracle's service-form SNI ends in a numeric
-# label that rustls correctly rejects, so request no SNI and retain the
-# post-handshake DN verification rather than weakening TLS or forcing an
-# unencodable SNI value.
-wallet_use_sni=false
+# this descriptor's DNS-safe HOST. OCI's front end requires the wallet's
+# service-form SNI, so preserve it while keeping the DN check enabled.
+wallet_use_sni=true
 
 adb_id="$(<"$run_dir/adb_id")"
 scope="urn:oracle:db::id::$TF_VAR_compartment_ocid::$adb_id"
