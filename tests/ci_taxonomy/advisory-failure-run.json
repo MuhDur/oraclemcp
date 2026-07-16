@@ -1,0 +1,17 @@
+{
+  "databaseId": 1002,
+  "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "workflowName": "Fixture CI",
+  "jobs": [
+    {
+      "name": "required gate",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "floating gate",
+      "status": "completed",
+      "conclusion": "cancelled"
+    }
+  ]
+}

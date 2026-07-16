@@ -4,6 +4,12 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# CI taxonomy is derived from the workflow source itself. It fails closed on
+# duplicate YAML mapping keys (notably duplicate step-level `with:` blocks),
+# missing explicit permission policy, missing job timeouts, and drift from the
+# committed cross-repo ci-taxonomy/v1 document.
+python3 scripts/ci_taxonomy.py --check
+
 failures=0
 while IFS=: read -r file line_number source; do
   ref="${source#*uses:}"

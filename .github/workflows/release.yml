@@ -347,6 +347,7 @@ jobs:
         (contains(github.ref_name, '-') || needs.publish-crates.result == 'success')
       }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: write
       # SBOM + provenance: actions/attest-build-provenance and cosign keyless

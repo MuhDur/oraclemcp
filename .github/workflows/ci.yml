@@ -51,6 +51,7 @@ jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
         with:
@@ -65,6 +66,7 @@ jobs:
     name: clippy (-D warnings)
     needs: web-build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
         with:
@@ -90,6 +92,7 @@ jobs:
     name: cargo test
     needs: web-build
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
         with:
@@ -189,6 +192,7 @@ jobs:
   ergonomics:
     name: agent ergonomics drift guard
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
@@ -319,6 +323,7 @@ jobs:
     name: build on pinned nightly
     needs: web-build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
         with:
@@ -352,6 +357,7 @@ jobs:
     name: multi-nightly early-warning (advisory)
     runs-on: ubuntu-latest
     continue-on-error: true
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -378,6 +384,7 @@ jobs:
   docs:
     name: cargo doc (builds)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
@@ -405,6 +412,7 @@ jobs:
   boundary:
     name: engine-free boundary + surface + driver-seam + honesty + conformance accounting
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
@@ -444,6 +452,7 @@ jobs:
   api-lock:
     name: public-API lock (cargo public-api + semver-checks)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
         with:
@@ -469,6 +478,7 @@ jobs:
     name: release metadata sync
     needs: web-build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
@@ -492,6 +502,7 @@ jobs:
   supply-chain:
     name: cargo deny (advisories, licenses, bans, sources)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
@@ -511,6 +522,7 @@ jobs:
     name: build thin driver
     needs: web-build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
         with:
@@ -639,6 +651,7 @@ jobs:
   sensitive-data:
     name: sensitive-data lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
         with:
@@ -654,6 +667,7 @@ jobs:
     name: fuzz targets compile (nightly)
     runs-on: ubuntu-latest
     continue-on-error: true
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
         with:
