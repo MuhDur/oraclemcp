@@ -91,6 +91,11 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/migrate_mutation_result.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/merge_release_sbom.sh",
       "kind": "entry_point",
       "trace": "required-quality"
@@ -212,6 +217,11 @@
     },
     {
       "path": "scripts/test_check_mutation_result.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/test_migrate_mutation_result.py",
       "kind": "entry_point",
       "trace": "required-quality"
     },
