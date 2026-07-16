@@ -1161,10 +1161,14 @@ fn surface_inventory_authn_no_leak() {
         &server,
         &dashboard_cfg,
         HttpRequest::new(
-            "GET",
-            format!("{DASHBOARD_PAIR_PATH}?ticket=opaque"),
-            [("host", "127.0.0.1"), ("accept", "text/html")],
-            Vec::new(),
+            "POST",
+            DASHBOARD_PAIR_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("origin", "http://127.0.0.1"),
+                ("content-type", "application/x-www-form-urlencoded"),
+            ],
+            format!("{DASHBOARD_PAIRING_CODE_FIELD}=opaque").into_bytes(),
         )
         .with_peer_loopback(false),
     );

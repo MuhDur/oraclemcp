@@ -490,9 +490,13 @@ MCP initialize still returns `Mcp-Session-Id` for non-browser clients but does
 not mint a privileged browser cookie.
 
 The browser dashboard is never authenticated by loopback alone. `oraclemcp
-dashboard` mints a 0600 one-time ticket in the user runtime directory and opens
-`/dashboard/pair?ticket=...`; the server consumes that ticket once, within 60
-seconds, and returns an HttpOnly, SameSite=Strict dashboard session cookie.
+dashboard` mints a 0600 one-time ticket in the user runtime directory and prints
+a secret-free `/dashboard/pair` URL plus a one-time code. Opening that URL serves
+a script-free form; submitting the code POSTs it in the request body, and the
+server consumes the ticket once, within 60 seconds, and returns an HttpOnly,
+SameSite=Strict dashboard session cookie. The code is never accepted from the
+request target, so it cannot leak through browser history, a `Referer`, or an
+access log; a `?ticket=...` URL is refused without consuming the ticket.
 That cookie is `Secure` under native TLS or asserted trusted HTTPS termination;
 the only plaintext exception is the loopback pairing flow.
 Dashboard session details are fetched from `/dashboard/session` and are kept out

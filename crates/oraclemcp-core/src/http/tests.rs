@@ -794,10 +794,20 @@ fn operator_get_owned(path: String, if_none_match: Option<&str>) -> HttpRequest 
     HttpRequest::new("GET", path, headers, Vec::new()).with_peer_loopback(true)
 }
 
-fn ticket_from_pairing_url(url: &str) -> &str {
-    url.split_once("ticket=")
-        .map(|(_, token)| token)
-        .expect("pairing URL has ticket query")
+/// A same-origin submission of the pairing form: the one-time code travels in
+/// the body, never the request target (bead oraclemcp-l6xn).
+fn pairing_post(code: &str) -> HttpRequest {
+    HttpRequest::new(
+        "POST",
+        DASHBOARD_PAIR_PATH,
+        [
+            ("host", "127.0.0.1"),
+            ("origin", "http://127.0.0.1"),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ],
+        format!("{DASHBOARD_PAIRING_CODE_FIELD}={code}").into_bytes(),
+    )
+    .with_peer_loopback(true)
 }
 
 include!("tests_dashboard.rs");

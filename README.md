@@ -163,16 +163,21 @@ oraclemcp --json clients issue --label claude --scope oracle:read
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Service -Yes -Profile db_ro
 ```
 
-Request a listener-bound one-time pairing URL, then open the printed URL:
+Request a listener-bound pairing URL plus a one-time code, open the printed URL,
+and paste the code into the form it serves:
 
 ```sh
 om dashboard
 ```
 
-The CLI never passes the bearer URL to a desktop launcher (where process argv
-could expose it). The dashboard uses a one-time loopback pairing ticket bound to
-the exact live listener instance and scheme/host/port, then an HttpOnly,
-SameSite=Strict cookie plus CSRF and route-scoped action tickets. The cookie is
+The printed URL carries **no secret**, so it is safe in browser history, in a
+`Referer`, and in the view of any extension holding `tabs`/`webNavigation`
+permission. The one-time code is accepted only from the pairing form's POST body
+— never from a URL query or fragment — and the CLI never hands either to a
+desktop launcher (where process argv could expose it). The dashboard uses a
+one-time loopback pairing ticket bound to the exact live listener instance and
+scheme/host/port, then an HttpOnly, SameSite=Strict cookie plus CSRF and
+route-scoped action tickets. The cookie is
 `Secure` under native TLS or explicit trusted HTTPS termination; the only
 non-Secure exception is server-observed loopback HTTP, and remote plaintext
 requests never receive privileged browser cookies. Browser
@@ -385,9 +390,14 @@ The HTTP service also owns a private runtime instance lock; a second
 metadata instead of silently taking over another port or socket.
 
 The browser dashboard is paired separately even on loopback. `oraclemcp
-dashboard` creates a 0600 one-time ticket under the user runtime directory,
-opens `/dashboard/pair?ticket=...`, and the server immediately exchanges it for
-an HttpOnly, SameSite=Strict dashboard cookie. The cookie is `Secure` under
+dashboard` creates a 0600 one-time ticket under the user runtime directory and
+prints a secret-free `/dashboard/pair` URL alongside a one-time code. That URL
+serves a script-free form; submitting the code POSTs it in the request body, and
+the server exchanges it for an HttpOnly, SameSite=Strict dashboard cookie. The
+code is never read from the request target — a `/dashboard/pair?ticket=...` URL
+is refused outright without consuming the ticket — so the bootstrap secret
+cannot be recovered from browser history, a `Referer`, an access log, or a
+browser extension watching navigations. The cookie is `Secure` under
 native TLS or `[http].trusted_https_termination = true`; non-Secure cookies are
 limited to server-observed loopback HTTP. Forwarded scheme headers are ignored,
 and remote plaintext requests do not receive privileged browser cookies. The

@@ -69,7 +69,8 @@ use crate::client_credentials::{
 use crate::config_ops::{ConfigOpsError, ConfigOpsService};
 use crate::dashboard_auth::{
     DASHBOARD_ACTION_TICKET_HEADER, DASHBOARD_AUDIENCE_HEADER, DASHBOARD_CSRF_HEADER,
-    DASHBOARD_INSTANCE_HEADER, DASHBOARD_PAIR_PATH, DASHBOARD_PROBE_CHALLENGE_HEADER,
+    DASHBOARD_INSTANCE_HEADER, DASHBOARD_PAIR_PATH, DASHBOARD_PAIRING_CODE_FIELD,
+    DASHBOARD_PAIRING_TTL_SECONDS, DASHBOARD_PROBE_CHALLENGE_HEADER,
     DASHBOARD_PROBE_TOKEN_HASH_HEADER, DASHBOARD_PROOF_HEADER, DASHBOARD_SESSION_PATH,
     DashboardAuth,
 };
@@ -258,7 +259,7 @@ mod wire;
 // Façade: the listener lifecycle moved to `serve`, but every existing path
 // (`oraclemcp_core::http::serve_http`, the `lib.rs` re-exports, and this
 // module's own calls into `close_http_principal_sessions`) resolves unchanged.
-use request_target::split_request_target;
+use request_target::{parse_form_urlencoded, split_request_target};
 // Façade: the transport configuration moved to `config`, but every existing
 // path (`oraclemcp_core::http::HttpTransportConfig`, the `lib.rs` re-exports)
 // resolves unchanged.
@@ -1145,12 +1146,21 @@ fn handle_http_exchange(
     }
 }
 
+/// Local dashboard bootstrap (bead oraclemcp-l6xn).
+///
+/// `GET` serves a script-free pairing form; `POST` exchanges the pasted code for
+/// a session cookie. The bootstrap secret is accepted **only** from the POST
+/// body: it is never read from the request target, so it cannot be recovered
+/// from browser history, an extension's tab/navigation events, `Referer`, or an
+/// access log. A stale `?ticket=` URL is refused without consuming anything.
 fn handle_dashboard_pairing_route(
     config: &HttpTransportConfig,
     request: &HttpRequest,
 ) -> HttpResponse {
-    if request.method != "GET" {
-        return with_dashboard_security_headers(empty_response(405).with_header("allow", "GET"));
+    if !matches!(request.method.as_str(), "GET" | "POST") {
+        return with_dashboard_security_headers(
+            empty_response(405).with_header("allow", "GET, POST"),
+        );
     }
     if let Some(response) = guard_http_request(config, request) {
         return with_dashboard_security_headers(response);
@@ -1161,18 +1171,31 @@ fn handle_dashboard_pairing_route(
     if !request.peer_is_loopback {
         return dashboard_auth_error_response(403, "dashboard_pairing_requires_loopback");
     }
-    let Some(ticket) = request
-        .query_param("ticket")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return dashboard_pairing_auth_required_response();
-    };
+    // A secret in the request target is refused outright rather than honored:
+    // replaying a pre-l6xn URL must not pair, and must not burn a live ticket.
+    if request.query_param("ticket").is_some() {
+        return dashboard_auth_error_response(400, "dashboard_pairing_query_secret_refused");
+    }
     let cookie_policy = PrivilegedCookiePolicy::for_request(config, request);
     if cookie_policy == PrivilegedCookiePolicy::Suppress {
         return dashboard_auth_error_response(403, "dashboard_pairing_requires_secure_transport");
     }
-    match auth.exchange_ticket(ticket, auth.audience(), cookie_policy.secure()) {
+    if request.method == "GET" {
+        if let Some(response) = enforce_dashboard_get_headers(request) {
+            return response;
+        }
+        return dashboard_pairing_form_response();
+    }
+    if let Some(response) = enforce_dashboard_post_headers(request) {
+        return response;
+    }
+    if request.body.len() > MAX_PAIRING_BODY_BYTES {
+        return with_dashboard_security_headers(empty_response(413));
+    }
+    let Some(code) = dashboard_pairing_code_from_body(request) else {
+        return dashboard_pairing_auth_required_response();
+    };
+    match auth.exchange_ticket(&code, auth.audience(), cookie_policy.secure()) {
         Ok(login) => with_dashboard_security_headers(
             empty_response(303)
                 .with_header("location", "/")
@@ -1181,6 +1204,83 @@ fn handle_dashboard_pairing_route(
         ),
         Err(_) => dashboard_pairing_auth_required_response(),
     }
+}
+
+/// Read the one-time code from a same-origin form submission. Only an exact
+/// `application/x-www-form-urlencoded` body is read; nothing else is inspected.
+fn dashboard_pairing_code_from_body(request: &HttpRequest) -> Option<String> {
+    let content_type = request.header("content-type")?;
+    let media_type = content_type.split(';').next()?.trim();
+    if !media_type.eq_ignore_ascii_case("application/x-www-form-urlencoded") {
+        return None;
+    }
+    let body = std::str::from_utf8(&request.body).ok()?;
+    parse_form_urlencoded(body)
+        .into_iter()
+        .find(|(name, _)| name == DASHBOARD_PAIRING_CODE_FIELD)
+        .map(|(_, value)| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// The bootstrap form. Script-free by design: keeping JS out of the pairing
+/// boundary means no page script ever handles the code, and the page needs no
+/// CSP relaxation. Inline `style-src` is already permitted by [`dashboard_csp`].
+fn dashboard_pairing_form_response() -> HttpResponse {
+    let body = format!(
+        r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Pair the oraclemcp dashboard</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{ margin: 0; min-height: 100vh; display: grid; place-items: center;
+         font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; }}
+  main {{ width: min(28rem, 90vw); }}
+  h1 {{ font-size: 1.25rem; margin: 0 0 .5rem; }}
+  p {{ margin: 0 0 1.25rem; opacity: .8; }}
+  label {{ display: block; font-weight: 600; margin-bottom: .375rem; }}
+  input, button {{ font: inherit; width: 100%; box-sizing: border-box;
+                   padding: .625rem .75rem; border-radius: .5rem; }}
+  input {{ border: 1px solid currentColor; letter-spacing: .05em; }}
+  button {{ margin-top: .75rem; border: 0; font-weight: 600; cursor: pointer;
+            background: currentColor; }}
+  button span {{ mix-blend-mode: difference; filter: invert(1); }}
+</style>
+</head>
+<body>
+<main>
+  <h1>Pair the oraclemcp dashboard</h1>
+  <p>Paste the one-time code printed by <code>oraclemcp dashboard</code>. It expires
+     {ttl} seconds after it was issued and works once.</p>
+  <form method="post" action="{path}">
+    <label for="{field}">One-time pairing code</label>
+    <input id="{field}" name="{field}" type="password" autocomplete="off"
+           autocapitalize="off" autocorrect="off" spellcheck="false" autofocus
+           required>
+    <button type="submit"><span>Pair this browser</span></button>
+  </form>
+</main>
+</body>
+</html>
+"##,
+        ttl = DASHBOARD_PAIRING_TTL_SECONDS,
+        path = DASHBOARD_PAIR_PATH,
+        field = DASHBOARD_PAIRING_CODE_FIELD,
+    );
+    with_dashboard_security_headers(HttpResponse {
+        status: 200,
+        headers: vec![
+            (
+                "content-type".to_owned(),
+                "text/html; charset=utf-8".to_owned(),
+            ),
+            ("cache-control".to_owned(), "no-store".to_owned()),
+        ],
+        body: body.into_bytes(),
+    })
 }
 
 fn handle_dashboard_session_route(
@@ -2322,6 +2422,9 @@ fn new_session_id() -> String {
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+/// The pairing route returns before the MCP body cap, so it carries its own.
+/// One hex code in a form body is ~80 bytes; 1 KiB is generous and bounded.
+const MAX_PAIRING_BODY_BYTES: usize = 1024;
 
 fn reason_phrase(status: u16) -> &'static str {
     match status {

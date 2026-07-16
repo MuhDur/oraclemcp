@@ -3,6 +3,13 @@
 //! The dashboard is same-origin HTTP, but loopback is not a browser security
 //! boundary. This module owns the local bootstrap ticket, the HttpOnly session
 //! cookie, and per-route action tickets used by `/operator/v1` POST routes.
+//!
+//! The bootstrap code is a **body-only** credential (bead oraclemcp-l6xn). It is
+//! never placed in a URL — not in the query and not in the fragment — because a
+//! URL is readable from browser history and from any extension holding `tabs` or
+//! `webNavigation` permission, which observe a navigation before page script can
+//! scrub it. The operator pastes the code into a script-free same-origin form,
+//! and the server accepts it only from that `POST` body.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -29,8 +36,12 @@ use oraclemcp_audit::{ct_eq, hmac_sha256};
 
 use crate::operator_protocol::OPERATOR_ROUTE_SPECS;
 
-/// One-time local bootstrap route used by `oraclemcp dashboard`.
+/// One-time local bootstrap route used by `oraclemcp dashboard`. `GET` serves
+/// the script-free pairing form; `POST` exchanges the code in the request body.
 pub const DASHBOARD_PAIR_PATH: &str = "/dashboard/pair";
+/// Form field the pairing page returns the one-time bootstrap code in. The code
+/// is only ever accepted from a `POST` body, never from the request target.
+pub const DASHBOARD_PAIRING_CODE_FIELD: &str = "pairing_code";
 /// Same-origin session-info route used by the SPA to get CSRF/action tickets.
 pub const DASHBOARD_SESSION_PATH: &str = "/dashboard/session";
 /// Liveness path probed before minting a dashboard pairing ticket (B3.1 / D1).
@@ -54,14 +65,20 @@ pub const DASHBOARD_CSRF_HEADER: &str = "x-oraclemcp-csrf";
 /// Header carrying the route-scoped dashboard action ticket.
 pub const DASHBOARD_ACTION_TICKET_HEADER: &str = "x-oraclemcp-action-ticket";
 
-const DASHBOARD_PAIRING_TTL_SECONDS: u64 = 60;
+/// Lifetime of a one-time pairing code, from mint to exchange.
+pub const DASHBOARD_PAIRING_TTL_SECONDS: u64 = 60;
 const DASHBOARD_SESSION_TTL_SECONDS: u64 = 12 * 60 * 60;
 const TOKEN_BYTES: usize = 32;
 
 /// A freshly minted local pairing ticket.
 pub struct DashboardPairingTicket {
-    /// URL to open in the browser. Contains the one-time bootstrap secret.
+    /// URL to open in the browser. Deliberately carries **no** secret, so it is
+    /// safe in browser history, extension `tabs`/`webNavigation` events, and
+    /// `Referer` (bead oraclemcp-l6xn).
     pub url: String,
+    /// The one-time bootstrap code, pasted into the pairing form and returned
+    /// to the server in a POST body. Never place this in a URL.
+    pub code: String,
     /// Expiration as a Unix timestamp.
     pub expires_unix: u64,
     /// The 0600 ticket file consumed by the running service.
@@ -100,7 +117,8 @@ pub struct DashboardListenerProof {
 impl fmt::Debug for DashboardPairingTicket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DashboardPairingTicket")
-            .field("url", &"<redacted-bootstrap-url>")
+            .field("url", &self.url)
+            .field("code", &"<redacted>")
             .field("expires_unix", &self.expires_unix)
             .field("ticket_file", &self.ticket_file)
             .finish()
@@ -554,14 +572,17 @@ pub fn mint_dashboard_pairing_ticket(
         operation: "sync dashboard pairing ticket",
         message: e.to_string(),
     })?;
+    // The bootstrap secret is NOT in this URL. It travels only in the pairing
+    // form's POST body, so it never reaches the request target, an access log,
+    // `Referer`, browser history, or an extension's tab/navigation events.
     let url = format!(
-        "{}{}?ticket={}",
+        "{}{}",
         request.audience.trim_end_matches('/'),
         DASHBOARD_PAIR_PATH,
-        request.token,
     );
     Ok(DashboardPairingTicket {
         url,
+        code: request.token,
         expires_unix,
         ticket_file,
     })
@@ -774,12 +795,6 @@ mod tests {
         dir
     }
 
-    fn token_from_url(url: &str) -> &str {
-        url.split_once("ticket=")
-            .map(|(_, token)| token)
-            .expect("pairing URL has ticket")
-    }
-
     fn auth_and_ticket(dir: PathBuf, base_url: &str) -> (DashboardAuth, DashboardPairingTicket) {
         let auth = DashboardAuth::new(dir.clone(), base_url).expect("dashboard auth builds");
         let request = prepare_dashboard_pairing(base_url).expect("pairing prepares");
@@ -812,7 +827,7 @@ mod tests {
     fn pairing_ticket_is_single_use_and_hash_only() {
         let dir = test_dir("single-use");
         let (auth, ticket) = auth_and_ticket(dir, "http://127.0.0.1:7070");
-        let token = token_from_url(&ticket.url);
+        let token = &ticket.code;
         let file = fs::read_to_string(&ticket.ticket_file).expect("ticket file is readable");
         assert!(
             !file.contains(token),
@@ -836,7 +851,7 @@ mod tests {
     fn csrf_and_action_ticket_are_route_scoped() {
         let dir = test_dir("scoped");
         let (auth, ticket) = auth_and_ticket(dir, "http://127.0.0.1:7070");
-        let token = token_from_url(&ticket.url);
+        let token = &ticket.code;
         let login = auth
             .exchange_ticket(token, auth.audience(), false)
             .expect("login works");
@@ -921,7 +936,7 @@ mod tests {
         let request = prepare_dashboard_pairing(base).expect("pairing prepares");
         let proof = listener_proof(&intended, &request);
         let ticket = mint_dashboard_pairing_ticket(&dir, request, proof).expect("ticket mints");
-        let token = token_from_url(&ticket.url);
+        let token = &ticket.code;
 
         assert!(matches!(
             other_instance.exchange_ticket(token, other_instance.audience(), false),
@@ -948,9 +963,34 @@ mod tests {
         let ticket = mint_dashboard_pairing_ticket(&dir, request, proof)
             .expect("structurally valid proof persists for server verification");
         assert!(matches!(
-            auth.exchange_ticket(token_from_url(&ticket.url), auth.audience(), false),
+            auth.exchange_ticket(&ticket.code, auth.audience(), false),
             Err(DashboardAuthError::ListenerBindingMismatch)
         ));
+    }
+
+    #[test]
+    fn expired_pairing_ticket_fails_closed_and_is_swept() {
+        let dir = test_dir("expiry");
+        let (auth, ticket) = auth_and_ticket(dir, "http://127.0.0.1:7070");
+        // Age the persisted ticket rather than the clock: the TTL is enforced
+        // from the ticket's own recorded expiry.
+        let raw = fs::read_to_string(&ticket.ticket_file).expect("ticket file is readable");
+        let mut stored: serde_json::Value = serde_json::from_str(&raw).expect("ticket json");
+        stored["expires_unix"] = serde_json::json!(unix_now().saturating_sub(1));
+        fs::write(
+            &ticket.ticket_file,
+            serde_json::to_vec(&stored).expect("ticket re-serializes"),
+        )
+        .expect("rewrite ticket");
+
+        assert!(matches!(
+            auth.exchange_ticket(&ticket.code, auth.audience(), false),
+            Err(DashboardAuthError::ExpiredTicket)
+        ));
+        assert!(
+            !ticket.ticket_file.exists(),
+            "an expired ticket is swept, not left replayable"
+        );
     }
 
     #[test]

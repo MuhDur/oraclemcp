@@ -74,17 +74,18 @@ use oraclemcp_core::{
     ClientCredentialIssueRequest, ClientCredentialLifecycle, ClientCredentialStore,
     ConfigApplyOutcome, ConfigDraftPreview, ConfigOpsBackend, ConfigOpsError, ConfigOpsService,
     ConfigOpsStatus, ConfigReloadApplier, ConfigReloadApplyReport, CustomToolCatalog,
-    CustomToolDef, DEFAULT_REQUEST_TIMEOUT, DashboardAuth, DashboardAuthError, DispatchCloseReason,
-    DispatchContext, DispatchFuture, DispatchOutcome, DoctorAuthCapabilities, DoctorAuthModeKind,
-    DoctorContext, DoctorLevelCaps, DoctorProfileCaps, DoctorStateLayout, EffectiveHttpScheme,
-    ExportRegistry, FeatureTiers, FileStore, HttpSessionLifecycle, HttpTransportConfig,
-    LaneContext, LaneDispatchFactory, LaneDispatchFactoryBuilder, LaneRuntime, MCP_PATH,
-    McpSurfaceDetail, McpSurfaceFuture, MtlsClientRegistry, OAuthEnforcement, ObservabilityState,
-    OperatorAuthorityPolicy, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH,
-    PreparedLaneDispatch, ServiceOwner, ServiceTransport, ShutdownCoordinator, SiemFormat,
-    SiemHttpForwarder, SourceHistoryStore, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial,
-    TlsServerConfig, ToolDispatch, ToolStreamSender, WriteIntentLog, apply_legacy_state_migration,
-    build_server_config, default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
+    CustomToolDef, DASHBOARD_PAIRING_TTL_SECONDS, DEFAULT_REQUEST_TIMEOUT, DashboardAuth,
+    DashboardAuthError, DispatchCloseReason, DispatchContext, DispatchFuture, DispatchOutcome,
+    DoctorAuthCapabilities, DoctorAuthModeKind, DoctorContext, DoctorLevelCaps, DoctorProfileCaps,
+    DoctorStateLayout, EffectiveHttpScheme, ExportRegistry, FeatureTiers, FileStore,
+    HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory,
+    LaneDispatchFactoryBuilder, LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture,
+    MtlsClientRegistry, OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy,
+    OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, PreparedLaneDispatch, ServiceOwner,
+    ServiceTransport, ShutdownCoordinator, SiemFormat, SiemHttpForwarder, SourceHistoryStore,
+    StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig, ToolDispatch,
+    ToolStreamSender, WriteIntentLog, apply_legacy_state_migration, build_server_config,
+    default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
     mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file,
     prepare_dashboard_pairing, probe_dashboard_http_service, requires_mtls, run_doctor,
     service_app_doctor_snapshot, sign, start_oraclemcp_service_app_with_transport,
@@ -4216,19 +4217,20 @@ fn run_dashboard_cmd(
             return ExitCode::from(2);
         }
     };
-    // Never pass the one-time bearer URL to xdg-open/open/cmd: child process
-    // argv and desktop launcher metadata are visible to other local processes.
-    // The URL is emitted only on this command's stdout for deliberate opening.
+    // The URL carries no secret (bead oraclemcp-l6xn), but the browser is still
+    // never launched from here: a launcher argv is visible to other local
+    // processes, and pairing stays a deliberate operator act.
     let opened = false;
     if !no_open && !robot_json {
         eprintln!(
-            "{binary_name} dashboard: automatic browser launch is disabled for pairing-secret safety; open the printed URL manually"
+            "{binary_name} dashboard: automatic browser launch is disabled; open the printed URL manually"
         );
     }
     if robot_json {
         let output = serde_json::json!({
             "kind": "dashboard_pairing",
             "url": ticket.url,
+            "pairing_code": ticket.code,
             "expires_unix": ticket.expires_unix,
             "opened": opened,
             "ticket_file": ticket.ticket_file,
@@ -4238,6 +4240,12 @@ fn run_dashboard_cmd(
             ExitCode::SUCCESS,
         )
     } else {
+        // stdout stays the machine-readable channel (the URL); the code and its
+        // instructions go to stderr so `om dashboard | …` keeps working.
+        eprintln!(
+            "{binary_name} dashboard: open the URL below, then paste this one-time code (valid {DASHBOARD_PAIRING_TTL_SECONDS}s, single use):\n\n    {}\n",
+            ticket.code
+        );
         stdout_exit(write_stdout_line(&ticket.url), ExitCode::SUCCESS)
     }
 }

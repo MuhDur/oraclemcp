@@ -12,19 +12,14 @@ fn dashboard_pairing_sets_strict_cookie_and_session_view() {
     };
     let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
         .expect("ticket mints");
-    let token = ticket_from_pairing_url(&ticket.url);
-
-    let pair = handle_http_request(
-        &test_server(),
-        &cfg,
-        HttpRequest::new(
-            "GET",
-            format!("{DASHBOARD_PAIR_PATH}?ticket={token}"),
-            [("host", "127.0.0.1"), ("accept", "text/html")],
-            Vec::new(),
-        )
-        .with_peer_loopback(true),
+    let token = &ticket.code;
+    assert!(
+        !ticket.url.contains(token.as_str()) && !ticket.url.contains('?') && !ticket.url.contains('#'),
+        "the pairing URL carries no bootstrap secret: {}",
+        ticket.url
     );
+
+    let pair = handle_http_request(&test_server(), &cfg, pairing_post(token));
     assert_eq!(pair.status, 303);
     assert_eq!(pair.header("location"), Some("/"));
     assert_eq!(pair.header("referrer-policy"), Some("no-referrer"));
@@ -38,18 +33,12 @@ fn dashboard_pairing_sets_strict_cookie_and_session_view() {
     assert!(!cookie.contains("Secure"), "loopback HTTP remains usable");
     let cookie_pair = cookie.split(';').next().expect("cookie pair");
 
-    let replay = handle_http_request(
-        &test_server(),
-        &cfg,
-        HttpRequest::new(
-            "GET",
-            format!("{DASHBOARD_PAIR_PATH}?ticket={token}"),
-            [("host", "127.0.0.1"), ("accept", "text/html")],
-            Vec::new(),
-        )
-        .with_peer_loopback(true),
-    );
+    let replay = handle_http_request(&test_server(), &cfg, pairing_post(token));
     assert_eq!(replay.status, 401, "pairing ticket is single-use");
+    assert!(
+        replay.header("set-cookie").is_none(),
+        "a replayed code mints no second session"
+    );
 
     let unauth_shell = handle_http_request(
         &test_server(),
@@ -120,19 +109,20 @@ fn dashboard_pairing_uses_secure_cookie_on_effective_https() {
     };
     let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
         .expect("ticket mints");
-    let token = ticket_from_pairing_url(&ticket.url);
+    let token = &ticket.code;
     let pair = handle_http_request(
         &test_server(),
         &cfg,
         HttpRequest::new(
-            "GET",
-            format!("{DASHBOARD_PAIR_PATH}?ticket={token}"),
+            "POST",
+            DASHBOARD_PAIR_PATH,
             [
                 ("host", "127.0.0.1"),
-                ("accept", "text/html"),
+                ("origin", "https://127.0.0.1"),
+                ("content-type", "application/x-www-form-urlencoded"),
                 ("x-forwarded-proto", "http"),
             ],
-            Vec::new(),
+            format!("{DASHBOARD_PAIRING_CODE_FIELD}={token}").into_bytes(),
         )
         .with_peer_loopback(true),
     );
@@ -308,7 +298,7 @@ fn malicious_page_cannot_trigger_dashboard_gated_action() {
     let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
         .expect("ticket mints");
     let login = auth
-        .exchange_ticket(ticket_from_pairing_url(&ticket.url), auth.audience(), false)
+        .exchange_ticket(&ticket.code, auth.audience(), false)
         .expect("login works");
     let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
     let view = auth
@@ -403,4 +393,202 @@ fn malicious_page_cannot_trigger_dashboard_gated_action() {
     );
     assert_eq!(valid.status, 200);
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+}
+
+/// Bead oraclemcp-l6xn acceptance, proven on the **real served loopback path**
+/// (native parser, real sockets) rather than only through `handle_http_request`.
+///
+/// The bootstrap secret never appears in a request target, so it cannot be
+/// recovered from browser history, an extension's `tabs`/`webNavigation` events,
+/// `Referer`, or an access log — while single-use, `no-store`, `no-referrer`,
+/// CSP, and the HttpOnly/SameSite=Strict cookie all still hold.
+#[test]
+fn served_dashboard_pairing_keeps_the_bootstrap_secret_out_of_the_request_target() {
+    use std::io::Write as _;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::AtomicBool;
+
+    let dir = dashboard_test_dir("served-pairing");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind pairing listener");
+    let addr = listener.local_addr().expect("pairing listener address");
+    let host = format!("127.0.0.1:{}", addr.port());
+    let audience = format!("http://{host}");
+    let auth = Arc::new(DashboardAuth::new(dir, &audience).expect("dashboard auth builds"));
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = Arc::clone(&shutdown);
+    let server_auth = Arc::clone(&auth);
+    let handle = std::thread::spawn(move || {
+        serve_http_until(
+            listener,
+            test_server(),
+            &HttpTransportConfig {
+                dashboard_auth: Some(server_auth),
+                ..Default::default()
+            },
+            server_shutdown,
+        )
+        .expect("pairing listener exits cleanly")
+    });
+
+    // Every request target this flow sends, exactly as an access log records it.
+    let mut access_log: Vec<String> = Vec::new();
+    let mut send = |method: &str, target: &str, extra: &str, body: &str| -> String {
+        access_log.push(format!("{method} {target} HTTP/1.1"));
+        let request = format!(
+            "{method} {target} HTTP/1.1\r\nhost: {host}\r\nconnection: close\r\n{extra}content-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let mut stream = TcpStream::connect(addr).expect("connect to pairing listener");
+        stream
+            .write_all(request.as_bytes())
+            .expect("write pairing request");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("read pairing response");
+        response
+    };
+
+    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
+        .expect("ticket mints");
+    let code = ticket.code.clone();
+    assert_eq!(ticket.url, format!("{audience}{DASHBOARD_PAIR_PATH}"));
+    assert!(
+        !ticket.url.contains(&code) && !ticket.url.contains('?') && !ticket.url.contains('#'),
+        "the URL the operator opens carries no secret: {}",
+        ticket.url
+    );
+
+    // The bootstrap page is served with no secret in it and none supplied.
+    let form = send("GET", DASHBOARD_PAIR_PATH, "accept: text/html\r\n", "");
+    assert!(form.starts_with("HTTP/1.1 200 "), "served form: {form}");
+    assert!(!form.contains(&code), "the served form never carries the code");
+    assert!(form.contains(&format!("name=\"{DASHBOARD_PAIRING_CODE_FIELD}\"")));
+    assert!(form.contains("referrer-policy: no-referrer"));
+    assert!(form.contains("frame-ancestors 'none'"));
+    assert!(form.contains("cache-control: no-store"));
+
+    // The code is accepted from the body and mints exactly one session.
+    let form_headers = format!(
+        "origin: {audience}\r\nsec-fetch-site: same-origin\r\ncontent-type: application/x-www-form-urlencoded\r\n"
+    );
+    let submit = format!("{DASHBOARD_PAIRING_CODE_FIELD}={code}");
+    let paired = send("POST", DASHBOARD_PAIR_PATH, &form_headers, &submit);
+    assert!(paired.starts_with("HTTP/1.1 303 "), "pairing: {paired}");
+    assert!(paired.contains("location: /"));
+    assert!(paired.contains("cache-control: no-store"));
+    assert!(paired.contains("referrer-policy: no-referrer"));
+    assert!(paired.contains("HttpOnly"));
+    assert!(paired.contains("SameSite=Strict"));
+    assert!(
+        !paired.contains(&code),
+        "no response — redirect Location included — echoes the code"
+    );
+
+    // Replay fails closed and mints no second session.
+    let replay = send("POST", DASHBOARD_PAIR_PATH, &form_headers, &submit);
+    assert!(replay.starts_with("HTTP/1.1 401 "), "replay: {replay}");
+    assert!(
+        !replay.to_ascii_lowercase().contains("set-cookie"),
+        "exactly one session mint: {replay}"
+    );
+    assert!(
+        !replay.contains(&code),
+        "the error text never echoes the code"
+    );
+
+    // The access log of the whole successful flow is secret-free.
+    assert!(
+        access_log.iter().all(|line| !line.contains(&code)),
+        "no request target carries the bootstrap secret: {access_log:?}"
+    );
+
+    shutdown.store(true, AtomicOrdering::SeqCst);
+    let _ = TcpStream::connect(addr);
+    handle.join().expect("pairing listener thread joins");
+}
+
+/// A pre-l6xn `?ticket=` URL replayed from history must not pair — and must not
+/// consume the live ticket it names, so the real body exchange still succeeds.
+#[test]
+fn served_dashboard_pairing_refuses_a_secret_in_the_query_without_consuming_it() {
+    use std::io::Write as _;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::AtomicBool;
+
+    let dir = dashboard_test_dir("served-pairing-query");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind pairing listener");
+    let addr = listener.local_addr().expect("pairing listener address");
+    let host = format!("127.0.0.1:{}", addr.port());
+    let audience = format!("http://{host}");
+    let auth = Arc::new(DashboardAuth::new(dir, &audience).expect("dashboard auth builds"));
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = Arc::clone(&shutdown);
+    let server_auth = Arc::clone(&auth);
+    let handle = std::thread::spawn(move || {
+        serve_http_until(
+            listener,
+            test_server(),
+            &HttpTransportConfig {
+                dashboard_auth: Some(server_auth),
+                ..Default::default()
+            },
+            server_shutdown,
+        )
+        .expect("pairing listener exits cleanly")
+    });
+
+    let send = |method: &str, target: &str, extra: &str, body: &str| -> String {
+        let request = format!(
+            "{method} {target} HTTP/1.1\r\nhost: {host}\r\nconnection: close\r\n{extra}content-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let mut stream = TcpStream::connect(addr).expect("connect to pairing listener");
+        stream
+            .write_all(request.as_bytes())
+            .expect("write pairing request");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("read pairing response");
+        response
+    };
+
+    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
+        .expect("ticket mints");
+    let code = ticket.code.clone();
+
+    let refused = send(
+        "GET",
+        &format!("{DASHBOARD_PAIR_PATH}?ticket={code}"),
+        "accept: text/html\r\n",
+        "",
+    );
+    assert!(refused.starts_with("HTTP/1.1 400 "), "refused: {refused}");
+    assert!(
+        !refused.to_ascii_lowercase().contains("set-cookie"),
+        "a secret in the query never pairs: {refused}"
+    );
+    assert!(
+        !refused.contains(&code),
+        "the refusal never echoes the code back"
+    );
+
+    // Refusing the URL did not burn the ticket: the body exchange still pairs.
+    let paired = send(
+        "POST",
+        DASHBOARD_PAIR_PATH,
+        &format!(
+            "origin: {audience}\r\ncontent-type: application/x-www-form-urlencoded\r\n"
+        ),
+        &format!("{DASHBOARD_PAIRING_CODE_FIELD}={code}"),
+    );
+    assert!(
+        paired.starts_with("HTTP/1.1 303 "),
+        "the refused URL must not consume the ticket: {paired}"
+    );
+
+    shutdown.store(true, AtomicOrdering::SeqCst);
+    let _ = TcpStream::connect(addr);
+    handle.join().expect("pairing listener thread joins");
 }

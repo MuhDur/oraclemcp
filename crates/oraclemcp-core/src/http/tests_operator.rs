@@ -2761,7 +2761,7 @@ fn dashboard_workbench_ddl_apply_is_release_gated() {
                 crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
                     .expect("ticket mints");
             let login = auth
-                .exchange_ticket(ticket_from_pairing_url(&ticket.url), auth.audience(), false)
+                .exchange_ticket(&ticket.code, auth.audience(), false)
                 .expect("login works");
             let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
             let view = auth
@@ -2839,7 +2839,7 @@ fn dashboard_structured_ddl_preview_remains_available() {
     let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
         .expect("ticket mints");
     let login = auth
-        .exchange_ticket(ticket_from_pairing_url(&ticket.url), auth.audience(), false)
+        .exchange_ticket(&ticket.code, auth.audience(), false)
         .expect("login works");
     let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
     let view = auth

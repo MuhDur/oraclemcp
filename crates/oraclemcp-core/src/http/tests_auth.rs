@@ -519,7 +519,7 @@ fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak()
     let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
         .expect("ticket mints");
     let login = auth
-        .exchange_ticket(ticket_from_pairing_url(&ticket.url), auth.audience(), false)
+        .exchange_ticket(&ticket.code, auth.audience(), false)
         .expect("login works");
     let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
     let view = auth
@@ -765,13 +765,19 @@ fn uniform_auth_errors_no_enumeration_oracle() {
         dashboard_auth: Some(Arc::clone(&auth)),
         ..Default::default()
     };
+    // The code is a body credential now, so uniformity is asserted on the POST
+    // exchange: an absent code and a wrong code must be indistinguishable.
     let missing_pairing = handle_http_request(
         &test_server(),
         &dashboard_cfg,
         HttpRequest::new(
-            "GET",
+            "POST",
             DASHBOARD_PAIR_PATH,
-            [("host", "127.0.0.1"), ("accept", "text/html")],
+            [
+                ("host", "127.0.0.1"),
+                ("origin", "http://127.0.0.1"),
+                ("content-type", "application/x-www-form-urlencoded"),
+            ],
             Vec::new(),
         )
         .with_peer_loopback(true),
@@ -779,13 +785,7 @@ fn uniform_auth_errors_no_enumeration_oracle() {
     let invalid_pairing = handle_http_request(
         &test_server(),
         &dashboard_cfg,
-        HttpRequest::new(
-            "GET",
-            format!("{DASHBOARD_PAIR_PATH}?ticket=invalid-bootstrap-secret"),
-            [("host", "127.0.0.1"), ("accept", "text/html")],
-            Vec::new(),
-        )
-        .with_peer_loopback(true),
+        pairing_post("invalid-bootstrap-secret"),
     );
     assert_eq!(
         auth_fingerprint(&invalid_pairing),
@@ -799,7 +799,7 @@ fn uniform_auth_errors_no_enumeration_oracle() {
     let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
         .expect("ticket mints");
     let login = auth
-        .exchange_ticket(ticket_from_pairing_url(&ticket.url), auth.audience(), false)
+        .exchange_ticket(&ticket.code, auth.audience(), false)
         .expect("login works");
     let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
     let view = auth

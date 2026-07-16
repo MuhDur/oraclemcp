@@ -466,11 +466,15 @@ fn om_alias_argv0_aware_runs_dashboard_pairing() {
         serde_json::from_slice(&dashboard_output.stdout).expect("dashboard JSON");
     assert_eq!(value["kind"], "dashboard_pairing");
     assert_eq!(value["opened"], false);
+    let url = value["url"].as_str().expect("url string");
+    let code = value["pairing_code"].as_str().expect("pairing code string");
+    assert_eq!(url, format!("{base_url}/dashboard/pair"));
+    // bead oraclemcp-l6xn: the bootstrap secret is reported beside the URL, never
+    // inside it — no query, no fragment, nothing recoverable from history.
+    assert!(!code.is_empty());
     assert!(
-        value["url"]
-            .as_str()
-            .expect("url string")
-            .starts_with(&format!("{base_url}/dashboard/pair?ticket="))
+        !url.contains(code) && !url.contains('?') && !url.contains('#'),
+        "pairing URL must carry no bootstrap secret: {url}"
     );
 }
 

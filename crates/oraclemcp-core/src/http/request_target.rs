@@ -20,6 +20,12 @@ pub(super) fn split_request_target(
     (path.to_owned(), query_string, query)
 }
 
+/// Decode an `application/x-www-form-urlencoded` request body. Bodies and query
+/// strings share one grammar, so they share one parser.
+pub(super) fn parse_form_urlencoded(body: &str) -> Vec<(String, String)> {
+    parse_query_string(body)
+}
+
 fn parse_query_string(query: &str) -> Vec<(String, String)> {
     query
         .split('&')

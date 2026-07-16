@@ -340,7 +340,13 @@ write-capable SQL shell.
 *Mitigation.* Loopback alone is not dashboard authentication. `oraclemcp
 dashboard` mints a 0600 one-time pairing ticket in the user's runtime
 directory; `/dashboard/pair` requires loopback, consumes the ticket once, and
-sets an HttpOnly, SameSite=Strict session cookie. Native TLS and the explicit
+sets an HttpOnly, SameSite=Strict session cookie. The bootstrap code is a
+body-only credential: `GET /dashboard/pair` serves a script-free form and the
+code is accepted only from that same-origin POST body, so it never enters the
+request target, where browser history, a `Referer`, an access log, or an
+extension holding `tabs`/`webNavigation` could recover it. A legacy
+`?ticket=...` URL is refused without consuming the ticket it names, so replaying
+a history entry neither pairs nor burns a live ticket. Native TLS and the explicit
 `trusted_https_termination` assertion add `Secure`; non-Secure cookies are
 limited to server-observed loopback HTTP, while remote plaintext requests never
 receive privileged browser cookies. Forwarded scheme headers are ignored, so

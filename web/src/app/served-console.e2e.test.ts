@@ -105,14 +105,24 @@ async function waitReady(): Promise<void> {
 
 /** Pair with the operator surface the way the browser does. */
 async function pair(): Promise<void> {
-  const minted = spawnSync(BIN, ["dashboard", "--url", BASE, "--no-open"], {
+  const minted = spawnSync(BIN, ["--json", "dashboard", "--url", BASE, "--no-open"], {
     env: { ...process.env, ORACLEMCP_CONFIG: join(workdir, "config.toml") },
     encoding: "utf8"
   });
-  const url = minted.stdout.trim().split("\n").pop() ?? "";
-  expect(url, "om dashboard should mint a pairing URL").toContain("/dashboard/pair?ticket=");
-  // The pairing GET 303-redirects and sets the session cookie on that response.
-  const res = await fetch(url, { redirect: "manual" });
+  const payload = JSON.parse(minted.stdout.trim().split("\n").pop() ?? "{}");
+  const url: string = payload.url ?? "";
+  const code: string = payload.pairing_code ?? "";
+  expect(url, "om dashboard should mint a pairing URL").toContain("/dashboard/pair");
+  expect(code, "om dashboard should mint a pairing code").not.toBe("");
+  // bead oraclemcp-l6xn: the bootstrap secret travels in the form body only.
+  expect(url, "the pairing URL must carry no bootstrap secret").not.toContain(code);
+  // Submitting the pairing form 303-redirects and sets the session cookie.
+  const res = await fetch(url, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": "application/x-www-form-urlencoded", origin: BASE },
+    body: new URLSearchParams({ pairing_code: code }).toString()
+  });
   const setCookie = res.headers.get("set-cookie") ?? "";
   const match = /oraclemcp_dashboard_session=[^;]+/.exec(setCookie);
   expect(match, "pairing should set the dashboard session cookie").not.toBeNull();
