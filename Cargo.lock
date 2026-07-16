@@ -2125,6 +2125,7 @@ dependencies = [
  "plsql-lineage",
  "plsql-output",
  "plsql-parser-antlr",
+ "plsql-project",
  "plsql-sast",
  "plsql-symbols",
  "rcgen",

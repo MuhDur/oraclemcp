@@ -113,7 +113,7 @@ pub fn register_tools(registry: &mut ToolRegistry) {
         ToolDescriptor::new(
             "oracle_plsql_lineage",
             ToolTier::FoundationStatic,
-            "Run offline dependency-lineage traversal from a logical object id in a local PL/SQL project.",
+            "Run offline dependency-lineage traversal from a logical object id in a local PL/SQL project. Wrapped or obfuscated bodies are reported as a partial lineage gap.",
         )
         .with_input_schema(object_schema(
             json!({
@@ -972,6 +972,7 @@ fn run_what_breaks(args: WhatBreaksArgs) -> Result<Value, ErrorEnvelope> {
 
 fn run_lineage(args: LineageArgs) -> Result<Value, ErrorEnvelope> {
     let run = analyze_local_project(&args.project_root)?;
+    let wrapped_source = target_has_wrapped_source(&args.project_root, &args.target);
     let selector = NodeSelector::LogicalObjectId(args.target.clone());
     let Ok(node) = run.dep_graph.resolve_node(&selector) else {
         let mut available_nodes: Vec<String> = run
@@ -982,7 +983,7 @@ fn run_lineage(args: LineageArgs) -> Result<Value, ErrorEnvelope> {
             .collect();
         available_nodes.sort();
         available_nodes.truncate(25);
-        return Ok(json!({
+        let mut value = json!({
             "target": args.target,
             "found": false,
             "available_node_sample": available_nodes,
@@ -990,11 +991,15 @@ fn run_lineage(args: LineageArgs) -> Result<Value, ErrorEnvelope> {
                 "node_count": run.dep_graph.node_count(),
                 "edge_count": run.dep_graph.edge_count(),
             },
-        }));
+        });
+        if wrapped_source {
+            mark_wrapped_source_partial(&mut value, &args.target);
+        }
+        return Ok(value);
     };
 
     let direction = parse_lineage_direction(args.direction.as_deref())?;
-    let value = match direction {
+    let mut value = match direction {
         LineageDirection::Downstream => {
             json!({ "target": args.target, "found": true, "direction": "downstream", "result": impact(&run.dep_graph, &node.id, args.max_depth) })
         }
@@ -1011,7 +1016,143 @@ fn run_lineage(args: LineageArgs) -> Result<Value, ErrorEnvelope> {
             })
         }
     };
+    if wrapped_source {
+        mark_wrapped_source_partial(&mut value, &args.target);
+    }
     Ok(value)
+}
+
+const WRAPPED_SOURCE_UNKNOWN_REASON: &str = "WrappedSource";
+const WRAPPED_SOURCE_DETAIL: &str =
+    "Wrapped or obfuscated PL/SQL source prevents complete source-only lineage.";
+
+/// Return whether a wrapped body in the project belongs to the requested target.
+///
+/// This deliberately uses the engine family's header-shaped detector rather than
+/// parsing the opaque body. A wrapped body proves only that a gap exists; it
+/// cannot prove any dependency edge.
+fn target_has_wrapped_source(project_root: &str, target: &str) -> bool {
+    let project_root = Path::new(project_root);
+    let Ok(manifest) = plsql_project::ProjectManifest::load(project_root) else {
+        return false;
+    };
+    let Ok(source_files) = plsql_project::discover_files(project_root, &manifest) else {
+        return false;
+    };
+    source_files.into_iter().any(|source_file| {
+        std::fs::read_to_string(project_root.join(source_file.relative_path))
+            .ok()
+            .is_some_and(|source| {
+                plsql_project::looks_wrapped(&source)
+                    && wrapped_source_declares_target(&source, target)
+            })
+    })
+}
+
+fn wrapped_source_declares_target(source: &str, target: &str) -> bool {
+    let scan_window = source.get(..4096).unwrap_or(source);
+    scan_window.lines().take(64).any(|line| {
+        let tokens: Vec<&str> = line
+            .trim()
+            .trim_end_matches(';')
+            .split_whitespace()
+            .collect();
+        let Some(last) = tokens.last() else {
+            return false;
+        };
+        if !last.eq_ignore_ascii_case("wrapped") {
+            return false;
+        }
+
+        let object_position = tokens.iter().position(|token| {
+            matches!(
+                token.to_ascii_uppercase().as_str(),
+                "PACKAGE" | "FUNCTION" | "PROCEDURE" | "TRIGGER" | "TYPE" | "LIBRARY"
+            )
+        });
+        let Some(object_position) = object_position else {
+            return false;
+        };
+        let object_name_position = if tokens[object_position].eq_ignore_ascii_case("package")
+            || tokens[object_position].eq_ignore_ascii_case("type")
+        {
+            if tokens
+                .get(object_position + 1)
+                .is_some_and(|token| token.eq_ignore_ascii_case("body"))
+            {
+                object_position + 2
+            } else {
+                object_position + 1
+            }
+        } else {
+            object_position + 1
+        };
+        let Some(object_name) = tokens.get(object_name_position) else {
+            return false;
+        };
+        lineage_object_name_matches(object_name, target)
+    })
+}
+
+fn lineage_object_name_matches(header_name: &str, target: &str) -> bool {
+    let header_name = header_name
+        .split('(')
+        .next()
+        .unwrap_or(header_name)
+        .trim_matches('"');
+    let target = target.trim().trim_matches('"');
+    header_name.eq_ignore_ascii_case(target)
+        || header_name.rsplit('.').next().is_some_and(|header| {
+            target
+                .rsplit('.')
+                .next()
+                .is_some_and(|target| header.trim_matches('"').eq_ignore_ascii_case(target))
+        })
+}
+
+fn mark_wrapped_source_partial(value: &mut Value, target: &str) {
+    let marker = json!({
+        "source": target,
+        "unknown_reason": WRAPPED_SOURCE_UNKNOWN_REASON,
+        "detail": WRAPPED_SOURCE_DETAIL,
+    });
+    let Some(root) = value.as_object_mut() else {
+        return;
+    };
+    root.insert("lineage_completeness".to_owned(), json!("partial"));
+    root.insert(
+        "partial_lineage_marker".to_owned(),
+        json!({
+            "reason": WRAPPED_SOURCE_UNKNOWN_REASON,
+            "detail": WRAPPED_SOURCE_DETAIL,
+        }),
+    );
+    if let Some(result) = root.get_mut("result") {
+        append_wrapped_source_unknown_edge(result, marker.clone());
+    }
+    for direction in ["upstream", "downstream"] {
+        if let Some(result) = root.get_mut(direction) {
+            append_wrapped_source_unknown_edge(result, marker.clone());
+        }
+    }
+    if !root.contains_key("result") && !root.contains_key("upstream") {
+        root.insert("unknown_edges".to_owned(), json!([marker]));
+    }
+}
+
+fn append_wrapped_source_unknown_edge(result: &mut Value, marker: Value) {
+    let Some(result) = result.as_object_mut() else {
+        return;
+    };
+    let Some(unknown_edges) = result
+        .entry("unknown_edges".to_owned())
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+    else {
+        return;
+    };
+    unknown_edges.push(marker);
+    result.insert("partial".to_owned(), json!(true));
 }
 
 /// The logical id a column node carries, as `owner.object.column` (the depgraph
@@ -2655,6 +2796,67 @@ mod tests {
             "no edges for a missing column"
         );
         assert!(value["available_column_sample"].is_array());
+    }
+
+    #[test]
+    fn lineage_marks_wrapped_body_as_partial_without_inventing_dependencies() {
+        let project = tempfile::tempdir().expect("wrapped lineage project");
+        std::fs::write(
+            project.path().join("secure_pkg.pks"),
+            "CREATE OR REPLACE PACKAGE secure_pkg AS\n\
+             PROCEDURE public_api;\n\
+             END secure_pkg;\n",
+        )
+        .expect("write package spec");
+        std::fs::write(
+            project.path().join("secure_pkg.pkb"),
+            "CREATE OR REPLACE PACKAGE BODY secure_pkg WRAPPED\n\
+             a000000\n\
+             1\n\
+             abcd\n",
+        )
+        .expect("write wrapped package body");
+
+        let value = run_lineage(LineageArgs {
+            project_root: project.path().display().to_string(),
+            target: "SECURE_PKG".to_owned(),
+            direction: Some("bidirectional".to_owned()),
+            max_depth: None,
+        })
+        .expect("wrapped source must not fail lineage");
+
+        assert_eq!(value["found"], json!(true), "value={value}");
+        assert_eq!(value["lineage_completeness"], json!("partial"));
+        assert_eq!(
+            value["partial_lineage_marker"]["reason"],
+            json!(WRAPPED_SOURCE_UNKNOWN_REASON)
+        );
+        for direction in ["upstream", "downstream"] {
+            let result = &value[direction];
+            assert_eq!(result["partial"], json!(true), "value={value}");
+            let unknown_edges = result["unknown_edges"]
+                .as_array()
+                .expect("partial lineage has typed unknown edges");
+            assert!(unknown_edges.iter().any(|edge| {
+                edge["source"] == "SECURE_PKG"
+                    && edge["unknown_reason"] == WRAPPED_SOURCE_UNKNOWN_REASON
+            }));
+            assert!(
+                result["edges"]
+                    .as_array()
+                    .expect("lineage result has an edge set")
+                    .is_empty(),
+                "wrapped source must not fabricate dependency edges: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_source_marker_is_scoped_to_its_declared_object() {
+        let source = "PACKAGE BODY app.secure_pkg WRAPPED\na000000\n1\nabcd\n";
+        assert!(wrapped_source_declares_target(source, "APP.SECURE_PKG"));
+        assert!(wrapped_source_declares_target(source, "secure_pkg"));
+        assert!(!wrapped_source_declares_target(source, "APP.OTHER_PKG"));
     }
 
     fn test_source_column(

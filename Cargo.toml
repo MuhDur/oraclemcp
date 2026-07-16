@@ -79,6 +79,7 @@ plsql-engine = { version = "=0.7.0", default-features = false }
 plsql-catalog = { version = "=0.7.0", default-features = false }
 plsql-depgraph = { version = "=0.7.0", default-features = false }
 plsql-lineage = { version = "=0.7.0", default-features = false }
+plsql-project = { version = "=0.7.0", default-features = false }
 plsql-ir = { version = "=0.7.0", default-features = false }
 plsql-parser-antlr = { version = "=0.7.0", default-features = false }
 plsql-symbols = { version = "=0.7.0", default-features = false }

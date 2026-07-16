@@ -33,6 +33,7 @@ plsql-intelligence = [
     "dep:plsql-catalog",
     "dep:plsql-depgraph",
     "dep:plsql-lineage",
+    "dep:plsql-project",
     "dep:plsql-ir",
     "dep:plsql-parser-antlr",
     "dep:plsql-symbols",
@@ -88,6 +89,7 @@ plsql-engine = { workspace = true, optional = true }
 plsql-catalog = { workspace = true, optional = true }
 plsql-depgraph = { workspace = true, optional = true }
 plsql-lineage = { workspace = true, optional = true }
+plsql-project = { workspace = true, optional = true }
 plsql-ir = { workspace = true, optional = true }
 plsql-parser-antlr = { workspace = true, optional = true }
 plsql-symbols = { workspace = true, optional = true }
