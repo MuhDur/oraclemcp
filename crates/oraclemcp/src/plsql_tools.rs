@@ -9,7 +9,7 @@ use chrono::Utc;
 use oraclemcp_core::tools::{ToolDescriptor, ToolRegistry, ToolTier};
 use oraclemcp_db::{
     CatalogExtractReport, CatalogExtractRequest, CatalogRowSetName, CatalogSchemaFilter, DbError,
-    OracleConnection, OracleRow as DbOracleRow, extract_catalog_rowsets,
+    OracleBind, OracleConnection, OracleRow as DbOracleRow, extract_catalog_rowsets,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{Classifier, ClassifierConfig, ObjectRef, Purity, SideEffectOracle};
@@ -49,12 +49,11 @@ pub const TOOL_NAMES: [&str; 9] = [
     "oracle_plsql_blast_radius",
 ];
 
-const STATIC_TOOL_NAMES: [&str; 7] = [
+const STATIC_TOOL_NAMES: [&str; 6] = [
     "oracle_plsql_parse",
     "oracle_plsql_analyze",
     "oracle_plsql_what_breaks",
     "oracle_plsql_lineage",
-    "oracle_lineage",
     "oracle_plsql_sast",
     "oracle_plsql_doc",
 ];
@@ -130,8 +129,8 @@ pub fn register_tools(registry: &mut ToolRegistry) {
     registry.register(
         ToolDescriptor::new(
             "oracle_lineage",
-            ToolTier::FoundationStatic,
-            "Source-derived COLUMN lineage: for owner.object.column, return the upstream columns it derives from and the downstream objects that read it, computed from the depgraph's column edges (DerivesColumn/WritesColumn/ReadsColumn). Traces a column through a view chain.",
+            ToolTier::FoundationLiveDb,
+            "Live-verified COLUMN lineage: cross-check source-derived owner.object.column edges against the guarded Oracle catalog and mark verified, missing, or type-mismatched drift.",
         )
         .with_input_schema(object_schema(
             json!({
@@ -205,7 +204,6 @@ pub fn dispatch_static(tool: &str, args: Value) -> Result<Value, ErrorEnvelope> 
         "oracle_plsql_analyze" => run_analyze(parse_args(tool, args)?),
         "oracle_plsql_what_breaks" => run_what_breaks(parse_args(tool, args)?),
         "oracle_plsql_lineage" => run_lineage(parse_args(tool, args)?),
-        "oracle_lineage" => run_column_lineage(parse_args(tool, args)?),
         "oracle_plsql_sast" => run_sast(parse_args(tool, args)?),
         "oracle_plsql_doc" => run_doc(parse_args(tool, args)?),
         _ => Err(ErrorEnvelope::new(
@@ -222,6 +220,7 @@ pub async fn dispatch_live(
     args: Value,
 ) -> Result<Value, ErrorEnvelope> {
     match tool {
+        "oracle_lineage" => run_column_lineage_live(cx, conn, parse_args(tool, args)?).await,
         "oracle_plsql_live_snapshot" => run_live_snapshot(cx, conn, parse_args(tool, args)?).await,
         "oracle_plsql_blast_radius" => run_blast_radius(cx, conn, parse_args(tool, args)?).await,
         _ => Err(ErrorEnvelope::new(
@@ -1058,6 +1057,7 @@ fn resolve_column_node<'a>(
 /// source-derived edge list the tool returns. Each edge is the accessing object,
 /// how it touches the column, and the depgraph's confidence — never any literal
 /// value or bind, only object/column identifiers already present in the source.
+#[cfg(test)]
 fn column_edges_json(result: &plsql_lineage::ColumnAccessResult) -> Value {
     let edges: Vec<Value> = result
         .accessors
@@ -1086,6 +1086,7 @@ fn column_edges_json(result: &plsql_lineage::ColumnAccessResult) -> Value {
 /// (`column_writers`: `DerivesColumn`/`WritesColumn`) and the downstream objects
 /// that read it (`column_readers`: `ReadsColumn`). Traces a column through a view
 /// chain. Purely source-derived — no database round-trip, no literals or binds.
+#[cfg(test)]
 fn run_column_lineage(args: ColumnLineageArgs) -> Result<Value, ErrorEnvelope> {
     let source_graph = source_derived_column_graph(Path::new(&args.project_root))?;
     let Some(node) = resolve_column_node(
@@ -1131,6 +1132,241 @@ fn run_column_lineage(args: ColumnLineageArgs) -> Result<Value, ErrorEnvelope> {
     }))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceLineageColumnRef {
+    logical_id: String,
+    expected_data_type: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CatalogColumnRef {
+    data_type: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct LiveCatalogSnapshot {
+    columns: BTreeMap<String, CatalogColumnRef>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CatalogDriftMarker {
+    Verified,
+    Missing,
+    TypeMismatch,
+}
+
+impl CatalogDriftMarker {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::Missing => "drift:missing",
+            Self::TypeMismatch => "drift:type_mismatch",
+        }
+    }
+}
+
+fn classify_catalog_drift(
+    source: &SourceLineageColumnRef,
+    catalog: &LiveCatalogSnapshot,
+) -> CatalogDriftMarker {
+    let key = normalize_source_name(&source.logical_id);
+    let Some(live) = catalog.columns.get(&key) else {
+        return CatalogDriftMarker::Missing;
+    };
+    if source
+        .expected_data_type
+        .as_deref()
+        .is_some_and(|expected| normalize_data_type(expected) != live.data_type)
+    {
+        CatalogDriftMarker::TypeMismatch
+    } else {
+        CatalogDriftMarker::Verified
+    }
+}
+
+fn catalog_marker_json(source: &SourceLineageColumnRef, catalog: &LiveCatalogSnapshot) -> Value {
+    let key = normalize_source_name(&source.logical_id);
+    let live = catalog.columns.get(&key);
+    json!({
+        "status": classify_catalog_drift(source, catalog).as_str(),
+        "column_logical_id": source.logical_id,
+        "source_data_type": source.expected_data_type,
+        "catalog_data_type": live.map(|column| column.data_type.as_str()),
+    })
+}
+
+fn column_edges_json_with_catalog_markers(
+    result: &plsql_lineage::ColumnAccessResult,
+    source_graph: &SourceDerivedColumnGraph,
+    catalog: &LiveCatalogSnapshot,
+) -> Value {
+    let edges: Vec<Value> = result
+        .accessors
+        .iter()
+        .map(|accessor| {
+            let source = source_graph.column_ref(&accessor.accessor_logical_id);
+            json!({
+                "object": accessor.accessor_logical_id,
+                "edge_kind": accessor.edge_kind,
+                "accessor_kind": accessor.accessor_kind,
+                "confidence": format!("{:?}", accessor.confidence),
+                "is_unknown_column_of_table": accessor.is_unknown_column_of_table,
+                "catalog_marker": catalog_marker_json(&source, catalog),
+            })
+        })
+        .collect();
+    json!({
+        "column_logical_id": result.column_logical_id,
+        "edges": edges,
+        "resolution_error": result.resolution_error,
+    })
+}
+
+async fn run_column_lineage_live(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    args: ColumnLineageArgs,
+) -> Result<Value, ErrorEnvelope> {
+    let source_graph = source_derived_column_graph(Path::new(&args.project_root))?;
+    let Some(node) = resolve_column_node(
+        &source_graph.graph,
+        args.owner.as_deref(),
+        &args.object,
+        &args.column,
+    ) else {
+        let mut available: Vec<String> = source_graph
+            .graph
+            .nodes
+            .values()
+            .filter(|node| matches!(node.identity_kind, NodeIdentityKind::Column))
+            .map(|node| node.logical_id.to_string())
+            .collect();
+        available.sort();
+        available.truncate(25);
+        return Ok(json!({
+            "owner": args.owner,
+            "object": args.object,
+            "column": args.column,
+            "found": false,
+            "available_column_sample": available,
+            "source_files_scanned": source_graph.source_files_scanned,
+            "unsupported_projection_count": source_graph.unsupported_projection_count,
+            "catalog_cross_check": { "enabled": true, "catalog_columns_loaded": 0 },
+        }));
+    };
+
+    let upstream = column_writers(&source_graph.graph, &NodeSelector::NodeId(node.id));
+    let downstream = column_readers(&source_graph.graph, &NodeSelector::NodeId(node.id));
+    let catalog = live_catalog_snapshot_for_lineage(
+        cx,
+        conn,
+        args.owner.as_deref(),
+        Some(node.logical_id.as_str()),
+        [&upstream, &downstream],
+    )
+    .await?;
+    let target_ref = source_graph.column_ref(node.logical_id.as_str());
+    Ok(json!({
+        "owner": args.owner,
+        "object": args.object,
+        "column": args.column,
+        "found": true,
+        "column_logical_id": node.logical_id.to_string(),
+        "catalog_marker": catalog_marker_json(&target_ref, &catalog),
+        "upstream": column_edges_json_with_catalog_markers(&upstream, &source_graph, &catalog),
+        "downstream": column_edges_json_with_catalog_markers(&downstream, &source_graph, &catalog),
+        "source_files_scanned": source_graph.source_files_scanned,
+        "unsupported_projection_count": source_graph.unsupported_projection_count,
+        "catalog_cross_check": {
+            "enabled": true,
+            "catalog_columns_loaded": catalog.columns.len(),
+        },
+    }))
+}
+
+async fn live_catalog_snapshot_for_lineage(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner_hint: Option<&str>,
+    target_column: Option<&str>,
+    results: [&plsql_lineage::ColumnAccessResult; 2],
+) -> Result<LiveCatalogSnapshot, ErrorEnvelope> {
+    let mut objects = BTreeSet::new();
+    if let Some(target_column) = target_column
+        && let Some((owner, object, _)) = split_lineage_column_id(target_column, owner_hint)
+    {
+        objects.insert((owner, object));
+    }
+    for result in results {
+        for accessor in &result.accessors {
+            if let Some((owner, object, _)) =
+                split_lineage_column_id(&accessor.accessor_logical_id, owner_hint)
+            {
+                objects.insert((owner, object));
+            }
+        }
+    }
+
+    let mut snapshot = LiveCatalogSnapshot::default();
+    for (owner, object) in objects {
+        for row in conn
+            .query_rows(
+                cx,
+                "SELECT column_name, data_type \
+                 FROM all_tab_columns \
+                 WHERE owner = :1 AND table_name = :2 \
+                 ORDER BY column_id",
+                &[
+                    OracleBind::from(owner.clone()),
+                    OracleBind::from(object.clone()),
+                ],
+            )
+            .await
+            .map_err(DbError::into_envelope)?
+        {
+            let Some(column_name) = row.text("COLUMN_NAME") else {
+                continue;
+            };
+            let Some(data_type) = row.text("DATA_TYPE") else {
+                continue;
+            };
+            let logical_id = column_logical_id(Some(&owner), &object, column_name);
+            snapshot.columns.insert(
+                normalize_source_name(&logical_id),
+                CatalogColumnRef {
+                    data_type: normalize_data_type(data_type),
+                },
+            );
+        }
+    }
+    Ok(snapshot)
+}
+
+fn split_lineage_column_id(
+    logical_id: &str,
+    owner_hint: Option<&str>,
+) -> Option<(String, String, String)> {
+    let parts: Vec<&str> = logical_id
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .collect();
+    match parts.as_slice() {
+        [owner, object, column] => Some((
+            owner.to_ascii_uppercase(),
+            object.to_ascii_uppercase(),
+            column.to_ascii_uppercase(),
+        )),
+        [object, column] => owner_hint.map(|owner| {
+            (
+                owner.to_ascii_uppercase(),
+                object.to_ascii_uppercase(),
+                column.to_ascii_uppercase(),
+            )
+        }),
+        _ => None,
+    }
+}
+
 const MAX_SOURCE_LINEAGE_FILES: usize = 2_048;
 const MAX_SOURCE_LINEAGE_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -1143,6 +1379,7 @@ struct SourceDerivedColumnGraph {
     graph: DepGraph,
     column_nodes: BTreeMap<String, NodeId>,
     object_columns: BTreeMap<String, BTreeSet<String>>,
+    column_types: BTreeMap<String, String>,
     edge_keys: BTreeSet<(String, String, &'static str)>,
     next_node_id: u64,
     next_edge_id: u64,
@@ -1209,7 +1446,12 @@ impl SourceDerivedColumnGraph {
 
     fn add_table(&mut self, table: &SourceTable) {
         for column in &table.columns {
-            self.ensure_column(format!("{}.{}", table.object, column));
+            let logical_id = format!("{}.{}", table.object, column.name);
+            self.ensure_column(logical_id.clone());
+            if let Some(data_type) = &column.data_type {
+                self.column_types
+                    .insert(normalize_source_name(&logical_id), data_type.clone());
+            }
         }
     }
 
@@ -1241,6 +1483,14 @@ impl SourceDerivedColumnGraph {
                 // edge makes the consumer visible from the source column.
                 self.insert_projection_edge(&source, &target, EdgeKind::DerivesColumn);
                 self.insert_projection_edge(&target, &source, EdgeKind::ReadsColumn);
+                if let Some(data_type) = self
+                    .column_types
+                    .get(&normalize_source_name(&source))
+                    .cloned()
+                {
+                    self.column_types
+                        .insert(normalize_source_name(&target), data_type);
+                }
             }
         }
     }
@@ -1325,12 +1575,26 @@ impl SourceDerivedColumnGraph {
                     .is_some_and(|(_, object)| object == reference)
         })
     }
+
+    fn column_ref(&self, logical_id: &str) -> SourceLineageColumnRef {
+        let logical_id = normalize_source_name(logical_id);
+        SourceLineageColumnRef {
+            expected_data_type: self.column_types.get(&logical_id).cloned(),
+            logical_id,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 struct SourceTable {
     object: String,
-    columns: Vec<String>,
+    columns: Vec<SourceColumn>,
+}
+
+#[derive(Clone, Debug)]
+struct SourceColumn {
+    name: String,
+    data_type: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1574,7 +1838,10 @@ fn parse_source_table(tokens: &[SourceToken], mut index: usize) -> Option<(Sourc
         .into_iter()
         .filter_map(|definition| match definition.first() {
             Some(SourceToken::Word(column)) if !is_table_constraint_keyword(column) => {
-                Some(column.clone())
+                Some(SourceColumn {
+                    name: column.clone(),
+                    data_type: token_word(definition.get(1)).map(normalize_data_type),
+                })
             }
             _ => None,
         })
@@ -1852,6 +2119,10 @@ fn token_is_punctuation(token: Option<&SourceToken>, wanted: char) -> bool {
 
 fn normalize_source_name(value: &str) -> String {
     value.trim().trim_matches('"').to_ascii_lowercase()
+}
+
+fn normalize_data_type(value: &str) -> String {
+    value.trim().to_ascii_uppercase()
 }
 
 fn is_table_constraint_keyword(word: &str) -> bool {
@@ -2386,40 +2657,75 @@ mod tests {
         assert!(value["available_column_sample"].is_array());
     }
 
+    fn test_source_column(
+        logical_id: &str,
+        expected_data_type: Option<&str>,
+    ) -> SourceLineageColumnRef {
+        SourceLineageColumnRef {
+            logical_id: normalize_source_name(logical_id),
+            expected_data_type: expected_data_type.map(normalize_data_type),
+        }
+    }
+
+    fn test_catalog(columns: &[(&str, &str)]) -> LiveCatalogSnapshot {
+        let mut catalog = LiveCatalogSnapshot::default();
+        for (logical_id, data_type) in columns {
+            catalog.columns.insert(
+                normalize_source_name(logical_id),
+                CatalogColumnRef {
+                    data_type: normalize_data_type(data_type),
+                },
+            );
+        }
+        catalog
+    }
+
     #[test]
-    fn oracle_lineage_is_registered_and_dispatchable_under_the_feature() {
-        // The feature-lane contract: the tool registers and is reachable
-        // through the static dispatch arm used by the served MCP surface.
+    fn catalog_drift_markers_distinguish_verified_missing_and_type_mismatch() {
+        let source = test_source_column("APP.V_PAID.AMOUNT", Some("NUMBER"));
+        let verified = test_catalog(&[("APP.V_PAID.AMOUNT", "NUMBER")]);
+        assert_eq!(
+            classify_catalog_drift(&source, &verified),
+            CatalogDriftMarker::Verified
+        );
+        assert_eq!(
+            catalog_marker_json(&source, &verified)["status"],
+            "verified"
+        );
+
+        let missing = test_catalog(&[("APP.V_PAID.ID", "NUMBER")]);
+        assert_eq!(
+            classify_catalog_drift(&source, &missing),
+            CatalogDriftMarker::Missing
+        );
+        assert_eq!(
+            catalog_marker_json(&source, &missing)["status"],
+            "drift:missing"
+        );
+
+        let mismatch = test_catalog(&[("APP.V_PAID.AMOUNT", "VARCHAR2")]);
+        assert_eq!(
+            classify_catalog_drift(&source, &mismatch),
+            CatalogDriftMarker::TypeMismatch
+        );
+        let marker = catalog_marker_json(&source, &mismatch);
+        assert_eq!(marker["status"], "drift:type_mismatch");
+        assert_eq!(marker["source_data_type"], "NUMBER");
+        assert_eq!(marker["catalog_data_type"], "VARCHAR2");
+    }
+
+    #[test]
+    fn oracle_lineage_is_registered_as_a_live_catalog_tool_under_the_feature() {
         assert!(TOOL_NAMES.contains(&"oracle_lineage"));
-        assert!(is_static_tool("oracle_lineage"));
+        assert!(!is_static_tool("oracle_lineage"));
         let mut registry = ToolRegistry::default();
         register_tools(&mut registry);
-        assert!(
-            registry
-                .tools
-                .iter()
-                .any(|tool| tool.name == "oracle_lineage"),
-            "oracle_lineage must be registered under the feature"
-        );
-        let project = write_view_chain_project();
-        let value = dispatch_static(
-            "oracle_lineage",
-            json!({
-                "project_root": project.path().display().to_string(),
-                "owner": "app",
-                "object": "v_paid",
-                "column": "amount",
-            }),
-        )
-        .expect("the registered static tool dispatches");
-        assert_eq!(value["found"], json!(true));
-        assert!(
-            !value["upstream"]["edges"]
-                .as_array()
-                .expect("upstream edge array")
-                .is_empty(),
-            "served dispatch must retain source-derived column edges"
-        );
+        let descriptor = registry
+            .tools
+            .iter()
+            .find(|tool| tool.name == "oracle_lineage")
+            .expect("oracle_lineage must be registered under the feature");
+        assert_eq!(descriptor.tier, ToolTier::FoundationLiveDb);
     }
 
     #[test]

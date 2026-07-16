@@ -81,6 +81,120 @@ mod live {
         assert_after_drop_tools(&dispatcher, &schema);
     }
 
+    #[test]
+    fn oracle_lineage_live_catalog_marks_verified_missing_and_type_drift() {
+        let Some(admin) = connect_or_skip("lineage_catalog_drift/admin") else {
+            return;
+        };
+        let schema = hero_schema_name();
+        if let Err(error) = create_scratch_schema(&admin, &schema) {
+            eprintln!("[live-xe] SKIP lineage_catalog_drift: {error}");
+            return;
+        }
+        let guard = SchemaGuard {
+            conn: admin,
+            schema: schema.clone(),
+        };
+        provision_lineage_catalog_drift_schema(&guard.conn, &schema);
+
+        let project = tempfile::tempdir().expect("lineage source project");
+        std::fs::write(
+            project.path().join("lineage.sql"),
+            format!(
+                "CREATE TABLE {schema}.LINEAGE_OK (AMOUNT NUMBER);\n\
+                 CREATE VIEW {schema}.V_LINEAGE_OK AS \
+                 SELECT AMOUNT FROM {schema}.LINEAGE_OK;\n\
+                 CREATE TABLE {schema}.LINEAGE_TYPE (AMOUNT NUMBER);\n\
+                 CREATE VIEW {schema}.V_LINEAGE_TYPE AS \
+                 SELECT AMOUNT FROM {schema}.LINEAGE_TYPE;\n\
+                 CREATE TABLE {schema}.LINEAGE_GHOST (AMOUNT NUMBER);\n\
+                 CREATE VIEW {schema}.V_LINEAGE_MISSING AS \
+                 SELECT AMOUNT FROM {schema}.LINEAGE_GHOST;\n"
+            ),
+        )
+        .expect("write source lineage fixture");
+
+        let Some(read_conn) = connect_or_skip("lineage_catalog_drift/read") else {
+            return;
+        };
+        let dispatcher = OracleDispatcher::new(Box::new(read_conn));
+        let project_root = project.path().display().to_string();
+
+        let verified = dispatch(
+            &dispatcher,
+            "oracle_lineage",
+            json!({
+                "project_root": project_root,
+                "owner": schema,
+                "object": "V_LINEAGE_OK",
+                "column": "AMOUNT",
+            }),
+        );
+        assert_eq!(verified["catalog_marker"]["status"], "verified");
+        assert_lineage_edge_marker(&verified, "verified");
+
+        let type_mismatch = dispatch(
+            &dispatcher,
+            "oracle_lineage",
+            json!({
+                "project_root": project.path().display().to_string(),
+                "owner": schema,
+                "object": "V_LINEAGE_TYPE",
+                "column": "AMOUNT",
+            }),
+        );
+        assert_eq!(
+            type_mismatch["catalog_marker"]["status"], "drift:type_mismatch",
+            "the source NUMBER must not be reported as verified against a live VARCHAR2 view: {type_mismatch}"
+        );
+
+        let missing = dispatch(
+            &dispatcher,
+            "oracle_lineage",
+            json!({
+                "project_root": project.path().display().to_string(),
+                "owner": schema,
+                "object": "V_LINEAGE_MISSING",
+                "column": "AMOUNT",
+            }),
+        );
+        assert_eq!(missing["catalog_marker"]["status"], "verified");
+        assert_lineage_edge_marker(&missing, "drift:missing");
+    }
+
+    fn provision_lineage_catalog_drift_schema(conn: &RustOracleConnection, schema: &str) {
+        for sql in [
+            format!("CREATE TABLE {schema}.LINEAGE_OK (AMOUNT NUMBER)"),
+            format!(
+                "CREATE VIEW {schema}.V_LINEAGE_OK AS \
+                 SELECT AMOUNT FROM {schema}.LINEAGE_OK"
+            ),
+            format!("CREATE TABLE {schema}.LINEAGE_TYPE (AMOUNT VARCHAR2(20))"),
+            format!(
+                "CREATE VIEW {schema}.V_LINEAGE_TYPE AS \
+                 SELECT AMOUNT FROM {schema}.LINEAGE_TYPE"
+            ),
+            format!(
+                "CREATE VIEW {schema}.V_LINEAGE_MISSING AS \
+                 SELECT CAST(1 AS NUMBER) AS AMOUNT FROM DUAL"
+            ),
+        ] {
+            execute_sql(conn, &sql).expect("provision live lineage catalog fixture");
+        }
+    }
+
+    fn assert_lineage_edge_marker(value: &Value, expected_marker: &str) {
+        let edges = value["upstream"]["edges"]
+            .as_array()
+            .expect("live lineage upstream edges");
+        assert!(
+            edges
+                .iter()
+                .any(|edge| { edge["catalog_marker"]["status"].as_str() == Some(expected_marker) }),
+            "expected at least one upstream {expected_marker} marker: {value}"
+        );
+    }
+
     fn assert_before_drop_tools(dispatcher: &OracleDispatcher, schema: &str) {
         let statuses = object_statuses(dispatcher, schema);
         assert_eq!(

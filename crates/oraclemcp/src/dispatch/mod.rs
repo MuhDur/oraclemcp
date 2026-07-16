@@ -12239,6 +12239,11 @@ impl OracleDispatcher {
             }
             match tool {
             #[cfg(feature = "plsql-intelligence")]
+            "oracle_lineage" => {
+                return crate::plsql_tools::dispatch_live(cx, &guarded_metadata_conn, tool, args)
+                    .await;
+            }
+            #[cfg(feature = "plsql-intelligence")]
             tool if crate::plsql_tools::is_static_tool(tool) => {
                 crate::plsql_tools::dispatch_static(tool, args)
             }
