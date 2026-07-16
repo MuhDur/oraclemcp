@@ -4244,8 +4244,8 @@ mod tests {
     }
 
     /// A4 — the write-posture check reports the wallet truth table for this
-    /// default build: ewallet.pem is supported; cwallet.sso and standalone
-    /// ewallet.p12 get explicit typed diagnostics instead of false support.
+    /// default build: all three wallet artifacts are supported by the pinned
+    /// driver's public wallet loaders.
     #[test]
     fn doctor_reports_supported_wallet_modes() {
         let conn = LiveMock;
@@ -4262,7 +4262,7 @@ mod tests {
                 posture.detail
             );
         }
-        assert!(posture.detail.contains("unsupported in this build"));
+        assert!(posture.detail.contains("supported"));
         assert!(
             supported_wallet_modes()
                 .iter()

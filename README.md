@@ -126,6 +126,11 @@ bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz --version
 powershell -ExecutionPolicy Bypass -File .\install.ps1 `
   -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.9.0
 ```
+Historical 0.8.0 offline examples used `-Version 0.8.0`; use 0.9.0 for the
+coordinated release target above.
+The corresponding historical invocations were
+`bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz --version 0.8.0`
+and `-Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.8.0`.
 
 The release installer does not silently fall back from a missing release archive
 to a source build. Use `--source` explicitly when you want `cargo install`

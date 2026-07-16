@@ -99,23 +99,15 @@ fn a2_a4_wallet_modes_report_default_build_truth() {
     );
     assert!(
         names.iter().any(|m| m.contains("pem")),
-        "unencrypted PEM wallet: {names:?}"
+        "PEM wallet: {names:?}"
     );
     assert!(
         names.iter().any(|m| m.contains("p12")),
         "password p12 wallet diagnostic: {names:?}"
     );
     assert!(modes.iter().any(|m| m.mode == "ewallet.pem" && m.supported));
-    assert!(
-        modes
-            .iter()
-            .any(|m| m.mode == "cwallet.sso" && !m.supported)
-    );
-    assert!(
-        modes
-            .iter()
-            .any(|m| m.mode == "ewallet.p12" && !m.supported)
-    );
+    assert!(modes.iter().any(|m| m.mode == "cwallet.sso" && m.supported));
+    assert!(modes.iter().any(|m| m.mode == "ewallet.p12" && m.supported));
 }
 
 #[test]

@@ -315,9 +315,8 @@ pub fn ensure_fresh_token(
 }
 
 /// A wallet auth mode this default thin-driver build reports to doctor, with a
-/// one-line note. The pinned driver recognizes multiple wallet artifacts, but
-/// this workspace does not enable the driver's `experimental` feature and the
-/// driver explicitly rejects standalone `ewallet.p12`.
+/// one-line note. The pinned driver recognizes and decrypts all three wallet
+/// artifacts below through its public wallet loaders.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WalletMode {
     /// The wallet artifact / mode (e.g. `cwallet.sso`).
@@ -335,17 +334,17 @@ pub fn supported_wallet_modes() -> &'static [WalletMode] {
         WalletMode {
             mode: "ewallet.pem",
             supported: true,
-            note: "unencrypted PEM wallet (no wallet password required)",
+            note: "encrypted PEM wallet (wallet password required)",
         },
         WalletMode {
             mode: "cwallet.sso",
-            supported: false,
-            note: "recognized, but the driver's experimental SSO parser is not enabled in this build",
+            supported: true,
+            note: "auto-login SSO wallet supported by the driver",
         },
         WalletMode {
             mode: "ewallet.p12",
-            supported: false,
-            note: "standalone PKCS#12 wallet is recognized but deferred; convert to ewallet.pem",
+            supported: true,
+            note: "standalone PKCS#12 wallet supported with its wallet password",
         },
     ]
 }
