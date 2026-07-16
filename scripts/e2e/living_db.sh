@@ -197,6 +197,7 @@ run_lane() {
   run_case "$lane" "cqn_uri_coalescing" 0 cargo test -p oraclemcp-core --lib subscriptions::tests::cqn_emon_callback_relay_is_uri_only_and_coalesced -- --exact || lane_failed=1
   run_case "$lane" "cqn_object_refusal" 0 cargo test -p oraclemcp-core --lib subscriptions::tests::cqn_effect_point_refuses_object_scope_before_the_db_adapter -- --exact || lane_failed=1
   run_case "$lane" "arrow_governed_round_trip" 0 "${common_env[@]}" cargo test -p oraclemcp --features live-xe --test live_xe_service_attach live_xe_arrow_query_round_trips_through_served_mcp -- --ignored --exact --nocapture || lane_failed=1
+  run_case "$lane" "operator_oauth_scope_ceiling" 0 "${common_env[@]}" cargo test -p oraclemcp --features live-xe --test live_xe_service_attach live_xe_operator_oauth_scope_never_raises_admin_profile -- --ignored --exact --nocapture || lane_failed=1
 
   if [ "$lane_failed" -ne 0 ]; then
     e2e_log_event "lane_result" "assert" "fail" 0 "lane=$lane evidence=$matrix_dir/$lane"

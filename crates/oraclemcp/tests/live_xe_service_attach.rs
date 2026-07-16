@@ -2,7 +2,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
-use std::io::{Cursor, Read, Write};
+use std::io::{BufReader, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -131,6 +131,98 @@ tag = "e2e.arrow.policy-masked"
     path
 }
 
+const OPERATOR_OAUTH_RESOURCE: &str = "https://oraclemcp.live-e2e.test/mcp";
+const OPERATOR_OAUTH_ISSUER: &str = "https://issuer.live-e2e.test";
+const OPERATOR_OAUTH_SUBJECT: &str = "live-e2e-operator";
+const OPERATOR_OAUTH_CLIENT_ID: &str = "oraclemcp-live-e2e";
+const OPERATOR_OAUTH_SECRET: &str = "operator-live-e2e-hs256-secret-0123456789";
+
+fn core_sha256_hex(bytes: &[u8]) -> String {
+    oraclemcp_audit::sha256_hex(bytes)
+        .strip_prefix("sha256:")
+        .expect("audit SHA-256 values carry their documented prefix")
+        .to_owned()
+}
+
+fn operator_oauth_principal_key() -> String {
+    let stable_material = format!(
+        "iss={OPERATOR_OAUTH_ISSUER}\nsub={OPERATOR_OAUTH_SUBJECT}\nclient_id={OPERATOR_OAUTH_CLIENT_ID}"
+    );
+    format!("oauth:{}", core_sha256_hex(stable_material.as_bytes()))
+}
+
+fn mint_operator_oauth_token(scope: &str) -> String {
+    let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(r#"{"alg":"HS256","typ":"at+jwt"}"#);
+    let claims = json!({
+        "iss": OPERATOR_OAUTH_ISSUER,
+        "aud": [OPERATOR_OAUTH_RESOURCE],
+        "exp": 2_000_000_000_i64,
+        "nbf": 1_000_000_000_i64,
+        "sub": OPERATOR_OAUTH_SUBJECT,
+        "client_id": OPERATOR_OAUTH_CLIENT_ID,
+        "iat": 1_000_000_000_i64,
+        "jti": "operator-scope-ceiling-live-e2e",
+        "scope": scope,
+    });
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&claims).expect("serialize OAuth test claims"));
+    let signing_input = format!("{header}.{payload}");
+    let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        oraclemcp_audit::hmac_sha256(OPERATOR_OAUTH_SECRET.as_bytes(), signing_input.as_bytes()),
+    );
+    format!("{signing_input}.{signature}")
+}
+
+fn write_operator_scope_live_config(root: &Path, dsn: &str, user: &str) -> PathBuf {
+    let path = root.join("profiles.toml");
+    let audit = root.join("audit.jsonl");
+    let operator_principal = operator_oauth_principal_key();
+    let config = format!(
+        r#"
+schema_version = 2
+default_profile = "live_xe"
+
+[http]
+json_response = true
+
+[http.oauth]
+resource = {resource}
+allowed_issuers = [{issuer}]
+authorization_servers = [{issuer}]
+required_scopes = ["oracle:read"]
+hs256_secret_ref = "env:E2E_OPERATOR_OAUTH_HS256_SECRET"
+
+[http.operator]
+allow_loopback_owner = false
+allowed_subjects = [{operator_principal}]
+
+[audit]
+path = {audit}
+key_id = "live-xe-e2e"
+key_ref = "env:E2E_LIVE_AUDIT_KEY"
+
+[[profiles]]
+name = "live_xe"
+description = "live XE OAuth scope-ceiling operator profile"
+connect_string = {dsn}
+username = {user}
+credential_ref = "env:ORACLEMCP_TEST_PASSWORD"
+max_level = "ADMIN"
+default_level = "ADMIN"
+call_timeout_seconds = 10
+"#,
+        resource = toml_string(OPERATOR_OAUTH_RESOURCE),
+        issuer = toml_string(OPERATOR_OAUTH_ISSUER),
+        operator_principal = toml_string(&operator_principal),
+        audit = toml_string(&audit.display().to_string()),
+        dsn = toml_string(dsn),
+        user = toml_string(user),
+    );
+    fs::write(&path, config).expect("write OAuth scope-ceiling live config");
+    path
+}
+
 fn live_env() -> Option<(String, String, String)> {
     if std::env::var("ORACLEMCP_LIVE_XE").ok().as_deref() != Some("1") {
         eprintln!(
@@ -185,6 +277,37 @@ fn spawn_service(
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn live-XE service");
+    ChildGuard { child }
+}
+
+fn spawn_oauth_service(
+    addr: SocketAddr,
+    config: &Path,
+    runtime_dir: &Path,
+    state_dir: &Path,
+) -> ChildGuard {
+    let child = Command::new(env!("CARGO_BIN_EXE_oraclemcp"))
+        .args([
+            "--json",
+            "serve",
+            "--listen",
+            &addr.to_string(),
+            "--http-json-response",
+            "--profile",
+            "live_xe",
+        ])
+        .env(oraclemcp_config::CONFIG_PATH_ENV, config)
+        .env(
+            "E2E_LIVE_AUDIT_KEY",
+            "oraclemcp-live-service-test-audit-key",
+        )
+        .env("E2E_OPERATOR_OAUTH_HS256_SECRET", OPERATOR_OAUTH_SECRET)
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env("XDG_STATE_HOME", state_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn OAuth-protected live-XE service");
     ChildGuard { child }
 }
 
@@ -388,6 +511,37 @@ fn tool_call(addr: SocketAddr, session_id: &str, id: u64, name: &str, arguments:
     .expect("tool HTTP request");
     assert_eq!(reply.status, 200, "{name} failed: {}", reply.body);
     sse_last_json(&reply.body)
+}
+
+fn operator_action(
+    addr: SocketAddr,
+    token: &str,
+    path: &str,
+    tool: &str,
+    arguments: Value,
+) -> Value {
+    let body = json!({
+        "tool": tool,
+        "arguments": arguments,
+    });
+    let authorization = format!("Bearer {token}");
+    let reply = http_request(
+        addr,
+        "POST",
+        path,
+        &[
+            ("content-type", "application/json"),
+            ("authorization", &authorization),
+        ],
+        Some(body.to_string().as_bytes()),
+    )
+    .expect("operator action HTTP request");
+    assert_eq!(
+        reply.status, 200,
+        "operator action {tool} at {path} failed: {}",
+        reply.body
+    );
+    serde_json::from_str(&reply.body).expect("operator action JSON response")
 }
 
 fn dashboard_pairing_url(
@@ -745,6 +899,155 @@ fn live_xe_arrow_query_round_trips_through_served_mcp() {
             "database": "live-xe",
             "outcome": "pass",
             "format": "arrow"
+        })
+    );
+}
+
+/// `d94040a` carries the validated OAuth `ScopeGrant` through the operator
+/// action route. This proof starts from a deliberately ADMIN-capable profile,
+/// reaches a real XE `dual` query through that route, then proves that the
+/// identical read-scoped token cannot preview or execute a DML statement.
+#[test]
+#[ignore = "live-xe: set ORACLEMCP_LIVE_XE=1 and ORACLEMCP_TEST_* against a running Oracle"]
+fn live_xe_operator_oauth_scope_never_raises_admin_profile() {
+    let Some((dsn, user, password)) = live_env() else {
+        return;
+    };
+    let root = temp_root("operator-oauth-scope");
+    let runtime_dir = root.join("run");
+    let state_dir = root.join("state");
+    fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+    let config = write_operator_scope_live_config(&root, &dsn, &user);
+    let configured = oraclemcp_config::OracleMcpConfig::load(Some(&config))
+        .expect("OAuth scope-ceiling config parses");
+    let profile = configured
+        .profile("live_xe")
+        .expect("OAuth scope-ceiling profile is present");
+    assert_eq!(
+        profile.max_level().as_str(),
+        "ADMIN",
+        "this proof must start from an ADMIN-capable profile"
+    );
+    assert_eq!(
+        profile.default_level().as_str(),
+        "ADMIN",
+        "this proof must start at ADMIN before request-local scope narrowing"
+    );
+
+    let addr = free_loopback_addr();
+    let mut service = spawn_oauth_service(addr, &config, &runtime_dir, &state_dir);
+    wait_for_service(&mut service, addr);
+
+    let token = mint_operator_oauth_token("oracle:read");
+    let read = operator_action(
+        addr,
+        &token,
+        "/operator/v1/actions/execute",
+        "oracle_query",
+        json!({
+            "sql": "SELECT 'operator-oauth-scope-live' AS scope_marker FROM dual",
+            "max_rows": 1,
+        }),
+    );
+    let read_result = &read["data"]["mcp_response"]["result"];
+    assert_eq!(read_result["isError"], json!(false), "{read}");
+    assert_eq!(
+        read_result["structuredContent"]["rows"],
+        json!([{ "SCOPE_MARKER": "operator-oauth-scope-live" }]),
+        "the read-scoped operator request must reach the live XE connection: {read}"
+    );
+
+    let preview = operator_action(
+        addr,
+        &token,
+        "/operator/v1/actions/preview",
+        "oracle_preview_sql",
+        json!({
+            "sql": "UPDATE dual SET dummy = 'operator-oauth-scope-proof'",
+        }),
+    );
+    let preview_content = &preview["data"]["mcp_response"]["result"]["structuredContent"];
+    assert_eq!(
+        preview_content["session_level"],
+        json!("READ_ONLY"),
+        "an oracle:read token clamps an ADMIN default level: {preview}"
+    );
+    assert_eq!(
+        preview_content["profile_ceiling"],
+        json!("READ_ONLY"),
+        "the effective ceiling must be the token scope, not ADMIN: {preview}"
+    );
+    assert_eq!(preview_content["required_level"], json!("READ_WRITE"));
+    assert_eq!(preview_content["gate_decision"], json!("blocked"));
+    assert_eq!(
+        preview_content["blocked_reason"]["type"],
+        json!("exceeds_ceiling"),
+        "the operator route must report a scope-derived ceiling refusal: {preview}"
+    );
+    assert!(
+        preview_content["execute_confirmation"].is_null(),
+        "a scope-refused DML preview must not mint an execution grant: {preview}"
+    );
+
+    let execute = operator_action(
+        addr,
+        &token,
+        "/operator/v1/actions/execute",
+        "oracle_execute",
+        json!({
+            "sql": "UPDATE dual SET dummy = 'operator-oauth-scope-proof'",
+            "commit": false,
+        }),
+    );
+    let execute_result = &execute["data"]["mcp_response"]["result"];
+    assert_eq!(execute_result["isError"], json!(true), "{execute}");
+    assert_eq!(
+        execute_result["structuredContent"]["error_class"],
+        json!("OPERATING_LEVEL_TOO_LOW"),
+        "the dispatch gate must refuse DML before the real connection can write: {execute}"
+    );
+
+    let audit_path = root.join("audit.jsonl");
+    let audit_body = fs::read_to_string(&audit_path).expect("read operator audit chain");
+    let audit_records = oraclemcp_audit::parse_jsonl(&audit_body).expect("parse operator audit");
+    assert!(
+        audit_records.iter().any(|record| {
+            record.tool == "operator_api"
+                && record.decision == oraclemcp_audit::AuditDecision::Blocked
+                && record.outcome == oraclemcp_audit::AuditOutcome::Failed
+        }),
+        "the scope-refused operator action must leave a blocked terminal audit record"
+    );
+    let audit_key =
+        oraclemcp_audit::SigningKey::new("live-xe-e2e", "oraclemcp-live-service-test-audit-key")
+            .expect("valid live e2e audit signing key");
+    let verification = oraclemcp_audit::verify_reader(
+        BufReader::new(fs::File::open(&audit_path).expect("open operator audit chain")),
+        &[audit_key],
+    )
+    .expect("read operator audit chain for verification");
+    assert!(
+        matches!(
+            verification,
+            oraclemcp_audit::VerifyOutcome::Ok { records } if records >= 6
+        ),
+        "operator audit chain must verify after the blocked write attempt: {verification:?}"
+    );
+
+    let rendered = format!("{read}{preview}{execute}");
+    assert_no_secret_leak(&rendered, &dsn, &user, &password);
+    eprintln!(
+        "{}",
+        json!({
+            "contract": "OAUTH-OPERATOR-SCOPE-CEILING",
+            "requirement_id": "lel3",
+            "lane": "served-operator-oauth",
+            "database": "live-xe",
+            "profile_max_level": "ADMIN",
+            "token_scope": "oracle:read",
+            "effective_ceiling": "READ_ONLY",
+            "outcome": "pass",
         })
     );
 }
