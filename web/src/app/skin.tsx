@@ -103,6 +103,8 @@ export type DashboardSkin = {
     logoMark: string;
     nav: string;
     navLink: string;
+    /** Visually hidden until focused; every skin must keep it reachable. */
+    skipLink: string;
   };
 };
 
@@ -194,7 +196,9 @@ export const OMCP_SKIN: DashboardSkin = {
       "flex size-10 items-center justify-center rounded-lg bg-[var(--om-clearance-read-only)] text-[var(--om-bg)]",
     nav: "flex gap-2 overflow-x-auto lg:flex-col",
     navLink:
-      "inline-flex min-h-10 items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold text-[var(--om-text)] hover:bg-[var(--om-surface)] hover:text-[var(--om-text-bright)] [&.active]:bg-[var(--om-surface)] [&.active]:text-[var(--om-gold)] [&.active]:shadow-sm"
+      "inline-flex min-h-10 items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold text-[var(--om-text)] hover:bg-[var(--om-surface)] hover:text-[var(--om-text-bright)] [&.active]:bg-[var(--om-surface)] [&.active]:text-[var(--om-gold)] [&.active]:shadow-sm",
+    skipLink:
+      "sr-only focus-visible:not-sr-only focus-visible:absolute focus-visible:left-4 focus-visible:top-4 focus-visible:z-50 focus-visible:inline-flex focus-visible:min-h-10 focus-visible:items-center focus-visible:rounded-md focus-visible:bg-[var(--om-surface)] focus-visible:px-4 focus-visible:py-2 focus-visible:text-sm focus-visible:font-semibold focus-visible:text-[var(--om-gold)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
   }
 };
 
@@ -1230,6 +1234,15 @@ export function UndoTreeRenderer({
 
 export function assertDashboardSkinConformance(skin: DashboardSkin): void {
   const fixture = skinContractFixture();
+  // A skip link is part of the grammar, not one skin's styling choice: it must
+  // exist and must reveal itself on focus, or keyboard users are stranded
+  // behind the sidebar nav on every route.
+  if (!skin.layout.skipLink.trim()) {
+    throw new Error(`skin ${skin.name} must provide a skip-to-main-content link class`);
+  }
+  if (!skin.layout.skipLink.includes("focus-visible:not-sr-only")) {
+    throw new Error(`skin ${skin.name} skip link must become visible on keyboard focus`);
+  }
   if (typeof skin.renderers.CostBadge !== "function") {
     throw new Error(`skin ${skin.name} must provide a cost-badge renderer`);
   }

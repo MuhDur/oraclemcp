@@ -343,6 +343,11 @@ function RootLayout(): React.ReactElement {
       data-dashboard-skin={skin.name}
       data-dashboard-theme={skin.theme.name}
     >
+      {/* Ahead of the 11-item sidebar nav in tab order, so keyboard users can
+          reach content without traversing it on every route. */}
+      <a href="#main" className={skin.layout.skipLink} data-omcp-skip-link="main">
+        Skip to main content
+      </a>
       <div className={skin.layout.frame}>
         <aside className={skin.layout.sidebar}>
           <div className="flex items-center gap-3">
@@ -362,7 +367,7 @@ function RootLayout(): React.ReactElement {
             ))}
           </nav>
         </aside>
-        <main className="min-w-0 flex-1 space-y-4">
+        <main id="main" tabIndex={-1} className="min-w-0 flex-1 space-y-4">
           <GroundControlStrip />
           <Outlet />
         </main>
@@ -573,6 +578,7 @@ function SessionsPage(): React.ReactElement {
   const [confirm, setConfirm] = React.useState("");
   const [lastResult, setLastResult] = React.useState<SessionLevelResult | null>(null);
   const [cancelNotice, setCancelNotice] = React.useState<string | null>(null);
+  const [pendingCancelLaneId, setPendingCancelLaneId] = React.useState<string | null>(null);
   const capabilities = useDashboardCapabilities();
   const session = useQuery({
     queryKey: ["dashboard-session"],
@@ -687,11 +693,19 @@ function SessionsPage(): React.ReactElement {
     }
   });
 
+  // Ask through the console's own dialog rather than window.confirm, so the
+  // prompt is styled, focus-managed, and assertable like every other gate.
   const requestCancelLane = (laneId: string): void => {
     if (!laneId) {
       return;
     }
-    if (typeof window !== "undefined" && !window.confirm(`Cancel lane ${laneId}? This kills its Oracle session and grants.`)) {
+    setPendingCancelLaneId(laneId);
+  };
+
+  const confirmCancelLane = (): void => {
+    const laneId = pendingCancelLaneId;
+    setPendingCancelLaneId(null);
+    if (!laneId) {
       return;
     }
     setCancelNotice(null);
@@ -736,6 +750,25 @@ function SessionsPage(): React.ReactElement {
       description="Live lane state, activity, and per-lane clearance."
     >
       <div className="space-y-4">
+        {pendingCancelLaneId ? (
+          <ConfirmDialog
+            id="lane-cancel"
+            title="Cancel lane"
+            body={
+              <>
+                Cancel lane{" "}
+                <span className="font-mono font-semibold text-[var(--om-text-bright)]">
+                  {pendingCancelLaneId}
+                </span>
+                ? This kills its Oracle session and grants.
+              </>
+            }
+            confirmLabel="Cancel lane"
+            busy={cancelMutation.isPending}
+            onCancel={() => setPendingCancelLaneId(null)}
+            onConfirm={confirmCancelLane}
+          />
+        ) : null}
         <SessionMissionHeader
           model={groundControl}
           summary={summary}
@@ -1134,7 +1167,7 @@ function SessionLevelControlPanel({
             className={cn(inputClass, "font-mono")}
             value={confirm}
             onChange={(event) => onConfirmChange(event.target.value)}
-            placeholder="preview grant"
+            placeholder="e.g. xgrant-4821-7.9f3c…"
           />
         </label>
         <div className="flex flex-wrap gap-2">
@@ -1768,6 +1801,7 @@ function ConfigPage(): React.ReactElement {
   const [applyOutcome, setApplyOutcome] = React.useState<ConfigApplyData | null>(null);
   const [lastError, setLastError] = React.useState<string | null>(null);
   const [previewConfirmed, setPreviewConfirmed] = React.useState(false);
+  const [rollbackPending, setRollbackPending] = React.useState(false);
   const session = useQuery({
     queryKey: ["dashboard-session"],
     queryFn: fetchDashboardSession,
@@ -1877,7 +1911,7 @@ function ConfigPage(): React.ReactElement {
                 setPreviewConfirmed(false);
               }}
               spellCheck={false}
-              className="min-h-72 w-full resize-y rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] p-3 font-mono text-sm leading-6 text-[var(--om-text-bright)] outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+              className="min-h-72 w-full resize-y rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] p-3 font-mono text-sm leading-6 text-[var(--om-text-bright)] outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
               aria-label="Config draft TOML"
             />
             <div className="flex flex-wrap items-center gap-2">
@@ -1914,15 +1948,33 @@ function ConfigPage(): React.ReactElement {
                   type="button"
                   variant="secondary"
                   disabled={busy}
-                  onClick={() => {
-                    if (window.confirm("Roll back the applied configuration change?")) {
-                      rollbackMutation.mutate(applyOutcome.outcome.rollback_id);
-                    }
-                  }}
+                  onClick={() => setRollbackPending(true)}
                 >
                   <RotateCcw className="size-4" aria-hidden="true" />
                   Rollback
                 </Button>
+              ) : null}
+              {applyOutcome && rollbackPending ? (
+                <ConfirmDialog
+                  id="config-rollback"
+                  title="Roll back configuration"
+                  body={
+                    <>
+                      Roll back the applied configuration change and restore rollback id{" "}
+                      <span className="font-mono font-semibold text-[var(--om-text-bright)]">
+                        {applyOutcome.outcome.rollback_id}
+                      </span>
+                      ?
+                    </>
+                  }
+                  confirmLabel="Roll back"
+                  busy={busy}
+                  onCancel={() => setRollbackPending(false)}
+                  onConfirm={() => {
+                    setRollbackPending(false);
+                    rollbackMutation.mutate(applyOutcome.outcome.rollback_id);
+                  }}
+                />
               ) : null}
               {lastError ? (
                 <Badge tone="warn" role="alert" className="max-w-full whitespace-normal break-all">
@@ -2308,6 +2360,120 @@ export function clientCredentialConfirmationReady(
   return typedClientId === action.client.client_id;
 }
 
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Keep Tab focus inside a modal for as long as it is mounted, and hand focus
+ * back to whatever opened it on close. `aria-modal` tells assistive tech the
+ * rest of the page is inert; without a trap that is a promise we do not keep.
+ */
+function useModalFocus<T extends HTMLElement>(): React.RefObject<T | null> {
+  const ref = React.useRef<T | null>(null);
+  React.useEffect(() => {
+    const node = ref.current;
+    if (!node) {
+      return;
+    }
+    const invoker = document.activeElement as HTMLElement | null;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") {
+        return;
+      }
+      const items = Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+      if (items.length === 0) {
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !node.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    node.addEventListener("keydown", onKeyDown);
+    return () => {
+      node.removeEventListener("keydown", onKeyDown);
+      // Returning focus to the trigger keeps the keyboard user where they were,
+      // instead of dumping them at the top of the document.
+      if (invoker && typeof invoker.focus === "function" && document.contains(invoker)) {
+        invoker.focus();
+      }
+    };
+  }, []);
+  return ref;
+}
+
+/**
+ * The console's own confirmation dialog, for destructive actions that need a
+ * deliberate second act but no typed-token ceremony. It replaces
+ * `window.confirm`, which cannot be styled, focus-managed, or asserted in a
+ * test — the backend step-up grant remains the real gate; this is misclick
+ * protection.
+ */
+export function ConfirmDialog({
+  title,
+  body,
+  confirmLabel,
+  busy = false,
+  id,
+  onCancel,
+  onConfirm
+}: {
+  title: string;
+  body: React.ReactNode;
+  confirmLabel: string;
+  busy?: boolean;
+  id: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}): React.ReactElement {
+  const dialogRef = useModalFocus<HTMLDivElement>();
+  const titleId = `${id}-confirm-title`;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[color-mix(in_srgb,var(--om-bg)_80%,transparent)] p-4"
+      data-omcp-dialog-backdrop={id}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) {
+          onCancel();
+        }
+      }}
+    >
+      <div
+        ref={dialogRef}
+        className="w-full max-w-lg rounded-md border border-[color-mix(in_srgb,var(--om-copper)_55%,transparent)] bg-[var(--om-surface)] p-4 shadow-lg"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        data-omcp-dialog={id}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && !busy) {
+            onCancel();
+          }
+        }}
+      >
+        <h3 id={titleId} className="text-base font-semibold text-[var(--om-text-bright)]">
+          {title}
+        </h3>
+        <p className="mt-2 text-sm text-[var(--om-text-muted)]">{body}</p>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Button type="button" variant="secondary" disabled={busy} onClick={onCancel} autoFocus>
+            Cancel
+          </Button>
+          <Button type="button" variant="primary" disabled={busy} onClick={onConfirm}>
+            {busy ? "Working" : confirmLabel}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ClientCredentialConfirmationDialog({
   action,
   busy,
@@ -2324,57 +2490,71 @@ function ClientCredentialConfirmationDialog({
   onConfirm: () => void;
 }): React.ReactElement {
   const destructiveLabel = action.kind === "rotate" ? "Rotate credential" : "Revoke credential";
+  const dialogRef = useModalFocus<HTMLDivElement>();
   return (
     <div
-      className="rounded-md border border-[color-mix(in_srgb,var(--om-copper)_55%,transparent)] bg-[var(--om-surface)] p-4 shadow-lg"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="client-credential-confirm-title"
-      onKeyDown={(event) => {
-        if (event.key === "Escape" && !busy) {
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[color-mix(in_srgb,var(--om-bg)_80%,transparent)] p-4"
+      data-omcp-dialog-backdrop="client-credential"
+      // Dismissing is the safe direction here (it cancels), so a backdrop click
+      // is allowed — but only when the action is not already in flight.
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) {
           onCancel();
         }
       }}
     >
-      <h3
-        id="client-credential-confirm-title"
-        className="text-base font-semibold text-[var(--om-text-bright)]"
+      <div
+        ref={dialogRef}
+        className="w-full max-w-lg rounded-md border border-[color-mix(in_srgb,var(--om-copper)_55%,transparent)] bg-[var(--om-surface)] p-4 shadow-lg"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="client-credential-confirm-title"
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && !busy) {
+            onCancel();
+          }
+        }}
       >
-        {destructiveLabel}
-      </h3>
-      <p className="mt-2 text-sm text-[var(--om-text-muted)]">
-        <span className="font-mono font-semibold text-[var(--om-text-bright)]">
-          {action.client.client_id}
-        </span>{" "}
-        ({action.client.label}), generation {action.client.generation}, scopes{" "}
-        {action.client.scopes.join(", ") || "none"}. This closes its active MCP sessions.
-        {action.kind === "rotate"
-          ? " The replacement bearer is shown once."
-          : " Revocation cannot be undone."}
-      </p>
-      <label className="mt-3 block">
-        <span className={OM_LABEL}>Type the exact client ID to confirm</span>
-        <input
-          className={cn(OM_INPUT, "font-mono")}
-          value={typedClientId}
-          autoFocus
-          autoComplete="off"
-          spellCheck={false}
-          onChange={(event) => onTypedClientId(event.target.value)}
-        />
-      </label>
-      <div className="mt-4 flex flex-wrap gap-2">
-        <Button type="button" variant="secondary" disabled={busy} onClick={onCancel}>
-          Cancel
-        </Button>
-        <Button
-          type="button"
-          variant="primary"
-          disabled={busy || !clientCredentialConfirmationReady(action, typedClientId)}
-          onClick={onConfirm}
+        <h3
+          id="client-credential-confirm-title"
+          className="text-base font-semibold text-[var(--om-text-bright)]"
         >
-          {busy ? "Working" : destructiveLabel}
-        </Button>
+          {destructiveLabel}
+        </h3>
+        <p className="mt-2 text-sm text-[var(--om-text-muted)]">
+          <span className="font-mono font-semibold text-[var(--om-text-bright)]">
+            {action.client.client_id}
+          </span>{" "}
+          ({action.client.label}), generation {action.client.generation}, scopes{" "}
+          {action.client.scopes.join(", ") || "none"}. This closes its active MCP sessions.
+          {action.kind === "rotate"
+            ? " The replacement bearer is shown once."
+            : " Revocation cannot be undone."}
+        </p>
+        <label className="mt-3 block">
+          <span className={OM_LABEL}>Type the exact client ID to confirm</span>
+          <input
+            className={cn(OM_INPUT, "font-mono")}
+            value={typedClientId}
+            autoFocus
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(event) => onTypedClientId(event.target.value)}
+          />
+        </label>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Button type="button" variant="secondary" disabled={busy} onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant="primary"
+            disabled={busy || !clientCredentialConfirmationReady(action, typedClientId)}
+            onClick={onConfirm}
+          >
+            {busy ? "Working" : destructiveLabel}
+          </Button>
+        </div>
       </div>
     </div>
   );
@@ -3378,7 +3558,7 @@ function EventFact({ label, value }: { label: string; value: unknown }): React.R
         {label}
       </p>
       <p className="mt-1 break-all font-mono text-xs text-[var(--om-text)]">
-        {String(value ?? "...")}
+        {String(value ?? "…")}
       </p>
     </div>
   );
@@ -4703,7 +4883,7 @@ function ColumnLineagePanel({
         <label className="block">
           <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Object</span>
           <input
-            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
             value={object}
             onChange={(event) => setObject(event.target.value)}
             placeholder="V_PAID"
@@ -4712,7 +4892,7 @@ function ColumnLineagePanel({
         <label className="block">
           <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Column</span>
           <input
-            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
             value={column}
             onChange={(event) => setColumn(event.target.value)}
             placeholder="AMOUNT"
@@ -4805,7 +4985,7 @@ function VectorClusterPanel({
         <label className="block">
           <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Table</span>
           <input
-            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
             value={table}
             onChange={(event) => setTable(event.target.value)}
             placeholder="DOCUMENTS"
@@ -4814,7 +4994,7 @@ function VectorClusterPanel({
         <label className="block">
           <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Vector column</span>
           <input
-            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
             value={column}
             onChange={(event) => setColumn(event.target.value)}
             placeholder="EMBEDDING"
@@ -4823,7 +5003,7 @@ function VectorClusterPanel({
         <label className="block">
           <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Metric</span>
           <select
-            className="h-10 rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            className="h-10 rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
             value={metric}
             onChange={(event) => setMetric(event.target.value as VectorMetric)}
           >
@@ -4835,7 +5015,7 @@ function VectorClusterPanel({
         <label className="block">
           <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">k</span>
           <input
-            className="h-10 w-20 rounded-md border border-[var(--om-border)] px-3 text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            className="h-10 w-20 rounded-md border border-[var(--om-border)] px-3 text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
             type="number"
             min={1}
             max={1000}
@@ -4851,7 +5031,7 @@ function VectorClusterPanel({
       <label className="block">
         <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Query vector</span>
         <input
-          className="h-10 w-full rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+          className="h-10 w-full rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
           value={vectorText}
           onChange={(event) => setVectorText(event.target.value)}
           placeholder="0.12, -0.44, 0.9, …"
@@ -5213,7 +5393,7 @@ export function ExplorerObjectsPanel({
                     </td>
                     <td className="px-4 py-4 align-top">
                       <Badge tone={row.status === "INVALID" ? "warn" : row.status ? "ok" : "off"}>
-                        {row.status || "..."}
+                        {row.status || "…"}
                       </Badge>
                     </td>
                     <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
@@ -5311,12 +5491,12 @@ function ExplorerObjectDetailPanel({
       </div>
       <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,0.65fr)_minmax(360px,1.35fr)]">
         <div className="space-y-3">
-          <ExplorerFact label="Owner" value={selectedRef?.owner ?? "..."} />
-          <ExplorerFact label="Name" value={selectedRef?.name ?? "..."} />
-          <ExplorerFact label="Type" value={selectedRef?.objectType ?? "..."} />
-          <ExplorerFact label="Status" value={row?.status || "..."} />
-          <ExplorerFact label="Columns" value={row?.columnCount ?? "..."} />
-          <ExplorerFact label="Rows" value={row?.numRows ?? "..."} />
+          <ExplorerFact label="Owner" value={selectedRef?.owner ?? "…"} />
+          <ExplorerFact label="Name" value={selectedRef?.name ?? "…"} />
+          <ExplorerFact label="Type" value={selectedRef?.objectType ?? "…"} />
+          <ExplorerFact label="Status" value={row?.status || "…"} />
+          <ExplorerFact label="Columns" value={row?.columnCount ?? "…"} />
+          <ExplorerFact label="Rows" value={row?.numRows ?? "…"} />
           {result?.state === "ok" ? (
             <ExplorerFact
               label="Cache"
@@ -5423,9 +5603,9 @@ function objectRowsFromResponse(
     objectName: cellText(row, "object_name") ?? "",
     objectType: cellText(row, "object_type") ?? "",
     status: cellText(row, "status") ?? "",
-    numRows: cellText(row, "num_rows") ?? "...",
-    columnCount: cellText(row, "column_count") ?? "...",
-    lastAnalyzed: cellText(row, "last_analyzed") ?? "...",
+    numRows: cellText(row, "num_rows") ?? "…",
+    columnCount: cellText(row, "column_count") ?? "…",
+    lastAnalyzed: cellText(row, "last_analyzed") ?? "…",
     comment: cellText(row, "comment") ?? "",
     raw: row
   }));
@@ -5440,7 +5620,7 @@ function sourceRowsFromResponse(
     owner: cellText(row, "owner") ?? "",
     name: cellText(row, "name") ?? "",
     objectType: cellText(row, "type") ?? "",
-    line: cellText(row, "line") ?? "...",
+    line: cellText(row, "line") ?? "…",
     text: cellText(row, "text") ?? "",
     raw: row
   }));
@@ -5883,12 +6063,16 @@ function ReviewsPage(): React.ReactElement {
                 />
               </label>
             </div>
-            <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label="proposal author">
+            {/* A toggle group, not tabs: these buttons control no tabpanel, so
+                claiming role=tablist would promise arrow-key/roving-tabindex
+                semantics we do not implement. aria-pressed states the choice. */}
+            <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="proposal author">
               {(["agent", "human"] as ChangeProposalAuthorKind[]).map((item) => (
                 <Button
                   key={item}
                   type="button"
                   variant={author === item ? "primary" : "secondary"}
+                  aria-pressed={author === item}
                   onClick={() => setAuthor(item)}
                 >
                   {item}
@@ -5914,12 +6098,13 @@ function ReviewsPage(): React.ReactElement {
               />
             </label>
             <div className="mt-4 flex flex-wrap items-center gap-3">
-              <div className="flex flex-wrap gap-2" role="tablist" aria-label="proposal unit">
+              <div className="flex flex-wrap gap-2" role="group" aria-label="proposal unit">
                 {reviewUnits.map((item) => (
                   <Button
                     key={item.id}
                     type="button"
                     variant={unit === item.id ? "primary" : "secondary"}
+                    aria-pressed={unit === item.id}
                     onClick={() => setUnit(item.id)}
                   >
                     {item.label}
@@ -5973,7 +6158,7 @@ function ReviewsPage(): React.ReactElement {
                   className={cn(OM_INPUT, "font-mono")}
                   value={confirm}
                   onChange={(event) => setConfirm(event.target.value)}
-                  placeholder="preview grant"
+                  placeholder="e.g. xgrant-4821-7.9f3c…"
                 />
               </label>
             </div>
@@ -6892,12 +7077,13 @@ function WorkbenchPage(): React.ReactElement {
         <ConsolePanel className="p-4">
           <div className="flex flex-col gap-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div className="flex flex-wrap gap-2" role="tablist" aria-label="workbench mode">
+              <div className="flex flex-wrap gap-2" role="group" aria-label="workbench mode">
                 {workbenchModes.map((item) => (
                   <Button
                     key={item.id}
                     type="button"
                     variant={mode === item.id ? "primary" : "secondary"}
+                    aria-pressed={mode === item.id}
                     onClick={() => setMode(item.id)}
                   >
                     {item.label}
@@ -6958,7 +7144,7 @@ function WorkbenchPage(): React.ReactElement {
                 className={cn(OM_INPUT, "font-mono")}
                 value={confirm}
                 onChange={(event) => setConfirm(event.target.value)}
-                placeholder="preview grant"
+                placeholder="e.g. xgrant-4821-7.9f3c…"
               />
             </label>
 
@@ -7211,7 +7397,7 @@ function ScnScrubberPanel({
         <label className="block">
           <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">SCN</span>
           <input
-            className="h-10 w-48 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            className="h-10 w-48 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
             value={scnInput}
             inputMode="numeric"
             onChange={(event) => setScnInput(event.target.value)}
@@ -7229,7 +7415,7 @@ function ScnScrubberPanel({
         <label className="block">
           <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Timestamp</span>
           <input
-            className="h-10 w-56 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            className="h-10 w-56 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
             value={timestampInput}
             onChange={(event) => setTimestampInput(event.target.value)}
             placeholder="2026-07-13 09:00:00"
@@ -7388,6 +7574,7 @@ function UndoTreePanel({
   const [workspace, setWorkspace] = React.useState<WorkspaceView | null>(null);
   const [entries, setEntries] = React.useState<UndoTreeEntry[]>([]);
   const [notice, setNotice] = React.useState<string | null>(null);
+  const [discardPending, setDiscardPending] = React.useState(false);
   const nextId = React.useRef(0);
 
   const history = useQuery({
@@ -7482,7 +7669,7 @@ function UndoTreePanel({
         <label className="block">
           <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Checkpoint</span>
           <input
-            className="h-10 w-56 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+            className="h-10 w-56 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
             value={checkpointName}
             onChange={(event) => setCheckpointName(event.target.value)}
             placeholder="SP_BEFORE_BACKFILL"
@@ -7508,17 +7695,25 @@ function UndoTreePanel({
           type="button"
           variant="ghost"
           disabled={!session || pending || !model.open}
-          onClick={() => {
-            if (
-              window.confirm("Discard the workspace? This drops all held, uncommitted statements.")
-            ) {
-              undo.mutate(undefined);
-            }
-          }}
+          onClick={() => setDiscardPending(true)}
         >
           Discard workspace
         </Button>
       </div>
+      {discardPending ? (
+        <ConfirmDialog
+          id="workbench-discard"
+          title="Discard workspace"
+          body="This drops all held, uncommitted statements in the workspace."
+          confirmLabel="Discard workspace"
+          busy={pending}
+          onCancel={() => setDiscardPending(false)}
+          onConfirm={() => {
+            setDiscardPending(false);
+            undo.mutate(undefined);
+          }}
+        />
+      ) : null}
       {error ? <p className="text-xs text-[var(--om-copper)]">{error.message}</p> : null}
       {notice ? (
         <p className="text-xs font-semibold text-[var(--om-copper)]">{notice}</p>
@@ -7857,7 +8052,7 @@ function AuditPage(): React.ReactElement {
             <label className="block">
               <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Subject Hash</span>
               <input
-                className="h-10 w-full rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+                className="h-10 w-full rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
                 value={subjectIdHash}
                 onChange={(event) => setSubjectIdHash(event.target.value)}
                 placeholder="subject-sha256:"
@@ -7866,7 +8061,7 @@ function AuditPage(): React.ReactElement {
             <label className="block">
               <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Tool</span>
               <select
-                className="h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+                className="h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
                 value={tool}
                 onChange={(event) => setTool(event.target.value)}
               >
@@ -7882,7 +8077,7 @@ function AuditPage(): React.ReactElement {
             <label className="block">
               <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Level</span>
               <select
-                className="h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+                className="h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
                 value={dangerLevel}
                 onChange={(event) => setDangerLevel(event.target.value)}
               >
@@ -7896,7 +8091,7 @@ function AuditPage(): React.ReactElement {
             <label className="block">
               <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Limit</span>
               <input
-                className="h-10 w-full rounded-md border border-[var(--om-border)] px-3 text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
+                className="h-10 w-full rounded-md border border-[var(--om-border)] px-3 text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
                 min={1}
                 max={200}
                 type="number"
@@ -8239,7 +8434,7 @@ function shortHash(value: string | null): string {
   if (value.length <= 28) {
     return value;
   }
-  return `${value.slice(0, 19)}...${value.slice(-8)}`;
+  return `${value.slice(0, 19)}…${value.slice(-8)}`;
 }
 
 function clampAuditLimit(value: number): number {
@@ -8983,7 +9178,7 @@ export function buildRefactorPreview(
   const preview = chunks.join("");
   return {
     occurrences,
-    preview: preview.length > 2400 ? `${preview.slice(0, 2400)}\n...` : preview,
+    preview: preview.length > 2400 ? `${preview.slice(0, 2400)}\n…` : preview,
     error: null
   };
 }
@@ -9115,7 +9310,7 @@ const columns: ColumnDef<ProbeResult>[] = [
     accessorKey: "latencyMs",
     cell: ({ row }) => (
       <span className="font-mono text-sm text-[var(--om-text)]">
-        {row.original.latencyMs === null ? "..." : `${row.original.latencyMs}ms`}
+        {row.original.latencyMs === null ? "…" : `${row.original.latencyMs}ms`}
       </span>
     )
   }
