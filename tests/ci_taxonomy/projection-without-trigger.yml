@@ -1,0 +1,6 @@
+# Local input for a required-proof runner; GitHub never executes this file.
+jobs:
+  quality:
+    steps:
+      - name: Format
+        run: cargo fmt --all -- --check
