@@ -27,6 +27,28 @@ classifier.  The invariant is that a policy may remove an admitted operation
 or make its requirements stricter, but may never make a refused operation
 admissible.
 
+### Row scoping does not require an Oracle licence
+
+`RequirePredicate` is **the** row-scoping path, and it is deliberately
+licence-free.  Oracle-native row-level controls (VPD / RLS) are an optional
+accelerator that a licensed site may add later; exactly as ADR-0008 says of
+`DBMS_REDACT` for masking, they **do not replace the server seam**.  The MCP
+server is the last point that can enforce one uniform row policy over every
+result, whatever the target database is licensed for.
+
+This is a load-bearing property, not a convenience: deferring the native tier
+must never silently downgrade row scoping to "licensed customers only".  On an
+unlicensed database a matching `RequirePredicate` still conjoins its predicate
+into the statement that actually reaches Oracle, so a principal never receives
+rows outside its policy — enforced, not advertised.
+
+The enforcement is a rewrite, so it is bound by the same fail-closed rules as
+everything else in this ADR: the predicate is placed into the parsed AST (never
+by text splicing), the rendered candidate **re-enters the classifier** before it
+runs (SEC-1), and any shape the rewriter cannot prove it can scope — an alias, a
+join, a CTE — is refused rather than executed unscoped.  A rewrite that cannot
+be proven is a denial; it is never a fall-open read.
+
 ## Decision
 
 ### Scope and configuration shape
