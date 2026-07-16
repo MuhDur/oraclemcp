@@ -2,8 +2,8 @@
 
 This is *our own* security audit of `oraclemcp`, not an upstream claim. It is the
 threat-model half of the D5 release gate: it enumerates the assets, the threats
-against them, the mitigation that holds each threat in check, and — crucially —
-the **committed test suite that keeps that mitigation honest**. Every mitigation
+against them, the mitigation that holds each threat in check, and the
+**committed test suite that keeps that mitigation honest**. Every mitigation
 below names a file path you can run.
 
 `oraclemcp` is **governed and least-privilege**: a fail-closed SQL classifier

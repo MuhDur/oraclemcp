@@ -55,11 +55,12 @@ same governed config-ops path (timestamped backup, atomic write, strict
 re-validation) used everywhere else. It is **consent-gated**: an interactive run
 asks before it scans and again before it writes; a non-interactive run without
 `--discover-tns` (or `--yes`) refuses with exit code 2 and scans nothing. It
-writes **no secrets to disk** — each profile references an environment variable
-(`env:ORACLE_<NAME>_PASSWORD`) you export yourself — keeps every profile capped
-at `READ_ONLY`, and is **idempotent and non-destructive**: existing profiles and
-hand edits are preserved, only new databases are added. When no `tnsnames.ora`
-is found it falls back to the minimal starter profile so you still boot. Add
+writes **no secrets to disk** (each profile references an environment variable,
+`env:ORACLE_<NAME>_PASSWORD`, that you export yourself), keeps every profile
+capped at `READ_ONLY`, and is **idempotent and non-destructive**: existing
+profiles and hand edits are preserved, only new databases are added. When no
+`tnsnames.ora` is found it falls back to the minimal starter profile so you
+still boot. Add
 `--json` for a names-only agent report, or `--dry-run` to preview without
 writing. Run `oraclemcp doctor` afterwards to see exactly which credentials
 remain to be set. Full contract: `docs/tns-discovery-onboarding.md`.
