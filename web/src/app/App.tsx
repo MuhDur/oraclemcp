@@ -2504,31 +2504,10 @@ export function ConfirmDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }): React.ReactElement {
-  const dialogRef = useModalFocus<HTMLDivElement>();
   const titleId = `${id}-confirm-title`;
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[color-mix(in_srgb,var(--om-bg)_80%,transparent)] p-4"
-      data-omcp-dialog-backdrop={id}
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !busy) {
-          onCancel();
-        }
-      }}
-    >
-      <div
-        ref={dialogRef}
-        className="w-full max-w-lg rounded-md border border-[color-mix(in_srgb,var(--om-copper)_55%,transparent)] bg-[var(--om-surface)] p-4 shadow-lg"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        data-omcp-dialog={id}
-        onKeyDown={(event) => {
-          if (event.key === "Escape" && !busy) {
-            onCancel();
-          }
-        }}
-      >
+    <ModalShell id={id} titleId={titleId} busy={busy} onCancel={onCancel}>
+      <div data-omcp-dialog={id}>
         <h3 id={titleId} className="text-base font-semibold text-[var(--om-text-bright)]">
           {title}
         </h3>
@@ -2544,6 +2523,44 @@ export function ConfirmDialog({
             {busy ? "Working" : confirmLabel}
           </Button>
         </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+function ModalShell({
+  id,
+  titleId,
+  busy,
+  onCancel,
+  children
+}: {
+  id: string;
+  titleId: string;
+  busy: boolean;
+  onCancel: () => void;
+  children: React.ReactNode;
+}): React.ReactElement {
+  const dialogRef = useModalFocus<HTMLDivElement>();
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[color-mix(in_srgb,var(--om-bg)_80%,transparent)] p-4"
+      data-omcp-dialog-backdrop={id}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onCancel();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        className="w-full max-w-lg rounded-md border border-[color-mix(in_srgb,var(--om-copper)_55%,transparent)] bg-[var(--om-surface)] p-4 shadow-lg"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && !busy) onCancel();
+        }}
+      >
+        {children}
       </div>
     </div>
   );
@@ -2565,31 +2582,13 @@ function ClientCredentialConfirmationDialog({
   onConfirm: () => void;
 }): React.ReactElement {
   const destructiveLabel = action.kind === "rotate" ? "Rotate credential" : "Revoke credential";
-  const dialogRef = useModalFocus<HTMLDivElement>();
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[color-mix(in_srgb,var(--om-bg)_80%,transparent)] p-4"
-      data-omcp-dialog-backdrop="client-credential"
-      // Dismissing is the safe direction here (it cancels), so a backdrop click
-      // is allowed — but only when the action is not already in flight.
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !busy) {
-          onCancel();
-        }
-      }}
+    <ModalShell
+      id="client-credential"
+      titleId="client-credential-confirm-title"
+      busy={busy}
+      onCancel={onCancel}
     >
-      <div
-        ref={dialogRef}
-        className="w-full max-w-lg rounded-md border border-[color-mix(in_srgb,var(--om-copper)_55%,transparent)] bg-[var(--om-surface)] p-4 shadow-lg"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="client-credential-confirm-title"
-        onKeyDown={(event) => {
-          if (event.key === "Escape" && !busy) {
-            onCancel();
-          }
-        }}
-      >
         <h3
           id="client-credential-confirm-title"
           className="text-base font-semibold text-[var(--om-text-bright)]"
@@ -2631,8 +2630,7 @@ function ClientCredentialConfirmationDialog({
             {busy ? "Working" : destructiveLabel}
           </Button>
         </div>
-      </div>
-    </div>
+    </ModalShell>
   );
 }
 
