@@ -1,0 +1,33 @@
+{
+  "schema": "mutation-result/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-16T18:10:00Z",
+  "source": {
+    "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "scope": {
+    "claim": "scoped",
+    "description": "A survivor without taxonomy is an unclassified count.",
+    "targets": ["crates/oracledb-protocol/src/describe/timestamp.rs"]
+  },
+  "started_at": "2026-07-16T18:00:00Z",
+  "ended_at": "2026-07-16T18:09:00Z",
+  "resource_budget": {
+    "isolated_target_dir": "/tmp/evidence/target",
+    "memory_max_bytes": 1,
+    "pid_task_max": 1
+  },
+  "shards": [{ "id": "shard-1of1", "status": "complete" }],
+  "counts": { "caught": 0, "missed": 1, "timeout": 0, "unviable": 0 },
+  "denominator": "caught+missed",
+  "rate": 0.0,
+  "survivors": [
+    {
+      "mutant_id": "timestamp.rs:118:9:replace-scale-with-0",
+      "location": "crates/oracledb-protocol/src/describe/timestamp.rs:118"
+    }
+  ],
+  "kills": []
+}

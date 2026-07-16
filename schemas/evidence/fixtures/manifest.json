@@ -95,6 +95,18 @@
       "covers": "Three kills claimed, two witnessed. The third is an assertion."
     },
     {
+      "file": "mutation-null-end-time.json",
+      "expect_code": "E_UNFINISHED",
+      "expect_path": "/ended_at",
+      "covers": "A mutation run without a completion instant cannot turn partial counts into a measurement."
+    },
+    {
+      "file": "missing-survivor-taxonomy.json",
+      "expect_code": "E_SCHEMA",
+      "expect_path": "/survivors/0/taxonomy",
+      "covers": "Every survivor must carry a taxonomy, not merely contribute to counts.missed."
+    },
+    {
       "file": "duplicate-kill-mutant.json",
       "expect_code": "E_DUPLICATE_MUTANT",
       "expect_path": "/kills/1/mutant_id",
