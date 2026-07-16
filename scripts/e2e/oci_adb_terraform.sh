@@ -136,8 +136,23 @@ cleanup() {
     if [ "$destroy_status" -eq 0 ]; then
       e2e_log_event "terraform_destroy" "teardown" "pass" 0 "throwaway Always Free ADB destroyed"
     else
-      e2e_log_event "terraform_destroy" "teardown" "fail" 0 "destroy failed; inspect runtime-only target/e2e artifact before retrying"
-      echo "OCI ADB acceptance teardown failed; the operator must destroy the throwaway resource using its runtime state." >&2
+      e2e_log_event "terraform_destroy" "teardown" "fail" 0 "terraform destroy failed; trying OCI CLI fallback"
+      adb_id=""
+      if [ -f "$oci_config" ] && command -v oci >/dev/null 2>&1; then
+        adb_id="$(terraform -chdir="$terraform_dir" output -state="$state_file" -raw adb_id 2>/dev/null || true)"
+        if [ -n "$adb_id" ] && OCI_CLI_CONFIG_FILE="$oci_config" oci db autonomous-database delete \
+          --autonomous-database-id "$adb_id" --force >"$run_dir/oci_cli_destroy.log" 2>&1; then
+          e2e_log_event "terraform_destroy" "teardown" "pass" 0 "OCI CLI deleted throwaway Always Free ADB after Terraform destroy failure"
+          destroy_status=0
+        else
+          e2e_log_event "terraform_destroy" "teardown" "fail" 0 "OCI CLI fallback could not delete throwaway ADB; inspect runtime-only artifact"
+        fi
+      else
+        e2e_log_event "terraform_destroy" "teardown" "fail" 0 "OCI CLI fallback unavailable; inspect runtime-only artifact"
+      fi
+      if [ "$destroy_status" -ne 0 ]; then
+        echo "OCI ADB acceptance teardown failed; the operator must destroy the throwaway resource using its runtime state." >&2
+      fi
     fi
   fi
   if [ "$prior_status" -eq 0 ] && [ "$destroy_status" -ne 0 ]; then

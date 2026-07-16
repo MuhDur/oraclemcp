@@ -105,7 +105,7 @@ output "adb_id" {
 }
 
 output "admin_connect_string" {
-  value     = oci_database_autonomous_database.signoff.connection_strings[0].all_connection_strings["high"]
+  value     = try(oci_database_autonomous_database.signoff.connection_strings[0].all_connection_strings["high"], "")
   sensitive = true
 }
 
