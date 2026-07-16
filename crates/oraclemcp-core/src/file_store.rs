@@ -255,17 +255,24 @@ impl FileStore {
             }
         }
 
-        // The descriptor already owns the lock. All fallible initialization
-        // below is therefore crash-safe: `?` drops the descriptor and releases
-        // ownership, while the persistent (possibly partial) sidecar is never
-        // interpreted as ownership by a future process.
-        file.set_len(0)
-            .and_then(|()| file.seek(SeekFrom::Start(0)).map(|_| ()))
-            .and_then(|()| write_metadata(&mut file, owner))
-            .map_err(|e| FileStoreError::Io(e.to_string()))?;
-        file.sync_all()
-            .map_err(|e| FileStoreError::Io(e.to_string()))?;
-        fsync_dir(&self.root)?;
+        // A fork duplicates this descriptor's open file description. Dropping
+        // only the parent descriptor after a failed initialization can therefore
+        // leave the flock live until the child reaches exec, even though this
+        // acquisition has already failed. Explicit unlock releases the shared
+        // lock immediately on every failure path; the sidecar may remain
+        // partial, but it is never interpreted as ownership by a future process.
+        let initialization = (|| -> Result<()> {
+            file.set_len(0)
+                .and_then(|()| file.seek(SeekFrom::Start(0)).map(|_| ()))
+                .and_then(|()| write_metadata(&mut file, owner))
+                .map_err(|e| FileStoreError::Io(e.to_string()))?;
+            file.sync_all()
+                .map_err(|e| FileStoreError::Io(e.to_string()))?;
+            fsync_dir(&self.root)
+        })();
+        if let Err(error) = initialization {
+            return Err(release_failed_service_lock_initialization(&file, error));
+        }
         Ok(ServiceOwner {
             inner: Arc::new(ServiceOwnerInner {
                 root: self.root.clone(),
@@ -760,6 +767,25 @@ fn private_open_error(path: &Path, error: &std::io::Error) -> FileStoreError {
     FileStoreError::Io(format!("cannot open {}: {error}", path.display()))
 }
 
+/// Release a partially initialized service lock before its descriptor drops.
+///
+/// `flock` is associated with the open file description, so a child created by
+/// `fork` can transiently retain a duplicate while the parent reports an
+/// initialization failure. Calling `unlock` on the parent's descriptor releases
+/// that shared lock immediately; waiting for every duplicate to close would make
+/// the error path spuriously report [`FileStoreError::Locked`].
+fn release_failed_service_lock_initialization(
+    file: &File,
+    initialization_error: FileStoreError,
+) -> FileStoreError {
+    match file.unlock() {
+        Ok(()) => initialization_error,
+        Err(unlock_error) => FileStoreError::Io(format!(
+            "{initialization_error}; additionally could not explicitly release the service lock: {unlock_error}"
+        )),
+    }
+}
+
 fn write_service_lock_metadata(file: &mut File, owner: &str) -> std::io::Result<()> {
     writeln!(file, "pid={}", std::process::id())?;
     // Debug formatting escapes control characters so this operator hint stays
@@ -1218,6 +1244,33 @@ mod tests {
             .acquire_service_owner("recovered-owner")
             .expect("partial initialization must not leave a permanent lock");
         drop(recovered);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_lock_initialization_failure_releases_a_duplicated_open_file_description() {
+        let store = FileStore::open(test_root("partial-lock-init-duplicated-fd")).expect("store");
+        let duplicated_descriptor = Arc::new(std::sync::Mutex::new(None::<File>));
+        let duplicate_for_failure = Arc::clone(&duplicated_descriptor);
+
+        let error =
+            match store.acquire_service_owner_with_metadata("failing-owner", move |file, _owner| {
+                // `try_clone` is `dup(2)`: it shares the lock's open file
+                // description exactly like the transient child descriptor in
+                // the fork-to-exec window that exposed this flake.
+                *duplicate_for_failure.lock().expect("duplicate slot") = Some(file.try_clone()?);
+                Err(std::io::Error::other("injected metadata failure"))
+            }) {
+                Ok(_) => panic!("metadata initialization must fail"),
+                Err(error) => error,
+            };
+        assert!(matches!(error, FileStoreError::Io(_)));
+
+        let recovered = store.acquire_service_owner("recovered-owner").expect(
+            "initialization failure must explicitly unlock even while a duplicated descriptor lives",
+        );
+        drop(recovered);
+        drop(duplicated_descriptor.lock().expect("duplicate slot").take());
     }
 
     #[test]
