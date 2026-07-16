@@ -7,6 +7,7 @@ import {
   Link,
   Outlet,
   RouterProvider,
+  useBlocker,
   useNavigate,
   useSearch
 } from "@tanstack/react-router";
@@ -1833,6 +1834,8 @@ function ConfigPage(): React.ReactElement {
   const [lastError, setLastError] = React.useState<string | null>(null);
   const [previewConfirmed, setPreviewConfirmed] = React.useState(false);
   const [rollbackPending, setRollbackPending] = React.useState(false);
+  // A drafted-but-unapplied TOML edit is unsaved work; once applied it is not.
+  const draftGuard = useUnsavedChangesGuard(draftToml.trim().length > 0 && !applyOutcome);
   const session = useQuery({
     queryKey: ["dashboard-session"],
     queryFn: fetchDashboardSession,
@@ -1924,6 +1927,16 @@ function ConfigPage(): React.ReactElement {
       description="Redacted draft/apply workflow for the service profile file."
     >
       <div className="space-y-4">
+        {draftGuard.status === "blocked" ? (
+          <ConfirmDialog
+            id="config-unsaved"
+            title="Leave with an unapplied draft?"
+            body="Your configuration draft has not been applied. Leaving this page discards it."
+            confirmLabel="Leave and discard"
+            onCancel={draftGuard.reset}
+            onConfirm={draftGuard.proceed}
+          />
+        ) : null}
         <ProfileCards />
         <ConfigStatusPanel data={status} pending={config.isFetching} />
         <Surface className="overflow-hidden">
@@ -2446,6 +2459,24 @@ function useModalFocus<T extends HTMLElement>(): React.RefObject<T | null> {
  * test — the backend step-up grant remains the real gate; this is misclick
  * protection.
  */
+/** The SQL the Workbench opens with. Editor content equal to it is not the
+ *  operator's work, so leaving with it untouched must not warn. */
+const WORKBENCH_SQL_SEED = "SELECT * FROM dual";
+
+/**
+ * Warn before leaving a page that still holds unsaved work. Navigation within
+ * the same route (selecting a lane, say) is never blocked — only actually
+ * leaving. `enableBeforeUnload` covers the tab close and reload the router
+ * cannot intercept itself.
+ */
+function useUnsavedChangesGuard(dirty: boolean) {
+  return useBlocker({
+    shouldBlockFn: ({ current, next }) => dirty && next.routeId !== current.routeId,
+    enableBeforeUnload: () => dirty,
+    withResolver: true
+  });
+}
+
 export function ConfirmDialog({
   title,
   body,
@@ -6991,7 +7022,7 @@ type RefactorPreview = {
 
 function WorkbenchPage(): React.ReactElement {
   const [mode, setMode] = React.useState<WorkbenchMode>("classify_only");
-  const [sql, setSql] = React.useState("SELECT * FROM dual");
+  const [sql, setSql] = React.useState(WORKBENCH_SQL_SEED);
   const [laneId, setLaneId] = React.useState("");
   const [confirm, setConfirm] = React.useState("");
   const [maxRows, setMaxRows] = React.useState(100);
@@ -7006,6 +7037,10 @@ function WorkbenchPage(): React.ReactElement {
   const [lineageDepth, setLineageDepth] = React.useState(2);
   const [identifier, setIdentifier] = React.useState("");
   const [replacement, setReplacement] = React.useState("");
+  // Only the operator's own SQL counts as unsaved work, never the opening seed.
+  const sqlGuard = useUnsavedChangesGuard(
+    sql.trim().length > 0 && sql.trim() !== WORKBENCH_SQL_SEED
+  );
   const [changesetJson, setChangesetJson] = React.useState(
     '{\n  "objects": [],\n  "unclassified_files": []\n}'
   );
@@ -7122,6 +7157,16 @@ function WorkbenchPage(): React.ReactElement {
       eyebrow="Guarded SQL"
       description="Human-in-the-loop SQL through the same classifier, lane gate, confirmation, and audit path as MCP tools."
     >
+      {sqlGuard.status === "blocked" ? (
+        <ConfirmDialog
+          id="workbench-unsaved"
+          title="Leave the Workbench?"
+          body="The SQL editor holds work that has not been run. Leaving this page discards it."
+          confirmLabel="Leave and discard"
+          onCancel={sqlGuard.reset}
+          onConfirm={sqlGuard.proceed}
+        />
+      ) : null}
       <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.6fr)_minmax(360px,0.75fr)]">
         <ConsolePanel className="p-4">
           <div className="flex flex-col gap-4">
