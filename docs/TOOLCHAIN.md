@@ -18,16 +18,54 @@ The current pin is **`nightly-2026-05-11`**.
 
 ## 1. Why the pin exists (one paragraph)
 
-The thin-native line runs on the **asupersync 0.3.5** async runtime, and
-asupersync uses nightly-only language features (`#![feature(try_trait_v2)]` and
-`try_trait_v2_residual`). There is therefore **no stable MSRV** for this
-workspace. The pinned `oracledb` 0.8.3 driver is **stable-clean** and is *not*
-the reason for the nightly pin; asupersync is the constraint, and it is pre-1.0
-and still moving. We pin a single nightly and bump it **deliberately**, rather
-than tracking `nightly` automatically, so a surprise upstream toolchain change
-can never silently break a build or a release. See ADR-0001 for the full
-decision and its review trigger (asupersync no longer needing those nightly-only
-features — `try_trait_v2` reaching stable, or asupersync dropping it).
+There is **no stable MSRV** for this workspace. The pin is real and required,
+but for two *independent* reasons — and neither is "asupersync requires
+nightly". Stating it that way is wrong, and it previously sent an audit looking
+in the wrong place, so the precise mechanism is worth the extra sentences.
+
+**1. asupersync's `nightly-outcome-try` feature (all platforms).** The pinned
+asupersync 0.3.5 gates its nightly use behind a cargo feature:
+
+```rust
+// asupersync-0.3.5/src/lib.rs:52-53
+#![cfg_attr(feature = "nightly-outcome-try", feature(try_trait_v2))]
+#![cfg_attr(feature = "nightly-outcome-try", feature(try_trait_v2_residual))]
+```
+
+That feature is **opt-in, but in asupersync's `default` set**
+(`default = ["proc-macros", "nightly-outcome-try"]`). asupersync does not
+*require* nightly; a consumer that opts out of its defaults does not get it.
+Our root `Cargo.toml` **does** opt out (`default-features = false`). The feature
+still lands because **`oracledb` declares its asupersync dependency without
+`default-features = false`**, and cargo unifies features across the graph — so
+the driver's defaults re-enable it for everyone. Verify with:
+
+```sh
+cargo tree -i asupersync -e features   # asupersync feature "default" <- oracledb
+```
+
+Neither the driver's nor the server's own source uses the nightly syntax: the
+feature arrives transitively and unrequested.
+The pinned `oracledb` 0.8.3 driver's own source is stable-clean — but its
+**dependency declaration** is the proximate cause, so "oracledb is not the
+reason for the pin" is misleading.
+
+**2. `windows_by_handle` (Windows only).** `oraclemcp-core` enables it for
+`MetadataExt::number_of_links`, which `file_store` needs to refuse a hard-linked
+service lock and the audit sink needs for file identity. There is no stable
+`std` equivalent, so **Windows needs nightly even if reason 1 goes away**.
+
+We pin a single nightly and bump it **deliberately**, rather than tracking
+`nightly` automatically, so a surprise upstream toolchain change can never
+silently break a build or a release.
+
+**Review trigger (corrected).** ADR-0001 frames this as waiting for asupersync
+to stop needing nightly. That is not the only lever, and probably not the first
+one: reason 1 may be removable *today* by having `oracledb` set
+`default-features = false` on asupersync (keeping `proc-macros`, its other
+default) — no upstream change required. Bead `oraclemcp-yi2z` tracks proving
+that. Reason 2 needs `windows_by_handle` to stabilise
+(rust-lang/rust#63010) or a stable replacement, and gates Windows only.
 
 ---
 
@@ -175,9 +213,10 @@ toolchain.
 
 `ci.yml` runs a `multi-nightly` matrix job that builds and tests on the pinned
 date **and** the floating `nightly` channel, marked `continue-on-error: true`.
-It is **advisory, not a gate**: because the line has no stable MSRV and depends
-on specific nightly-only features in **asupersync** (`try_trait_v2` +
-`try_trait_v2_residual`; the `oracledb` driver is stable-clean), a future
+It is **advisory, not a gate**: because the line has no stable MSRV and builds
+against specific nightly-only features (`try_trait_v2` + `try_trait_v2_residual`
+via asupersync's default `nightly-outcome-try`; `windows_by_handle` on
+Windows — §1), a future
 toolchain breaking us is a *when*, not an *if*. The job turns that into an early warning —
 a red square that tells you to start §2 triage — instead of a release-day
 surprise. The boundary lint additionally surfaces an `opentelemetry-sdk`

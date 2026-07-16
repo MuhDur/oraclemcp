@@ -1,8 +1,13 @@
-# ADR 0001 — Pinned nightly toolchain (Asupersync needs nightly-only features), no stable MSRV
+# ADR 0001 — Pinned nightly toolchain, no stable MSRV
 
 ## Status
 
-Accepted (0.4.0).
+Accepted (0.4.0). **Decision stands; its stated reason was corrected 2026-07-16
+— see [Correction](#correction-2026-07-16-bead-oraclemcp-yi2z) before relying on
+the Context below.** In short: asupersync does not *require* nightly (the
+feature is opt-in, merely on by default), `oracledb` *is* the proximate cause
+(its dependency declaration does not opt out), and Windows needs nightly for a
+second, unrelated reason. The Context is preserved as written for the record.
 
 ## Context
 
@@ -39,13 +44,41 @@ build on the pinned toolchain.
 - Documentation must repeatedly clarify "nightly is build-time-only" because it
   reads as a runtime requirement to newcomers (see `docs/operations.md` §1).
 
-## Review trigger
+## Correction (2026-07-16, bead `oraclemcp-yi2z`)
 
-Revisit when **asupersync no longer requires nightly-only language features** —
-either `try_trait_v2` / `try_trait_v2_residual` stabilize on a stable Rust
-release, or an asupersync version drops its use of them. At that point (the
-`oracledb` driver is already stable-clean) evaluate adopting a stable MSRV and
-dropping the nightly pin.
+The decision above stands — the pin is real and still required — but two factual
+statements in it are **wrong**, and they matter because they point the review
+trigger at the wrong lever. Left in place above as the record of what was
+decided; corrected here:
+
+1. **"asupersync requires nightly-only language features" is inaccurate.**
+   asupersync gates them behind its `nightly-outcome-try` cargo feature
+   (`asupersync-0.3.5/src/lib.rs:52-53`). The feature is opt-in — it is merely
+   in asupersync's `default` set. A consumer that opts out does not get it.
+2. **"the `oracledb` driver is not the reason for the pin" is inaccurate.** Its
+   *source* is stable-clean, but it declares its asupersync dependency **without
+   `default-features = false`**, so cargo feature unification re-enables the
+   nightly feature for the whole graph — overriding this workspace's own opt-out.
+   `cargo tree -i asupersync -e features` shows `asupersync feature "default"
+   <- oracledb`. It is the proximate cause.
+3. **Missed at the time:** on **Windows**, `oraclemcp-core` independently needs
+   `windows_by_handle` for `MetadataExt::number_of_links` (hard-linked-lock
+   refusal). Windows needs nightly even if 1 and 2 are resolved.
+
+## Review trigger (corrected)
+
+Two levers, not one — and the first needs nobody upstream:
+
+- **Now, and independently of any upstream release:** evaluate having `oracledb`
+  set `default-features = false` on asupersync (keeping `proc-macros`, its other
+  default). Neither driver nor server source uses the nightly syntax, so this may
+  drop the requirement outright on non-Windows. Tracked by `oraclemcp-yi2z`;
+  **prove it builds and gates green on stable before dropping the pin.**
+- **Upstream:** `try_trait_v2` / `try_trait_v2_residual` stabilizing, or
+  asupersync dropping the feature from its defaults, would resolve it without
+  the driver change.
+- **Windows:** additionally needs `windows_by_handle` (rust-lang/rust#63010) to
+  stabilize, or a stable replacement for `number_of_links`.
 
 The concrete procedure for bumping the pin in the meantime — when, the exact
 files to edit, how to validate, and how to roll back — lives in

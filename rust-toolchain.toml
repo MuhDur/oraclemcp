@@ -1,8 +1,12 @@
 # This branch is pinned to NIGHTLY Rust.
 #
-# The thin-native migration depends on asupersync/oracledb, and asupersync uses
-# nightly-only language features. There is no stable MSRV for this line; bump
-# this date deliberately with asupersync/oracledb upgrades and CI workflow pins.
+# Two independent reasons, neither of which is "asupersync requires nightly":
+#   1. asupersync's `nightly-outcome-try` feature (try_trait_v2 + its residual)
+#      is opt-in but ON BY DEFAULT, and reaches us through oracledb's asupersync
+#      dependency, which does not opt out. Bead oraclemcp-yi2z tracks dropping it.
+#   2. Windows only: oraclemcp-core's `windows_by_handle`.
+# There is no stable MSRV for this line; bump this date deliberately with
+# asupersync/oracledb upgrades and CI workflow pins. See docs/TOOLCHAIN.md §1.
 [toolchain]
 channel = "nightly-2026-05-11"
 components = ["rustfmt", "clippy"]

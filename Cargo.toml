@@ -18,9 +18,15 @@ edition = "2024"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/MuhDur/oraclemcp"
 homepage = "https://github.com/MuhDur/oraclemcp"
-# No `rust-version`: the thin-native line is pinned to nightly because
-# asupersync uses nightly-only language features (try_trait_v2 + its residual).
-# The oracledb 0.8.3 driver is stable-clean and is NOT the reason for the pin.
+# No `rust-version`: the line is pinned to nightly for two independent reasons.
+# (1) asupersync's `nightly-outcome-try` feature enables feature(try_trait_v2) +
+# its residual. It is opt-in but in asupersync's DEFAULT set; we opt out below
+# (default-features = false), and it is re-enabled anyway because oracledb
+# depends on asupersync WITHOUT opting out, and cargo unifies features. Nobody's
+# source uses the nightly syntax — it arrives transitively (bead oraclemcp-yi2z).
+# (2) Windows only: oraclemcp-core's windows_by_handle (see its lib.rs).
+# asupersync does not "require" nightly. The oracledb 0.8.3 driver's own source is stable-clean —
+# it is its dep declaration, not its source, that is the proximate cause. See docs/TOOLCHAIN.md §1.
 keywords = ["oracle", "mcp", "database", "sql"]
 categories = ["database", "development-tools"]
 

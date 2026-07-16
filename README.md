@@ -227,11 +227,16 @@ channels once they resolve.
 
 ## Source builds and runtime requirements
 
-This branch is pinned to **`nightly-2026-05-11`**. The thin-native line has no
-stable MSRV because **asupersync 0.3.5** uses nightly-only language features
-(`#![feature(try_trait_v2)]` and `try_trait_v2_residual`); the pinned `oracledb`
-0.8.3 driver itself is stable-clean. The repository's `rust-toolchain.toml`
-selects the pin for local builds. Use the release installer above when you want
+This branch is pinned to **`nightly-2026-05-11`** and has no stable MSRV. The
+pin is required, for two independent reasons: **asupersync 0.3.5**'s
+`nightly-outcome-try` feature enables `#![feature(try_trait_v2)]` and
+`try_trait_v2_residual` inside asupersync (it is opt-in, but in asupersync's
+default feature set, and reaches us through the `oracledb` dependency), and on
+**Windows** `oraclemcp-core` additionally needs `windows_by_handle`. The pinned
+`oracledb` 0.8.3 driver's own source is stable-clean — it is its asupersync
+dependency declaration that pulls the nightly feature in.
+[`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) has the exact mechanism. The
+repository's `rust-toolchain.toml` selects the pin for local builds. Use the release installer above when you want
 the prebuilt binary; use `cargo install` only when you intentionally want a
 source build.
 
@@ -908,9 +913,10 @@ legacy `signature` value before restarting a protected profile.
 ## Building and testing
 
 `oraclemcp` builds on a single **pinned Rust nightly** (`nightly-2026-05-11`,
-recorded in `rust-toolchain.toml`). The pin exists because **asupersync 0.3.5**
-uses nightly-only language features (`try_trait_v2` + `try_trait_v2_residual`) —
-the `oracledb` 0.8.3 driver is stable-clean. The pin is **build-time only**: the
+recorded in `rust-toolchain.toml`). Two independent things need it: asupersync 0.3.5's
+`nightly-outcome-try` feature (`try_trait_v2` + `try_trait_v2_residual`), which
+is opt-in but on by default and reaches us via the `oracledb` dependency; and,
+on Windows only, `windows_by_handle`. The pin is **build-time only**: the
 shipped binary has no runtime dependency on nightly. See
 [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) for the full rationale and the
 re-pin runbook.

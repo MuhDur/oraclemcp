@@ -121,25 +121,26 @@ if ! grep -Fq "fn $driver_seam_fn" "$connection_rs"; then
   fail "connection.rs must define fn $driver_seam_fn driver seam regression test"
 fi
 
-require_contains \
-  "AGENTS.md" \
-  "$driver_version driver is stable-clean" \
-  "driver provenance"
-require_contains \
-  "README.md" \
-  "$driver_version driver itself is stable-clean" \
-  "driver provenance"
-require_contains \
-  "docs/operations.md" \
-  "pinned \`oracledb\` $driver_version driver is stable-clean" \
-  "driver provenance"
+# Driver provenance: each doc must name the CURRENTLY PINNED driver version, so
+# a version bump cannot leave stale provenance behind. The anchor deliberately
+# says "own source is stable-clean" rather than the old "driver is stable-clean":
+# the driver's source carries no nightly features, but its asupersync dependency
+# declaration is what pulls `nightly-outcome-try` into the graph. The previous
+# anchor pinned the inaccurate framing in place and is why it survived several
+# doc passes (bead oraclemcp-yi2z). Keep the version interpolation.
+for provenance_doc in "AGENTS.md" "README.md" "docs/operations.md"; do
+  require_contains \
+    "$provenance_doc" \
+    "\`oracledb\` $driver_version driver's own source is stable-clean" \
+    "driver provenance"
+done
 require_contains \
   "docs/operations.md" \
   "pinned \`oracledb\` $driver_version stack parses" \
   "EXPIRE_TIME driver provenance"
 require_contains \
   "docs/TOOLCHAIN.md" \
-  "pinned \`oracledb\` $driver_version driver is **stable-clean**" \
+  "\`oracledb\` $driver_version driver's own source is stable-clean" \
   "toolchain driver provenance"
 require_contains \
   "docs/adr/0001-pinned-nightly-toolchain.md" \
@@ -159,7 +160,7 @@ require_contains \
   "behavior-inventory protocol pin"
 require_contains \
   "Cargo.toml" \
-  "The oracledb $driver_version driver is stable-clean" \
+  "The oracledb $driver_version driver's own source is stable-clean" \
   "workspace driver provenance"
 require_contains \
   "Cargo.toml" \

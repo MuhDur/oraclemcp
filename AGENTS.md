@@ -27,10 +27,27 @@ deliberate step.
 ## Rust toolchain & gates
 
 - Cargo workspace, `resolver = "2"`, pinned nightly
-  **`nightly-2026-05-11`**, `edition = "2024"`. The thin-native line has no
-  stable MSRV because **asupersync 0.3.5** requires nightly-only language
-  features (`try_trait_v2` + `try_trait_v2_residual`); the pinned `oracledb`
-  0.8.3 driver is stable-clean.
+  **`nightly-2026-05-11`**, `edition = "2024"`. There is no stable MSRV, for two
+  independent reasons — see [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md):
+  1. **asupersync 0.3.5's `nightly-outcome-try` feature** enables
+     `feature(try_trait_v2)` + `try_trait_v2_residual` inside asupersync itself
+     (`asupersync-0.3.5/src/lib.rs:52-53`). It is **opt-in but on by default**,
+     not something asupersync inherently requires. We ask for
+     `default-features = false` (`Cargo.toml`), but `oracledb` depends on
+     asupersync *without* opting out, so feature unification turns it back on
+     for the whole graph. Neither driver nor server source uses the nightly
+     syntax — the feature arrives transitively and unrequested. Whether it can
+     be dropped is bead `oraclemcp-yi2z`; until then **the nightly pin is real
+     and required**.
+  2. **Windows only:** `oraclemcp-core` enables `windows_by_handle` for
+     `MetadataExt::number_of_links`, which `file_store` needs to refuse a
+     hard-linked service lock (and the audit sink needs for file identity).
+     There is no stable `std` equivalent, so Windows needs nightly regardless of
+     reason 1.
+  Note the pinned `oracledb` 0.8.3 driver's own source is stable-clean; it is
+  its asupersync **dependency declaration** that pulls the nightly feature in.
+  Do not restate this as "asupersync requires nightly" — that attribution is
+  wrong and sent a prior audit looking in the wrong place.
 - Every crate is `#![forbid(unsafe_code)]`. Do not introduce `unsafe`.
 - Before committing: `cargo fmt --all -- --check`, `cargo clippy --workspace
   --all-targets -- -D warnings`, `cargo test --workspace`, `cargo deny check`
