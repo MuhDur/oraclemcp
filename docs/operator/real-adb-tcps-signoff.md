@@ -40,8 +40,12 @@ RELEASE_TAG=vX.Y.Z bash scripts/release_preflight.sh
 ## What Needs Real Operator Credentials
 
 The real-cloud signoff needs a throwaway or non-customer ADB lane and a
-prefetched OCI IAM database token. The script writes temporary profiles and raw
-runtime output only under ignored `target/e2e/`.
+prefetched OCI IAM database token. The two authentication probes deliberately
+use different database users: a password user (normally `ADMIN`) proves the
+wallet/password path, while an `IDENTIFIED GLOBALLY` user proves the OCI IAM
+token path. A global IAM user is not assumed to have a database password.
+The script writes temporary profiles and raw runtime output only under ignored
+`target/e2e/`.
 
 Required env:
 
@@ -51,7 +55,8 @@ export CARGO_BUILD_JOBS=16
 export ORACLEMCP_REAL_ADB_SIGNOFF=1
 export ORACLEMCP_REAL_ADB_NON_CUSTOMER_ASSERTION=1
 export ORACLEMCP_REAL_ADB_CONNECT_STRING='<ADB TCPS connect string or wallet alias>'
-export ORACLEMCP_REAL_ADB_USER='<database user for the signoff lane>'
+export ORACLEMCP_REAL_ADB_PASSWORD_USER='<password user, normally ADMIN>'
+export ORACLEMCP_REAL_ADB_IAM_USER='<global user mapped to the OCI IAM principal>'
 export ORACLEMCP_REAL_ADB_PASSWORD='<database password for wallet/password smoke>'
 export ORACLEMCP_REAL_ADB_WALLET_LOCATION='<path to the unzipped ADB wallet directory>'
 export ORACLEMCP_REAL_ADB_SSL_SERVER_CERT_DN='<exact server certificate DN from the wallet metadata>'
@@ -77,6 +82,46 @@ Or run synthetic + real signoff through the single local gate command:
 bash scripts/local_release_gate.sh --log --real-adb
 ```
 
+## Operator-Gated Always Free ADB Lane
+
+`.github/workflows/oci-adb.yml` is the reproducible live-cloud acceptance
+route. It is `workflow_dispatch` only: `plan` makes no cloud mutation;
+`apply-and-signoff` requires the literal confirmation
+`provision-and-destroy`, provisions a fresh Always Free ADB with Terraform,
+creates a wallet, maps a throwaway global database user to the supplied IAM
+principal, mints a database-scoped token, runs both real TCPS probes, and
+destroys the database in an exit trap.
+
+The repository stores these six OCI API-key inputs as GitHub Actions secrets:
+
+- `OCI_TENANCY_OCID`, `OCI_USER_OCID`, `OCI_FINGERPRINT`, `OCI_PRIVATE_KEY`
+- `OCI_REGION`, `OCI_COMPARTMENT_OCID`
+
+The `apply-and-signoff` dispatch also requires `iam_principal_name`. This is a
+local IAM user principal name, optionally qualified as `domain/name`; it is not
+an OCID. OCI API-key credentials can mint a token but do not create the
+Autonomous Database global-user mapping required for that token to authenticate.
+
+For an operator shell, the equivalent wiring is:
+
+```sh
+export TF_VAR_tenancy_ocid='<OCI tenancy OCID>'
+export TF_VAR_user_ocid='<OCI API-key user OCID>'
+export TF_VAR_fingerprint='<OCI API-key fingerprint>'
+export TF_VAR_private_key_path='<path to OCI API-key PEM>'
+export TF_VAR_region='<OCI region>'
+export TF_VAR_compartment_ocid='<throwaway ADB compartment OCID>'
+export ORACLEMCP_ADB_IAM_PRINCIPAL_NAME='<domain/name or local IAM user name>'
+export ORACLEMCP_REAL_ADB_NON_CUSTOMER_ASSERTION=1
+
+bash scripts/e2e/oci_adb_terraform.sh --log --apply-and-signoff
+```
+
+An absent OCI input produces the typed, zero-success-exit result
+`SKIP_BLOCKED_OCI_CREDS`; it is not presented as a live pass. A failed
+teardown is an error: retain the runtime-only state under `target/e2e/` and
+destroy the throwaway resource before retrying.
+
 ## Evidence Handling
 
 Auto-verified and commit-safe:
@@ -89,6 +134,8 @@ Auto-verified and commit-safe:
 Runtime-only and not commit-safe:
 
 - `target/e2e/real_adb_tcps_signoff/**`
+- `target/e2e/oci_adb_terraform/**` (Terraform state, wallet, OCI token, and
+  raw provider/client output)
 - Generated real ADB profile TOML files.
 - Doctor output from the real wallet/password and OCI IAM token probes.
 

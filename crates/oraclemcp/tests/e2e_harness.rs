@@ -890,7 +890,11 @@ fn every_e2e_scenario_script_is_reachable_from_the_runner_or_its_own_test() {
 
     // Release/operator gates: run from the release suites and pinned by their own
     // dry-run tests above, deliberately not part of the standard sweep.
-    let gated = ["hardening_acceptance.sh", "real_adb_tcps_signoff.sh"];
+    let gated = [
+        "hardening_acceptance.sh",
+        "real_adb_tcps_signoff.sh",
+        "oci_adb_terraform.sh",
+    ];
     // The runner and the shared library are not scenarios.
     let infra = ["run_all.sh", "lib.sh"];
 
@@ -1310,6 +1314,85 @@ fn real_adb_signoff_dry_run_schedules_wallet_and_iam_doctor_paths() {
                 .as_str()
                 .is_some_and(|message| message.contains("values are never logged or committed"))),
         "missing env contract event: {events:?}"
+    );
+}
+
+#[test]
+fn oci_adb_terraform_dry_run_wires_explicit_teardown() {
+    let output = run_script(
+        "scripts/e2e/oci_adb_terraform.sh",
+        &["--log", "--dry-run", "--apply-and-signoff"],
+    );
+    assert!(
+        output.status.success(),
+        "OCI ADB Terraform dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    let command_messages = events
+        .iter()
+        .filter(|event| event["event"] == "command_start")
+        .filter_map(|event| event["message"].as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "terraform init (offline wiring)",
+        "terraform plan (no cloud mutation)",
+        "terraform apply throwaway Always Free ADB",
+        "configure OCI IAM global user mapping",
+        "mint scoped OCI database token",
+        "real ADB TCPS password and IAM signoff",
+    ] {
+        assert!(
+            command_messages.iter().any(|message| *message == expected),
+            "OCI ADB Terraform dry-run did not schedule {expected}: {command_messages:?}"
+        );
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "terraform_destroy" && event["outcome"] == "skipped"),
+        "dry-run must declare that it never provisioned a cloud database: {events:?}"
+    );
+
+    let root = repo_root();
+    let harness = std::fs::read_to_string(root.join("scripts/e2e/oci_adb_terraform.sh"))
+        .expect("read OCI ADB Terraform harness");
+    for expected in [
+        "SKIP_BLOCKED_OCI_CREDS",
+        "ORACLEMCP_REAL_ADB_NON_CUSTOMER_ASSERTION=1",
+        "terraform -chdir=\"$terraform_dir\" destroy",
+        "ORACLEMCP_REAL_ADB_PASSWORD_USER=ADMIN",
+        "ORACLEMCP_REAL_ADB_IAM_USER=\"$(<\"$run_dir/iam_database_user\")\"",
+    ] {
+        assert!(
+            harness.contains(expected),
+            "OCI ADB harness lost its required safety contract: {expected}"
+        );
+    }
+
+    let workflow = std::fs::read_to_string(root.join(".github/workflows/oci-adb.yml"))
+        .expect("read OCI ADB workflow");
+    for expected in [
+        "workflow_dispatch:",
+        "apply-and-signoff",
+        "provision-and-destroy",
+        "iam_principal_name",
+        "OCI_TENANCY_OCID",
+        "OCI_USER_OCID",
+        "OCI_FINGERPRINT",
+        "OCI_PRIVATE_KEY",
+        "OCI_REGION",
+        "OCI_COMPARTMENT_OCID",
+    ] {
+        assert!(
+            workflow.contains(expected),
+            "OCI ADB workflow lost required operator-gated input: {expected}"
+        );
+    }
+    assert!(
+        !workflow.contains("push:"),
+        "OCI ADB workflow must stay manual, not push-triggered"
     );
 }
 

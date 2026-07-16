@@ -21,7 +21,8 @@ Required live-run env:
   ORACLEMCP_REAL_ADB_SIGNOFF=1
   ORACLEMCP_REAL_ADB_NON_CUSTOMER_ASSERTION=1
   ORACLEMCP_REAL_ADB_CONNECT_STRING
-  ORACLEMCP_REAL_ADB_USER
+  ORACLEMCP_REAL_ADB_PASSWORD_USER
+  ORACLEMCP_REAL_ADB_IAM_USER
   ORACLEMCP_REAL_ADB_PASSWORD
   ORACLEMCP_REAL_ADB_WALLET_LOCATION
   ORACLEMCP_REAL_ADB_SSL_SERVER_CERT_DN
@@ -71,7 +72,8 @@ require_live_env() {
   fi
   for name in \
     ORACLEMCP_REAL_ADB_CONNECT_STRING \
-    ORACLEMCP_REAL_ADB_USER \
+    ORACLEMCP_REAL_ADB_PASSWORD_USER \
+    ORACLEMCP_REAL_ADB_IAM_USER \
     ORACLEMCP_REAL_ADB_PASSWORD \
     ORACLEMCP_REAL_ADB_WALLET_LOCATION \
     ORACLEMCP_REAL_ADB_SSL_SERVER_CERT_DN \
@@ -92,10 +94,11 @@ require_live_env() {
 write_profile() {
   local path="$1"
   local profile="$2"
-  local use_iam="$3"
+  local profile_user="$3"
+  local use_iam="$4"
   local connect_string user wallet ssl_dn use_sni
   connect_string="$(toml_string "$ORACLEMCP_REAL_ADB_CONNECT_STRING")"
-  user="$(toml_string "$ORACLEMCP_REAL_ADB_USER")"
+  user="$(toml_string "$profile_user")"
   wallet="$(toml_string "$ORACLEMCP_REAL_ADB_WALLET_LOCATION")"
   ssl_dn="$(toml_string "$ORACLEMCP_REAL_ADB_SSL_SERVER_CERT_DN")"
   use_sni="${ORACLEMCP_REAL_ADB_USE_SNI:-true}"
@@ -162,8 +165,8 @@ binary="$cargo_target_dir/debug/oraclemcp"
 
 if [ "$E2E_DRY_RUN" != "1" ]; then
   require_live_env
-  write_profile "$wallet_config" "$wallet_profile" false
-  write_profile "$iam_config" "$iam_profile" true
+  write_profile "$wallet_config" "$wallet_profile" "$ORACLEMCP_REAL_ADB_PASSWORD_USER" false
+  write_profile "$iam_config" "$iam_profile" "$ORACLEMCP_REAL_ADB_IAM_USER" true
 else
   e2e_log_event "dry_run_env" "setup" "skipped" 0 "live env validation skipped in --dry-run"
 fi

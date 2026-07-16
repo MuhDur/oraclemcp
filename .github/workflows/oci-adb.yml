@@ -1,0 +1,105 @@
+name: OCI Always Free ADB acceptance
+
+# This is deliberately dispatch-only. The apply path creates a fresh, throwaway
+# Always Free ADB and always invokes Terraform destroy through the harness trap.
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "plan is non-mutating; apply-and-signoff provisions, proves, then destroys a throwaway ADB"
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply-and-signoff
+      confirmation:
+        description: "Required for apply-and-signoff: enter provision-and-destroy"
+        required: false
+        type: string
+      iam_principal_name:
+        description: "OCI IAM local-user principal name (or domain/name) mapped to the throwaway global DB user"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oci-adb-acceptance
+  cancel-in-progress: false
+
+jobs:
+  acceptance:
+    name: OCI ADB acceptance
+    runs-on: ubuntu-latest
+    environment: oci-adb-acceptance
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+
+      - name: Install pinned OCI CLI and Thin Python driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --no-cache-dir \
+            'oci-cli==3.89.1' 'oracledb==4.0.2'
+
+      - name: Materialize OCI API key in runner-private storage
+        shell: bash
+        env:
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/oci-api-key.pem"
+          if [ -z "$OCI_PRIVATE_KEY" ]; then
+            # Let the harness emit its typed SKIP_BLOCKED_OCI_CREDS result
+            # instead of writing a newline-only PEM that fails ambiguously.
+            printf 'OCI_KEY_PATH=%s\n' "$key" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          printf '%s\n' "$OCI_PRIVATE_KEY" >"$key"
+          chmod 600 "$key"
+          printf 'OCI_KEY_PATH=%s\n' "$key" >> "$GITHUB_ENV"
+
+      - name: Validate explicit apply confirmation
+        if: ${{ inputs.operation == 'apply-and-signoff' }}
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          IAM_PRINCIPAL_NAME: ${{ inputs.iam_principal_name }}
+        run: |
+          set -euo pipefail
+          [ "$CONFIRMATION" = "provision-and-destroy" ] || {
+            echo "apply-and-signoff requires confirmation=provision-and-destroy" >&2
+            exit 1
+          }
+          [ -n "$IAM_PRINCIPAL_NAME" ] || {
+            echo "apply-and-signoff requires iam_principal_name" >&2
+            exit 1
+          }
+
+      - name: Plan or provision, sign off, and destroy
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
+          TF_VAR_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}
+          TF_VAR_user_ocid: ${{ secrets.OCI_USER_OCID }}
+          TF_VAR_fingerprint: ${{ secrets.OCI_FINGERPRINT }}
+          TF_VAR_private_key_path: ${{ env.OCI_KEY_PATH }}
+          TF_VAR_region: ${{ secrets.OCI_REGION }}
+          TF_VAR_compartment_ocid: ${{ secrets.OCI_COMPARTMENT_OCID }}
+          ORACLEMCP_ADB_IAM_PRINCIPAL_NAME: ${{ inputs.iam_principal_name }}
+        run: |
+          set -euo pipefail
+          args=(--log)
+          if [ "${{ inputs.operation }}" = "apply-and-signoff" ]; then
+            export ORACLEMCP_REAL_ADB_NON_CUSTOMER_ASSERTION=1
+            args+=(--apply-and-signoff)
+          fi
+          bash scripts/e2e/oci_adb_terraform.sh "${args[@]}"
