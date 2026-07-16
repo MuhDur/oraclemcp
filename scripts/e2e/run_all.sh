@@ -46,6 +46,7 @@ scenarios=(
   scripts/e2e/load_soak.sh
   scripts/e2e/live_xe_headline.sh
   scripts/e2e/oracle_version_matrix.sh
+  scripts/e2e/living_db.sh
   scripts/e2e/editions.sh
   scripts/e2e/governed_rag.sh
   scripts/e2e/time_diff.sh

@@ -87,6 +87,8 @@ dashboard_workbench = true
 
 [audit]
 path = {}
+key_id = "live-xe-e2e"
+key_ref = "env:E2E_LIVE_AUDIT_KEY"
 
 [[profiles]]
 name = "live_xe"
@@ -103,6 +105,29 @@ call_timeout_seconds = 10
         toml_string(user)
     );
     fs::write(&path, config).expect("write live-XE config");
+    path
+}
+
+fn write_masked_arrow_live_config(root: &Path, dsn: &str, user: &str) -> PathBuf {
+    let path = write_live_config(root, dsn, user);
+    let mut config = fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("open live Arrow config for masking policy");
+    writeln!(
+        config,
+        r#"
+
+[profiles.masking]
+mask_unknown_default = true
+
+[[profiles.masking.rules]]
+column_match = {{ column = "POLICY_MASKED" }}
+action = "mask"
+tag = "e2e.arrow.policy-masked"
+"#
+    )
+    .expect("append live Arrow masking policy");
     path
 }
 
@@ -150,6 +175,10 @@ fn spawn_service(
             "live_xe",
         ])
         .env(oraclemcp_config::CONFIG_PATH_ENV, config)
+        .env(
+            "E2E_LIVE_AUDIT_KEY",
+            "oraclemcp-live-service-test-audit-key",
+        )
         .env("XDG_RUNTIME_DIR", runtime_dir)
         .env("XDG_STATE_HOME", state_dir)
         .stdout(Stdio::piped())
@@ -377,6 +406,10 @@ fn dashboard_pairing_url(
             "--no-open",
         ])
         .env(oraclemcp_config::CONFIG_PATH_ENV, config)
+        .env(
+            "E2E_LIVE_AUDIT_KEY",
+            "oraclemcp-live-service-test-audit-key",
+        )
         .env("XDG_RUNTIME_DIR", runtime_dir)
         .env("XDG_STATE_HOME", state_dir)
         .stdout(Stdio::piped())
@@ -403,13 +436,23 @@ fn path_from_url(url: &str) -> &str {
 }
 
 fn assert_no_secret_leak(value: &str, dsn: &str, user: &str, password: &str) {
-    for forbidden in [
-        dsn,
-        user,
-        password,
-        "credential_ref",
-        "ORACLEMCP_TEST_PASSWORD",
-    ] {
+    for forbidden in [dsn, user, password] {
+        // Local XE images sometimes use `oracle`/`system` as bootstrap
+        // credentials. Those short generic words occur in ordinary protocol
+        // prose and `oraclemcp` identifiers, so byte-searching them would be a
+        // false leak signal. All non-generic live values remain checked.
+        if matches!(
+            forbidden.to_ascii_lowercase().as_str(),
+            "oracle" | "system" | "sys"
+        ) {
+            continue;
+        }
+        assert!(
+            !value.contains(forbidden),
+            "live attach output leaked sensitive marker {forbidden}: {value}"
+        );
+    }
+    for forbidden in ["credential_ref", "ORACLEMCP_TEST_PASSWORD"] {
         assert!(
             !value.contains(forbidden),
             "live attach output leaked sensitive marker {forbidden}: {value}"
@@ -626,7 +669,7 @@ fn live_xe_arrow_query_round_trips_through_served_mcp() {
     let state_dir = root.join("state");
     fs::create_dir_all(&runtime_dir).expect("create runtime dir");
     fs::create_dir_all(&state_dir).expect("create state dir");
-    let config = write_live_config(&root, &dsn, &user);
+    let config = write_masked_arrow_live_config(&root, &dsn, &user);
     let addr = free_loopback_addr();
     let mut service = spawn_service(addr, &config, &runtime_dir, &state_dir);
     wait_for_service(&mut service, addr);
@@ -638,7 +681,7 @@ fn live_xe_arrow_query_round_trips_through_served_mcp() {
         1,
         "oracle_query",
         json!({
-            "sql": "SELECT 'arrow-ipc-live' AS marker, 42 AS answer FROM dual",
+            "sql": "SELECT 'arrow-ipc-live' AS marker, 'do-not-escape' AS policy_masked FROM dual",
             "max_rows": 1
         }),
     );
@@ -648,7 +691,7 @@ fn live_xe_arrow_query_round_trips_through_served_mcp() {
         2,
         "oracle_query",
         json!({
-            "sql": "SELECT 'arrow-ipc-live' AS marker, 42 AS answer FROM dual",
+            "sql": "SELECT 'arrow-ipc-live' AS marker, 'do-not-escape' AS policy_masked FROM dual",
             "max_rows": 1,
             "format": "arrow"
         }),
@@ -666,13 +709,30 @@ fn live_xe_arrow_query_round_trips_through_served_mcp() {
     let json_content = &json_reply["result"]["structuredContent"];
     let arrow_content = &arrow_reply["result"]["structuredContent"];
     assert!(arrow_content.get("rows").is_none(), "Arrow omits JSON rows");
+    let json_rows = json_content["rows"]
+        .as_array()
+        .expect("JSON mode returns rows")
+        .clone();
     assert_eq!(
-        decode_arrow_json_rows(arrow_content),
-        json_content["rows"]
-            .as_array()
-            .expect("JSON mode returns rows")
-            .clone(),
+        json_rows[0]["POLICY_MASKED"],
+        json!("<masked>"),
+        "the governed JSON page masks the e2e policy column before it can reach Arrow"
+    );
+    let arrow_rows = decode_arrow_json_rows(arrow_content);
+    assert_eq!(
+        arrow_rows, json_rows,
         "real Oracle Arrow IPC decodes to the same governed rows as JSON mode"
+    );
+    assert_eq!(
+        arrow_rows[0]["POLICY_MASKED"],
+        json!("<masked>"),
+        "Arrow IPC must carry only the post-egress masked cell"
+    );
+    assert!(
+        !Value::Array(arrow_rows)
+            .to_string()
+            .contains("do-not-escape"),
+        "the raw Oracle literal must not survive masked Arrow egress"
     );
 
     let rendered = format!("{json_reply}{arrow_reply}");

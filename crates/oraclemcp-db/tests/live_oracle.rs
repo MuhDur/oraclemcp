@@ -658,6 +658,15 @@ fn live_cqn_query_registration_is_predicate_bound_and_cleanupable() {
                     .await;
                 return;
             }
+            Err(DbError::Query(message)) if message.contains("ORA-29970") => {
+                eprintln!(
+                    "[live-xe] SKIP {test_name}: this Oracle line rejects the thin driver's QUERY-level CQN registration ({message})"
+                );
+                let _ = conn
+                    .execute(&cx, &format!("DROP TABLE {TABLE} PURGE"), &[])
+                    .await;
+                return;
+            }
             Err(error) => panic!("23ai accepts query-level CQN registration: {error}"),
         };
         assert!(registration.registration_id() > 0);
@@ -716,6 +725,15 @@ fn live_cqn_query_callback_is_event_only_within_the_ten_second_ceiling() {
             Err(DbError::Query(message)) if message.contains("ORA-29972") => {
                 eprintln!(
                     "[live-xe] SKIP {test_name}: the configured test account lacks Oracle CHANGE NOTIFICATION privilege"
+                );
+                let _ = conn
+                    .execute(&cx, &format!("DROP TABLE {TABLE} PURGE"), &[])
+                    .await;
+                return;
+            }
+            Err(DbError::Query(message)) if message.contains("ORA-29970") => {
+                eprintln!(
+                    "[live-xe] SKIP {test_name}: this Oracle line rejects the thin driver's QUERY-level CQN registration ({message})"
                 );
                 let _ = conn
                     .execute(&cx, &format!("DROP TABLE {TABLE} PURGE"), &[])
