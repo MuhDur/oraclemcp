@@ -1,0 +1,231 @@
+{
+  "schema": "entry-trace/v1",
+  "tri_state": {
+    "outcomes": [
+      "PASS",
+      "SKIP",
+      "FAIL"
+    ],
+    "required_skip": "FAIL",
+    "skip_reason_pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+  },
+  "script_inventory": [
+    {
+      "path": "scripts/audit_bead_closes.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/check_bead_close_evidence.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/check_entry_trace_contract.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/ci_taxonomy.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/dashboard_bundle_check.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/dashboard_skin_lint.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/gen_coverage_report.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/generate_operator_schema.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/install_mcp_publisher.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/installer_lint_and_offline_smoke.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/local_release_gate.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/local_release_gate_check.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/merge_release_sbom.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/mutation_safety_gate.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/oraclemcp_agent_surface_lint.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/oraclemcp_api_lock.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/oraclemcp_arch_fitness_lint.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/oraclemcp_boundary_lint.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/oraclemcp_concurrency_lint.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/oraclemcp_driver_seam_lint.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/oraclemcp_ergonomics_lint.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/oraclemcp_feature_powerset.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/oraclemcp_honesty_grep.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/plsql_feature_lane_check.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/provenance_check.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/publish_crates.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/release_acceptance_ci_suite.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/release_preflight.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/release_sbom_check.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/release_sbom_check_test.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/release_surface_sync_check.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/render_distribution_manifests.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/secret_scan.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/sensitive_data_lint.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/ui_fixtures_validate_against_rust_schema.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/validate_docker_provenance_workflow.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/validate_evidence.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/validate_npm_publish_input.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/workflow_supply_chain_check.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    }
+  ],
+  "traces": [
+    {
+      "id": "required-quality",
+      "tier": "required",
+      "runner": "scripts/check_entry_trace_contract.sh",
+      "skip_policy": "fail",
+      "dispatch": [
+        {
+          "path": "scripts/check_entry_trace_contract.sh",
+          "marker": "entry-trace: OK"
+        }
+      ],
+      "result": {
+        "path": "scripts/check_entry_trace_contract.sh",
+        "markers": [
+          "entry-trace: OK",
+          "sys.exit(1)"
+        ]
+      },
+      "capabilities": []
+    }
+  ]
+}
