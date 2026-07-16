@@ -23,6 +23,10 @@ def main() -> int:
     if findings:
         finding = findings[0]
         raise SystemExit(f"{finding.code}: {finding.path}: {finding.message}")
+    if doc["repo"] != "oraclemcp":
+        raise SystemExit(
+            f"E_REPO_MISMATCH: expected 'oraclemcp', got {doc['repo']!r}"
+        )
     sha=subprocess.check_output(["git","rev-parse","HEAD"],cwd=ROOT,text=True).strip()
     if doc.get("source",{}).get("sha") != sha: raise SystemExit("E_STALE_SHA: artifact is not for HEAD")
     print(f"mutation-result: OK ({doc['rate']:.6f})")
