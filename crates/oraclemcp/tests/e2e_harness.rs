@@ -875,6 +875,48 @@ fn fleet_e2e_dry_run_is_registered_and_schedules_omcpb() {
     );
 }
 
+/// Arc K's live lineage proof must remain reachable from the ordinary sweep.
+/// Its dry-run validates the opt-in matrix wiring without requiring a database.
+#[test]
+fn live_lineage_dry_run_is_registered_and_reports_a_pass() {
+    let root = repo_root();
+    let output = Command::new("bash")
+        .arg(root.join("scripts/e2e/live_lineage.sh"))
+        .args(["--log", "--dry-run", "--lane", "xe18"])
+        .current_dir(&root)
+        .env("ORACLEMCP_E2E_SEED", "4242")
+        .env(
+            "ORACLEMCP_E2E_ARTIFACT_DIR",
+            root.join("target/e2e-contract"),
+        )
+        .env("ORACLEMCP_LIVE_XE", "1")
+        .env("ORACLE_MATRIX_XE18_USER", "e2e_test")
+        .env("ORACLE_MATRIX_XE18_PASSWORD", "not-used-in-dry-run")
+        .output()
+        .expect("run live lineage dry-run");
+    assert!(
+        output.status.success(),
+        "live lineage dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "live_lineage"),
+        "missing passing live-lineage completion: {events:?}"
+    );
+    let runner =
+        std::fs::read_to_string(root.join("scripts/e2e/run_all.sh")).expect("read run_all.sh");
+    assert!(
+        runner.contains("scripts/e2e/live_lineage.sh"),
+        "live lineage feature lane must be dispatched by run_all.sh"
+    );
+}
+
 /// A scenario that is not in `run_all.sh` never runs in the sweep, so "we have an
 /// e2e for that" quietly stops being true. Pin the registration itself: every
 /// scenario script in scripts/e2e/ is either dispatched by the runner or is a
