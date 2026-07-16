@@ -1,5 +1,11 @@
 # Real ADB TCPS + OCI IAM Sign-Off
 
+**FREE TIER ONLY — NO COSTS.** The Terraform acceptance lane must provision
+only an Always Free ADB (`is_free_tier = true`) with no paid shape or storage.
+Never alter that assertion. The harness refuses to apply if the module does not
+contain the explicit free-tier guard, and its exit trap attempts both Terraform
+destroy and an OCI CLI delete fallback.
+
 This runbook is for the operator-run C5 smoke and the D3.2 local pre-tag gate.
 The committed repo contains only synthetic evidence. Real ADB wallet files,
 connect strings, certificate DNs, usernames, passwords, and IAM database tokens

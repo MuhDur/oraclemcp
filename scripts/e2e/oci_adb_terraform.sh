@@ -91,6 +91,18 @@ terraform_source="$ROOT/infra/oci-adb"
 terraform_dir="$state_dir/module"
 destroy_needed=false
 
+assert_free_tier_module() {
+  local module="$1"
+  # Fail closed before init/plan/apply if the checked-in module is changed to
+  # request a paid database. This is intentionally textual: it also catches a
+  # provider-schema change before Terraform can evaluate a plan.
+  grep -Eq '^[[:space:]]*is_free_tier[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$module/main.tf" || \
+    e2e_finish_fail "REFUSING: OCI harness is FREE TIER ONLY — is_free_tier=true is required"
+  if grep -Eq '^[[:space:]]*is_free_tier[[:space:]]*=[[:space:]]*false[[:space:]]*$' "$module/main.tf"; then
+    e2e_finish_fail "REFUSING: OCI harness is FREE TIER ONLY — paid ADB is forbidden"
+  fi
+}
+
 mkdir -p "$state_dir"
 chmod 700 "$run_dir" "$state_dir"
 export TF_DATA_DIR="$state_dir/.terraform"
@@ -211,6 +223,7 @@ fi
 umask 077
 mkdir -p "$terraform_dir"
 cp -R "$terraform_source/." "$terraform_dir/"
+assert_free_tier_module "$terraform_dir"
 cat >"$oci_config" <<EOF
 [DEFAULT]
 user=$TF_VAR_user_ocid

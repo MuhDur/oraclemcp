@@ -1,3 +1,5 @@
+# FREE TIER ONLY — NO COSTS. This operator-gated module must never provision a
+# paid ADB shape or paid storage. Keep `is_free_tier = true` unchanged.
 terraform {
   required_version = ">= 1.9.0, < 2.0.0"
 
@@ -90,6 +92,13 @@ resource "oci_database_autonomous_database" "signoff" {
   is_free_tier                = true
   is_mtls_connection_required = true
   license_model               = "LICENSE_INCLUDED"
+}
+
+check "free_tier_only" {
+  assert {
+    condition     = oci_database_autonomous_database.signoff.is_free_tier == true
+    error_message = "REFUSING: OCI harness is FREE TIER ONLY — no paid ADB may be provisioned"
+  }
 }
 
 resource "oci_database_autonomous_database_wallet" "signoff" {
