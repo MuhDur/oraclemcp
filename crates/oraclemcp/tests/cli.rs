@@ -614,6 +614,7 @@ fn setup_write_round_trips_profiles_through_config_ops() {
         .env("HOME", &dir)
         .env("ORACLEMCP_TOOLS_DIR", &tools_dir)
         .env_remove("APP_PASSWORD")
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let serve_output = wait_with_timeout(serve, Duration::from_secs(30));
@@ -1537,6 +1538,7 @@ credential_ref = "env:APP_PASSWORD"
         .env("HOME", &dir)
         .env("ORACLEMCP_TOOLS_DIR", &tools_dir)
         .env_remove("APP_PASSWORD")
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let serve_output = wait_with_timeout(serve, Duration::from_secs(30));
@@ -1703,6 +1705,7 @@ fn discovery_annotated_config_boots() {
         .env("HOME", &dir)
         .env("ORACLEMCP_TOOLS_DIR", &tools_dir)
         .env_remove("ORACLE_SALES_RO_PASSWORD")
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let serve_output = wait_with_timeout(serve, Duration::from_secs(30));
