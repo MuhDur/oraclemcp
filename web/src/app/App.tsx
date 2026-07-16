@@ -5176,6 +5176,11 @@ function ExplorerGlobalSearchPanel({
   const tone = pending ? "info" : request ? (totalHits > 0 ? "ok" : "off") : "neutral";
   const objectCache = objectCacheStatus ?? "cold";
   const sourceCache = sourceCacheStatus ?? "cold";
+  // Both hit lists take the same up-to-5000 bound as the object table.
+  const objectHitsRef = React.useRef<HTMLDivElement>(null);
+  const sourceHitsRef = React.useRef<HTMLDivElement>(null);
+  const objectHits = useWindowedRows(objectRows, objectHitsRef, ESTIMATED_HIT_PX);
+  const sourceHits = useWindowedRows(sourceRows, sourceHitsRef, ESTIMATED_HIT_PX);
 
   return (
     <ConsolePanel>
@@ -5262,28 +5267,44 @@ function ExplorerGlobalSearchPanel({
               </span>
               <Badge tone={includeObjects ? "ok" : "off"}>{objectRows.length}</Badge>
             </div>
-            <div className="max-h-[360px] overflow-auto">
+            <div
+              ref={objectHitsRef}
+              className="max-h-[360px] overflow-auto"
+              data-omcp-virtualized={objectHits.virtualize ? "object-hits" : undefined}
+            >
               {objectRows.length === 0 ? (
                 <p className="px-3 py-6 text-sm font-semibold text-[var(--om-text-muted)]">
                   No objects
                 </p>
               ) : (
-                objectRows.map((row) => (
-                  <button
-                    key={objectRefKey(rowRef(row))}
-                    type="button"
-                    className="block w-full border-b border-[var(--om-border)] px-3 py-3 text-left hover:bg-[var(--om-surface-muted)]"
-                    onClick={() => onSelectObject(row)}
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="min-w-0 truncate font-mono text-sm font-semibold text-[var(--om-text-bright)]">
-                        {row.objectName}
-                      </span>
-                      <Badge tone="neutral">{row.objectType}</Badge>
-                    </div>
-                    <p className="mt-1 font-mono text-xs text-[var(--om-text-muted)]">{row.owner}</p>
-                  </button>
-                ))
+                <>
+                  {objectHits.padTop > 0 ? (
+                    <div aria-hidden="true" style={{ height: objectHits.padTop }} />
+                  ) : null}
+                  {objectHits.visible.map(({ row, index }) => (
+                    <button
+                      key={objectRefKey(rowRef(row))}
+                      ref={objectHits.measure}
+                      data-index={index}
+                      type="button"
+                      className="block w-full border-b border-[var(--om-border)] px-3 py-3 text-left hover:bg-[var(--om-surface-muted)]"
+                      onClick={() => onSelectObject(row)}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="min-w-0 truncate font-mono text-sm font-semibold text-[var(--om-text-bright)]">
+                          {row.objectName}
+                        </span>
+                        <Badge tone="neutral">{row.objectType}</Badge>
+                      </div>
+                      <p className="mt-1 font-mono text-xs text-[var(--om-text-muted)]">
+                        {row.owner}
+                      </p>
+                    </button>
+                  ))}
+                  {objectHits.padBottom > 0 ? (
+                    <div aria-hidden="true" style={{ height: objectHits.padBottom }} />
+                  ) : null}
+                </>
               )}
             </div>
           </div>
@@ -5294,31 +5315,47 @@ function ExplorerGlobalSearchPanel({
               </span>
               <Badge tone={includeSource ? "ok" : "off"}>{sourceRows.length}</Badge>
             </div>
-            <div className="max-h-[360px] overflow-auto">
+            <div
+              ref={sourceHitsRef}
+              className="max-h-[360px] overflow-auto"
+              data-omcp-virtualized={sourceHits.virtualize ? "source-hits" : undefined}
+            >
               {sourceRows.length === 0 ? (
                 <p className="px-3 py-6 text-sm font-semibold text-[var(--om-text-muted)]">
                   No source hits
                 </p>
               ) : (
-                sourceRows.map((row) => (
-                  <button
-                    key={`${row.owner}.${row.name}:${row.objectType}:${row.line}`}
-                    type="button"
-                    className="block w-full border-b border-[var(--om-border)] px-3 py-3 text-left hover:bg-[var(--om-surface-muted)]"
-                    onClick={() => onSelectSource(row)}
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="min-w-0 truncate font-mono text-sm font-semibold text-[var(--om-text-bright)]">
-                        {row.name}
-                      </span>
-                      <span className="font-mono text-xs font-semibold text-[var(--om-text-muted)]">
-                        {row.objectType}:{row.line}
-                      </span>
-                    </div>
-                    <p className="mt-1 font-mono text-xs text-[var(--om-text-muted)]">{row.owner}</p>
-                    <p className="mt-2 line-clamp-2 text-sm text-[var(--om-text)]">{row.text}</p>
-                  </button>
-                ))
+                <>
+                  {sourceHits.padTop > 0 ? (
+                    <div aria-hidden="true" style={{ height: sourceHits.padTop }} />
+                  ) : null}
+                  {sourceHits.visible.map(({ row, index }) => (
+                    <button
+                      key={`${row.owner}.${row.name}:${row.objectType}:${row.line}`}
+                      ref={sourceHits.measure}
+                      data-index={index}
+                      type="button"
+                      className="block w-full border-b border-[var(--om-border)] px-3 py-3 text-left hover:bg-[var(--om-surface-muted)]"
+                      onClick={() => onSelectSource(row)}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="min-w-0 truncate font-mono text-sm font-semibold text-[var(--om-text-bright)]">
+                          {row.name}
+                        </span>
+                        <span className="font-mono text-xs font-semibold text-[var(--om-text-muted)]">
+                          {row.objectType}:{row.line}
+                        </span>
+                      </div>
+                      <p className="mt-1 font-mono text-xs text-[var(--om-text-muted)]">
+                        {row.owner}
+                      </p>
+                      <p className="mt-2 line-clamp-2 text-sm text-[var(--om-text)]">{row.text}</p>
+                    </button>
+                  ))}
+                  {sourceHits.padBottom > 0 ? (
+                    <div aria-hidden="true" style={{ height: sourceHits.padBottom }} />
+                  ) : null}
+                </>
               )}
             </div>
           </div>
@@ -5391,6 +5428,46 @@ function ExplorerSchemasPanel({
 const VIRTUALIZE_ROW_THRESHOLD = 150;
 /** Two-line object cell plus py-4; the virtualizer re-measures from the DOM. */
 const ESTIMATED_ROW_PX = 73;
+/** A global-search hit: one two-line button. */
+const ESTIMATED_HIT_PX = 62;
+
+/**
+ * Window a long list against a scroll container.
+ *
+ * Fails safe by design: until the virtualizer has measured a live scroll
+ * element — and if measurement ever fails outright — every row is returned. A
+ * slow list is a nuisance; a blank one is a lie.
+ */
+function useWindowedRows<T>(
+  rows: T[],
+  scrollRef: React.RefObject<HTMLElement | null>,
+  estimatePx: number
+): {
+  virtualize: boolean;
+  measure: ((node: Element | null) => void) | undefined;
+  visible: Array<{ row: T; index: number }>;
+  padTop: number;
+  padBottom: number;
+} {
+  const virtualize = rows.length > VIRTUALIZE_ROW_THRESHOLD;
+  const virtualizer = useVirtualizer({
+    count: virtualize ? rows.length : 0,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => estimatePx,
+    overscan: 10
+  });
+  const items = virtualizer.getVirtualItems();
+  const windowed = virtualize && items.length > 0;
+  return {
+    virtualize,
+    measure: virtualize ? virtualizer.measureElement : undefined,
+    visible: windowed
+      ? items.map((item) => ({ row: rows[item.index], index: item.index }))
+      : rows.map((row, index) => ({ row, index })),
+    padTop: windowed ? items[0].start : 0,
+    padBottom: windowed ? virtualizer.getTotalSize() - items[items.length - 1].end : 0
+  };
+}
 
 function ExplorerObjectTableRow({
   row,
@@ -5467,28 +5544,15 @@ export function ExplorerObjectsPanel({
   onSelect: (row: ExplorerObjectRow) => void;
 }): React.ReactElement {
   const scrollRef = React.useRef<HTMLDivElement>(null);
-  // Explorer permits up to 5000 rows. Window them once the list is big enough
-  // to matter, and leave the ordinary list alone: virtualization needs a live
-  // scroll element to measure, which a server-rendered pass does not have.
-  const virtualize = rows.length > VIRTUALIZE_ROW_THRESHOLD;
-  const virtualizer = useVirtualizer({
-    count: virtualize ? rows.length : 0,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => ESTIMATED_ROW_PX,
-    overscan: 10
-  });
-  const virtualItems = virtualizer.getVirtualItems();
-  // Fail safe: window only once the virtualizer has actually measured. Before
-  // the scroll element exists — and if measurement ever fails outright — render
-  // the whole list. A slow object list is a nuisance; a blank one is a lie.
-  const windowed = virtualize && virtualItems.length > 0;
-  const visibleRows = windowed
-    ? virtualItems.map((item) => ({ row: rows[item.index], index: item.index }))
-    : rows.map((row, index) => ({ row, index }));
-  const padTop = windowed ? virtualItems[0].start : 0;
-  const padBottom = windowed
-    ? virtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end
-    : 0;
+  // Explorer permits up to 5000 rows; window them once the list is big enough
+  // to matter.
+  const {
+    virtualize,
+    measure,
+    visible: visibleRows,
+    padTop,
+    padBottom
+  } = useWindowedRows(rows, scrollRef, ESTIMATED_ROW_PX);
   return (
     <ConsolePanel>
       <ConsolePanelHeader
@@ -5541,7 +5605,7 @@ export function ExplorerObjectsPanel({
                       row={row}
                       index={index}
                       selected={Boolean(selected)}
-                      measure={virtualize ? virtualizer.measureElement : undefined}
+                      measure={measure}
                       onSelect={onSelect}
                     />
                   );
