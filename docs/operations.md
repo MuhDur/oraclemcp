@@ -23,11 +23,12 @@ incapable of writing.
 ## 1. The pinned nightly toolchain is build-time-only
 
 `oraclemcp` builds on a pinned Rust toolchain (`nightly-2026-05-11`, recorded in
-`rust-toolchain.toml`). The line has no stable MSRV: **asupersync 0.3.5**'s
+`rust-toolchain.toml`). The coordinated 0.9.0 release targets **asupersync
+0.3.9**; the line has no stable MSRV because its
 `nightly-outcome-try` feature (`try_trait_v2` + `try_trait_v2_residual`) is
 opt-in but on by default and reaches the build through the `oracledb`
-dependency, and on Windows `oraclemcp-core` also needs `windows_by_handle`. The
-pinned `oracledb` 0.8.3 driver's own source is stable-clean — it is its
+target `oracledb` 0.8.4 dependency, and on Windows `oraclemcp-core` also needs
+`windows_by_handle`. The target driver's own source is stable-clean — it is its
 asupersync dependency declaration that pulls the nightly feature in.
 [`TOOLCHAIN.md`](TOOLCHAIN.md) §1 has the exact mechanism.
 
@@ -108,7 +109,7 @@ docker buildx build \
 docker run -i --rm oraclemcp:plsql-intelligence --json info
 ```
 
-Pin to an immutable tag (`:0.8.0`), not `:latest`, in any non-interactive
+Pin to an immutable 0.9.0 tag (`:0.9.0`), not `:latest`, in any non-interactive
 deployment, and verify the image digest against the release. The exact
 verification commands — SBOM, provenance, and signatures for both the binaries
 and the image — are in [§6](#6-verifying-release-artifacts-sbom-provenance-signatures).
@@ -591,7 +592,7 @@ own reactor and Oracle connection. The local pool's operating posture:
   string; on a dead connection the pool discards dirty and the next checkout
   opens a fresh session against the (failed-over) listener. A read-only standby
   forces the session ceiling to `READ_ONLY` (§3.5, §5.8).
-- **Upstream `EXPIRE_TIME` status.** The pinned `oracledb` 0.8.3 stack parses
+- **Upstream `EXPIRE_TIME` status.** The target `oracledb` 0.8.4 stack parses
   `EXPIRE_TIME` into `Description::expire_time`, and `TRANSPORT_CONNECT_TIMEOUT`
   is honored for bounded connect handshakes, but rust-oracledb#14 still tracks
   applying `EXPIRE_TIME` as TCP keepalive on established sockets. `oraclemcp`
