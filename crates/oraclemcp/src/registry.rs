@@ -191,6 +191,21 @@ fn query_output_schema() -> Value {
                 "description": "Serialized rows keyed by column name. NUMBER cells are strings unless numbers_as_float=true.",
                 "items": row_object_schema()
             },
+            "format": {
+                "type": "string",
+                "enum": ["arrow"],
+                "description": "Present as arrow when oracle_query was requested with format=arrow. In that form rows is omitted and the governed page is carried in arrow_ipc_b64."
+            },
+            "arrow_ipc_b64": {
+                "type": "string",
+                "contentEncoding": "base64",
+                "description": "Base64 Apache Arrow IPC stream for the already-masked, audit-bound result page. Each UTF-8 cell is a JSON literal; see arrow_cell_encoding."
+            },
+            "arrow_cell_encoding": {
+                "type": "string",
+                "enum": ["json_utf8_literal_v1"],
+                "description": "Arrow cell encoding used by arrow_ipc_b64. Decode each UTF-8 value as a JSON literal to recover the same value as JSON mode."
+            },
             "row_count": { "type": "integer", "minimum": 0 },
             "truncated": { "type": "boolean" },
             "next_cursor": { "type": ["string", "null"] },
@@ -483,6 +498,7 @@ pub fn tool_registry() -> ToolRegistry {
                     "read_only_standby": { "type": "boolean", "description": "If true, refuse the max_query_cost estimation path because EXPLAIN PLAN writes PLAN_TABLE. Only meaningful when an effective max_query_cost is set. Defaults false." },
                     "allow_plan_table_write": { "type": "boolean", "description": "Default false. Must be true, with the active session at READ_WRITE, before max_query_cost may run EXPLAIN PLAN and write PLAN_TABLE for pre-execution cost estimation." },
                     "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page (incremental fetch). Resuming with it yields the next page byte-identically." },
+                    "format": { "type": "string", "enum": ["json", "arrow"], "description": "Inline result format. json (default) returns rows; arrow returns base64 Arrow IPC in arrow_ipc_b64 after the identical masking and audit path. Arrow and export/streaming are mutually exclusive." },
                     "streaming": { "type": "boolean", "description": "Deliver the result incrementally instead of one inline page. Over HTTP/SSE, scalar/self-contained rowsets emit one `event: row` frame per row; LOB, BFILE, and REF CURSOR values fall back to ordered cursor `event: chunk` frames. Mutually exclusive with export and as_of. Never affects the read-only classifier." },
                     "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows in this page / streamed chunk (default 200, hard cap 5000)." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },

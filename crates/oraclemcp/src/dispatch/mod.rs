@@ -17,6 +17,10 @@ use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
 
+use arrow_array::{ArrayRef, RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Schema};
+use base64::Engine;
+
 #[path = "../refusal_corpus.rs"]
 mod refusal_corpus;
 
@@ -120,6 +124,10 @@ const DEFAULT_LOB_MAX_CHARS: usize = 1_000_000;
 const MAX_QUERY_MAX_ROWS: usize = 5_000;
 /// Hard cap on serialized bytes per `oracle_query` page.
 const MAX_QUERY_RESULT_BYTES: usize = 25 * 1024 * 1024;
+/// Arrow cells use compact JSON literals so the IPC stream preserves the exact
+/// governed JSON value contract (including lossless NUMBER strings, truncated
+/// LOB objects, and nested structured cells) without a type-coercion escape.
+const ARROW_CELL_ENCODING: &str = "json_utf8_literal_v1";
 /// Hard cap on rows materialized into a single `oracle_query` export resource
 /// (E3/E3b). Bounds the work + memory of one export independent of the inline
 /// page cap; rows beyond this are dropped and the export is marked truncated.
@@ -3464,6 +3472,7 @@ async fn semantic_search_as_query_args(
             read_only_standby: false,
             allow_plan_table_write: false,
             export: false,
+            format: QueryFormat::Json,
             export_format: None,
             streaming: false,
             as_of: None,
@@ -4005,6 +4014,100 @@ fn reseal_query_cursor(mut response: Value, sql: &str, active_profile: Option<&s
         map.insert("next_cursor".to_owned(), Value::String(sealed));
     }
     response
+}
+
+/// Encode an already-serialized query page as a base64 Arrow IPC stream.
+///
+/// This deliberately operates only after [`SerializeOptions`] has applied
+/// egress masking and the normal read path has bound the mask certificate into
+/// the audit chain. Every Arrow field is UTF-8 JSON literals so decoding the
+/// stream gives exactly the row values that JSON mode would have returned.
+fn query_response_as_arrow(response: QueryResponse) -> Result<Value, ErrorEnvelope> {
+    let fields = response
+        .columns
+        .iter()
+        .map(|column| {
+            Field::new(column, DataType::Utf8, true).with_metadata(HashMap::from([(
+                "oraclemcp:cell_encoding".to_owned(),
+                ARROW_CELL_ENCODING.to_owned(),
+            )]))
+        })
+        .collect::<Vec<_>>();
+    let arrays = response
+        .columns
+        .iter()
+        .map(|column| {
+            response
+                .rows
+                .iter()
+                .map(|row| {
+                    serde_json::to_string(row.get(column).unwrap_or(&Value::Null)).map_err(
+                        |error| {
+                            ErrorEnvelope::new(
+                                ErrorClass::Internal,
+                                format!(
+                                    "cannot serialize governed query cell for Arrow IPC: {error}"
+                                ),
+                            )
+                        },
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|cells| Arc::new(StringArray::from(cells)) as ArrayRef)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let schema = Arc::new(Schema::new_with_metadata(
+        fields,
+        HashMap::from([
+            ("oraclemcp:format".to_owned(), "arrow_ipc_v1".to_owned()),
+            (
+                "oraclemcp:cell_encoding".to_owned(),
+                ARROW_CELL_ENCODING.to_owned(),
+            ),
+        ]),
+    ));
+    let batch = RecordBatch::try_new(schema, arrays).map_err(|error| {
+        ErrorEnvelope::new(
+            ErrorClass::Internal,
+            format!("cannot assemble governed query page for Arrow IPC: {error}"),
+        )
+    })?;
+    let ipc = arrow_ipc::writer::StreamWriter::try_new(Vec::new(), batch.schema().as_ref())
+        .and_then(|mut writer| {
+            writer.write(&batch)?;
+            writer.finish()?;
+            writer.into_inner()
+        })
+        .map_err(|error| {
+            ErrorEnvelope::new(
+                ErrorClass::Internal,
+                format!("cannot encode governed query page as Arrow IPC: {error}"),
+            )
+        })?;
+
+    let mut value = serde_json::to_value(response).map_err(|error| {
+        ErrorEnvelope::new(
+            ErrorClass::Internal,
+            format!("cannot serialize governed query response metadata: {error}"),
+        )
+    })?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "governed query response must serialize as an object",
+        )
+    })?;
+    object.remove("rows");
+    object.insert("format".to_owned(), Value::String("arrow".to_owned()));
+    object.insert(
+        "arrow_ipc_b64".to_owned(),
+        Value::String(base64::engine::general_purpose::STANDARD.encode(ipc)),
+    );
+    object.insert(
+        "arrow_cell_encoding".to_owned(),
+        Value::String(ARROW_CELL_ENCODING.to_owned()),
+    );
+    Ok(value)
 }
 
 /// Stringify one serialized query cell for an export. NUMBER/text cells are
@@ -13641,6 +13744,15 @@ impl OracleDispatcher {
                 // forged/cross-statement cursor fails closed).
                 let offset =
                     decode_query_cursor(a.cursor.as_deref(), &a.sql, active_profile.as_deref())?;
+                if a.format == QueryFormat::Arrow && (a.export || a.streaming) {
+                    return Err(invalid_args(
+                        "format=arrow is an inline result format and is mutually exclusive with \
+                         export and streaming",
+                    )
+                    .with_next_step(
+                        "use format=json with export/streaming, or remove export/streaming for an Arrow page",
+                    ));
+                }
                 // K10: streaming delivery. The classifier already proved this read
                 // (`gate?` above); streaming only changes how the SAME rows are
                 // DELIVERED — as an ordered, resumable `chunks` array driven by
@@ -13851,7 +13963,10 @@ impl OracleDispatcher {
                         Some(&mut response),
                     )?;
                 }
-                let response = serde_json::to_value(response).unwrap_or(Value::Null);
+                let response = match a.format {
+                    QueryFormat::Json => serde_json::to_value(response).unwrap_or(Value::Null),
+                    QueryFormat::Arrow => query_response_as_arrow(response)?,
+                };
                 Ok(reseal_query_cursor(
                     response,
                     &a.sql,

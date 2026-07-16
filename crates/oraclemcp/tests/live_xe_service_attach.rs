@@ -2,13 +2,16 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use arrow_array::{Array, StringArray};
+use arrow_ipc::reader::StreamReader;
+use base64::Engine;
 use serde_json::{Value, json};
 
 struct ChildGuard {
@@ -288,6 +291,50 @@ fn sse_last_json(body: &str) -> Value {
         .unwrap_or_else(|| panic!("SSE body did not contain a JSON event: {body}"))
 }
 
+/// Decode the documented Arrow result shape as an external MCP consumer would.
+/// The service returns JSON literals inside UTF-8 Arrow cells so it can retain
+/// the exact governed JSON value contract without bypassing egress masking.
+fn decode_arrow_json_rows(content: &Value) -> Vec<Value> {
+    assert_eq!(content["format"], json!("arrow"));
+    assert_eq!(
+        content["arrow_cell_encoding"],
+        json!("json_utf8_literal_v1")
+    );
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(
+            content["arrow_ipc_b64"]
+                .as_str()
+                .expect("Arrow service response includes base64 IPC"),
+        )
+        .expect("Arrow service response base64 decodes");
+    let mut reader = StreamReader::try_new(Cursor::new(bytes), None).expect("Arrow IPC opens");
+    let batch = reader
+        .next()
+        .expect("Arrow IPC includes one page batch")
+        .expect("Arrow IPC page decodes");
+    assert!(reader.next().is_none(), "one query page is one Arrow batch");
+    (0..batch.num_rows())
+        .map(|row_index| {
+            let mut row = serde_json::Map::new();
+            for (column_index, field) in batch.schema().fields().iter().enumerate() {
+                let values = batch
+                    .column(column_index)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("Arrow query field is UTF-8 JSON literals");
+                let value = if values.is_null(row_index) {
+                    Value::Null
+                } else {
+                    serde_json::from_str(values.value(row_index))
+                        .expect("Arrow cell JSON literal decodes")
+                };
+                row.insert(field.name().to_owned(), value);
+            }
+            Value::Object(row)
+        })
+        .collect()
+}
+
 fn tool_call(addr: SocketAddr, session_id: &str, id: u64, name: &str, arguments: Value) -> Value {
     let body = json!({
         "jsonrpc": "2.0",
@@ -423,6 +470,54 @@ fn live_xe_service_attachs_mcp_status_and_dashboard_without_mocks() {
         assert_eq!(rows.len(), 1, "{reply}");
     }
 
+    // C3.3: the served, real Oracle query must round-trip through the public
+    // base64 Arrow IPC response exactly as its default JSON page does. The
+    // dispatcher applies the same egress/masking and audit path before this
+    // encoding boundary; unit coverage separately exercises an active mask.
+    let arrow_session = initialize(addr, "arrow-ipc-live");
+    let json_reply = tool_call(
+        addr,
+        &arrow_session,
+        14,
+        "oracle_query",
+        json!({
+            "sql": "SELECT 'arrow-ipc-live' AS marker, 42 AS answer FROM dual",
+            "max_rows": 1
+        }),
+    );
+    let arrow_reply = tool_call(
+        addr,
+        &arrow_session,
+        15,
+        "oracle_query",
+        json!({
+            "sql": "SELECT 'arrow-ipc-live' AS marker, 42 AS answer FROM dual",
+            "max_rows": 1,
+            "format": "arrow"
+        }),
+    );
+    let json_content = &json_reply["result"]["structuredContent"];
+    let arrow_content = &arrow_reply["result"]["structuredContent"];
+    assert_eq!(
+        json_reply["result"]["isError"],
+        json!(false),
+        "{json_reply}"
+    );
+    assert_eq!(
+        arrow_reply["result"]["isError"],
+        json!(false),
+        "{arrow_reply}"
+    );
+    assert!(arrow_content.get("rows").is_none(), "Arrow omits JSON rows");
+    assert_eq!(
+        decode_arrow_json_rows(arrow_content),
+        json_content["rows"]
+            .as_array()
+            .expect("JSON mode returns rows")
+            .clone(),
+        "real Oracle Arrow IPC decodes to the same governed rows as JSON mode"
+    );
+
     let info_session = initialize(addr, "connection-info-g6");
     let info = tool_call(addr, &info_session, 13, "oracle_connection_info", json!({}));
     assert_eq!(
@@ -512,6 +607,84 @@ fn live_xe_service_attachs_mcp_status_and_dashboard_without_mocks() {
                 "listen": addr.to_string(),
                 "runtime_instance": "present"
             }
+        })
+    );
+}
+
+/// C3.3's direct live proof is intentionally independent from the broader G6
+/// dashboard pairing test: it runs a real 23ai query through the served MCP
+/// boundary and verifies that Arrow IPC reconstructs the same governed rows as
+/// the default JSON page.
+#[test]
+#[ignore = "live-xe: set ORACLEMCP_LIVE_XE=1 and ORACLEMCP_TEST_* against a running Oracle"]
+fn live_xe_arrow_query_round_trips_through_served_mcp() {
+    let Some((dsn, user, password)) = live_env() else {
+        return;
+    };
+    let root = temp_root("arrow-ipc");
+    let runtime_dir = root.join("run");
+    let state_dir = root.join("state");
+    fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+    let config = write_live_config(&root, &dsn, &user);
+    let addr = free_loopback_addr();
+    let mut service = spawn_service(addr, &config, &runtime_dir, &state_dir);
+    wait_for_service(&mut service, addr);
+
+    let session = initialize(addr, "arrow-ipc-live");
+    let json_reply = tool_call(
+        addr,
+        &session,
+        1,
+        "oracle_query",
+        json!({
+            "sql": "SELECT 'arrow-ipc-live' AS marker, 42 AS answer FROM dual",
+            "max_rows": 1
+        }),
+    );
+    let arrow_reply = tool_call(
+        addr,
+        &session,
+        2,
+        "oracle_query",
+        json!({
+            "sql": "SELECT 'arrow-ipc-live' AS marker, 42 AS answer FROM dual",
+            "max_rows": 1,
+            "format": "arrow"
+        }),
+    );
+    assert_eq!(
+        json_reply["result"]["isError"],
+        json!(false),
+        "{json_reply}"
+    );
+    assert_eq!(
+        arrow_reply["result"]["isError"],
+        json!(false),
+        "{arrow_reply}"
+    );
+    let json_content = &json_reply["result"]["structuredContent"];
+    let arrow_content = &arrow_reply["result"]["structuredContent"];
+    assert!(arrow_content.get("rows").is_none(), "Arrow omits JSON rows");
+    assert_eq!(
+        decode_arrow_json_rows(arrow_content),
+        json_content["rows"]
+            .as_array()
+            .expect("JSON mode returns rows")
+            .clone(),
+        "real Oracle Arrow IPC decodes to the same governed rows as JSON mode"
+    );
+
+    let rendered = format!("{json_reply}{arrow_reply}");
+    assert_no_secret_leak(&rendered, &dsn, &user, &password);
+    eprintln!(
+        "{}",
+        json!({
+            "contract": "C3.3",
+            "lane": "served-arrow-ipc",
+            "database": "live-xe",
+            "outcome": "pass",
+            "format": "arrow"
         })
     );
 }

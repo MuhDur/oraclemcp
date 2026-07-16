@@ -5,15 +5,19 @@
 use super::*;
 use crate::cost_budget::QueryCostBudgetStore;
 use crate::registry::tool_names;
+use arrow_array::{Array, StringArray};
+use arrow_ipc::reader::StreamReader;
 use asupersync::Cx;
 use asupersync::channel::mpsc;
 use asupersync::runtime::RuntimeBuilder;
+use base64::Engine;
 use oraclemcp_config::CumulativeQueryCostBudgetConfig;
 use oraclemcp_core::{DispatchCloseReason, DispatchContext, FileStore, ScopeGrant};
 use oraclemcp_db::{OracleBackend, OracleCell, OracleRow, QueryRowStream, QueryRowStreamStart};
 use oraclemcp_guard::SET_TRANSACTION_READ_ONLY;
 use oraclemcp_guard::corpus::{CorpusRecord, ReasonCategory};
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Barrier;
 use std::sync::Mutex;
@@ -29,6 +33,54 @@ fn run_with_current_cx(f: impl FnOnce(&Cx)) {
         let cx = Cx::current().expect("block_on installs a current Cx");
         f(&cx);
     });
+}
+
+/// Decode the public Arrow response shape back into the exact JSON row values
+/// promised by `arrow_cell_encoding`. This is intentionally a consumer-side
+/// test helper, rather than reaching into the encoder's implementation.
+fn decode_arrow_json_rows(output: &Value) -> Vec<Value> {
+    assert_eq!(
+        output["arrow_cell_encoding"],
+        json!(ARROW_CELL_ENCODING),
+        "Arrow response advertises its lossless cell encoding"
+    );
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(
+            output["arrow_ipc_b64"]
+                .as_str()
+                .expect("Arrow response has base64 IPC"),
+        )
+        .expect("Arrow response base64 decodes");
+    let mut reader = StreamReader::try_new(Cursor::new(bytes), None).expect("IPC stream opens");
+    let batch = reader
+        .next()
+        .expect("IPC stream has one result batch")
+        .expect("IPC batch decodes");
+    assert!(
+        reader.next().is_none(),
+        "a paginated oracle_query page is one Arrow IPC batch"
+    );
+
+    (0..batch.num_rows())
+        .map(|row_index| {
+            let mut row = serde_json::Map::new();
+            for (column_index, field) in batch.schema().fields().iter().enumerate() {
+                let values = batch
+                    .column(column_index)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("Arrow query fields are UTF-8 JSON literals");
+                let value = if values.is_null(row_index) {
+                    Value::Null
+                } else {
+                    serde_json::from_str(values.value(row_index))
+                        .expect("Arrow JSON literal decodes")
+                };
+                row.insert(field.name().to_owned(), value);
+            }
+            Value::Object(row)
+        })
+        .collect()
 }
 
 fn session_bundle(conn: impl OracleConnection + 'static) -> ProfileConnectionBundle {
@@ -4173,6 +4225,55 @@ fn query_binds_are_accepted_and_typed() {
         )
         .expect("binds accepted");
     assert!(out["columns"].is_array() || out.is_object());
+}
+
+#[test]
+fn arrow_query_decodes_to_the_same_governed_rows_as_json_mode() {
+    let json_mode = OracleDispatcher::new(Box::new(OneRowMock))
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "SELECT owner, object_name FROM all_objects" }),
+        )
+        .expect("JSON query dispatches");
+    let arrow_mode = OracleDispatcher::new(Box::new(OneRowMock))
+        .dispatch(
+            "oracle_query",
+            json!({
+                "sql": "SELECT owner, object_name FROM all_objects",
+                "format": "arrow"
+            }),
+        )
+        .expect("Arrow query dispatches");
+
+    assert_eq!(arrow_mode["format"], json!("arrow"));
+    assert!(
+        arrow_mode.get("rows").is_none(),
+        "Arrow mode never leaves a parallel unmasked JSON row channel"
+    );
+    assert_eq!(arrow_mode["columns"], json_mode["columns"]);
+    assert_eq!(
+        Value::Array(decode_arrow_json_rows(&arrow_mode)),
+        json_mode["rows"],
+        "Arrow IPC is lossless relative to the default JSON response"
+    );
+}
+
+#[test]
+fn arrow_query_refuses_export_or_streaming_delivery_modes() {
+    for incompatible in [json!({ "export": true }), json!({ "streaming": true })] {
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "sql".to_owned(),
+            Value::String("SELECT owner FROM all_objects".to_owned()),
+        );
+        args.insert("format".to_owned(), Value::String("arrow".to_owned()));
+        args.extend(incompatible.as_object().expect("object").clone());
+        let err = OracleDispatcher::new(Box::new(OneRowMock))
+            .dispatch("oracle_query", Value::Object(args))
+            .expect_err("Arrow only supports a governed inline result page");
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+        assert!(err.message.contains("format=arrow"), "{err:?}");
+    }
 }
 
 #[test]
@@ -9760,6 +9861,58 @@ mod audit_wiring {
         assert_eq!(
             audited.decisions.len(),
             certificate["decisions"].as_array().unwrap().len()
+        );
+    }
+
+    #[test]
+    fn masked_arrow_read_contains_only_audit_bound_masked_values() {
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher = dispatcher_with(ddl_level(), auditor)
+            .with_result_masking_policy(Some(mask_all_policy()));
+
+        let out = dispatcher
+            .dispatch(
+                "oracle_query",
+                json!({
+                    "sql": "SELECT owner, object_name FROM all_objects",
+                    "format": "arrow"
+                }),
+            )
+            .expect("masked Arrow read dispatches");
+
+        assert!(out.get("rows").is_none(), "Arrow omits JSON rows");
+        let decoded_rows = decode_arrow_json_rows(&out);
+        assert!(
+            !Value::Array(decoded_rows.clone())
+                .to_string()
+                .contains("EMPLOYEES"),
+            "the Arrow payload must not recover a pre-mask value: {decoded_rows:?}"
+        );
+        assert!(
+            decoded_rows
+                .iter()
+                .all(|row| row.as_object().is_some_and(|row| {
+                    row.values()
+                        .all(|value| value == &json!(oraclemcp_db::MASKED_RESULT_VALUE))
+                })),
+            "every masked output column stays masked after Arrow decode: {decoded_rows:?}"
+        );
+        let certificate = out["mask_certificate"]
+            .as_object()
+            .expect("masked Arrow response retains its audit certificate");
+        let audit_entry_hash = certificate["audit_entry_hash"]
+            .as_str()
+            .expect("certificate remains audit-bound");
+        let records = sink.records();
+        assert_eq!(
+            records.len(),
+            2,
+            "read audit has pending and succeeded records"
+        );
+        assert_eq!(records[1].entry_hash, audit_entry_hash);
+        assert!(
+            records[1].result_masking.is_some(),
+            "audit record binds the same masking decision before Arrow egress"
         );
     }
 

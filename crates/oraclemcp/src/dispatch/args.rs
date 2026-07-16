@@ -5,6 +5,18 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+/// Inline representation for an `oracle_query` result page.
+///
+/// `Arrow` never changes query execution or egress policy: it only encodes the
+/// already-serialized, already-masked result page after audit binding.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum QueryFormat {
+    #[default]
+    Json,
+    Arrow,
+}
+
 #[derive(Deserialize)]
 pub(super) struct QueryArgs {
     pub(super) sql: String,
@@ -53,9 +65,13 @@ pub(super) struct QueryArgs {
     /// inlining rows. Default false preserves the inline, paginated behavior.
     #[serde(default, alias = "export_to_resource")]
     pub(super) export: bool,
+    /// Inline result representation. JSON is the compatibility-preserving
+    /// default; Arrow encodes the already-governed page as base64 IPC.
+    #[serde(default)]
+    pub(super) format: QueryFormat,
     /// Export serialization format: `csv` (default) or `json`. Only meaningful
     /// with `export=true`.
-    #[serde(default, alias = "format")]
+    #[serde(default)]
     pub(super) export_format: Option<String>,
     /// K10: when true, deliver the (bounded) result as an ordered sequence of
     /// resumable page `chunks` instead of a single inline page — "incremental
