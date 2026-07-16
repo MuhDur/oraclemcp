@@ -5865,6 +5865,7 @@ function ReviewsPage(): React.ReactElement {
   const [laneId, setLaneId] = React.useState("");
   const [confirm, setConfirm] = React.useState("");
   const [applyCommit, setApplyCommit] = React.useState(true);
+  const [applyAcknowledged, setApplyAcknowledged] = React.useState(false);
   const [lastResult, setLastResult] = React.useState<ReviewResult | null>(null);
   const [proposalsCursor, setProposalsCursor] = React.useState<string | undefined>(undefined);
   const [historyCursor, setHistoryCursor] = React.useState<string | undefined>(undefined);
@@ -5912,11 +5913,15 @@ function ReviewsPage(): React.ReactElement {
   });
   const selectedDetail = detailQuery.data?.data.proposal ?? null;
 
+  // No auto-select effect: `selected` above already falls back to the first
+  // proposal for display, so mirroring that into the URL would put a proposal
+  // the operator never chose into a link they might share.
+
+  // An acknowledgement is about one specific proposal. Never let it carry over
+  // to the next one the operator selects.
   React.useEffect(() => {
-    if (!selectedId && filtered[0]) {
-      setSelectedId(filtered[0].id);
-    }
-  }, [filtered, selectedId]);
+    setApplyAcknowledged(false);
+  }, [selectedProposalId]);
 
   // Cursors are bound to the board revision; if the store changed under a held
   // cursor the server rejects it, so fall back to the first page.
@@ -6013,11 +6018,21 @@ function ReviewsPage(): React.ReactElement {
     profile.trim().length > 0 &&
     sqlTemplate.trim().length > 0 &&
     !draftMutation.isPending;
+  // Name the strongest thing this proposal does, so the acknowledgement says
+  // what the operator is agreeing to rather than "are you sure?".
+  const applyDangerSummary = React.useMemo(() => {
+    const units = new Set(
+      (selected?.statements ?? [])
+        .filter((statement) => statement.unit !== "read")
+        .map((statement) => statement.unit.toUpperCase())
+    );
+    return units.size > 0 ? Array.from(units).sort().join(" + ") : "non-read";
+  }, [selected]);
   const canApply =
     session.status === "success" &&
     Boolean(selected) &&
     !applyMutation.isPending &&
-    (!needsConfirm || confirm.trim().length > 0);
+    (!needsConfirm || (confirm.trim().length > 0 && applyAcknowledged));
 
   return (
     <PageFrame
@@ -6252,6 +6267,22 @@ function ReviewsPage(): React.ReactElement {
                     : "loading statement detail…"}
                 </p>
               )
+            ) : null}
+            {needsConfirm ? (
+              // The grant auto-fills from the preview, so a non-empty confirm
+              // field is not a deliberate act. Name what is about to change and
+              // make the operator acknowledge it — the same pattern Config uses
+              // for a sensitive draft. The server-side grant is still the gate.
+              <label className={cn(OM_CHECK_LABEL, "mt-4")}>
+                <input
+                  className={OM_CHECKBOX}
+                  type="checkbox"
+                  checked={applyAcknowledged}
+                  onChange={(event) => setApplyAcknowledged(event.target.checked)}
+                />
+                I reviewed this {applyDangerSummary} change against {selected?.profile ?? "this profile"}
+                {applyCommit ? " and intend to commit it" : ""}
+              </label>
             ) : null}
             <div className="mt-4 flex flex-wrap items-center gap-3">
               <label className={OM_CHECK_LABEL}>
