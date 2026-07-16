@@ -146,6 +146,15 @@ else
     e2e_finish_fail "building the oraclemcp binary through omcpb failed"
   fi
 
+  # A dry run SKIPS the build, so it never writes output.txt. Return before
+  # reading that artifact, mirroring sql_policy.sh — otherwise the sed below
+  # reads a file that a dry run cannot have produced.
+  if [ "$E2E_DRY_RUN" = "1" ]; then
+    e2e_log_event "scenario_assert" "assert" "skipped" 0 "dry-run: time-diff wiring validated, no live lanes exercised"
+    e2e_finish_pass
+    exit 0
+  fi
+
   build_output="$(e2e_artifact_dir)/output.txt"
   build_target="$(sed -n 's/^omcpb: lane [0-9][0-9]*  target=\([^ ]*\)  jobs=.*/\1/p' "$build_output" | tail -n 1)"
   [ -n "$build_target" ] || e2e_finish_fail "omcpb completed without reporting its selected target directory"
