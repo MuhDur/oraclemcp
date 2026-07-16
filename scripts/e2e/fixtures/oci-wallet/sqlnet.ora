@@ -1,0 +1,2 @@
+WALLET_LOCATION=(SOURCE=(METHOD=FILE)(METHOD_DATA=(DIRECTORY=/runtime-only/wallet)))
+SSL_SERVER_CERT_DN='CN=fallback.example.invalid'

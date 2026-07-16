@@ -11,6 +11,11 @@
   },
   "script_inventory": [
     {
+      "path": "scripts/e2e/extract_ssl_server_cert_dn.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/audit_bead_closes.py",
       "kind": "entry_point",
       "trace": "required-quality"

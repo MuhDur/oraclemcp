@@ -281,7 +281,8 @@ base64 --decode "$run_dir/wallet_base64" >"$run_dir/wallet.zip"
 unzip -qq "$run_dir/wallet.zip" -d "$wallet_dir"
 chmod -R u=rwX,go= "$wallet_dir"
 [ -s "$wallet_dir/tnsnames.ora" ] || e2e_finish_fail "downloaded ADB wallet has no tnsnames.ora"
-ssl_dn="$(sed -n 's/.*SSL_SERVER_CERT_DN=\([^)]*\).*/\1/p' "$wallet_dir/tnsnames.ora" | head -n 1)"
+ssl_dn="$(python3 "$ROOT/scripts/e2e/extract_ssl_server_cert_dn.py" \
+  "$wallet_dir/tnsnames.ora" "$wallet_dir/sqlnet.ora" 2>/dev/null || true)"
 [ -n "$ssl_dn" ] || e2e_finish_fail "downloaded ADB wallet has no SSL_SERVER_CERT_DN"
 
 adb_id="$(<"$run_dir/adb_id")"
