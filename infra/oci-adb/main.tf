@@ -114,7 +114,10 @@ output "adb_id" {
 }
 
 output "admin_connect_string" {
-  value     = try(oci_database_autonomous_database.signoff.connection_strings[0].all_connection_strings["high"], "")
+  # OCI returns the all_connection_strings map with uppercase service keys.
+  # Keep the wallet-alias fallback in the harness for provider regressions, but
+  # use the actual provider key here so a normal apply returns the HIGH service.
+  value     = try(oci_database_autonomous_database.signoff.connection_strings[0].all_connection_strings["HIGH"], "")
   sensitive = true
 }
 

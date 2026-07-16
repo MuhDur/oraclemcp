@@ -177,7 +177,6 @@ e2e_run_cargo_capped() {
   local phase="$1"
   shift
   local target_dir="${CARGO_TARGET_DIR:-/home/durakovic/.cache/cargo-target-server}"
-  local build_jobs="${CARGO_BUILD_JOBS:-16}"
   local memory_max="${ORACLEMCP_CARGO_MEMORY_MAX:-24G}"
   mkdir -p "$target_dir"
 
@@ -189,7 +188,7 @@ e2e_run_cargo_capped() {
     systemd-run --user --scope -q \
     -p "MemoryMax=$memory_max" \
     -p MemorySwapMax=0 \
-    -- env "CARGO_TARGET_DIR=$target_dir" "CARGO_BUILD_JOBS=$build_jobs" cargo "$@"
+    -- env -u CARGO_BUILD_JOBS "CARGO_TARGET_DIR=$target_dir" cargo "$@"
 }
 
 e2e_finish_pass() {

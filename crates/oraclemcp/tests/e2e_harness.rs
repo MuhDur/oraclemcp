@@ -1339,8 +1339,9 @@ fn real_adb_signoff_dry_run_schedules_wallet_and_iam_doctor_paths() {
         .collect::<Vec<_>>();
     for expected in [
         "cargo build -p oraclemcp --bin oraclemcp",
-        "--json doctor --online --profile real_adb_wallet_smoke",
-        "--json doctor --online --profile real_adb_iam_smoke",
+        "run_real_adb_doctor",
+        "real_adb_wallet_smoke",
+        "real_adb_iam_smoke",
         "bash scripts/secret_scan.sh",
     ] {
         assert!(
@@ -1356,6 +1357,40 @@ fn real_adb_signoff_dry_run_schedules_wallet_and_iam_doctor_paths() {
                 .as_str()
                 .is_some_and(|message| message.contains("values are never logged or committed"))),
         "missing env contract event: {events:?}"
+    );
+
+    let root = repo_root();
+    let harness = std::fs::read_to_string(root.join("scripts/e2e/real_adb_tcps_signoff.sh"))
+        .expect("read real ADB signoff harness");
+    for expected in [
+        "credential_ref = \"env:ADB_PASSWORD\"",
+        "wallet_password_ref = \"env:ADB_WALLET_PASSWORD\"",
+        "token_env = \"ADB_IAM_TOKEN\"",
+        "env -i",
+        "run_real_adb_doctor",
+    ] {
+        assert!(
+            harness.contains(expected),
+            "real ADB signoff lost its isolated child-environment contract: {expected}"
+        );
+    }
+    assert!(
+        !harness.contains("env:ORACLEMCP_REAL_ADB_"),
+        "server config must not resolve credentials from the config-override namespace"
+    );
+}
+
+#[test]
+fn wallet_dn_fixture_covers_explicit_fallback_and_omitted_certificate_subjects() {
+    let output = run_script("scripts/e2e/test_extract_ssl_server_cert_dn.sh", &[]);
+    assert!(
+        output.status.success(),
+        "wallet DN fixture test failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "oci-wallet-dn: fixtures OK"
     );
 }
 
@@ -1406,10 +1441,40 @@ fn oci_adb_terraform_dry_run_wires_explicit_teardown() {
         "terraform -chdir=\"$terraform_dir\" destroy",
         "ORACLEMCP_REAL_ADB_PASSWORD_USER=ADMIN",
         "ORACLEMCP_REAL_ADB_IAM_USER=\"$(<\"$run_dir/iam_database_user\")\"",
+        "bootstrap-admin-profile.toml",
+        "max_level = \"ADMIN\"",
+        "oracle_set_session_level",
+        "oracle_preview_sql",
+        "\"oracle_execute\"",
+        "wallet_use_sni=true",
+        "ORACLEMCP_REAL_ADB_USE_SNI=\"$wallet_use_sni\"",
+        "provider_connect_string",
+        "wallet_high_target",
+        "openssl s_client",
+        "adb_server_certificate",
+        "connect_timeout_seconds = 60",
+        "wait_for_adb_tcps",
+        "--json doctor --online --profile oci_adb_bootstrap",
     ] {
         assert!(
             harness.contains(expected),
             "OCI ADB harness lost its required safety contract: {expected}"
+        );
+    }
+    assert!(
+        !harness.contains("import oracledb"),
+        "OCI ADB bootstrap must use the guarded server path, not an ambient Python driver"
+    );
+
+    let terraform = std::fs::read_to_string(root.join("infra/oci-adb/main.tf"))
+        .expect("read OCI ADB Terraform module");
+    for expected in [
+        "is_free_tier                = true",
+        "all_connection_strings[\"HIGH\"]",
+    ] {
+        assert!(
+            terraform.contains(expected),
+            "OCI ADB Terraform module lost its required contract: {expected}"
         );
     }
 

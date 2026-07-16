@@ -25,11 +25,11 @@ Required live-run env:
   ORACLEMCP_REAL_ADB_IAM_USER
   ORACLEMCP_REAL_ADB_PASSWORD
   ORACLEMCP_REAL_ADB_WALLET_LOCATION
-  ORACLEMCP_REAL_ADB_SSL_SERVER_CERT_DN
   ORACLEMCP_REAL_ADB_IAM_TOKEN
 
 Optional env:
   ORACLEMCP_REAL_ADB_WALLET_PASSWORD
+  ORACLEMCP_REAL_ADB_SSL_SERVER_CERT_DN
   ORACLEMCP_REAL_ADB_USE_SNI=true|false
 USAGE
   e2e_usage_common
@@ -76,7 +76,6 @@ require_live_env() {
     ORACLEMCP_REAL_ADB_IAM_USER \
     ORACLEMCP_REAL_ADB_PASSWORD \
     ORACLEMCP_REAL_ADB_WALLET_LOCATION \
-    ORACLEMCP_REAL_ADB_SSL_SERVER_CERT_DN \
     ORACLEMCP_REAL_ADB_IAM_TOKEN
   do
     if [ -z "${!name:-}" ]; then
@@ -100,7 +99,7 @@ write_profile() {
   connect_string="$(toml_string "$ORACLEMCP_REAL_ADB_CONNECT_STRING")"
   user="$(toml_string "$profile_user")"
   wallet="$(toml_string "$ORACLEMCP_REAL_ADB_WALLET_LOCATION")"
-  ssl_dn="$(toml_string "$ORACLEMCP_REAL_ADB_SSL_SERVER_CERT_DN")"
+  ssl_dn="$(toml_string "${ORACLEMCP_REAL_ADB_SSL_SERVER_CERT_DN:-}")"
   use_sni="${ORACLEMCP_REAL_ADB_USE_SNI:-true}"
   case "$use_sni" in
     true|false) ;;
@@ -116,22 +115,27 @@ write_profile() {
     printf 'connect_string = %s\n' "$connect_string"
     printf 'username = %s\n' "$user"
     if [ "$use_iam" = "false" ]; then
-      printf 'credential_ref = "env:ORACLEMCP_REAL_ADB_PASSWORD"\n'
+      printf 'credential_ref = "env:ADB_PASSWORD"\n'
     fi
     printf 'max_level = "READ_ONLY"\n'
     printf 'default_level = "READ_ONLY"\n'
-    printf 'call_timeout_seconds = 30\n\n'
+    printf 'call_timeout_seconds = 30\n'
+    # A newly provisioned Always Free listener can need more than the thin
+    # driver's default 20 seconds before it accepts the first TCPS session.
+    printf 'connect_timeout_seconds = 60\n\n'
     printf '[profiles.oci]\n'
     printf 'wallet_location = %s\n' "$wallet"
     if [ -n "${ORACLEMCP_REAL_ADB_WALLET_PASSWORD:-}" ]; then
-      printf 'wallet_password_ref = "env:ORACLEMCP_REAL_ADB_WALLET_PASSWORD"\n'
+      printf 'wallet_password_ref = "env:ADB_WALLET_PASSWORD"\n'
     fi
     printf 'ssl_server_dn_match = true\n'
-    printf 'ssl_server_cert_dn = %s\n' "$ssl_dn"
+    if [ -n "${ORACLEMCP_REAL_ADB_SSL_SERVER_CERT_DN:-}" ]; then
+      printf 'ssl_server_cert_dn = %s\n' "$ssl_dn"
+    fi
     printf 'use_sni = %s\n' "$use_sni"
     if [ "$use_iam" = "true" ]; then
       printf 'use_iam_token = true\n'
-      printf 'token_env = "ORACLEMCP_REAL_ADB_IAM_TOKEN"\n'
+      printf 'token_env = "ADB_IAM_TOKEN"\n'
     fi
   } >"$path"
   chmod 600 "$path"
@@ -175,13 +179,29 @@ if ! e2e_run_cargo_capped "setup" build -p oraclemcp --bin oraclemcp; then
   e2e_finish_fail "building oraclemcp binary failed"
 fi
 
-if ! e2e_run_command "act" env ORACLEMCP_CONFIG="$wallet_config" XDG_STATE_HOME="$state_dir/wallet" \
-  "$binary" --json doctor --online --profile "$wallet_profile"; then
+run_real_adb_doctor() {
+  local config="$1"
+  local state_home="$2"
+  local profile="$3"
+  # The public harness inputs use ORACLEMCP_REAL_ADB_* names, but that prefix
+  # is the server's config-override namespace. Give the child only the exact
+  # neutral secret references its generated profile resolves.
+  env -i \
+    "HOME=$HOME" \
+    "PATH=$PATH" \
+    "ORACLEMCP_CONFIG=$config" \
+    "XDG_STATE_HOME=$state_home" \
+    "ADB_PASSWORD=$ORACLEMCP_REAL_ADB_PASSWORD" \
+    "ADB_WALLET_PASSWORD=${ORACLEMCP_REAL_ADB_WALLET_PASSWORD:-}" \
+    "ADB_IAM_TOKEN=$ORACLEMCP_REAL_ADB_IAM_TOKEN" \
+    "$binary" --json doctor --online --profile "$profile"
+}
+
+if ! e2e_run_command "act" run_real_adb_doctor "$wallet_config" "$state_dir/wallet" "$wallet_profile"; then
   e2e_finish_fail "real ADB wallet/password doctor signoff failed"
 fi
 
-if ! e2e_run_command "act" env ORACLEMCP_CONFIG="$iam_config" XDG_STATE_HOME="$state_dir/iam" \
-  "$binary" --json doctor --online --profile "$iam_profile"; then
+if ! e2e_run_command "act" run_real_adb_doctor "$iam_config" "$state_dir/iam" "$iam_profile"; then
   e2e_finish_fail "real ADB OCI-IAM token doctor signoff failed"
 fi
 
