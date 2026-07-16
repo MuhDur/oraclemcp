@@ -28,6 +28,18 @@
       "path_filtered": false
     },
     {
+      "check_name": "Rust workspace (Windows)",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "windows-rust",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "Windows installer PSSA and dry-run",
       "tier": "required",
       "workflow": "CI",
@@ -572,6 +584,7 @@
       "jobs": [
         "Oracle FREE 23ai matrix + VECTOR smoke",
         "PL/SQL intelligence feature matrix",
+        "Rust workspace (Windows)",
         "Windows installer PSSA and dry-run",
         "agent ergonomics drift guard",
         "build on pinned nightly",
@@ -716,6 +729,7 @@
     "required": [
       "Oracle FREE 23ai matrix + VECTOR smoke",
       "PL/SQL intelligence feature matrix",
+      "Rust workspace (Windows)",
       "Windows installer PSSA and dry-run",
       "agent ergonomics drift guard",
       "build on pinned nightly",
