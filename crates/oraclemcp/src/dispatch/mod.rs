@@ -12350,9 +12350,14 @@ impl OracleDispatcher {
             tool if crate::plsql_tools::is_static_tool(tool) => {
                 crate::plsql_tools::dispatch_static(tool, args)
             }
+            // Same conn as oracle_lineage above (bead oraclemcp-jr2i). These
+            // read the catalog in bulk, so running them on the bare observed
+            // conn meant their reads were neither proven read-only against the
+            // generated-read allowlist nor recorded in the audit chain — while
+            // oracle_lineage, an identical class of dictionary read, was both.
             #[cfg(feature = "plsql-intelligence")]
             "oracle_plsql_live_snapshot" | "oracle_plsql_blast_radius" => {
-                return crate::plsql_tools::dispatch_live(cx, &observed_metadata_conn, tool, args)
+                return crate::plsql_tools::dispatch_live(cx, &guarded_metadata_conn, tool, args)
                     .await;
             }
             "oracle_execute" => {
