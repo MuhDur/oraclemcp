@@ -138,4 +138,30 @@ assert result["survivors"] == [
         ),
     }
 ]
+
+for label, extra_arguments in [
+    ("invalid-sha", ["--source-sha", "not-a-sha"]),
+    ("mismatched-shards", ["--shard-id", "one", "--shard-id", "two"]),
+]:
+    rejected_output = workdir / f"{label}.json"
+    command = [
+        sys.executable,
+        str(root / "scripts/migrate_mutation_result.py"),
+        "--outcomes",
+        str(outcomes),
+        "--source-sha",
+        sha,
+        "--scope-target",
+        "src/lib.rs",
+        "--description",
+        "rejection fixture",
+        "--resource-budget",
+        str(budget),
+        "--output",
+        str(rejected_output),
+        *extra_arguments,
+    ]
+    rejected = subprocess.run(command, capture_output=True, text=True)
+    assert rejected.returncode == 2, rejected.stderr
+    assert not rejected_output.exists()
 print(f"migrate-mutation-result: contract OK ({workdir})")

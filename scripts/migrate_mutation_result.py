@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,6 +50,8 @@ def main() -> int:
 
     if args.shard_id and len(args.shard_id) != len(args.outcomes):
         parser.error("--shard-id must be supplied once for every --outcomes file")
+    if re.fullmatch(r"[0-9a-f]{40}", args.source_sha) is None:
+        parser.error("--source-sha must be a full lowercase 40-character Git SHA")
 
     budget = json.loads(args.resource_budget.read_text())
     outcomes_docs = [json.loads(path.read_text()) for path in args.outcomes]
