@@ -1368,6 +1368,7 @@ fn real_adb_signoff_dry_run_schedules_wallet_and_iam_doctor_paths() {
         "token_env = \"ADB_IAM_TOKEN\"",
         "env -i",
         "run_real_adb_doctor",
+        "ORACLEMCP_REAL_ADB_USE_SNI:-false",
     ] {
         assert!(
             harness.contains(expected),
@@ -1446,7 +1447,7 @@ fn oci_adb_terraform_dry_run_wires_explicit_teardown() {
         "oracle_set_session_level",
         "oracle_preview_sql",
         "\"oracle_execute\"",
-        "wallet_use_sni=true",
+        "wallet_use_sni=false",
         "ORACLEMCP_REAL_ADB_USE_SNI=\"$wallet_use_sni\"",
         "provider_connect_string",
         "wallet_high_target",
@@ -1480,6 +1481,10 @@ fn oci_adb_terraform_dry_run_wires_explicit_teardown() {
         !harness.contains("connect_timeout_seconds = 60"),
         "the OCI harness resolves the wallet HIGH alias to a full Oracle Net descriptor; \
          the server must not inject connect_timeout_seconds into that descriptor"
+    );
+    assert!(
+        harness.contains("ssl_server_dn_match = true"),
+        "disabling unencodable Oracle service-form SNI must retain strict post-handshake DN verification"
     );
 
     let workflow = std::fs::read_to_string(root.join(".github/workflows/oci-adb.yml"))

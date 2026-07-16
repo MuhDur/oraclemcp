@@ -374,9 +374,11 @@ fi
 
 # `ssl_server_dn_match` remains true even when a modern wallet omits an
 # explicit DN: then the driver performs the stricter host/SAN match against
-# this descriptor's DNS-safe HOST. SNI must use that host, never the service
-# alias (which can contain underscores).
-wallet_use_sni=true
+# this descriptor's DNS-safe HOST. Oracle's service-form SNI ends in a numeric
+# label that rustls correctly rejects, so request no SNI and retain the
+# post-handshake DN verification rather than weakening TLS or forcing an
+# unencodable SNI value.
+wallet_use_sni=false
 
 adb_id="$(<"$run_dir/adb_id")"
 scope="urn:oracle:db::id::$TF_VAR_compartment_ocid::$adb_id"

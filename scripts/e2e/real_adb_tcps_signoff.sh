@@ -100,7 +100,10 @@ write_profile() {
   user="$(toml_string "$profile_user")"
   wallet="$(toml_string "$ORACLEMCP_REAL_ADB_WALLET_LOCATION")"
   ssl_dn="$(toml_string "${ORACLEMCP_REAL_ADB_SSL_SERVER_CERT_DN:-}")"
-  use_sni="${ORACLEMCP_REAL_ADB_USE_SNI:-true}"
+  # Oracle service-form SNI can end in a numeric DNS label.  The driver fails
+  # closed when rustls cannot encode it, while `ssl_server_dn_match=true`
+  # remains the strict post-handshake authentication mechanism.
+  use_sni="${ORACLEMCP_REAL_ADB_USE_SNI:-false}"
   case "$use_sni" in
     true|false) ;;
     *) e2e_finish_fail "ORACLEMCP_REAL_ADB_USE_SNI must be true or false" ;;
