@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { ConfirmDialog } from "./App";
+import { ConfirmDialog, optionalSearchString } from "./App";
 import { OMCP_SKIN, assertDashboardSkinConformance, type DashboardSkin } from "./skin";
 
 // 2ekf: the Web Interface Guidelines polish pass. This harness renders to static
@@ -49,6 +49,20 @@ describe("the console's own confirmation dialog", () => {
     );
     expect(busy).toContain("Working");
     expect(busy).toContain("disabled");
+  });
+});
+
+describe("deep-link search params degrade instead of throwing", () => {
+  it("accepts a real value", () => {
+    expect(optionalSearchString("lane-7")).toBe("lane-7");
+  });
+
+  it("treats absent, empty, and non-string values as no selection", () => {
+    // A deep link is a convenience, so junk in the URL must fall back to "no
+    // selection" rather than throw the operator into an error boundary.
+    for (const junk of [undefined, null, "", 42, {}, [], true]) {
+      expect(optionalSearchString(junk)).toBeUndefined();
+    }
   });
 });
 

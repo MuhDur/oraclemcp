@@ -6,7 +6,9 @@ import {
   createRouter,
   Link,
   Outlet,
-  RouterProvider
+  RouterProvider,
+  useNavigate,
+  useSearch
 } from "@tanstack/react-router";
 import {
   QueryClient,
@@ -243,10 +245,23 @@ const overviewRoute = createRoute({
   component: OverviewPage
 });
 
+/**
+ * Read one optional string search param, fail-soft. A deep link is a
+ * convenience, so a junk value degrades to "no selection" rather than throwing
+ * the operator to an error boundary. It is never an authorization input: the
+ * server still decides what this subject may see.
+ */
+export function optionalSearchString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 const sessionsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/sessions",
-  component: SessionsPage
+  component: SessionsPage,
+  validateSearch: (search: Record<string, unknown>): { lane?: string } => ({
+    lane: optionalSearchString(search.lane)
+  })
 });
 
 const healthRoute = createRoute({
@@ -282,7 +297,10 @@ const auditRoute = createRoute({
 const explorerRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/explorer",
-  component: ExplorerPage
+  component: ExplorerPage,
+  validateSearch: (search: Record<string, unknown>): { lane?: string } => ({
+    lane: optionalSearchString(search.lane)
+  })
 });
 
 const workbenchRoute = createRoute({
@@ -294,7 +312,10 @@ const workbenchRoute = createRoute({
 const reviewsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/reviews",
-  component: ReviewsPage
+  component: ReviewsPage,
+  validateSearch: (search: Record<string, unknown>): { id?: string } => ({
+    id: optionalSearchString(search.id)
+  })
 });
 
 const doctorRoute = createRoute({
@@ -572,7 +593,19 @@ function OverviewPage(): React.ReactElement {
 }
 
 function SessionsPage(): React.ReactElement {
-  const [selectedLaneId, setSelectedLaneId] = React.useState("");
+  // The selected lane lives in the URL so an operator can hand a colleague a
+  // link to the exact lane they are looking at, and so reload/back keep it.
+  const { lane: selectedLaneId = "" } = useSearch({ from: sessionsRoute.id });
+  const navigate = useNavigate({ from: sessionsRoute.id });
+  const setSelectedLaneId = React.useCallback(
+    (laneId: string) => {
+      void navigate({
+        search: { lane: laneId || undefined },
+        replace: true
+      });
+    },
+    [navigate]
+  );
   const [targetLevel, setTargetLevel] = React.useState<OperatingLevel>("READ_WRITE");
   const [ttlSeconds, setTtlSeconds] = React.useState(900);
   const [confirm, setConfirm] = React.useState("");
@@ -626,11 +659,9 @@ function SessionsPage(): React.ReactElement {
     retry: 1
   });
 
-  React.useEffect(() => {
-    if (!selectedLaneId && lanes.length > 0) {
-      setSelectedLaneId(lanes[0].lane_id);
-    }
-  }, [lanes, selectedLaneId]);
+  // No auto-select effect: `selectedLane` above already falls back to the first
+  // lane for display, so mirroring that into the URL would put a lane the
+  // operator never chose into a link they might share.
 
   const levelMutation = useMutation({
     mutationFn: async (action: SessionLevelControlAction) => {
@@ -4330,7 +4361,17 @@ type ExplorerDetailResult =
     };
 
 function ExplorerPage(): React.ReactElement {
-  const [laneId, setLaneId] = React.useState("");
+  // The lane is the Explorer's identity — which database you are reading — so
+  // it belongs in the URL. The live text filters below stay local: they drive
+  // queries on every keystroke, and writing the URL that often would thrash it.
+  const { lane: laneId = "" } = useSearch({ from: explorerRoute.id });
+  const explorerNavigate = useNavigate({ from: explorerRoute.id });
+  const setLaneId = React.useCallback(
+    (next: string) => {
+      void explorerNavigate({ search: { lane: next || undefined }, replace: true });
+    },
+    [explorerNavigate]
+  );
   const [schemaFilter, setSchemaFilter] = React.useState("");
   const [owner, setOwner] = React.useState("");
   const [objectType, setObjectType] = React.useState("");
@@ -5771,7 +5812,15 @@ function reviewFailure(label: string, error: unknown, fallback: string): ReviewR
 
 function ReviewsPage(): React.ReactElement {
   const [filter, setFilter] = React.useState("");
-  const [selectedId, setSelectedId] = React.useState("");
+  // Which proposal you are reviewing is the page's identity, so it is linkable.
+  const { id: selectedId = "" } = useSearch({ from: reviewsRoute.id });
+  const reviewsNavigate = useNavigate({ from: reviewsRoute.id });
+  const setSelectedId = React.useCallback(
+    (next: string) => {
+      void reviewsNavigate({ search: { id: next || undefined }, replace: true });
+    },
+    [reviewsNavigate]
+  );
   const [profile, setProfile] = React.useState("prod");
   const [author, setAuthor] = React.useState<ChangeProposalAuthorKind>("agent");
   const [title, setTitle] = React.useState("Change proposal");
