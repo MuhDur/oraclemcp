@@ -1,0 +1,24 @@
+# Local Required graph source for scripts/verify_required_local.py.
+# Keep this small, explicit projection synchronized with the required CI gates.
+jobs:
+  quality:
+    steps:
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test workspace
+        run: cargo test --workspace
+      - name: Surface sync
+        run: bash scripts/release_surface_sync_check.sh
+      - name: Seam lint
+        run: bash scripts/oraclemcp_driver_seam_lint.sh
+      - name: Honesty grep
+        run: bash scripts/oraclemcp_honesty_grep.sh
+      - name: API lock
+        run: bash scripts/oraclemcp_api_lock.sh
+      - name: Supply-chain checks
+        run: cargo deny check
+      - name: Live matrix
+        if: ${{ inputs.profile == 'release-qualification' }}
+        run: bash scripts/version_matrix.sh full all
