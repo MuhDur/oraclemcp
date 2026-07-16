@@ -1101,13 +1101,22 @@ fn lineage_object_name_matches(header_name: &str, target: &str) -> bool {
         .unwrap_or(header_name)
         .trim_matches('"');
     let target = target.trim().trim_matches('"');
-    header_name.eq_ignore_ascii_case(target)
-        || header_name.rsplit('.').next().is_some_and(|header| {
-            target
-                .rsplit('.')
-                .next()
-                .is_some_and(|target| header.trim_matches('"').eq_ignore_ascii_case(target))
-        })
+    if header_name.eq_ignore_ascii_case(target) {
+        return true;
+    }
+    // A source header that explicitly names an owner is evidence only for that
+    // owner. Falling back to the last segment is useful for callers who ask
+    // for an unqualified local object, but must not turn APP.PKG into a marker
+    // for OTHER.PKG.
+    if header_name.contains('.') && target.contains('.') {
+        return false;
+    }
+    header_name.rsplit('.').next().is_some_and(|header| {
+        target
+            .rsplit('.')
+            .next()
+            .is_some_and(|target| header.trim_matches('"').eq_ignore_ascii_case(target))
+    })
 }
 
 fn mark_wrapped_source_partial(value: &mut Value, target: &str) {
@@ -2857,6 +2866,10 @@ mod tests {
         assert!(wrapped_source_declares_target(source, "APP.SECURE_PKG"));
         assert!(wrapped_source_declares_target(source, "secure_pkg"));
         assert!(!wrapped_source_declares_target(source, "APP.OTHER_PKG"));
+        assert!(
+            !wrapped_source_declares_target(source, "OTHER.SECURE_PKG"),
+            "an explicitly qualified wrapped header must not affect a same-named object in another schema"
+        );
     }
 
     fn test_source_column(
