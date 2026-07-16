@@ -37,6 +37,18 @@ done
 cd "$ROOT"
 e2e_log_event "scenario_start" "setup" "running" 0 "governed hybrid retrieval requires local XE 18, XE 21, and FREE 23ai lanes"
 
+# A dry run exercises no lane, so it needs no lane credentials: it validates
+# wiring and returns, exactly as sql_policy.sh and time_diff.sh do. This must
+# stay ABOVE the hard-failure checks below — without it a --dry-run demands a
+# live opt-in it will never use, which fails run_all --dry-run on any machine
+# without the labs (CI included). It does not soften the contract below: a real
+# governed-RAG run still hard-fails when the labs are absent.
+if [ "$E2E_DRY_RUN" = "1" ]; then
+  e2e_log_event "scenario_assert" "assert" "skipped" 0 "dry-run: governed-RAG wiring validated, no live lanes exercised"
+  e2e_finish_pass
+  exit 0
+fi
+
 # Unlike optional general live scenarios, this bead's acceptance criterion IS a
 # served capability-boundary proof. A missing opt-in or any lane credential is
 # therefore a hard failure, never a green skip in run_all.
