@@ -2191,6 +2191,7 @@ dependencies = [
  "async-trait",
  "command-group",
  "getrandom 0.2.17",
+ "libc",
  "oracledb-protocol",
  "oraclemcp-audit",
  "oraclemcp-auth",

@@ -48,6 +48,15 @@ toml = "0.8"
 tracing.workspace = true
 wait-timeout = "0.2"
 
+# The service-lock sidecar must be opened with `O_NOFOLLOW` so a symlinked lock
+# is refused in the open itself rather than followed into an arbitrary truncate
+# (bead oraclemcp-siry). `OpenOptionsExt::custom_flags` is a safe API — this
+# keeps `#![forbid(unsafe_code)]` — but the flag's value is platform-specific,
+# so it must come from libc rather than a hardcoded constant. libc is already in
+# the dependency graph transitively; this adds no new package.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 async-trait.workspace = true
 rcgen = "0.13"

@@ -232,8 +232,11 @@ impl FileStore {
         write_metadata: impl FnOnce(&mut File, &str) -> std::io::Result<()>,
     ) -> Result<ServiceOwner> {
         let path = self.root.join(SERVICE_LOCK_FILE);
-        let mut file = open_private_lock_file(&path)
-            .map_err(|e| FileStoreError::Io(format!("cannot open {}: {e}", path.display())))?;
+        let mut file = open_private_lock_file(&path).map_err(|e| lock_open_error(&path, &e))?;
+        // Authenticate the sidecar before anything touches it: the descriptor is
+        // truncated below, so a linked or special-file sidecar must be refused
+        // while that is still harmless.
+        authenticate_lock_file(&file, &path)?;
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => return Err(FileStoreError::Locked),
@@ -590,12 +593,76 @@ fn create_new_private_file(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
+/// Open the service-lock sidecar without ever following a link (bead
+/// oraclemcp-siry).
+///
+/// `O_NOFOLLOW` refuses a symlinked sidecar **in the open itself**. That
+/// atomicity is the point: an inspect-then-open would leave a window for a
+/// same-UID actor to swap the path between the check and the open, and the
+/// caller truncates this descriptor — so following a link would turn lock
+/// acquisition into an arbitrary truncate of any file this UID can write.
+///
+/// `custom_flags` is a safe API, so `#![forbid(unsafe_code)]` still holds.
 fn open_private_lock_file(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
-    options.mode(0o600);
+    {
+        options.mode(0o600);
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
     options.open(path)
+}
+
+/// Refuse a lock sidecar that is not a lone regular file.
+///
+/// This authenticates the **open descriptor**, never the path: `fstat` on the
+/// fd we already hold cannot be swapped underneath us, so there is no window
+/// between inspection and use.
+///
+/// `O_NOFOLLOW` already refused a symlink, but it does not refuse a hard link
+/// or a special file. A pre-planted hard link would share an inode with a
+/// victim file, so truncating "our" lock would truncate theirs; a FIFO or
+/// device would divert the write entirely. Both are refused as `UnsafePath`
+/// rather than acted on.
+fn authenticate_lock_file(file: &File, path: &Path) -> Result<()> {
+    let meta = file
+        .metadata()
+        .map_err(|e| FileStoreError::Io(format!("cannot inspect {}: {e}", path.display())))?;
+    if !meta.is_file() {
+        return Err(FileStoreError::UnsafePath(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let links = meta.nlink();
+        if links != 1 {
+            return Err(FileStoreError::UnsafePath(format!(
+                "{} has {links} hard links; a lock sidecar must be a lone regular file",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Map a refused no-follow open onto the fail-closed [`FileStoreError`].
+///
+/// `ELOOP` here means the sidecar existed and was a symlink, which is a
+/// path-safety refusal, not an ordinary I/O fault — surfacing it as `Io` would
+/// bury an attack signal in transient-error noise.
+fn lock_open_error(path: &Path, error: &std::io::Error) -> FileStoreError {
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::ELOOP) {
+        return FileStoreError::UnsafePath(format!(
+            "{} is a symlink; a lock sidecar must be a lone regular file",
+            path.display()
+        ));
+    }
+    FileStoreError::Io(format!("cannot open {}: {error}", path.display()))
 }
 
 fn write_service_lock_metadata(file: &mut File, owner: &str) -> std::io::Result<()> {
@@ -672,6 +739,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::process::{Command, Stdio};
+    use std::sync::atomic::AtomicBool;
     use std::thread;
     use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -1153,5 +1221,139 @@ mod tests {
                 .exists(),
             "audit file remains after refused prune"
         );
+    }
+
+    // Bead oraclemcp-siry. A same-UID actor who can write the state directory
+    // must not be able to turn lock acquisition into a write to a file of their
+    // choosing. Each test asserts the victim's bytes SURVIVE — refusing with the
+    // right error but still truncating would be a passing test and a live bug.
+
+    const VICTIM_BYTES: &[u8] = b"victim-content-must-survive";
+
+    #[cfg(unix)]
+    #[test]
+    fn service_lock_refuses_a_symlinked_sidecar_without_touching_the_target() {
+        let root = test_root("lock-symlink");
+        let store = FileStore::open(root.clone()).expect("store");
+        let victim = root.join("victim.txt");
+        fs::write(&victim, VICTIM_BYTES).expect("plant victim");
+        let lock_path = root.join(SERVICE_LOCK_FILE);
+        let _ = fs::remove_file(&lock_path);
+        std::os::unix::fs::symlink(&victim, &lock_path).expect("plant symlink sidecar");
+
+        let error = match store.acquire_service_owner("attacked-owner") {
+            Ok(_) => panic!("a symlinked lock sidecar must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, FileStoreError::UnsafePath(_)),
+            "a symlinked sidecar is a path-safety refusal, not generic io: {error:?}"
+        );
+        assert_eq!(
+            fs::read(&victim).expect("victim still readable"),
+            VICTIM_BYTES,
+            "the symlink target must never be truncated or written"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_lock_refuses_a_hard_linked_sidecar_without_touching_the_target() {
+        let root = test_root("lock-hardlink");
+        let store = FileStore::open(root.clone()).expect("store");
+        let victim = root.join("victim.txt");
+        fs::write(&victim, VICTIM_BYTES).expect("plant victim");
+        let lock_path = root.join(SERVICE_LOCK_FILE);
+        let _ = fs::remove_file(&lock_path);
+        // O_NOFOLLOW does not refuse a hard link: it shares the victim's inode,
+        // so truncating "our" lock would truncate theirs.
+        fs::hard_link(&victim, &lock_path).expect("plant hard-linked sidecar");
+
+        let error = match store.acquire_service_owner("attacked-owner") {
+            Ok(_) => panic!("a hard-linked lock sidecar must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, FileStoreError::UnsafePath(_)),
+            "a hard-linked sidecar is a path-safety refusal, not generic io: {error:?}"
+        );
+        assert_eq!(
+            fs::read(&victim).expect("victim still readable"),
+            VICTIM_BYTES,
+            "a shared inode must never be truncated or written"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_lock_refuses_a_non_regular_sidecar() {
+        let root = test_root("lock-fifo");
+        let store = FileStore::open(root.clone()).expect("store");
+        let lock_path = root.join(SERVICE_LOCK_FILE);
+        let _ = fs::remove_file(&lock_path);
+        // A FIFO would divert the metadata write to whoever is reading it.
+        // mkfifo via the shell keeps this test free of an unsafe libc call.
+        let made = Command::new("mkfifo")
+            .arg(&lock_path)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !made {
+            eprintln!("skipping: mkfifo unavailable");
+            return;
+        }
+
+        let error = match store.acquire_service_owner("attacked-owner") {
+            Ok(_) => panic!("a non-regular lock sidecar must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, FileStoreError::UnsafePath(_)),
+            "a fifo sidecar is a path-safety refusal, not generic io: {error:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_lock_survives_a_symlink_swap_race() {
+        // The refusal must hold under a concurrent attacker swapping the sidecar
+        // between a real file and a symlink: the open is no-follow, so there is
+        // no inspect-then-open window to win. Either outcome is acceptable —
+        // acquiring a genuine lock, or an UnsafePath refusal — but the victim
+        // must never be written, and a follow must never be an Io error that
+        // silently truncated it.
+        let root = test_root("lock-symlink-race");
+        let store = FileStore::open(root.clone()).expect("store");
+        let victim = root.join("victim.txt");
+        fs::write(&victim, VICTIM_BYTES).expect("plant victim");
+        let lock_path = root.join(SERVICE_LOCK_FILE);
+
+        let swap_path = lock_path.clone();
+        let swap_victim = victim.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper_stop = Arc::clone(&stop);
+        let swapper = thread::spawn(move || {
+            while !swapper_stop.load(Ordering::Relaxed) {
+                let _ = fs::remove_file(&swap_path);
+                let _ = std::os::unix::fs::symlink(&swap_victim, &swap_path);
+                let _ = fs::remove_file(&swap_path);
+                let _ = fs::write(&swap_path, b"");
+            }
+        });
+
+        for _ in 0..400 {
+            match store.acquire_service_owner("racing-owner") {
+                Ok(owner) => drop(owner),
+                Err(FileStoreError::UnsafePath(_) | FileStoreError::Io(_)) => {}
+                Err(other) => panic!("unexpected lock error under race: {other:?}"),
+            }
+            assert_eq!(
+                fs::read(&victim).expect("victim still readable"),
+                VICTIM_BYTES,
+                "no interleaving may write through a symlinked sidecar"
+            );
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().expect("swapper thread joins");
     }
 }
