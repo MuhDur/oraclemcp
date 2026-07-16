@@ -95,6 +95,24 @@
       "covers": "Three kills claimed, two witnessed. The third is an assertion."
     },
     {
+      "file": "duplicate-kill-mutant.json",
+      "expect_code": "E_DUPLICATE_MUTANT",
+      "expect_path": "/kills/1/mutant_id",
+      "covers": "One witnessed kill repeated twice must not inflate counts.caught."
+    },
+    {
+      "file": "duplicate-survivor-mutant.json",
+      "expect_code": "E_DUPLICATE_MUTANT",
+      "expect_path": "/survivors/1/mutant_id",
+      "covers": "One classified survivor repeated twice must not inflate counts.missed."
+    },
+    {
+      "file": "overlapping-mutant.json",
+      "expect_code": "E_MUTANT_POPULATION_OVERLAP",
+      "expect_path": "/survivors/0/mutant_id",
+      "covers": "A mutant cannot be claimed as both killed and surviving."
+    },
+    {
       "file": "scoped-test-marks-ready.json",
       "expect_code": "E_SCOPED_TEST_CANNOT_MARK_READY",
       "expect_path": "/readiness/basis",

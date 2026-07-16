@@ -572,6 +572,42 @@ def _semantic_mutation_result(doc: dict) -> list:
                 "without a witness is an assertion, not evidence",
             )
         )
+
+    populations: dict[str, set[str]] = {}
+    for population in ("kills", "survivors"):
+        seen: dict[str, int] = {}
+        for index, record in enumerate(doc[population]):
+            mutant_id = record["mutant_id"]
+            if mutant_id in seen:
+                out.append(
+                    Finding(
+                        "E_DUPLICATE_MUTANT",
+                        f"/{population}/{index}/mutant_id",
+                        f"mutant {mutant_id!r} was already recorded at "
+                        f"/{population}/{seen[mutant_id]}/mutant_id; one mutant "
+                        "cannot inflate a population count by appearing twice",
+                    )
+                )
+            else:
+                seen[mutant_id] = index
+        populations[population] = set(seen)
+
+    overlap = populations["kills"] & populations["survivors"]
+    if overlap:
+        mutant_id = sorted(overlap)[0]
+        survivor_index = next(
+            index
+            for index, record in enumerate(doc["survivors"])
+            if record["mutant_id"] == mutant_id
+        )
+        out.append(
+            Finding(
+                "E_MUTANT_POPULATION_OVERLAP",
+                f"/survivors/{survivor_index}/mutant_id",
+                f"mutant {mutant_id!r} is recorded as both killed and surviving; "
+                "the populations must be disjoint",
+            )
+        )
     return out
 
 

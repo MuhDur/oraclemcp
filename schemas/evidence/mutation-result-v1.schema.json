@@ -100,12 +100,12 @@
       "maximum": 1
     },
     "survivors": {
-      "description": "One classified record per surviving mutant. The list length must equal counts.missed: a summary count with fewer records than it claims is not a taxonomy (E_SURVIVOR_COUNT_MISMATCH).",
+      "description": "One classified record per distinct surviving mutant. The list length must equal counts.missed and mutant IDs must not repeat or also appear among kills: a summary count with fewer records or a repeated ID is not a taxonomy (E_SURVIVOR_COUNT_MISMATCH, E_DUPLICATE_MUTANT, E_MUTANT_POPULATION_OVERLAP).",
       "type": "array",
       "items": { "$ref": "#/$defs/survivor" }
     },
     "kills": {
-      "description": "One witnessed record per claimed kill. The list length must equal counts.caught: a kill without a witness is an assertion, not evidence (E_MISSING_WITNESS).",
+      "description": "One witnessed record per distinct claimed kill. The list length must equal counts.caught and mutant IDs must not repeat or also appear among survivors: a kill without a witness is an assertion, not evidence (E_MISSING_WITNESS, E_DUPLICATE_MUTANT, E_MUTANT_POPULATION_OVERLAP).",
       "type": "array",
       "items": { "$ref": "#/$defs/kill" }
     }

@@ -1,0 +1,41 @@
+{
+  "schema": "mutation-result/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-16T18:00:00Z",
+  "source": {
+    "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "scope": {
+    "claim": "scoped",
+    "description": "A mutant cannot be both killed and surviving.",
+    "targets": ["crates/oracledb-protocol/src/describe/timestamp.rs"]
+  },
+  "started_at": "2026-07-16T17:50:00Z",
+  "ended_at": "2026-07-16T17:59:00Z",
+  "resource_budget": {
+    "isolated_target_dir": "/tmp/evidence/target",
+    "memory_max_bytes": 1,
+    "pid_task_max": 1
+  },
+  "shards": [{ "id": "shard-1of1", "status": "complete" }],
+  "counts": { "caught": 1, "missed": 1, "timeout": 0, "unviable": 0 },
+  "denominator": "caught+missed",
+  "rate": 0.5,
+  "survivors": [
+    {
+      "mutant_id": "timestamp.rs:96:5:replace-precision-with-0",
+      "location": "crates/oracledb-protocol/src/describe/timestamp.rs:96",
+      "taxonomy": "triage-pending"
+    }
+  ],
+  "kills": [
+    {
+      "mutant_id": "timestamp.rs:96:5:replace-precision-with-0",
+      "location": "crates/oracledb-protocol/src/describe/timestamp.rs:96",
+      "mutant_fails_test": { "test": "describe::tests::tstz_descriptor_precision_scale", "outcome": "fail" },
+      "head_passes_test": { "test": "describe::tests::tstz_descriptor_precision_scale", "outcome": "pass" }
+    }
+  ]
+}
