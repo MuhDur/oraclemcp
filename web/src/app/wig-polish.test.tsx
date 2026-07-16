@@ -1,8 +1,39 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { ConfirmDialog, optionalSearchString } from "./App";
+import {
+  ConfirmDialog,
+  ExplorerObjectsPanel,
+  optionalSearchString,
+  type ExplorerObjectRow
+} from "./App";
 import { OMCP_SKIN, assertDashboardSkinConformance, type DashboardSkin } from "./skin";
+
+function explorerRow(n: number): ExplorerObjectRow {
+  return {
+    owner: "HR",
+    objectName: `OBJ_${n}`,
+    objectType: "TABLE",
+    status: "VALID",
+    numRows: "1",
+    columnCount: "1",
+    lastAnalyzed: "2026-07-01",
+    comment: "",
+    raw: {}
+  };
+}
+
+function explorerMarkup(count: number): string {
+  return renderToStaticMarkup(
+    <ExplorerObjectsPanel
+      rows={Array.from({ length: count }, (_, i) => explorerRow(i))}
+      selectedRef={null}
+      pending={false}
+      error={null}
+      onSelect={() => {}}
+    />
+  );
+}
 
 // 2ekf: the Web Interface Guidelines polish pass. This harness renders to static
 // markup, so — as explorer-a11y.test.tsx already notes — DOM-event behavior
@@ -49,6 +80,40 @@ describe("the console's own confirmation dialog", () => {
     );
     expect(busy).toContain("Working");
     expect(busy).toContain("disabled");
+  });
+});
+
+describe("the Explorer object list windows only when it is worth it", () => {
+  it("renders an ordinary page in full, so it stays server-renderable", () => {
+    // The default page is 100 rows. Windowing needs a live scroll element to
+    // measure, which a server-rendered pass has none of — so an ordinary list
+    // must not opt in, or it would render empty.
+    const markup = explorerMarkup(100);
+    expect(markup).not.toContain("data-omcp-virtualized");
+    expect(markup).toContain("OBJ_0");
+    expect(markup).toContain("OBJ_99");
+  });
+
+  it("marks a large page as windowed and gives it a scroll viewport", () => {
+    const markup = explorerMarkup(1000);
+    expect(markup).toContain('data-omcp-virtualized="objects"');
+    expect(markup).toContain("overflow-y-auto");
+  });
+
+  it("shows every row until the virtualizer has measured, never a blank list", () => {
+    // Before a scroll element exists to measure — and if measurement ever fails
+    // — the panel must fall back to the whole list. A slow list is a nuisance;
+    // a blank one is a lie. This harness has no layout, so it exercises exactly
+    // that unmeasured path.
+    const markup = explorerMarkup(1000);
+    expect(markup).toContain("OBJ_0");
+    expect(markup).toContain("OBJ_999");
+  });
+
+  it("keeps every row's accessible name and count honest at both sizes", () => {
+    expect(explorerMarkup(100)).toContain('aria-label="Select OBJ_0"');
+    // The header always states the true total, windowed or not.
+    expect(explorerMarkup(1000)).toContain("1000 objects");
   });
 });
 

@@ -18,6 +18,7 @@ import {
   useQueries,
   useQuery
 } from "@tanstack/react-query";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   type ColumnDef,
   flexRender,
@@ -5384,6 +5385,74 @@ function ExplorerSchemasPanel({
   );
 }
 
+/** Above this many rows the object list is windowed. The Explorer's default
+ *  page is 100, so ordinary use renders as it always did; only a deliberately
+ *  large page (up to the permitted 5000) pays for virtualization. */
+const VIRTUALIZE_ROW_THRESHOLD = 150;
+/** Two-line object cell plus py-4; the virtualizer re-measures from the DOM. */
+const ESTIMATED_ROW_PX = 73;
+
+function ExplorerObjectTableRow({
+  row,
+  index,
+  selected,
+  measure,
+  onSelect
+}: {
+  row: ExplorerObjectRow;
+  index: number;
+  selected: boolean;
+  measure?: (node: Element | null) => void;
+  onSelect: (row: ExplorerObjectRow) => void;
+}): React.ReactElement {
+  return (
+    <tr
+      ref={measure}
+      data-index={index}
+      className={cn(
+        "cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--om-gold)]",
+        selected ? "bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)]" : "bg-transparent"
+      )}
+      role="button"
+      tabIndex={0}
+      aria-pressed={selected}
+      aria-label={`Select ${row.objectName}`}
+      onClick={() => onSelect(row)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelect(row);
+        }
+      }}
+    >
+      <td className="px-4 py-4 align-top">
+        <p className="font-mono text-sm font-semibold text-[var(--om-text-bright)]">
+          {row.objectName}
+        </p>
+        <p className="mt-1 font-mono text-xs text-[var(--om-text-muted)]">{row.owner}</p>
+      </td>
+      <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
+        {row.objectType}
+      </td>
+      <td className="px-4 py-4 align-top">
+        <Badge tone={row.status === "INVALID" ? "warn" : row.status ? "ok" : "off"}>
+          {row.status || "…"}
+        </Badge>
+      </td>
+      <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">{row.numRows}</td>
+      <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
+        {row.columnCount}
+      </td>
+      <td className="px-4 py-4 align-top font-mono text-xs text-[var(--om-text)]">
+        {row.lastAnalyzed}
+      </td>
+      <td className="max-w-[280px] px-4 py-4 align-top text-sm text-[var(--om-text)]">
+        <p className="line-clamp-2">{row.comment}</p>
+      </td>
+    </tr>
+  );
+}
+
 export function ExplorerObjectsPanel({
   rows,
   selectedRef,
@@ -5397,6 +5466,29 @@ export function ExplorerObjectsPanel({
   error: string | null;
   onSelect: (row: ExplorerObjectRow) => void;
 }): React.ReactElement {
+  const scrollRef = React.useRef<HTMLDivElement>(null);
+  // Explorer permits up to 5000 rows. Window them once the list is big enough
+  // to matter, and leave the ordinary list alone: virtualization needs a live
+  // scroll element to measure, which a server-rendered pass does not have.
+  const virtualize = rows.length > VIRTUALIZE_ROW_THRESHOLD;
+  const virtualizer = useVirtualizer({
+    count: virtualize ? rows.length : 0,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ESTIMATED_ROW_PX,
+    overscan: 10
+  });
+  const virtualItems = virtualizer.getVirtualItems();
+  // Fail safe: window only once the virtualizer has actually measured. Before
+  // the scroll element exists — and if measurement ever fails outright — render
+  // the whole list. A slow object list is a nuisance; a blank one is a lie.
+  const windowed = virtualize && virtualItems.length > 0;
+  const visibleRows = windowed
+    ? virtualItems.map((item) => ({ row: rows[item.index], index: item.index }))
+    : rows.map((row, index) => ({ row, index }));
+  const padTop = windowed ? virtualItems[0].start : 0;
+  const padBottom = windowed
+    ? virtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end
+    : 0;
   return (
     <ConsolePanel>
       <ConsolePanelHeader
@@ -5406,7 +5498,11 @@ export function ExplorerObjectsPanel({
         tone={pending ? "info" : rows.length > 0 ? "ok" : "off"}
       />
       {error ? <ErrorNotice message={error} /> : null}
-      <div className="overflow-x-auto">
+      <div
+        ref={scrollRef}
+        className={cn("overflow-x-auto", virtualize && "max-h-[70vh] overflow-y-auto")}
+        data-omcp-virtualized={virtualize ? "objects" : undefined}
+      >
         <table className="w-full min-w-[980px] border-collapse text-left">
           <thead className="bg-[var(--om-surface-muted)] text-2xs uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
             <tr>
@@ -5430,59 +5526,32 @@ export function ExplorerObjectsPanel({
                 </td>
               </tr>
             ) : (
-              rows.map((row) => {
-                const ref = rowRef(row);
-                const selected = selectedRef && objectRefKey(selectedRef) === objectRefKey(ref);
-                return (
-                  <tr
-                    key={objectRefKey(ref)}
-                    className={cn(
-                      "cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--om-gold)]",
-                      selected
-                        ? "bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)]"
-                        : "bg-transparent"
-                    )}
-                    role="button"
-                    tabIndex={0}
-                    aria-pressed={Boolean(selected)}
-                    aria-label={`Select ${row.objectName}`}
-                    onClick={() => onSelect(row)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        onSelect(row);
-                      }
-                    }}
-                  >
-                    <td className="px-4 py-4 align-top">
-                      <p className="font-mono text-sm font-semibold text-[var(--om-text-bright)]">
-                        {row.objectName}
-                      </p>
-                      <p className="mt-1 font-mono text-xs text-[var(--om-text-muted)]">{row.owner}</p>
-                    </td>
-                    <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
-                      {row.objectType}
-                    </td>
-                    <td className="px-4 py-4 align-top">
-                      <Badge tone={row.status === "INVALID" ? "warn" : row.status ? "ok" : "off"}>
-                        {row.status || "…"}
-                      </Badge>
-                    </td>
-                    <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
-                      {row.numRows}
-                    </td>
-                    <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
-                      {row.columnCount}
-                    </td>
-                    <td className="px-4 py-4 align-top font-mono text-xs text-[var(--om-text)]">
-                      {row.lastAnalyzed}
-                    </td>
-                    <td className="max-w-[280px] px-4 py-4 align-top text-sm text-[var(--om-text)]">
-                      <p className="line-clamp-2">{row.comment}</p>
-                    </td>
+              <>
+                {padTop > 0 ? (
+                  <tr aria-hidden="true">
+                    <td colSpan={7} style={{ height: padTop }} />
                   </tr>
-                );
-              })
+                ) : null}
+                {visibleRows.map(({ row, index }) => {
+                  const ref = rowRef(row);
+                  const selected = selectedRef && objectRefKey(selectedRef) === objectRefKey(ref);
+                  return (
+                    <ExplorerObjectTableRow
+                      key={objectRefKey(ref)}
+                      row={row}
+                      index={index}
+                      selected={Boolean(selected)}
+                      measure={virtualize ? virtualizer.measureElement : undefined}
+                      onSelect={onSelect}
+                    />
+                  );
+                })}
+                {padBottom > 0 ? (
+                  <tr aria-hidden="true">
+                    <td colSpan={7} style={{ height: padBottom }} />
+                  </tr>
+                ) : null}
+              </>
             )}
           </tbody>
         </table>
