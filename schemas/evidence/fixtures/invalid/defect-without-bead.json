@@ -1,0 +1,37 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-16T12:40:00Z",
+  "bead_id": "rust-oracledb-driver-next-release-c23g.4",
+  "scope": {
+    "summary": "Ship the descriptor normalizer.",
+    "in_scope": ["crates/oracledb-protocol/src/describe/timestamp.rs"],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "protocol-internal-decode-path"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [],
+  "known_defects": [
+    {
+      "description": "TSLTZ descriptors still report scale 0 when the server omits the attribute; the normalizer papers over it.",
+      "bead_id": null
+    }
+  ],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

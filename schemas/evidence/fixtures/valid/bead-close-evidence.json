@@ -1,0 +1,57 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-16T12:40:00Z",
+  "bead_id": "rust-oracledb-evidence-controls-f1cl.1",
+  "scope": {
+    "summary": "Author cross-repo-evidence-contract-v1: four versioned schemas, negative fixtures, and an offline validator.",
+    "in_scope": [
+      "schemas/evidence/*.schema.json",
+      "schemas/evidence/fixtures/**",
+      "scripts/validate_evidence.py",
+      "docs/EVIDENCE_CONTRACT.md"
+    ],
+    "out_of_scope": [
+      "Producing real proofs: the commands that emit these documents are separate beads.",
+      "Wiring the contract check into a CI workflow."
+    ]
+  },
+  "source": {
+    "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [
+    {
+      "schema": "required-proof/v1",
+      "path": "tests/artifacts/evidence/required-proof-4f2a9c1e.json",
+      "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e"
+    }
+  ],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/check_evidence_contract.sh",
+        "kind": "cli",
+        "trace": "Runs the fixture suite end to end and exits non-zero when any rule stops firing."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The semantic layer is re-implemented per repo; only the schema files and rule codes are shared, so the two implementations can drift in message text.",
+    "The structural validator implements the subset of draft 2020-12 these schemas use, not the whole specification."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "rust-oracledb-evidence-controls-f1cl.2",
+    "rust-oracledb-evidence-controls-f1cl.8"
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}

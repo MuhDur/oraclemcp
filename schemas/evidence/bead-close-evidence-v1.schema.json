@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cross-repo-evidence-contract:v1:bead-close-evidence",
+  "title": "bead-close-evidence/v1",
+  "description": "The evidence a bead cites when it is closed. Every claim a close makes must be traceable to an artifact at the same SHA: proofs, entry-point traces, and live evidence when live behaviour is claimed. Limitations and follow-ups are mandatory fields, not optional politeness, because the failure this contract exists to prevent is a close that is silent about what it did not do.",
+  "x-evidence-contract": "cross-repo-evidence-contract-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "repo",
+    "generated_at",
+    "bead_id",
+    "scope",
+    "source",
+    "proofs",
+    "integration_evidence",
+    "live_evidence",
+    "limitations",
+    "known_defects",
+    "follow_ups",
+    "readiness"
+  ],
+  "properties": {
+    "schema": {
+      "description": "Contract discriminator. Consumers must reject any document whose schema they do not implement rather than best-effort parse it (E_UNSUPPORTED_SCHEMA).",
+      "const": "bead-close-evidence/v1"
+    },
+    "repo": {
+      "description": "Repository this evidence was produced in. The repo name lives in the payload, never in the schema, so the schema file stays byte-identical across repos.",
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at": { "$ref": "#/$defs/timestamp" },
+    "bead_id": {
+      "description": "The bead being closed, e.g. rust-oracledb-evidence-controls-f1cl.1.",
+      "type": "string",
+      "minLength": 1
+    },
+    "scope": {
+      "description": "What this close covers and, explicitly, what it does not. out_of_scope may be empty, but it must be stated.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "in_scope", "out_of_scope"],
+      "properties": {
+        "summary": { "type": "string", "minLength": 1 },
+        "in_scope": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "out_of_scope": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "source": { "$ref": "#/$defs/sourceRef" },
+    "proofs": {
+      "description": "Evidence documents backing this close. Each must be recorded at source.sha; a proof from an earlier commit does not describe the code being closed (E_STALE_SHA).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/proofRef" }
+    },
+    "integration_evidence": {
+      "description": "How the change was shown to be reachable in the product, not merely unit-tested. entry_points may be empty for changes with no runtime surface (docs, schemas); entry_points_excluded_reason is where that is stated. The tri-state rule that enforces this is defined by the entry-trace control, which imports this schema.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry_points"],
+      "properties": {
+        "entry_points": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/entryPoint" }
+        },
+        "entry_points_excluded_reason": {
+          "description": "Machine-readable token stating why this change has no entry point, e.g. no-runtime-surface.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "live_evidence": {
+      "description": "Live or external-system evidence. If claimed is true, at least one artifact is required: a live claim with nothing to point at is the exact failure this contract exists to catch (E_LIVE_CLAIM_WITHOUT_ARTIFACT).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claimed", "artifacts"],
+      "properties": {
+        "claimed": { "type": "boolean" },
+        "artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifactRef" }
+        }
+      }
+    },
+    "limitations": {
+      "description": "Known limitations of this close. Required and may be empty, but empty is then an explicit assertion that there are none.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "known_defects": {
+      "description": "Defects known at close time. Each must name an open bead; a known defect with nowhere to be fixed is how a defect disappears (E_DEFECT_WITHOUT_BEAD).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/knownDefect" }
+    },
+    "follow_ups": {
+      "description": "Bead ids carrying the deferred work.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "readiness": {
+      "description": "What this close claims, and on what basis. The pair is checked: some bases cannot support a ready claim.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claim", "basis"],
+      "properties": {
+        "claim": { "enum": ["ready", "not-ready"] },
+        "basis": {
+          "description": "required-proof: a full Required graph proof at this SHA. live-evidence: an exact-SHA live artifact. scoped-test: a targeted test over part of the change; real evidence, but never sufficient to call a bead ready (E_SCOPED_TEST_CANNOT_MARK_READY). manual-review: read, not executed; cannot support ready (E_INSUFFICIENT_READINESS_BASIS).",
+          "enum": ["required-proof", "live-evidence", "scoped-test", "manual-review"]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "proofRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "path", "sha"],
+      "properties": {
+        "schema": {
+          "description": "Which evidence contract the referenced document satisfies.",
+          "enum": [
+            "required-proof/v1",
+            "release-candidate-proof/v1",
+            "mutation-result/v1"
+          ]
+        },
+        "path": { "type": "string", "minLength": 1 },
+        "sha": { "$ref": "#/$defs/sha1" }
+      }
+    },
+    "entryPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "trace"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["cli", "tool", "route", "config-gate", "api"] },
+        "trace": {
+          "description": "The test or artifact tracing this entry point through to a dispatch/result.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "knownDefect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "bead_id"],
+      "properties": {
+        "description": { "type": "string", "minLength": 1 },
+        "bead_id": {
+          "description": "Open bead tracking this defect, or null. Nullable on purpose: an untracked defect must be representable so it can be rejected with a precise reason (E_DEFECT_WITHOUT_BEAD) rather than silently omitted from the list.",
+          "type": ["string", "null"],
+          "minLength": 1
+        }
+      }
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "sha"],
+      "properties": {
+        "kind": {
+          "description": "Artifact family, e.g. version-matrix.",
+          "type": "string",
+          "minLength": 1
+        },
+        "path": { "type": "string", "minLength": 1 },
+        "sha": {
+          "description": "The commit this artifact was recorded for.",
+          "$ref": "#/$defs/sha1"
+        }
+      }
+    },
+    "sha1": {
+      "description": "Full 40-character lowercase hex git object name. Abbreviated or uppercase SHAs are rejected: evidence must name an exact, unambiguous commit.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sourceRef": {
+      "description": "The exact tree this evidence was produced from.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha", "tree_clean"],
+      "properties": {
+        "sha": { "$ref": "#/$defs/sha1" },
+        "tree_clean": {
+          "description": "False means uncommitted changes were present. Evidence from a dirty tree is not reproducible and is rejected (E_TREE_DIRTY).",
+          "type": "boolean"
+        },
+        "branch": { "type": "string", "minLength": 1 }
+      }
+    },
+    "timestamp": {
+      "description": "RFC 3339 UTC instant, e.g. 2026-07-16T12:00:00Z.",
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

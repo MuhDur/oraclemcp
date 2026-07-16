@@ -1,0 +1,124 @@
+{
+  "contract": "cross-repo-evidence-contract-v1",
+  "note": "Every invalid fixture is a well-formed document with exactly one defect planted in it, and declares the single finding it must produce. Asserting the code AND the path (not merely 'it was rejected') is what keeps a rule from silently going dead: a fixture that is rejected for the wrong reason still looks green.",
+  "valid": [
+    {
+      "file": "required-proof-pass.json",
+      "covers": "A green Required graph. Also pins that an advisory skip carrying a machine-readable reason, with a null end time, is legitimate and does not gate."
+    },
+    {
+      "file": "required-proof-fail.json",
+      "covers": "An honestly red proof. A required-proof recording a failure is valid evidence; only a verdict the records do not support is not."
+    },
+    {
+      "file": "release-candidate-proof.json",
+      "covers": "A validated candidate. Also pins that a failed advisory job and a still-running advisory job do not block a release."
+    },
+    {
+      "file": "mutation-result.json",
+      "covers": "A scoped mutation run whose declared rate recomputes, every survivor is classified, and every claimed kill carries both witnesses."
+    },
+    {
+      "file": "bead-close-evidence.json",
+      "covers": "A close backed by a required-proof at the same SHA, with limitations stated rather than implied."
+    }
+  ],
+  "invalid": [
+    {
+      "file": "malformed-sha.json",
+      "expect_code": "E_SCHEMA",
+      "expect_path": "/source/sha",
+      "covers": "An abbreviated SHA. Evidence must name an exact commit; 4f2a9c1e is a prefix, and prefixes collide."
+    },
+    {
+      "file": "skipped-as-pass.json",
+      "expect_code": "E_SKIPPED_AS_PASS",
+      "expect_path": "/verdict",
+      "covers": "A required command skipped, with the proof still declaring pass. The skip even carries an honest reason: it is the promotion to pass that is the lie."
+    },
+    {
+      "file": "null-end-time.json",
+      "expect_code": "E_UNFINISHED",
+      "expect_path": "/commands/1/ended_at",
+      "covers": "A command claiming outcome pass that never recorded an end. It cannot have passed; it never finished."
+    },
+    {
+      "file": "arithmetic-mismatch.json",
+      "expect_code": "E_RATE_MISMATCH",
+      "expect_path": "/rate",
+      "covers": "A declared kill rate of 0.9 over counts that yield 0.75. Unreachable by JSON Schema, which has no arithmetic: this is why the contract has a semantic layer at all."
+    },
+    {
+      "file": "wrong-artifact-sha.json",
+      "expect_code": "E_ARTIFACT_SHA_MISMATCH",
+      "expect_path": "/artifacts/0/sha",
+      "covers": "A version-matrix artifact recorded for the parent commit, offered as evidence for this one. The parent-artifact substitution."
+    },
+    {
+      "file": "required-ci-not-green.json",
+      "expect_code": "E_REQUIRED_CI_NOT_GREEN",
+      "expect_path": "/required_ci/jobs/1",
+      "covers": "A required job still in progress. Non-terminal is not success; the subtler half of 'never call CI green while a required job is non-success'."
+    },
+    {
+      "file": "tag-version-mismatch.json",
+      "expect_code": "E_TAG_VERSION_MISMATCH",
+      "expect_path": "/candidate/tag",
+      "covers": "A v0.8.4 tag on a tree that ships 0.8.3."
+    },
+    {
+      "file": "stale-command-sha.json",
+      "expect_code": "E_STALE_SHA",
+      "expect_path": "/commands/1/sha",
+      "covers": "A passing test result carried over from the parent commit into this proof."
+    },
+    {
+      "file": "tree-dirty.json",
+      "expect_code": "E_TREE_DIRTY",
+      "expect_path": "/source/tree_clean",
+      "covers": "A proof produced from uncommitted changes, describing code that exists at no commit."
+    },
+    {
+      "file": "shard-incomplete.json",
+      "expect_code": "E_SHARD_INCOMPLETE",
+      "expect_path": "/shards/1/status",
+      "covers": "A mutation run whose second shard never finished, making its counts a floor rather than a measurement."
+    },
+    {
+      "file": "unwitnessed-kill.json",
+      "expect_code": "E_MISSING_WITNESS",
+      "expect_path": "/kills",
+      "covers": "Three kills claimed, two witnessed. The third is an assertion."
+    },
+    {
+      "file": "scoped-test-marks-ready.json",
+      "expect_code": "E_SCOPED_TEST_CANNOT_MARK_READY",
+      "expect_path": "/readiness/basis",
+      "covers": "The rule the bead asked to be documented, executed instead: a scoped test cannot mark a bead ready."
+    },
+    {
+      "file": "live-claim-without-artifact.json",
+      "expect_code": "E_LIVE_CLAIM_WITHOUT_ARTIFACT",
+      "expect_path": "/live_evidence/artifacts",
+      "covers": "A close claiming live verification with nothing to point at."
+    },
+    {
+      "file": "defect-without-bead.json",
+      "expect_code": "E_DEFECT_WITHOUT_BEAD",
+      "expect_path": "/known_defects/0/bead_id",
+      "covers": "A defect known at close time with no bead tracking it: how a known defect becomes an unknown one."
+    },
+    {
+      "file": "server-required-local-proof-parent-sha.json",
+      "expect_code": "E_STALE_SHA",
+      "expect_path": "/required_proof/sha",
+      "covers": "oraclemcp-specific parent-proof substitution: a release candidate cannot inherit a required-local proof from the parent SHA."
+    },
+    {
+      "file": "server-adb-live-claim-without-artifact.json",
+      "expect_code": "E_LIVE_CLAIM_WITHOUT_ARTIFACT",
+      "expect_path": "/live_evidence/artifacts",
+      "covers": "oraclemcp OCI/ADB lane: an operator-gated live claim with no artifact remains a refusal, never a release-ready assertion."
+    }
+  ]
+}

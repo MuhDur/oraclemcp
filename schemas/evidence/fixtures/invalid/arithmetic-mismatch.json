@@ -1,0 +1,76 @@
+{
+  "schema": "mutation-result/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-16T12:30:00Z",
+  "source": {
+    "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "scope": {
+    "claim": "scoped",
+    "description": "Sensitivity of the 0.8.4 TSTZ/TSLTZ descriptor normalization patch.",
+    "targets": ["crates/oracledb-protocol/src/describe/timestamp.rs"]
+  },
+  "started_at": "2026-07-16T12:22:00Z",
+  "ended_at": "2026-07-16T12:29:14Z",
+  "resource_budget": {
+    "isolated_target_dir": "/home/durakovic/.cache/evidence-runs/mutants-4f2a9c1e/target",
+    "memory_max_bytes": 8589934592,
+    "pid_task_max": 256
+  },
+  "shards": [{ "id": "shard-1of1", "status": "complete" }],
+  "counts": {
+    "caught": 3,
+    "missed": 1,
+    "timeout": 0,
+    "unviable": 1
+  },
+  "denominator": "caught+missed",
+  "rate": 0.9,
+  "survivors": [
+    {
+      "mutant_id": "timestamp.rs:118:9:replace-scale-with-0",
+      "location": "crates/oracledb-protocol/src/describe/timestamp.rs:118",
+      "taxonomy": "missing-assertion"
+    }
+  ],
+  "kills": [
+    {
+      "mutant_id": "timestamp.rs:96:5:replace-precision-with-0",
+      "location": "crates/oracledb-protocol/src/describe/timestamp.rs:96",
+      "mutant_fails_test": {
+        "test": "describe::tests::tstz_descriptor_precision_scale",
+        "outcome": "fail"
+      },
+      "head_passes_test": {
+        "test": "describe::tests::tstz_descriptor_precision_scale",
+        "outcome": "pass"
+      }
+    },
+    {
+      "mutant_id": "timestamp.rs:101:5:replace-match-arm",
+      "location": "crates/oracledb-protocol/src/describe/timestamp.rs:101",
+      "mutant_fails_test": {
+        "test": "describe::tests::tsltz_descriptor_family_normalized",
+        "outcome": "fail"
+      },
+      "head_passes_test": {
+        "test": "describe::tests::tsltz_descriptor_family_normalized",
+        "outcome": "pass"
+      }
+    },
+    {
+      "mutant_id": "timestamp.rs:107:5:delete-normalization",
+      "location": "crates/oracledb-protocol/src/describe/timestamp.rs:107",
+      "mutant_fails_test": {
+        "test": "describe::tests::builtin_descriptor_family_roundtrip",
+        "outcome": "fail"
+      },
+      "head_passes_test": {
+        "test": "describe::tests::builtin_descriptor_family_roundtrip",
+        "outcome": "pass"
+      }
+    }
+  ]
+}

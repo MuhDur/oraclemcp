@@ -1,0 +1,38 @@
+{
+  "schema": "release-candidate-proof/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-16T12:55:00Z",
+  "candidate": {
+    "tag": "v0.9.0",
+    "version": "0.9.0"
+  },
+  "source": {
+    "sha": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "required_proof": {
+    "schema": "required-proof/v1",
+    "path": "tests/artifacts/evidence/required-proof-parent.json",
+    "sha": "0f1e2d3c4b5a69788796a5b4c3d2e1f001122334"
+  },
+  "required_ci": {
+    "sha": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+    "jobs": [
+      {
+        "name": "Required / required",
+        "tier": "required",
+        "status": "completed",
+        "conclusion": "success"
+      }
+    ]
+  },
+  "artifacts": [
+    {
+      "kind": "live-version-matrix",
+      "path": "tests/artifacts/version_matrix/results-1a2b3c4d.json",
+      "sha": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"
+    }
+  ],
+  "verdict": "pass"
+}

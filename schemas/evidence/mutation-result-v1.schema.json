@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cross-repo-evidence-contract:v1:mutation-result",
+  "title": "mutation-result/v1",
+  "description": "Raw, self-checking evidence from a mutation-testing run. Replaces summary-only claims: the document carries the raw counts, the denominator it declares, and the witnesses behind every claimed kill, so a consumer can recompute the rate instead of trusting it. A mutation run always states its scope; a scoped run is evidence about that scope only and never about the workspace.",
+  "x-evidence-contract": "cross-repo-evidence-contract-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "repo",
+    "generated_at",
+    "source",
+    "scope",
+    "started_at",
+    "ended_at",
+    "resource_budget",
+    "shards",
+    "counts",
+    "denominator",
+    "rate",
+    "survivors",
+    "kills"
+  ],
+  "properties": {
+    "schema": {
+      "description": "Contract discriminator. Consumers must reject any document whose schema they do not implement rather than best-effort parse it (E_UNSUPPORTED_SCHEMA).",
+      "const": "mutation-result/v1"
+    },
+    "repo": {
+      "description": "Repository this evidence was produced in. The repo name lives in the payload, never in the schema, so the schema file stays byte-identical across repos.",
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at": { "$ref": "#/$defs/timestamp" },
+    "source": { "$ref": "#/$defs/sourceRef" },
+    "scope": {
+      "description": "What this run actually covered. Declared up front so a narrow run cannot later be cited as a broad claim.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claim", "description", "targets"],
+      "properties": {
+        "claim": {
+          "description": "scoped: evidence about the named targets only. workspace: evidence about the whole workspace. A scoped run can never satisfy a readiness claim that requires workspace evidence.",
+          "enum": ["scoped", "workspace"]
+        },
+        "description": { "type": "string", "minLength": 1 },
+        "targets": {
+          "description": "Exact files or modules mutated.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "started_at": { "$ref": "#/$defs/timestamp" },
+    "ended_at": {
+      "description": "Completion instant, or null if the run never finished. Nullable on purpose: an unfinished run must be representable so it can be rejected with a precise reason (E_UNFINISHED) rather than a generic type error. A run that did not end has not measured anything.",
+      "$ref": "#/$defs/nullableTimestamp"
+    },
+    "resource_budget": { "$ref": "#/$defs/resourceBudget" },
+    "shards": {
+      "description": "Every shard the run was split across. An incomplete shard means the population was never fully evaluated, so the counts are a floor, not a measurement (E_SHARD_INCOMPLETE).",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["complete", "incomplete"] }
+        }
+      }
+    },
+    "counts": {
+      "description": "Raw population counts. These are the measurement; rate is derived from them and re-derived by the consumer.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["caught", "missed", "timeout", "unviable"],
+      "properties": {
+        "caught": { "type": "integer", "minimum": 0 },
+        "missed": { "type": "integer", "minimum": 0 },
+        "timeout": { "type": "integer", "minimum": 0 },
+        "unviable": {
+          "description": "Mutants that did not compile. Never part of any denominator: an unviable mutant tests nothing.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "denominator": {
+      "description": "The formula this document declares for rate. Stated explicitly because the choice changes the number, and an undeclared denominator is how a rate becomes unfalsifiable.",
+      "enum": ["caught+missed", "caught+missed+timeout"]
+    },
+    "rate": {
+      "description": "Declared kill rate. Recomputed from counts and denominator by the consumer; a declared rate that does not match is rejected (E_RATE_MISMATCH).",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "survivors": {
+      "description": "One classified record per surviving mutant. The list length must equal counts.missed: a summary count with fewer records than it claims is not a taxonomy (E_SURVIVOR_COUNT_MISMATCH).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/survivor" }
+    },
+    "kills": {
+      "description": "One witnessed record per claimed kill. The list length must equal counts.caught: a kill without a witness is an assertion, not evidence (E_MISSING_WITNESS).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/kill" }
+    }
+  },
+  "$defs": {
+    "survivor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mutant_id", "location", "taxonomy"],
+      "properties": {
+        "mutant_id": { "type": "string", "minLength": 1 },
+        "location": {
+          "description": "file:line of the mutated site.",
+          "type": "string",
+          "minLength": 1
+        },
+        "taxonomy": {
+          "description": "Why this mutant survived. triage-pending is honest and allowed; omitting the field is not.",
+          "enum": [
+            "equivalent-mutant",
+            "missing-assertion",
+            "uncovered-code",
+            "unreachable-code",
+            "triage-pending"
+          ]
+        },
+        "note": { "type": "string", "minLength": 1 }
+      }
+    },
+    "kill": {
+      "description": "A claimed kill and its two witnesses. Both directions are required: the mutant must fail a named test, and that same test must pass on unmutated HEAD. Without the second witness a permanently-red test would 'kill' every mutant.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mutant_id", "location", "mutant_fails_test", "head_passes_test"],
+      "properties": {
+        "mutant_id": { "type": "string", "minLength": 1 },
+        "location": { "type": "string", "minLength": 1 },
+        "mutant_fails_test": {
+          "description": "Witness that the mutant is detected: the named test fails with the mutant applied.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["test", "outcome"],
+          "properties": {
+            "test": { "type": "string", "minLength": 1 },
+            "outcome": {
+              "description": "Pinned by const: this witness is only meaningful if the mutant made the test fail.",
+              "const": "fail"
+            }
+          }
+        },
+        "head_passes_test": {
+          "description": "Witness that the test is a real detector: the same test passes on unmutated HEAD.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["test", "outcome"],
+          "properties": {
+            "test": { "type": "string", "minLength": 1 },
+            "outcome": {
+              "description": "Pinned by const: this witness is only meaningful if HEAD passes.",
+              "const": "pass"
+            }
+          }
+        }
+      }
+    },
+    "nullableTimestamp": {
+      "description": "An RFC 3339 UTC instant, or null when the event has not happened. Null is representable so it can be rejected by a named semantic rule rather than a generic type error.",
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "resourceBudget": {
+      "description": "Declared resource ceilings the run was executed under. Required so a proof cannot be produced by a run that silently exhausted the host (the retrospective's ~40GB-RSS and 9,700-thread incidents).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["isolated_target_dir", "memory_max_bytes", "pid_task_max"],
+      "properties": {
+        "isolated_target_dir": {
+          "description": "Per-run build directory. Must not be the shared/global target dir: a shared dir makes a run's inputs unattributable.",
+          "type": "string",
+          "minLength": 1
+        },
+        "memory_max_bytes": { "type": "integer", "minimum": 1 },
+        "pid_task_max": {
+          "description": "Task/PID ceiling. The scarce resource in the cgroup-exhaustion incident; a memory cap alone was proven insufficient.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "sha1": {
+      "description": "Full 40-character lowercase hex git object name. Abbreviated or uppercase SHAs are rejected: evidence must name an exact, unambiguous commit.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sourceRef": {
+      "description": "The exact tree this evidence was produced from.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha", "tree_clean"],
+      "properties": {
+        "sha": { "$ref": "#/$defs/sha1" },
+        "tree_clean": {
+          "description": "False means uncommitted changes were present. Evidence from a dirty tree is not reproducible and is rejected (E_TREE_DIRTY).",
+          "type": "boolean"
+        },
+        "branch": { "type": "string", "minLength": 1 }
+      }
+    },
+    "timestamp": {
+      "description": "RFC 3339 UTC instant, e.g. 2026-07-16T12:00:00Z.",
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

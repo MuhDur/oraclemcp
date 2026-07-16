@@ -1,0 +1,43 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-16T12:56:00Z",
+  "bead_id": "oraclemcp-oci-live-adb-harness-y1x7",
+  "scope": {
+    "summary": "Advance the OCI Always Free ADB acceptance harness without claiming an operator-gated live result.",
+    "in_scope": [
+      "scripts/e2e/real_adb_tcps_signoff.sh"
+    ],
+    "out_of_scope": [
+      "Running the credentialed OCI acceptance against a real tenancy."
+    ]
+  },
+  "source": {
+    "sha": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/e2e/real_adb_tcps_signoff.sh",
+        "kind": "cli",
+        "trace": "The operator-gated harness reaches the live ADB acceptance boundary."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": []
+  },
+  "limitations": [
+    "OCI credentials and an Always Free ADB are operator-provided."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

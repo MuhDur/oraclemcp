@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cross-repo-evidence-contract:v1:required-proof",
+  "title": "required-proof/v1",
+  "description": "Evidence that a repository's Required command graph was run to completion against one exact, clean tree. Produced by the repo's verify-required-local command. This document never asserts that CI is green and never authorises a release; it asserts only what ran locally, on what SHA, under what resource budget, and with what outcome.",
+  "x-evidence-contract": "cross-repo-evidence-contract-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "repo",
+    "generated_at",
+    "source",
+    "tool_versions",
+    "resource_budget",
+    "commands",
+    "verdict"
+  ],
+  "properties": {
+    "schema": {
+      "description": "Contract discriminator. Consumers must reject any document whose schema they do not implement rather than best-effort parse it (E_UNSUPPORTED_SCHEMA).",
+      "const": "required-proof/v1"
+    },
+    "repo": {
+      "description": "Repository this evidence was produced in. The repo name lives in the payload, never in the schema, so the schema file stays byte-identical across repos.",
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at": { "$ref": "#/$defs/timestamp" },
+    "source": { "$ref": "#/$defs/sourceRef" },
+    "tool_versions": {
+      "description": "Resolved versions of every tool the graph depended on (e.g. rustc, cargo, cargo-deny). Declared, not ambient: a proof that cannot name its toolchain cannot be reproduced.",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "resource_budget": { "$ref": "#/$defs/resourceBudget" },
+    "commands": {
+      "description": "One record per command in the Required graph. An empty list is rejected: a proof with no commands is not a proof.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/commandRecord" }
+    },
+    "verdict": {
+      "description": "Declared overall verdict. Cross-checked against the command records; a declared pass that the records do not support is rejected (E_VERDICT_MISMATCH).",
+      "enum": ["pass", "fail"]
+    }
+  },
+  "$defs": {
+    "commandRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tier", "argv", "sha", "outcome", "exit_code", "started_at", "ended_at"],
+      "properties": {
+        "id": {
+          "description": "Stable identifier for this command within the graph (e.g. fmt, clippy, test-workspace).",
+          "type": "string",
+          "minLength": 1
+        },
+        "tier": {
+          "description": "required: must pass for the proof to pass; a skip here is a failure (E_SKIPPED_AS_PASS). advisory: reported, never gating.",
+          "enum": ["required", "advisory"]
+        },
+        "argv": {
+          "description": "Exact argument vector executed, unsplit. Records the command as run, not a prose description of it.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "sha": {
+          "description": "Tree the command actually ran against. Must equal source.sha; a differing value means a stale result was carried forward (E_STALE_SHA).",
+          "$ref": "#/$defs/sha1"
+        },
+        "outcome": {
+          "description": "Tri-state. skip is a first-class outcome and must carry a machine-readable reason; it is never silently promoted to pass.",
+          "enum": ["pass", "fail", "skip"]
+        },
+        "skip_reason": {
+          "description": "Required when outcome is skip. Machine-readable token (e.g. no-live-database), not free prose.",
+          "type": "string",
+          "minLength": 1
+        },
+        "exit_code": {
+          "description": "Process exit status, or null when the command did not run to completion (skipped or interrupted).",
+          "type": ["integer", "null"]
+        },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "ended_at": {
+          "description": "Completion instant, or null if the command never finished. Nullable on purpose: an unfinished command must be representable so it can be rejected with a precise reason (E_UNFINISHED_COMMAND) rather than a generic type error.",
+          "$ref": "#/$defs/nullableTimestamp"
+        }
+      }
+    },
+    "resourceBudget": {
+      "description": "Declared resource ceilings the run was executed under. Required so a proof cannot be produced by a run that silently exhausted the host (the retrospective's ~40GB-RSS and 9,700-thread incidents).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["isolated_target_dir", "memory_max_bytes", "pid_task_max"],
+      "properties": {
+        "isolated_target_dir": {
+          "description": "Per-run build directory. Must not be the shared/global target dir: a shared dir makes a run's inputs unattributable.",
+          "type": "string",
+          "minLength": 1
+        },
+        "memory_max_bytes": { "type": "integer", "minimum": 1 },
+        "pid_task_max": {
+          "description": "Task/PID ceiling. The scarce resource in the cgroup-exhaustion incident; a memory cap alone was proven insufficient.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "nullableTimestamp": {
+      "description": "An RFC 3339 UTC instant, or null when the event has not happened. Null is representable so it can be rejected by a named semantic rule rather than a generic type error.",
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "sha1": {
+      "description": "Full 40-character lowercase hex git object name. Abbreviated or uppercase SHAs are rejected: evidence must name an exact, unambiguous commit.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sourceRef": {
+      "description": "The exact tree this evidence was produced from.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha", "tree_clean"],
+      "properties": {
+        "sha": { "$ref": "#/$defs/sha1" },
+        "tree_clean": {
+          "description": "False means uncommitted changes were present. Evidence from a dirty tree is not reproducible and is rejected (E_TREE_DIRTY).",
+          "type": "boolean"
+        },
+        "branch": { "type": "string", "minLength": 1 }
+      }
+    },
+    "timestamp": {
+      "description": "RFC 3339 UTC instant, e.g. 2026-07-16T12:00:00Z.",
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

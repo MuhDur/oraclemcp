@@ -1,0 +1,37 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-16T12:40:00Z",
+  "bead_id": "rust-oracledb-driver-next-release-c23g.3",
+  "scope": {
+    "summary": "Freeze the live timestamp descriptor regression against a real 23ai server.",
+    "in_scope": ["crates/oracledb/tests/live_descriptor.rs"],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "cargo test --test live_descriptor",
+        "kind": "cli",
+        "trace": "Drives ALL_TYPE_ATTRS against the live 23ai container."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": []
+  },
+  "limitations": [],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}

@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cross-repo-evidence-contract:v1:release-candidate-proof",
+  "title": "release-candidate-proof/v1",
+  "description": "Evidence that a candidate tag at an exact SHA satisfies every release precondition. Emitted only on success by the repo's verify-release-exact-sha command. This document is a validation record, not an authorisation: producing it performs no git tag, push, publish or registry mutation, and possessing it does not make a release happen.",
+  "x-evidence-contract": "cross-repo-evidence-contract-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "repo",
+    "generated_at",
+    "candidate",
+    "source",
+    "required_proof",
+    "required_ci",
+    "artifacts",
+    "verdict"
+  ],
+  "properties": {
+    "schema": {
+      "description": "Contract discriminator. Consumers must reject any document whose schema they do not implement rather than best-effort parse it (E_UNSUPPORTED_SCHEMA).",
+      "const": "release-candidate-proof/v1"
+    },
+    "repo": {
+      "description": "Repository this evidence was produced in. The repo name lives in the payload, never in the schema, so the schema file stays byte-identical across repos.",
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at": { "$ref": "#/$defs/timestamp" },
+    "candidate": {
+      "description": "The tag under consideration. It does not exist yet: this proof validates a candidate without creating it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tag", "version"],
+      "properties": {
+        "tag": {
+          "description": "Candidate tag name, e.g. v0.8.4.",
+          "type": "string",
+          "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$"
+        },
+        "version": {
+          "description": "Workspace version the tree declares. Must correspond to the tag; a tag naming a different version than the tree ships is rejected (E_TAG_VERSION_MISMATCH).",
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$"
+        }
+      }
+    },
+    "source": { "$ref": "#/$defs/sourceRef" },
+    "required_proof": {
+      "description": "Reference to the required-proof/v1 document backing this candidate. Its SHA must equal source.sha, so a release cannot inherit a proof from an earlier commit (E_STALE_SHA).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "path", "sha"],
+      "properties": {
+        "schema": { "const": "required-proof/v1" },
+        "path": { "type": "string", "minLength": 1 },
+        "sha": { "$ref": "#/$defs/sha1" }
+      }
+    },
+    "required_ci": {
+      "description": "Observed CI state for the exact candidate SHA. A required job that is non-terminal or non-success makes this proof invalid (E_REQUIRED_CI_NOT_GREEN); advisory jobs are recorded but never gate.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha", "jobs"],
+      "properties": {
+        "sha": { "$ref": "#/$defs/sha1" },
+        "jobs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/ciJob" }
+        }
+      }
+    },
+    "artifacts": {
+      "description": "Evidence artifacts this release stands on (e.g. the live version-matrix result). Each artifact's SHA must equal source.sha: an artifact recorded for a parent commit is a substitution, not evidence for this one (E_ARTIFACT_SHA_MISMATCH).",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/artifactRef" }
+    },
+    "verdict": {
+      "description": "Pinned by const: this document exists only for a candidate that passed every precondition, so a failing release-candidate-proof is a contradiction in terms rather than a value. A candidate that fails produces findings and no document. The preconditions themselves are re-checked on read, so the const is an assertion this file must live up to, not a way to declare success.",
+      "const": "pass"
+    }
+  },
+  "$defs": {
+    "ciJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "tier", "status", "conclusion"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "tier": {
+          "description": "required: gates the release. advisory: reported separately, never gating.",
+          "enum": ["required", "advisory"]
+        },
+        "status": {
+          "description": "Run lifecycle state. Anything other than completed is non-terminal and can never count as green.",
+          "enum": ["queued", "in_progress", "completed"]
+        },
+        "conclusion": {
+          "description": "Terminal result, or null while the job is non-terminal. Only success counts as green: skipped and neutral are not success.",
+          "enum": [
+            "success",
+            "failure",
+            "cancelled",
+            "skipped",
+            "timed_out",
+            "neutral",
+            "action_required",
+            null
+          ]
+        }
+      }
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "sha"],
+      "properties": {
+        "kind": {
+          "description": "Artifact family, e.g. version-matrix.",
+          "type": "string",
+          "minLength": 1
+        },
+        "path": { "type": "string", "minLength": 1 },
+        "sha": {
+          "description": "The commit this artifact was recorded for.",
+          "$ref": "#/$defs/sha1"
+        }
+      }
+    },
+    "sha1": {
+      "description": "Full 40-character lowercase hex git object name. Abbreviated or uppercase SHAs are rejected: evidence must name an exact, unambiguous commit.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sourceRef": {
+      "description": "The exact tree this evidence was produced from.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha", "tree_clean"],
+      "properties": {
+        "sha": { "$ref": "#/$defs/sha1" },
+        "tree_clean": {
+          "description": "False means uncommitted changes were present. Evidence from a dirty tree is not reproducible and is rejected (E_TREE_DIRTY).",
+          "type": "boolean"
+        },
+        "branch": { "type": "string", "minLength": 1 }
+      }
+    },
+    "timestamp": {
+      "description": "RFC 3339 UTC instant, e.g. 2026-07-16T12:00:00Z.",
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

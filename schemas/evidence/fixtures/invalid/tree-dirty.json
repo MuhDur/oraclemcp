@@ -1,0 +1,29 @@
+{
+  "schema": "required-proof/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-16T12:10:00Z",
+  "source": {
+    "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e",
+    "tree_clean": false,
+    "branch": "main"
+  },
+  "tool_versions": { "rustc": "1.93.0-nightly (nightly-2026-05-11)" },
+  "resource_budget": {
+    "isolated_target_dir": "/home/durakovic/.cache/evidence-runs/4f2a9c1e/target",
+    "memory_max_bytes": 17179869184,
+    "pid_task_max": 384
+  },
+  "commands": [
+    {
+      "id": "fmt",
+      "tier": "required",
+      "argv": ["cargo", "fmt", "--all", "--", "--check"],
+      "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e",
+      "outcome": "pass",
+      "exit_code": 0,
+      "started_at": "2026-07-16T12:05:01Z",
+      "ended_at": "2026-07-16T12:05:04Z"
+    }
+  ],
+  "verdict": "pass"
+}

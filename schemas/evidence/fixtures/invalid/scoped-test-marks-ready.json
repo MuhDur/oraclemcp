@@ -1,0 +1,34 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-16T12:40:00Z",
+  "bead_id": "rust-oracledb-driver-next-release-c23g.2",
+  "scope": {
+    "summary": "Normalize the TSTZ/TSLTZ built-in descriptor family.",
+    "in_scope": ["crates/oracledb-protocol/src/describe/timestamp.rs"],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "protocol-internal-decode-path"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Only the TSTZ descriptor unit test was run; the workspace suite was not."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "scoped-test"
+  }
+}
