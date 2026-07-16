@@ -118,7 +118,9 @@ shell still forks afterwards — containment held: the budget fails the RUN, not
 ## Feeding the evidence contract
 
 `--emit-budget` prints exactly the `resource_budget` block that
-[`required-proof/v1` and `mutation-result/v1`](EVIDENCE_CONTRACT.md) require:
+[`required-proof/v1`](../schemas/evidence/required-proof-v1.schema.json) and
+[`mutation-result/v1`](../schemas/evidence/mutation-result-v1.schema.json)
+require:
 
 ```json
 {

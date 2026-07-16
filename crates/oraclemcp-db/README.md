@@ -1,10 +1,12 @@
 # oraclemcp-db
 
-The **canonical shared Oracle foundation** for the two-binary family
-(`oraclemcp` and the sibling PL/SQL-intelligence superset `plsql-mcp`), per
-[ADR-0006](../../docs/adr/0006-oraclemcp-db-canonical-foundation.md).
+The **canonical shared Oracle foundation** for `oraclemcp`, including its
+optional embedded PL/SQL-intelligence engine, per
+[ADR-0006](../../docs/adr/0006-oraclemcp-db-canonical-foundation.md). The
+standalone `plsql-mcp` server described by that historical ADR is deprecated.
 
-It owns the correctness-critical Oracle layer both binaries build on:
+It owns the correctness-critical Oracle layer used by the server and its
+optional embedded engine:
 
 - the backend-independent [`OracleConnection`] trait + the thin
   [`oracledb`]-backed `RustOracleConnection`,
@@ -20,9 +22,9 @@ into this crate's public API: callers depend only on the `oraclemcp-db` types.
 
 ## API stability
 
-Because this surface has two consumers, the public API is treated as a
-**product** and follows SemVer once published. It is snapshot-locked in CI so an
-unintended breaking change is caught before it reaches `plsql-mcp`:
+Because this surface is published, its public API is treated as a **product**
+and follows SemVer once published. It is snapshot-locked in CI so an unintended
+breaking change is caught before release:
 
 - **`cargo public-api`** — diffs the rendered public API against a committed
   baseline (`api/<crate>.txt`). Any addition or removal that is not reflected in
@@ -31,8 +33,8 @@ unintended breaking change is caught before it reaches `plsql-mcp`:
   major / minor / patch and fails when the surface changed in a way the version
   bump does not allow.
 
-The same gate covers the engine-free **published spine** `plsql-mcp` consumes
-(`oraclemcp-error`, `oraclemcp-guard`) alongside this crate.
+The same gate covers the public dependencies used by this crate
+(`oraclemcp-error`, `oraclemcp-guard`) alongside the canonical foundation.
 
 The accepted published-spine dependency on `oraclemcp-error` **is part of the
 locked surface** (re-exported as `error_envelope`; its `ErrorEnvelope` type

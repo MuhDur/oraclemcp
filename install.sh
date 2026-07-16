@@ -880,7 +880,7 @@ verify_checksum() {
 
 cosign_required_message() {
   printf '%s\n' \
-    "ORACLEMCP_INSTALL_COSIGN_REQUIRED: --verify require needs cosign. Install cosign from https://docs.sigstore.dev/cosign/installation/ or set ORACLEMCP_COSIGN=/path/to/cosign, then rerun the installer."
+    "ORACLEMCP_INSTALL_COSIGN_REQUIRED: --verify require needs cosign. Install cosign from https://docs.sigstore.dev/cosign/system_config/installation/ or set ORACLEMCP_COSIGN=/path/to/cosign, then rerun the installer."
 }
 
 should_download_cosign_metadata() {

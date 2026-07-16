@@ -13,7 +13,7 @@ than treating it as permanent.
 | [0003](0003-keyed-mac-audit-chain.md) | Keyed-MAC (HMAC-SHA256) signed audit chain wired into served dispatch | Accepted |
 | [0004](0004-governed-operating-level-ladder.md) | Governed operating-level ladder with confirmation-gated escalation | Accepted |
 | [0005](0005-awr-diagnostics-license-gating.md) | AWR / Diagnostics-Pack license gating (never invoke a paid pack unlicensed) | Accepted |
-| [0006](0006-oraclemcp-db-canonical-foundation.md) | Planned `plsql-mcp` convergence onto `oraclemcp-db` | Superseded |
+| [0006](0006-oraclemcp-db-canonical-foundation.md) | Historical standalone `plsql-mcp` convergence plan | Superseded |
 | [0007](0007-phase0-lane-bridge.md) | Phase-0 lane bridge for non-Send Oracle sessions | Accepted |
 | [0008](0008-result-masking-policy.md) | Result masking policy and per-profile tokenization | Accepted |
 | [0009](0009-policy-as-code-grammar.md) | Policy-as-code grammar and monotone decisions | Accepted |

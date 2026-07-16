@@ -41,11 +41,12 @@ eroded and needs re-establishing.
 
 ## Addendum (B5) — Public-API lock on the shared surface
 
-The seam keeps driver churn *in*; a complementary gate keeps the public surface
-*stable* for the two consumers of the canonical foundation (ADR-0006:
-`oraclemcp-db`, plus the engine-free spine `oraclemcp-error` / `oraclemcp-guard`
-that `plsql-mcp` converges onto). An unintended breaking change to that surface
-must be caught before it reaches `plsql-mcp`.
+The seam keeps driver churn *in*; a complementary gate keeps the published
+canonical foundation stable (`oraclemcp-db`, plus its public
+`oraclemcp-error` / `oraclemcp-guard` dependencies). An unintended breaking
+change to that surface must be caught before release. ADR-0006's separate
+`plsql-mcp` convergence story is superseded: the server's supported optional
+engine is embedded through `plsql-intelligence`.
 
 **Decision.** Adopt two API-lock tools (mirroring `oracledb`'s own ADR-0002):
 
@@ -63,21 +64,20 @@ Both render rustdoc JSON, so they run on the pinned nightly (ADR-0001). They are
 installed as standalone CI binaries (`taiki-e/install-action`), **not** added to
 the workspace dependency graph, so they do not affect `cargo deny`.
 
-**Locked crates.** The published spine `plsql-mcp` consumes
-(`oraclemcp-error`, `oraclemcp-guard`) and the canonical foundation
-(`oraclemcp-db`). The binary-facing aggregation crate `oraclemcp-core` is
-deliberately **not** locked — it is an internal consumer, not a shared product
-API. The accepted spine dependency `oraclemcp-error` is part of the locked
-`oraclemcp-db` surface (re-exported as `error_envelope`; `ErrorEnvelope` appears
-in return positions), not pretended away.
+**Locked crates.** The canonical foundation (`oraclemcp-db`) and its public
+dependencies (`oraclemcp-error`, `oraclemcp-guard`) are snapshot-locked. The
+binary-facing aggregation crate `oraclemcp-core` is deliberately **not** locked
+— it is an internal consumer, not a shared product API. The accepted dependency
+on `oraclemcp-error` is part of the locked `oraclemcp-db` surface (re-exported
+as `error_envelope`; `ErrorEnvelope` appears in return positions), not
+pretended away.
 
 **Baseline-refresh procedure.** See `crates/oraclemcp-db/README.md` and the
 header of `scripts/oraclemcp_api_lock.sh`:
 `cargo public-api -p <crate> > crates/<crate>/api/<crate>.txt` under the pinned
 nightly.
 
-**Review trigger (addendum).** Revisit the locked-crate set if `plsql-mcp`'s
-convergence (ADR-0006) lands and a fourth shared crate joins the spine, or if
-`cargo public-api` / `cargo semver-checks` rustdoc-JSON output stops being
-stable under a re-pinned nightly (regenerate the baselines as part of the
-re-pin).
+**Review trigger (addendum).** Revisit the locked-crate set if another public
+crate joins the canonical foundation, or if `cargo public-api` /
+`cargo semver-checks` rustdoc-JSON output stops being stable under a re-pinned
+nightly (regenerate the baselines as part of the re-pin).

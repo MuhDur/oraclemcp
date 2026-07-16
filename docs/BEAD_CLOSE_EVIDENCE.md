@@ -5,8 +5,9 @@ it.* The failure this exists to prevent is the close that makes the claim and
 skips the reason — the one that says "verified against 23ai" with nothing to
 point at, or cites a proof that is red, or mentions a defect that no bead tracks.
 
-The shape of the claim is [`bead-close-evidence/v1`](EVIDENCE_CONTRACT.md); this
-document is how it is produced and audited.
+The shape of the claim is
+[`bead-close-evidence/v1`](../schemas/evidence/bead-close-evidence-v1.schema.json);
+this document is how it is produced and audited.
 
 ```bash
 scripts/audit_bead_closes.py --template <bead-id>   # scaffold, prefilled from git
