@@ -120,9 +120,10 @@ write_profile() {
     printf 'max_level = "READ_ONLY"\n'
     printf 'default_level = "READ_ONLY"\n'
     printf 'call_timeout_seconds = 30\n'
-    # A newly provisioned Always Free listener can need more than the thin
-    # driver's default 20 seconds before it accepts the first TCPS session.
-    printf 'connect_timeout_seconds = 60\n\n'
+    # OCI wallets normally supply full Oracle Net descriptors.  Keep
+    # descriptor-specific transport timeouts inside that descriptor: the
+    # server intentionally refuses an injected connect_timeout_seconds here.
+    printf '\n'
     printf '[profiles.oci]\n'
     printf 'wallet_location = %s\n' "$wallet"
     if [ -n "${ORACLEMCP_REAL_ADB_WALLET_PASSWORD:-}" ]; then

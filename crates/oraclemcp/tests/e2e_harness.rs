@@ -1452,7 +1452,6 @@ fn oci_adb_terraform_dry_run_wires_explicit_teardown() {
         "wallet_high_target",
         "openssl s_client",
         "adb_server_certificate",
-        "connect_timeout_seconds = 60",
         "wait_for_adb_tcps",
         "--json doctor --online --profile oci_adb_bootstrap",
     ] {
@@ -1477,6 +1476,11 @@ fn oci_adb_terraform_dry_run_wires_explicit_teardown() {
             "OCI ADB Terraform module lost its required contract: {expected}"
         );
     }
+    assert!(
+        !harness.contains("connect_timeout_seconds = 60"),
+        "the OCI harness resolves the wallet HIGH alias to a full Oracle Net descriptor; \
+         the server must not inject connect_timeout_seconds into that descriptor"
+    );
 
     let workflow = std::fs::read_to_string(root.join(".github/workflows/oci-adb.yml"))
         .expect("read OCI ADB workflow");

@@ -407,8 +407,11 @@ bootstrap_ssl_dn="$(toml_string "$ssl_dn")"
   printf 'credential_ref = "env:ADB_ADMIN_PASSWORD"\n'
   printf 'max_level = "ADMIN"\n'
   printf 'default_level = "READ_ONLY"\n'
+  # The wallet supplies a full Oracle Net descriptor.  The server correctly
+  # refuses to inject connect_timeout_seconds into one; a harness retry bounds
+  # startup instead, while any descriptor-specific transport timeout remains
+  # authored inside tnsnames.ora.
   printf 'call_timeout_seconds = 30\n\n'
-  printf 'connect_timeout_seconds = 60\n\n'
   printf '[profiles.oci]\n'
   printf 'wallet_location = %s\n' "$bootstrap_wallet"
   printf 'wallet_password_ref = "env:ADB_WALLET_PASSWORD"\n'
