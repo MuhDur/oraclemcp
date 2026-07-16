@@ -1,0 +1,73 @@
+[manifest]
+version = 1
+description = "Current oraclemcp release and runtime version surfaces."
+generate_command = "python3 scripts/release_surface_manifest.py --write"
+check_command = "python3 scripts/release_surface_manifest.py --check"
+
+[[canonical]]
+name = "server_version"
+path = "crates/oraclemcp/Cargo.toml"
+toml_key = "package.version"
+
+[[canonical]]
+name = "driver_version"
+path = "Cargo.toml"
+toml_key = "workspace.dependencies.oracledb.version"
+strip_prefix = "="
+
+[[canonical]]
+name = "runtime_version"
+path = "Cargo.toml"
+toml_key = "workspace.dependencies.asupersync.version"
+
+[[surface]]
+name = "agents_runtime_version"
+source = "runtime_version"
+path = "AGENTS.md"
+pattern = "asupersync (?P<value>[0-9]+\\.[0-9]+\\.[0-9]+)"
+replacement = "asupersync {runtime_version}"
+match_count = 1
+
+[[surface]]
+name = "toolchain_runtime_version"
+source = "runtime_version"
+path = "docs/TOOLCHAIN.md"
+pattern = "asupersync (?P<value>[0-9]+\\.[0-9]+\\.[0-9]+)"
+replacement = "asupersync {runtime_version}"
+match_count = 1
+
+[[surface]]
+name = "toolchain_driver_version"
+source = "driver_version"
+path = "docs/TOOLCHAIN.md"
+pattern = "oracledb` (?P<value>[0-9]+\\.[0-9]+\\.[0-9]+) driver"
+replacement = "oracledb` {driver_version} driver"
+match_count = 1
+
+[[surface]]
+name = "operations_runtime_version"
+source = "runtime_version"
+path = "docs/operations.md"
+pattern = "asupersync (?P<value>[0-9]+\\.[0-9]+\\.[0-9]+)"
+replacement = "asupersync {runtime_version}"
+match_count = 1
+
+[[surface]]
+name = "operations_driver_version"
+source = "driver_version"
+path = "docs/operations.md"
+pattern = "oracledb` (?P<value>[0-9]+\\.[0-9]+\\.[0-9]+) driver"
+replacement = "oracledb` {driver_version} driver"
+match_count = 1
+
+[[intentional_non_lockstep]]
+name = "driver release train"
+canonical_path = "Cargo.toml"
+independent_from = "server_version"
+rationale = "The oracledb driver is an upstream release train and must remain independently pinned."
+
+[[intentional_non_lockstep]]
+name = "nightly toolchain"
+canonical_path = "rust-toolchain.toml"
+independent_from = "server_version"
+rationale = "The nightly pin follows asupersync language-feature compatibility, not server semver."
