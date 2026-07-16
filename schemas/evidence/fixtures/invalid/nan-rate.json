@@ -1,0 +1,33 @@
+{
+  "schema": "mutation-result/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-16T12:30:00Z",
+  "source": {
+    "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "scope": {
+    "claim": "scoped",
+    "description": "A finite rate is required before this run can be evidence.",
+    "targets": ["crates/oracledb-protocol/src/describe/timestamp.rs"]
+  },
+  "started_at": "2026-07-16T12:22:00Z",
+  "ended_at": "2026-07-16T12:29:14Z",
+  "resource_budget": {
+    "isolated_target_dir": "/home/durakovic/.cache/evidence-runs/mutants-4f2a9c1e/target",
+    "memory_max_bytes": 8589934592,
+    "pid_task_max": 256
+  },
+  "shards": [{ "id": "shard-1of1", "status": "complete" }],
+  "counts": {
+    "caught": 0,
+    "missed": 0,
+    "timeout": 0,
+    "unviable": 0
+  },
+  "denominator": "caught+missed",
+  "rate": NaN,
+  "survivors": [],
+  "kills": []
+}

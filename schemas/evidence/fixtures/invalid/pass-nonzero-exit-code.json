@@ -8,9 +8,7 @@
     "branch": "main"
   },
   "tool_versions": {
-    "rustc": "1.93.0-nightly (nightly-2026-05-11)",
-    "cargo": "1.93.0-nightly",
-    "cargo-deny": "0.16.2"
+    "rustc": "1.93.0-nightly (nightly-2026-05-11)"
   },
   "resource_budget": {
     "isolated_target_dir": "/home/durakovic/.cache/evidence-runs/4f2a9c1e/target",
@@ -18,8 +16,8 @@
     "pid_task_max": 384
   },
   "command_graph": {
-    "command_ids": ["clippy", "fmt", "live-matrix", "test-workspace"],
-    "sha256": "42a4720eb2963bfa7070ef744aaae71368ded78f1ca59e3f32596fed49438f52"
+    "command_ids": ["fmt", "live-matrix", "test-workspace"],
+    "sha256": "ef9ef9a41b7916d72e1994387959ddf4cd093492c1d372655adeeda8b17a76ec"
   },
   "commands": [
     {
@@ -28,29 +26,9 @@
       "argv": ["cargo", "fmt", "--all", "--", "--check"],
       "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e",
       "outcome": "pass",
-      "exit_code": 0,
+      "exit_code": 1,
       "started_at": "2026-07-16T12:05:01Z",
       "ended_at": "2026-07-16T12:05:04Z"
-    },
-    {
-      "id": "clippy",
-      "tier": "required",
-      "argv": [
-        "cargo",
-        "clippy",
-        "--workspace",
-        "--exclude",
-        "oracledb-pyshim",
-        "--no-deps",
-        "--",
-        "-D",
-        "warnings"
-      ],
-      "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e",
-      "outcome": "pass",
-      "exit_code": 0,
-      "started_at": "2026-07-16T12:05:04Z",
-      "ended_at": "2026-07-16T12:07:52Z"
     },
     {
       "id": "test-workspace",
@@ -59,7 +37,7 @@
       "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e",
       "outcome": "pass",
       "exit_code": 0,
-      "started_at": "2026-07-16T12:07:52Z",
+      "started_at": "2026-07-16T12:05:04Z",
       "ended_at": "2026-07-16T12:09:41Z"
     },
     {

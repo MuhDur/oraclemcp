@@ -1,0 +1,56 @@
+{
+  "schema": "release-candidate-proof/v2",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-16T12:20:00Z",
+  "candidate": {
+    "tag": "v0.8.4",
+    "version": "0.8.4"
+  },
+  "source": {
+    "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "required_proof": {
+    "schema": "required-proof/v2",
+    "path": "tests/artifacts/evidence/required-proof-4f2a9c1e.json",
+    "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e"
+  },
+  "required_ci": {
+    "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e",
+    "jobs": [
+      {
+        "name": "Required / required",
+        "tier": "required",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Version matrix / full",
+        "tier": "required",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Soak / nightly",
+        "tier": "advisory",
+        "status": "completed",
+        "conclusion": "failure"
+      },
+      {
+        "name": "Canary / weekly",
+        "tier": "advisory",
+        "status": "in_progress",
+        "conclusion": null
+      }
+    ]
+  },
+  "artifacts": [
+    {
+      "kind": "version-matrix",
+      "path": "tests/artifacts/version_matrix/results-4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e.json",
+      "sha": "4f2a9c1e7b3d5086af12cd34ef56ab78901c2d3e"
+    }
+  ],
+  "verdict": "pass"
+}

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Offline validator for cross-repo-evidence-contract-v1 documents.
+"""Offline validator for versioned cross-repo evidence-contract documents.
 
 The contract has two layers, and both are load-bearing:
 
-  structural  the four schemas/evidence/*.schema.json files (draft 2020-12).
+  structural  the versioned schemas/evidence/*.schema.json files (draft 2020-12).
               These are the cross-repo contract and are mirrored byte-for-byte
               between rust-oracledb and oraclemcp.
 
@@ -26,12 +26,14 @@ that says "yes" the day the network is down.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import re
 import sys
 from pathlib import Path
 
-CONTRACT = "cross-repo-evidence-contract-v1"
+CONTRACT = "cross-repo-evidence-contract"
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_DIR = ROOT / "schemas" / "evidence"
@@ -40,13 +42,15 @@ FIXTURE_DIR = SCHEMA_DIR / "fixtures"
 # Document `schema` discriminator -> schema file.
 SCHEMA_FILES = {
     "required-proof/v1": "required-proof-v1.schema.json",
+    "required-proof/v2": "required-proof-v2.schema.json",
     "release-candidate-proof/v1": "release-candidate-proof-v1.schema.json",
+    "release-candidate-proof/v2": "release-candidate-proof-v2.schema.json",
     "mutation-result/v1": "mutation-result-v1.schema.json",
     "bead-close-evidence/v1": "bead-close-evidence-v1.schema.json",
 }
 
 # $defs that appear in more than one schema must be identical everywhere, or the
-# four schemas drift into four dialects. Enforced by check_shared_defs().
+# schema versions drift into incompatible dialects. Enforced by check_shared_defs().
 SHARED_DEFS = (
     "sha1",
     "sourceRef",
@@ -111,9 +115,17 @@ def _type_ok(instance, name: str) -> bool:
             return False
         if isinstance(instance, int):
             return True
-        return isinstance(instance, float) and instance.is_integer()
+        return (
+            isinstance(instance, float)
+            and math.isfinite(instance)
+            and instance.is_integer()
+        )
     if name == "number":
-        return isinstance(instance, (int, float)) and not isinstance(instance, bool)
+        return (
+            isinstance(instance, (int, float))
+            and not isinstance(instance, bool)
+            and (not isinstance(instance, float) or math.isfinite(instance))
+        )
     raise ValueError(f"unsupported type keyword: {name}")
 
 
@@ -261,6 +273,47 @@ def _tree_clean(doc: dict, out: list) -> None:
         )
 
 
+def _required_graph_finding(doc: dict, expected: dict[str, dict[str, object] | None]) -> Finding | None:
+    """Check records against a repository-derived Required graph witness."""
+    actual: dict[str, dict] = {}
+    for command in doc["commands"]:
+        identifier = command["id"]
+        if identifier in actual:
+            return Finding(
+                "E_COMMAND_GRAPH_MISMATCH",
+                "/commands",
+                f"duplicate command record {identifier!r} cannot witness the Required graph",
+            )
+        actual[identifier] = command
+
+    missing = sorted(set(expected) - set(actual))
+    unexpected = sorted(set(actual) - set(expected))
+    if missing or unexpected:
+        detail = []
+        if missing:
+            detail.append(f"missing {', '.join(missing)}")
+        if unexpected:
+            detail.append(f"unexpected {', '.join(unexpected)}")
+        return Finding(
+            "E_COMMAND_GRAPH_MISMATCH",
+            "/commands",
+            "command records do not exactly match the Required graph (" + "; ".join(detail) + ")",
+        )
+
+    for identifier, expected_record in expected.items():
+        if expected_record is None:
+            continue
+        actual_record = actual[identifier]
+        for field in ("tier", "argv"):
+            if actual_record[field] != expected_record[field]:
+                return Finding(
+                    "E_COMMAND_GRAPH_MISMATCH",
+                    "/commands",
+                    f"{identifier}: recorded {field} differs from the Required graph witness",
+                )
+    return None
+
+
 def _semantic_required_proof(doc: dict) -> list:
     out: list = []
     _tree_clean(doc, out)
@@ -307,6 +360,28 @@ def _semantic_required_proof(doc: dict) -> list:
                     "no end time, so it never ran to completion",
                 )
             )
+        elif cmd["exit_code"] is None:
+            # `exit_code` is nullable only so interrupted commands can be
+            # represented. A pass/fail record that has an end time must name
+            # the process status that produced its outcome.
+            out.append(
+                Finding(
+                    "E_UNFINISHED",
+                    f"{path}/exit_code",
+                    f"command {cmd['id']!r} reports outcome {cmd['outcome']!r} and "
+                    "an end time but no exit status, so its completion cannot be "
+                    "verified",
+                )
+            )
+        elif (cmd["outcome"] == "pass") != (cmd["exit_code"] == 0):
+            out.append(
+                Finding(
+                    "E_EXIT_STATUS_MISMATCH",
+                    f"{path}/exit_code",
+                    f"command {cmd['id']!r} reports outcome {cmd['outcome']!r} but "
+                    f"exit status {cmd['exit_code']}; only exit status 0 can be pass",
+                )
+            )
 
         if required and cmd["outcome"] == "fail":
             saw_required_fail = True
@@ -331,6 +406,44 @@ def _semantic_required_proof(doc: dict) -> list:
                     f"derive {derived!r}",
                 )
             )
+    return out
+
+
+def _semantic_required_proof_v2(doc: dict) -> list:
+    """Require v2 records to match their self-declared graph record exactly.
+
+    The record catches malformed or internally inconsistent documents.  It is
+    deliberately not treated as an authenticity boundary: an exact-SHA release
+    consumer must compare these records with the candidate workflow it derives.
+    """
+
+    out = _semantic_required_proof(doc)
+    graph = doc["command_graph"]
+    command_ids = graph["command_ids"]
+    canonical_ids = sorted(set(command_ids))
+    if command_ids != canonical_ids:
+        out.append(
+            Finding(
+                "E_COMMAND_GRAPH_MISMATCH",
+                "/command_graph/command_ids",
+                "command IDs must be unique and lexicographically sorted before hashing",
+            )
+        )
+        return out
+    canonical = json.dumps(command_ids, ensure_ascii=False, separators=(",", ":"))
+    expected_hash = hashlib.sha256(canonical.encode()).hexdigest()
+    if graph["sha256"] != expected_hash:
+        out.append(
+            Finding(
+                "E_COMMAND_GRAPH_MISMATCH",
+                "/command_graph/sha256",
+                "command graph SHA-256 does not match its canonical command IDs",
+            )
+        )
+        return out
+    graph_finding = _required_graph_finding(doc, {identifier: None for identifier in command_ids})
+    if graph_finding is not None:
+        out.append(graph_finding)
     return out
 
 
@@ -533,7 +646,9 @@ def _semantic_bead_close_evidence(doc: dict) -> list:
 
 SEMANTIC_RULES = {
     "required-proof/v1": _semantic_required_proof,
+    "required-proof/v2": _semantic_required_proof_v2,
     "release-candidate-proof/v1": _semantic_release_candidate_proof,
+    "release-candidate-proof/v2": _semantic_release_candidate_proof,
     "mutation-result/v1": _semantic_mutation_result,
     "bead-close-evidence/v1": _semantic_bead_close_evidence,
 }
@@ -595,12 +710,55 @@ def check_shared_defs() -> list:
                 if canonical != expected:
                     errors.append(
                         f"$defs/{def_name} differs between {origin} and {filename}; "
-                        "shared definitions must be identical or the four schemas "
-                        "drift into four dialects"
+                        "shared definitions must be identical or schema versions "
+                        "drift into incompatible dialects"
                     )
             else:
                 seen[def_name] = (filename, canonical)
     return errors
+
+
+def check_mirror(mirror_root: Path) -> int:
+    """Verify the complete versioned-schema inventory byte-for-byte.
+
+    The semantic validator is deliberately implementation-specific, but a
+    versioned schema is the shared contract.  A dual-release caller supplies
+    its sibling checkout explicitly so ordinary single-repository CI remains
+    hermetic while the coordinated release cannot silently drift.
+    """
+
+    mirror_dir = mirror_root / "schemas" / "evidence"
+    expected = set(SCHEMA_FILES.values())
+    actual = {path.name for path in mirror_dir.glob("*.schema.json")}
+    failures = 0
+
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    for filename in missing:
+        failures += 1
+        print(f"FAIL mirror: missing schema {filename}", file=sys.stderr)
+    for filename in unexpected:
+        failures += 1
+        print(f"FAIL mirror: unexpected schema {filename}", file=sys.stderr)
+
+    for filename in sorted(expected & actual):
+        local = (SCHEMA_DIR / filename).read_bytes()
+        mirrored = (mirror_dir / filename).read_bytes()
+        if local != mirrored:
+            failures += 1
+            print(f"FAIL mirror: {filename} differs byte-for-byte", file=sys.stderr)
+
+    if failures:
+        print(
+            f"evidence-contract mirror: {failures} inventory or byte-identity failures",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"evidence-contract mirror: {len(expected)} schemas byte-identical with "
+        f"{mirror_root}"
+    )
+    return 0
 
 
 def check_fixtures() -> int:
@@ -667,11 +825,22 @@ def main() -> int:
         action="store_true",
         help="run the fixture suite instead of validating files",
     )
+    parser.add_argument(
+        "--mirror-root",
+        type=Path,
+        help="sibling repository root for the coordinated byte-identity check",
+    )
     parser.add_argument("--json", action="store_true", help="emit findings as JSON")
     args = parser.parse_args()
 
     if args.check_fixtures:
-        return check_fixtures()
+        result = check_fixtures()
+        if args.mirror_root is not None:
+            result |= check_mirror(args.mirror_root)
+        return result
+
+    if args.mirror_root is not None:
+        parser.error("--mirror-root requires --check-fixtures")
 
     if not args.files:
         parser.error("pass at least one document, or --check-fixtures")

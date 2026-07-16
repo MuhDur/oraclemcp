@@ -21,6 +21,10 @@
     {
       "file": "bead-close-evidence.json",
       "covers": "A close backed by a required-proof at the same SHA, with limitations stated rather than implied."
+    },
+    {
+      "file": "release-candidate-proof-v2.json",
+      "covers": "A version-2 candidate proof whose required-proof reference is versioned in lockstep with the graph-record contract."
     }
   ],
   "invalid": [
@@ -119,6 +123,36 @@
       "expect_code": "E_LIVE_CLAIM_WITHOUT_ARTIFACT",
       "expect_path": "/live_evidence/artifacts",
       "covers": "oraclemcp OCI/ADB lane: an operator-gated live claim with no artifact remains a refusal, never a release-ready assertion."
+    },
+    {
+      "file": "null-exit-code.json",
+      "expect_code": "E_UNFINISHED",
+      "expect_path": "/commands/0/exit_code",
+      "covers": "A completed pass with no process status. A pass/fail record must name the exit status that produced its outcome."
+    },
+    {
+      "file": "pass-nonzero-exit-code.json",
+      "expect_code": "E_EXIT_STATUS_MISMATCH",
+      "expect_path": "/commands/0/exit_code",
+      "covers": "A required command claiming pass after exit status 1. A forged outcome cannot turn a failed process into green evidence."
+    },
+    {
+      "file": "fail-zero-exit-code.json",
+      "expect_code": "E_EXIT_STATUS_MISMATCH",
+      "expect_path": "/commands/0/exit_code",
+      "covers": "A required command claiming failure after exit status 0. Outcome and status must agree in both directions."
+    },
+    {
+      "file": "missing-required-command.json",
+      "expect_code": "E_COMMAND_GRAPH_MISMATCH",
+      "expect_path": "/commands",
+      "covers": "A v2 proof whose records omit a command named by its committed Required graph. A pass over a subset is not evidence of the full graph."
+    },
+    {
+      "file": "nan-rate.json",
+      "expect_code": "E_SCHEMA",
+      "expect_path": "/rate",
+      "covers": "Python accepts bare NaN while decoding JSON, but evidence rates must be finite before numeric bounds or arithmetic can be trusted."
     }
   ]
 }
