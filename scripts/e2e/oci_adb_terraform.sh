@@ -423,11 +423,11 @@ bootstrap_ssl_dn="$(toml_string "$ssl_dn")"
   printf 'default_profile = "oci_adb_bootstrap"\n\n'
   printf '[[profiles]]\n'
   printf 'name = "oci_adb_bootstrap"\n'
-  printf 'description = "runtime-only throwaway ADB IAM bootstrap; never committed"\n'
+  printf 'description = "runtime-only throwaway ADB IAM TCPS readiness probe; never committed"\n'
   printf 'connect_string = %s\n' "$bootstrap_connect_string"
   printf 'username = "ADMIN"\n'
   printf 'credential_ref = "env:ADB_ADMIN_PASSWORD"\n'
-  printf 'max_level = "ADMIN"\n'
+  printf 'max_level = "READ_ONLY"\n'
   printf 'default_level = "READ_ONLY"\n'
   # The wallet supplies a full Oracle Net descriptor.  The server correctly
   # refuses to inject connect_timeout_seconds into one; a harness retry bounds
@@ -446,20 +446,20 @@ bootstrap_ssl_dn="$(toml_string "$ssl_dn")"
 chmod 600 "$bootstrap_config"
 
 if ! e2e_run_cargo_capped "setup" build -p oraclemcp --bin oraclemcp; then
-  e2e_finish_fail "building oraclemcp for the guarded IAM bootstrap failed"
+  e2e_finish_fail "building oraclemcp for the IAM TCPS readiness probe failed"
 fi
-[ -x "$bootstrap_binary" ] || e2e_finish_fail "guarded IAM bootstrap binary was not produced"
+[ -x "$bootstrap_binary" ] || e2e_finish_fail "IAM TCPS readiness-probe binary was not produced"
 
 wait_for_adb_tcps() {
   local attempt status started ended output cert_chain server_dn
   # Terraform waits for resource creation, but the freshly-created ADB's TCPS
   # listener can lag that state briefly. Probe through the real server before
-  # any ADMIN mapping; never retry the mapping itself.
+  # any direct ADMIN mapping; never retry the mapping itself.
   for attempt in 1 2 3 4 5 6; do
     started="$(e2e_epoch_ms)"
     output="$run_dir/adb_tcps_readiness_${attempt}.log"
     e2e_log_event "adb_tcps_readiness" "setup" "running" 0 \
-      "real server doctor attempt $attempt/6 before guarded IAM bootstrap"
+      "real server doctor attempt $attempt/6 before direct IAM bootstrap"
     # Capture the actual leaf-certificate DN from the same concrete TCPS
     # endpoint. This is evidence only; the server still performs strict
     # certificate matching itself via ssl_server_dn_match=true.
@@ -480,7 +480,7 @@ wait_for_adb_tcps() {
           printf '%s' "$server_dn" >"$run_dir/adb_server_cert_dn"
           chmod 600 "$run_dir/adb_server_cert_dn"
           e2e_log_event "adb_server_certificate" "setup" "pass" 0 \
-            "captured real TCPS leaf certificate DN before guarded IAM bootstrap"
+            "captured real TCPS leaf certificate DN before direct IAM bootstrap"
         fi
       fi
     fi
@@ -490,7 +490,6 @@ wait_for_adb_tcps() {
       "PATH=$PATH" \
       "XDG_STATE_HOME=$bootstrap_state" \
       "ORACLEMCP_CONFIG=$bootstrap_config" \
-      "ORACLEMCP_AUDIT_KEY=$bootstrap_audit_key" \
       "ADB_ADMIN_PASSWORD=$admin_password" \
       "ADB_WALLET_PASSWORD=$wallet_password" \
       "$bootstrap_binary" --json doctor --online --profile oci_adb_bootstrap >"$output" 2>&1
@@ -499,7 +498,7 @@ wait_for_adb_tcps() {
     ended="$(e2e_epoch_ms)"
     if [ "$status" -eq 0 ]; then
       e2e_log_event "adb_tcps_readiness" "setup" "pass" "$((ended - started))" \
-        "real server doctor connected before guarded IAM bootstrap"
+        "real server doctor connected before direct IAM bootstrap"
       return 0
     fi
     e2e_log_event "adb_tcps_readiness" "setup" "running" "$((ended - started))" \
@@ -511,197 +510,27 @@ wait_for_adb_tcps() {
   return 1
 }
 
-bootstrap_script="$run_dir/configure_iam_global_user.py"
-bootstrap_audit_key="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
-[ "${#bootstrap_audit_key}" -eq 64 ] || e2e_finish_fail "could not generate runtime-only bootstrap audit key"
-cat >"$bootstrap_script" <<'PY'
-import json
-import os
-import queue
-import re
-import subprocess
-import sys
-import threading
-import time
-
-
-class BootstrapFailure(Exception):
-    pass
-
-
-class McpSession:
-    def __init__(self, binary, config, state_dir, server_log):
-        # `ORACLEMCP_*` is a configuration-override namespace. The enclosing
-        # harness deliberately uses that namespace for its own values, so do
-        # not leak those helpers into the child server process.
-        env = {key: value for key, value in os.environ.items() if not key.startswith("ORACLEMCP_")}
-        env["ORACLEMCP_CONFIG"] = config
-        # ADMIN bootstrap actions must be recorded by the server's signed audit
-        # chain. This key is generated for this throwaway run only.
-        env["ORACLEMCP_AUDIT_KEY"] = os.environ["ORACLEMCP_AUDIT_KEY"]
-        env["XDG_STATE_HOME"] = state_dir
-        self.log = open(server_log, "a", encoding="utf-8")
-        self.proc = subprocess.Popen(
-            [binary, "serve", "--profile", "oci_adb_bootstrap", "--allow-no-auth"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=self.log,
-            text=True,
-            bufsize=1,
-            env=env,
-        )
-        self.responses = queue.Queue()
-        self.request_id = 0
-        threading.Thread(target=self._read_stdout, daemon=True).start()
-
-    def _read_stdout(self):
-        assert self.proc.stdout is not None
-        for line in self.proc.stdout:
-            line = line.strip()
-            if line:
-                self.responses.put(line)
-
-    def rpc(self, method, params=None, timeout=90):
-        self.request_id += 1
-        request = {"jsonrpc": "2.0", "id": self.request_id, "method": method}
-        if params is not None:
-            request["params"] = params
-        assert self.proc.stdin is not None
-        self.proc.stdin.write(json.dumps(request) + "\n")
-        self.proc.stdin.flush()
-        deadline = time.monotonic() + timeout
-        while True:
-            if self.proc.poll() is not None:
-                raise BootstrapFailure("guarded IAM bootstrap server exited before replying")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise BootstrapFailure(f"timed out waiting for guarded MCP {method}")
-            try:
-                line = self.responses.get(timeout=min(remaining, 0.5))
-            except queue.Empty:
-                continue
-            try:
-                reply = json.loads(line)
-            except json.JSONDecodeError as error:
-                raise BootstrapFailure("guarded IAM bootstrap server emitted malformed JSON-RPC") from error
-            if reply.get("id") == self.request_id:
-                if "error" in reply:
-                    raise BootstrapFailure(f"guarded MCP {method} returned a protocol error")
-                return reply
-
-    def notify(self, method):
-        assert self.proc.stdin is not None
-        self.proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": method}) + "\n")
-        self.proc.stdin.flush()
-
-    def call(self, tool, arguments):
-        reply = self.rpc("tools/call", {"name": tool, "arguments": arguments})
-        result = reply.get("result")
-        if not isinstance(result, dict) or result.get("isError") is True:
-            raise BootstrapFailure(f"guarded MCP {tool} refused the IAM bootstrap operation")
-        content = result.get("structuredContent")
-        if not isinstance(content, dict):
-            raise BootstrapFailure(f"guarded MCP {tool} returned no structured result")
-        return content
-
-    def close(self):
-        try:
-            if self.proc.stdin is not None:
-                self.proc.stdin.close()
-            self.proc.wait(timeout=15)
-        except (OSError, subprocess.TimeoutExpired):
-            self.proc.kill()
-            self.proc.wait(timeout=15)
-        finally:
-            self.log.close()
-
-
-def require(condition, message):
-    if not condition:
-        raise BootstrapFailure(message)
-
-
-def elevate_to_admin(session):
-    preview = session.call("oracle_set_session_level", {"level": "ADMIN", "ttl_seconds": 120})
-    token = (preview.get("confirmation") or {}).get("confirm")
-    require(token, "ADMIN elevation did not issue a confirmation grant")
-    applied = session.call(
-        "oracle_set_session_level",
-        {"level": "ADMIN", "ttl_seconds": 120, "execute": True, "confirm": token},
-    )
-    require(
-        (applied.get("session") or {}).get("current_level") == "ADMIN",
-        "confirmed ADMIN elevation did not take effect",
-    )
-
-
-def execute_admin(session, statement):
-    preview = session.call("oracle_preview_sql", {"sql": statement})
-    require(preview.get("gate_decision") == "allow", "guard did not allow the approved ADMIN statement")
-    token = (preview.get("execute_confirmation") or {}).get("confirm")
-    require(token, "ADMIN statement preview did not issue an execution confirmation")
-    outcome = session.call(
-        "oracle_execute", {"sql": statement, "commit": True, "confirm": token}
-    )
-    require(outcome.get("executed") is True, "approved ADMIN statement was not executed")
-
-
-def main():
-    binary, config, state_dir, server_log = sys.argv[1:5]
-    principal = os.environ["ORACLEMCP_ADB_IAM_PRINCIPAL_NAME"]
-    database_user = os.environ["ORACLEMCP_ADB_IAM_DATABASE_USER"]
-    if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,29}", database_user):
-        raise BootstrapFailure("invalid generated IAM database username")
-    if not re.fullmatch(r"[A-Za-z0-9._@:/=-]{1,128}", principal):
-        raise BootstrapFailure("invalid IAM principal name")
-
-    session = McpSession(binary, config, state_dir, server_log)
-    try:
-        initialize = session.rpc(
-            "initialize",
-            {
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": {"name": "oci-adb-acceptance", "version": "1"},
-            },
-        )
-        require(
-            initialize.get("result", {}).get("serverInfo", {}).get("name") == "oraclemcp",
-            "guarded IAM bootstrap server did not identify as oraclemcp",
-        )
-        session.notify("notifications/initialized")
-        elevate_to_admin(session)
-        execute_admin(session, "BEGIN DBMS_CLOUD_ADMIN.ENABLE_EXTERNAL_AUTHENTICATION('OCI_IAM'); END;")
-        execute_admin(
-            session,
-            f"CREATE USER {database_user} IDENTIFIED GLOBALLY AS 'IAM_PRINCIPAL_NAME={principal}'",
-        )
-        execute_admin(session, f"GRANT CREATE SESSION TO {database_user}")
-    finally:
-        session.close()
-
-
-try:
-    main()
-except (BootstrapFailure, IndexError, KeyError) as error:
-    raise SystemExit(f"guarded IAM bootstrap failed: {error}") from None
-PY
-chmod 700 "$bootstrap_script"
-
 if ! wait_for_adb_tcps; then
-  e2e_finish_fail "throwaway ADB TCPS listener did not become ready before guarded IAM bootstrap"
+  e2e_finish_fail "throwaway ADB TCPS listener did not become ready before direct IAM bootstrap"
 fi
 
-if ! run_redacted "act" "configure OCI IAM global user mapping" env \
+bootstrap_manifest="$ROOT/scripts/e2e/oci_adb_iam_bootstrap/Cargo.toml"
+[ -f "$bootstrap_manifest" ] || e2e_finish_fail "missing direct OCI IAM bootstrap helper"
+
+e2e_log_event "iam_admin_bootstrap" "act" "running" 0 \
+  "direct ADMIN wallet setup enables OCI IAM and maps the throwaway principal"
+if ! ORACLEMCP_ADB_CONNECT_STRING="$(<"$run_dir/admin_connect_string")" \
+  ORACLEMCP_ADB_ADMIN_PASSWORD="$admin_password" \
+  ORACLEMCP_ADB_WALLET_LOCATION="$wallet_dir" \
+  ORACLEMCP_ADB_WALLET_PASSWORD="$wallet_password" \
+  ORACLEMCP_ADB_SSL_SERVER_CERT_DN="$ssl_dn" \
   ORACLEMCP_ADB_IAM_PRINCIPAL_NAME="$ORACLEMCP_ADB_IAM_PRINCIPAL_NAME" \
-  ORACLEMCP_AUDIT_KEY="$bootstrap_audit_key" \
   ORACLEMCP_ADB_IAM_DATABASE_USER="$(<"$run_dir/iam_database_user")" \
-  ADB_ADMIN_PASSWORD="$admin_password" \
-  ADB_WALLET_PASSWORD="$wallet_password" \
-  python3 "$bootstrap_script" "$bootstrap_binary" "$bootstrap_config" "$bootstrap_state" \
-  "$run_dir/bootstrap-server.log"; then
+  e2e_run_cargo_capped "act" run --quiet --manifest-path "$bootstrap_manifest"; then
   e2e_finish_fail "creating OCI IAM global-user mapping failed"
 fi
+e2e_log_event "iam_admin_bootstrap" "act" "pass" 0 \
+  "direct ADMIN wallet setup enabled OCI IAM and mapped the throwaway principal"
 
 if ! run_redacted "act" "real ADB TCPS password and IAM signoff" env \
   CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$run_dir/cargo-target}" \

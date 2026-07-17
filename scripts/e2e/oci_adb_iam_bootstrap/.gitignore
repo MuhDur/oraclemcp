@@ -1,0 +1,4 @@
+# Runtime helper resolution follows the active workspace driver for each live
+# acceptance run. Its lockfile can therefore contain a temporary local-driver
+# override and must not be committed.
+Cargo.lock

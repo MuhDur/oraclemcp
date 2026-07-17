@@ -201,12 +201,68 @@ run_real_adb_doctor() {
     "$binary" --json doctor --online --profile "$profile"
 }
 
+# Prove the MCP surface itself can use each authenticated session.  `doctor`
+# opens a connection and runs its own health checks, but this explicit stdio
+# exchange additionally proves the fail-closed READ_ONLY classifier admits a
+# real query after authentication.  The IAM profile must return the mapped
+# global database user, not merely reach token minting.
+run_guarded_readonly_query() {
+  local config="$1"
+  local state_home="$2"
+  local profile="$3"
+  local expected_user="$4"
+  local transcript reply actual_user
+
+  transcript="$({
+    jq -cn '{jsonrpc:"2.0", id:1, method:"initialize", params:{protocolVersion:"2025-03-26", capabilities:{}, clientInfo:{name:"oraclemcp-real-adb-signoff", version:"1"}}}'
+    jq -cn '{jsonrpc:"2.0", method:"notifications/initialized"}'
+    jq -cn '{jsonrpc:"2.0", id:2, method:"tools/call", params:{name:"oracle_query", arguments:{sql:"SELECT USER FROM DUAL", max_rows:1}}}'
+  } | env -i \
+    "HOME=$HOME" \
+    "PATH=$PATH" \
+    "ORACLEMCP_CONFIG=$config" \
+    "XDG_STATE_HOME=$state_home" \
+    "ADB_PASSWORD=$ORACLEMCP_REAL_ADB_PASSWORD" \
+    "ADB_WALLET_PASSWORD=${ORACLEMCP_REAL_ADB_WALLET_PASSWORD:-}" \
+    "ADB_IAM_TOKEN=$ORACLEMCP_REAL_ADB_IAM_TOKEN" \
+    "$binary" --json serve --profile "$profile" --allow-no-auth
+  )" || {
+    printf '%s\n' "$transcript"
+    return 1
+  }
+
+  reply="$(printf '%s\n' "$transcript" | jq -ce 'select(.id == 2)')" || {
+    printf 'guarded READ_ONLY query returned no tool reply\n' >&2
+    return 1
+  }
+  if [ "$(jq -r 'if .result.isError == false then "false" else "true" end' <<<"$reply")" != "false" ]; then
+    printf 'guarded READ_ONLY query was refused: %s\n' "$reply" >&2
+    return 1
+  fi
+  actual_user="$(jq -r '.result.structuredContent.rows[0].USER // empty' <<<"$reply")"
+  if [ "$actual_user" != "$expected_user" ]; then
+    printf 'guarded READ_ONLY query returned unexpected database user: %s\n' "$reply" >&2
+    return 1
+  fi
+}
+
+wallet_expected_user="${ORACLEMCP_REAL_ADB_PASSWORD_USER:-ADMIN}"
+iam_expected_user="${ORACLEMCP_REAL_ADB_IAM_USER:-OMCP_IAM_ACCEPT}"
+
 if ! e2e_run_command "act" run_real_adb_doctor "$wallet_config" "$state_dir/wallet" "$wallet_profile"; then
   e2e_finish_fail "real ADB wallet/password doctor signoff failed"
+fi
+if ! e2e_run_command "act" run_guarded_readonly_query \
+  "$wallet_config" "$state_dir/wallet-query" "$wallet_profile" "$wallet_expected_user"; then
+  e2e_finish_fail "real ADB wallet/password guarded READ_ONLY query failed"
 fi
 
 if ! e2e_run_command "act" run_real_adb_doctor "$iam_config" "$state_dir/iam" "$iam_profile"; then
   e2e_finish_fail "real ADB OCI-IAM token doctor signoff failed"
+fi
+if ! e2e_run_command "act" run_guarded_readonly_query \
+  "$iam_config" "$state_dir/iam-query" "$iam_profile" "$iam_expected_user"; then
+  e2e_finish_fail "real ADB OCI-IAM token guarded READ_ONLY query failed"
 fi
 
 summary="$run_dir/summary.json"
@@ -224,7 +280,9 @@ if [ "$E2E_DRY_RUN" != "1" ]; then
       checks: [
         "oraclemcp binary built under capped cargo",
         "doctor --online passed for TCPS wallet username/password",
-        "doctor --online passed for TCPS OCI IAM database token"
+        "oracle_query SELECT USER FROM DUAL passed for TCPS wallet username/password",
+        "doctor --online passed for TCPS OCI IAM database token",
+        "oracle_query SELECT USER FROM DUAL passed for TCPS OCI IAM database token"
       ]
     }' >"$summary"
 fi
@@ -233,5 +291,5 @@ if ! e2e_run_command "assert" bash scripts/secret_scan.sh; then
   e2e_finish_fail "committed-tree confidentiality scan failed"
 fi
 
-e2e_log_event "signoff_summary" "assert" "pass" 0 "auto-verified wallet/password + OCI-IAM doctor paths; evidence remains under target/e2e"
+e2e_log_event "signoff_summary" "assert" "pass" 0 "auto-verified wallet/password + OCI-IAM doctor and guarded READ_ONLY query paths; evidence remains under target/e2e"
 e2e_finish_pass

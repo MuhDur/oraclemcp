@@ -1340,6 +1340,7 @@ fn real_adb_signoff_dry_run_schedules_wallet_and_iam_doctor_paths() {
     for expected in [
         "cargo build -p oraclemcp --bin oraclemcp",
         "run_real_adb_doctor",
+        "run_guarded_readonly_query",
         "real_adb_wallet_smoke",
         "real_adb_iam_smoke",
         "bash scripts/secret_scan.sh",
@@ -1368,6 +1369,8 @@ fn real_adb_signoff_dry_run_schedules_wallet_and_iam_doctor_paths() {
         "token_env = \"ADB_IAM_TOKEN\"",
         "env -i",
         "run_real_adb_doctor",
+        "run_guarded_readonly_query",
+        "SELECT USER FROM DUAL",
         "ORACLEMCP_REAL_ADB_USE_SNI:-true",
     ] {
         assert!(
@@ -1443,10 +1446,8 @@ fn oci_adb_terraform_dry_run_wires_explicit_teardown() {
         "ORACLEMCP_REAL_ADB_PASSWORD_USER=ADMIN",
         "ORACLEMCP_REAL_ADB_IAM_USER=\"$(<\"$run_dir/iam_database_user\")\"",
         "bootstrap-admin-profile.toml",
-        "max_level = \"ADMIN\"",
-        "oracle_set_session_level",
-        "oracle_preview_sql",
-        "\"oracle_execute\"",
+        "iam_admin_bootstrap",
+        "oci_adb_iam_bootstrap/Cargo.toml",
         "wallet_use_sni=true",
         "ORACLEMCP_REAL_ADB_USE_SNI=\"$wallet_use_sni\"",
         "provider_connect_string",
@@ -1464,8 +1465,25 @@ fn oci_adb_terraform_dry_run_wires_explicit_teardown() {
     }
     assert!(
         !harness.contains("import oracledb"),
-        "OCI ADB bootstrap must use the guarded server path, not an ambient Python driver"
+        "OCI ADB bootstrap must stay pure Rust; the server is the IAM-probe boundary"
     );
+    let bootstrap =
+        std::fs::read_to_string(root.join("scripts/e2e/oci_adb_iam_bootstrap/src/main.rs"))
+            .expect("read OCI ADB direct IAM bootstrap helper");
+    for expected in [
+        "#![forbid(unsafe_code)]",
+        "RustOracleConnection",
+        "DBMS_CLOUD_ADMIN.ENABLE_EXTERNAL_AUTHENTICATION",
+        "CREATE USER {database_user} IDENTIFIED GLOBALLY",
+        "GRANT CREATE SESSION TO {database_user}",
+        "valid_database_user",
+        "valid_principal",
+    ] {
+        assert!(
+            bootstrap.contains(expected),
+            "OCI ADB direct IAM bootstrap helper lost its safety contract: {expected}"
+        );
+    }
 
     let terraform = std::fs::read_to_string(root.join("infra/oci-adb/main.tf"))
         .expect("read OCI ADB Terraform module");
