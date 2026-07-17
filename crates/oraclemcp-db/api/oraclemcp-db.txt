@@ -4446,6 +4446,7 @@ pub oraclemcp_db::OracleConnectOptions::connect_string: alloc::string::String
 pub oraclemcp_db::OracleConnectOptions::connect_timeout: core::option::Option<core::time::Duration>
 pub oraclemcp_db::OracleConnectOptions::external_auth: bool
 pub oraclemcp_db::OracleConnectOptions::iam_token: core::option::Option<alloc::string::String>
+pub oraclemcp_db::OracleConnectOptions::iam_token_private_key: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectOptions::inactivity_timeout: core::option::Option<core::time::Duration>
 pub oraclemcp_db::OracleConnectOptions::keepalive_minutes: core::option::Option<u64>
 pub oraclemcp_db::OracleConnectOptions::password: core::option::Option<alloc::string::String>

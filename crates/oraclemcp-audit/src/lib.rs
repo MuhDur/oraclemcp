@@ -1,3 +1,11 @@
+// Windows only, for `MetadataExt::number_of_links`/`volume_serial_number`
+// (rust-lang/rust#63010), which the audit sink needs to prove file identity for
+// the append-only log. It is the Windows counterpart of the stable
+// `unix::fs::MetadataExt` used for the same purpose, and there is no stable std
+// equivalent. Adds no nightly requirement: the line is already pinned to nightly
+// for asupersync (see rust-toolchain.toml). `cfg_attr`-gated so nothing changes
+// for non-Windows builds. Mirrors oraclemcp-core's declaration.
+#![cfg_attr(windows, feature(windows_by_handle))]
 #![forbid(unsafe_code)]
 
 //! Out-of-band durable audit for the `oraclemcp` server (plan §5.13, §6.4; bead

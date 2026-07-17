@@ -11,7 +11,7 @@
   },
   "script_inventory": [
     {
-      "path": "scripts/e2e/extract_ssl_server_cert_dn.py",
+      "path": "scripts/check_evidence_contract.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },
