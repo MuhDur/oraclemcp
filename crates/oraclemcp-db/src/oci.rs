@@ -489,15 +489,15 @@ mod tests {
 
     #[test]
     fn supported_wallet_modes_report_default_build_truth() {
-        // A4: the default build consumes ewallet.pem directly and gives typed
-        // diagnostics for recognized wallet artifacts the driver cannot load.
+        // A4: the default build consumes all three wallet artifacts through
+        // the pinned driver's public wallet loaders.
         let modes = supported_wallet_modes();
         for needle in ["ewallet.pem", "cwallet.sso", "ewallet.p12"] {
             let mode = modes
                 .iter()
                 .find(|m| m.mode == needle)
                 .unwrap_or_else(|| panic!("{needle} mode reported"));
-            assert_eq!(mode.supported, needle == "ewallet.pem", "{needle}");
+            assert!(mode.supported, "{needle}");
         }
     }
 

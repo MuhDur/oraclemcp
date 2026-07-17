@@ -4271,12 +4271,12 @@ mod tests {
         assert!(
             supported_wallet_modes()
                 .iter()
-                .any(|m| m.mode == "cwallet.sso" && !m.supported)
+                .any(|m| m.mode == "cwallet.sso" && m.supported)
         );
         assert!(
             supported_wallet_modes()
                 .iter()
-                .any(|m| m.mode == "ewallet.p12" && !m.supported)
+                .any(|m| m.mode == "ewallet.p12" && m.supported)
         );
     }
 }
