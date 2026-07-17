@@ -236,13 +236,13 @@ channels once they resolve.
 
 This branch is pinned to **`nightly-2026-05-11`** and has no stable MSRV. The
 pin is required, for two independent reasons: this pre-publish checkout
-currently resolves asupersync 0.3.5; the coordinated 0.9.0 release targets
+currently resolves asupersync 0.3.9; the coordinated 0.9.0 release targets
 **asupersync 0.3.9**'s
 `nightly-outcome-try` feature enables `#![feature(try_trait_v2)]` and
 `try_trait_v2_residual` inside asupersync (it is opt-in, but in asupersync's
 default feature set, and reaches us through the `oracledb` dependency), and on
 **Windows** `oraclemcp-core` additionally needs `windows_by_handle`. The pinned
-`oracledb` 0.8.3 driver's own source is stable-clean in this pre-publish
+`oracledb` 0.8.4 driver's own source is stable-clean in this pre-publish
 checkout; the coordinated target `oracledb` 0.8.4 driver's own source is
 stable-clean — it is its asupersync
 dependency declaration that pulls the nightly feature in.

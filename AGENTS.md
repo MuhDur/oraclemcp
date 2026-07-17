@@ -29,9 +29,9 @@ deliberate step.
 - Cargo workspace, `resolver = "2"`, pinned nightly
   **`nightly-2026-05-11`**, `edition = "2024"`. There is no stable MSRV, for two
   independent reasons — see [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md):
-  1. **asupersync 0.3.5's `nightly-outcome-try` feature** enables
+  1. **asupersync 0.3.9's `nightly-outcome-try` feature** enables
      `feature(try_trait_v2)` + `try_trait_v2_residual` inside asupersync itself
-     (`asupersync-0.3.5/src/lib.rs:52-53`). It is **opt-in but on by default**,
+     (`asupersync-0.3.9/src/lib.rs:52-53`). It is **opt-in but on by default**,
      not something asupersync inherently requires. We ask for
      `default-features = false` (`Cargo.toml`), but `oracledb` depends on
      asupersync *without* opting out, so feature unification turns it back on
@@ -44,7 +44,7 @@ deliberate step.
      hard-linked service lock (and the audit sink needs for file identity).
      There is no stable `std` equivalent, so Windows needs nightly regardless of
      reason 1.
-  Note the pinned `oracledb` 0.8.3 driver's own source is stable-clean; it is
+  Note the pinned `oracledb` 0.8.4 driver's own source is stable-clean; it is
   its asupersync **dependency declaration** that pulls the nightly feature in.
   Do not restate this as "asupersync requires nightly" — that attribution is
   wrong and sent a prior audit looking in the wrong place.

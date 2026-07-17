@@ -173,7 +173,7 @@ pub trait CqnNotificationReceiver {
 /// name an `oracledb::` path — so consumers (e.g. `oraclemcp doctor`'s trio-stack
 /// provenance) can report the *driver's* version without reaching for
 /// `env!("CARGO_PKG_VERSION")`, which would resolve to the wrong crate. Because
-/// the whole workspace pins `oracledb = "=0.8.3"`, this is `"0.8.3"`.
+/// the whole workspace pins `oracledb = "=0.8.4"`, this is `"0.8.4"`.
 pub const DRIVER_VERSION: &str = oracledb::VERSION;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1809,7 +1809,16 @@ mod driver {
         let mut connect_options =
             oracledb::ConnectOptions::new(&connect_string, user, password, identity);
         if let Some(token) = iam_token {
-            connect_options = connect_options.with_access_token(token.to_owned());
+            // OCI IAM *database* tokens are proof-of-possession: when the profile
+            // resolved the bound private key, wire it through so the driver signs
+            // the auth header (`AUTH_HEADER`/`AUTH_SIGNATURE`). Without the key the
+            // database refuses the bearer token with ORA-01017; a plain OAuth2
+            // bearer token has no key and uses the token-only path.
+            connect_options = match opts.iam_token_private_key.as_deref() {
+                Some(private_key) => connect_options
+                    .with_access_token_and_key(token.to_owned(), private_key.to_owned()),
+                None => connect_options.with_access_token(token.to_owned()),
+            };
         }
         // session_identity.edition must be sent during authentication so no user
         // SQL runs under the default edition before the requested edition applies.
@@ -2753,15 +2762,17 @@ mod driver {
                 let stream = self.stream.take().ok_or_else(|| {
                     DbError::Internal("owned row stream has already been recovered".to_owned())
                 })?;
-                let connection = stream
-                    .into_connection()
-                    .map_err(|err| DbError::Quarantined {
-                        outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
-                        message: format!(
-                            "owned row stream could not recover its connection: {}",
-                            sanitize_driver_error(err, &self.opts)
-                        ),
-                    })?;
+                let connection =
+                    stream
+                        .into_connection()
+                        .await
+                        .map_err(|err| DbError::Quarantined {
+                            outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                            message: format!(
+                                "owned row stream could not recover its connection: {}",
+                                sanitize_driver_error(err, &self.opts)
+                            ),
+                        })?;
                 replace_connection_slot(&self.inner, cx, connection).await?;
                 super::db_checkpoint(cx, "oracle_db.query_row_stream.recovered")?;
                 Ok(())
@@ -5524,15 +5535,17 @@ mod driver {
             })?;
             let metadata = stream.columns().to_vec();
             if let Some(reason) = row_stream_chunked_fallback_reason(&metadata) {
-                let connection = stream
-                    .into_connection()
-                    .map_err(|err| DbError::Quarantined {
-                        outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
-                        message: format!(
-                            "owned row stream could not recover for chunked fallback: {}",
-                            sanitize_driver_error(err, &self.opts)
-                        ),
-                    })?;
+                let connection =
+                    stream
+                        .into_connection()
+                        .await
+                        .map_err(|err| DbError::Quarantined {
+                            outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                            message: format!(
+                                "owned row stream could not recover for chunked fallback: {}",
+                                sanitize_driver_error(err, &self.opts)
+                            ),
+                        })?;
                 self.replace_connection(cx, connection).await?;
                 super::db_checkpoint(cx, "oracle_db.query_row_stream.fallback")?;
                 return Ok(QueryRowStreamStart::Fallback { reason });
@@ -7772,25 +7785,25 @@ mod driver_seam {
     }
 
     #[test]
-    fn pin_is_0_8_3_and_seam_intact() {
+    fn pin_is_0_8_4_and_seam_intact() {
         let root = workspace_root();
         let manifest =
             std::fs::read_to_string(root.join("Cargo.toml")).expect("read workspace Cargo.toml");
         assert!(
-            manifest.contains(r#"oracledb = { version = "=0.8.3", default-features = false }"#),
-            "workspace Cargo.toml must keep the oracledb dependency exactly pinned at =0.8.3"
+            manifest.contains(r#"oracledb = { version = "=0.8.4", default-features = false }"#),
+            "workspace Cargo.toml must keep the oracledb dependency exactly pinned at =0.8.4"
         );
 
         let lock = std::fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");
         assert_eq!(
             lock_package_versions(&lock, "oracledb"),
-            vec!["0.8.3".to_owned()],
-            "Cargo.lock must resolve exactly one oracledb package at 0.8.3"
+            vec!["0.8.4".to_owned()],
+            "Cargo.lock must resolve exactly one oracledb package at 0.8.4"
         );
         assert_eq!(
             lock_package_versions(&lock, "oracledb-protocol"),
-            vec!["0.8.3".to_owned()],
-            "Cargo.lock must resolve the matching oracledb-protocol 0.8.3 package"
+            vec!["0.8.4".to_owned()],
+            "Cargo.lock must resolve the matching oracledb-protocol 0.8.4 package"
         );
 
         assert_eq!(

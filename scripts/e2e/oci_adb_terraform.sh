@@ -407,12 +407,23 @@ if ! run_redacted "act" "mint scoped OCI database token" env OCI_CLI_CONFIG_FILE
 fi
 [ -s "$token_dir/token" ] || e2e_finish_fail "OCI CLI did not write a database token"
 chmod 600 "$token_dir/token"
+# `oci iam db-token get` also writes the RSA private key the token is bound to
+# (`oci_db_key.pem`). OCI IAM database tokens are proof-of-possession, so the
+# server-side IAM probe must sign the auth header with this key; a bearer token
+# alone is refused with ORA-01017.
+[ -s "$token_dir/oci_db_key.pem" ] || e2e_finish_fail "OCI CLI did not write the db-token private key (oci_db_key.pem)"
+chmod 600 "$token_dir/oci_db_key.pem"
 
 # OCI's scoped database token names the IAM principal twice: `userName` and
-# `dbUserName` identify the human-readable OCI user, while `sub` is the stable
-# OCI user identity ADB matches for the global-user mapping. The database
-# schema is a separate mapped global user. Decode only these non-secret claims
-# and refuse a mismatch before creating any mapping or opening the token probe.
+# `dbUserName` carry the human-readable OCI user name. This *name* is what the
+# ADB `IDENTIFIED GLOBALLY AS 'IAM_PRINCIPAL_NAME=<name>'` mapping matches at
+# token-auth time (Oracle resolves the name to the OCID at CREATE USER and
+# stores it in DBA_USERS.EXTERNAL_NAME). `sub` is the stable OCID, captured
+# only for logging/audit — it is NOT the global-user mapping key (mapping the
+# OCID as IAM_PRINCIPAL_NAME never matches the token's principal and yields
+# ORA-01017). The database schema is a separate mapped global user. Decode only
+# these non-secret claims and refuse a mismatch before creating any mapping or
+# opening the token probe.
 token_identity="$run_dir/iam_token_identity"
 if ! python3 - "$token_dir/token" >"$token_identity" <<'PY'
 import base64
@@ -457,7 +468,7 @@ if [ "$token_principal" != "$ORACLEMCP_ADB_IAM_PRINCIPAL_NAME" ]; then
   e2e_finish_fail "OCI database token principal does not match ORACLEMCP_ADB_IAM_PRINCIPAL_NAME"
 fi
 e2e_log_event "iam_token_principal" "act" "pass" 0 \
-  "scoped OCI token userName/dbUserName matches the configured IAM user; token sub captured for global-user mapping"
+  "scoped OCI token userName/dbUserName matches the configured IAM user (${#token_subject} char sub OCID captured for audit only; the principal NAME is the IAM_PRINCIPAL_NAME mapping key)"
 
 toml_string() {
   jq -Rn --arg value "$1" '$value'
@@ -575,7 +586,7 @@ if ! ORACLEMCP_ADB_CONNECT_STRING="$(<"$run_dir/admin_connect_string")" \
   ORACLEMCP_ADB_WALLET_LOCATION="$wallet_dir" \
   ORACLEMCP_ADB_WALLET_PASSWORD="$wallet_password" \
   ORACLEMCP_ADB_SSL_SERVER_CERT_DN="$ssl_dn" \
-  ORACLEMCP_ADB_IAM_PRINCIPAL_NAME="$token_subject" \
+  ORACLEMCP_ADB_IAM_PRINCIPAL_NAME="$token_principal" \
   ORACLEMCP_ADB_IAM_DATABASE_USER="$(<"$run_dir/iam_database_user")" \
   e2e_run_cargo_capped "act" run --quiet --manifest-path "$bootstrap_manifest"; then
   e2e_finish_fail "creating OCI IAM global-user mapping failed"
@@ -597,6 +608,7 @@ if ! run_redacted "act" "real ADB TCPS password and IAM signoff" env \
   ORACLEMCP_REAL_ADB_SSL_SERVER_CERT_DN="$ssl_dn" \
   ORACLEMCP_REAL_ADB_USE_SNI="$wallet_use_sni" \
   ORACLEMCP_REAL_ADB_IAM_TOKEN="$(<"$token_dir/token")" \
+  ORACLEMCP_REAL_ADB_IAM_TOKEN_KEY_FILE="$token_dir/oci_db_key.pem" \
   bash scripts/e2e/real_adb_tcps_signoff.sh --log; then
   e2e_finish_fail "real ADB TCPS signoff failed"
 fi

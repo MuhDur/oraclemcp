@@ -78,7 +78,8 @@ require_live_env() {
     ORACLEMCP_REAL_ADB_IAM_USER \
     ORACLEMCP_REAL_ADB_PASSWORD \
     ORACLEMCP_REAL_ADB_WALLET_LOCATION \
-    ORACLEMCP_REAL_ADB_IAM_TOKEN
+    ORACLEMCP_REAL_ADB_IAM_TOKEN \
+    ORACLEMCP_REAL_ADB_IAM_TOKEN_KEY_FILE
   do
     if [ -z "${!name:-}" ]; then
       e2e_finish_fail "set $name for real ADB signoff"
@@ -86,6 +87,11 @@ require_live_env() {
   done
   if [ ! -d "$ORACLEMCP_REAL_ADB_WALLET_LOCATION" ]; then
     e2e_finish_fail "ORACLEMCP_REAL_ADB_WALLET_LOCATION must be a directory"
+  fi
+  # OCI IAM database tokens are proof-of-possession: the bound private key
+  # (oci_db_key.pem) must be present so the driver can sign the auth header.
+  if [ ! -f "$ORACLEMCP_REAL_ADB_IAM_TOKEN_KEY_FILE" ]; then
+    e2e_finish_fail "ORACLEMCP_REAL_ADB_IAM_TOKEN_KEY_FILE must be the OCI db-token private key file (oci_db_key.pem)"
   fi
   if [ ! -f "$ORACLEMCP_REAL_ADB_WALLET_LOCATION/tnsnames.ora" ]; then
     e2e_finish_fail "wallet directory must contain tnsnames.ora"
@@ -142,6 +148,9 @@ write_profile() {
     if [ "$use_iam" = "true" ]; then
       printf 'use_iam_token = true\n'
       printf 'token_env = "ADB_IAM_TOKEN"\n'
+      # The OCI IAM database token is proof-of-possession: point the profile at
+      # the bound private key so the driver signs AUTH_HEADER/AUTH_SIGNATURE.
+      printf 'token_key_file = %s\n' "$(toml_string "$ORACLEMCP_REAL_ADB_IAM_TOKEN_KEY_FILE")"
     fi
   } >"$path"
   chmod 600 "$path"
@@ -206,6 +215,41 @@ run_real_adb_doctor() {
     "$binary" --json doctor --online --profile "$profile"
 }
 
+# Retry the IAM-token doctor to tolerate OCI IAM propagation lag. On a freshly
+# provisioned ADB the sequence DBMS_CLOUD_ADMIN.ENABLE_EXTERNAL_AUTHENTICATION
+# + CREATE USER ... IDENTIFIED GLOBALLY AS 'IAM_PRINCIPAL_NAME=<default-domain
+# user>' does not take effect instantly: the database must pick up the new IAM
+# external-authentication configuration and global-user mapping before a scoped
+# token resolves, and until it does the token login fails closed with ORA-01017.
+# This mirrors the pre-bootstrap wait_for_adb_tcps readiness loop; it never
+# weakens the guard (each attempt is a full fail-closed doctor at READ_ONLY) and
+# it only ever waits for a *correct* mapping to become live. The wallet/password
+# path needs no such wait, so only the IAM path is wrapped.
+run_real_adb_iam_doctor() {
+  local config="$1"
+  local state_home="$2"
+  local profile="$3"
+  local attempt max status
+  max="${ORACLEMCP_REAL_ADB_IAM_MAX_ATTEMPTS:-15}"
+  status=1
+  for ((attempt = 1; attempt <= max; attempt++)); do
+    if run_real_adb_doctor "$config" "$state_home/attempt-$attempt" "$profile"; then
+      if [ "$attempt" -gt 1 ]; then
+        printf 'OCI IAM token doctor authenticated on attempt %d/%d after mapping propagation\n' \
+          "$attempt" "$max"
+      fi
+      return 0
+    fi
+    status=$?
+    if [ "$attempt" -lt "$max" ]; then
+      printf 'OCI IAM token doctor attempt %d/%d not yet authenticated (IAM mapping/enablement propagation lag); waiting 20s\n' \
+        "$attempt" "$max"
+      sleep 20
+    fi
+  done
+  return "$status"
+}
+
 # Prove the MCP surface itself can use each authenticated session.  `doctor`
 # opens a connection and runs its own health checks, but this explicit stdio
 # exchange additionally proves the fail-closed READ_ONLY classifier admits a
@@ -262,7 +306,7 @@ if ! e2e_run_command "act" run_guarded_readonly_query \
   e2e_finish_fail "real ADB wallet/password guarded READ_ONLY query failed"
 fi
 
-if ! e2e_run_command "act" run_real_adb_doctor "$iam_config" "$state_dir/iam" "$iam_profile"; then
+if ! e2e_run_command "act" run_real_adb_iam_doctor "$iam_config" "$state_dir/iam" "$iam_profile"; then
   e2e_finish_fail "real ADB OCI-IAM token doctor signoff failed"
 fi
 if ! e2e_run_command "act" run_guarded_readonly_query \

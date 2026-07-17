@@ -136,6 +136,20 @@ pub struct OciConfig {
     /// and is never persisted or logged. Mutually exclusive with `token_env` /
     /// `token_file` (configuring more than one is a fail-closed config error).
     pub token_exec: Option<Vec<String>>,
+    /// Path to the PKCS#8 PEM **private key** an OCI IAM *database* token is bound
+    /// to (`oci iam db-token get` writes it as `oci_db_key.pem`). This is a
+    /// *reference* — the PATH, never the key. Required for OCI IAM database tokens:
+    /// they are proof-of-possession, so the driver signs the auth header with this
+    /// key (`AUTH_HEADER`/`AUTH_SIGNATURE`); without it the database refuses the
+    /// bearer token with `ORA-01017`. A plain OAuth2 bearer token needs no key. The
+    /// file is re-read on every connect and is never persisted or logged. Mutually
+    /// exclusive with `token_key_env`.
+    pub token_key_file: Option<String>,
+    /// Name of an environment variable holding the PKCS#8 PEM private key an OCI
+    /// IAM database token is bound to. This is a *reference* — the variable NAME,
+    /// never the key. Resolved at connect time; never persisted or logged. Mutually
+    /// exclusive with `token_key_file`.
+    pub token_key_env: Option<String>,
 }
 
 impl std::fmt::Debug for OciConfig {
@@ -153,6 +167,10 @@ impl std::fmt::Debug for OciConfig {
         // a program path or an inline argument can never widen a surface, matching
         // the other OCI reference fields.
         let token_exec = self.token_exec.as_ref().map(|_| "<redacted>");
+        // token_key_file / token_key_env are references (a path / a var name), not
+        // the key value; render presence-only like the other OCI reference fields.
+        let token_key_file = self.token_key_file.as_ref().map(|_| "<redacted>");
+        let token_key_env = self.token_key_env.as_ref().map(|_| "<redacted>");
         f.debug_struct("OciConfig")
             .field("wallet_location", &wallet_location)
             .field("wallet_password_ref", &wallet_password_ref)
@@ -164,6 +182,8 @@ impl std::fmt::Debug for OciConfig {
             .field("token_env", &token_env)
             .field("token_file", &token_file)
             .field("token_exec", &token_exec)
+            .field("token_key_file", &token_key_file)
+            .field("token_key_env", &token_key_env)
             .finish()
     }
 }
@@ -2095,6 +2115,8 @@ mod tests {
             token_env: None,
             token_file: None,
             token_exec: None,
+            token_key_file: None,
+            token_key_env: None,
         });
         prof.proxy_auth = Some(ProxyAuthConfig {
             proxy_user: Some("MCP_PROXY".to_owned()),
@@ -2197,6 +2219,8 @@ mod tests {
                 "--profile".to_owned(),
                 "prod".to_owned(),
             ]),
+            token_key_file: Some("/private/oci_db_key.pem".to_owned()),
+            token_key_env: None,
         });
         prof.proxy_auth = Some(ProxyAuthConfig {
             proxy_user: Some("private-proxy-user".to_owned()),
@@ -2314,6 +2338,8 @@ mod tests {
             token_env: None,
             token_file: None,
             token_exec: None,
+            token_key_file: None,
+            token_key_env: None,
         });
         let mut child = p("dev");
         child.base = Some("shared".to_owned());

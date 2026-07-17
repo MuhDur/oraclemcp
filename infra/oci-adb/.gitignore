@@ -1,0 +1,14 @@
+# Terraform working-directory artifacts — never commit these.
+# Provider cache (large binaries), local state, and any *.tfvars (may hold secrets).
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json

@@ -244,6 +244,11 @@ fn profile_to_options_for_level(
         // `use_iam_token` set but no token injected, the adapter returns a precise
         // setup error rather than attempting a password connect.
         iam_token: None,
+        // Like the token itself, the OCI IAM database-token proof-of-possession
+        // private key is resolved at connect time from the profile's
+        // `[profiles.oci]` `token_key_file` / `token_key_env` reference and
+        // injected by `oraclemcp_core::inject_iam_token`; never embedded here.
+        iam_token_private_key: None,
         session_identity: profile
             .session_identity
             .as_ref()

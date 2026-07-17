@@ -99,10 +99,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err("OCI IAM external authentication was not enabled".into());
         }
 
-        // `CREATE USER ... IAM_PRINCIPAL_NAME=<token sub>` above is the
-        // exact mapping operation. `DBA_USERS.EXTERNAL_NAME` is deliberately
-        // not parsed here: OCI canonicalizes that value differently across
-        // service versions. The following live IAM-token session and
+        // `CREATE USER ... IAM_PRINCIPAL_NAME=<principal name>` above is the
+        // exact mapping operation: the principal is the token's IAM user name
+        // (`userName`/`dbUserName`), which Oracle resolves to the user OCID at
+        // CREATE USER time and matches against the token at auth time. The
+        // token `sub` OCID is NOT the mapping key (mapping the OCID literally
+        // yields ORA-01017). `DBA_USERS.EXTERNAL_NAME` is deliberately not
+        // parsed here: OCI canonicalizes that value differently across service
+        // versions. The following live IAM-token session and
         // `SELECT USER FROM DUAL` are the behavior-level proof that this exact
         // token resolves to the created global schema.
         Ok::<(), Box<dyn Error>>(())

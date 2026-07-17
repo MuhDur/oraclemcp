@@ -24,7 +24,7 @@ nightly". Stating it that way is wrong, and it previously sent an audit looking
 in the wrong place, so the precise mechanism is worth the extra sentences.
 
 **1. asupersync's `nightly-outcome-try` feature (all platforms).** The pinned
-asupersync 0.3.5 gates its nightly use behind a cargo feature:
+asupersync 0.3.9 gates its nightly use behind a cargo feature:
 
 ```rust
 // asupersync-0.3.5/src/lib.rs:52-53
@@ -46,7 +46,7 @@ cargo tree -i asupersync -e features   # asupersync feature "default" <- oracled
 
 Neither the driver's nor the server's own source uses the nightly syntax: the
 feature arrives transitively and unrequested.
-The pinned `oracledb` 0.8.3 driver's own source is stable-clean — but its
+The pinned `oracledb` 0.8.4 driver's own source is stable-clean — but its
 **dependency declaration** is the proximate cause, so "oracledb is not the
 reason for the pin" is misleading.
 

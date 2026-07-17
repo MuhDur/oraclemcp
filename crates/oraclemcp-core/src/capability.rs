@@ -48,7 +48,7 @@
 //!   `OperatingLevel` ceiling in `oraclemcp-guard`. The capability row does not
 //!   classify SQL; it removes *ambient process effects* from the read path so a
 //!   read handler cannot, e.g., spawn a remote task even if a future code path
-//!   tried to. Caveat: in the pinned asupersync 0.3.5, `Scope::spawn` is generic
+//!   tried to. Caveat: in the pinned asupersync 0.3.9, `Scope::spawn` is generic
 //!   over the caller's caps and is **not** yet gated on
 //!   [`HasSpawn`](asupersync::cx::HasSpawn); the `SPAWN=false` bit is enforced
 //!   structurally here (the read Cx is never handed a `Scope`, and widening to

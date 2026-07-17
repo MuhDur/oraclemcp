@@ -1450,7 +1450,7 @@ fn oci_adb_terraform_dry_run_wires_explicit_teardown() {
         "OCI database token userName and dbUserName differ",
         "OCI database token principal does not match ORACLEMCP_ADB_IAM_PRINCIPAL_NAME",
         "OCI database token omits userName, dbUserName, or sub",
-        "ORACLEMCP_ADB_IAM_PRINCIPAL_NAME=\"$token_subject\"",
+        "ORACLEMCP_ADB_IAM_PRINCIPAL_NAME=\"$token_principal\"",
         "bootstrap-admin-profile.toml",
         "iam_admin_bootstrap",
         "oci_adb_iam_bootstrap/Cargo.toml",

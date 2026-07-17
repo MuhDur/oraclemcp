@@ -730,6 +730,13 @@ pub struct OracleConnectOptions {
     pub use_iam_token: bool,
     /// A pre-fetched OCI IAM database token, when `use_iam_token` is set.
     pub iam_token: Option<String>,
+    /// The PKCS#8 PEM private key an OCI IAM *database* token is bound to. When
+    /// present with `iam_token`, the driver performs the token's proof-of-possession
+    /// (`AUTH_HEADER`/`AUTH_SIGNATURE`) — required for OCI IAM database tokens
+    /// (`oci iam db-token get`), which are refused with `ORA-01017` if the bearer
+    /// token is presented alone. A plain OAuth2 bearer token needs none. The value
+    /// is transient and is never persisted or logged.
+    pub iam_token_private_key: Option<String>,
     /// Optional profile-driven session identity.
     pub session_identity: Option<OracleSessionIdentity>,
     /// Application-context triples applied by the thin driver during logon.
@@ -772,6 +779,7 @@ impl Default for OracleConnectOptions {
             use_sni: None,
             use_iam_token: false,
             iam_token: None,
+            iam_token_private_key: None,
             session_identity: None,
             app_context: Vec::new(),
             sdu: None,
@@ -811,6 +819,10 @@ impl std::fmt::Debug for OracleConnectOptions {
             .field("use_sni", &self.use_sni)
             .field("use_iam_token", &self.use_iam_token)
             .field("iam_token", &redact(&self.iam_token))
+            .field(
+                "iam_token_private_key",
+                &redact(&self.iam_token_private_key),
+            )
             .field("session_identity", &session_identity)
             .field("app_context_count", &app_context_count)
             .field("sdu", &self.sdu)

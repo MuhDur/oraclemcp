@@ -144,6 +144,23 @@ pub enum IamTokenError {
     /// not valid UTF-8. No output bytes are carried.
     #[error("IAM token_exec output is not a valid base64url token")]
     ExecBadCharset,
+    /// Both `token_key_file` and `token_key_env` are configured. They are
+    /// mutually exclusive so an operator's intent is never silently disambiguated.
+    #[error(
+        "ambiguous IAM token key source: configure at most one of token_key_file or token_key_env"
+    )]
+    AmbiguousKeySource,
+    /// The IAM token proof-of-possession private-key file could not be read
+    /// (missing / unreadable). Carries the path reference only, never the key.
+    #[error("IAM token key file `{0}` could not be read")]
+    KeyFileUnreadable(String),
+    /// The environment variable named by `token_key_env` is not set. Carries the
+    /// variable name only, never the key.
+    #[error("IAM token key environment variable `{0}` is not set")]
+    KeyEnvMissing(String),
+    /// The resolved proof-of-possession private key is empty (whitespace-only).
+    #[error("resolved IAM token key from {0} is empty")]
+    KeyEmpty(&'static str),
 }
 
 /// A simple server-side IAM database-token source: an environment variable, a
@@ -672,9 +689,60 @@ pub fn inject_iam_token_with(
     let Some(source) = ServerIamTokenSource::from_oci(oci)? else {
         return Ok(());
     };
-    let token = source.get_token_with(env_lookup)?;
+    let token = source.get_token_with(&env_lookup)?;
     options.iam_token = Some(token);
+    // OCI IAM *database* tokens are proof-of-possession: resolve the bound private
+    // key (a `token_key_file` path or `token_key_env` variable) so the driver can
+    // sign the auth header. Absent for a plain OAuth2 bearer token; a database
+    // token without its key fails closed later with ORA-01017 at connect.
+    if let Some(key) = resolve_iam_token_key(oci, &env_lookup)? {
+        options.iam_token_private_key = Some(key);
+    }
     Ok(())
+}
+
+/// Resolve the OCI IAM database-token proof-of-possession private key (PKCS#8
+/// PEM) from the profile's `token_key_file` (path) or `token_key_env` (variable
+/// name) reference, re-read fresh on every connect. The two are mutually
+/// exclusive. Returns `Ok(None)` when neither is configured (a plain OAuth2
+/// bearer token). The key is never persisted or logged; only path/name
+/// references appear in errors.
+fn resolve_iam_token_key(
+    oci: &OciConfig,
+    env_lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Option<String>, IamTokenError> {
+    let file = oci
+        .token_key_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    let env = oci
+        .token_key_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    match (file, env) {
+        (Some(_), Some(_)) => Err(IamTokenError::AmbiguousKeySource),
+        (Some(path), None) => {
+            let raw = std::fs::read_to_string(path)
+                .map_err(|_| IamTokenError::KeyFileUnreadable(path.to_owned()))?;
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(IamTokenError::KeyEmpty("file"));
+            }
+            Ok(Some(trimmed.to_owned()))
+        }
+        (None, Some(var)) => {
+            let raw =
+                env_lookup(var).ok_or_else(|| IamTokenError::KeyEnvMissing(var.to_owned()))?;
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(IamTokenError::KeyEmpty("env"));
+            }
+            Ok(Some(trimmed.to_owned()))
+        }
+        (None, None) => Ok(None),
+    }
 }
 
 /// Read the `exp` (Unix seconds) claim from a JWT **without validating the
@@ -1376,6 +1444,113 @@ mod tests {
         let mut opts = connect_options_for(&profile);
         inject_iam_token_with(&profile, &mut opts, env_map(&[])).expect("inject over tcps");
         assert_eq!(opts.iam_token.as_deref(), Some("resolved.exec.jwt"));
+    }
+
+    #[test]
+    fn inject_resolves_the_pop_private_key_from_env() {
+        // An OCI IAM *database* token: the profile names both the token and the
+        // bound private key. inject must wire the key through so the driver can
+        // sign the proof-of-possession header.
+        let profile = tcps_profile_with_oci(
+            r#"
+            use_iam_token = true
+            token_env = "OMCP_TEST_IAM_TOKEN"
+            token_key_env = "OMCP_TEST_IAM_KEY"
+            "#,
+        );
+        let mut opts = connect_options_for(&profile);
+        inject_iam_token_with(
+            &profile,
+            &mut opts,
+            env_map(&[
+                ("OMCP_TEST_IAM_TOKEN", "header.payload.sig"),
+                (
+                    "OMCP_TEST_IAM_KEY",
+                    "-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----",
+                ),
+            ]),
+        )
+        .expect("inject over tcps");
+        assert_eq!(opts.iam_token.as_deref(), Some("header.payload.sig"));
+        assert!(
+            opts.iam_token_private_key
+                .as_deref()
+                .is_some_and(|k| k.contains("BEGIN PRIVATE KEY")),
+            "the proof-of-possession key must be resolved and wired through"
+        );
+    }
+
+    #[test]
+    fn inject_resolves_the_pop_private_key_from_file() {
+        let key_path =
+            std::env::temp_dir().join(format!("oraclemcp-iam-pop-key-{}.pem", std::process::id()));
+        std::fs::write(
+            &key_path,
+            "-----BEGIN PRIVATE KEY-----\nZm9v\n-----END PRIVATE KEY-----\n",
+        )
+        .expect("write key");
+        let profile = tcps_profile_with_oci(&format!(
+            r#"
+            use_iam_token = true
+            token_env = "OMCP_TEST_IAM_TOKEN"
+            token_key_file = "{}"
+            "#,
+            key_path.display()
+        ));
+        let mut opts = connect_options_for(&profile);
+        inject_iam_token_with(
+            &profile,
+            &mut opts,
+            env_map(&[("OMCP_TEST_IAM_TOKEN", "header.payload.sig")]),
+        )
+        .expect("inject over tcps");
+        let _ = std::fs::remove_file(&key_path);
+        assert!(
+            opts.iam_token_private_key
+                .as_deref()
+                .is_some_and(|k| k.contains("BEGIN PRIVATE KEY"))
+        );
+    }
+
+    #[test]
+    fn inject_ambiguous_pop_key_source_is_fail_closed() {
+        let profile = tcps_profile_with_oci(
+            r#"
+            use_iam_token = true
+            token_env = "OMCP_TEST_IAM_TOKEN"
+            token_key_file = "/tmp/oraclemcp-does-not-exist.pem"
+            token_key_env = "OMCP_TEST_IAM_KEY"
+            "#,
+        );
+        let mut opts = connect_options_for(&profile);
+        let err = inject_iam_token_with(
+            &profile,
+            &mut opts,
+            env_map(&[("OMCP_TEST_IAM_TOKEN", "header.payload.sig")]),
+        )
+        .expect_err("ambiguous key source");
+        assert_eq!(err, IamTokenError::AmbiguousKeySource);
+    }
+
+    #[test]
+    fn inject_bearer_token_needs_no_pop_key() {
+        // A plain OAuth2 bearer token names no key: the token resolves and no
+        // proof-of-possession key is wired (the None path).
+        let profile = tcps_profile_with_oci(
+            r#"
+            use_iam_token = true
+            token_env = "OMCP_TEST_IAM_TOKEN"
+            "#,
+        );
+        let mut opts = connect_options_for(&profile);
+        inject_iam_token_with(
+            &profile,
+            &mut opts,
+            env_map(&[("OMCP_TEST_IAM_TOKEN", "header.payload.sig")]),
+        )
+        .expect("inject");
+        assert!(opts.iam_token.is_some());
+        assert!(opts.iam_token_private_key.is_none());
     }
 
     #[test]

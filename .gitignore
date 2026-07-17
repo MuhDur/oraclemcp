@@ -67,3 +67,6 @@ venv/
 *.actual
 # insta pending snapshots (accept with `cargo insta accept`, then commit .snap).
 *.snap.new
+
+# Off-scope / not part of any release (operator directive: never commit).
+docs/plan/PLAN_GCP_SHOWCASE_LAUNCH.md
