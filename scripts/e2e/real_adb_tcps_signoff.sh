@@ -22,6 +22,7 @@ Required live-run env:
   ORACLEMCP_REAL_ADB_NON_CUSTOMER_ASSERTION=1
   ORACLEMCP_REAL_ADB_CONNECT_STRING
   ORACLEMCP_REAL_ADB_PASSWORD_USER
+  ORACLEMCP_REAL_ADB_IAM_DATABASE_USER
   ORACLEMCP_REAL_ADB_IAM_USER
   ORACLEMCP_REAL_ADB_PASSWORD
   ORACLEMCP_REAL_ADB_WALLET_LOCATION
@@ -73,6 +74,7 @@ require_live_env() {
   for name in \
     ORACLEMCP_REAL_ADB_CONNECT_STRING \
     ORACLEMCP_REAL_ADB_PASSWORD_USER \
+    ORACLEMCP_REAL_ADB_IAM_DATABASE_USER \
     ORACLEMCP_REAL_ADB_IAM_USER \
     ORACLEMCP_REAL_ADB_PASSWORD \
     ORACLEMCP_REAL_ADB_WALLET_LOCATION \
@@ -174,7 +176,10 @@ binary="$cargo_target_dir/debug/oraclemcp"
 if [ "$E2E_DRY_RUN" != "1" ]; then
   require_live_env
   write_profile "$wallet_config" "$wallet_profile" "$ORACLEMCP_REAL_ADB_PASSWORD_USER" false
-  write_profile "$iam_config" "$iam_profile" "$ORACLEMCP_REAL_ADB_IAM_USER" true
+  # OCI IAM resolves the token against its global-user mapping. The profile
+  # username must be that mapped database schema, which the guarded query also
+  # proves with SELECT USER FROM DUAL.
+  write_profile "$iam_config" "$iam_profile" "$ORACLEMCP_REAL_ADB_IAM_DATABASE_USER" true
 else
   e2e_log_event "dry_run_env" "setup" "skipped" 0 "live env validation skipped in --dry-run"
 fi

@@ -84,6 +84,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         for statement in [enable_iam, create_user.as_str(), grant_session.as_str()] {
             connection.execute(&cx, statement, &[]).await?;
         }
+
+        let provider = connection
+            .query_rows(
+                &cx,
+                "SELECT VALUE FROM V$PARAMETER WHERE NAME = 'identity_provider_type'",
+                &[],
+            )
+            .await?
+            .into_iter()
+            .next()
+            .and_then(|row| row.text("VALUE").map(str::to_owned));
+        if provider.as_deref() != Some("OCI_IAM") {
+            return Err("OCI IAM external authentication was not enabled".into());
+        }
+
+        // `CREATE USER ... IAM_PRINCIPAL_NAME=<token sub>` above is the
+        // exact mapping operation. `DBA_USERS.EXTERNAL_NAME` is deliberately
+        // not parsed here: OCI canonicalizes that value differently across
+        // service versions. The following live IAM-token session and
+        // `SELECT USER FROM DUAL` are the behavior-level proof that this exact
+        // token resolves to the created global schema.
         Ok::<(), Box<dyn Error>>(())
     })
 }

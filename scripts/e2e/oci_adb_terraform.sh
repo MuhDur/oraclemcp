@@ -408,6 +408,57 @@ fi
 [ -s "$token_dir/token" ] || e2e_finish_fail "OCI CLI did not write a database token"
 chmod 600 "$token_dir/token"
 
+# OCI's scoped database token names the IAM principal twice: `userName` and
+# `dbUserName` identify the human-readable OCI user, while `sub` is the stable
+# OCI user identity ADB matches for the global-user mapping. The database
+# schema is a separate mapped global user. Decode only these non-secret claims
+# and refuse a mismatch before creating any mapping or opening the token probe.
+token_identity="$run_dir/iam_token_identity"
+if ! python3 - "$token_dir/token" >"$token_identity" <<'PY'
+import base64
+import json
+import re
+import sys
+
+token = open(sys.argv[1], encoding="utf-8").read().strip()
+parts = token.split(".")
+if len(parts) != 3:
+    raise SystemExit("OCI database token is not a three-segment JWT")
+payload = parts[1] + "=" * (-len(parts[1]) % 4)
+try:
+    claims = json.loads(base64.urlsafe_b64decode(payload))
+except (ValueError, json.JSONDecodeError) as error:
+    raise SystemExit("OCI database token payload is not valid JSON") from error
+
+principal = claims.get("userName")
+login_user = claims.get("dbUserName")
+subject = claims.get("sub")
+if not all(isinstance(value, str) for value in (principal, login_user, subject)):
+    raise SystemExit("OCI database token omits userName, dbUserName, or sub")
+if principal != login_user:
+    raise SystemExit("OCI database token userName and dbUserName differ")
+for claim_name, value in (("principal", principal), ("subject", subject)):
+    if not re.fullmatch(r"[A-Za-z0-9._@:/=-]{1,128}", value):
+        raise SystemExit(f"OCI database token {claim_name} has unsupported characters")
+print(principal)
+print(subject)
+PY
+then
+  e2e_finish_fail "could not verify OCI database token identity"
+fi
+chmod 600 "$token_identity"
+mapfile -t token_identity_lines <"$token_identity"
+if [ "${#token_identity_lines[@]}" -ne 2 ]; then
+  e2e_finish_fail "OCI database token identity extraction returned an invalid claim count"
+fi
+token_principal="${token_identity_lines[0]}"
+token_subject="${token_identity_lines[1]}"
+if [ "$token_principal" != "$ORACLEMCP_ADB_IAM_PRINCIPAL_NAME" ]; then
+  e2e_finish_fail "OCI database token principal does not match ORACLEMCP_ADB_IAM_PRINCIPAL_NAME"
+fi
+e2e_log_event "iam_token_principal" "act" "pass" 0 \
+  "scoped OCI token userName/dbUserName matches the configured IAM user; token sub captured for global-user mapping"
+
 toml_string() {
   jq -Rn --arg value "$1" '$value'
 }
@@ -524,7 +575,7 @@ if ! ORACLEMCP_ADB_CONNECT_STRING="$(<"$run_dir/admin_connect_string")" \
   ORACLEMCP_ADB_WALLET_LOCATION="$wallet_dir" \
   ORACLEMCP_ADB_WALLET_PASSWORD="$wallet_password" \
   ORACLEMCP_ADB_SSL_SERVER_CERT_DN="$ssl_dn" \
-  ORACLEMCP_ADB_IAM_PRINCIPAL_NAME="$ORACLEMCP_ADB_IAM_PRINCIPAL_NAME" \
+  ORACLEMCP_ADB_IAM_PRINCIPAL_NAME="$token_subject" \
   ORACLEMCP_ADB_IAM_DATABASE_USER="$(<"$run_dir/iam_database_user")" \
   e2e_run_cargo_capped "act" run --quiet --manifest-path "$bootstrap_manifest"; then
   e2e_finish_fail "creating OCI IAM global-user mapping failed"
@@ -538,6 +589,7 @@ if ! run_redacted "act" "real ADB TCPS password and IAM signoff" env \
   ORACLEMCP_REAL_ADB_NON_CUSTOMER_ASSERTION=1 \
   ORACLEMCP_REAL_ADB_CONNECT_STRING="$(<"$run_dir/admin_connect_string")" \
   ORACLEMCP_REAL_ADB_PASSWORD_USER=ADMIN \
+  ORACLEMCP_REAL_ADB_IAM_DATABASE_USER="$(<"$run_dir/iam_database_user")" \
   ORACLEMCP_REAL_ADB_IAM_USER="$(<"$run_dir/iam_database_user")" \
   ORACLEMCP_REAL_ADB_PASSWORD="$admin_password" \
   ORACLEMCP_REAL_ADB_WALLET_LOCATION="$wallet_dir" \
