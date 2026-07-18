@@ -52,7 +52,11 @@ jobs:
     name: release gates
     needs: web-build
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 60 (was 45): the full gate battery (fmt + clippy x3 + test --workspace
+    # --all-targets + dashboard test + doc + deny x2 + package) sits right at the
+    # 45m edge on a cold-ish cache; a workspace-crate source change (e.g. the
+    # binary) forces a recompile that tips it over. 60 gives headroom.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
         with:
