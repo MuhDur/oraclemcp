@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "gate": "D3.2 local pre-tag release gate",
+  "source_sha": "e6d80d2f3cfe",
+  "created_at": "2026-07-18T09:00:01Z",
+  "confidentiality": {
+    "committed_identifiers": "synthetic-only",
+    "server_certificate_subject": "CN=oracle-test.invalid",
+    "real_adb_evidence": "out-of-band; never committed"
+  },
+  "checks": [
+    {
+      "name": "synthetic_oci_tcps_wallet_iam_token",
+      "status": "pass",
+      "command": "cargo test -p oraclemcp-core --test oci_tcps_e2e profile_wallet_and_iam_token_reach_local_tcps_terminator -- --nocapture",
+      "verifies": [
+        "synthetic wallet material reaches a local TCPS terminator",
+        "the server injects an IAM database token over TCPS only",
+        "mTLS peer certificate and post-TLS Oracle Net bytes are observed",
+        "token and wallet paths are not leaked in the asserted error text"
+      ]
+    }
+  ]
+}
