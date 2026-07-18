@@ -4763,10 +4763,16 @@ fn run_setup(
 const LATEST_RELEASE_API_URL: &str =
     "https://api.github.com/repos/MuhDur/oraclemcp/releases/latest";
 const LATEST_RELEASE_MAX_BYTES: usize = 1024 * 1024;
+// Embed the installers from a crate-local copy kept byte-identical to the
+// repo-root install.sh/install.ps1 (drift-guarded by the
+// `embedded_installers_match_repo_root` test below). The repo-root originals
+// are what `curl | bash` fetches; `cargo package` only includes files inside
+// the crate, so the self-update embed must read a local copy or the published
+// tarball fails to verify (qa93 packaging regression).
 #[cfg(any(test, not(windows)))]
-const EMBEDDED_INSTALLER_SH: &[u8] = include_bytes!("../../../install.sh");
+const EMBEDDED_INSTALLER_SH: &[u8] = include_bytes!("../install.sh");
 #[cfg(any(test, windows))]
-const EMBEDDED_INSTALLER_PS1: &[u8] = include_bytes!("../../../install.ps1");
+const EMBEDDED_INSTALLER_PS1: &[u8] = include_bytes!("../install.ps1");
 #[cfg(not(windows))]
 const EMBEDDED_SELF_UPDATE_INSTALLER: &[u8] = EMBEDDED_INSTALLER_SH;
 #[cfg(windows)]

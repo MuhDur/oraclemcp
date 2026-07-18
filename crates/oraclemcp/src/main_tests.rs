@@ -11,6 +11,31 @@ use oraclemcp_config::HttpOAuthConfig;
 use std::sync::atomic::AtomicUsize;
 
 #[test]
+fn embedded_installers_match_repo_root() {
+    // The crate-local install.sh/install.ps1 (embedded via include_bytes! so the
+    // published binary can self-update offline) must stay byte-identical to the
+    // repo-root originals that `curl | bash` fetches. Skips when the repo-root
+    // files are absent (e.g. inside a published/vendored crate).
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+    for (name, embedded) in [
+        ("install.sh", EMBEDDED_INSTALLER_SH),
+        ("install.ps1", EMBEDDED_INSTALLER_PS1),
+    ] {
+        let Ok(original) = std::fs::read(root.join(name)) else {
+            continue;
+        };
+        assert_eq!(
+            embedded,
+            original.as_slice(),
+            "crates/oraclemcp/{name} drifted from the repo-root {name}; \
+             they must stay byte-identical (copy the repo-root file into the crate)"
+        );
+    }
+}
+
+#[test]
 fn self_update_uses_only_authenticated_embedded_installer_bytes() {
     assert_eq!(embedded_installer_sha256(EMBEDDED_INSTALLER_SH).len(), 64);
     assert_eq!(embedded_installer_sha256(EMBEDDED_INSTALLER_PS1).len(), 64);
