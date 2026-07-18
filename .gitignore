@@ -40,6 +40,7 @@ venv/
 # Agent state (never commit)
 .claude/
 .ntm/
+.codex/
 
 # Beads compliance audit dir (managed by /beads-compliance-and-completion-verification skill)
 /beads_compliance_audit/
@@ -68,5 +69,9 @@ venv/
 # insta pending snapshots (accept with `cargo insta accept`, then commit .snap).
 *.snap.new
 
-# Off-scope / not part of any release (operator directive: never commit).
-docs/plan/PLAN_GCP_SHOWCASE_LAUNCH.md
+codex.mcp.json
+cursor.mcp.json
+factory.mcp.json
+gemini.mcp.json
+opencode.json
+windsurf.mcp.json
