@@ -1360,7 +1360,7 @@ pub struct DoctorWalletPostureReport {
 
 /// Map a typed driver [`oracledb_protocol::tls::wallet::WalletError`] into the
 /// secret-free [`DoctorWalletErrorKind`]. The driver enum is `#[non_exhaustive]`,
-/// so a wildcard arm is required; every variant the pinned `=0.7.4` driver can
+/// so a wildcard arm is required; every variant the pinned `=0.8.4` driver can
 /// produce is mapped explicitly.
 fn wallet_error_kind(error: &oracledb_protocol::tls::wallet::WalletError) -> DoctorWalletErrorKind {
     use oracledb_protocol::tls::wallet::WalletError;
@@ -1375,7 +1375,7 @@ fn wallet_error_kind(error: &oracledb_protocol::tls::wallet::WalletError) -> Doc
         WalletError::KeyDecrypt(_) => DoctorWalletErrorKind::KeyDecrypt,
         WalletError::PasswordRequired { .. } => DoctorWalletErrorKind::PasswordRequired,
         WalletError::UnsupportedFormat { .. } => DoctorWalletErrorKind::UnsupportedFormat,
-        // Forward-compat: the pinned =0.7.4 driver produces no other variant.
+        // Forward-compat: the pinned =0.8.4 driver produces no other variant.
         _ => DoctorWalletErrorKind::Pem,
     }
 }
