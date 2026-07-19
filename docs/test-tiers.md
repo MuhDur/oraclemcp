@@ -78,7 +78,8 @@ gates a tag push, not a merge).
 | fuzz targets **run** (actual corpus execution) | none automated — `cargo +nightly-2026-05-11 fuzz run <target>` locally only | manual | — (gap; see §4.4) | n/a |
 | gvenzl 23ai matrix + VECTOR smoke (real live DB) | `ci.yml:oracle-free23` (`scripts/e2e/oracle_version_matrix.sh --log --lane free23`) | every push+PR | 1 (should be 2; see §4.1) | required |
 | gvenzl full ladder (XE 18 / XE 21 / FREE 23ai) | `scripts/e2e/oracle_version_matrix.sh --log` | operator/agent-run, no schedule | 2-shaped, executed as 3 | manual |
-| code-coverage baseline / ratchet (`cargo llvm-cov`) | not implemented | — | 1 (ratchet) / 2 (baseline) — **not built yet** | n/a (gap; see §4.5) |
+| `scripts/coverage_baseline.sh` (code-coverage baseline, bead D1; `tests/coverage/BASELINE.{json,md}`) | local / not wired into CI | on demand (deliberate dispatch) | 2 | n/a (local generator, not a CI job yet; see §4.5, §6) |
+| code-coverage ratchet/gate (bead D2: changed-line coverage + per-crate mutation floor on guard/audit/db) | not implemented | — | 1 (ratchet) — **not built yet** | n/a (gap; see §4.5) |
 | loom model-checks | not implemented — no `loom` dependency in the workspace | — | 2 — **not built yet** | n/a (gap; see §4.6) |
 | `scripts/e2e/oci_adb_terraform.sh`, `real_adb_tcps_signoff.sh`, `oci_adb_iam_bootstrap/` (real OCI Always-Free ADB) | `oci-adb.yml:acceptance` | `workflow_dispatch` only | 3 | manual |
 | `scripts/local_release_gate.sh` (D3.2: synthetic TCPS proof, optional real-ADB delegation) | local, pre-tag | on demand before a release tag | 3 | n/a (local, not a CI job) |
@@ -118,14 +119,27 @@ prevent. As of this writing:
    guard/config/sql targets" — the target count itself is aspirational too,
    not just the scheduled-run lane; today there are 2, both in
    `oraclemcp-guard`.
-4. **No code-coverage measurement exists at all** (`cargo llvm-cov` or
-   equivalent) — confirmed by grep across `scripts/*.sh`, `scripts/*.py`, and
-   `.github/workflows/*.yml`. `scripts/gen_coverage_report.sh` is a different,
-   already-real thing: **conformance clause coverage** (MUST/SHOULD vs
-   `tests/conformance/clauses.tsv`), wired into the required `boundary` job.
-   Do not conflate the two when reading this doc or the plan: "coverage
-   ratchet" (Tier 1) and "coverage baseline" (Tier 2) in plan §30.6 both refer
-   to *code* coverage and remain unbuilt.
+4. **Partially closed by bead D1 (§6): a code-coverage BASELINE now exists,
+   the RATCHET still does not.** Before D1 there was no code-coverage
+   measurement at all (`cargo llvm-cov` or equivalent) anywhere in
+   `scripts/*.sh`, `scripts/*.py`, or `.github/workflows/*.yml`.
+   `scripts/coverage_baseline.sh` now runs `cargo llvm-cov --workspace` and
+   commits per-crate + workspace-total line/region/function numbers to
+   `tests/coverage/BASELINE.{json,md}` — but it is a **local, on-demand
+   generator only** (Tier 2), not wired into any CI workflow, and it has no
+   gate: `--check` only validates that the committed file is well-formed, it
+   does not re-run coverage or fail on drift. `scripts/gen_coverage_report.sh`
+   remains a different, already-real thing: **conformance clause coverage**
+   (MUST/SHOULD vs `tests/conformance/clauses.tsv`), wired into the required
+   `boundary` job. Do not conflate the two when reading this doc or the plan:
+   "coverage ratchet" (Tier 1, plan §30.2 item 2 / §32.2 TRI-1 — changed-line
+   coverage plus a per-crate mutation floor on guard/audit/db, not a naive
+   never-decrease global line) is bead D2 and remains unbuilt; "coverage
+   baseline" (Tier 2) is what D1 built. Also unbuilt: a driver
+   (`rust-oracledb`, separate repo) baseline, and a `--features
+   plsql-intelligence` / `live-xe` variant of the server baseline (D1
+   deliberately scoped to default features, matching Tier 1 `cargo test
+   --workspace`; see `tests/coverage/BASELINE.md`).
 5. **No loom model-checking exists** — no `loom` dependency appears anywhere
    in the workspace. The plan's Tier 2 loom line item is aspirational.
 6. **`.github/required/_quality.yml`'s "Live matrix" step references a
@@ -178,3 +192,54 @@ Both are process controls in the same family as `tests/golden/PROVENANCE.md`'s
 re-approving" rule — a human (or reviewing agent) reading a regenerated golden
 diff is still the backstop the static lint cannot replace; see the lint
 script's own header comment for exactly what it does and does not prove.
+
+## 6. Coverage baseline (bead D1)
+
+Plan §30.2 named the empirical coverage baseline as P0: `cargo-llvm-cov` was
+already installed but wired nowhere. Bead D1 closes the baseline half of
+that gap (the ratchet/gate half is bead D2, deliberately not built here —
+see §4.5 item 4 for why a naive "never decrease" gate would be the wrong
+design).
+
+- **`scripts/coverage_baseline.sh`** — runs `cargo llvm-cov --workspace
+  --locked --summary-only --json` (default features, matching Tier 1
+  `cargo test --workspace`) and hands the raw export to
+  **`scripts/coverage_baseline.py`**, which aggregates it per crate (by
+  `crates/<name>/src/...` path) plus a workspace total and writes:
+  - `tests/coverage/BASELINE.json` — machine-readable, schema
+    `coverage-baseline/v1`: per-crate and total line/region/function
+    `count`/`covered`/`percent`, the exact command, the git SHA, the
+    `cargo-llvm-cov` version, and what was excluded.
+  - `tests/coverage/BASELINE.md` — the same numbers as a human-readable
+    table, with the regeneration command and the same honesty notes as this
+    section.
+  ```bash
+  bash scripts/coverage_baseline.sh            # regenerate the baseline (slow: full instrumented build + test pass)
+  bash scripts/coverage_baseline.sh --check     # structural validation only — see below
+  ```
+- **What `--check` does and does not prove.** It confirms the committed
+  baseline file exists, is valid JSON, and matches its declared schema. It
+  does **not** re-run coverage and does **not** detect that the committed
+  numbers have drifted from the current tree — building that comparison
+  (and deciding what to do about a regression) is bead D2's job, on purpose;
+  D1 is the foundation, not the gate.
+- **Scope, stated exactly** (see also `tests/coverage/BASELINE.md`'s own
+  header): default Cargo features only (no `live-xe`, no
+  `plsql-intelligence` — both are already out of the Tier 1 `cargo test
+  --workspace` lane this baseline mirrors); source lines/regions/functions
+  under each crate's own `src/` (cargo-llvm-cov does not instrument
+  dependencies, and empirically — verified against this workspace's own
+  `oraclemcp-config`, which has a `tests/` dir — it does not instrument
+  integration-test files or fuzz targets either, so this measures what
+  source code ran, not how much of the test suite executed); doctests
+  excluded (`--doctests` is unstable in the pinned `cargo-llvm-cov` 0.8.7
+  and slow).
+- **Not built here, left for follow-up:** the bead D2 ratchet itself; a
+  `rust-oracledb` (driver, separate repo) baseline; a
+  `--features plsql-intelligence` / `live-xe` variant of the server
+  baseline; CI wiring (this is a Tier 2 local/on-demand generator, not a
+  scheduled workflow job).
+- This is a heavy, instrumented build. It is not part of any required or
+  scheduled CI lane; run it deliberately, on a machine with headroom, with
+  `CARGO_TARGET_DIR` pointed at a dedicated directory if another build is
+  using the workspace's default `target/` concurrently.

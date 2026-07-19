@@ -1,0 +1,216 @@
+{
+  "schema": "coverage-baseline/v1",
+  "generated_at": "2026-07-19T22:09:34Z",
+  "git_sha": "4b46e87bb874427f1f117b38bbeec39a1c2f790f",
+  "cargo_llvm_cov_version": "cargo-llvm-cov 0.8.7",
+  "command": "cargo llvm-cov --workspace --locked --summary-only --json --output-path /tmp/tmp.Ygxp5Xqror/raw-llvm-cov.json",
+  "measured": {
+    "scope": "oraclemcp workspace (crates/*); the driver, rust-oracledb, is a separate repo and needs its own baseline",
+    "features": "default",
+    "excludes": [
+      "live-xe",
+      "plsql-intelligence",
+      "doctests"
+    ],
+    "unit": "source lines/regions/functions under crates/*/src (cargo-llvm-cov's own workspace scoping; integration tests, fuzz targets, and dependencies are not instrumented)"
+  },
+  "crates": [
+    {
+      "name": "oraclemcp",
+      "lines": {
+        "count": 24255,
+        "covered": 18736,
+        "percent": 77.25
+      },
+      "regions": {
+        "count": 33318,
+        "covered": 26101,
+        "percent": 78.34
+      },
+      "functions": {
+        "count": 1780,
+        "covered": 1294,
+        "percent": 72.7
+      }
+    },
+    {
+      "name": "oraclemcp-audit",
+      "lines": {
+        "count": 8888,
+        "covered": 8628,
+        "percent": 97.07
+      },
+      "regions": {
+        "count": 14307,
+        "covered": 13918,
+        "percent": 97.28
+      },
+      "functions": {
+        "count": 679,
+        "covered": 643,
+        "percent": 94.7
+      }
+    },
+    {
+      "name": "oraclemcp-auth",
+      "lines": {
+        "count": 1386,
+        "covered": 1317,
+        "percent": 95.02
+      },
+      "regions": {
+        "count": 2304,
+        "covered": 2165,
+        "percent": 93.97
+      },
+      "functions": {
+        "count": 178,
+        "covered": 172,
+        "percent": 96.63
+      }
+    },
+    {
+      "name": "oraclemcp-config",
+      "lines": {
+        "count": 4961,
+        "covered": 4765,
+        "percent": 96.05
+      },
+      "regions": {
+        "count": 6319,
+        "covered": 6052,
+        "percent": 95.77
+      },
+      "functions": {
+        "count": 401,
+        "covered": 390,
+        "percent": 97.26
+      }
+    },
+    {
+      "name": "oraclemcp-core",
+      "lines": {
+        "count": 42365,
+        "covered": 38920,
+        "percent": 91.87
+      },
+      "regions": {
+        "count": 62582,
+        "covered": 57647,
+        "percent": 92.11
+      },
+      "functions": {
+        "count": 3685,
+        "covered": 3266,
+        "percent": 88.63
+      }
+    },
+    {
+      "name": "oraclemcp-db",
+      "lines": {
+        "count": 19563,
+        "covered": 16663,
+        "percent": 85.18
+      },
+      "regions": {
+        "count": 27012,
+        "covered": 23007,
+        "percent": 85.17
+      },
+      "functions": {
+        "count": 2244,
+        "covered": 1811,
+        "percent": 80.7
+      }
+    },
+    {
+      "name": "oraclemcp-error",
+      "lines": {
+        "count": 484,
+        "covered": 474,
+        "percent": 97.93
+      },
+      "regions": {
+        "count": 735,
+        "covered": 721,
+        "percent": 98.1
+      },
+      "functions": {
+        "count": 53,
+        "covered": 52,
+        "percent": 98.11
+      }
+    },
+    {
+      "name": "oraclemcp-guard",
+      "lines": {
+        "count": 9179,
+        "covered": 8928,
+        "percent": 97.27
+      },
+      "regions": {
+        "count": 12632,
+        "covered": 12239,
+        "percent": 96.89
+      },
+      "functions": {
+        "count": 769,
+        "covered": 757,
+        "percent": 98.44
+      }
+    },
+    {
+      "name": "oraclemcp-telemetry",
+      "lines": {
+        "count": 2472,
+        "covered": 2264,
+        "percent": 91.59
+      },
+      "regions": {
+        "count": 3700,
+        "covered": 3347,
+        "percent": 90.46
+      },
+      "functions": {
+        "count": 271,
+        "covered": 249,
+        "percent": 91.88
+      }
+    },
+    {
+      "name": "oraclemcp-verifier",
+      "lines": {
+        "count": 63,
+        "covered": 54,
+        "percent": 85.71
+      },
+      "regions": {
+        "count": 79,
+        "covered": 68,
+        "percent": 86.08
+      },
+      "functions": {
+        "count": 3,
+        "covered": 3,
+        "percent": 100.0
+      }
+    }
+  ],
+  "total": {
+    "lines": {
+      "count": 113616,
+      "covered": 100749,
+      "percent": 88.68
+    },
+    "regions": {
+      "count": 162988,
+      "covered": 145265,
+      "percent": 89.13
+    },
+    "functions": {
+      "count": 10063,
+      "covered": 8637,
+      "percent": 85.83
+    }
+  }
+}

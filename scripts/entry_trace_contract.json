@@ -51,6 +51,16 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/coverage_baseline.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/coverage_baseline.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/ci_taxonomy.py",
       "kind": "entry_point",
       "trace": "required-quality"
