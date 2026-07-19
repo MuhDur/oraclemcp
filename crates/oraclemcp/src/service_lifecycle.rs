@@ -997,7 +997,23 @@ fn relativize_file_manifest(manifest: &mut BackupFileManifest, backup_root: &Pat
     if let Some(path) = manifest.backup_path.as_deref() {
         let path = Path::new(path);
         if let Ok(relative) = path.strip_prefix(backup_root) {
-            manifest.backup_path = Some(relative.display().to_string());
+            // Emit a portable, `/`-separated backup path. `Path::display()`
+            // renders with the platform separator, so on Windows this field
+            // would otherwise become e.g. `config\profiles.toml`, and restore's
+            // `validate_file_manifest` requires the exact portable strings
+            // (`config/profiles.toml`, `audit/audit.jsonl`,
+            // `audit/audit.jsonl.anchor`) — the backslash form falls through to
+            // `ORACLEMCP_SERVICE_RESTORE_INVALID_BACKUP` before any payload or
+            // audit check runs. Reusing `portable_relative_path` (the same
+            // helper the state inventory already uses) keeps the value portable
+            // on both platforms, so it is byte-identical on Linux and a
+            // cross-OS backup restores. It is set before the manifest is signed,
+            // and the restore validator is unchanged, so no integrity guarantee
+            // is weakened.
+            manifest.backup_path = Some(
+                portable_relative_path(relative)
+                    .unwrap_or_else(|_| relative.display().to_string()),
+            );
         }
     }
 }
