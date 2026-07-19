@@ -1129,6 +1129,85 @@ mod tests {
         );
     }
 
+    /// The remaining nine [`PolicyRewriteDenialReason`] variants all fall
+    /// through `rewrite_reason`'s catch-all arm to
+    /// [`PolicyGateDenialReason::PredicateRewriteRefused`] — the one arm the
+    /// test above did not reach. Before this, `PredicateRewriteRefused` had
+    /// zero coverage anywhere: it is otherwise only constructed at its call
+    /// site inside `enforce_sql_policy`, which no test drove into this branch
+    /// (every existing predicate-rewrite test either succeeds or hits
+    /// `BaseClassifierRefused`/`PredicateTargetConflict` specifically).
+    #[test]
+    fn rewrite_reason_collapses_every_other_rewrite_denial_to_predicate_rewrite_refused() {
+        for reason in [
+            PolicyRewriteDenialReason::InconsistentBaseDecision,
+            PolicyRewriteDenialReason::NoPredicates,
+            PolicyRewriteDenialReason::TargetContextMismatch,
+            PolicyRewriteDenialReason::OriginalParseFailed,
+            PolicyRewriteDenialReason::UnsupportedStatementShape,
+            PolicyRewriteDenialReason::PredicateParseFailed,
+            PolicyRewriteDenialReason::CandidateClassifierRefused,
+            PolicyRewriteDenialReason::CandidateNotReadOnly,
+            PolicyRewriteDenialReason::IncompleteCandidateDecision,
+        ] {
+            assert_eq!(
+                rewrite_reason(reason),
+                PolicyGateDenialReason::PredicateRewriteRefused,
+                "{reason:?} must collapse to PredicateRewriteRefused, not silently \
+                 fall back to a different (or no) denial reason"
+            );
+        }
+    }
+
+    /// The wire label is the ADR-0009 proof the operator console parses
+    /// (`{"Deny": {"reason": "...", ...}}`); a rename here is a silent
+    /// contract break the console cannot recover from. Only one of the eight
+    /// variants (`matching_deny_rule`) was pinned before this test — the other
+    /// seven wire strings had no golden coverage at all.
+    #[test]
+    fn policy_gate_denial_reason_wire_labels_are_pinned() {
+        let cases = [
+            (
+                PolicyGateDenialReason::BaseClassifierRefused,
+                "base_classifier_refused",
+            ),
+            (
+                PolicyGateDenialReason::IncompleteBaseDecision,
+                "incomplete_base_decision",
+            ),
+            (PolicyGateDenialReason::InvalidPolicy, "invalid_policy"),
+            (
+                PolicyGateDenialReason::MatchingDenyRule,
+                "matching_deny_rule",
+            ),
+            (
+                PolicyGateDenialReason::PredicateTargetConflict,
+                "predicate_target_conflict",
+            ),
+            (
+                PolicyGateDenialReason::UnresolvedPolicyTarget,
+                "unresolved_policy_target",
+            ),
+            (
+                PolicyGateDenialReason::PredicateRewriteRefused,
+                "predicate_rewrite_refused",
+            ),
+            (
+                PolicyGateDenialReason::NonMonotonicComposition,
+                "non_monotonic_composition",
+            ),
+        ];
+        for (reason, wire) in cases {
+            assert_eq!(reason.as_str(), wire);
+            // The label also flows through `.attachment()` verbatim.
+            let denial = PolicyGateDenial {
+                reason,
+                matched_rule_ids: Vec::new(),
+            };
+            assert_eq!(denial.attachment()["Deny"]["reason"], json!(wire));
+        }
+    }
+
     #[test]
     fn select_joins_do_not_infer_exact_targets() {
         let facts = StatementPolicyFacts::derive(

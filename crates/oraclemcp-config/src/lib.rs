@@ -2690,6 +2690,79 @@ mod tests {
         }
     }
 
+    /// The test above (`audit_shipping_rejects_remote_plaintext_and_unsupported_urls`)
+    /// only proves each malformed endpoint fails *somehow*; it never discriminates
+    /// which [`SiemEndpointError`] variant fired, so a regression that swapped one
+    /// rejection reason for another (e.g. `ftp://` misclassified as
+    /// `InvalidAuthority` instead of `UnsupportedScheme`) would pass silently. Pin
+    /// the exact variant for every rejection path, including the ones with no
+    /// coverage at all until now (`Empty`, `UnsafeCharacter`, `Fragment`,
+    /// `UnsupportedScheme`, `UserInfo`).
+    #[test]
+    fn siem_endpoint_parse_discriminates_each_error_variant() {
+        assert_eq!(SiemEndpoint::parse(""), Err(SiemEndpointError::Empty));
+        assert_eq!(
+            SiemEndpoint::parse("https://siem.example.com/ingest\r\nx-forged: value"),
+            Err(SiemEndpointError::UnsafeCharacter),
+            "an embedded CR must be rejected before scheme/authority parsing, \
+             not misclassified as a malformed authority"
+        );
+        assert_eq!(
+            SiemEndpoint::parse("https://siem.example.com/a\tb"),
+            Err(SiemEndpointError::UnsafeCharacter),
+            "a literal tab is a control/whitespace character, not a URL error"
+        );
+        assert_eq!(
+            SiemEndpoint::parse("https://siem.example.com/ingest#fragment"),
+            Err(SiemEndpointError::Fragment)
+        );
+        assert_eq!(
+            SiemEndpoint::parse("ftp://siem.example.com/ingest"),
+            Err(SiemEndpointError::UnsupportedScheme),
+            "a non-http(s) scheme must be UnsupportedScheme, not InvalidAuthority"
+        );
+        assert_eq!(
+            SiemEndpoint::parse("siem.example.com/ingest"),
+            Err(SiemEndpointError::UnsupportedScheme),
+            "a scheme-less endpoint is UnsupportedScheme (checked before authority parsing)"
+        );
+        assert_eq!(
+            SiemEndpoint::parse("https:///missing-host"),
+            Err(SiemEndpointError::InvalidAuthority)
+        );
+        assert_eq!(
+            SiemEndpoint::parse("https://siem.example.com:0/ingest"),
+            Err(SiemEndpointError::InvalidAuthority),
+            "port 0 is not a usable destination port"
+        );
+        assert_eq!(
+            SiemEndpoint::parse("https://siem.example.com:notaport/ingest"),
+            Err(SiemEndpointError::InvalidAuthority)
+        );
+        assert_eq!(
+            // sensitive-lint:allow deliberate invalid fixture
+            SiemEndpoint::parse("https://user:secret@siem.example.com/ingest"),
+            Err(SiemEndpointError::UserInfo),
+            "embedded URL userinfo must be its own distinct variant, not folded \
+             into InvalidAuthority"
+        );
+        assert_eq!(
+            SiemEndpoint::parse("http://siem.example.com/ingest"),
+            Err(SiemEndpointError::RemotePlaintext),
+            "a non-loopback host over http is RemotePlaintext, not UnsupportedScheme"
+        );
+        assert_eq!(
+            SiemEndpoint::parse("http://10.0.0.8:8080/ingest"),
+            Err(SiemEndpointError::RemotePlaintext)
+        );
+        assert_eq!(
+            SiemEndpoint::parse("http://localhost:8080/ingest"),
+            Err(SiemEndpointError::RemotePlaintext),
+            "a hostname is never treated as a literal loopback IP, even \
+             `localhost` — only a parsed loopback IpAddr qualifies"
+        );
+    }
+
     #[test]
     fn audit_shipping_accepts_https_and_explicit_literal_loopback_http() {
         for endpoint in [

@@ -111,6 +111,28 @@ mod tests {
         assert!(UnifiedAuditPolicy::new("ORACLEMCP_AUDIT", "MCP_RO").is_ok());
     }
 
+    /// The loose `.is_err()` check above never named the variant, so a future
+    /// second `UnifiedAuditError` arm (the type is `#[non_exhaustive]`) could
+    /// silently swap in for `InvalidIdentifier` and this test would not notice.
+    /// Pin the exact variant and, critically, WHICH of the two identifiers it
+    /// names — a policy name that fails but reports the `mcp_user` value (or
+    /// vice versa) would misdirect an operator fixing the config.
+    #[test]
+    fn policy_rejects_bad_identifiers_names_the_offending_one() {
+        assert_eq!(
+            UnifiedAuditPolicy::new("p; DROP", "u"),
+            Err(UnifiedAuditError::InvalidIdentifier("p; DROP".to_owned())),
+            "the policy_name is checked first and must be the one named"
+        );
+        assert_eq!(
+            UnifiedAuditPolicy::new("ORACLEMCP_AUDIT", "u; GRANT DBA"),
+            Err(UnifiedAuditError::InvalidIdentifier(
+                "u; GRANT DBA".to_owned()
+            )),
+            "a valid policy_name paired with a bad mcp_user must name the mcp_user"
+        );
+    }
+
     #[test]
     fn ddl_shapes() {
         let p = UnifiedAuditPolicy::new("ORACLEMCP_AUDIT", "MCP_RO").unwrap();

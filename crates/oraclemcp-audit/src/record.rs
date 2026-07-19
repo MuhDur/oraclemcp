@@ -2487,6 +2487,25 @@ mod tests {
         SigningKey::new("k1", vec![0x5a; 33]).expect("longer audit signing key is valid");
     }
 
+    /// The loose `.expect_err()` above only proved undersized key material
+    /// fails *somehow* — it never named the variant or checked the wrapped
+    /// [`HmacSha256KeyError`] payload. `SigningKeyError::InvalidMaterial` had
+    /// zero discriminating coverage anywhere: a regression that swapped it
+    /// for `InvalidKeyId` (a wrong-but-plausible variant, since both fail
+    /// closed) would have passed every existing test.
+    #[test]
+    fn undersized_signing_key_is_invalid_material_not_invalid_key_id() {
+        let error =
+            SigningKey::new("k1", vec![0x5a; 16]).expect_err("16-byte key is below the floor");
+        assert_eq!(
+            error,
+            SigningKeyError::InvalidMaterial(HmacSha256KeyError {
+                actual: 16,
+                minimum: crate::hmac::MIN_HMAC_SHA256_KEY_BYTES,
+            })
+        );
+    }
+
     #[test]
     fn signing_key_rejects_ambiguous_or_log_injecting_ids() {
         for id in [
@@ -2755,6 +2774,158 @@ mod tests {
         );
         assert!(with_observed_scn.starts_with("sha256:"));
         assert_eq!(with_observed_scn.len(), "sha256:".len() + 64);
+    }
+
+    /// `AuditVerdictCertificate::new` guards six preconditions before a
+    /// certificate can become persisted evidence beside a signed audit record.
+    /// Before this test, three of its six checks (`AuditSqlDigestMismatch`,
+    /// `AuditCoreHashMismatch`, `InvalidAuditEntryHash` — all in
+    /// `bind_to_record`) were covered; the other three construction-time
+    /// checks here (`EmptyClassifierVersion`, `EmptyDerivation`,
+    /// `InvalidStatementDigest`, `InvalidObservedScn`, `InconsistentLevel`)
+    /// had zero coverage anywhere in the workspace. A regression that let a
+    /// malformed core through `new()` would silently widen what the audit
+    /// chain treats as a bound, verifiable classifier proof.
+    #[test]
+    fn verdict_certificate_new_rejects_each_malformed_core() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let step = AuditVerdictDerivationStep::new(
+            AuditVerdictRuleId::R16,
+            AuditVerdictConstruct::FinalSafe,
+        )
+        .expect("registered derivation step");
+
+        assert_eq!(
+            AuditVerdictCertificate::new(
+                String::new(),
+                vec![step],
+                Some(AuditVerdictOperatingLevel::ReadOnly),
+                None,
+                digest.clone(),
+                AuditVerdict::Safe,
+            ),
+            Err(AuditVerdictCertificateError::EmptyClassifierVersion)
+        );
+        assert_eq!(
+            AuditVerdictCertificate::new(
+                "   ".to_owned(),
+                vec![step],
+                Some(AuditVerdictOperatingLevel::ReadOnly),
+                None,
+                digest.clone(),
+                AuditVerdict::Safe,
+            ),
+            Err(AuditVerdictCertificateError::EmptyClassifierVersion),
+            "whitespace-only is not a real classifier version"
+        );
+        assert_eq!(
+            AuditVerdictCertificate::new(
+                "audit-policy-v1".to_owned(),
+                Vec::new(),
+                Some(AuditVerdictOperatingLevel::ReadOnly),
+                None,
+                digest.clone(),
+                AuditVerdict::Safe,
+            ),
+            Err(AuditVerdictCertificateError::EmptyDerivation)
+        );
+        assert_eq!(
+            AuditVerdictCertificate::new(
+                "audit-policy-v1".to_owned(),
+                vec![step],
+                Some(AuditVerdictOperatingLevel::ReadOnly),
+                None,
+                "not-a-canonical-digest".to_owned(),
+                AuditVerdict::Safe,
+            ),
+            Err(AuditVerdictCertificateError::InvalidStatementDigest)
+        );
+        assert_eq!(
+            AuditVerdictCertificate::new(
+                "audit-policy-v1".to_owned(),
+                vec![step],
+                Some(AuditVerdictOperatingLevel::ReadOnly),
+                Some(String::new()),
+                digest.clone(),
+                AuditVerdict::Safe,
+            ),
+            Err(AuditVerdictCertificateError::InvalidObservedScn),
+            "an empty observed_scn is distinct from an absent one and must be rejected"
+        );
+        assert_eq!(
+            AuditVerdictCertificate::new(
+                "audit-policy-v1".to_owned(),
+                vec![step],
+                Some(AuditVerdictOperatingLevel::ReadOnly),
+                Some("12x45".to_owned()),
+                digest.clone(),
+                AuditVerdict::Safe,
+            ),
+            Err(AuditVerdictCertificateError::InvalidObservedScn),
+            "a non-digit observed_scn must be rejected, not silently truncated"
+        );
+        assert_eq!(
+            AuditVerdictCertificate::new(
+                "audit-policy-v1".to_owned(),
+                vec![step],
+                None,
+                None,
+                digest.clone(),
+                AuditVerdict::Safe,
+            ),
+            Err(AuditVerdictCertificateError::InconsistentLevel),
+            "a non-Forbidden verdict must carry a level"
+        );
+        assert_eq!(
+            AuditVerdictCertificate::new(
+                "audit-policy-v1".to_owned(),
+                vec![step],
+                Some(AuditVerdictOperatingLevel::ReadOnly),
+                None,
+                digest.clone(),
+                AuditVerdict::Forbidden,
+            ),
+            Err(AuditVerdictCertificateError::InconsistentLevel),
+            "a Forbidden verdict must NOT carry a level — there is nothing it authorized"
+        );
+
+        // The one registered-derivation error lives on the sibling constructor,
+        // `AuditVerdictDerivationStep::new` — also uncovered before this test,
+        // and constructed twice in production (`oraclemcp-guard/src/classifier.rs`)
+        // with no test anywhere pinning what it actually rejects.
+        assert_eq!(
+            AuditVerdictDerivationStep::new(
+                AuditVerdictRuleId::R15,
+                AuditVerdictConstruct::FinalSafe,
+            ),
+            Err(AuditVerdictCertificateError::UnregisteredDerivation),
+            "R15 is the routine-purity rule; a final_verdict construct is not \
+             in its registered pair set"
+        );
+        assert_eq!(
+            AuditVerdictDerivationStep::new(
+                AuditVerdictRuleId::R16,
+                AuditVerdictConstruct::RoutineCallsAbsent,
+            ),
+            Err(AuditVerdictCertificateError::UnregisteredDerivation),
+            "R16 is the final-verdict rule; a routine-purity construct is not \
+             in its registered pair set"
+        );
+
+        // And the positive control: every documented-valid combination above
+        // actually succeeds, so the negative cases above are proven against a
+        // constructor that does accept well-formed input.
+        assert!(
+            AuditVerdictCertificate::new(
+                "audit-policy-v1".to_owned(),
+                vec![step],
+                Some(AuditVerdictOperatingLevel::ReadOnly),
+                Some("12345".to_owned()),
+                digest,
+                AuditVerdict::Safe,
+            )
+            .is_ok()
+        );
     }
 
     #[test]

@@ -462,6 +462,26 @@ mod tests {
         assert_eq!(receipt.verify_offline(&TestCheckpointVerifier), Ok(()));
     }
 
+    /// `MerkleRootMismatch` had zero coverage before this: every existing
+    /// negative test corrupts either the entry body (`HeadNotBoundToEntry`) or
+    /// the proof's structural shape (`MalformedProof`), never a root hash that
+    /// is well-formed sha256 hex but simply does not reconstruct from the leaf
+    /// and siblings. This is the actual tamper-detection arithmetic — a
+    /// malicious or buggy Rekor server (or MITM) that returns a bogus root
+    /// alongside an otherwise-plausible proof must be caught here, not waved
+    /// through because the earlier checks happened to pass.
+    #[test]
+    fn receipt_rejects_a_well_formed_root_hash_that_does_not_reconstruct() {
+        let mut receipt = receipt_for(head());
+        // Exactly 64 hex chars, same shape as a real sha256 digest, but not the
+        // leaf hash the entry body actually recomputes to.
+        receipt.proof.root_hash = "f".repeat(64);
+        assert_eq!(
+            receipt.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MerkleRootMismatch)
+        );
+    }
+
     #[test]
     fn receipt_rejects_an_entry_body_that_does_not_name_the_head_manifest() {
         let mut receipt = receipt_for(head());

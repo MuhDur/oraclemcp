@@ -700,6 +700,7 @@ fn request_target_preserves_and_decodes_query_string() {
 }
 
 include!("tests_operator.rs");
+include!("tests_ci_lanes.rs");
 fn dashboard_test_dir(name: &str) -> PathBuf {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     dir.push("../../target/tmp/dashboard-http-tests");

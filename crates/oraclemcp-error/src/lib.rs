@@ -678,6 +678,76 @@ mod tests {
         assert!(json.get("retry_after_ms").is_none());
     }
 
+    /// Every `OracleMcpError` variant besides `Busy` and `Oracle` (both covered
+    /// elsewhere) had zero coverage of its `into_envelope()` mapping: the only
+    /// production caller of this type constructs `Busy` exclusively (admission
+    /// control), so a wrong `ErrorClass` on any other arm — e.g. `ForbiddenStatement`
+    /// silently mapping to `Internal`, or `LeaseRequired`/`OperatingLevelTooLow`
+    /// losing their `with_next_step` guidance — would have passed every existing
+    /// test in the workspace. Pin the exact class and, where the variant attaches
+    /// one, the next-step guidance for each remaining arm.
+    #[test]
+    fn every_oracle_mcp_error_variant_maps_to_its_documented_class() {
+        let object_not_found = OracleMcpError::ObjectNotFound {
+            name: "EMPLOYES".to_owned(),
+            fuzzy_matches: vec!["EMPLOYEES".to_owned()],
+        }
+        .into_envelope();
+        assert_eq!(object_not_found.error_class, ErrorClass::ObjectNotFound);
+        assert_eq!(object_not_found.fuzzy_matches, vec!["EMPLOYEES".to_owned()]);
+
+        let insufficient_privilege =
+            OracleMcpError::InsufficientPrivilege("ORA-01031".to_owned()).into_envelope();
+        assert_eq!(
+            insufficient_privilege.error_class,
+            ErrorClass::InsufficientPrivilege
+        );
+
+        let forbidden =
+            OracleMcpError::ForbiddenStatement("multi-statement batch".to_owned()).into_envelope();
+        assert_eq!(forbidden.error_class, ErrorClass::ForbiddenStatement);
+
+        let lease_required =
+            OracleMcpError::LeaseRequired("no active lease".to_owned()).into_envelope();
+        assert_eq!(lease_required.error_class, ErrorClass::LeaseRequired);
+        assert!(
+            lease_required
+                .next_steps
+                .iter()
+                .any(|step| step.contains("acquire_lease"))
+        );
+
+        let level_too_low =
+            OracleMcpError::OperatingLevelTooLow("needs READ_WRITE".to_owned()).into_envelope();
+        assert_eq!(level_too_low.error_class, ErrorClass::OperatingLevelTooLow);
+        assert!(
+            level_too_low
+                .next_steps
+                .iter()
+                .any(|step| step.contains("escalate"))
+        );
+
+        let challenge =
+            OracleMcpError::ChallengeRequired("confirm the DDL".to_owned()).into_envelope();
+        assert_eq!(challenge.error_class, ErrorClass::ChallengeRequired);
+
+        let runtime_state =
+            OracleMcpError::RuntimeStateRequired("no live connection".to_owned()).into_envelope();
+        assert_eq!(runtime_state.error_class, ErrorClass::RuntimeStateRequired);
+
+        let invalid_args =
+            OracleMcpError::InvalidArguments("k must be in 1..=100".to_owned()).into_envelope();
+        assert_eq!(invalid_args.error_class, ErrorClass::InvalidArguments);
+
+        let policy_denied =
+            OracleMcpError::PolicyDenied("profile policy denied it".to_owned()).into_envelope();
+        assert_eq!(policy_denied.error_class, ErrorClass::PolicyDenied);
+
+        let internal =
+            OracleMcpError::Internal("unexpected join failure".to_owned()).into_envelope();
+        assert_eq!(internal.error_class, ErrorClass::Internal);
+    }
+
     #[test]
     fn busy_envelope_carries_retry_after() {
         let env = OracleMcpError::Busy {

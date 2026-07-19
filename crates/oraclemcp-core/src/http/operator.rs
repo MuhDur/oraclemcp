@@ -621,6 +621,7 @@ pub(super) enum OperatorRouteKind {
     Metrics,
     AuditTail,
     ActiveLanes,
+    CiLanes,
     LaneCancel,
     Vsession,
     Events,
@@ -666,6 +667,7 @@ pub(super) fn operator_route_kind(path: &str) -> OperatorRouteKind {
         "/operator/v1/metrics" => OperatorRouteKind::Metrics,
         "/operator/v1/audit-tail" => OperatorRouteKind::AuditTail,
         "/operator/v1/active-lanes" => OperatorRouteKind::ActiveLanes,
+        "/operator/v1/ci-lanes" => OperatorRouteKind::CiLanes,
         "/operator/v1/lanes/cancel" => OperatorRouteKind::LaneCancel,
         "/operator/v1/vsession" => OperatorRouteKind::Vsession,
         "/operator/v1/events" => OperatorRouteKind::Events,
@@ -780,6 +782,9 @@ pub(super) fn handle_operator_api_route(
         ),
         OperatorRouteKind::ActiveLanes => {
             operator_json_response(200, &request.path, operator_active_lanes_data(config))
+        }
+        OperatorRouteKind::CiLanes => {
+            operator_json_response(200, &request.path, operator_ci_lane_health_data(config))
         }
         OperatorRouteKind::LaneCancel => handle_operator_lane_cancel_route(config, request),
         OperatorRouteKind::Vsession => {

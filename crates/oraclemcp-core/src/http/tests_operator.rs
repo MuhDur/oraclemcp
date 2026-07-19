@@ -1207,6 +1207,13 @@ fn operator_v1_serves_schema_health_events_and_action_mapping() {
             .iter()
             .any(|route| route["path"] == "/operator/v1/actions/preview")
     );
+    assert!(
+        schema_body["routes"]
+            .as_array()
+            .expect("routes")
+            .iter()
+            .any(|route| route["path"] == "/operator/v1/ci-lanes")
+    );
 
     let health_response = handle_http_request(
         &test_server(),

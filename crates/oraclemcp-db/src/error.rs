@@ -991,4 +991,197 @@ mod tests {
         assert!(env.message.contains("oracle_query.serialize.rows"));
         assert!(env.retry_after_ms.is_none());
     }
+
+    // --- into_envelope coverage for the remaining DbError variants (H5) -----
+    //
+    // Each of these constructs and classifies without an ORA- code to parse, so
+    // they were previously exercised only at their *construction* sites
+    // (`matches!(err, DbError::Foo(_))`) and never through `into_envelope()` —
+    // the actual agent-facing rendering. A regression that mapped one of these
+    // to the wrong `ErrorClass` (e.g. `LeaseNotFound` silently losing its
+    // `LeaseRequired` class, or `Quarantined` losing its `ConnectionFailed`
+    // class) would have passed every existing test.
+
+    #[test]
+    fn backend_not_compiled_is_runtime_state_required() {
+        let env = DbError::BackendNotCompiled {
+            backend: OracleBackend::RustOracle,
+        }
+        .into_envelope();
+        assert_eq!(env.error_class, ErrorClass::RuntimeStateRequired);
+        assert!(env.message.contains("not compiled"));
+        assert!(env.message.contains("oracledb-thin"));
+    }
+
+    #[test]
+    fn unsupported_auth_is_invalid_arguments() {
+        let env = DbError::UnsupportedAuth("mTLS client cert auth not implemented".to_owned())
+            .into_envelope();
+        assert_eq!(env.error_class, ErrorClass::InvalidArguments);
+        assert!(env.message.contains("mTLS client cert"));
+    }
+
+    #[test]
+    fn unsupported_feature_is_invalid_arguments() {
+        let env = DbError::UnsupportedFeature("CQN registration".to_owned()).into_envelope();
+        assert_eq!(env.error_class, ErrorClass::InvalidArguments);
+        assert!(env.message.contains("CQN registration"));
+    }
+
+    #[test]
+    fn lease_required_points_at_acquire_lease() {
+        let env =
+            DbError::LeaseRequired("transaction needs a session lease".to_owned()).into_envelope();
+        assert_eq!(env.error_class, ErrorClass::LeaseRequired);
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("acquire_lease"))
+        );
+    }
+
+    #[test]
+    fn lease_not_found_is_distinct_from_lease_required_next_step() {
+        let env = DbError::LeaseNotFound("lease `abc123` does not exist or expired".to_owned())
+            .into_envelope();
+        assert_eq!(env.error_class, ErrorClass::LeaseRequired);
+        assert!(env.message.contains("abc123"));
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("fresh lease")),
+            "a not-found lease must point at acquiring a NEW lease, not reusing the stale id: {:?}",
+            env.next_steps
+        );
+    }
+
+    #[test]
+    fn quarantined_envelope_carries_outcome_in_message_and_discard_next_step() {
+        for outcome in [
+            QuarantineOutcome::RolledBack,
+            QuarantineOutcome::DiscardedUncommitted,
+            QuarantineOutcome::UnknownDiscarded,
+        ] {
+            let env = DbError::Quarantined {
+                outcome,
+                message: "cleanup failed".to_owned(),
+            }
+            .into_envelope();
+            assert_eq!(env.error_class, ErrorClass::ConnectionFailed, "{outcome}");
+            assert!(
+                env.message.contains(outcome.as_str()),
+                "envelope must name the quarantine outcome: {}",
+                env.message
+            );
+            assert!(
+                env.next_steps
+                    .iter()
+                    .any(|step| step.contains("do not reuse")),
+                "{outcome}: {:?}",
+                env.next_steps
+            );
+        }
+    }
+
+    #[test]
+    fn quarantined_commit_in_doubt_gets_a_distinct_verification_next_step() {
+        // CommitInDoubt is the one outcome where the transaction may actually
+        // have landed — "do not reuse the session" is not enough; the agent
+        // must be told to verify the outcome before retrying non-idempotent
+        // work (never assume the commit silently failed).
+        let env = DbError::Quarantined {
+            outcome: QuarantineOutcome::CommitInDoubt,
+            message: "fsync failed after commit".to_owned(),
+        }
+        .into_envelope();
+        assert_eq!(env.error_class, ErrorClass::ConnectionFailed);
+        assert!(env.message.contains("commit_in_doubt"));
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("verify the transaction outcome")),
+            "{:?}",
+            env.next_steps
+        );
+        assert!(
+            !env.next_steps
+                .iter()
+                .any(|step| step.contains("do not reuse")),
+            "CommitInDoubt must not carry the generic 'do not reuse' step in place \
+             of the verification step: {:?}",
+            env.next_steps
+        );
+    }
+
+    #[test]
+    fn internal_error_is_internal_class_and_preserves_detail() {
+        let env = DbError::Internal("pool lock poisoned: some thread panicked".to_owned())
+            .into_envelope();
+        assert_eq!(env.error_class, ErrorClass::Internal);
+        assert!(env.message.contains("pool lock poisoned"));
+    }
+
+    // --- is_uncertain_session_state marker coverage (H5) --------------------
+    //
+    // `message_is_uncertain_connection_state` is the defense-in-depth fallback
+    // for driver-originated Query/Execute errors that carry no structural
+    // variant. Its marker list gates whether a lease is quarantined after a
+    // failure — get it wrong and either a genuinely uncertain session gets
+    // reused (data risk) or a certain one gets needlessly discarded. Every
+    // marker had zero direct test before this: the only prior coverage was
+    // indirect, through `ConnectHandshake` (a structural variant that never
+    // touches this text-matching path at all).
+
+    #[test]
+    fn query_and_execute_uncertain_state_markers_are_each_detected() {
+        const MARKERS: &[&str] = &[
+            "DPY-4011: no more data to read from socket",
+            "call timeout exceeded",
+            "ORA-01013: user requested cancel of current operation",
+            "ORA-01012: not logged on",
+            "ORA-03113: end-of-file on communication channel",
+            "ORA-03114: not connected to ORACLE",
+            "ORA-03135: connection lost contact",
+            "ORA-12170: TNS:Connect timeout occurred",
+            "connection closed by peer",
+            "the connection is closed",
+        ];
+        for marker in MARKERS {
+            assert!(
+                DbError::Query((*marker).to_owned()).is_uncertain_session_state(),
+                "Query variant must flag as uncertain for marker: {marker}"
+            );
+            assert!(
+                DbError::Execute((*marker).to_owned()).is_uncertain_session_state(),
+                "Execute variant must flag as uncertain for marker: {marker}"
+            );
+        }
+    }
+
+    #[test]
+    fn query_marker_match_is_case_insensitive() {
+        assert!(
+            DbError::Query("ora-03113: end-of-file on communication channel".to_owned())
+                .is_uncertain_session_state(),
+            "a lower-cased ORA code must still match the marker"
+        );
+    }
+
+    #[test]
+    fn ordinary_query_error_without_a_marker_is_not_uncertain_state() {
+        let err = DbError::Query("ORA-00942: table or view does not exist".to_owned());
+        assert!(
+            !err.is_uncertain_session_state(),
+            "an ordinary object-not-found error must not trigger a session quarantine"
+        );
+    }
+
+    #[test]
+    fn connect_pool_and_cancelled_are_always_uncertain_session_state() {
+        // Unlike Query/Execute (marker-gated), these variants are unconditionally
+        // uncertain regardless of message content.
+        assert!(DbError::Connect("anything".to_owned()).is_uncertain_session_state());
+        assert!(DbError::Pool("anything".to_owned()).is_uncertain_session_state());
+        assert!(DbError::Cancelled("anything".to_owned()).is_uncertain_session_state());
+    }
 }

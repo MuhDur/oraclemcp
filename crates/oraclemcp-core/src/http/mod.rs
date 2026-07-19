@@ -248,6 +248,7 @@ impl std::fmt::Debug for OAuthEnforcement {
     }
 }
 
+mod ci_lanes;
 mod config;
 mod operator;
 mod request_target;
@@ -275,6 +276,17 @@ pub use config::{
 use stores::{
     HttpBufferedEvent, HttpResultWait, HttpSessionCapacityRejection,
     STATEFUL_SESSION_RETRY_AFTER_MS,
+};
+// Façade: the CI-lane-health tile moved to `ci_lanes`; the route dispatch in
+// `operator` only needs the handler entry point.
+use ci_lanes::operator_ci_lane_health_data;
+// The rest of `ci_lanes`' internals are exercised directly by the inline test
+// module (through `use super::*`); production code never names them.
+#[cfg(test)]
+use ci_lanes::{
+    CI_LANE_MAX_RESPONSE_BYTES, CiLaneCatalogEntry, CiLaneObservation, CiLaneSnapshot,
+    ci_lane_health_from_observations, ci_lane_health_json, fetch_ci_lane_snapshot,
+    load_ci_lane_snapshot, parse_ci_lane_catalog, write_ci_lane_snapshot,
 };
 // Reached by the inline test module through `use super::*`.
 use operator::{

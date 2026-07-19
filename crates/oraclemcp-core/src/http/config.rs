@@ -351,6 +351,13 @@ pub struct HttpTransportConfig {
     /// Optional audit JSONL path used by `/operator/v1/audit-tail`. The route
     /// summarizes records and never exposes bind values or raw identities.
     pub operator_audit_tail_path: Option<PathBuf>,
+    /// Optional path to a durably stored `/operator/v1/ci-lanes` snapshot
+    /// (schema `ci-lane-snapshot/v1`, produced by the `ci_lanes` module's
+    /// `fetch_ci_lane_snapshot` / `write_ci_lane_snapshot` pair). Unset renders
+    /// the tile as an honest `"unavailable"` catalog listing rather than a
+    /// fabricated green — nothing polls GitHub automatically from this
+    /// transport.
+    pub ci_lane_snapshot_path: Option<PathBuf>,
     /// Safe config draft/apply backend for `/operator/v1/config/*`.
     pub config_ops: Option<Arc<ConfigOpsService>>,
     /// Durable change proposal board for `/operator/v1/change-proposals/*`.
@@ -412,6 +419,10 @@ impl std::fmt::Debug for HttpTransportConfig {
                     .as_ref()
                     .map(|_| "<configured>"),
             )
+            .field(
+                "ci_lane_snapshot_path",
+                &self.ci_lane_snapshot_path.as_ref().map(|_| "<configured>"),
+            )
             .field("config_ops", &self.config_ops.is_some())
             .field("change_proposals", &self.change_proposals.is_some())
             .field("source_history", &self.source_history.is_some())
@@ -446,6 +457,7 @@ impl Default for HttpTransportConfig {
             dashboard_auth: None,
             operator_auditor: None,
             operator_audit_tail_path: None,
+            ci_lane_snapshot_path: None,
             config_ops: None,
             change_proposals: None,
             source_history: None,

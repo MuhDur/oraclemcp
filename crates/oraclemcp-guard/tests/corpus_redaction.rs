@@ -270,6 +270,30 @@ fn a_tampered_record_is_refused_at_load() {
 }
 
 #[test]
+fn a_non_json_corpus_line_is_refused_as_malformed() {
+    // The corpus is an operator-visible JSONL file on disk (bead A8 territory):
+    // truncated writes, a torn append after a crash, or a hand-edit that broke
+    // the JSON entirely must fail closed as `Malformed`, not panic and not be
+    // silently skipped. This was the one `CorpusRedactionError` variant with no
+    // discriminating test anywhere in the crate before this.
+    for garbage in ["", "not json at all", "{", "[1, 2, 3]", "\"just a string\""] {
+        assert_eq!(
+            CorpusRecord::from_jsonl_line(garbage),
+            Err(CorpusRedactionError::Malformed),
+            "line {garbage:?} must be refused as Malformed"
+        );
+    }
+
+    // Valid JSON that simply is not a corpus record (wrong shape) is Malformed
+    // too, not a panic or a different variant.
+    let wrong_shape = r#"{"unrelated":"json","not":"a corpus record"}"#;
+    assert_eq!(
+        CorpusRecord::from_jsonl_line(wrong_shape),
+        Err(CorpusRedactionError::Malformed)
+    );
+}
+
+#[test]
 fn an_error_never_echoes_the_secret_it_rejected() {
     // A rejection that quotes the offending text just moves the leak into the log.
     for hostile in ["password is hunter2", "leaked 'alice@example.test'"] {
