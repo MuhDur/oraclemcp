@@ -128,7 +128,7 @@ prevent. As of this writing:
    to *code* coverage and remain unbuilt.
 5. **No loom model-checking exists** — no `loom` dependency appears anywhere
    in the workspace. The plan's Tier 2 loom line item is aspirational.
-6. **`.github/workflows/_quality.yml`'s "Live matrix" step references a
+6. **`.github/required/_quality.yml`'s "Live matrix" step references a
    nonexistent script.** Line 24 runs `bash scripts/version_matrix.sh full
    all`; no such file exists (`scripts/version_matrix.sh` is not in the repo).
    The real live-matrix entry point is `scripts/e2e/oracle_version_matrix.sh

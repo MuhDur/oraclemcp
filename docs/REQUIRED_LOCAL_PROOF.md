@@ -1,7 +1,7 @@
 # Local Required proof
 
 `scripts/verify_required_local.sh` is the local counterpart to the effective
-`required` profile in `.github/workflows/_quality.yml`. It emits
+`required` profile in `.github/required/_quality.yml`. It emits
 `required-proof/v1`: an exact SHA, tool versions, enforced resource budget, and
 one outcome record for every effective Required command. It never claims that
 GitHub CI is green and it never tags, pushes, publishes, or creates a release.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the local Required graph and emit a self-validating required-proof/v1.
 
-The graph is derived from `.github/workflows/_quality.yml`, not copied here.
+The graph is derived from `.github/required/_quality.yml`, not copied here.
 Every workflow step and condition must be classified below.  An unfamiliar step,
 action, or condition is a hard error: silently omitting a newly required gate
 would make the proof less strict exactly when CI became stricter.
@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-QUALITY_WORKFLOW = ROOT / ".github/workflows/_quality.yml"
+QUALITY_WORKFLOW = ROOT / ".github/required/_quality.yml"
 RESOURCE_BUDGET = ROOT / "scripts/resource_budget.sh"
 VALIDATOR = ROOT / "scripts/validate_evidence.py"
 
