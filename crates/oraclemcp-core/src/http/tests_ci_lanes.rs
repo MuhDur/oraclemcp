@@ -146,9 +146,16 @@ fn drive<F: std::future::Future>(future: F) -> F::Output {
         .build()
         .expect("test fetch runtime builds");
     // block-on-boundary: test-only helper driving fetch_ci_lane_snapshot; there
-    // is no production caller (the ci_lanes route is sync/file-backed). The
-    // concurrency lint's cfg(test) skip is path-based (/tests/ or tests.rs) and
-    // does not match this tests_-prefixed src file, so sanction it explicitly.
+    // is no production caller (the ci_lanes route is sync/file-backed). This
+    // marker predates E7 (oraclemcp-eng-program-bp8ia.6.7): the lint's
+    // git_files() skip was path-based (/tests/ or tests.rs) and did not match
+    // this tests_-prefixed src file (included into a #[cfg(test)] mod via
+    // `include!()`, so it carries no #[cfg(test)] marker of its own), which
+    // is why this helper needed explicit sanctioning to pass. E7 widened
+    // git_files() to also skip tests_*.rs / *_tests.rs by filename, so this
+    // whole file is now out of the production scan; the marker is kept as a
+    // belt-and-suspenders documentation note in case that scoping ever
+    // narrows again.
     runtime.block_on(async {
         let _cx = Cx::current().expect("block_on installs a current Cx");
         future.await
