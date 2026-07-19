@@ -22,6 +22,10 @@ fn assert_mentions(haystack: &str, needle: &str, label: &str) {
     assert!(haystack.contains(needle), "{label} must mention {needle:?}");
 }
 
+fn assert_repo_file_exists(path: &str) {
+    assert!(repo_root().join(path).is_file(), "{path} must resolve");
+}
+
 #[test]
 fn release_docs_cover_0_8_config_migration_surfaces() {
     let upgrade = read_repo_file("docs/upgrading-to-0.8.0.md");
@@ -71,6 +75,84 @@ fn release_docs_cover_0_8_config_migration_surfaces() {
         "`token_exec`",
     ] {
         assert_mentions(&configuration, field, "configuration field reference");
+    }
+}
+
+#[test]
+fn release_docs_cover_shipped_0_9_operator_surfaces() {
+    let upgrade = read_repo_file("docs/upgrading-to-0.9.0.md");
+    let downgrade = read_repo_file("docs/downgrading-0.9.0-to-0.8.0.md");
+    let rollout = read_repo_file("docs/feature-rollout-0.9.0.md");
+    let readme = read_repo_file("README.md");
+    let operations = read_repo_file("docs/operations.md");
+    let changelog = read_repo_file("CHANGELOG.md");
+
+    for link in [
+        "docs/upgrading-to-0.9.0.md",
+        "docs/downgrading-0.9.0-to-0.8.0.md",
+        "docs/feature-rollout-0.9.0.md",
+    ] {
+        assert_mentions(&readme, link, "README current release-doc links");
+        assert_repo_file_exists(link);
+    }
+
+    for field in [
+        "pure-Rust thin `oracledb` driver pinned exactly",
+        "to **0.8.4**",
+        "asupersync pinned to **0.3.9**",
+        "[http.control]",
+        "preauth_workers",
+        "operator_workers",
+        "doctor_workers",
+        "Last-Event-ID",
+        "non_transactional_effect",
+        "query_effect_requires_fetch",
+    ] {
+        assert_mentions(&upgrade, field, "0.9.0 upgrade doc");
+    }
+
+    for field in [
+        "Remove the 0.9.0 control-listener table",
+        "audit schema v4",
+        "fresh audit file",
+        "Discard outstanding 0.9.0 lease handles",
+        "--version 0.8.0 --force",
+    ] {
+        assert_mentions(&downgrade, field, "0.9.0 downgrade runbook");
+    }
+
+    for surface in [
+        "Dedicated control listener",
+        "Stateful HTTP notifications",
+        "Opaque session leases",
+        "Non-transactional effect metadata",
+        "SQL-free current audit records",
+    ] {
+        assert_mentions(&rollout, surface, "0.9.0 feature-rollout defaults");
+    }
+
+    assert_mentions(&changelog, "## [0.9.0] — 2026-07-18", "0.9.0 ship date");
+    assert_mentions(&readme, "shipped 0.9.0 release", "README ship state");
+    assert_mentions(
+        &operations,
+        "shipped 0.9.0 release",
+        "operations ship state",
+    );
+
+    for stale in [
+        "pre-publish checkout",
+        "coordinated 0.9.0 release targets",
+        "target `oracledb` 0.8.4",
+        "target driver's own source",
+    ] {
+        assert!(
+            !readme.contains(stale),
+            "README retains stale wording {stale:?}"
+        );
+        assert!(
+            !operations.contains(stale),
+            "operations retains stale wording {stale:?}"
+        );
     }
 }
 

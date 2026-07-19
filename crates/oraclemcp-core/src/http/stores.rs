@@ -25,6 +25,8 @@
 //! `mod.rs` and resolves every name in exactly the environment it was written
 //! in, so the extraction cannot silently rebind a type.
 use super::*;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 const DEFAULT_MAX_STATEFUL_SESSIONS_GLOBAL: usize = 1_024;
 const DEFAULT_MAX_STATEFUL_SESSIONS_PER_PRINCIPAL: usize = 32;
@@ -344,7 +346,6 @@ const MAX_BUFFERED_MCP_BYTES_GLOBAL: usize = 64 * 1024 * 1024;
 #[derive(Debug, Default)]
 pub struct HttpResultStore {
     state: Mutex<HttpResultStoreState>,
-    changed: Condvar,
     limits: HttpResultStoreLimits,
 }
 
@@ -381,6 +382,23 @@ struct HttpResultSession {
     next_sequence: u64,
     dropped_through_sequence: u64,
     cursor_binding: String,
+    signal: Arc<HttpResultSessionSignal>,
+}
+
+#[derive(Debug, Default)]
+struct HttpResultSessionSignal {
+    changed: Condvar,
+    #[cfg(test)]
+    notification_count: AtomicUsize,
+}
+
+impl HttpResultSessionSignal {
+    fn notify_all(&self) {
+        #[cfg(test)]
+        self.notification_count
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        self.changed.notify_all();
+    }
 }
 
 #[derive(Debug)]
@@ -398,6 +416,7 @@ impl HttpResultSession {
             next_sequence: 0,
             dropped_through_sequence: 0,
             cursor_binding: sha256_hex(session_id.as_bytes())[..32].to_owned(),
+            signal: Arc::new(HttpResultSessionSignal::default()),
         }
     }
 
@@ -496,7 +515,6 @@ impl HttpResultStore {
     pub(super) fn with_limits_for_test(limits: HttpResultStoreLimits) -> Self {
         Self {
             state: Mutex::new(HttpResultStoreState::default()),
-            changed: Condvar::new(),
             limits,
         }
     }
@@ -547,11 +565,12 @@ impl HttpResultStore {
             event
         };
         let retained_bytes = event.retained_bytes();
-        let session_evicted_bytes = {
+        let (session_evicted_bytes, signal) = {
             let session = state
                 .sessions
                 .get_mut(session_id)
                 .expect("replay session was inserted under the same store lock");
+            let signal = Arc::clone(&session.signal);
             session.retained_bytes = session.retained_bytes.saturating_add(retained_bytes);
             session.events.push(HttpRetainedEvent {
                 event: event.clone(),
@@ -568,7 +587,7 @@ impl HttpResultStore {
                 };
                 evicted_bytes = evicted_bytes.saturating_add(evicted);
             }
-            evicted_bytes
+            (evicted_bytes, signal)
         };
         state.retained_bytes = state
             .retained_bytes
@@ -599,7 +618,7 @@ impl HttpResultStore {
             state.retained_bytes = state.retained_bytes.saturating_sub(evicted_bytes);
         }
         drop(state);
-        self.changed.notify_all();
+        signal.notify_all();
         Some(id)
     }
 
@@ -652,6 +671,7 @@ impl HttpResultStore {
             let Some(session) = state.sessions.get(session_id) else {
                 return HttpResultWait::Closed;
             };
+            let signal = Arc::clone(&session.signal);
             let events = session.buffered_events();
             let cursor = format!("{after_seq}/0");
             match events_after_sequence(
@@ -666,7 +686,7 @@ impl HttpResultStore {
                 Ok(_) => {}
                 Err(_) => return HttpResultWait::Closed,
             }
-            let wait = self.changed.wait_for(&mut state, timeout);
+            let wait = signal.changed.wait_for(&mut state, timeout);
             if wait.timed_out() {
                 return HttpResultWait::Timeout;
             }
@@ -679,20 +699,43 @@ impl HttpResultStore {
         if let Some(session) = &removed {
             state.retained_bytes = state.retained_bytes.saturating_sub(session.retained_bytes);
         }
+        let signal = removed.as_ref().map(|session| Arc::clone(&session.signal));
         drop(state);
-        if removed.is_some() {
-            self.changed.notify_all();
+        if let Some(signal) = signal {
+            signal.notify_all();
         }
     }
 
     pub(super) fn close_all(&self) {
         let mut state = self.state.lock();
         if !state.sessions.is_empty() {
+            let signals = state
+                .sessions
+                .values()
+                .map(|session| Arc::clone(&session.signal))
+                .collect::<Vec<_>>();
             state.sessions.clear();
             state.retained_bytes = 0;
             drop(state);
-            self.changed.notify_all();
+            for signal in signals {
+                signal.notify_all();
+            }
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn session_notification_count_for_test(&self, session_id: &str) -> usize {
+        self.state
+            .lock()
+            .sessions
+            .get(session_id)
+            .map(|session| {
+                session
+                    .signal
+                    .notification_count
+                    .load(AtomicOrdering::Relaxed)
+            })
+            .unwrap_or_default()
     }
 
     #[cfg(test)]

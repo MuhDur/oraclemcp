@@ -175,6 +175,19 @@ fn character_types_are_strings() {
 }
 
 #[test]
+fn boolean_values_are_exact_json_booleans() {
+    assert_eq!(ser("BOOLEAN", "true"), json!(true));
+    assert_eq!(ser("BOOLEAN", "false"), json!(false));
+    assert_eq!(
+        serialize_cell(
+            &OracleCell::new("BOOLEAN", None),
+            &SerializeOptions::default()
+        ),
+        Value::Null
+    );
+}
+
+#[test]
 fn date_and_timestamp_are_iso_8601() {
     // The driver renders DATE/TIMESTAMP with a space; output is canonical ISO.
     assert_eq!(
@@ -325,6 +338,7 @@ fn null_is_json_null_for_every_type() {
         "BLOB",
         "INTERVAL YEAR(2) TO MONTH",
         "INTERVAL DAY(2) TO SECOND(9)",
+        "BOOLEAN",
     ] {
         let v = serialize_cell(&OracleCell::new(t, None), &SerializeOptions::default());
         assert_eq!(v, Value::Null, "NULL {t} should be JSON null");

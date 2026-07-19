@@ -40,6 +40,28 @@ export interface OperatorLaneSummary {
   subject_id_hash: string;
 }
 
+export type OperatorCiLaneTier = "scheduled" | "advisory";
+export type OperatorCiLaneState = "success" | "not_green" | "unknown";
+
+export interface OperatorCiLaneHealth {
+  check_name: string;
+  tier: OperatorCiLaneTier;
+  workflow: string;
+  workflow_file: string;
+  job_id: string;
+  event: "push" | "pull_request" | "schedule";
+  path_filtered: boolean;
+  state: OperatorCiLaneState;
+  last_status: string | null;
+  last_conclusion: string | null;
+  streak: { conclusion: string | null; count: number; capped: boolean };
+  run_id: number | null;
+  run_url: string | null;
+  head_sha: string | null;
+  completed_at: string | null;
+  source_error: string | null;
+}
+
 export interface OperatorIdempotency {
   request_id: string;
   idempotency_key_sha256: string;

@@ -130,10 +130,8 @@ write_profile() {
     fi
     printf 'max_level = "READ_ONLY"\n'
     printf 'default_level = "READ_ONLY"\n'
+    printf 'connect_timeout_seconds = 60\n'
     printf 'call_timeout_seconds = 30\n'
-    # OCI wallets normally supply full Oracle Net descriptors.  Keep
-    # descriptor-specific transport timeouts inside that descriptor: the
-    # server intentionally refuses an injected connect_timeout_seconds here.
     printf '\n'
     printf '[profiles.oci]\n'
     printf 'wallet_location = %s\n' "$wallet"

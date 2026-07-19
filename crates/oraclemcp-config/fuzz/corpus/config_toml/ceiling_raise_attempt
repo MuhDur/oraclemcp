@@ -1,0 +1,9 @@
+[[profiles]]
+name = "shared"
+connect_string = "localhost:1521/FREEPDB1"
+max_level = "READ_ONLY"
+
+[[profiles]]
+name = "child"
+base = "shared"
+max_level = "ADMIN"

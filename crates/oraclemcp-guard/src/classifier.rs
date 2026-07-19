@@ -3775,8 +3775,14 @@ impl Classifier {
                 verified_local_vector_embedding,
             )]
         } else {
-            // Multi-statement pure SQL: let the parser split, classify each.
-            match Parser::parse_sql(&OracleDialect {}, sql) {
+            // Multi-statement pure SQL: normalize the same narrowly-proven
+            // Oracle 23ai VECTOR_EMBEDDING grammar used by the single-statement
+            // path before asking sqlparser to split the batch. Each resulting
+            // AST statement is still classified independently, so normalization
+            // cannot lower a dangerous sibling statement or bypass the max-tier
+            // fold below.
+            let parser_sql = normalize_vector_embedding_for_parser(sql);
+            match Parser::parse_sql(&OracleDialect {}, &parser_sql) {
                 Ok(stmts) => stmts
                     .iter()
                     .map(|s| {
@@ -4213,6 +4219,25 @@ mod tests {
                  needs catalog proof: {sql}"
             );
         }
+    }
+
+    #[test]
+    fn verified_vector_embedding_classifies_identically_alone_and_in_a_batch() {
+        let classifier = Classifier::default();
+        let vector_sql = "SELECT VECTOR_DISTANCE(d.embedding, VECTOR_EMBEDDING(LOCAL_ONNX_MODEL USING :1), COSINE) FROM docs d";
+        let alone = classifier.classify_verified_local_vector_embedding(vector_sql);
+        let batched = classifier
+            .classify_verified_local_vector_embedding(&format!("SELECT 1 FROM dual; {vector_sql}"));
+
+        assert_eq!(alone.danger, DangerLevel::Safe, "{alone:?}");
+        assert_eq!(batched.danger, alone.danger, "{batched:?}");
+        assert_eq!(batched.required_level, alone.required_level, "{batched:?}");
+
+        let unsafe_batch = classifier.classify_verified_local_vector_embedding(&format!(
+            "{vector_sql}; DROP TABLE app.docs"
+        ));
+        assert_eq!(unsafe_batch.danger, DangerLevel::Destructive);
+        assert_eq!(unsafe_batch.required_level, Some(OperatingLevel::Ddl));
     }
 
     #[test]

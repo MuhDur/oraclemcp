@@ -710,7 +710,10 @@ fn validate_optional_non_empty_masking_field(
 /// A single named Oracle connection profile, as written in
 /// `~/.config/oraclemcp/profiles.toml`. Inheritable fields are `Option`;
 /// [`resolve_inheritance`] merges a `base` chain and the accessors apply
-/// defaults.
+/// defaults. Ordinary fields use child-wins shallow inheritance. Security
+/// ceilings are tighten-only across the chain: explicit `max_level` values are
+/// intersected at the lowest level, and `protected = true` cannot be cleared by
+/// a child.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionProfile {
@@ -975,8 +978,24 @@ impl ConnectionProfile {
     }
 
     /// Fill every unset (`None`) field of `self` from `parent` — shallow-merge,
-    /// child wins. `name` and `base` are never inherited.
+    /// child wins for ordinary fields. Explicit operating ceilings intersect at
+    /// the lower level, and protection is monotone (`true` from either source
+    /// wins and pins the merged ceiling to `READ_ONLY`). `name` and `base` are
+    /// never inherited.
     fn inherit_from(&mut self, parent: &ConnectionProfile) {
+        let merged_max_level = match (self.max_level, parent.max_level) {
+            (Some(child), Some(parent)) => Some(child.min(parent)),
+            (Some(child), None) => Some(child),
+            (None, Some(parent)) => Some(parent),
+            (None, None) => None,
+        };
+        let merged_protected = match (self.protected, parent.protected) {
+            (Some(child), Some(parent)) => Some(child || parent),
+            (Some(child), None) => Some(child),
+            (None, Some(parent)) => Some(parent),
+            (None, None) => None,
+        };
+
         macro_rules! inherit {
             ($($field:ident),* $(,)?) => {$(
                 if self.$field.is_none() { self.$field = parent.$field.clone(); }
@@ -997,9 +1016,7 @@ impl ConnectionProfile {
             inactivity_timeout_seconds,
             keepalive_minutes,
             sdu,
-            max_level,
             default_level,
-            protected,
             require_signed_tools,
             read_only_standby,
             allow_change_notification,
@@ -1015,6 +1032,12 @@ impl ConnectionProfile {
             masking,
             sql_policy,
         );
+        self.protected = merged_protected;
+        self.max_level = if merged_protected == Some(true) {
+            Some(OperatingLevel::ReadOnly)
+        } else {
+            merged_max_level
+        };
     }
 
     /// Non-sensitive metadata for `list_profiles` self-discovery. Deliberately
@@ -1141,7 +1164,8 @@ pub struct ProfileMetadata {
 
 /// Resolve `base` inheritance across all profiles, in place. Detects unknown
 /// bases, inheritance cycles, and duplicate names. Each profile ends up with
-/// its `base` chain merged in (child fields win).
+/// its `base` chain merged in. Ordinary fields are child-wins; security
+/// ceilings are intersected and protection is monotone.
 pub fn resolve_inheritance(profiles: &mut [ConnectionProfile]) -> Result<(), ConfigError> {
     // Index by name; reject duplicates.
     let mut index: BTreeMap<String, usize> = BTreeMap::new();
@@ -1175,9 +1199,9 @@ pub fn resolve_inheritance(profiles: &mut [ConnectionProfile]) -> Result<(), Con
             chain.push(base_idx);
             current_base = raw[base_idx].base.clone();
         }
-        // Apply ancestors nearest-first; nearer ancestors win over farther ones
-        // (and the child, already populated, wins over all — inherit only fills
-        // None fields).
+        // Apply ancestors nearest-first. For ordinary fields, nearer ancestors
+        // win over farther ones (and the populated child wins over all).
+        // Security constraints are accumulated by intersection/monotone OR.
         for &ancestor in &chain {
             let parent = raw[ancestor].clone();
             profiles[i].inherit_from(&parent);
@@ -2070,6 +2094,37 @@ mod tests {
         child.max_level = Some(OperatingLevel::ReadOnly);
         let mut profiles = vec![base, child];
         resolve_inheritance(&mut profiles).expect("resolve");
+        assert_eq!(profiles[1].max_level(), OperatingLevel::ReadOnly);
+    }
+
+    #[test]
+    fn child_cannot_raise_an_explicit_base_ceiling() {
+        let mut base = p("shared");
+        base.max_level = Some(OperatingLevel::ReadOnly);
+        let mut child = p("dev");
+        child.base = Some("shared".to_owned());
+        child.max_level = Some(OperatingLevel::Admin);
+        let mut profiles = vec![base, child];
+
+        resolve_inheritance(&mut profiles).expect("resolve");
+
+        assert_eq!(profiles[1].max_level(), OperatingLevel::ReadOnly);
+    }
+
+    #[test]
+    fn child_cannot_clear_inherited_protection_or_raise_its_ceiling() {
+        let mut base = p("prod-base");
+        base.max_level = Some(OperatingLevel::ReadOnly);
+        base.protected = Some(true);
+        let mut child = p("prod-child");
+        child.base = Some("prod-base".to_owned());
+        child.max_level = Some(OperatingLevel::Admin);
+        child.protected = Some(false);
+        let mut profiles = vec![base, child];
+
+        resolve_inheritance(&mut profiles).expect("resolve");
+
+        assert!(profiles[1].protected());
         assert_eq!(profiles[1].max_level(), OperatingLevel::ReadOnly);
     }
 

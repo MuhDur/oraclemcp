@@ -15,6 +15,9 @@
     "changeProposalListResponse": {
       "$ref": "#/$defs/versionedResponse"
     },
+    "ciLanesResponse": {
+      "$ref": "#/$defs/versionedResponse"
+    },
     "clientCredentialRevokeResponse": {
       "$ref": "#/$defs/versionedResponse"
     },
@@ -249,6 +252,13 @@
       "method": "GET",
       "path": "/operator/v1/metrics",
       "schema": "metricsResponse",
+      "sse": false
+    },
+    {
+      "mcp_tool": null,
+      "method": "GET",
+      "path": "/operator/v1/ci-lanes",
+      "schema": "ciLanesResponse",
       "sse": false
     },
     {

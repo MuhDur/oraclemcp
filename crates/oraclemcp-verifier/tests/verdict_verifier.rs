@@ -71,20 +71,66 @@ fn externally_rederives_a_sample_verdict_and_confirms_its_bound_audit_hash() {
     assert_eq!(verified.observed_scn, Some(42_000_001));
 }
 
+#[derive(Clone, Copy, Debug)]
+enum VerdictTamper {
+    FlippedVerdict,
+    WrongStatementSha,
+    ForgedAuditMac,
+    Derivation,
+}
+
 #[test]
-fn rejects_a_tampered_certificate_without_trusting_the_server() {
+fn verifier_tamper_matrix_rejects_each_mutation_with_the_exact_error() {
+    let rows = [
+        (
+            "flipped_verdict",
+            VerdictTamper::FlippedVerdict,
+            VerdictVerificationError::VerdictMismatch,
+        ),
+        (
+            "wrong_statement_sha",
+            VerdictTamper::WrongStatementSha,
+            VerdictVerificationError::StatementDigestMismatch,
+        ),
+        (
+            "forged_audit_mac",
+            VerdictTamper::ForgedAuditMac,
+            VerdictVerificationError::AuditSignatureInvalid,
+        ),
+        (
+            "changed_derivation",
+            VerdictTamper::Derivation,
+            VerdictVerificationError::DerivationMismatch,
+        ),
+    ];
     let sql = "SELECT 1 FROM dual";
-    let (mut certificate, audit_record, key) = evidence_for(sql);
-    certificate.derivation[0].construct = "final_verdict:FORBIDDEN".to_owned();
 
-    let result = verify_verdict(VerdictEvidence {
-        sql,
-        certificate: &certificate,
-        audit_record: &audit_record,
-        audit_keys: std::slice::from_ref(&key),
-    });
+    for (name, tamper, expected) in rows {
+        // Reuse the same real classifier -> certificate -> signed audit fixture
+        // as the acceptance test. Only the named evidence field is changed.
+        let (mut certificate, mut audit_record, key) = evidence_for(sql);
+        match tamper {
+            VerdictTamper::FlippedVerdict => certificate.verdict = DangerLevel::Forbidden,
+            VerdictTamper::WrongStatementSha => {
+                certificate.stmt_digest = format!("sha256:{}", "0".repeat(64));
+            }
+            VerdictTamper::ForgedAuditMac => {
+                audit_record.signature = Some(format!("hmac-sha256:{}", "0".repeat(64)));
+            }
+            VerdictTamper::Derivation => {
+                certificate.derivation[0].construct = "final_verdict:FORBIDDEN".to_owned();
+            }
+        }
 
-    assert_eq!(result, Err(VerdictVerificationError::DerivationMismatch));
+        let result = verify_verdict(VerdictEvidence {
+            sql,
+            certificate: &certificate,
+            audit_record: &audit_record,
+            audit_keys: std::slice::from_ref(&key),
+        });
+
+        assert_eq!(result, Err(expected), "tamper row {name}");
+    }
 }
 
 #[test]

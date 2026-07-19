@@ -1640,6 +1640,100 @@ mod driver {
         }
     }
 
+    fn descriptor_description_closing_offsets(connect_string: &str) -> Result<Vec<usize>, DbError> {
+        let descriptor = oracledb_protocol::net::connectstring::parse(connect_string)
+            .map_err(|err| DbError::Connect(err.to_string()))?
+            .ok_or_else(|| DbError::Connect("expected a full Oracle Net descriptor".to_owned()))?;
+        let mut stack: Vec<Option<String>> = Vec::new();
+        let mut description_ends = Vec::new();
+        let mut quote = None;
+        let mut escaped = false;
+
+        for (offset, character) in connect_string.char_indices() {
+            if let Some(active_quote) = quote {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == active_quote {
+                    quote = None;
+                }
+                continue;
+            }
+            if matches!(character, '\'' | '"') {
+                quote = Some(character);
+                continue;
+            }
+            if character == '(' {
+                let tail = &connect_string[offset + character.len_utf8()..];
+                let key = tail
+                    .trim_start()
+                    .split_once('=')
+                    .map(|(key, _)| key.trim().to_ascii_lowercase())
+                    .filter(|key| {
+                        !key.is_empty()
+                            && key
+                                .chars()
+                                .all(|item| item.is_ascii_alphanumeric() || item == '_')
+                    });
+                stack.push(key);
+            } else if character == ')' {
+                let key = stack.pop().ok_or_else(|| {
+                    DbError::Connect("unbalanced Oracle Net descriptor".to_owned())
+                })?;
+                if key.as_deref() == Some("description") {
+                    description_ends.push(offset);
+                }
+            }
+        }
+        if !stack.is_empty() || quote.is_some() {
+            return Err(DbError::Connect(
+                "unterminated Oracle Net descriptor".to_owned(),
+            ));
+        }
+        if description_ends.len() != descriptor.descriptions.len() {
+            return Err(DbError::Connect(format!(
+                "could not bind connect_timeout_seconds to every Oracle Net DESCRIPTION: parsed {}, located {}",
+                descriptor.descriptions.len(),
+                description_ends.len()
+            )));
+        }
+        Ok(description_ends)
+    }
+
+    fn inject_descriptor_transport_timeout(
+        connect_string: &str,
+        timeout: Duration,
+    ) -> Result<String, DbError> {
+        let value = format_transport_connect_timeout(timeout);
+        let insertion = format!("(TRANSPORT_CONNECT_TIMEOUT={value})");
+        let mut result = connect_string.to_owned();
+        for offset in descriptor_description_closing_offsets(connect_string)?
+            .into_iter()
+            .rev()
+        {
+            result.insert_str(offset, &insertion);
+        }
+        let parsed = oracledb_protocol::net::connectstring::parse(&result)
+            .map_err(|err| DbError::Connect(err.to_string()))?
+            .ok_or_else(|| DbError::Connect("timeout injection lost the descriptor".to_owned()))?;
+        let expected = if timeout.subsec_millis() == 0 {
+            timeout.as_secs().max(1) as f64
+        } else {
+            timeout.as_millis().max(1) as f64 / 1_000.0
+        };
+        if parsed
+            .descriptions
+            .iter()
+            .any(|description| (description.tcp_connect_timeout - expected).abs() > f64::EPSILON)
+        {
+            return Err(DbError::Connect(
+                "connect timeout was not preserved across every Oracle Net DESCRIPTION".to_owned(),
+            ));
+        }
+        Ok(result)
+    }
+
     fn connect_string_with_transport_timeout(
         connect_string: &str,
         timeout: Option<Duration>,
@@ -1647,20 +1741,19 @@ mod driver {
         let Some(timeout) = timeout.filter(|timeout| !timeout.is_zero()) else {
             return Ok(connect_string.to_owned());
         };
-        if connect_string.trim_start().starts_with('(') {
-            return Err(DbError::UnsupportedAuth(
-                "connect_timeout_seconds cannot be injected into a full Oracle Net descriptor; \
-                 set TRANSPORT_CONNECT_TIMEOUT inside the descriptor instead"
-                    .to_owned(),
-            ));
-        }
         let lower = connect_string.to_ascii_lowercase();
-        if lower.contains("transport_connect_timeout=") || lower.contains("tcp_connect_timeout=") {
+        if lower.contains("transport_connect_timeout=")
+            || lower.contains("tcp_connect_timeout=")
+            || lower.contains("connect_timeout=")
+        {
             return Err(DbError::UnsupportedAuth(
                 "connect_timeout_seconds conflicts with an existing transport_connect_timeout \
                  value in connect_string; configure it in only one place"
                     .to_owned(),
             ));
+        }
+        if connect_string.trim_start().starts_with('(') {
+            return inject_descriptor_transport_timeout(connect_string, timeout);
         }
         let separator = if connect_string.contains('?') {
             '&'
@@ -1798,8 +1891,9 @@ mod driver {
         let identity = client_identity(opts.session_identity.as_ref())?;
         // Both the Oracle Net transport-connect timeout and the EXPIRE_TIME
         // dead-connection-detection interval are connect-string knobs (the thin
-        // driver has no ConnectOptions setter for either), so chain both
-        // injections onto the resolved string before building the options.
+        // driver has no ConnectOptions setter for either), so chain both onto
+        // the resolved string before building the options. Timeout injection
+        // covers every DESCRIPTION in a full descriptor or DESCRIPTION_LIST.
         let connect_string = connect_string_with_transport_timeout(
             &selected_target.connect_string,
             opts.connect_timeout,
@@ -2174,23 +2268,35 @@ mod driver {
         Ok(out)
     }
 
-    fn order_named_binds_for_driver(sql: &str, named: Vec<(String, BindValue)>) -> Vec<BindValue> {
+    fn order_named_binds_for_driver(
+        sql: &str,
+        named: Vec<(String, BindValue)>,
+    ) -> Result<Vec<BindValue>, DbError> {
         let order = placeholder_order(sql);
         let mut remaining = named;
         let mut out = Vec::with_capacity(remaining.len());
         for placeholder in &order {
-            if let Some(pos) = remaining
+            let pos = remaining
                 .iter()
                 .position(|(name, _)| name_matches(name, placeholder))
-            {
-                let (_, value) = remaining.remove(pos);
-                out.push(value);
-            }
-        }
-        for (_, value) in remaining {
+                .ok_or_else(|| {
+                    DbError::Query(format!("named bind :{placeholder} has no supplied value"))
+                })?;
+            let (_, value) = remaining.remove(pos);
             out.push(value);
         }
-        out
+        if !remaining.is_empty() {
+            let mut unmatched: Vec<String> = remaining
+                .into_iter()
+                .map(|(name, _)| name.trim_start_matches(':').to_owned())
+                .collect();
+            unmatched.sort_unstable_by_key(|name| name.to_ascii_uppercase());
+            return Err(DbError::Query(format!(
+                "supplied named bind(s) do not occur in the SQL statement: {}",
+                unmatched.join(", ")
+            )));
+        }
+        Ok(out)
     }
 
     fn name_matches(supplied: &str, scanned: &str) -> bool {
@@ -2708,6 +2814,45 @@ mod driver {
         Ok(())
     }
 
+    async fn quarantine_connection_slot(
+        inner: &Arc<AsyncMutex<super::RustOracleConnectionSlot>>,
+        cx: &Cx,
+        reason: String,
+    ) -> Result<(), DbError> {
+        let mut guard = inner
+            .lock(cx)
+            .await
+            .map_err(|err| DbError::Internal(format!("thin connection lock failed: {err}")))?;
+        guard.quarantine_reason = Some(reason);
+        drop(guard.connection.take());
+        Ok(())
+    }
+
+    pub(super) async fn recover_connection_or_quarantine<T, E>(
+        inner: &Arc<AsyncMutex<super::RustOracleConnectionSlot>>,
+        cx: &Cx,
+        recovery: Result<T, E>,
+        opts: &OracleConnectOptions,
+    ) -> Result<T, DbError>
+    where
+        E: Display,
+    {
+        match recovery {
+            Ok(connection) => Ok(connection),
+            Err(error) => {
+                let reason = format!(
+                    "owned row stream could not recover its connection: {}",
+                    sanitize_driver_error(error, opts)
+                );
+                quarantine_connection_slot(inner, cx, reason.clone()).await?;
+                Err(DbError::Quarantined {
+                    outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                    message: reason,
+                })
+            }
+        }
+    }
+
     pub(super) struct RustOracleRowStream {
         inner: Arc<AsyncMutex<super::RustOracleConnectionSlot>>,
         opts: OracleConnectOptions,
@@ -2762,17 +2907,9 @@ mod driver {
                 let stream = self.stream.take().ok_or_else(|| {
                     DbError::Internal("owned row stream has already been recovered".to_owned())
                 })?;
+                let recovery = stream.into_connection().await;
                 let connection =
-                    stream
-                        .into_connection()
-                        .await
-                        .map_err(|err| DbError::Quarantined {
-                            outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
-                            message: format!(
-                                "owned row stream could not recover its connection: {}",
-                                sanitize_driver_error(err, &self.opts)
-                            ),
-                        })?;
+                    recover_connection_or_quarantine(&self.inner, cx, recovery, &self.opts).await?;
                 replace_connection_slot(&self.inner, cx, connection).await?;
                 super::db_checkpoint(cx, "oracle_db.query_row_stream.recovered")?;
                 Ok(())
@@ -2864,9 +3001,7 @@ mod driver {
                 fseconds,
             }) => OracleCell::new(
                 oracle_type,
-                Some(format!(
-                    "{days} {hours:02}:{minutes:02}:{seconds:02}.{fseconds:09}"
-                )),
+                Some(format_interval_ds(days, hours, minutes, seconds, fseconds)),
             ),
             Some(QueryValue::IntervalYM { years, months }) => {
                 OracleCell::new(oracle_type, Some(format!("{years}-{months}")))
@@ -3102,9 +3237,7 @@ mod driver {
                     fseconds,
                 }) => OracleCell::new(
                     oracle_type,
-                    Some(format!(
-                        "{days} {hours:02}:{minutes:02}:{seconds:02}.{fseconds:09}"
-                    )),
+                    Some(format_interval_ds(days, hours, minutes, seconds, fseconds)),
                 ),
                 Some(QueryValue::IntervalYM { years, months }) => {
                     OracleCell::new(oracle_type, Some(format!("{years}-{months}")))
@@ -4179,15 +4312,34 @@ mod driver {
                     (":c".to_owned(), BindValue::Text("three".to_owned())),
                     (":b".to_owned(), BindValue::Number("2".to_owned())),
                     (":a".to_owned(), BindValue::Number("1".to_owned())),
-                    (":unused".to_owned(), BindValue::Text("tail".to_owned())),
                 ],
-            );
+            )
+            .expect("all supplied names occur in SQL");
 
-            assert_eq!(ordered.len(), 4);
+            assert_eq!(ordered.len(), 3);
             assert!(matches!(&ordered[0], BindValue::Number(value) if value == "1"));
             assert!(matches!(&ordered[1], BindValue::Number(value) if value == "2"));
             assert!(matches!(&ordered[2], BindValue::Text(value) if value == "three"));
-            assert!(matches!(&ordered[3], BindValue::Text(value) if value == "tail"));
+        }
+
+        #[test]
+        fn named_binds_reject_missing_and_unmatched_names_before_execute() {
+            let unmatched = order_named_binds_for_driver(
+                "select :a from dual",
+                vec![
+                    (":a".to_owned(), BindValue::Number("1".to_owned())),
+                    (":unused".to_owned(), BindValue::Number("2".to_owned())),
+                ],
+            )
+            .expect_err("an unmatched name must never be appended positionally");
+            assert!(unmatched.to_string().contains("unused"));
+
+            let missing = order_named_binds_for_driver(
+                "select :a, :b from dual",
+                vec![(":a".to_owned(), BindValue::Number("1".to_owned()))],
+            )
+            .expect_err("a missing named value must fail before driver execution");
+            assert!(missing.to_string().contains(":b"));
         }
 
         #[test]
@@ -4906,6 +5058,60 @@ mod driver {
                 "2026-06-29 12:34:56 +05:45"
             );
         }
+
+        #[test]
+        fn interval_ds_formatter_uses_one_canonical_sign() {
+            assert_eq!(
+                super::format_interval_ds(1, 2, 3, 4, 123_456_789),
+                "+01 02:03:04.123456789"
+            );
+            assert_eq!(
+                super::format_interval_ds(0, -1, -2, -3, -4),
+                "-00 01:02:03.000000004"
+            );
+            assert_eq!(
+                super::format_interval_ds(0, 0, 0, 0, -1),
+                "-00 00:00:00.000000001"
+            );
+            assert_eq!(
+                super::format_interval_ds(0, 0, 0, 0, 0),
+                "+00 00:00:00.000000000"
+            );
+            assert_eq!(
+                super::format_interval_ds(i32::MIN, -23, -59, -59, -999_999_999),
+                "-2147483648 23:59:59.999999999"
+            );
+        }
+    }
+
+    fn format_interval_ds(
+        days: i32,
+        hours: i32,
+        minutes: i32,
+        seconds: i32,
+        fseconds: i32,
+    ) -> String {
+        // Oracle encodes the sign on every component. Its canonical text form
+        // carries that sign once, before the day field, with absolute component
+        // magnitudes. This matters most for negative sub-day values whose day
+        // component is zero: formatting each signed component independently
+        // would produce malformed strings such as `0 -01:-02:-03.-000000004`.
+        let sign = if [days, hours, minutes, seconds, fseconds]
+            .into_iter()
+            .any(|component| component < 0)
+        {
+            '-'
+        } else {
+            '+'
+        };
+        format!(
+            "{sign}{:02} {:02}:{:02}:{:02}.{:09}",
+            days.unsigned_abs(),
+            hours.unsigned_abs(),
+            minutes.unsigned_abs(),
+            seconds.unsigned_abs(),
+            fseconds.unsigned_abs(),
+        )
     }
 
     fn format_datetime(
@@ -5599,7 +5805,7 @@ mod driver {
             let ordered_binds = if binds.is_empty() {
                 Vec::new()
             } else {
-                order_named_binds_for_driver(sql, binds)
+                order_named_binds_for_driver(sql, binds)?
             };
             let result = execute_with_timeout(
                 cx,
@@ -5636,7 +5842,7 @@ mod driver {
             let ordered_binds = if binds.is_empty() {
                 Vec::new()
             } else {
-                order_named_binds_for_driver(sql, binds)
+                order_named_binds_for_driver(sql, binds)?
             };
             let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
@@ -6255,6 +6461,54 @@ mod tests {
             ),
             "subsequent use remains structurally quarantined: {error:?}"
         );
+    }
+
+    #[test]
+    fn failed_owned_stream_recovery_quarantines_the_connection_slot() {
+        use asupersync::runtime::RuntimeBuilder;
+
+        let inner = Arc::new(AsyncMutex::new(RustOracleConnectionSlot {
+            connection: None,
+            quarantine_reason: None,
+        }));
+        let conn = RustOracleConnection {
+            opts: OracleConnectOptions::default(),
+            inner: Arc::clone(&inner),
+            wire_limits: Mutex::new(WireLimits::default()),
+            cqn_client_ids: Mutex::new(HashMap::new()),
+        };
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            let recovery = driver::recover_connection_or_quarantine::<(), _>(
+                &inner,
+                &cx,
+                Err("injected recovery failure"),
+                conn.options(),
+            )
+            .await;
+            assert!(
+                matches!(
+                    recovery,
+                    Err(DbError::Quarantined {
+                        outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                        ref message,
+                    }) if message.contains("injected recovery failure")
+                ),
+                "recovery failure must be typed quarantine: {recovery:?}"
+            );
+
+            match conn.lock_inner(&cx).await {
+                Err(DbError::Quarantined {
+                    outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                    message,
+                }) => assert!(message.contains("injected recovery failure")),
+                Err(other) => panic!("slot lost quarantine type: {other:?}"),
+                Ok(_) => panic!("failed recovery left the slot reusable"),
+            }
+        });
     }
 
     #[test]
@@ -6886,7 +7140,7 @@ mod tests {
     }
 
     #[test]
-    fn thin_connect_options_reject_descriptor_connect_timeout_injection() {
+    fn thin_connect_options_apply_descriptor_connect_timeout() {
         let opts = OracleConnectOptions {
             connect_string: "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=svc)))"
                 .to_owned(),
@@ -6896,9 +7150,54 @@ mod tests {
             ..Default::default()
         };
 
-        let err = driver::to_connect_options(&opts).expect_err("descriptor injection refused");
-        assert!(matches!(err, DbError::UnsupportedAuth(_)));
-        assert!(err.to_string().contains("descriptor"), "{err}");
+        let connect = driver::to_connect_options(&opts).expect("descriptor timeout accepted");
+        let parsed = oracledb_protocol::net::connectstring::parse(connect.connect_string())
+            .expect("injected descriptor parses")
+            .expect("full descriptor");
+        assert_eq!(parsed.descriptions.len(), 1);
+        assert_eq!(parsed.first_description().tcp_connect_timeout, 9.0);
+        assert!(
+            connect
+                .connect_string()
+                .contains("(TRANSPORT_CONNECT_TIMEOUT=9)"),
+            "{}",
+            connect.connect_string()
+        );
+    }
+
+    #[test]
+    fn thin_connect_options_apply_timeout_to_every_description() {
+        let opts = OracleConnectOptions {
+            connect_string: "(DESCRIPTION_LIST=\
+                (DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=one)(PORT=1521))\
+                    (CONNECT_DATA=(SERVICE_NAME=svc)))\
+                (DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=two)(PORT=1521))\
+                    (CONNECT_DATA=(SERVICE_NAME=svc))))"
+                .to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            connect_timeout: Some(Duration::from_millis(250)),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("descriptor-list timeout accepted");
+        let parsed = oracledb_protocol::net::connectstring::parse(connect.connect_string())
+            .expect("injected descriptor list parses")
+            .expect("full descriptor list");
+        assert_eq!(parsed.descriptions.len(), 2);
+        assert!(
+            parsed
+                .descriptions
+                .iter()
+                .all(|description| description.tcp_connect_timeout == 0.25)
+        );
+        assert_eq!(
+            connect
+                .connect_string()
+                .matches("(TRANSPORT_CONNECT_TIMEOUT=250ms)")
+                .count(),
+            2
+        );
     }
 
     #[test]

@@ -1,0 +1,458 @@
+   Compiling libc v0.2.186
+   Compiling version_check v0.9.5
+   Compiling subtle v2.6.1
+   Compiling memchr v2.8.1
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling zerocopy v0.8.52
+   Compiling cpufeatures v0.2.17
+   Compiling crossbeam-utils v0.8.21
+   Compiling cmov v0.5.4
+   Compiling base64ct v1.8.3
+   Compiling flagset v0.4.7
+   Compiling minimal-lexical v0.2.1
+   Compiling const-oid v0.9.6
+   Compiling time-core v0.1.8
+   Compiling num-conv v0.2.2
+   Compiling powerfmt v0.2.0
+   Compiling futures-core v0.3.32
+   Compiling semver v1.0.28
+   Compiling either v1.16.0
+   Compiling opaque-debug v0.3.1
+   Compiling rustix v1.1.4
+   Compiling futures-sink v0.3.32
+   Compiling anyhow v1.0.102
+   Compiling rayon-core v1.13.0
+   Compiling untrusted v0.9.0
+   Compiling parking_lot_core v0.9.12
+   Compiling slab v0.4.12
+   Compiling linux-raw-sys v0.12.1
+   Compiling futures-task v0.3.32
+   Compiling cfg_aliases v0.2.1
+   Compiling oid-registry v0.8.1
+   Compiling scopeguard v1.2.0
+   Compiling crc32fast v1.5.0
+   Compiling signal-hook v0.4.4
+   Compiling smallvec v1.15.1
+   Compiling data-encoding v2.11.0
+   Compiling rustls v0.23.40
+   Compiling virtue-next v0.1.3
+   Compiling bytes v1.11.1
+   Compiling unty-next v0.1.1
+   Compiling futures-io v0.3.32
+   Compiling allocator-api2 v0.2.21
+   Compiling equivalent v1.0.2
+   Compiling hex v0.4.3
+   Compiling foldhash v0.2.0
+   Compiling percent-encoding v2.3.2
+   Compiling parking v2.2.1
+   Compiling lazy_static v1.5.0
+   Compiling base64 v0.22.1
+   Compiling clap_lex v1.1.0
+   Compiling anstyle v1.0.14
+   Compiling ciborium-io v0.2.2
+   Compiling same-file v1.0.6
+   Compiling cast v0.3.0
+   Compiling anes v0.1.6
+   Compiling oorandom v11.1.5
+   Compiling generic-array v0.14.7
+   Compiling num-traits v0.2.19
+   Compiling ctutils v0.4.2
+   Compiling time-macros v0.2.27
+   Compiling deranged v0.5.8
+   Compiling memoffset v0.9.1
+   Compiling nix v0.31.3
+   Compiling futures-channel v0.3.32
+   Compiling lock_api v0.4.14
+   Compiling pem-rfc7468 v0.7.0
+   Compiling ring v0.17.14
+   Compiling rustc_version v0.4.1
+   Compiling itertools v0.10.5
+   Compiling futures-lite v2.6.1
+   Compiling syn v2.0.117
+   Compiling clap_builder v4.6.0
+   Compiling walkdir v2.5.0
+   Compiling nom v7.1.3
+   Compiling aho-corasick v1.1.4
+   Compiling digest v0.11.3
+   Compiling hashbrown v0.17.1
+   Compiling curve25519-dalek v4.1.3
+   Compiling bincode_derive-next v2.1.0
+   Compiling sha2 v0.11.0
+   Compiling sha1 v0.11.0
+   Compiling hmac v0.13.0
+   Compiling crossbeam-epoch v0.9.18
+   Compiling crossbeam-queue v0.3.12
+   Compiling crossbeam-deque v0.8.6
+   Compiling block-buffer v0.10.4
+   Compiling inout v0.1.4
+   Compiling num-integer v0.1.46
+   Compiling rmp v0.8.15
+   Compiling num-bigint v0.4.6
+   Compiling time v0.3.47
+   Compiling regex-automata v0.4.14
+   Compiling rayon v1.12.0
+   Compiling criterion-plot v0.5.0
+   Compiling getrandom v0.2.17
+   Compiling getrandom v0.3.4
+   Compiling errno v0.3.14
+   Compiling getrandom v0.4.2
+   Compiling stacker v0.1.24
+   Compiling socket2 v0.6.4
+   Compiling is-terminal v0.4.17
+   Compiling signal-hook-registry v1.4.8
+   Compiling rand_core v0.6.4
+   Compiling rand_core v0.9.5
+   Compiling parking_lot v0.12.5
+   Compiling crypto-common v0.1.7
+   Compiling rusticata-macros v4.1.0
+   Compiling clap v4.6.1
+   Compiling digest v0.10.7
+   Compiling universal-hash v0.5.1
+   Compiling aead v0.5.2
+   Compiling polyval v0.6.2
+   Compiling poly1305 v0.8.0
+   Compiling signature v2.2.0
+   Compiling sha2 v0.10.9
+   Compiling hmac v0.12.1
+   Compiling sha1 v0.10.6
+   Compiling md-5 v0.10.6
+   Compiling ghash v0.5.1
+   Compiling ed25519 v2.2.3
+   Compiling pbkdf2 v0.12.2
+   Compiling hkdf v0.12.4
+   Compiling serde_json v1.0.150
+   Compiling synstructure v0.13.2
+   Compiling tempfile v3.27.0
+   Compiling polling v3.11.0
+   Compiling zeroize_derive v1.5.0
+   Compiling serde_derive v1.0.228
+   Compiling zerocopy-derive v0.8.52
+   Compiling thiserror-impl v2.0.18
+   Compiling der_derive v0.7.3
+   Compiling asn1-rs-derive v0.6.0
+   Compiling asn1-rs-impl v0.2.0
+   Compiling displaydoc v0.2.6
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling futures-macro v0.3.32
+   Compiling tracing-attributes v0.1.31
+   Compiling prost-derive v0.14.4
+   Compiling pin-project-internal v1.1.13
+   Compiling recursive-proc-macro-impl v0.1.1
+   Compiling asupersync-macros v0.3.4
+   Compiling async-trait v0.1.89
+   Compiling sysinfo v0.33.1
+   Compiling regex v1.12.3
+   Compiling recursive v0.1.1
+   Compiling sqlparser v0.62.0
+   Compiling zeroize v1.8.2
+   Compiling cipher v0.4.4
+   Compiling rustls-pki-types v1.14.1
+   Compiling futures-util v0.3.32
+   Compiling der v0.7.10
+   Compiling aes v0.8.4
+   Compiling ctr v0.9.2
+   Compiling chacha20 v0.9.1
+   Compiling pin-project v1.1.13
+   Compiling thiserror v2.0.18
+   Compiling tracing v0.1.44
+   Compiling asn1-rs v0.7.2
+   Compiling opentelemetry v0.31.0
+   Compiling rustls-pemfile v2.2.0
+   Compiling chacha20poly1305 v0.10.1
+   Compiling prost v0.14.4
+   Compiling ed25519-dalek v2.2.0
+   Compiling aes-gcm v0.10.3
+   Compiling spki v0.7.3
+   Compiling pkcs8 v0.10.2
+   Compiling x509-cert v0.2.5
+   Compiling signatory v0.27.1
+   Compiling der-parser v10.0.0
+   Compiling x509-parser v0.18.1
+   Compiling franken-evidence v0.3.4
+   Compiling franken-kernel v0.3.4
+   Compiling rmp-serde v1.3.1
+   Compiling oraclemcp-error v0.4.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-error)
+   Compiling tinytemplate v1.2.1
+   Compiling bincode-next v2.1.0
+   Compiling oraclemcp-audit v0.4.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-audit)
+   Compiling futures-executor v0.3.32
+   Compiling franken-decision v0.3.4
+   Compiling ppv-lite86 v0.2.21
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling rand_chacha v0.3.1
+   Compiling rand_chacha v0.9.0
+   Compiling ciborium v0.2.2
+   Compiling rand v0.9.4
+   Compiling rand v0.8.6
+   Compiling criterion v0.5.1
+   Compiling opentelemetry_sdk v0.31.0
+   Compiling nkeys v0.4.5
+   Compiling oracledb-protocol v0.5.0
+   Compiling rustls-webpki v0.103.13
+   Compiling asupersync v0.3.4
+   Compiling oraclemcp-guard v0.4.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-guard)
+   Compiling oracledb v0.5.0
+   Compiling oraclemcp-db v0.4.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-db)
+    Finished `bench` profile [optimized] target(s) in 2m 12s
+     Running unittests src/lib.rs (target/release/deps/oraclemcp_db-660505243278c39f)
+
+running 178 tests
+test auth_adapter::tests::incomplete_proxy_is_invalid ... ignored
+test auth_adapter::tests::kerberos_emits_keytab_and_constrained_delegation ... ignored
+test auth_adapter::tests::kerberos_without_keytab_is_invalid ... ignored
+test auth_adapter::tests::password_and_external_are_plain ... ignored
+test auth_adapter::tests::proxy_debug_is_redacted_but_sensitive_values_are_available ... ignored
+test auth_adapter::tests::proxy_emits_connect_through_identity ... ignored
+test auth_adapter::tests::radius_sets_the_radius_service_and_is_unsupported_in_thin_mode ... ignored
+test awr::tests::awr_query_targets_dba_hist ... ignored
+test awr::tests::diagnostics_pack_selects_awr_ash ... ignored
+test awr::tests::five_pct_of_total_mode_adds_a_share_threshold ... ignored
+test awr::tests::live_cursor_is_free_and_targets_v_sqlstats ... ignored
+test awr::tests::metric_parse_accepts_aliases ... ignored
+test awr::tests::metric_selection_changes_the_order_column ... ignored
+test awr::tests::statspack_query_targets_stats_tables ... ignored
+test awr::tests::top_n_is_clamped ... ignored
+test awr::tests::unavailable_is_a_clear_error_offering_statspack_never_empty ... ignored
+test awr::tests::unlicensed_falls_back_to_statspack_then_unavailable ... ignored
+test connection::driver::lob_tests::bfile_locator_read_is_bounded_when_size_is_unknown ... ignored
+test connection::driver::lob_tests::clob_locator_read_is_bounded_and_reports_full_length ... ignored
+test connection::driver::lob_tests::cursor_caps_enforce_rows_and_cells_with_sentinel_fetch ... ignored
+test connection::driver::lob_tests::locator_read_failure_is_structured ... ignored
+test connection::driver::lob_tests::materializes_blob_locator_as_binary ... ignored
+test connection::driver::lob_tests::materializes_clob_locator_as_text ... ignored
+test connection::driver::lob_tests::named_binds_are_ordered_by_first_real_placeholder ... ignored
+test connection::driver::lob_tests::null_clob_cell_serializes_as_null ... ignored
+test connection::driver::lob_tests::unsupported_lob_subtype_is_explicit_error ... ignored
+test connection::driver_seam::no_block_on_in_db_path ... ignored
+test connection::driver_seam::no_oracledb_driver_call_outside_adapter ... ignored
+test connection::driver_seam::pattern_distinguishes_driver_from_workspace_crate ... ignored
+test connection::tests::driver_error_redaction_removes_connect_material ... ignored
+test connection::tests::duration_to_millis_saturates ... ignored
+test connection::tests::iam_token_over_non_tcps_is_refused_fail_closed ... ignored
+test connection::tests::iam_token_over_tcps_is_wired_through_with_access_token ... ignored
+test connection::tests::iam_token_wired_via_wallet_backed_tls_descriptor ... ignored
+test connection::tests::prefetch_rows_only_for_select_statements ... ignored
+test connection::tests::thin_connect_options_apply_app_context_in_order ... ignored
+test connection::tests::thin_connect_options_apply_edition_when_configured ... ignored
+test connection::tests::thin_connect_options_apply_explicit_tls_fields ... ignored
+test connection::tests::thin_connect_options_apply_proxy_auth ... ignored
+test connection::tests::thin_connect_options_apply_sdu_when_configured ... ignored
+test connection::tests::thin_connect_options_apply_statement_cache_size_when_configured ... ignored
+test connection::tests::thin_connect_options_keep_driver_default_sdu_when_unset ... ignored
+test connection::tests::thin_connect_options_keep_driver_default_statement_cache_when_unset ... ignored
+test connection::tests::thin_connect_options_keep_legacy_identity_fallbacks ... ignored
+test connection::tests::thin_connect_options_keep_wallet_sni_default ... ignored
+test connection::tests::thin_connect_options_reject_unsupported_enterprise_auth ... ignored
+test connection::tests::thin_connect_options_use_explicit_client_identity_fields ... ignored
+test connection::tests::thin_mode_rejects_external_auth_before_connecting ... ignored
+test connection::tests::use_iam_token_without_a_fetched_token_is_a_setup_error ... ignored
+test doctor::tests::posture_reflects_driver_compilation ... ignored
+test drcp::tests::non_pooled_leaves_the_connect_string_unchanged ... ignored
+test drcp::tests::pooled_appends_server_class_and_purity ... ignored
+test drcp::tests::pooled_uses_ampersand_when_base_already_has_query ... ignored
+test error::tests::cancelled_error_is_timeout_envelope ... ignored
+test error::tests::connect_error_without_code_is_connection_failed ... ignored
+test error::tests::pool_error_is_busy_with_retry ... ignored
+test error::tests::query_error_with_ora_code_classifies ... ignored
+test health::tests::all_lists_every_subcheck_once ... ignored
+test health::tests::buffer_cache_sql_reads_v_sysstat ... ignored
+test health::tests::constraint_sql_flags_disabled_or_not_validated ... ignored
+test health::tests::degrades_from_dba_to_all_when_dba_is_denied ... ignored
+test health::tests::degrades_to_structured_skip_when_dba_and_all_denied ... ignored
+test health::tests::invalid_objects_sql_targets_the_right_view_and_predicate ... ignored
+test health::tests::nested_all_in_list_still_means_everything ... ignored
+test health::tests::parse_all_selects_everything ... ignored
+test health::tests::parse_collects_unknown_tokens_without_failing ... ignored
+test health::tests::parse_comma_list_resolves_and_orders_canonically ... ignored
+test health::tests::preflight_reports_degraded_posture_as_skips ... ignored
+test health::tests::preflight_reports_full_access_posture ... ignored
+test health::tests::preflight_serializes_to_stable_json ... ignored
+test health::tests::sequence_sql_filters_non_cycle_near_ceiling ... ignored
+test health::tests::severity_orders_ok_below_critical ... ignored
+test health::tests::skipped_finding_is_structured ... ignored
+test health::tests::tablespace_sql_uses_usage_metrics_view ... ignored
+test health::tests::top_queries_statspack_fallback_through_preflight ... ignored
+test health::tests::unusable_indexes_sql_targets_status_unusable ... ignored
+test intelligence::tests::describe_constraints_binds_owner_and_table ... ignored
+test intelligence::tests::describe_index_trigger_and_view_bind_names ... ignored
+test intelligence::tests::get_ddl_uses_text_slice_not_raw_metadata_lob ... ignored
+test intelligence::tests::get_source_caps_text_and_reports_metadata ... ignored
+test intelligence::tests::get_sources_by_name_lists_source_types_and_fetches_each ... ignored
+test intelligence::tests::identifier_and_type_validation ... ignored
+test intelligence::tests::list_objects_binds_filters_and_limit ... ignored
+test intelligence::tests::list_schemas_binds_filter_and_limit ... ignored
+test intelligence::tests::read_lob_caps_text_and_validates_identifiers ... ignored
+test intelligence::tests::search_detail_level_parses_and_defaults_to_standard ... ignored
+test intelligence::tests::search_objects_full_level_adds_columns_and_indexes ... ignored
+test intelligence::tests::search_objects_names_level_is_identifiers_only ... ignored
+test intelligence::tests::search_objects_summary_flags_stale_stats ... ignored
+test intelligence::tests::search_objects_summary_uses_all_tables_num_rows_not_count_star ... ignored
+test intelligence::tests::search_source_binds_optional_scope_filters ... ignored
+test intelligence::tests::search_source_rejects_unknown_source_type ... ignored
+test lease::tests::acquire_applies_login_and_stamps_identity ... ignored
+test lease::tests::acquire_binds_live_agent_into_module_action_and_client_info ... ignored
+test lease::tests::acquire_clears_tags_before_setting_no_cross_request_leak ... ignored
+test lease::tests::commit_and_rollback_route_to_the_pinned_session ... ignored
+test lease::tests::expired_lease_forces_rollback_and_is_unusable ... ignored
+test lease::tests::no_lease_transaction_is_a_structured_error ... ignored
+test lease::tests::preview_dml_discards_lease_when_savepoint_cleanup_fails ... ignored
+test lease::tests::preview_dml_rolls_back_to_savepoint_after_cancellation ... ignored
+test lease::tests::reap_expired_cleans_open_transactions ... ignored
+test lease::tests::renew_resets_the_deadline ... ignored
+test lease::tests::savepoint_name_is_validated ... ignored
+test lease::tests::session_tag_statements_clear_then_set_live_identity ... ignored
+test lease::tests::session_tag_values_are_bounded_and_control_free ... ignored
+test oci::tests::adb_connect_string_forms ... ignored
+test oci::tests::complete_wallet_classifies_and_parses_aliases ... ignored
+test oci::tests::descriptor_wallet_location_preserves_case ... ignored
+test oci::tests::discover_missing_dir_errors ... ignored
+test oci::tests::ensure_fresh_token_reuses_then_refreshes ... ignored
+test oci::tests::iam_token_refresh_logic ... ignored
+test oci::tests::plaintext_tcp_is_rejected_for_adb ... ignored
+test oci::tests::quoted_wallet_location_with_space_round_trips ... ignored
+test oci::tests::spaced_descriptor_tls_check_is_whitespace_tolerant ... ignored
+test oci::tests::unencrypted_and_sso_and_password_wallets_are_reported_supported ... ignored
+test oci::tests::wallet_missing_sso_is_incomplete ... ignored
+test plscope::tests::compile_object_can_emit_plain_compile_only ... ignored
+test plscope::tests::execute_immediate_audit_finds_dynamic_sql ... ignored
+test plscope::tests::plscope_identifiers_parses_rows ... ignored
+test plscope::tests::recompile_emits_plscope_settings_and_compile ... ignored
+test plscope::tests::recompile_handles_package_body_and_validates_idents ... ignored
+test plscope::tests::unused_declaration_lint_flags_only_unreferenced_signatures ... ignored
+test pool::tests::cancelled_call_discards_checked_out_connection ... ignored
+test pool::tests::checkout_respects_acquire_timeout_when_exhausted ... ignored
+test pool::tests::cpu_derived_ceiling_is_two_n_plus_one ... ignored
+test pool::tests::pool_metrics_balance_and_bound_predicates ... ignored
+test pool::tests::pool_settings_defaults ... ignored
+test pool::tests::record_checkin_clean_returns_to_idle_and_counts_release ... ignored
+test pool::tests::record_checkin_dirty_discards_and_frees_slot ... ignored
+test pool::tests::reserve_new_connection_is_bounded_by_max_size ... ignored
+test pool::tests::resolved_clamps_max_size_to_cpu_ceiling ... ignored
+test pool::tests::resolved_keeps_configured_max_when_below_cpu_ceiling ... ignored
+test privileges::tests::matrix_is_populated ... ignored
+test privileges::tests::plscope_and_diagnostics_detected ... ignored
+test privileges::tests::read_only_principal_reports_cannot_write ... ignored
+test privileges::tests::tier_falls_back_dba_to_all_to_user ... ignored
+test privileges::tests::unprobeable_posture_is_unknown_not_falsely_safe ... ignored
+test privileges::tests::view_prefixes ... ignored
+test privileges::tests::write_capable_principal_is_detected_with_evidence ... ignored
+test query::tests::byte_cap_truncates_mid_page ... ignored
+test query::tests::cursor_roundtrips ... ignored
+test query::tests::paginated_sql_wraps_and_strips_trailing_semicolon ... ignored
+test query::tests::read_query_named_uses_named_binds_and_paginates ... ignored
+test query::tests::row_cap_truncates_and_sets_cursor ... ignored
+test query::tests::single_pass_byte_cap_matches_reference_across_caps ... ignored
+test query::tests::under_cap_is_not_truncated ... ignored
+test schema_diff::tests::diff_detects_added_dropped_changed ... ignored
+test schema_diff::tests::identical_schemas_have_empty_diff ... ignored
+test schema_diff::tests::migration_orders_creates_then_drops_and_classifies_steps ... ignored
+test serialize::tests::base64_roundtrip_shapes ... ignored
+test serialize::tests::binary_double_is_a_number ... ignored
+test serialize::tests::blob_base64_truncates_at_cap ... ignored
+test serialize::tests::blob_bytes_base64_with_length ... ignored
+test serialize::tests::canonical_nls_covers_date_timestamp_and_decimal ... ignored
+test serialize::tests::classify_type_public_signature_unchanged ... ignored
+test serialize::tests::clob_truncates_at_cap_with_flag ... ignored
+test serialize::tests::date_and_timestamp_pass_through_iso_text ... ignored
+test serialize::tests::driver_rendered_datetime_canonicalizes_to_iso ... ignored
+test serialize::tests::high_precision_non_number_numeric_stays_string ... ignored
+test serialize::tests::json_byte_len_matches_to_string_len ... ignored
+test serialize::tests::nested_result_byte_cap_marks_truncated ... ignored
+test serialize::tests::nested_result_serializes_rows_and_counts ... ignored
+test serialize::tests::null_is_json_null ... ignored
+test serialize::tests::number_serializes_as_string_by_default ... ignored
+test serialize::tests::numbers_as_float_opt_in ... ignored
+test serialize::tests::page_cache_handles_mixed_case_and_padded_type_names ... ignored
+test serialize::tests::page_cache_serializes_byte_identically_to_per_cell ... ignored
+test serialize::tests::text_cap_marks_truncated_text_without_changing_default ... ignored
+test serialize::tests::unsupported_type_emits_explicit_marker ... ignored
+test standby::tests::physical_standby_forces_read_only ... ignored
+test standby::tests::primary_read_write_is_not_standby ... ignored
+test standby::tests::unreadable_role_is_not_assumed_standby ... ignored
+test types::tests::bind_from_conversions ... ignored
+test types::tests::debug_redacts_connect_material ... ignored
+test types::tests::debug_redacts_session_identity_values ... ignored
+test types::tests::debug_renders_absent_secrets_as_none ... ignored
+test types::tests::row_lookup_is_case_insensitive ... ignored
+test types::tests::standby_detection ... ignored
+
+test result: ok. 0 passed; 0 failed; 178 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running benches/classify_type.rs (target/release/deps/classify_type-7df6af27e33a34c9)
+Benchmarking classify_type/classify_per_call
+Benchmarking classify_type/classify_per_call: Warming up for 3.0000 s
+Benchmarking classify_type/classify_per_call: Collecting 100 samples in estimated 5.0016 s (14M iterations)
+Benchmarking classify_type/classify_per_call: Analyzing
+classify_type/classify_per_call
+                        time:   [360.06 ns 363.91 ns 367.65 ns]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) low mild
+Benchmarking classify_type/serialize_row_classifies_columns
+Benchmarking classify_type/serialize_row_classifies_columns: Warming up for 3.0000 s
+Benchmarking classify_type/serialize_row_classifies_columns: Collecting 100 samples in estimated 5.0019 s (8.8M iterations)
+Benchmarking classify_type/serialize_row_classifies_columns: Analyzing
+classify_type/serialize_row_classifies_columns
+                        time:   [550.51 ns 555.33 ns 559.90 ns]
+Found 12 outliers among 100 measurements (12.00%)
+  5 (5.00%) low severe
+  7 (7.00%) low mild
+
+     Running benches/lob_capping.rs (target/release/deps/lob_capping-3db4c123df0d171e)
+Benchmarking lob_capping/clob_under_cap
+Benchmarking lob_capping/clob_under_cap: Warming up for 3.0000 s
+Benchmarking lob_capping/clob_under_cap: Collecting 100 samples in estimated 5.0421 s (318k iterations)
+Benchmarking lob_capping/clob_under_cap: Analyzing
+lob_capping/clob_under_cap
+                        time:   [16.581 µs 16.691 µs 16.806 µs]
+Found 26 outliers among 100 measurements (26.00%)
+  18 (18.00%) low severe
+  4 (4.00%) low mild
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+Benchmarking lob_capping/clob_over_cap_truncates
+Benchmarking lob_capping/clob_over_cap_truncates: Warming up for 3.0000 s
+Benchmarking lob_capping/clob_over_cap_truncates: Collecting 100 samples in estimated 5.0240 s (419k iterations)
+Benchmarking lob_capping/clob_over_cap_truncates: Analyzing
+lob_capping/clob_over_cap_truncates
+                        time:   [12.177 µs 12.258 µs 12.332 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) low severe
+  4 (4.00%) low mild
+Benchmarking lob_capping/blob_base64_over_cap
+Benchmarking lob_capping/blob_base64_over_cap: Warming up for 3.0000 s
+Benchmarking lob_capping/blob_base64_over_cap: Collecting 100 samples in estimated 5.4847 s (40k iterations)
+Benchmarking lob_capping/blob_base64_over_cap: Analyzing
+lob_capping/blob_base64_over_cap
+                        time:   [134.57 µs 135.56 µs 136.51 µs]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) low mild
+
+     Running benches/page_serialization.rs (target/release/deps/page_serialization-cb32434843a23442)
+Benchmarking page_serialization/read_query_10_rows
+Benchmarking page_serialization/read_query_10_rows: Warming up for 3.0000 s
+Benchmarking page_serialization/read_query_10_rows: Collecting 100 samples in estimated 5.0058 s (288k iterations)
+Benchmarking page_serialization/read_query_10_rows: Analyzing
+page_serialization/read_query_10_rows
+                        time:   [17.376 µs 17.535 µs 17.681 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  7 (7.00%) low mild
+Benchmarking page_serialization/read_query_200_rows
+Benchmarking page_serialization/read_query_200_rows: Warming up for 3.0000 s
+Benchmarking page_serialization/read_query_200_rows: Collecting 100 samples in estimated 6.5923 s (15k iterations)
+Benchmarking page_serialization/read_query_200_rows: Analyzing
+page_serialization/read_query_200_rows
+                        time:   [426.11 µs 429.58 µs 432.80 µs]
+Found 12 outliers among 100 measurements (12.00%)
+  7 (7.00%) low severe
+  5 (5.00%) low mild
+Benchmarking page_serialization/read_query_1000_rows
+Benchmarking page_serialization/read_query_1000_rows: Warming up for 3.0000 s
+Benchmarking page_serialization/read_query_1000_rows: Collecting 100 samples in estimated 5.1741 s (2400 iterations)
+Benchmarking page_serialization/read_query_1000_rows: Analyzing
+page_serialization/read_query_1000_rows
+                        time:   [2.1317 ms 2.1443 ms 2.1561 ms]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) low mild
+

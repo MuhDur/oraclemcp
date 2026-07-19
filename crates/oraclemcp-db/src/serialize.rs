@@ -354,6 +354,7 @@ pub fn classify_type(oracle_type: &str) -> TypeRepr {
 struct ColumnRepr {
     repr: TypeRepr,
     is_number_type: bool,
+    is_boolean_type: bool,
 }
 
 impl ColumnRepr {
@@ -362,6 +363,7 @@ impl ColumnRepr {
         ColumnRepr {
             repr: classify_uppercased(&t),
             is_number_type: t.starts_with("NUMBER"),
+            is_boolean_type: t == "BOOLEAN",
         }
     }
 }
@@ -473,6 +475,17 @@ fn serialize_cell_classified(cell: &OracleCell, col: ColumnRepr, opts: &Serializ
     let Some(text) = cell.text() else {
         return Value::Null;
     };
+    if col.is_boolean_type {
+        return match text {
+            "true" => Value::Bool(true),
+            "false" => Value::Bool(false),
+            _ => json!({
+                "unsupported": cell.oracle_type,
+                "value": null,
+                "warning": "invalid BOOLEAN representation from driver"
+            }),
+        };
+    }
     match col.repr {
         TypeRepr::Numeric => {
             if opts.numbers_as_float {

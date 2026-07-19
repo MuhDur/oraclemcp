@@ -3220,15 +3220,18 @@ fn query_as_of_from_args(arg: Option<&AsOfArg>) -> Result<Option<AsOf>, ErrorEnv
 fn query_caps_from_args(args: &QueryArgs) -> QueryCaps {
     let defaults = QueryCaps::default();
     QueryCaps {
-        max_rows: args
-            .max_rows
-            .unwrap_or(defaults.max_rows)
-            .clamp(1, MAX_QUERY_MAX_ROWS),
+        max_rows: bounded_query_max_rows(args.max_rows),
         max_result_bytes: args
             .max_result_bytes
             .unwrap_or(defaults.max_result_bytes)
             .clamp(1, MAX_QUERY_RESULT_BYTES),
     }
+}
+
+fn bounded_query_max_rows(max_rows: Option<usize>) -> usize {
+    max_rows
+        .unwrap_or(QueryCaps::default().max_rows)
+        .clamp(1, MAX_QUERY_MAX_ROWS)
 }
 
 struct SemanticSearchResponseMetadata {
@@ -3488,10 +3491,7 @@ async fn semantic_search_as_query_args(
 fn diff_query_caps_from_args(args: &DiffArgs) -> QueryCaps {
     let defaults = QueryCaps::default();
     QueryCaps {
-        max_rows: args
-            .max_rows
-            .unwrap_or(defaults.max_rows)
-            .clamp(1, MAX_QUERY_MAX_ROWS),
+        max_rows: bounded_query_max_rows(args.max_rows),
         max_result_bytes: args
             .max_result_bytes
             .unwrap_or(defaults.max_result_bytes)
@@ -4291,6 +4291,20 @@ fn call_timeout_duration(seconds: Option<u64>) -> Result<Option<Duration>, Error
     Ok(Some(Duration::from_secs(
         seconds.min(MAX_CALL_TIMEOUT_SECONDS),
     )))
+}
+
+fn request_budget_with_tool_timeout(
+    cx: &Cx,
+    request_budget: RequestBudget,
+    args: &Value,
+) -> Result<RequestBudget, ErrorEnvelope> {
+    let Some(timeout) = call_timeout_duration(args.get("timeout_seconds").and_then(Value::as_u64))?
+    else {
+        return Ok(request_budget);
+    };
+    let request_budget = request_budget.tighten_timeout(timeout);
+    request_budget.enforce(cx).map_err(DbError::into_envelope)?;
+    Ok(request_budget)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6523,17 +6537,29 @@ fn dbms_output_json(out: &DbmsOutput, max_lines: usize, max_chars: usize) -> Val
     })
 }
 
-fn prune_execute_approved_tokens(state: &mut DispatcherState) {
-    let now = Instant::now();
-    state
-        .execute_approved_tokens
-        .retain(|_, grant| grant.expires_at > now);
-    while state.execute_approved_tokens.len() >= MAX_EXECUTE_APPROVED_TOKENS {
-        let Some(key) = state.execute_approved_tokens.keys().next().cloned() else {
+fn prune_execute_approved_token_map(
+    tokens: &mut HashMap<String, ExecuteApprovedGrant>,
+    now: Instant,
+) {
+    tokens.retain(|_, grant| grant.expires_at > now);
+    while tokens.len() >= MAX_EXECUTE_APPROVED_TOKENS {
+        let Some(key) = tokens
+            .iter()
+            .min_by(|(left_key, left), (right_key, right)| {
+                left.expires_at
+                    .cmp(&right.expires_at)
+                    .then_with(|| left_key.cmp(right_key))
+            })
+            .map(|(key, _)| key.clone())
+        else {
             break;
         };
-        state.execute_approved_tokens.remove(&key);
+        tokens.remove(&key);
     }
+}
+
+fn prune_execute_approved_tokens(state: &mut DispatcherState) {
+    prune_execute_approved_token_map(&mut state.execute_approved_tokens, Instant::now());
 }
 
 fn remember_execute_approved_token(state: &mut DispatcherState, sql: &str, preview: &Value) {
@@ -8343,7 +8369,7 @@ async fn preview_dml_inner(
         ));
     }
     let caps = QueryCaps {
-        max_rows: args.max_rows.unwrap_or(QueryCaps::default().max_rows),
+        max_rows: bounded_query_max_rows(args.max_rows),
         ..QueryCaps::default()
     };
 
@@ -11077,11 +11103,17 @@ fn response_reports_terminal_effect(name: &str, value: &Value) -> bool {
     match canonical_tool_name(name) {
         "oracle_switch_profile" => true,
         "oracle_set_session_level" => bool_field("changed"),
+        // Both successful workspace controls have already changed Oracle's
+        // transaction/savepoint state. Replacing that fact with a retryable
+        // outer timeout can duplicate a checkpoint or repeat an undo.
+        "oracle_checkpoint" | "oracle_undo_to" => true,
         "oracle_compile_object" => bool_field("compiled"),
         "oracle_patch_source" | "oracle_create_or_replace" | "deploy_ddl" => bool_field("applied"),
         "oracle_execute" | "execute_approved" => {
             bool_field("executed")
-                && (bool_field("committed") || bool_field("non_transactional_effect"))
+                && (bool_field("committed")
+                    || bool_field("held")
+                    || bool_field("non_transactional_effect"))
         }
         _ => false,
     }
@@ -11504,17 +11536,11 @@ impl OracleDispatcher {
         name: &str,
         args: Value,
     ) -> Result<Value, ErrorEnvelope> {
-        let mut request_budget = self.dispatch_request_budget(cx, context)?;
-        if let Some(timeout_seconds) = args
-            .get("timeout_seconds")
-            .and_then(Value::as_u64)
-            .filter(|seconds| *seconds > 0)
-        {
-            request_budget = request_budget.tighten_timeout(Duration::from_secs(
-                timeout_seconds.min(MAX_CALL_TIMEOUT_SECONDS),
-            ));
-            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
-        }
+        let mut request_budget = request_budget_with_tool_timeout(
+            cx,
+            self.dispatch_request_budget(cx, context)?,
+            &args,
+        )?;
         let tool = canonical_tool_name(name);
         if tool == "oracle_switch_profile" {
             {
@@ -13990,17 +14016,11 @@ impl OracleDispatcher {
         args: Value,
         frames: ToolStreamSender,
     ) -> Result<Value, ErrorEnvelope> {
-        let mut request_budget = self.dispatch_request_budget(cx, context)?;
-        if let Some(timeout_seconds) = args
-            .get("timeout_seconds")
-            .and_then(Value::as_u64)
-            .filter(|seconds| *seconds > 0)
-        {
-            request_budget = request_budget.tighten_timeout(Duration::from_secs(
-                timeout_seconds.min(MAX_CALL_TIMEOUT_SECONDS),
-            ));
-            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
-        }
+        let mut request_budget = request_budget_with_tool_timeout(
+            cx,
+            self.dispatch_request_budget(cx, context)?,
+            &args,
+        )?;
         if let Some(quarantine) = self.connection_quarantine()? {
             return Err(ErrorEnvelope::new(
                 ErrorClass::RuntimeStateRequired,

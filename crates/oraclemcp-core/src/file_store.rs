@@ -814,10 +814,25 @@ fn open_append_private_file(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
+/// Persist a directory-entry mutation where the platform exposes directory
+/// handles through `File::open`. This is the POSIX half of the store's
+/// write-temp/fsync/rename/fsync-dir sequence.
+#[cfg(unix)]
 fn fsync_dir(path: &Path) -> Result<()> {
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|e| FileStoreError::Io(e.to_string()))
+}
+
+/// Windows does not let `File::open` open a directory for `sync_all`; it
+/// returns `ERROR_ACCESS_DENIED` even for the private state root. The file
+/// content is still synced before each rename/return. This mirrors the
+/// platform boundary used by the audit sink, shipping spool, doctor migration,
+/// and service lifecycle rather than turning every successful Windows state
+/// mutation into a false I/O failure.
+#[cfg(not(unix))]
+fn fsync_dir(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn validate_segment(kind: &'static str, value: &str) -> Result<()> {
@@ -998,6 +1013,35 @@ mod tests {
                 .mode()
                 & 0o777,
             0o600
+        );
+    }
+
+    /// Regression for vzui: Windows `File::open(directory)` returns access
+    /// denied, so both owner acquisition and the post-rename directory-sync
+    /// boundary used to reject otherwise successful durable state operations.
+    /// This cross-platform test exercises both boundaries, drops the OS lock,
+    /// then proves the state and persistent lock sidecar reopen normally.
+    #[test]
+    fn service_owner_persists_and_reopens_regular_state_cross_platform() {
+        let root = test_root("owner-persist-reopen");
+        let store = FileStore::open(&root).expect("open service store");
+        let owner = store
+            .acquire_service_owner("first-owner")
+            .expect("acquire first service owner");
+        let id = StoreId::from_safe_segment("durable-state").expect("fixed state id");
+        let path = store
+            .write_root_atomic(&owner, &id, "json", br#"{"generation":1}"#)
+            .expect("persist regular service state");
+        drop(owner);
+
+        let reopened = FileStore::open(&root).expect("reopen service store");
+        let _owner = reopened
+            .acquire_service_owner("second-owner")
+            .expect("reacquire persistent service lock");
+        assert_eq!(
+            fs::read(&path).expect("read reopened service state"),
+            br#"{"generation":1}"#,
+            "ordinary durable state must survive owner release and reopening"
         );
     }
 

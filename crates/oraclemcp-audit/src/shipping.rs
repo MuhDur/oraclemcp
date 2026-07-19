@@ -462,13 +462,15 @@ pub fn syslog_line(record: &AuditRecord) -> String {
 
 /// Append text to the RFC-5424 MSG without admitting a physical line/control
 /// boundary. Backslash and quote are escaped to keep the summary unambiguous;
-/// C0/C1 controls and DEL use Rust's ASCII escape spelling. Other Unicode is
-/// preserved verbatim.
+/// C0/C1 controls and DEL use Rust's ASCII escape spelling. Unicode line and
+/// paragraph separators are escaped explicitly; other Unicode is preserved.
 fn push_syslog_msg_text(message: &mut String, value: &str) {
     for c in value.chars() {
         match c {
             '\\' => message.push_str("\\\\"),
             '"' => message.push_str("\\\""),
+            '\u{2028}' => message.push_str("\\u2028"),
+            '\u{2029}' => message.push_str("\\u2029"),
             _ if c.is_control() => message.extend(c.escape_default()),
             _ => message.push(c),
         }
@@ -521,7 +523,7 @@ fn cef_escape_header(s: &str) -> String {
         match c {
             '\\' => out.push_str("\\\\"),
             '|' => out.push_str("\\|"),
-            '\n' | '\r' => out.push(' '),
+            '\n' | '\r' | '\u{2028}' | '\u{2029}' => out.push(' '),
             _ => out.push(c),
         }
     }
@@ -539,6 +541,8 @@ fn push_cef_kv(ext: &mut String, key: &str, value: &str) {
             '=' => ext.push_str("\\="),
             '\n' => ext.push_str("\\n"),
             '\r' => ext.push_str("\\r"),
+            '\u{2028}' => ext.push_str("\\u2028"),
+            '\u{2029}' => ext.push_str("\\u2029"),
             _ => ext.push(c),
         }
     }
@@ -557,6 +561,8 @@ fn push_sd_param(sd: &mut String, key: &str, value: &str) {
             '"' => sd.push_str("\\\""),
             ']' => sd.push_str("\\]"),
             '\n' | '\r' => sd.push(' '),
+            '\u{2028}' => sd.push_str("\\u2028"),
+            '\u{2029}' => sd.push_str("\\u2029"),
             _ if c.is_control() => sd.extend(c.escape_default()),
             _ => sd.push(c),
         }
@@ -1697,5 +1703,23 @@ y"#
         let mut msg = String::new();
         push_syslog_msg_text(&mut msg, "a\\b\"c\r\nx\t\0\u{1b}\u{7f}é工具");
         assert_eq!(msg, r#"a\\b\"c\r\nx\t\u{0}\u{1b}\u{7f}é工具"#);
+    }
+
+    #[test]
+    fn siem_encoders_escape_unicode_line_and_paragraph_separators() {
+        assert_eq!(cef_escape_header("a\u{2028}b\u{2029}c"), "a b c");
+
+        let mut cef = String::new();
+        push_cef_kv(&mut cef, "msg", "a\u{2028}b\u{2029}c");
+        assert_eq!(cef, r#"msg=a\u2028b\u2029c "#);
+
+        let mut structured = String::from("[oraclemcp@0");
+        push_sd_param(&mut structured, "msg", "a\u{2028}b\u{2029}c");
+        structured.push(']');
+        assert_eq!(structured, r#"[oraclemcp@0 msg="a\u2028b\u2029c"]"#);
+
+        let mut message = String::new();
+        push_syslog_msg_text(&mut message, "a\u{2028}b\u{2029}c");
+        assert_eq!(message, r#"a\u2028b\u2029c"#);
     }
 }

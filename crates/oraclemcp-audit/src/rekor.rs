@@ -129,7 +129,7 @@ impl RekorAnchorReceipt {
         let manifest_hex = manifest_sha256
             .strip_prefix("sha256:")
             .expect("manifest_sha256 is constructed locally with a sha256 prefix");
-        if !contains_ascii(&self.proof.entry_body, manifest_hex) {
+        if !entry_body_binds_manifest_hash(&self.proof.entry_body, manifest_hex) {
             return Err(RekorProofError::HeadNotBoundToEntry);
         }
 
@@ -147,6 +147,16 @@ impl RekorAnchorReceipt {
         }
         checkpoint_verifier.verify_checkpoint(&self.proof)
     }
+}
+
+#[derive(Deserialize)]
+struct RekorEntryHeadBinding {
+    artifact_hash: String,
+}
+
+fn entry_body_binds_manifest_hash(entry_body: &[u8], manifest_hex: &str) -> bool {
+    serde_json::from_slice::<RekorEntryHeadBinding>(entry_body)
+        .is_ok_and(|binding| binding.artifact_hash == manifest_hex)
 }
 
 /// Failure to create a Rekor entry. Error classes are intentionally stable and
@@ -402,12 +412,6 @@ fn parse_sha256_hex(value: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
-fn contains_ascii(haystack: &[u8], needle: &str) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle.as_bytes())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,6 +471,25 @@ mod tests {
         let mut receipt = receipt_for(head());
         receipt.proof.entry_body = b"{\"artifact_hash\":\"different\"}".to_vec();
         receipt.proof.root_hash = hex_of(rekor_leaf_hash(&receipt.proof.entry_body));
+        assert_eq!(
+            receipt.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::HeadNotBoundToEntry)
+        );
+    }
+
+    #[test]
+    fn receipt_rejects_manifest_hash_only_in_an_unrelated_json_field() {
+        let mut receipt = receipt_for(head());
+        let manifest_hex = receipt
+            .head
+            .manifest_sha256()
+            .strip_prefix("sha256:")
+            .expect("local manifest hash has prefix")
+            .to_owned();
+        receipt.proof.entry_body =
+            format!("{{\"artifact_hash\":\"different\",\"note\":\"{manifest_hex}\"}}").into_bytes();
+        receipt.proof.root_hash = hex_of(rekor_leaf_hash(&receipt.proof.entry_body));
+
         assert_eq!(
             receipt.verify_offline(&TestCheckpointVerifier),
             Err(RekorProofError::HeadNotBoundToEntry)
@@ -970,10 +993,14 @@ mod tests {
     }
 
     #[test]
-    fn contains_ascii_searches_for_exact_byte_windows() {
-        let body = b"{\"artifact_hash\":\"sha256:beef\"}".as_slice();
-        assert!(contains_ascii(body, "artifact_hash"));
-        assert!(!contains_ascii(body, "missing_token"));
+    fn entry_body_binding_requires_the_exact_parsed_artifact_hash_field() {
+        let body = br#"{"artifact_hash":"beef","note":"decoy"}"#;
+        assert!(entry_body_binds_manifest_hash(body, "beef"));
+        assert!(!entry_body_binds_manifest_hash(body, "decoy"));
+        assert!(!entry_body_binds_manifest_hash(
+            br#"{"note":"beef"}"#,
+            "beef"
+        ));
     }
 
     #[test]

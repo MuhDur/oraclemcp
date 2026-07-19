@@ -3872,8 +3872,9 @@ mod tests {
                 canonical_outcome_tag(AuditOutcome::DiscardedUncommitted),
                 canonical_outcome_tag(AuditOutcome::CommitInDoubt),
                 canonical_outcome_tag(AuditOutcome::UnknownDiscarded),
+                canonical_outcome_tag(AuditOutcome::HeldUncommitted),
             ],
-            [0, 1, 2, 3, 4, 5, 6]
+            [0, 1, 2, 3, 4, 5, 6, 7]
         );
     }
 

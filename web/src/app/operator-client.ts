@@ -594,6 +594,274 @@ export type ActiveLanesData = {
   lanes: ActiveLane[];
 };
 
+export type CiLaneTier = "scheduled" | "advisory" | "unknown";
+export type CiLaneState = "success" | "not_green" | "unknown";
+export type CiLaneFreshness = "fresh" | "stale" | "refreshing" | "unavailable";
+
+export type CiLaneHealth = {
+  check_name: string;
+  tier: CiLaneTier;
+  workflow: string;
+  workflow_file: string;
+  job_id: string;
+  event: "push" | "pull_request" | "schedule" | "unknown";
+  path_filtered: boolean;
+  state: CiLaneState;
+  last_status: string | null;
+  last_conclusion: string | null;
+  streak: {
+    conclusion: string | null;
+    count: number;
+    capped: boolean;
+  };
+  run_id: number | null;
+  run_url: string | null;
+  head_sha: string | null;
+  completed_at: string | null;
+  source_error: string | null;
+};
+
+export type CiLaneHealthData = {
+  source: string;
+  catalog_schema: string;
+  catalog_complete: boolean;
+  repo: string;
+  refresh_state: "ready" | "refreshing" | "failed";
+  freshness: CiLaneFreshness;
+  refreshed_at: string | null;
+  last_attempt_at: string | null;
+  age_seconds: number | null;
+  streak_window: number;
+  refresh_interval_seconds: number;
+  stale_after_seconds: number;
+  summary: {
+    posture: "green" | "not_green" | "unknown";
+    total: number;
+    success: number;
+    not_green: number;
+    unknown: number;
+  };
+  lanes: CiLaneHealth[];
+  errors: string[];
+};
+
+/** Normalize the CI-honesty wire shape without ever upgrading ambiguity to green. */
+export function normalizeCiLaneHealthData(value: Record<string, unknown>): CiLaneHealthData {
+  const source = stringValue(value["source"]) ?? "unavailable";
+  const catalogSchema = stringValue(value["catalog_schema"]) ?? "unknown";
+  const repo = stringValue(value["repo"]) ?? "unknown";
+  const rawFreshness = stringValue(value["freshness"]);
+  const freshness: CiLaneFreshness = isCiLaneFreshness(rawFreshness)
+    ? rawFreshness
+    : "unavailable";
+  const rawRefreshState = stringValue(value["refresh_state"]);
+  const refreshState = isCiLaneRefreshState(rawRefreshState) ? rawRefreshState : "failed";
+  const refreshedAt = validCiLaneTimestamp(nullableString(value["refreshed_at"]));
+  const lastAttemptAt = validCiLaneTimestamp(nullableString(value["last_attempt_at"]));
+  const ageSeconds = safeNonNegativeInteger(value["age_seconds"]);
+  const streakWindow = safeNonNegativeInteger(value["streak_window"]) ?? 0;
+  const refreshIntervalSeconds = safeNonNegativeInteger(value["refresh_interval_seconds"]) ?? 0;
+  const staleAfterSeconds = safeNonNegativeInteger(value["stale_after_seconds"]) ?? 0;
+  const wireErrors = Array.isArray(value["errors"])
+    ? value["errors"].flatMap((error) => {
+        const message = stringValue(error);
+        return message ? [message] : [];
+      })
+    : [];
+  const sourceFresh =
+    (source === "github_actions" ||
+      (source === "github_actions_partial" && wireErrors.length > 0)) &&
+    refreshState === "ready" &&
+    freshness === "fresh" &&
+    refreshedAt !== null &&
+    ageSeconds !== null &&
+    staleAfterSeconds > 0 &&
+    ageSeconds < staleAfterSeconds;
+  let invalidRows = 0;
+  const lanes = (Array.isArray(value["lanes"]) ? value["lanes"] : []).map((raw, index) => {
+    const lane = recordValue(raw);
+    const streak = recordValue(lane?.["streak"]);
+    const checkName = stringValue(lane?.["check_name"]);
+    const workflow = stringValue(lane?.["workflow"]);
+    const workflowFile = stringValue(lane?.["workflow_file"]);
+    const jobId = stringValue(lane?.["job_id"]);
+    const rawTier = stringValue(lane?.["tier"]);
+    const tier: CiLaneTier = rawTier === "scheduled" || rawTier === "advisory"
+      ? rawTier
+      : "unknown";
+    const rawEvent = stringValue(lane?.["event"]);
+    const event = isCiLaneEvent(rawEvent) ? rawEvent : "unknown";
+    const lastStatus = nullableString(lane?.["last_status"]);
+    const lastConclusion = nullableString(lane?.["last_conclusion"]);
+    const sourceError = nullableString(lane?.["source_error"]);
+    const declaredState = stringValue(lane?.["state"]);
+    const streakConclusion = nullableString(streak?.["conclusion"]);
+    const streakCount = safeNonNegativeInteger(streak?.["count"]);
+    const streakCapped = streak?.["capped"] === true;
+    const runId = safeNonNegativeInteger(lane?.["run_id"]);
+    const candidateRunUrl = nullableString(lane?.["run_url"]);
+    const runUrl = candidateRunUrl?.startsWith("https://github.com/MuhDur/oraclemcp/")
+      ? candidateRunUrl
+      : null;
+    const headSha = validGitSha(nullableString(lane?.["head_sha"]));
+    const completedAt = validCiLaneTimestamp(nullableString(lane?.["completed_at"]));
+    const rowValid =
+      lane !== null &&
+      checkName !== null &&
+      workflow !== null &&
+      workflowFile !== null &&
+      jobId !== null &&
+      tier !== "unknown" &&
+      event !== "unknown" &&
+      streak !== null;
+    if (!rowValid) {
+      invalidRows += 1;
+    }
+    const evidenceComplete =
+      lastStatus === "completed" &&
+      lastConclusion !== null &&
+      streakConclusion === lastConclusion &&
+      streakCount !== null &&
+      streakCount > 0 &&
+      streakWindow > 0 &&
+      streakCount <= streakWindow &&
+      streakCapped === (streakCount === streakWindow) &&
+      runId !== null &&
+      runId > 0 &&
+      runUrl !== null &&
+      headSha !== null &&
+      completedAt !== null;
+    const evidenceFresh =
+      sourceFresh && rowValid && evidenceComplete && sourceError === null;
+    let state: CiLaneState = "unknown";
+    if (evidenceFresh && declaredState === "success" && lastConclusion === "success") {
+      state = "success";
+    } else if (
+      evidenceFresh &&
+      declaredState === "not_green" &&
+      lastConclusion !== null &&
+      lastConclusion !== "success"
+    ) {
+      state = "not_green";
+    }
+    return {
+      check_name: checkName ?? `Unreadable lane ${index + 1}`,
+      tier,
+      workflow: workflow ?? "Unknown workflow",
+      workflow_file: workflowFile ?? "unknown",
+      job_id: jobId ?? "unknown",
+      event,
+      path_filtered: lane?.["path_filtered"] === true,
+      state,
+      last_status: lastStatus,
+      last_conclusion: lastConclusion,
+      streak: {
+        conclusion: streakConclusion,
+        count: streakCount ?? 0,
+        capped: streakCapped
+      },
+      run_id: runId,
+      run_url: runUrl,
+      head_sha: headSha,
+      completed_at: completedAt,
+      source_error:
+        sourceError ??
+        (!rowValid
+          ? "lane response was malformed"
+          : candidateRunUrl !== null && runUrl === null
+            ? "lane result URL was outside the expected repository"
+            : !evidenceComplete
+              ? lastConclusion === null
+                ? "lane has no completed evidence"
+                : "lane evidence was incomplete"
+              : null)
+    } satisfies CiLaneHealth;
+  });
+  const uniqueLanes = new Set(
+    lanes.map((lane) => `${lane.workflow_file}\0${lane.event}\0${lane.check_name}`)
+  );
+  const catalogComplete =
+    value["catalog_complete"] === true &&
+    catalogSchema === "ci-taxonomy/v1" &&
+    repo === "MuhDur/oraclemcp" &&
+    lanes.length > 0 &&
+    invalidRows === 0 &&
+    uniqueLanes.size === lanes.length;
+  const errors = [...wireErrors];
+  if (!catalogComplete) {
+    errors.push("CI lane catalog is incomplete; no all-green claim is available.");
+  }
+  const success = lanes.filter((lane) => lane.state === "success").length;
+  const notGreen = lanes.filter((lane) => lane.state === "not_green").length;
+  const unknown = lanes.length - success - notGreen;
+  return {
+    source,
+    catalog_schema: catalogSchema,
+    catalog_complete: catalogComplete,
+    repo,
+    refresh_state: refreshState,
+    freshness,
+    refreshed_at: refreshedAt,
+    last_attempt_at: lastAttemptAt,
+    age_seconds: ageSeconds,
+    streak_window: streakWindow,
+    refresh_interval_seconds: refreshIntervalSeconds,
+    stale_after_seconds: staleAfterSeconds,
+    summary: {
+      posture:
+        unknown > 0 || errors.length > 0 || freshness !== "fresh"
+          ? "unknown"
+          : notGreen > 0
+            ? "not_green"
+            : "green",
+      total: lanes.length,
+      success,
+      not_green: notGreen,
+      unknown
+    },
+    lanes,
+    errors: [...new Set(errors)]
+  };
+}
+
+function nullableString(value: unknown): string | null {
+  return value === null || value === undefined ? null : stringValue(value);
+}
+
+function safeNonNegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function validGitSha(value: string | null): string | null {
+  return value !== null && /^[0-9a-f]{40}$/.test(value) ? value : null;
+}
+
+function validCiLaneTimestamp(value: string | null): string | null {
+  if (value === null) {
+    return null;
+  }
+  const unix = /^unix:(\d+)$/.exec(value);
+  if (unix) {
+    const seconds = Number(unix[1]);
+    return Number.isSafeInteger(seconds) && seconds > 0 ? value : null;
+  }
+  return Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+function isCiLaneFreshness(value: string | null): value is CiLaneFreshness {
+  return value !== null && ["fresh", "stale", "refreshing", "unavailable"].includes(value);
+}
+
+function isCiLaneRefreshState(value: string | null): value is CiLaneHealthData["refresh_state"] {
+  return value !== null && ["ready", "refreshing", "failed"].includes(value);
+}
+
+function isCiLaneEvent(
+  value: string | null
+): value is Exclude<CiLaneHealth["event"], "unknown"> {
+  return value !== null && ["push", "pull_request", "schedule"].includes(value);
+}
+
 export type LaneCancelData = {
   status: "terminated" | "already_closed";
   lane_id: string;
@@ -1307,6 +1575,11 @@ export async function fetchOperatorConfig(): Promise<OperatorResponse<ConfigOpsS
 
 export async function fetchActiveLanes(): Promise<OperatorResponse<ActiveLanesData>> {
   return operatorGet("/operator/v1/active-lanes");
+}
+
+export async function fetchCiLaneHealth(): Promise<OperatorResponse<CiLaneHealthData>> {
+  const response = await operatorGet<Record<string, unknown>>("/operator/v1/ci-lanes");
+  return { ...response, data: normalizeCiLaneHealthData(response.data) };
 }
 
 export async function cancelLane(

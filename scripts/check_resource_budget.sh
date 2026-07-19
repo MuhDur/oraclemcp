@@ -92,7 +92,7 @@ f_peak="$(sed -n 's/.*peak=\([0-9]*\).*/\1/p' <<<"$fanout_out")"
 f_denied="$(sed -n 's/.*denied=\([0-9]*\).*/\1/p' <<<"$fanout_out")"
 
 if [ -n "${f_peak:-}" ] && [ -n "${f_max:-}" ] && [ "$f_peak" -le "$f_max" ]; then
-  ok "60 forks attempted under TasksMax=$f_max: peak was $f_peak — the budget was never exceeded"
+  ok "24 forks attempted under TasksMax=$f_max: peak was $f_peak — the budget was never exceeded"
 else
   bad "fanout exceeded its budget (peak=${f_peak:-?} max=${f_max:-?}) — NOT enforced"
 fi
@@ -113,21 +113,98 @@ fi
 
 echo
 echo "=== 4. tmpfs target dir is REFUSED (2026-07-16, as a check not a paragraph) ==="
-tmp_probe="$(mktemp -d -p /tmp resource-budget-probe.XXXXXX)"
-if [ "$(stat -f -c %T "$tmp_probe")" != "tmpfs" ]; then
+tmpfs_run_id="resource-budget-tmpfs-probe-$$"
+tmpfs_probe="/tmp/$tmpfs_run_id"
+if [ "$(stat -f -c %T /tmp)" != "tmpfs" ]; then
   echo "  SKIP  /tmp is not tmpfs on this host; cannot exercise the guard" >&2
 else
-  if ORACLEMCP_BUDGET_BASE="$tmp_probe" "$BUDGET" --profile build --emit-budget >/dev/null 2>&1; then
+  if tmpfs_err="$(ORACLEMCP_BUDGET_BASE=/tmp "$BUDGET" --profile build --run-id "$tmpfs_run_id" --emit-budget 2>&1 >/dev/null)"; then
     bad "a tmpfs target dir was ACCEPTED; the guard does not work"
   else
-    ok "tmpfs target dir refused (exit 78)"
+    tmpfs_status=$?
+    if [ "$tmpfs_status" -ne 78 ]; then
+      bad "tmpfs refusal exited $tmpfs_status, expected 78"
+    elif [[ "$tmpfs_err" != *"DISK, not OOM"* ]]; then
+      bad "tmpfs refusal omitted the DISK, not OOM diagnosis"
+    elif [ -e "$tmpfs_probe" ]; then
+      bad "tmpfs refusal materialized $tmpfs_probe; the negative-control probe leaked"
+    else
+      ok "tmpfs target dir refused as DISK, not OOM without materializing its target"
+    fi
   fi
 fi
-rmdir "$tmp_probe/build-"* 2>/dev/null || true
-rmdir "$tmp_probe" 2>/dev/null || true
 
 echo
-echo "=== 5. emitted budget satisfies the resource_budget contract ==="
+echo "=== 5. healthy real-disk target passes write/fsync/read canary ==="
+disk_probe_base="${ORACLEMCP_BUDGET_TEST_BASE:-$HOME/.cache/oraclemcp-budget-runs}"
+healthy_run_id="resource-budget-disk-healthy-$$"
+if healthy_json="$(ORACLEMCP_BUDGET_BASE="$disk_probe_base" "$BUDGET" --profile build --run-id "$healthy_run_id" --min-free-bytes 1 --emit-budget)"; then
+  healthy_target="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["isolated_target_dir"])' <<<"$healthy_json")"
+  healthy_canary="$healthy_target/.resource-budget-canary"
+  healthy_value=""
+  if [ -f "$healthy_canary" ] && IFS= read -r healthy_value <"$healthy_canary" && [ "$healthy_value" = "resource-budget-canary/v1" ]; then
+    ok "real-disk target passed the persisted write/fsync/read canary"
+  else
+    bad "healthy real-disk target did not retain the expected canary"
+  fi
+else
+  bad "healthy real-disk target was refused"
+fi
+
+echo
+echo "=== 6. forced low space is REFUSED before target creation or command start ==="
+low_run_id="resource-budget-low-space-probe-$$"
+low_target="$disk_probe_base/$low_run_id/target"
+if low_err="$(ORACLEMCP_BUDGET_BASE="$disk_probe_base" "$BUDGET" --profile build --run-id "$low_run_id" --min-free-bytes 999999999999999999 -- bash -c 'printf RESOURCE_BUDGET_COMMAND_RAN >&2; exit 99' 2>&1 >/dev/null)"; then
+  bad "forced-low-space target was ACCEPTED"
+else
+  low_status=$?
+  if [ "$low_status" -ne 78 ]; then
+    bad "forced-low-space refusal exited $low_status, expected 78"
+  elif [[ "$low_err" != *"DISK, not OOM"* ]] || [[ "$low_err" != *"configured minimum"* ]]; then
+    bad "forced-low-space refusal omitted its specific DISK, not OOM diagnosis"
+  elif [[ "$low_err" == *"RESOURCE_BUDGET_COMMAND_RAN"* ]]; then
+    bad "forced-low-space refusal started the guarded command"
+  elif [ -e "$low_target" ]; then
+    bad "forced-low-space refusal materialized $low_target"
+  else
+    ok "low space refused as DISK, not OOM before target creation or command start"
+  fi
+fi
+
+echo
+echo "=== 7. unwritable target fails the canary before command start ==="
+readonly_target=""
+for candidate in /usr/lib/nsight-compute/target /usr/lib/modules/*/kernel/drivers/target /usr/src/linux-headers-*/drivers/target; do
+  if [ -d "$candidate" ] && [ ! -w "$candidate" ] && [ ! -e "$candidate/.resource-budget-canary" ]; then
+    readonly_target="$candidate"
+    break
+  fi
+done
+if [ -z "$readonly_target" ]; then
+  echo "  SKIP  no suitable pre-existing unwritable disk-backed target directory on this host" >&2
+else
+  readonly_parent="$(dirname -- "$readonly_target")"
+  readonly_base="$(dirname -- "$readonly_parent")"
+  readonly_run_id="$(basename -- "$readonly_parent")"
+  if readonly_err="$(ORACLEMCP_BUDGET_BASE="$readonly_base" "$BUDGET" --profile build --run-id "$readonly_run_id" --min-free-bytes 1 -- bash -c 'printf RESOURCE_BUDGET_COMMAND_RAN >&2; exit 99' 2>&1 >/dev/null)"; then
+    bad "unwritable target was ACCEPTED"
+  else
+    readonly_status=$?
+    if [ "$readonly_status" -ne 78 ]; then
+      bad "unwritable-target refusal exited $readonly_status, expected 78"
+    elif [[ "$readonly_err" != *"DISK, not OOM"* ]] || [[ "$readonly_err" != *"canary failed during write"* ]]; then
+      bad "unwritable-target refusal omitted its canary-specific DISK, not OOM diagnosis"
+    elif [[ "$readonly_err" == *"RESOURCE_BUDGET_COMMAND_RAN"* ]]; then
+      bad "unwritable-target refusal started the guarded command"
+    else
+      ok "unwritable target failed the write canary as DISK, not OOM before command start"
+    fi
+  fi
+fi
+
+echo
+echo "=== 8. emitted budget satisfies the resource_budget contract ==="
 budget_json="$("$BUDGET" --profile mutants --run-id selftest-emit --emit-budget)"
 if python3 - "$budget_json" <<'PY'
 import json, sys

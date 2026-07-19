@@ -436,6 +436,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -447,6 +448,12 @@ jobs:
       - run: bash scripts/oraclemcp_honesty_grep.sh
       - name: entry-trace contract (required SKIP=FAIL)
         run: bash scripts/check_entry_trace_contract.sh
+      - name: tracker close integrity (all-status + coverage ratchet)
+        run: |
+          python3 scripts/audit_bead_closes.py --self-test
+          python3 scripts/audit_bead_closes.py \
+            --tracker-jsonl .beads/issues.jsonl \
+            --exact-evidence-floor 15
       # D6.3a: regenerate tests/conformance/COVERAGE.md from the clause manifest
       # and fail if it is stale (git-tracked doc would change) or if MUST-clause
       # coverage falls below 0.95.
@@ -679,9 +686,9 @@ jobs:
           persist-credentials: false
       - run: bash scripts/secret_scan.sh
 
-  # Compile the cargo-fuzz targets so they cannot silently rot (the classifier
-  # and ALTER SESSION allowlist each ship one). Build-only; campaigns run
-  # locally with `cargo +nightly-2026-05-11 fuzz run <target>`. Non-blocking:
+  # Compile every cargo-fuzz manifest so targets cannot silently rot (guard:
+  # classifier + ALTER SESSION; config: layered TOML + ceiling invariants).
+  # Build-only; campaigns run locally with the pinned nightly. Non-blocking:
   # cargo-fuzz + build-std is inherently churn-prone, so a transient toolchain
   # break here must not redden the rest of CI.
   fuzz-build:
@@ -706,5 +713,13 @@ jobs:
           tool: cargo-fuzz
         # Pin the gnu target: cargo-fuzz otherwise defaults to musl here, whose
         # static libc is incompatible with the ASan sanitizer.
-      - run: cargo +${{ env.RUST_TOOLCHAIN }} fuzz build --target x86_64-unknown-linux-gnu
-        working-directory: crates/oraclemcp-guard
+      - name: Build guard and config fuzz targets
+        run: |
+          set -euo pipefail
+          for fuzz_crate in crates/oraclemcp-guard crates/oraclemcp-config; do
+            (
+              cd "$fuzz_crate"
+              cargo +${{ env.RUST_TOOLCHAIN }} fuzz build \
+                --target x86_64-unknown-linux-gnu
+            )
+          done

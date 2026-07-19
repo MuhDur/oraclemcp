@@ -717,11 +717,9 @@ impl HttpSessionLifecycle for CancelRecordingLifecycle {
         principal_key: &str,
         reason: DispatchCloseReason,
     ) -> bool {
-        self.closed.lock().push((
-            session_id.to_owned(),
-            principal_key.to_owned(),
-            reason,
-        ));
+        self.closed
+            .lock()
+            .push((session_id.to_owned(), principal_key.to_owned(), reason));
         true
     }
 
@@ -1166,6 +1164,141 @@ fn operator_events_stream_classifier_verdicts_for_ladder() {
 }
 
 #[test]
+fn ci_lane_catalog_covers_every_scheduled_and_advisory_taxonomy_job() {
+    let raw = include_str!("../../../../docs/ci_taxonomy.json");
+    let document: Value = serde_json::from_str(raw).expect("taxonomy parses as JSON");
+    let expected = document["jobs"]
+        .as_array()
+        .expect("taxonomy jobs")
+        .iter()
+        .filter(|job| matches!(job["tier"].as_str(), Some("scheduled" | "advisory")))
+        .map(|job| job["check_name"].as_str().expect("check name").to_owned())
+        .collect::<HashSet<_>>();
+    let catalog = super::operator::parse_ci_lane_catalog(raw).expect("lane catalog parses");
+    let actual = catalog
+        .iter()
+        .map(|lane| lane.check_name.clone())
+        .collect::<HashSet<_>>();
+
+    assert_eq!(
+        actual, expected,
+        "the dashboard may not omit a watched lane"
+    );
+    assert_eq!(
+        catalog.len(),
+        expected.len(),
+        "lane identities must be unique"
+    );
+    assert!(
+        catalog
+            .iter()
+            .all(|lane| matches!(lane.tier.as_str(), "scheduled" | "advisory"))
+    );
+}
+
+#[test]
+fn ci_lane_catalog_rejects_unobservable_or_unsafe_workflows() {
+    let unsafe_path = r#"{
+        "schema":"ci-taxonomy/v1",
+        "repo":"oraclemcp",
+        "jobs":[{
+            "check_name":"mutation",
+            "tier":"scheduled",
+            "workflow":"Mutation",
+            "workflow_file":"../mutation.yml",
+            "job_id":"mutation",
+            "triggers":["schedule"],
+            "path_filtered":false
+        }]
+    }"#;
+    assert!(
+        super::operator::parse_ci_lane_catalog(unsafe_path)
+            .expect_err("path escape must fail")
+            .contains("safe basename")
+    );
+
+    let no_schedule = unsafe_path
+        .replace("../mutation.yml", "mutation.yml")
+        .replace("[\"schedule\"]", "[\"workflow_dispatch\"]");
+    assert!(
+        super::operator::parse_ci_lane_catalog(&no_schedule)
+            .expect_err("scheduled lane without schedule event must fail")
+            .contains("no schedule trigger")
+    );
+}
+
+#[test]
+fn ci_lane_streak_is_exact_and_missing_evidence_is_never_green() {
+    use super::operator::{
+        CiLaneCatalogEntry, CiLaneObservation, ci_lane_health_from_observations,
+        ci_lane_health_json,
+    };
+
+    let catalog = CiLaneCatalogEntry {
+        check_name: "guard + audit cargo-mutants".to_owned(),
+        tier: "scheduled".to_owned(),
+        workflow: "Mutation Safety".to_owned(),
+        workflow_file: "mutation-safety.yml".to_owned(),
+        job_id: "mutation-safety".to_owned(),
+        event: "schedule".to_owned(),
+        path_filtered: false,
+        whole_workflow: true,
+    };
+    let observation = |run_id, conclusion: &str| {
+        Ok(CiLaneObservation {
+            status: "completed".to_owned(),
+            conclusion: Some(conclusion.to_owned()),
+            run_id,
+            run_url: format!("https://github.com/MuhDur/oraclemcp/actions/runs/{run_id}"),
+            head_sha: "e004ebd5b5532a4b85984a62f8ad48a81aa3460c".to_owned(),
+            completed_at: Some("2026-07-18T00:00:00Z".to_owned()),
+        })
+    };
+    let health = ci_lane_health_from_observations(
+        catalog.clone(),
+        &[
+            observation(4, "success"),
+            observation(3, "success"),
+            observation(2, "success"),
+            observation(1, "cancelled"),
+        ],
+    );
+    assert_eq!(health.streak_conclusion.as_deref(), Some("success"));
+    assert_eq!(health.streak_count, 3);
+    assert!(!health.streak_capped);
+    assert_eq!(ci_lane_health_json(&health, false)["state"], "success");
+    assert_eq!(
+        ci_lane_health_json(&health, true)["state"],
+        "unknown",
+        "stale success cannot render green"
+    );
+
+    let missing_latest = ci_lane_health_from_observations(
+        catalog.clone(),
+        &[Err("job missing from latest completed run".to_owned())],
+    );
+    assert_eq!(
+        ci_lane_health_json(&missing_latest, false)["state"],
+        "unknown"
+    );
+    assert_eq!(missing_latest.streak_count, 0);
+
+    let history_gap = ci_lane_health_from_observations(
+        catalog,
+        &[
+            observation(4, "success"),
+            Err("older job observation missing".to_owned()),
+        ],
+    );
+    assert!(history_gap.source_error.is_some());
+    assert_eq!(
+        ci_lane_health_json(&history_gap, false)["state"],
+        "unknown",
+        "an unprovable streak cannot render as a green lane"
+    );
+}
+
+#[test]
 fn operator_v1_serves_schema_health_events_and_action_mapping() {
     let (auditor, sink) = operator_auditor();
     let health = oraclemcp_telemetry::HealthState::new(env!("CARGO_PKG_VERSION"));
@@ -1206,6 +1339,13 @@ fn operator_v1_serves_schema_health_events_and_action_mapping() {
             .expect("routes")
             .iter()
             .any(|route| route["path"] == "/operator/v1/actions/preview")
+    );
+    assert!(
+        schema_body["routes"]
+            .as_array()
+            .expect("routes")
+            .iter()
+            .any(|route| route["path"] == "/operator/v1/ci-lanes")
     );
 
     let health_response = handle_http_request(
@@ -2232,6 +2372,30 @@ fn operator_idempotency_ledger_reports_in_progress_before_completion() {
 }
 
 #[test]
+fn operator_idempotency_lease_drop_after_panic_permits_immediate_retry() {
+    let ledger = OperatorIdempotencyLedger::new();
+    let facts = idempotency_fact("panic-safe-lease");
+    let lease = match ledger.begin("/operator/v1/actions/execute", facts.clone()) {
+        OperatorIdempotencyBegin::Fresh(lease) => lease,
+        _ => panic!("first reservation must be fresh"),
+    };
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _lease = lease;
+        panic!("injected framework panic after idempotency begin");
+    }));
+    assert!(panicked.is_err());
+
+    assert!(
+        matches!(
+            ledger.begin("/operator/v1/actions/execute", facts),
+            OperatorIdempotencyBegin::Fresh(_)
+        ),
+        "dropping an uncompleted lease must remove only its own in-progress marker"
+    );
+}
+
+#[test]
 fn workbench_no_bypass_guard_is_the_feature() {
     let (auditor, _sink) = operator_auditor();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -3222,7 +3386,10 @@ fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
     );
     assert_eq!(draft.status, 200);
     let draft_json = response_json(&draft);
-    assert_eq!(draft_json["data"]["authority"], serde_json::json!("request_only"));
+    assert_eq!(
+        draft_json["data"]["authority"],
+        serde_json::json!("request_only")
+    );
     assert_eq!(
         draft_json["data"]["proposal"]["status"],
         serde_json::json!("requested")
@@ -3284,10 +3451,26 @@ fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
     );
 
     let records = sink.records();
-    assert_eq!(records.len(), 8, "every board read/write attempt is audited");
-    assert_operator_audit_pair(&records[0..2], AuditDecision::Allowed, AuditOutcome::Succeeded);
-    assert_operator_audit_pair(&records[2..4], AuditDecision::Allowed, AuditOutcome::Succeeded);
-    assert_operator_audit_pair(&records[4..6], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_eq!(
+        records.len(),
+        8,
+        "every board read/write attempt is audited"
+    );
+    assert_operator_audit_pair(
+        &records[0..2],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(
+        &records[2..4],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(
+        &records[4..6],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
     assert_operator_audit_pair(&records[6..8], AuditDecision::Blocked, AuditOutcome::Failed);
 }
 
@@ -3413,7 +3596,10 @@ fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit()
     );
     assert_eq!(rollback.status, 200);
     let rollback_json = response_json(&rollback);
-    assert_eq!(rollback_json["data"]["action"], serde_json::json!("rollback"));
+    assert_eq!(
+        rollback_json["data"]["action"],
+        serde_json::json!("rollback")
+    );
     assert_eq!(
         rollback_json["data"]["target_edition"],
         serde_json::json!("SYNTHETIC_BASE")
@@ -3434,12 +3620,32 @@ fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit()
 
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
     let records = sink.records();
-    assert_eq!(records.len(), 10, "every default-edition attempt is hash-chain audited");
-    assert_operator_audit_pair(&records[0..2], AuditDecision::Allowed, AuditOutcome::Succeeded);
-    assert_operator_audit_pair(&records[2..4], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_eq!(
+        records.len(),
+        10,
+        "every default-edition attempt is hash-chain audited"
+    );
+    assert_operator_audit_pair(
+        &records[0..2],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(
+        &records[2..4],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
     assert_operator_audit_pair(&records[4..6], AuditDecision::Blocked, AuditOutcome::Failed);
-    assert_operator_audit_pair(&records[6..8], AuditDecision::Allowed, AuditOutcome::Succeeded);
-    assert_operator_audit_pair(&records[8..10], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(
+        &records[6..8],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(
+        &records[8..10],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
 }
 
 #[test]
@@ -3553,12 +3759,32 @@ fn edition_default_flip_refuses_forked_or_replayed_review_state() {
 
     let records = sink.records();
     assert_eq!(records.len(), 12);
-    assert_operator_audit_pair(&records[0..2], AuditDecision::Allowed, AuditOutcome::Succeeded);
-    assert_operator_audit_pair(&records[2..4], AuditDecision::Allowed, AuditOutcome::Succeeded);
-    assert_operator_audit_pair(&records[4..6], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(
+        &records[0..2],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(
+        &records[2..4],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(
+        &records[4..6],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
     assert_operator_audit_pair(&records[6..8], AuditDecision::Blocked, AuditOutcome::Failed);
-    assert_operator_audit_pair(&records[8..10], AuditDecision::Blocked, AuditOutcome::Failed);
-    assert_operator_audit_pair(&records[10..12], AuditDecision::Blocked, AuditOutcome::Failed);
+    assert_operator_audit_pair(
+        &records[8..10],
+        AuditDecision::Blocked,
+        AuditOutcome::Failed,
+    );
+    assert_operator_audit_pair(
+        &records[10..12],
+        AuditDecision::Blocked,
+        AuditOutcome::Failed,
+    );
 }
 
 #[test]
@@ -3626,8 +3852,16 @@ fn edition_default_flip_surfaces_a_live_policy_refusal_as_an_audited_block() {
     );
     let records = sink.records();
     assert_eq!(records.len(), 6);
-    assert_operator_audit_pair(&records[0..2], AuditDecision::Allowed, AuditOutcome::Succeeded);
-    assert_operator_audit_pair(&records[2..4], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(
+        &records[0..2],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(
+        &records[2..4],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
     assert_operator_audit_pair(&records[4..6], AuditDecision::Blocked, AuditOutcome::Failed);
 }
 

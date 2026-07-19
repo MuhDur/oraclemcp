@@ -13,6 +13,7 @@ this document is how it is produced and audited.
 scripts/audit_bead_closes.py --template <bead-id>   # scaffold, prefilled from git
 scripts/check_bead_close_evidence.sh                # read-only audit
 scripts/check_bead_close_evidence.sh --strict       # also fail on unevidenced closes
+scripts/check_bead_close_evidence.sh --self-test    # deterministic control tests
 ```
 
 Documents live at `tests/artifacts/evidence/closes/<bead-id>.json`. The filename
@@ -34,8 +35,33 @@ audits is not an auditor.
 | `MALFORMED_JSON` | it is not JSON |
 | `BEAD_ID_MISMATCH` | the filename and the declared `bead_id` disagree |
 | `SOURCE_SHA_ABSENT` | `source.sha` is not a commit in this repository |
+| `SOURCE_SHA_NOT_AT_HEAD` | the source commit is not landed in HEAD ancestry |
 | `PROOF_ARTIFACT_ABSENT` | a cited proof is not on disk |
 | `LIVE_ARTIFACT_ABSENT` | a live claim points at a file that does not exist |
+| `ORIGINAL_FALSE_CLOSE_UNCORRECTED` | a comment proves the original close false, but its own `close_reason` was not corrected |
+
+Closes at or after `2026-07-18T20:00:00Z` also fail unless they carry evidence
+that binds the close reason to `source.sha`, proves the source is landed, names
+clean tracked scope entries as `path:<repo-relative pathspec>`, and finds an
+exact `Bead: <id>` trailer in the source commit. A live/e2e close additionally
+records both `lane` and immutable `run_id` in `live_evidence`. An ignored or
+self-skipping test without that scheduled-lane artifact is never sufficient.
+For Rust traces written as `path/to/test.rs::test_name`, the auditor reads the
+named function's attributes and detects `#[ignore]`; the close cannot evade the
+rule by omitting the word "ignored" from its prose.
+Re-closing a pre-charter false-close solely to repair its original tracker text
+is not a new delivery: it is exempt from source-path evidence only when the
+original discovery comment remains, the corrected reason explicitly retracts
+the claim, and it records both a run ID and corrective commit SHA.
+
+```json
+"live_evidence": {
+  "claimed": true,
+  "lane": "scheduled-oracle-matrix",
+  "run_id": "gh-29638451182",
+  "artifacts": [{ "kind": "version-matrix", "path": "...", "sha": "..." }]
+}
+```
 
 **Advisory** — reported, never gating. These are heuristics over free-text close
 reasons, and they are kept out of the gate deliberately:
@@ -54,9 +80,12 @@ audit that cries wolf gets muted, and a muted audit is worse than no audit.
 
 This repo has many closed beads and the contract is new. Retroactively failing
 every close that predates it would produce a permanently red gate, which teaches
-people to ignore it. So the audit reports coverage as a number — currently 2 of
-the legacy backlog — and that number should only move one way. `--strict` opts into failing on
-it, for a future where the backlog is worked down.
+people to ignore it. So the audit reports coverage as a number — currently 15
+evidenced legacy closes — and that number should only move one way. CI pins it
+with `--exact-evidence-floor 15`; deleting or invalidating evidence fails, and
+adding valid evidence fails until the floor is raised in the same change.
+`--strict` opts into failing on every historical gap, for a future
+where the backlog is worked down. Post-charter closes are always gated.
 
 The 70 advisory `LIVE_CLAIM_WITHOUT_REFERENCE` hits are a real finding about this
 repo's history, not noise to suppress: 70 closes claim live or end-to-end work
@@ -73,7 +102,7 @@ same one.**
 claims is committed at `source.sha`** — objectively checkable:
 
 ```bash
-git status --porcelain -- <scope.in_scope paths>    # empty => tree_clean: true
+git status --porcelain -- <scope.in_scope pathspecs> # empty => tree_clean: true
 ```
 
 It is **not** a claim that the entire working directory was pristine. This is a
@@ -92,12 +121,42 @@ This was found by dogfooding, not by a fixture: the first two close documents
 written were the author's own, and the literal reading rejected one of them for
 another agent's uncommitted file.
 
+Each post-charter path entry uses the unambiguous form
+`path:crates/example/src/lib.rs`. Absolute paths, pathspec magic, and `..`
+escapes are rejected; a pathspec must exist in `source.sha` and be clean at HEAD.
+
 ## Close evidence lands one commit after the work
 
 A document names `source.sha` — the commit the work landed in — so it cannot be
-inside that commit. The order is: land the work, then add its close evidence in
-the following commit, then close the bead. The audit only requires that
-`source.sha` exists and that the references resolve.
+inside that commit. The order is: land the work with an exact `Bead: <id>`
+trailer, then add its close evidence in the following commit, then close the
+bead with `source.sha` (or an unambiguous prefix) in `close_reason`. The audit
+requires that `source.sha` is an ancestor of HEAD and every scope path is clean.
+
+## Tracker enumeration is fail-closed
+
+Local audits ask `br list --all --deferred --json` for bounded pages and continue
+until `has_more` is false. Every page, total, offset, and captured ID is
+validated; duplicates, malformed JSON, or a changing total abort the audit.
+Because list pages omit comments and dependency records, the local audit also
+requires `.beads/issues.jsonl` to match live IDs and `updated_at` values; run
+`br sync --flush-only` when it reports drift.
+CI reads the checked-in `.beads/issues.jsonl` snapshot with the same unique-ID
+validation, so it needs no network or tracker binary. All tracker timestamps
+must carry explicit UTC. Umbrellas closed over unfinished leaves and ordinary
+leaf-to-epic blocking edges are surfaced instead of hiding leaf readiness.
+
+Before any bulk bead operation, capture and validate the complete machine
+surface first; do not scrape human output or silently accept the first page:
+
+```bash
+br list --all --deferred --json --limit 0 \
+  | scripts/audit_bead_closes.py --validate-id-capture -
+```
+
+The validator emits one JSON object containing `count` and the exact `ids`
+array. It refuses malformed objects, duplicate IDs, mismatched totals, and any
+capture whose `has_more` is not explicitly false.
 
 ## Readiness: what a close may claim
 

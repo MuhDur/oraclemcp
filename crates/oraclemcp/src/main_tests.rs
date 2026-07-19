@@ -1367,6 +1367,228 @@ fn metrics_dispatch_forwards_stream_frames_and_records_one_terminal_outcome() {
 }
 
 #[test]
+fn metrics_dispatch_bounds_unknown_tool_labels_across_all_export_surfaces() {
+    const CUSTOM_TOOL: &str = "customer_360";
+    const UNKNOWN_COUNT: usize = 64;
+
+    struct CatalogDispatch {
+        seen_names: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl ToolDispatch for CatalogDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            name: &'a str,
+            _args: serde_json::Value,
+        ) -> DispatchFuture<'a> {
+            self.seen_names
+                .lock()
+                .expect("seen-name mutex not poisoned")
+                .push(name.to_owned());
+            let advertised = name == "oracle_query" || name == CUSTOM_TOOL;
+            Box::pin(async move {
+                if advertised {
+                    DispatchOutcome::Ok(serde_json::json!({ "executed": name }))
+                } else {
+                    DispatchOutcome::Err(ErrorEnvelope::new(
+                        ErrorClass::InvalidArguments,
+                        "unknown tool",
+                    ))
+                }
+            })
+        }
+
+        fn mcp_surface_state<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _detail: McpSurfaceDetail,
+        ) -> McpSurfaceFuture<'a> {
+            let descriptor = oraclemcp_core::ToolDescriptor::new(
+                CUSTOM_TOOL,
+                oraclemcp_core::ToolTier::FoundationLiveDb,
+                "configured custom tool",
+            );
+            Box::pin(async move {
+                asupersync::Outcome::Ok(Some(oraclemcp_core::McpSurfaceState {
+                    current_level: OperatingLevel::ReadOnly,
+                    effective_ceiling: OperatingLevel::ReadOnly,
+                    max_level: OperatingLevel::ReadOnly,
+                    protected: false,
+                    active_profile: Some("dev".to_owned()),
+                    custom_catalog: oraclemcp_core::McpToolCatalogSnapshot {
+                        generation: 1,
+                        tools: vec![descriptor].into(),
+                    },
+                    connection: oraclemcp_core::ConnectionStatus::default(),
+                }))
+            })
+        }
+    }
+
+    let seen_names = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let metrics = Arc::new(Metrics::new());
+    let dispatch = MetricsDispatch::new(
+        Arc::new(CatalogDispatch {
+            seen_names: Arc::clone(&seen_names),
+        }),
+        Arc::clone(&metrics),
+    );
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("test runtime builds");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("test runtime installs Cx");
+        let context = DispatchContext::default().with_principal_key("oauth:metrics-cardinality");
+        dispatch
+            .dispatch(
+                &cx,
+                context,
+                "oracle_query",
+                serde_json::json!({ "sql": "SELECT 1 FROM dual" }),
+            )
+            .await
+            .expect("advertised built-in dispatches");
+        dispatch
+            .dispatch(&cx, context, CUSTOM_TOOL, serde_json::json!({}))
+            .await
+            .expect("advertised custom tool dispatches");
+        for index in 0..UNKNOWN_COUNT {
+            let name = format!("client_supplied_unknown_{index}");
+            assert!(
+                dispatch
+                    .dispatch(&cx, context, &name, serde_json::json!({}))
+                    .await
+                    .is_err(),
+                "unknown request remains an ordinary dispatch error"
+            );
+        }
+    });
+
+    let seen = seen_names.lock().expect("seen-name mutex not poisoned");
+    assert_eq!(seen.len(), UNKNOWN_COUNT + 2);
+    assert_eq!(seen[0], "oracle_query");
+    assert_eq!(seen[1], CUSTOM_TOOL);
+    assert_eq!(seen[2], "client_supplied_unknown_0");
+    assert_eq!(
+        seen.last().map(String::as_str),
+        Some("client_supplied_unknown_63"),
+        "canonicalization must not rewrite the name sent to dispatch"
+    );
+    drop(seen);
+
+    let expected_tools = std::collections::BTreeSet::from([
+        "oracle_query".to_owned(),
+        CUSTOM_TOOL.to_owned(),
+        UNLISTED_TOOL_METRIC_LABEL.to_owned(),
+    ]);
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.requests.len(), expected_tools.len());
+    assert_eq!(snapshot.lane_requests.len(), expected_tools.len());
+    assert_eq!(
+        snapshot.lane_request_duration_ms.len(),
+        expected_tools.len()
+    );
+    assert_eq!(
+        snapshot
+            .requests
+            .iter()
+            .map(|request| request.tool.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_tools
+    );
+    assert_eq!(
+        snapshot
+            .lane_requests
+            .iter()
+            .map(|request| request.tool.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_tools
+    );
+    assert_eq!(
+        snapshot
+            .lane_request_duration_ms
+            .iter()
+            .map(|duration| duration.tool.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_tools
+    );
+    let unlisted = snapshot
+        .requests
+        .iter()
+        .find(|request| request.tool == UNLISTED_TOOL_METRIC_LABEL)
+        .expect("one bounded unknown-tool series");
+    assert_eq!(unlisted.status, "error");
+    assert_eq!(unlisted.count, UNKNOWN_COUNT as u64);
+
+    let prometheus = metrics.prometheus_text();
+    assert!(prometheus.contains("tool=\"oracle_query\""));
+    assert!(prometheus.contains(&format!("tool=\"{CUSTOM_TOOL}\"")));
+    assert!(prometheus.contains("tool=\"unlisted\""));
+    assert!(!prometheus.contains("client_supplied_unknown_0"));
+    assert!(!prometheus.contains("client_supplied_unknown_63"));
+
+    fn otlp_attr<'a>(
+        attrs: &'a [oraclemcp_telemetry::otlp::proto::KeyValue],
+        key: &str,
+    ) -> Option<&'a str> {
+        attrs.iter().find_map(|attribute| {
+            if attribute.key != key {
+                return None;
+            }
+            match attribute.value.as_ref()?.value.as_ref()? {
+                oraclemcp_telemetry::otlp::proto::any_value::Value::StringValue(value) => {
+                    Some(value.as_str())
+                }
+            }
+        })
+    }
+
+    let otlp_config = oraclemcp_telemetry::OtlpConfig::from_lookup(|key| {
+        (key == "OTEL_EXPORTER_OTLP_ENDPOINT").then(|| "http://collector:4318".to_owned())
+    })
+    .expect("test OTLP config is enabled");
+    let otlp = oraclemcp_telemetry::otlp::metrics::build_request(
+        &otlp_config,
+        &oraclemcp_telemetry::Redactor::new(),
+        &snapshot,
+        1,
+        2,
+    );
+    let scope_metrics = &otlp.resource_metrics[0].scope_metrics[0].metrics;
+    for metric_name in [
+        "mcp.server.request.count",
+        "mcp.server.lane.request.count",
+        "mcp.server.lane.request.duration",
+    ] {
+        let labels = scope_metrics
+            .iter()
+            .filter(|metric| metric.name == metric_name)
+            .flat_map(|metric| match &metric.data {
+                Some(oraclemcp_telemetry::otlp::proto::metric::Data::Sum(sum)) => sum
+                    .data_points
+                    .iter()
+                    .filter_map(|point| otlp_attr(&point.attributes, "tool"))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+                Some(oraclemcp_telemetry::otlp::proto::metric::Data::Histogram(histogram)) => {
+                    histogram
+                        .data_points
+                        .iter()
+                        .filter_map(|point| otlp_attr(&point.attributes, "tool"))
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                }
+                _ => Vec::new(),
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(labels, expected_tools, "OTLP labels for {metric_name}");
+    }
+}
+
+#[test]
 fn metrics_dispatch_forwards_stream_cancellation_and_records_it_once() {
     struct CancellationAwareStream {
         stream_calls: Arc<std::sync::atomic::AtomicUsize>,
