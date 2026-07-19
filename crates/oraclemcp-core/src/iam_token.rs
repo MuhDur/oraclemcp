@@ -1124,13 +1124,25 @@ mod tests {
     /// Resolve a coreutil to an absolute path so it is invoked as a literal argv[0]
     /// (no PATH ambiguity, no shell). Fails the test loudly if the tool is absent.
     fn coreutil(name: &str) -> String {
-        for dir in ["/usr/bin", "/bin"] {
-            let candidate = format!("{dir}/{name}");
-            if std::path::Path::new(&candidate).exists() {
-                return candidate;
+        // Hermetic exec targets with no PATH ambiguity. On Unix these live in
+        // /usr/bin or /bin. On Windows the GitHub runners ship the identical
+        // coreutils via Git Bash, so look there too (with the .exe suffix) — the
+        // exec-provider tests then exercise the same cross-platform `Command`
+        // path on Windows instead of being skipped.
+        #[cfg(windows)]
+        let (dirs, suffix): (&[&str], &str) = (
+            &[r"C:\Program Files\Git\usr\bin", r"C:\Program Files\Git\bin"],
+            ".exe",
+        );
+        #[cfg(not(windows))]
+        let (dirs, suffix): (&[&str], &str) = (&["/usr/bin", "/bin"], "");
+        for dir in dirs {
+            let candidate = std::path::Path::new(dir).join(format!("{name}{suffix}"));
+            if candidate.exists() {
+                return candidate.to_string_lossy().into_owned();
             }
         }
-        panic!("hermetic test requires `{name}` (looked in /usr/bin and /bin)");
+        panic!("hermetic test requires `{name}` (looked in {dirs:?})");
     }
 
     fn exec_src(argv: &[&str]) -> ServerIamTokenSource {

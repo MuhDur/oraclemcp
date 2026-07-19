@@ -959,7 +959,7 @@ mod tests {
             [[profiles]]
             name = "dev"
             connect_string = "localhost:1521/FREEPDB1"
-            login_script = "{}"
+            login_script = '{}'
             "#,
             path.display()
         );

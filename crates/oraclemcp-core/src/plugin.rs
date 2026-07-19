@@ -540,12 +540,32 @@ mod tests {
         }
     }
 
+    /// Resolve `sh` for the hermetic subprocess-plugin tests: `/bin/sh` on Unix,
+    /// Git Bash `sh.exe` on the Windows CI runners (the runners ship it, same as
+    /// for the exec-token tests). The `sh -c '…'` scripts below use `cat`,
+    /// `printf`, and `/dev/null`, all of which Git Bash provides.
+    fn sh_bin() -> String {
+        #[cfg(windows)]
+        {
+            return [
+                r"C:\Program Files\Git\usr\bin\sh.exe",
+                r"C:\Program Files\Git\bin\sh.exe",
+            ]
+            .into_iter()
+            .find(|c| std::path::Path::new(c).exists())
+            .map(str::to_owned)
+            .expect("hermetic plugin test requires Git Bash sh.exe on Windows");
+        }
+        #[cfg(not(windows))]
+        "/bin/sh".to_owned()
+    }
+
     #[test]
     fn subprocess_roundtrip_over_the_json_protocol() {
         // A minimal out-of-process "plugin": reads+discards stdin, emits a fixed
         // PluginResponse. Proves the IPC boundary without any DB/secret access.
         let plugin = SubprocessPlugin::new(vec![
-            "/bin/sh".to_owned(),
+            sh_bin(),
             "-c".to_owned(),
             "cat >/dev/null; printf '{\"ok\":true,\"data\":{\"rows\":7}}'".to_owned(),
         ]);
@@ -560,11 +580,7 @@ mod tests {
 
     #[test]
     fn crashing_plugin_is_isolated_not_a_panic() {
-        let plugin = SubprocessPlugin::new(vec![
-            "/bin/sh".to_owned(),
-            "-c".to_owned(),
-            "exit 3".to_owned(),
-        ]);
+        let plugin = SubprocessPlugin::new(vec![sh_bin(), "-c".to_owned(), "exit 3".to_owned()]);
         let req = PluginRequest {
             capability: PluginCapability::ReadQuery,
             args: Value::Null,
@@ -576,7 +592,7 @@ mod tests {
     #[test]
     fn malformed_plugin_output_is_a_protocol_error() {
         let plugin = SubprocessPlugin::new(vec![
-            "/bin/sh".to_owned(),
+            sh_bin(),
             "-c".to_owned(),
             "printf 'not json'".to_owned(),
         ]);
@@ -597,7 +613,7 @@ mod tests {
             return;
         }
         let plugin = SubprocessPlugin::new(vec![
-            "/bin/sh".to_owned(),
+            sh_bin(),
             "-c".to_owned(),
             "IFS= read -r _; \
              if printenv HOME >/dev/null; then \
@@ -646,7 +662,7 @@ mod tests {
         // serialized JSON is ~128KB so both pipe directions are over a 64KB
         // buffer at once.
         let plugin = SubprocessPlugin::new(vec![
-            "/bin/sh".to_owned(),
+            sh_bin(),
             "-c".to_owned(),
             // Emit the big response first, THEN drain stdin (the deadlocking
             // order). printf builds {"ok":true,"data":{"blob":"xxxx…"}}.
@@ -673,12 +689,8 @@ mod tests {
         // reported as an isolated Crashed error.
         // The plugin sleeps far longer than the deadline (120x margin) and never
         // closes its stdout, mimicking a grandchild that inherits the pipe.
-        let plugin = SubprocessPlugin::new(vec![
-            "/bin/sh".to_owned(),
-            "-c".to_owned(),
-            "sleep 30".to_owned(),
-        ])
-        .with_timeout(Duration::from_millis(250));
+        let plugin = SubprocessPlugin::new(vec![sh_bin(), "-c".to_owned(), "sleep 30".to_owned()])
+            .with_timeout(Duration::from_millis(250));
         let req = PluginRequest {
             capability: PluginCapability::ReadQuery,
             args: Value::Null,
@@ -700,12 +712,8 @@ mod tests {
 
     #[cfg(unix)]
     fn assert_successful_parent_with_inherited_pipe_is_bounded(script: &str) {
-        let plugin = SubprocessPlugin::new(vec![
-            "/bin/sh".to_owned(),
-            "-c".to_owned(),
-            script.to_owned(),
-        ])
-        .with_timeout(Duration::from_millis(250));
+        let plugin = SubprocessPlugin::new(vec![sh_bin(), "-c".to_owned(), script.to_owned()])
+            .with_timeout(Duration::from_millis(250));
         let req = PluginRequest {
             capability: PluginCapability::ReadQuery,
             args: Value::Null,
@@ -764,7 +772,7 @@ mod tests {
     fn nonzero_plugin_stderr_is_never_exposed() {
         let secret = "QA117_PLUGIN_STDERR_SECRET";
         let plugin = SubprocessPlugin::new(vec![
-            "/bin/sh".to_owned(),
+            sh_bin(),
             "-c".to_owned(),
             format!("IFS= read -r _; printf '{secret}' >&2; exit 17"),
         ]);
@@ -782,7 +790,7 @@ mod tests {
     #[test]
     fn oversized_stdout_is_drained_but_rejected_at_the_cap() {
         let plugin = SubprocessPlugin::new(vec![
-            "/bin/sh".to_owned(),
+            sh_bin(),
             "-c".to_owned(),
             format!(
                 "IFS= read -r _; head -c {} /dev/zero | tr '\\0' x",
@@ -804,7 +812,7 @@ mod tests {
     #[test]
     fn oversized_stderr_is_drained_capped_and_suppressed() {
         let plugin = SubprocessPlugin::new(vec![
-            "/bin/sh".to_owned(),
+            sh_bin(),
             "-c".to_owned(),
             format!(
                 "IFS= read -r _; head -c {} /dev/zero | tr '\\0' s >&2; printf '{{\"ok\":true}}'",
@@ -853,7 +861,7 @@ mod tests {
         for iteration in 0..10 {
             let marker = format!("qa117-plugin-timeout-{}-{iteration}", std::process::id());
             let plugin = SubprocessPlugin::new(vec![
-                "/bin/sh".to_owned(),
+                sh_bin(),
                 "-c".to_owned(),
                 format!("sh -c 'sleep 30' {marker} & wait"),
             ])

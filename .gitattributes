@@ -17,6 +17,10 @@
 *.yaml  text eol=lf
 *.dict  text eol=lf
 *.tsv   text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
 
 # install.ps1 is checked as a static fixture (installer_e2e asserts it contains
 # "    Invoke-OptionalDiscovery\n"); a CRLF checkout breaks the \n-terminated
