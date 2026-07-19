@@ -1,0 +1,23 @@
+# Normalize line endings. This repo is developed on Linux and all committed
+# text is already LF; without this, a Windows checkout (autocrlf) rewrites text
+# files to CRLF, and the bash e2e/release scripts + golden fixtures then read a
+# trailing `\r` — e.g. a golden `serverInfo.version` of "0.9.0\r" fails an
+# equality check against the workspace "0.9.0" (bead F-WIN-E2E). Forcing LF on
+# checkout keeps every OS byte-identical.
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.py    text eol=lf
+*.json  text eol=lf
+*.jsonl text eol=lf
+*.toml  text eol=lf
+*.lock  text eol=lf
+*.rs    text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.dict  text eol=lf
+*.tsv   text eol=lf
+
+# PowerShell/batch installer scripts are left to git's default handling; the
+# bash e2e suite never reads them, and pinning their EOL here would only churn
+# the working tree.
