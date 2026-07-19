@@ -30,7 +30,11 @@ fn workspace_root() -> PathBuf {
 }
 
 fn is_scanned(p: &Path) -> bool {
-    let s = p.to_string_lossy();
+    // Normalize to `/` so the path-substring exclusions below match on Windows
+    // too: without this, a Windows path like `crates\oraclemcp\tests\honesty_grep.rs`
+    // never matches `/tests/`, so no test file is excluded and this scanner reads
+    // its own FORBIDDEN phrase list as violations.
+    let s = p.to_string_lossy().replace('\\', "/");
     let is_dockerfile = p
         .file_name()
         .and_then(|n| n.to_str())
@@ -113,7 +117,7 @@ fn call_routine_absent_from_agent_surface() {
 
     let mut violations = Vec::new();
     for f in &files {
-        let s = f.to_string_lossy();
+        let s = f.to_string_lossy().replace('\\', "/"); // normalize for Windows paths
         if s.contains("/tests/") || s.ends_with("tests.rs") {
             continue;
         }
