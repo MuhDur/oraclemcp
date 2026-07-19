@@ -326,9 +326,10 @@ use operator::{
     BrowserApplyPolicy, MAX_OPERATOR_EVENT_STREAMS, MAX_OPERATOR_EVENTS_PER_STREAM,
     OPERATOR_ACTION_TOOL_POLICIES, OPERATOR_IDEMPOTENCY_MAX_ENTRIES, OperatorIdempotencyBegin,
     OperatorIdempotencyEntry, OperatorIdempotencyFacts, OperatorIdempotencyInput,
-    SourceSnapshotFetchOutcome, current_source_document, dashboard_workbench_release_gate,
-    evict_completed_operator_idempotency_entries_to_capacity, operator_action_tool_policy,
-    operator_idempotency_facts, operator_json_response, redacted_audit_record,
+    SourceSnapshotFetchOutcome, classifier_verdict_from_record, current_source_document,
+    dashboard_workbench_release_gate, evict_completed_operator_idempotency_entries_to_capacity,
+    operator_action_tool_policy, operator_idempotency_facts, operator_json_response,
+    redacted_audit_record,
 };
 // Façade: the /operator/v1 surface moved to `operator`; `http::OperatorEventStore`
 // and the lib.rs re-exports resolve unchanged.

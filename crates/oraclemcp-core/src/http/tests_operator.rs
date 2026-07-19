@@ -1165,6 +1165,56 @@ fn operator_events_stream_classifier_verdicts_for_ladder() {
     );
 }
 
+// E4 (bead oraclemcp-eng-program-bp8ia.6.4): "no green-for-blocked rendering
+// anywhere". `classifier_verdict_from_record` is the map from a raw audit
+// `decision` string to the CLASSIFIER-LIVE ladder the dashboard renders. Its
+// match arm falls through to `_ => return None` for anything it does not
+// recognize, which drops the record from the ladder entirely rather than
+// defaulting it to a verdict. This test pins that default: an unrecognized,
+// empty, or case-mismatched decision NEVER becomes `"PASS"` (or any verdict) —
+// it is silently absent, exactly like the `operator_api` meta-entry filter
+// just above it, not silently affirmed.
+#[test]
+fn classifier_verdict_never_defaults_an_unrecognized_decision_to_pass() {
+    for decision in [
+        "",
+        "UNKNOWN",
+        "allowed",  // lowercase: the real field is emitted upper-case; a
+        // case mismatch must not be treated as a match.
+        "ALLOWED ", // trailing whitespace: not an exact match either.
+        "PENDING",
+        "ERROR",
+    ] {
+        let record = serde_json::json!({
+            "tool": "oracle_query",
+            "decision": decision,
+            "seq": 1,
+        });
+        assert_eq!(
+            classifier_verdict_from_record(&record),
+            None,
+            "decision {decision:?} must never be surfaced as a verdict, let alone PASS"
+        );
+    }
+
+    // Sanity check on the same helper: the one decision that legitimately
+    // means "admitted" really does map to PASS, so the assertions above are
+    // proving an absence, not a helper that always returns None.
+    let allowed = serde_json::json!({
+        "tool": "oracle_query",
+        "decision": "ALLOWED",
+        "seq": 2,
+    });
+    let verdict = classifier_verdict_from_record(&allowed).expect("ALLOWED must produce a verdict");
+    assert_eq!(verdict["verdict"], serde_json::json!("PASS"));
+
+    // A record with no `decision` field at all (defaults to "" via
+    // `unwrap_or_default`) must take the same fail-closed path as an
+    // explicitly empty string, never PASS.
+    let no_decision = serde_json::json!({ "tool": "oracle_query", "seq": 3 });
+    assert_eq!(classifier_verdict_from_record(&no_decision), None);
+}
+
 #[test]
 fn operator_v1_serves_schema_health_events_and_action_mapping() {
     let (auditor, sink) = operator_auditor();

@@ -3465,7 +3465,7 @@ fn operator_classifier_verdicts(config: &HttpTransportConfig) -> Value {
 /// is required before it can run, `REFUSED-exceeds-ceiling` = the guard blocked
 /// the statement. Operator API meta-entries (`operator_api`) are HTTP calls, not
 /// classified SQL, so they are skipped rather than shown as spurious passes.
-fn classifier_verdict_from_record(record: &Value) -> Option<Value> {
+pub(super) fn classifier_verdict_from_record(record: &Value) -> Option<Value> {
     let tool = record
         .get("tool")
         .and_then(Value::as_str)

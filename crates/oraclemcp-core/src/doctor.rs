@@ -4020,6 +4020,61 @@ mod tests {
         );
     }
 
+    // E4 (bead oraclemcp-eng-program-bp8ia.6.4): "no green-for-blocked
+    // rendering anywhere". A `Skip` check ("not applicable this run", per this
+    // module's own doc comment: "never a fake `Pass`") must never render,
+    // serialize, or count as a `Pass` in any of doctor's three surfaces: the
+    // enum itself, the JSON report, and the human `to_text()` report.
+    #[test]
+    fn skip_checks_never_render_or_serialize_as_pass() {
+        let report = DoctorReport {
+            checks: vec![
+                CheckResult::new(
+                    3,
+                    "Connectivity",
+                    CheckStatus::Skip,
+                    "no profile configured",
+                ),
+                CheckResult::new(4, "Role/standby", CheckStatus::Skip, "offline run"),
+            ],
+            profile_caps: None,
+            auth_capabilities: None,
+            service_health: None,
+            service_unit_caps: None,
+            fix: None,
+        };
+
+        // Distinct enum identity: Skip is not Pass.
+        assert_ne!(CheckStatus::Skip, CheckStatus::Pass);
+
+        // JSON: each check serializes its own status; a skip must read "skip",
+        // never "pass".
+        let json = report.to_json();
+        for check in json["checks"].as_array().expect("checks array") {
+            assert_eq!(check["status"], json!("skip"));
+            assert_ne!(check["status"], json!("pass"));
+        }
+        // All-skip is not a failure, so `ok` is honestly true — that is a
+        // distinct claim from "everything passed", and nothing here asserts a
+        // fabricated pass.
+        assert_eq!(json["ok"], json!(true));
+        assert!(!report.any_failed());
+        assert_eq!(report.exit_code(), 0);
+
+        // Human text: doctor has no "PASS" literal at all — status is
+        // conveyed only by the per-check glyph and the final ok/FAILED
+        // verdict word — and a Skip line must render with its own glyph, not
+        // the Pass glyph.
+        let text = report.to_text();
+        assert!(!text.contains("PASS"));
+        for line in text.lines().filter(|line| line.starts_with('[')) {
+            assert!(
+                line.starts_with("[-]"),
+                "a Skip check must render with the '-' glyph, not the Pass glyph: {line}"
+            );
+        }
+    }
+
     #[test]
     fn doctor_fix_fixture_gate_current_repairs_are_fixture_accounted() {
         let missing_tns = DoctorContext {
