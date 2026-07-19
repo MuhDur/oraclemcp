@@ -62,3 +62,27 @@ completed both the pinned and floating entries successfully (about fifteen and
 nine minutes respectively). The workflow now pins an explicit bounded timeout
 for that advisory job, so a future hang is reported as advisory evidence rather
 than consuming the platform default.
+
+## CI heartbeat (never discover red first)
+
+`scripts/ci_heartbeat.sh` closes the gap `--status`/`--verify-names` leave for
+unattended monitoring: those two modes need a specific commit SHA supplied by
+a human or a release script, so nothing polls them on its own. The heartbeat
+walks this repo's `required` and `scheduled` taxonomy tiers (skipping its own
+`ci-heartbeat.yml` workflow to avoid watching itself) plus, trivially in
+scope, the sibling `rust-oracledb` repo's `required` gate and its
+chronically-flaky `live.yml` Live nightly. For each watched workflow file it
+finds the latest **completed, non-cancelled** run — a `cancelled` run is
+almost always a push superseding an in-flight one under this repo's
+`cancel-in-progress` concurrency groups, not a failure, and conflating the two
+would itself be a false alarm. A lane the script cannot observe (API failure,
+no completed run yet) renders `unknown`, never a fabricated `success`.
+
+`.github/workflows/ci-heartbeat.yml` drives it every 30 minutes
+(`workflow_dispatch` also works on demand). The script's exit code is the
+actual notification path: a non-zero exit turns that scheduled run red, which
+rides GitHub's own scheduled-workflow-failure notification without any new
+webhook, secret, or always-on service. Run it locally (`bash
+scripts/ci_heartbeat.sh [--out PATH] [--no-driver] [--quiet]`) for the same
+signal outside GitHub Actions — useful from a personal cron job, or as a
+`doctor`-style spot check before starting a session.

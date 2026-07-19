@@ -1,0 +1,66 @@
+name: CI Heartbeat
+
+# The heartbeat/notifier for bead oraclemcp-eng-program-bp8ia.6.4 (plan §27.4
+# O3 + C8): "the deepest operator-trust wound was the operator discovering red
+# CI himself." This is the driving cron for scripts/ci_heartbeat.sh — it polls
+# the real GitHub Actions state for this repo's required + scheduled lanes
+# plus the sibling driver repo's required lane and Live nightly, then fails
+# THIS job when any of them is red, blocked, or unknown. A failing scheduled
+# run rides GitHub's own scheduled-workflow-failure notification, so a red
+# lane surfaces within one cycle instead of waiting for someone to look.
+#
+# Every 30 minutes is the cycle; that bounds how long a red can sit unseen.
+# This job does no build — it is a handful of read-only `gh api` calls — so
+# the cadence carries no meaningful cost on a public repo's unlimited free
+# Actions minutes.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  heartbeat:
+    name: watch required + scheduled lanes (server + driver)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # A literal path, not `${{ runner.temp }}`: the `runner` context is not
+      # available in a job-level `env:` block (only in step contexts).
+      CI_HEARTBEAT_OUTPUT: /tmp/ci-heartbeat.json
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Run CI heartbeat
+        id: heartbeat
+        run: bash scripts/ci_heartbeat.sh
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### CI heartbeat"
+            echo
+            echo '```json'
+            cat "$CI_HEARTBEAT_OUTPUT" 2>/dev/null || echo "(no snapshot written)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ci-heartbeat-snapshot
+          path: /tmp/ci-heartbeat.json
+          if-no-files-found: ignore
+          retention-days: 14
