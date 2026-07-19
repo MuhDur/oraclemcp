@@ -30,6 +30,9 @@ for arg in "$@"; do
 done
 
 cd "$ROOT"
+# TEMP-DIAG (F-WIN-E2E): unconditional stderr probe to ground-truth the Windows
+# Git-Bash failure — remove once diagnosed.
+echo "E2E-DIAG argc=$# argv=[$*] E2E_LOG=${E2E_LOG:-unset} E2E_DRY_RUN=${E2E_DRY_RUN:-unset} pwd=[$(pwd)] bashver=${BASH_VERSION:-unset} uname=[$(uname -s 2>/dev/null || echo NA)]" >&2
 e2e_log_event "scenario_start" "setup" "running" 0 "0.6.0 read-only dashboard acceptance gate"
 
 if ! e2e_run_command "act" bash scripts/dashboard_skin_lint.sh; then

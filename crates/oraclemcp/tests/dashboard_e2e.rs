@@ -93,7 +93,9 @@ fn read_only_dashboard_acceptance_gate_has_structured_dry_run() {
     let output = run_script("scripts/e2e/dashboard_readonly.sh", &["--log", "--dry-run"]);
     assert!(
         output.status.success(),
-        "dashboard_readonly dry-run failed: {}",
+        "dashboard_readonly dry-run failed (status={:?})\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 
