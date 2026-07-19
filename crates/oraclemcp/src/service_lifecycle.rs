@@ -1011,8 +1011,7 @@ fn relativize_file_manifest(manifest: &mut BackupFileManifest, backup_root: &Pat
             // and the restore validator is unchanged, so no integrity guarantee
             // is weakened.
             manifest.backup_path = Some(
-                portable_relative_path(relative)
-                    .unwrap_or_else(|_| relative.display().to_string()),
+                portable_relative_path(relative).unwrap_or_else(|_| relative.display().to_string()),
             );
         }
     }
