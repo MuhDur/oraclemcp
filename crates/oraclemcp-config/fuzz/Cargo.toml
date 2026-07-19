@@ -1,0 +1,28 @@
+# cargo-fuzz target for OracleMcpConfig::from_toml_str (bead H10 /
+# oraclemcp-eng-program-bp8ia.9.10). A standing artifact: run with
+# `cargo +nightly-2026-05-11 fuzz run config_toml` (needs nightly +
+# cargo-fuzz). The empty [workspace] table detaches this from the parent
+# workspace so it is not built by `cargo build --workspace`.
+[package]
+name = "oraclemcp-config-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oraclemcp-config]
+path = ".."
+
+[[bin]]
+name = "config_toml"
+path = "fuzz_targets/config_toml.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

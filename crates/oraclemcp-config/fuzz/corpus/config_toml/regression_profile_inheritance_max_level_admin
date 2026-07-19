@@ -1,0 +1,8 @@
+[[profiles]]
+name = "shared"
+connect_string = "localhotrue521BBBBBBBBBBBBBLY"
+
+[[profiles]]
+name = "child"
+base = "shared"
+max_level = "ADMIN"
