@@ -2912,6 +2912,11 @@ mod tests {
 
     // L270: `reject_unsafe_existing` must propagate a non-NotFound stat error
     // (the guard mutated to `true` would treat any error as "absent → ok").
+    // Unix-only: the `file/child` probe below induces the non-NotFound error via
+    // ENOTDIR; on Windows that same probe maps to `NotFound` (os error 3), so it
+    // cannot exercise the non-NotFound branch there (matches the other
+    // `#[cfg(unix)]` residue tests in this module).
+    #[cfg(unix)]
     #[test]
     fn residue_reject_unsafe_existing_propagates_non_notfound() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2992,6 +2997,9 @@ mod tests {
 
     // L634: `analyze_resume_log` must propagate a non-NotFound open error (the
     // guard mutated to `true` would swallow it as "fresh genesis").
+    // Unix-only: `file/child` induces ENOTDIR (a non-NotFound error) on Unix;
+    // Windows maps it to `NotFound`, so the probe cannot exercise this branch.
+    #[cfg(unix)]
     #[test]
     fn residue_analyze_resume_log_propagates_non_notfound() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3032,6 +3040,9 @@ mod tests {
     }
 
     // L724: `find_entry_hash_at_seq` must propagate a non-NotFound open error.
+    // Unix-only: `file/child` induces ENOTDIR (a non-NotFound error) on Unix;
+    // Windows maps it to `NotFound`, so the probe cannot exercise this branch.
+    #[cfg(unix)]
     #[test]
     fn residue_find_entry_hash_at_seq_propagates_non_notfound() {
         let dir = tempfile::tempdir().expect("tempdir");
