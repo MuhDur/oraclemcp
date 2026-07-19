@@ -15,6 +15,8 @@ jobs:
         run: bash scripts/oraclemcp_driver_seam_lint.sh
       - name: Honesty grep
         run: bash scripts/oraclemcp_honesty_grep.sh
+      - name: Fixture lint
+        run: bash scripts/oraclemcp_fixture_lint.sh
       - name: API lock
         run: bash scripts/oraclemcp_api_lock.sh
       - name: Supply-chain checks

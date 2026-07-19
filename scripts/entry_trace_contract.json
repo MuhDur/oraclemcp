@@ -156,6 +156,11 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/oraclemcp_fixture_lint.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/plsql_feature_lane_check.sh",
       "kind": "entry_point",
       "trace": "required-quality"
