@@ -88,16 +88,6 @@
         "artifacts": {
           "type": "array",
           "items": { "$ref": "#/$defs/artifactRef" }
-        },
-        "lane": {
-          "description": "Scheduled CI/live lane that produced the artifacts. Required by the post-charter close auditor for live claims.",
-          "type": "string",
-          "minLength": 1
-        },
-        "run_id": {
-          "description": "Immutable scheduled-lane run identifier. Required by the post-charter close auditor for live claims.",
-          "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
         }
       }
     },

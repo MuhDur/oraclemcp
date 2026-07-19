@@ -1458,7 +1458,7 @@ fn oci_adb_terraform_dry_run_wires_explicit_teardown() {
         "ORACLEMCP_REAL_ADB_USE_SNI=\"$wallet_use_sni\"",
         "provider_connect_string",
         "wallet_high_target",
-        "connect_timeout_seconds = 60",
+        "TRANSPORT_CONNECT_TIMEOUT=60",
         "openssl s_client",
         "adb_server_certificate",
         "wait_for_adb_tcps",
@@ -1506,8 +1506,9 @@ fn oci_adb_terraform_dry_run_wires_explicit_teardown() {
         );
     }
     assert!(
-        !harness.contains("transport_timeout = re.compile"),
-        "the OCI harness must pass the profile timeout through the server instead of rewriting the downloaded wallet descriptor"
+        !harness.contains("connect_timeout_seconds = 60"),
+        "the OCI harness resolves the wallet HIGH alias to a full Oracle Net descriptor; \
+         the server must not inject connect_timeout_seconds into that descriptor"
     );
     assert!(
         harness.contains("ssl_server_dn_match = true"),

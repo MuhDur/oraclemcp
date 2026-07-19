@@ -1,8 +1,0 @@
-schema_version = 4294967295
-
-[[profiles]]
-name = ""
-connect_string = ""
-call_timeout_seconds = 18446744073709551615
-max_level = "ADMIN"
-default_level = "ADMIN"

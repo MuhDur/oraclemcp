@@ -337,6 +337,20 @@ descriptor = text[start:end]
 if not re.search(r"\(PROTOCOL\s*=\s*TCPS\s*\)", descriptor, re.I):
     raise SystemExit("wallet HIGH connect descriptor is not TCPS")
 
+# A full DESCRIPTION descriptor owns its transport settings.  The server
+# deliberately rejects the profile-level connect_timeout_seconds in this case,
+# so add the bounded connect timeout to the descriptor itself.  Replace an
+# existing scalar rather than producing ambiguous duplicate settings.
+transport_timeout = re.compile(
+    r"\(TRANSPORT_CONNECT_TIMEOUT\s*=\s*[0-9]+\s*\)", re.I
+)
+if transport_timeout.search(descriptor):
+    descriptor = transport_timeout.sub("(TRANSPORT_CONNECT_TIMEOUT=60)", descriptor)
+else:
+    descriptor = descriptor[:-1] + "(TRANSPORT_CONNECT_TIMEOUT=60))"
+if len(transport_timeout.findall(descriptor)) != 1:
+    raise SystemExit("wallet HIGH descriptor has an ambiguous transport connect timeout")
+
 def value(name: str) -> str:
     match = re.search(r"\(" + name + r"\s*=\s*([^)\s]+)\s*\)", descriptor, re.I)
     if match is None:
@@ -355,6 +369,7 @@ json.dump(
         "descriptor": descriptor,
         "host": host,
         "port": int(port),
+        "transport_connect_timeout": 60,
     },
     sys.stdout,
 )
@@ -476,9 +491,10 @@ bootstrap_ssl_dn="$(toml_string "$ssl_dn")"
   printf 'credential_ref = "env:ADB_ADMIN_PASSWORD"\n'
   printf 'max_level = "READ_ONLY"\n'
   printf 'default_level = "READ_ONLY"\n'
-  # The server binds this profile timeout into every DESCRIPTION in the wallet's
-  # full Oracle Net descriptor without weakening its TCPS/security settings.
-  printf 'connect_timeout_seconds = 60\n'
+  # The wallet supplies a full Oracle Net descriptor.  The server correctly
+  # refuses to inject connect_timeout_seconds into one; a harness retry bounds
+  # startup instead, while any descriptor-specific transport timeout remains
+  # authored inside tnsnames.ora.
   printf 'call_timeout_seconds = 30\n\n'
   printf '[profiles.oci]\n'
   printf 'wallet_location = %s\n' "$bootstrap_wallet"

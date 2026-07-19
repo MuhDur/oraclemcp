@@ -32,13 +32,6 @@
       {
         "mcp_tool": null,
         "method": "GET",
-        "path": "/operator/v1/ci-lanes",
-        "schema": "ciLanesResponse",
-        "sse": false
-      },
-      {
-        "mcp_tool": null,
-        "method": "GET",
         "path": "/operator/v1/audit-tail",
         "schema": "auditTailResponse",
         "sse": false

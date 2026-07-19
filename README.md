@@ -69,12 +69,8 @@ Re-running the same one-liner is the update path. Re-running the same verified
 archive is a no-op for identical installed files; re-running with a newer target
 updates atomically after backing up the previous binary. A downgrade is refused unless you pass `--force`.
 
-For the shipped 0.9.0 line, see the current operator notes:
-[`docs/upgrading-to-0.9.0.md`](docs/upgrading-to-0.9.0.md),
-[`docs/downgrading-0.9.0-to-0.8.0.md`](docs/downgrading-0.9.0-to-0.8.0.md),
-and [`docs/feature-rollout-0.9.0.md`](docs/feature-rollout-0.9.0.md).
-
-The 0.8.0 notes remain available as historical release records:
+Historical 0.8.0 operator notes (the coordinated 0.9.0 equivalents are tracked
+separately):
 [`docs/upgrading-to-0.8.0.md`](docs/upgrading-to-0.8.0.md),
 [`docs/downgrading-0.8.0-to-0.7.2.md`](docs/downgrading-0.8.0-to-0.7.2.md),
 and [`docs/feature-rollout-0.8.0.md`](docs/feature-rollout-0.8.0.md).
@@ -131,7 +127,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 `
   -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.9.0
 ```
 Historical 0.8.0 offline examples used `-Version 0.8.0`; use 0.9.0 for the
-shipped release above.
+coordinated release target above.
 The corresponding historical invocations were
 `bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz --version 0.8.0`
 and `-Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.8.0`.
@@ -239,14 +235,17 @@ channels once they resolve.
 ## Source builds and runtime requirements
 
 This branch is pinned to **`nightly-2026-05-11`** and has no stable MSRV. The
-pin is required for two independent reasons. The shipped 0.9.0 release pins
-**asupersync 0.3.9**, whose
+pin is required, for two independent reasons: this pre-publish checkout
+currently resolves asupersync 0.3.9; the coordinated 0.9.0 release targets
+**asupersync 0.3.9**'s
 `nightly-outcome-try` feature enables `#![feature(try_trait_v2)]` and
 `try_trait_v2_residual` inside asupersync (it is opt-in, but in asupersync's
 default feature set, and reaches us through the `oracledb` dependency), and on
 **Windows** `oraclemcp-core` additionally needs `windows_by_handle`. The pinned
-`oracledb` 0.8.4 driver's own source is stable-clean; it is the driver's
-asupersync dependency declaration that pulls the nightly feature in.
+`oracledb` 0.8.4 driver's own source is stable-clean in this pre-publish
+checkout; the coordinated target `oracledb` 0.8.4 driver's own source is
+stable-clean — it is its asupersync
+dependency declaration that pulls the nightly feature in.
 [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) has the exact mechanism. The
 repository's `rust-toolchain.toml` selects the pin for local builds. Use the release installer above when you want
 the prebuilt binary; use `cargo install` only when you intentionally want a
@@ -925,11 +924,9 @@ legacy `signature` value before restarting a protected profile.
 ## Building and testing
 
 `oraclemcp` builds on a single **pinned Rust nightly** (`nightly-2026-05-11`,
-recorded in `rust-toolchain.toml`). Two independent things need it: the shipped
-0.9.0 release's asupersync 0.3.9
+recorded in `rust-toolchain.toml`). Two independent things need it: the coordinated 0.9.0 target asupersync 0.3.9's
 `nightly-outcome-try` feature (`try_trait_v2` + `try_trait_v2_residual`), which
-is opt-in but on by default and reaches us via the pinned `oracledb` 0.8.4
-dependency; and,
+is opt-in but on by default and reaches us via the target `oracledb` 0.8.4 dependency; and,
 on Windows only, `windows_by_handle`. The pin is **build-time only**: the
 shipped binary has no runtime dependency on nightly. See
 [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) for the full rationale and the

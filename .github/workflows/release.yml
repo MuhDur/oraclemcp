@@ -179,16 +179,11 @@ jobs:
       - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
         with:
           tool: cargo-hack
-      # The same-SHA CI powerset is already a hard prerequisite through
-      # `checks`; retain every other acceptance leg without rebuilding the
-      # feature powerset a second time on the tag path.
-      - run: bash scripts/release_acceptance_ci_suite.sh --skip-feature-powerset
+      - run: bash scripts/release_acceptance_ci_suite.sh
 
   build:
     name: build ${{ matrix.target }}
-    # Artifact builds are independent of acceptance and can overlap it. No
-    # publication job consumes them until acceptance has also passed.
-    needs: [checks, pinned-nightly, web-build]
+    needs: [checks, release-acceptance, pinned-nightly, web-build]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -521,7 +516,7 @@ jobs:
   # skips exact versions that are already on crates.io.
   publish-crates:
     name: Publish to crates.io
-    needs: [build, release-acceptance]
+    needs: build
     if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     environment: crates-io

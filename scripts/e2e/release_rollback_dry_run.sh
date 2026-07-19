@@ -103,12 +103,6 @@ require_literal .github/workflows/release.yml '  publish-crates:'
 require_literal .github/workflows/release.yml '  release:'
 require_literal .github/workflows/release.yml '  docker:'
 require_literal .github/workflows/release.yml '  publish-mcp-registry:'
-# Tranche-1 scheduling contract: expensive artifact builds overlap acceptance,
-# but crates.io publication remains gated by both. Acceptance may skip only the
-# powerset already proved by the same-SHA `checks` prerequisite.
-require_literal .github/workflows/release.yml '    needs: [checks, pinned-nightly, web-build]'
-require_literal .github/workflows/release.yml '    needs: [build, release-acceptance]'
-require_literal .github/workflows/release.yml 'scripts/release_acceptance_ci_suite.sh --skip-feature-powerset'
 for auxiliary in .github/workflows/docker.yml .github/workflows/publish-mcp.yml; do
   require_literal "$auxiliary" '  workflow_dispatch:'
   if grep -Eq '^  push:' "$ROOT/$auxiliary"; then

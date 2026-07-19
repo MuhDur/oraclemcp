@@ -240,34 +240,6 @@ fn replay_store_replaces_oversized_responses_with_a_bounded_honest_gap() {
 }
 
 #[test]
-fn replay_store_notifies_only_waiters_for_the_changed_session() {
-    let result_store = HttpResultStore::new();
-    result_store.ensure_session("session-a");
-    result_store.ensure_session("session-b");
-    assert_eq!(
-        result_store.session_notification_count_for_test("session-a"),
-        0
-    );
-    assert_eq!(
-        result_store.session_notification_count_for_test("session-b"),
-        0
-    );
-
-    result_store.append_response("session-a", serde_json::json!({ "row": 1 }));
-
-    assert_eq!(
-        result_store.session_notification_count_for_test("session-a"),
-        1,
-        "the changed session wakes its own SSE waiters"
-    );
-    assert_eq!(
-        result_store.session_notification_count_for_test("session-b"),
-        0,
-        "an unrelated session must not receive the wakeup"
-    );
-}
-
-#[test]
 fn replay_store_enforces_session_and_global_byte_caps_with_oldest_eviction() {
     let limits = HttpResultStoreLimits {
         max_events_per_session: 128,

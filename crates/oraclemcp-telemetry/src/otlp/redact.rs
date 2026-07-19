@@ -188,42 +188,6 @@ fn is_subject_sha256(value: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-fn contains_sensitive_ocid(value: &str) -> bool {
-    let value_lc = value.to_ascii_lowercase();
-    for prefix in ["ocid1.tenancy.", "ocid1.user.", "ocid1.compartment."] {
-        for (start, _) in value_lc.match_indices(prefix) {
-            if value_lc[..start]
-                .chars()
-                .next_back()
-                .is_some_and(|character| {
-                    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
-                })
-            {
-                continue;
-            }
-            let tail = &value_lc[start..];
-            let end = tail
-                .bytes()
-                .position(|byte| {
-                    !byte.is_ascii_alphanumeric() && !matches!(byte, b'.' | b'_' | b'-')
-                })
-                .unwrap_or(tail.len());
-            let candidate = tail[..end].trim_end_matches('.');
-            let parts = candidate.split('.').collect::<Vec<_>>();
-            if parts.len() >= 5
-                && parts[0] == "ocid1"
-                && matches!(parts[1], "tenancy" | "user" | "compartment")
-                && parts[2].starts_with("oc")
-                && parts[2][2..].bytes().all(|byte| byte.is_ascii_digit())
-                && parts.last().is_some_and(|unique| unique.len() >= 8)
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// Heuristic: does a free-form value look like a secret?
 ///
 /// Catches the common shapes that show up in logs/error messages:
@@ -267,13 +231,6 @@ fn value_looks_secret(value: &str) -> bool {
         if v_lc.contains(marker) {
             return true;
         }
-    }
-    // Global OCI identity/container identifiers frequently appear inside error
-    // prose rather than as a dedicated attribute. Treat their validated value
-    // shape as sensitive wherever it occurs; resource OCIDs outside this
-    // narrow tenancy/user/compartment set remain governed by their own fields.
-    if contains_sensitive_ocid(v) {
-        return true;
     }
     // Long opaque single-token blob (no whitespace), likely a key/token.
     if v.len() >= 40 && !v.chars().any(char::is_whitespace) {
@@ -425,49 +382,6 @@ mod tests {
             .filter("blob", "AKIA1234567890ABCDEFGHIJ0987654321ZZZZ_extra")
             .expect("kept");
         assert_eq!(v, REDACTED, "long opaque blob redacted");
-    }
-
-    #[test]
-    fn redacts_sensitive_ocids_embedded_in_prose() {
-        let r = Redactor::new();
-        for value in [
-            "request used tenancy ocid1.tenancy.oc1..aaaaaaaabbbbbbbb, then failed",
-            "principal=OCID1.USER.OC1..ABCDEF0123456789",
-            "scope (ocid1.compartment.oc1.eu-frankfurt-1.abcdefghijklmnop)",
-        ] {
-            assert_eq!(
-                r.redact_value("message", value),
-                REDACTED,
-                "sensitive OCID survived: {value}"
-            );
-        }
-    }
-
-    #[test]
-    fn ocid_redaction_preserves_approved_non_secret_shapes() {
-        let r = Redactor::new();
-        for (key, value) in [
-            ("message", "ordinary Oracle connectivity prose"),
-            (
-                "message",
-                "accepted sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef evidence",
-            ),
-            (
-                "subject_id_hash",
-                "subject-sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            ),
-            (
-                "message",
-                "resource ocid1.autonomousdatabase.oc1.eu-frankfurt-1.abcdefghijklmnop",
-            ),
-            ("message", "the token ocid1.tenancy is only a syntax label"),
-        ] {
-            assert_eq!(
-                r.redact_value(key, value),
-                value,
-                "approved non-secret was over-redacted: {value}"
-            );
-        }
     }
 
     #[test]

@@ -23,14 +23,15 @@ incapable of writing.
 ## 1. The pinned nightly toolchain is build-time-only
 
 `oraclemcp` builds on a pinned Rust toolchain (`nightly-2026-05-11`, recorded in
-`rust-toolchain.toml`). The shipped 0.9.0 release pins **asupersync 0.3.9**. The
-line has no stable MSRV because its
+`rust-toolchain.toml`). This pre-publish checkout currently resolves asupersync 0.3.9;
+the coordinated 0.9.0 release targets **asupersync 0.3.9**. The line
+has no stable MSRV because its
 `nightly-outcome-try` feature (`try_trait_v2` + `try_trait_v2_residual`) is
 opt-in but on by default and reaches the build through the `oracledb`
-pinned 0.8.4 dependency, and on Windows `oraclemcp-core` also needs
-`windows_by_handle`. The `oracledb` 0.8.4 driver's own source is stable-clean;
-it is the driver's asupersync dependency declaration that pulls the nightly
-feature in.
+target `oracledb` 0.8.4 dependency, and on Windows `oraclemcp-core` also needs
+`windows_by_handle`. The `oracledb` 0.8.4 driver's own source is stable-clean
+in this pre-publish checkout; the target driver's own source is stable-clean — it is its
+asupersync dependency declaration that pulls the nightly feature in.
 [`TOOLCHAIN.md`](TOOLCHAIN.md) §1 has the exact mechanism.
 
 **This is invisible at runtime.** Once compiled, `oraclemcp` is an ordinary
@@ -594,7 +595,8 @@ own reactor and Oracle connection. The local pool's operating posture:
   opens a fresh session against the (failed-over) listener. A read-only standby
   forces the session ceiling to `READ_ONLY` (§3.5, §5.8).
 - **Upstream `EXPIRE_TIME` status.** The pinned `oracledb` 0.8.4 stack parses
-  `EXPIRE_TIME`, retaining it in `Description::expire_time`, and `TRANSPORT_CONNECT_TIMEOUT`
+  `EXPIRE_TIME` today; the target `oracledb` 0.8.4 stack is expected to retain
+  `EXPIRE_TIME` into `Description::expire_time`, and `TRANSPORT_CONNECT_TIMEOUT`
   is honored for bounded connect handshakes, but rust-oracledb#14 still tracks
   applying `EXPIRE_TIME` as TCP keepalive on established sockets. `oraclemcp`
   does not fake that driver-owned socket option in the adapter; it relies on the

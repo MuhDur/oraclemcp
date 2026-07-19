@@ -96,44 +96,6 @@ and `.github/workflows/publish-mcp.yml` are manual recovery/repair auxiliaries,
 not additional tag pipelines. Homebrew and winget manifests ship as GitHub
 release assets for separate registry promotion. No npm/npx channel is offered.
 
-## Swarm operations charter v2
-
-The operator constitution is binding: never defer planned work unilaterally;
-report red before calling anything green; make only evidence-backed claims;
-reread this file and README.md every session; verify before acting; protect host,
-disk, and token budgets; drive autonomously while following operator choices
-exactly; keep the SQL guard tighten-only; quarantine field identifiers and
-secrets; create no surprise cost (OCI must remain provably free-tier); land the
-complete release scope rather than spreading it across version bumps; and
-escalate true blockers while delegating unforeseen in-scope work.
-
-- Shared-tree work is limited to at most three agents on disjoint reserved
-  domains. A build-heavy swarm requires one managed git worktree and one
-  per-agent `CARGO_TARGET_DIR` on real disk per agent, short-lived bead-scoped
-  branches, one canonical tracker database, fixture bootstrap, sccache, and
-  managed merge/removal. Never place build state on tmpfs. Preflight free space
-  plus a write/read canary and report capacity failures as `DISK`, not `OOM`.
-- Every Cargo invocation goes through the repository concurrency guard. Probe
-  Agent Mail build slots once; if that service is disabled, fall through to the
-  local enforced lock and existing job/TasksMax limits instead of polling it.
-  Default to scoped `-p` checks. `rch` may accelerate marathon lanes after
-  `rch doctor`, but unreachable workers must fall back locally and no gate may
-  require remote capacity.
-- Pin one Agent Mail identity to each pane and persist its registration token
-  outside compactable chat context. Reattach after compaction; never remint.
-  Before spawning, verify requested model, quota, and context headroom; size
-  waves to capacity, reconcile silently failed children, and never route release
-  finalization to a near-full pane.
-- The self-drive loop is `br ready` → claim → implement → prove → close; never
-  park an `in_progress` claim. Keep orders, Beads, and a running scratch summary
-  current. Child completion is event-driven. CI status is reported on a fixed
-  heartbeat and every transition, using a durable scheduler and debounced idle
-  notifications.
-- Before an expensive live loop, capture all diagnostics once and falsify the
-  hypothesis offline. Seed durable campaign lessons and the constitution into
-  repo-local cass-memory; the retro is evidence, this charter is policy, and
-  memory is only the task-time retrieval layer.
-
 ## Issue tracking
 
 This repo's issues are tracked in this checkout's local `.beads/` database.

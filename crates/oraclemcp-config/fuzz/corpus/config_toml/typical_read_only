@@ -1,8 +1,0 @@
-schema_version = 2
-
-[[profiles]]
-name = "dev"
-connect_string = "localhost:1521/FREEPDB1"
-max_level = "READ_ONLY"
-default_level = "READ_ONLY"
-protected = false

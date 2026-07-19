@@ -477,167 +477,6 @@ mod tests {
         })
     }
 
-    #[derive(Clone, Copy, Debug)]
-    enum OAuthMatrixCase {
-        Accept,
-        MalformedParts,
-        UnexpectedTokenType,
-        UnsupportedAlg,
-        BadSignature,
-        Expired,
-        NotYetValid,
-        UntrustedIssuer,
-        AudienceMismatch,
-        InsufficientScope,
-    }
-
-    struct OAuthMatrixRow {
-        name: &'static str,
-        case: OAuthMatrixCase,
-        now_unix: i64,
-        expected_error: Option<TokenError>,
-    }
-
-    fn tamper_signature(token: &str) -> String {
-        let mut parts = token.split('.').map(str::to_owned).collect::<Vec<_>>();
-        assert_eq!(parts.len(), 3, "minted test token has three JWT parts");
-        let first = parts[2]
-            .as_bytes()
-            .first()
-            .copied()
-            .expect("minted HS256 signature is non-empty");
-        // Change the first sextet, not the final base64url character whose low
-        // padding bits may be discarded while decoding a 32-byte signature.
-        parts[2].replace_range(..1, if first == b'A' { "Q" } else { "A" });
-        parts.join(".")
-    }
-
-    #[test]
-    fn oauth_validation_matrix_has_nine_typed_rejections_and_one_accept() {
-        const NOW: i64 = 1_500_000_000;
-        let rows = [
-            OAuthMatrixRow {
-                name: "valid",
-                case: OAuthMatrixCase::Accept,
-                now_unix: NOW,
-                expected_error: None,
-            },
-            OAuthMatrixRow {
-                name: "parts",
-                case: OAuthMatrixCase::MalformedParts,
-                now_unix: NOW,
-                expected_error: Some(TokenError::Malformed),
-            },
-            OAuthMatrixRow {
-                name: "typ",
-                case: OAuthMatrixCase::UnexpectedTokenType,
-                now_unix: NOW,
-                expected_error: Some(TokenError::UnexpectedTokenType),
-            },
-            OAuthMatrixRow {
-                name: "alg",
-                case: OAuthMatrixCase::UnsupportedAlg,
-                now_unix: NOW,
-                expected_error: Some(TokenError::UnsupportedAlg("none".to_owned())),
-            },
-            OAuthMatrixRow {
-                name: "signature",
-                case: OAuthMatrixCase::BadSignature,
-                now_unix: NOW,
-                expected_error: Some(TokenError::BadSignature),
-            },
-            OAuthMatrixRow {
-                name: "exp",
-                case: OAuthMatrixCase::Expired,
-                now_unix: 2_000_000_000,
-                expected_error: Some(TokenError::Expired),
-            },
-            OAuthMatrixRow {
-                name: "nbf",
-                case: OAuthMatrixCase::NotYetValid,
-                now_unix: 999_999_999,
-                expected_error: Some(TokenError::NotYetValid),
-            },
-            OAuthMatrixRow {
-                name: "iss",
-                case: OAuthMatrixCase::UntrustedIssuer,
-                now_unix: NOW,
-                expected_error: Some(TokenError::UntrustedIssuer(
-                    "https://evil-idp.example".to_owned(),
-                )),
-            },
-            OAuthMatrixRow {
-                name: "aud",
-                case: OAuthMatrixCase::AudienceMismatch,
-                now_unix: NOW,
-                expected_error: Some(TokenError::AudienceMismatch),
-            },
-            OAuthMatrixRow {
-                name: "scope",
-                case: OAuthMatrixCase::InsufficientScope,
-                now_unix: NOW,
-                expected_error: Some(TokenError::InsufficientScope),
-            },
-        ];
-        assert_eq!(
-            rows.len(),
-            10,
-            "matrix contract is nine rejects + one accept"
-        );
-        assert_eq!(
-            rows.iter()
-                .filter(|row| row.expected_error.is_some())
-                .count(),
-            9,
-            "matrix contract retains every rejection class"
-        );
-
-        for row in rows {
-            let mut config = cfg();
-            config.required_scopes = vec!["oracle:read".to_owned()];
-            let mut claims = good_claims();
-            let token = match row.case {
-                OAuthMatrixCase::Accept => mint(claims),
-                OAuthMatrixCase::MalformedParts => "only.two".to_owned(),
-                OAuthMatrixCase::UnexpectedTokenType => {
-                    mint_with_header(json!({ "alg": "HS256", "typ": "JWT" }), claims)
-                }
-                OAuthMatrixCase::UnsupportedAlg => {
-                    mint_with_header(json!({ "alg": "none", "typ": "at+jwt" }), claims)
-                }
-                OAuthMatrixCase::BadSignature => tamper_signature(&mint(claims)),
-                OAuthMatrixCase::Expired | OAuthMatrixCase::NotYetValid => mint(claims),
-                OAuthMatrixCase::UntrustedIssuer => {
-                    claims["iss"] = json!("https://evil-idp.example");
-                    mint(claims)
-                }
-                OAuthMatrixCase::AudienceMismatch => {
-                    claims["aud"] = json!(["https://some-other-resource.example"]);
-                    mint(claims)
-                }
-                OAuthMatrixCase::InsufficientScope => {
-                    config.required_scopes.push("oracle:admin".to_owned());
-                    mint(claims)
-                }
-            };
-
-            let result = config.validate(&token, &verifier(), row.now_unix);
-            match row.expected_error {
-                Some(expected) => assert_eq!(result, Err(expected), "row {}", row.name),
-                None => assert_eq!(
-                    result,
-                    Ok(vec![
-                        "openid".to_owned(),
-                        "oracle:read".to_owned(),
-                        "oracle:execute".to_owned(),
-                    ]),
-                    "row {}",
-                    row.name
-                ),
-            }
-        }
-    }
-
     #[test]
     fn hmac_known_answer() {
         // RFC-style KAT: HMAC-SHA256("key", "The quick brown fox jumps over the lazy dog").
@@ -647,6 +486,16 @@ mod tests {
             hex,
             "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
         );
+    }
+
+    #[test]
+    fn valid_token_passes_and_returns_scopes() {
+        let token = mint(good_claims());
+        let scopes = cfg()
+            .validate(&token, &verifier(), 1_500_000_000)
+            .expect("valid");
+        assert!(scopes.contains(&"oracle:read".to_owned()));
+        assert!(scopes.contains(&"oracle:execute".to_owned()));
     }
 
     #[test]
@@ -756,6 +605,83 @@ mod tests {
             cfg().validate(&token, &verifier(), 1_500_000_000),
             Err(TokenError::UnexpectedTokenType)
         );
+    }
+
+    #[test]
+    fn tampered_signature_is_rejected() {
+        let mut token = mint(good_claims());
+        token.pop();
+        token.push(if token.ends_with('A') { 'B' } else { 'A' });
+        assert_eq!(
+            cfg().validate(&token, &verifier(), 1_500_000_000),
+            Err(TokenError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn expired_token_is_rejected() {
+        let token = mint(good_claims());
+        // now > exp.
+        assert_eq!(
+            cfg().validate(&token, &verifier(), 2_000_000_001),
+            Err(TokenError::Expired)
+        );
+    }
+
+    #[test]
+    fn not_yet_valid_token_is_rejected() {
+        let token = mint(good_claims());
+        // now < nbf.
+        assert_eq!(
+            cfg().validate(&token, &verifier(), 999_999_999),
+            Err(TokenError::NotYetValid)
+        );
+    }
+
+    #[test]
+    fn wrong_audience_is_rejected_rfc8707() {
+        let mut c = good_claims();
+        c["aud"] = json!(["https://some-other-resource.example"]);
+        let token = mint(c);
+        assert_eq!(
+            cfg().validate(&token, &verifier(), 1_500_000_000),
+            Err(TokenError::AudienceMismatch)
+        );
+    }
+
+    #[test]
+    fn untrusted_issuer_is_rejected() {
+        let mut c = good_claims();
+        c["iss"] = json!("https://evil-idp.example");
+        let token = mint(c);
+        assert!(matches!(
+            cfg().validate(&token, &verifier(), 1_500_000_000),
+            Err(TokenError::UntrustedIssuer(_))
+        ));
+    }
+
+    #[test]
+    fn insufficient_scope_is_rejected() {
+        let mut config = cfg();
+        config.required_scopes = vec!["oracle:admin".to_owned()];
+        let token = mint(good_claims()); // only has read/execute
+        assert_eq!(
+            config.validate(&token, &verifier(), 1_500_000_000),
+            Err(TokenError::InsufficientScope)
+        );
+    }
+
+    #[test]
+    fn alg_none_is_rejected() {
+        // Forge an alg=none token (no signature).
+        let header = json!({ "alg": "none", "typ": "at+jwt" });
+        let h = b64url_encode(serde_json::to_string(&header).unwrap().as_bytes());
+        let p = b64url_encode(serde_json::to_string(&good_claims()).unwrap().as_bytes());
+        let token = format!("{h}.{p}.");
+        assert!(matches!(
+            cfg().validate(&token, &verifier(), 1_500_000_000),
+            Err(TokenError::UnsupportedAlg(_))
+        ));
     }
 
     #[test]

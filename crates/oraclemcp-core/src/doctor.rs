@@ -939,74 +939,9 @@ fn write_new_atomic_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
         doctor_migration_timestamp_suffix()
     ));
     write_new_private_file(&tmp_path, bytes)?;
-    install_new_file_no_replace(&tmp_path, path)?;
+    fs::rename(&tmp_path, path)
+        .map_err(|e| format!("failed to install {}: {e}", path.display()))?;
     sync_dir(parent)
-}
-
-/// Install a prepared private file only if the destination is still absent.
-///
-/// On Unix release targets the parent directory is opened once and both names
-/// are resolved relative to that stable handle. `RENAME_NOREPLACE` closes the
-/// check-then-rename race without following a destination symlink or
-/// overwriting a file created after the initial validation. Windows rename is
-/// already no-replace; unsupported targets fail closed instead of falling back
-/// to POSIX `rename`, whose replacement semantics would reintroduce the race.
-#[cfg(any(target_os = "linux", target_vendor = "apple", target_os = "redox"))]
-fn install_new_file_no_replace(tmp_path: &Path, path: &Path) -> Result<(), String> {
-    use rustix::fs::{Mode, OFlags, RenameFlags};
-
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    if tmp_path.parent().unwrap_or_else(|| Path::new(".")) != parent {
-        return Err("doctor atomic install requires one containing directory".to_owned());
-    }
-    let tmp_name = tmp_path
-        .file_name()
-        .ok_or_else(|| format!("invalid migration temporary path {}", tmp_path.display()))?;
-    let destination_name = path
-        .file_name()
-        .ok_or_else(|| format!("invalid migration target {}", path.display()))?;
-    let directory = rustix::fs::open(
-        parent,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|e| format!("failed to securely open {}: {e}", parent.display()))?;
-    rustix::fs::renameat_with(
-        &directory,
-        tmp_name,
-        &directory,
-        destination_name,
-        RenameFlags::NOREPLACE,
-    )
-    .map_err(|e| {
-        format!(
-            "failed to install {} without replacement: {e}",
-            path.display()
-        )
-    })
-}
-
-#[cfg(windows)]
-fn install_new_file_no_replace(tmp_path: &Path, path: &Path) -> Result<(), String> {
-    fs::rename(tmp_path, path).map_err(|e| {
-        format!(
-            "failed to install {} without replacement: {e}",
-            path.display()
-        )
-    })
-}
-
-#[cfg(not(any(
-    target_os = "linux",
-    target_vendor = "apple",
-    target_os = "redox",
-    windows
-)))]
-fn install_new_file_no_replace(_tmp_path: &Path, path: &Path) -> Result<(), String> {
-    Err(format!(
-        "atomic no-replace migration install is unsupported on this platform for {}",
-        path.display()
-    ))
 }
 
 #[cfg(unix)]
@@ -1425,17 +1360,13 @@ pub struct DoctorWalletPostureReport {
 
 /// Map a typed driver [`oracledb_protocol::tls::wallet::WalletError`] into the
 /// secret-free [`DoctorWalletErrorKind`]. The driver enum is `#[non_exhaustive]`,
-/// so a wildcard arm is required; every variant in the pinned `=0.8.4` driver
-/// is reviewed explicitly below.
+/// so a wildcard arm is required; every variant the pinned `=0.7.4` driver can
+/// produce is mapped explicitly.
 fn wallet_error_kind(error: &oracledb_protocol::tls::wallet::WalletError) -> DoctorWalletErrorKind {
     use oracledb_protocol::tls::wallet::WalletError;
     match error {
         WalletError::FileMissing(_) => DoctorWalletErrorKind::FileMissing,
         WalletError::Io { .. } => DoctorWalletErrorKind::Io,
-        // Preserve the existing serialized doctor taxonomy in this patch line:
-        // an oversized wallet is unusable input, represented by its conservative
-        // parse-failure bucket rather than a new public enum variant.
-        WalletError::TooLarge { .. } => DoctorWalletErrorKind::Pem,
         WalletError::Pem(_) => DoctorWalletErrorKind::Pem,
         WalletError::NoCertificates => DoctorWalletErrorKind::NoCertificates,
         WalletError::Sso(_) => DoctorWalletErrorKind::Sso,
@@ -1444,7 +1375,7 @@ fn wallet_error_kind(error: &oracledb_protocol::tls::wallet::WalletError) -> Doc
         WalletError::KeyDecrypt(_) => DoctorWalletErrorKind::KeyDecrypt,
         WalletError::PasswordRequired { .. } => DoctorWalletErrorKind::PasswordRequired,
         WalletError::UnsupportedFormat { .. } => DoctorWalletErrorKind::UnsupportedFormat,
-        // Forward-compat for variants added after the pinned =0.8.4 driver.
+        // Forward-compat: the pinned =0.7.4 driver produces no other variant.
         _ => DoctorWalletErrorKind::Pem,
     }
 }
@@ -3474,14 +3405,6 @@ mod tests {
     }
 
     #[test]
-    fn typed_wallet_error_mapping_covers_pinned_driver_too_large_variant() {
-        let error = oracledb_protocol::tls::wallet::WalletError::TooLarge {
-            maximum_bytes: 16 * 1024 * 1024,
-        };
-        assert_eq!(wallet_error_kind(&error), DoctorWalletErrorKind::Pem);
-    }
-
-    #[test]
     fn wallet_unsupported_format_is_structured_no_path_leak() {
         let ctx = DoctorContext {
             connection_error: Some(
@@ -4277,33 +4200,6 @@ mod tests {
                 .expect("second migration is noop")
                 .is_none(),
             "migration must be idempotent after the byte-identical copy exists"
-        );
-    }
-
-    #[test]
-    fn atomic_migration_install_never_replaces_a_racing_destination() {
-        let root = doctor_tmp_dir("legacy-state-racing-destination");
-        let parent = root.join("state").join("audit");
-        std::fs::create_dir_all(&parent).expect("migration parent exists");
-        let destination = parent.join("audit.jsonl");
-        let prepared = parent.join(".audit.jsonl.prepared");
-        std::fs::write(&prepared, b"prepared audit chain\n").expect("prepared file exists");
-
-        // Models another process winning the race after doctor validated the
-        // destination as absent but before its final install syscall.
-        std::fs::write(&destination, b"racing audit chain\n").expect("racing destination exists");
-        let error = install_new_file_no_replace(&prepared, &destination)
-            .expect_err("atomic install must refuse an existing destination");
-
-        assert!(error.contains("without replacement"), "{error}");
-        assert_eq!(
-            std::fs::read(&destination).expect("destination remains readable"),
-            b"racing audit chain\n",
-            "doctor must never overwrite the file that won the race"
-        );
-        assert_eq!(
-            std::fs::read(&prepared).expect("prepared source remains after refusal"),
-            b"prepared audit chain\n"
         );
     }
 

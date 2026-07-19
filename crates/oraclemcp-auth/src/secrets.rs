@@ -114,11 +114,7 @@ impl SecretRef {
                 scheme: scheme.to_owned(),
                 locator: locator.to_owned(),
             }),
-            // A malformed value has no trustworthy scheme/locator boundary.
-            // Retaining it in the typed error would expose the raw credential
-            // reference through Debug, telemetry, or an enclosing error even
-            // though Display is redacted.
-            _ => Err(SecretError::Malformed("<redacted>".to_owned())),
+            _ => Err(SecretError::Malformed(credential_ref.to_owned())),
         }
     }
 }
@@ -577,15 +573,6 @@ mod tests {
         assert_eq!(r.locator, "DB_PASSWORD");
         assert!(SecretRef::parse("noscheme").is_err());
         assert!(SecretRef::parse("env:").is_err());
-    }
-
-    #[test]
-    fn malformed_secret_reference_error_never_retains_the_raw_reference() {
-        const RAW_REFERENCE: &str = "private-token-without-a-scheme";
-        let error = SecretRef::parse(RAW_REFERENCE).expect_err("reference is malformed");
-        assert!(!error.to_string().contains(RAW_REFERENCE));
-        assert!(!format!("{error:?}").contains(RAW_REFERENCE));
-        assert!(matches!(error, SecretError::Malformed(ref value) if value == "<redacted>"));
     }
 
     #[test]

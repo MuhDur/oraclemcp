@@ -171,23 +171,12 @@ pub enum AsOf {
 
 const CURRENT_SCN_SQL: &str =
     "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER AS OBSERVED_SCN FROM DUAL";
+const LEGACY_CURRENT_SCN_SQL: &str = "SELECT CURRENT_SCN AS OBSERVED_SCN FROM V$DATABASE";
 const TIMESTAMP_TO_SCN_SQL: &str =
     "SELECT TIMESTAMP_TO_SCN(TO_TIMESTAMP(:1, 'YYYY-MM-DD HH24:MI:SS')) AS OBSERVED_SCN FROM DUAL";
 
-fn map_current_scn_capability_probe(error: DbError) -> DbError {
-    match error {
-        DbError::Query(message) if parse_ora_code(&message) == Some(904) => {
-            DbError::FlashbackRefusal {
-                kind: crate::FlashbackRefusalKind::CapabilityUnavailable,
-                message: "SCN capture capability probe could not resolve \
-                          DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER for this session; Oracle \
-                          returned ORA-00904 and no alternate SCN source was used"
-                    .to_owned(),
-                ora_code: Some(904),
-            }
-        }
-        other => other,
-    }
+fn current_scn_expression_is_unavailable(error: &DbError) -> bool {
+    matches!(error, DbError::Query(message) if parse_ora_code(message) == Some(904))
 }
 
 fn parse_observed_scn(rows: &[crate::types::OracleRow], source: &str) -> Result<u64, DbError> {
@@ -206,25 +195,34 @@ impl AsOf {
     /// Call this as the first query after `SET TRANSACTION READ ONLY`: Oracle
     /// keeps later reads in that transaction on the same consistent snapshot,
     /// while the returned SCN is a deterministic `DBMS_FLASHBACK` replay
-    /// target. This exact server-owned expression is also the capability probe:
-    /// the profile needs execute access to `DBMS_FLASHBACK`, which a subsequent
-    /// replay operation needs too. If Oracle cannot resolve it, the surrounding
-    /// audited read fails with a typed capability refusal before returning data;
-    /// it never substitutes a less-capable SCN source. The SQL uses no
-    /// caller-supplied text.
+    /// target. The profile needs execute access to `DBMS_FLASHBACK`, which the
+    /// subsequent replay operation needs too; absent that capability, the
+    /// surrounding audited read fails closed before returning data. The SQL is
+    /// server-owned and uses no caller-supplied text.
     pub async fn current_system_change_number(
         cx: &Cx,
         conn: &dyn OracleConnection,
     ) -> Result<u64, DbError> {
-        // Oracle 18c, 21c, and 23ai all expose this expression. ORA-00904 here
-        // means the capability did not resolve for THIS session (observed live
-        // when SYS.DBMS_FLASHBACK lacks an EXECUTE grant), not that an older
-        // server needs a different SCN source. Treat the call as a capability
-        // probe and fail typed instead of silently substituting V$DATABASE.
-        let rows = conn
-            .query_rows(cx, CURRENT_SCN_SQL, &[])
-            .await
-            .map_err(map_current_scn_capability_probe)?;
+        let rows = match conn.query_rows(cx, CURRENT_SCN_SQL, &[]).await {
+            Ok(rows) => rows,
+            // 23ai accepts the package expression above only without
+            // parentheses. ORA-00904 here means the expression did not resolve
+            // for THIS session — verified live (18c/21c/23ai) to be a missing
+            // EXECUTE grant on SYS.DBMS_FLASHBACK rather than a version gap:
+            // the package is present and VALID on every version in the matrix
+            // and the expression works once granted. V$DATABASE.CURRENT_SCN is
+            // the same server-owned quantity (both track the live SCN in
+            // lockstep; neither pins to the transaction snapshot), so reading
+            // it instead preserves the observed-SCN meaning exactly. Keep the
+            // fallback narrow: a privilege, connection, or any other error
+            // stays fail-closed instead of becoming a second attempt. A
+            // profile that reaches the fallback still cannot REPLAY: the
+            // as-of path needs DBMS_FLASHBACK itself and refuses, typed, there.
+            Err(error) if current_scn_expression_is_unavailable(&error) => {
+                conn.query_rows(cx, LEGACY_CURRENT_SCN_SQL, &[]).await?
+            }
+            Err(error) => return Err(error),
+        };
         parse_observed_scn(&rows, "current system change number")
     }
 
@@ -1310,7 +1308,10 @@ mod tests {
             sql: &str,
             binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
-            let event = if sql == CURRENT_SCN_SQL || sql == TIMESTAMP_TO_SCN_SQL {
+            let event = if sql == CURRENT_SCN_SQL
+                || sql == LEGACY_CURRENT_SCN_SQL
+                || sql == TIMESTAMP_TO_SCN_SQL
+            {
                 format!("query[{}]:{sql}", binds.len())
             } else {
                 "query".to_owned()
@@ -1329,7 +1330,10 @@ mod tests {
                 ));
             }
             Ok(vec![OracleRow {
-                columns: if sql == CURRENT_SCN_SQL || sql == TIMESTAMP_TO_SCN_SQL {
+                columns: if sql == CURRENT_SCN_SQL
+                    || sql == LEGACY_CURRENT_SCN_SQL
+                    || sql == TIMESTAMP_TO_SCN_SQL
+                {
                     vec![(
                         "OBSERVED_SCN".to_owned(),
                         OracleCell::new("NUMBER", Some("4242".to_owned())),
@@ -1425,7 +1429,11 @@ mod tests {
         assert_eq!(
             CURRENT_SCN_SQL,
             "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER AS OBSERVED_SCN FROM DUAL",
-            "the exact server-owned expression is both the capability probe and SCN capture"
+            "Oracle requires the server-owned SCN expression without parentheses"
+        );
+        assert_eq!(
+            LEGACY_CURRENT_SCN_SQL, "SELECT CURRENT_SCN AS OBSERVED_SCN FROM V$DATABASE",
+            "the legacy fallback stays a fixed server-owned query"
         );
         let conn = FlashbackRecorder::default();
         let (current, timestamp_target, events) = run_with_cx(|cx| async move {
@@ -1455,54 +1463,32 @@ mod tests {
     }
 
     #[test]
-    fn observed_scn_refuses_typed_when_the_capability_probe_cannot_resolve() {
+    fn observed_scn_uses_the_legacy_query_only_when_oracle_rejects_the_23ai_expression() {
         let conn = FlashbackRecorder {
             current_scn_error: Some(
                 "ORA-00904: \"SYS\".\"DBMS_FLASHBACK\": invalid identifier".to_owned(),
             ),
             ..Default::default()
         };
-        let (error, events) = run_with_cx(|cx| async move {
-            let error = AsOf::current_system_change_number(&cx, &conn)
+        let (current, events) = run_with_cx(|cx| async move {
+            let current = AsOf::current_system_change_number(&cx, &conn)
                 .await
-                .expect_err("missing SCN capture capability must refuse");
-            (error, conn.events.into_inner().expect("events"))
+                .expect("legacy current SCN");
+            (current, conn.events.into_inner().expect("events"))
         });
 
-        let envelope = error.clone().into_envelope();
-        match error {
-            DbError::FlashbackRefusal {
-                kind,
-                message,
-                ora_code,
-            } => {
-                assert_eq!(kind, crate::FlashbackRefusalKind::CapabilityUnavailable);
-                assert_eq!(ora_code, Some(904));
-                assert!(message.contains("capability probe"));
-                assert!(message.contains("no alternate SCN source was used"));
-                assert!(
-                    !message.contains("\"SYS\""),
-                    "raw Oracle detail stays redacted"
-                );
-            }
-            other => panic!("expected typed SCN capability refusal, got {other:?}"),
-        }
+        assert_eq!(current, 4242);
         assert_eq!(
-            envelope.error_class,
-            oraclemcp_error::ErrorClass::FlashbackCapabilityUnavailable
+            events,
+            vec![
+                format!("query[0]:{CURRENT_SCN_SQL}"),
+                format!("query[0]:{LEGACY_CURRENT_SCN_SQL}"),
+            ]
         );
-        assert_eq!(envelope.ora_code, Some(904));
-        assert!(
-            envelope
-                .next_steps
-                .iter()
-                .any(|step| step.contains("not silently degraded"))
-        );
-        assert_eq!(events, vec![format!("query[0]:{CURRENT_SCN_SQL}")]);
     }
 
     #[test]
-    fn observed_scn_does_not_misclassify_other_probe_errors() {
+    fn observed_scn_does_not_fallback_after_any_other_primary_error() {
         let conn = FlashbackRecorder {
             current_scn_error: Some("ORA-01031: insufficient privileges".to_owned()),
             ..Default::default()

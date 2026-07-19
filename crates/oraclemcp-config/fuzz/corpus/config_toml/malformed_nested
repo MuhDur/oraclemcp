@@ -1,6 +1,0 @@
-[[profiles]]
-name = "broken"
-connect_string = ["not", "a", "string"]
-max_level = "ROOT"
-protected = "sometimes"
-unknown_ceiling_escape = true

@@ -35,50 +35,6 @@ fn run_with_current_cx(f: impl FnOnce(&Cx)) {
     });
 }
 
-#[test]
-fn execute_approved_token_pruning_is_oldest_first_and_deterministic() {
-    let now = Instant::now();
-    let grant = |expires_at| ExecuteApprovedGrant {
-        sql: "update t set c = 1".to_owned(),
-        required_level: OperatingLevel::ReadWrite,
-        active_profile: Some("dev".to_owned()),
-        expires_at,
-    };
-    let mut tokens = HashMap::new();
-    tokens.insert("expired".to_owned(), grant(now));
-    tokens.insert(
-        "a-oldest-tie".to_owned(),
-        grant(now + Duration::from_secs(1)),
-    );
-    tokens.insert(
-        "z-oldest-tie".to_owned(),
-        grant(now + Duration::from_secs(1)),
-    );
-    for index in 0..MAX_EXECUTE_APPROVED_TOKENS - 2 {
-        tokens.insert(
-            format!("newer-{index:03}"),
-            grant(now + Duration::from_secs(2 + index as u64)),
-        );
-    }
-    assert_eq!(tokens.len(), MAX_EXECUTE_APPROVED_TOKENS + 1);
-
-    prune_execute_approved_token_map(&mut tokens, now);
-
-    assert_eq!(tokens.len(), MAX_EXECUTE_APPROVED_TOKENS - 1);
-    assert!(
-        !tokens.contains_key("expired"),
-        "expired grants are removed first"
-    );
-    assert!(
-        !tokens.contains_key("a-oldest-tie"),
-        "equal timestamps use token order as a deterministic tie break"
-    );
-    assert!(
-        tokens.contains_key("z-oldest-tie"),
-        "capacity pruning removes exactly the oldest remaining grant"
-    );
-}
-
 /// Decode the public Arrow response shape back into the exact JSON row values
 /// promised by `arrow_cell_encoding`. This is intentionally a consumer-side
 /// test helper, rather than reaching into the encoder's implementation.
@@ -7144,71 +7100,6 @@ fn query_timeout_override_cannot_widen_profile_timeout() {
     );
 }
 
-#[test]
-fn zero_timeout_is_rejected_consistently_at_the_shared_dispatch_boundary() {
-    let dispatcher = OracleDispatcher::new(Box::new(NoExecMock));
-    for tool in [
-        "oracle_query",
-        "query",
-        "oracle_semantic_search",
-        "oracle_diff",
-        "oracle_preview_dml",
-        "oracle_execute",
-        "execute_approved",
-        "oracle_compile_object",
-        "compile_object",
-        "compile_with_warnings",
-        "oracle_create_or_replace",
-        "create_or_replace",
-        "oracle_patch_source",
-        "patch_package",
-        "patch_view",
-        "deploy_ddl",
-        "oracle_top_queries",
-        "oracle_plan_timeline",
-        "oracle_db_health",
-    ] {
-        let error = dispatcher
-            .dispatch(tool, json!({ "timeout_seconds": 0 }))
-            .expect_err("zero is never a valid per-call timeout");
-        assert_eq!(error.error_class, ErrorClass::InvalidArguments, "{tool}");
-        assert_eq!(
-            error.message, "timeout_seconds must be at least 1 when provided",
-            "{tool}"
-        );
-    }
-
-    let stream_error = RuntimeBuilder::current_thread()
-        .build()
-        .expect("asupersync test runtime builds")
-        .block_on(async {
-            let cx = Cx::current().expect("block_on installs a current Cx");
-            let (frames_tx, _frames_rx) = mpsc::channel(1);
-            match ToolDispatch::dispatch_stream(
-                &dispatcher,
-                &cx,
-                DispatchContext::default(),
-                "oracle_query",
-                json!({
-                    "sql": "SELECT 1 FROM dual",
-                    "streaming": true,
-                    "timeout_seconds": 0,
-                }),
-                frames_tx,
-            )
-            .await
-            {
-                Outcome::Err(error) => error,
-                other => panic!("zero streaming timeout must be refused, got {other:?}"),
-            }
-        });
-    assert_eq!(stream_error.error_class, ErrorClass::InvalidArguments);
-    assert_eq!(
-        stream_error.message,
-        "timeout_seconds must be at least 1 when provided"
-    );
-}
-
 #[derive(Default)]
 struct QueryCostQuotaState {
     request_quota: Mutex<Option<DbRequestQuota>>,
@@ -8928,32 +8819,6 @@ mod qa85_terminal_boundaries {
         }
     }
 
-    struct CancelOnTerminalToolSink {
-        inner: Arc<MemoryAuditSink>,
-        cx: Cx,
-        armed_tool: Arc<Mutex<Option<String>>>,
-    }
-
-    impl AuditSink for CancelOnTerminalToolSink {
-        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
-            self.inner.append(record)?;
-            let armed = self
-                .armed_tool
-                .lock()
-                .expect("terminal-cancel tool mutex not poisoned");
-            if armed.as_deref() == Some(record.tool.as_str())
-                && record.outcome != AuditOutcome::Pending
-            {
-                self.cx.set_cancel_requested(true);
-            }
-            Ok(())
-        }
-
-        fn flush(&self) -> Result<(), AuditError> {
-            self.inner.flush()
-        }
-    }
-
     fn level_and_generation(dispatcher: &OracleDispatcher) -> (OperatingLevel, u64) {
         RuntimeBuilder::current_thread()
             .build()
@@ -9265,161 +9130,6 @@ mod qa85_terminal_boundaries {
             assert_eq!(state.level.effective_level(), OperatingLevel::ReadWrite);
             assert!(state.grant_generation > before_generation);
         });
-    }
-
-    #[test]
-    fn held_execute_and_workspace_controls_survive_late_outer_cancellation_once() {
-        RuntimeBuilder::current_thread()
-            .build()
-            .expect("asupersync test runtime builds")
-            .block_on(async {
-                let cx = Cx::current().expect("block_on installs a current Cx");
-                let state = Arc::new(ExecState::default());
-                let sink = Arc::new(MemoryAuditSink::new());
-                let armed_tool = Arc::new(Mutex::new(None));
-                let auditor = Arc::new(Auditor::new(
-                    Box::new(CancelOnTerminalToolSink {
-                        inner: Arc::clone(&sink),
-                        cx: cx.clone(),
-                        armed_tool: Arc::clone(&armed_tool),
-                    }),
-                    SigningKey::new(
-                        "qa85-test-key",
-                        b"qa85-held-terminal-boundary-key-1".to_vec(),
-                    )
-                    .expect("valid test key"),
-                ));
-                let dispatcher = OracleDispatcher::new_with_profile_level(
-                    Box::new(ExecRecordingMock::new(Arc::clone(&state))),
-                    Some("dev".to_owned()),
-                    read_write_level(),
-                )
-                .with_auditor(auditor);
-
-                *armed_tool
-                    .lock()
-                    .expect("terminal-cancel tool mutex not poisoned") =
-                    Some("oracle_checkpoint".to_owned());
-                let checkpoint = match ToolDispatch::dispatch(
-                    &dispatcher,
-                    &cx,
-                    DispatchContext::default(),
-                    "oracle_checkpoint",
-                    json!({ "name": "before_hold" }),
-                )
-                .await
-                {
-                    Outcome::Ok(value) => value,
-                    other => panic!("completed checkpoint must win late cancellation: {other:?}"),
-                };
-                assert_eq!(checkpoint["checkpoint"], json!("BEFORE_HOLD"));
-                assert!(cx.is_cancel_requested());
-                cx.set_cancel_requested(false);
-
-                *armed_tool
-                    .lock()
-                    .expect("terminal-cancel tool mutex not poisoned") =
-                    Some("oracle_execute".to_owned());
-                let held = match ToolDispatch::dispatch(
-                    &dispatcher,
-                    &cx,
-                    DispatchContext::default(),
-                    "oracle_execute",
-                    json!({
-                        "sql": "UPDATE employees SET salary = salary WHERE employee_id = 100",
-                        "hold": true,
-                    }),
-                )
-                .await
-                {
-                    Outcome::Ok(value) => value,
-                    other => panic!("completed held DML must win late cancellation: {other:?}"),
-                };
-                assert_eq!(held["executed"], json!(true));
-                assert_eq!(held["held"], json!(true));
-                assert_eq!(held["committed"], json!(false));
-                assert_eq!(held["deadline_observed_after_effect"], json!(true));
-                assert_eq!(held["workspace"]["held_statements"], json!(1));
-                assert!(cx.is_cancel_requested());
-                cx.set_cancel_requested(false);
-
-                *armed_tool
-                    .lock()
-                    .expect("terminal-cancel tool mutex not poisoned") =
-                    Some("oracle_undo_to".to_owned());
-                let undone = match ToolDispatch::dispatch(
-                    &dispatcher,
-                    &cx,
-                    DispatchContext::default(),
-                    "oracle_undo_to",
-                    json!({ "name": "before_hold" }),
-                )
-                .await
-                {
-                    Outcome::Ok(value) => value,
-                    other => panic!("completed undo must win late cancellation: {other:?}"),
-                };
-                assert_eq!(undone["undone_to"], json!("BEFORE_HOLD"));
-                assert_eq!(undone["discarded_statements"], json!(1));
-                assert_eq!(undone["workspace"]["held_statements"], json!(0));
-
-                let executed = executed_statements(&state);
-                assert_eq!(
-                    executed
-                        .iter()
-                        .filter(|sql| sql.contains("UPDATE employees"))
-                        .count(),
-                    1,
-                    "the late outer cancellation must not invite a duplicate DML"
-                );
-                assert_eq!(
-                    executed
-                        .iter()
-                        .filter(|sql| sql.as_str() == "SAVEPOINT BEFORE_HOLD")
-                        .count(),
-                    1
-                );
-                assert_eq!(
-                    executed
-                        .iter()
-                        .filter(|sql| sql.as_str() == "ROLLBACK TO SAVEPOINT BEFORE_HOLD")
-                        .count(),
-                    1
-                );
-
-                let records = sink.records();
-                let held_records = records
-                    .iter()
-                    .filter(|record| record.tool == "oracle_execute")
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    held_records.len(),
-                    2,
-                    "one pending plus one terminal record for exactly one DML"
-                );
-                assert_eq!(held_records[0].outcome, AuditOutcome::Pending);
-                assert_eq!(held_records[1].outcome, AuditOutcome::HeldUncommitted);
-                assert_eq!(
-                    held_records
-                        .iter()
-                        .filter(|record| record.outcome == AuditOutcome::HeldUncommitted)
-                        .count(),
-                    1,
-                    "the completed held effect has exactly one terminal audit record"
-                );
-                for tool in ["oracle_checkpoint", "oracle_undo_to"] {
-                    let outcomes = records
-                        .iter()
-                        .filter(|record| record.tool == tool)
-                        .map(|record| record.outcome)
-                        .collect::<Vec<_>>();
-                    assert_eq!(
-                        outcomes,
-                        vec![AuditOutcome::Pending, AuditOutcome::Succeeded],
-                        "{tool} is audited exactly once at each boundary"
-                    );
-                }
-            });
     }
 
     #[test]
@@ -10086,39 +9796,6 @@ mod audit_wiring {
                         .as_ref()
                         .is_some_and(|certificate| certificate.matches_record(record))
                 })
-        );
-    }
-
-    #[test]
-    fn audited_read_refuses_typed_when_scn_capability_probe_is_unavailable() {
-        let (auditor, sink) = auditor_with_sink();
-        let dispatcher = dispatcher_with_conn(
-            Box::new(FlashbackFailingMock {
-                message: "ORA-00904: \"SYS\".\"DBMS_FLASHBACK\": invalid identifier",
-            }),
-            ddl_level(),
-            auditor,
-        );
-
-        let error = dispatcher
-            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
-            .expect_err("an audited read must not bypass unavailable SCN capture");
-
-        assert_eq!(
-            error.error_class,
-            ErrorClass::FlashbackCapabilityUnavailable
-        );
-        assert_eq!(error.ora_code, Some(904));
-        assert!(error.message.contains("SCN capture capability probe"));
-        assert!(
-            error
-                .next_steps
-                .iter()
-                .any(|step| step.contains("not silently degraded"))
-        );
-        assert!(
-            sink.records().is_empty(),
-            "without an observed SCN the read refuses before a Pending or success audit record"
         );
     }
 
@@ -14577,44 +14254,6 @@ fn diff_needs_either_two_scns_or_two_profiles() {
 }
 
 // --- Arc I / bead .11.2 — the dry run (oracle_preview_dml) ------------------
-
-#[test]
-fn preview_dml_clamps_witness_rows_at_the_shared_query_boundary() {
-    for (requested, expected_fetch) in [(0, 2), (usize::MAX, MAX_QUERY_MAX_ROWS + 1)] {
-        let state = Arc::new(ExecState::default());
-        let dispatcher = workspace_dispatcher(&state);
-        dispatcher
-            .dispatch(
-                "oracle_preview_dml",
-                json!({
-                    "sql": "UPDATE employees SET salary = salary WHERE employee_id = 100",
-                    "witness": "SELECT employee_id, salary FROM employees WHERE employee_id = 100",
-                    "max_rows": requested,
-                }),
-            )
-            .expect("bounded preview witness dispatches");
-
-        let witness_queries = state
-            .queried
-            .lock()
-            .expect("query mutex")
-            .iter()
-            .filter(|sql| sql.contains("FETCH NEXT"))
-            .cloned()
-            .collect::<Vec<_>>();
-        assert_eq!(
-            witness_queries.len(),
-            2,
-            "the before and after witness reads both use the bounded page"
-        );
-        for sql in witness_queries {
-            assert!(
-                sql.contains(&format!("FETCH NEXT {expected_fetch} ROWS ONLY")),
-                "requested max_rows={requested} escaped the shared clamp: {sql}"
-            );
-        }
-    }
-}
 
 /// The dry run really executes, inside a savepoint the server owns, and really
 /// takes it back: the transaction ends where it started and nothing is committed.

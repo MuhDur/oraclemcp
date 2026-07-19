@@ -75,14 +75,6 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
     },
     OperatorRouteSpec {
         method: "GET",
-        path: "/operator/v1/ci-lanes",
-        schema: "ciLanesResponse",
-        sse: false,
-        mcp_tool: None,
-        browser_post: false,
-    },
-    OperatorRouteSpec {
-        method: "GET",
         path: "/operator/v1/audit-tail",
         schema: "auditTailResponse",
         sse: false,
@@ -443,7 +435,6 @@ pub fn operator_schema_bundle() -> Value {
             "routeIndexResponse": { "$ref": "#/$defs/versionedResponse" },
             "healthResponse": { "$ref": "#/$defs/versionedResponse" },
             "metricsResponse": { "$ref": "#/$defs/versionedResponse" },
-            "ciLanesResponse": { "$ref": "#/$defs/versionedResponse" },
             "auditTailResponse": { "$ref": "#/$defs/versionedResponse" },
             "activeLanesResponse": { "$ref": "#/$defs/versionedResponse" },
             "laneCancelResponse": { "$ref": "#/$defs/versionedResponse" },
@@ -525,28 +516,6 @@ export interface OperatorLaneSummary {{
   generation: number;
   status: "starting" | "running" | "stopped" | "quarantined";
   subject_id_hash: string;
-}}
-
-export type OperatorCiLaneTier = "scheduled" | "advisory";
-export type OperatorCiLaneState = "success" | "not_green" | "unknown";
-
-export interface OperatorCiLaneHealth {{
-  check_name: string;
-  tier: OperatorCiLaneTier;
-  workflow: string;
-  workflow_file: string;
-  job_id: string;
-  event: "push" | "pull_request" | "schedule";
-  path_filtered: boolean;
-  state: OperatorCiLaneState;
-  last_status: string | null;
-  last_conclusion: string | null;
-  streak: {{ conclusion: string | null; count: number; capped: boolean }};
-  run_id: number | null;
-  run_url: string | null;
-  head_sha: string | null;
-  completed_at: string | null;
-  source_error: string | null;
 }}
 
 export interface OperatorIdempotency {{
@@ -644,69 +613,6 @@ pub fn operator_fixture_values() -> Vec<(&'static str, Value)> {
                         "db_reachable": true,
                         "draining": false
                     }
-                }),
-            ),
-        ),
-        (
-            "ci-lanes",
-            operator_response(
-                "/operator/v1/ci-lanes",
-                json!({
-                    "source": "github_actions",
-                    "catalog_schema": "ci-taxonomy/v1",
-                    "catalog_complete": true,
-                    "repo": "MuhDur/oraclemcp",
-                    "refresh_state": "ready",
-                    "freshness": "fresh",
-                    "refreshed_at": "unix:1",
-                    "last_attempt_at": "unix:1",
-                    "age_seconds": 30,
-                    "streak_window": 4,
-                    "refresh_interval_seconds": 1800,
-                    "stale_after_seconds": 3600,
-                    "summary": {
-                        "posture": "not_green",
-                        "total": 2,
-                        "success": 1,
-                        "not_green": 1,
-                        "unknown": 0
-                    },
-                    "lanes": [{
-                        "check_name": "fuzz targets compile (nightly)",
-                        "tier": "advisory",
-                        "workflow": "CI",
-                        "workflow_file": "ci.yml",
-                        "job_id": "fuzz-build",
-                        "event": "push",
-                        "path_filtered": false,
-                        "state": "success",
-                        "last_status": "completed",
-                        "last_conclusion": "success",
-                        "streak": { "conclusion": "success", "count": 4, "capped": true },
-                        "run_id": 42,
-                        "run_url": "https://github.com/MuhDur/oraclemcp/actions/runs/42",
-                        "head_sha": "e004ebd5b5532a4b85984a62f8ad48a81aa3460c",
-                        "completed_at": "2026-07-18T00:00:00Z",
-                        "source_error": null
-                    }, {
-                        "check_name": "guard + audit cargo-mutants",
-                        "tier": "scheduled",
-                        "workflow": "Mutation Safety",
-                        "workflow_file": "mutation-safety.yml",
-                        "job_id": "mutation-safety",
-                        "event": "schedule",
-                        "path_filtered": false,
-                        "state": "not_green",
-                        "last_status": "completed",
-                        "last_conclusion": "cancelled",
-                        "streak": { "conclusion": "cancelled", "count": 3, "capped": false },
-                        "run_id": 41,
-                        "run_url": "https://github.com/MuhDur/oraclemcp/actions/runs/41",
-                        "head_sha": "1f8b10508c06b6d97931f83be25776c3bb82cd6c",
-                        "completed_at": "2026-07-17T00:00:00Z",
-                        "source_error": null
-                    }],
-                    "errors": []
                 }),
             ),
         ),

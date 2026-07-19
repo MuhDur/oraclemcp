@@ -2281,15 +2281,6 @@ struct MetricsDispatch {
     metrics: Arc<Metrics>,
 }
 
-const UNLISTED_TOOL_METRIC_LABEL: &str = "unlisted";
-
-fn is_advertised_builtin_tool(name: &str) -> bool {
-    static BUILTIN_TOOLS: std::sync::OnceLock<HashSet<&'static str>> = std::sync::OnceLock::new();
-    BUILTIN_TOOLS
-        .get_or_init(|| registry::tool_names().into_iter().collect())
-        .contains(name)
-}
-
 impl MetricsDispatch {
     fn new(inner: Arc<dyn ToolDispatch>, metrics: Arc<Metrics>) -> Self {
         Self { inner, metrics }
@@ -2302,40 +2293,6 @@ impl MetricsDispatch {
             .map(operator_subject_id_hash)
             .unwrap_or_else(|| operator_subject_id_hash("process"));
         (lane_id, subject_id_hash)
-    }
-
-    async fn canonical_metric_tool_label(
-        &self,
-        cx: &Cx,
-        context: oraclemcp_core::DispatchContext<'_>,
-        name: &str,
-    ) -> String {
-        if is_advertised_builtin_tool(name) {
-            return name.to_owned();
-        }
-
-        // Custom tools are profile-scoped and can change after a successful
-        // profile switch. Ask the dispatcher for the same immutable discovery
-        // snapshot used by tools/list instead of trusting a startup-time list.
-        // A failed/absent snapshot must not affect dispatch behavior; it only
-        // fails closed to the one bounded telemetry label.
-        let advertised_custom = match self
-            .inner
-            .mcp_surface_state(cx, context, McpSurfaceDetail::LevelOnly)
-            .await
-        {
-            asupersync::Outcome::Ok(Some(surface)) => surface
-                .custom_catalog
-                .tools
-                .iter()
-                .any(|tool| tool.name == name),
-            _ => false,
-        };
-        if advertised_custom {
-            name.to_owned()
-        } else {
-            UNLISTED_TOOL_METRIC_LABEL.to_owned()
-        }
     }
 
     fn record_outcome(
@@ -2381,9 +2338,8 @@ impl ToolDispatch for MetricsDispatch {
         Box::pin(async move {
             let started = Instant::now();
             let (lane_id, subject_id_hash) = Self::labels(context);
-            let metric_tool = self.canonical_metric_tool_label(cx, context, name).await;
             let result = self.inner.dispatch(cx, context, name, args).await;
-            self.record_outcome(started, &lane_id, &subject_id_hash, &metric_tool, &result);
+            self.record_outcome(started, &lane_id, &subject_id_hash, name, &result);
             result
         })
     }
@@ -2399,12 +2355,11 @@ impl ToolDispatch for MetricsDispatch {
         Box::pin(async move {
             let started = Instant::now();
             let (lane_id, subject_id_hash) = Self::labels(context);
-            let metric_tool = self.canonical_metric_tool_label(cx, context, name).await;
             let result = self
                 .inner
                 .dispatch_stream(cx, context, name, args, frames)
                 .await;
-            self.record_outcome(started, &lane_id, &subject_id_hash, &metric_tool, &result);
+            self.record_outcome(started, &lane_id, &subject_id_hash, name, &result);
             result
         })
     }
