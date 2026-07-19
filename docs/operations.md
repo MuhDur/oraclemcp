@@ -23,15 +23,13 @@ incapable of writing.
 ## 1. The pinned nightly toolchain is build-time-only
 
 `oraclemcp` builds on a pinned Rust toolchain (`nightly-2026-05-11`, recorded in
-`rust-toolchain.toml`). This pre-publish checkout currently resolves asupersync 0.3.9;
-the coordinated 0.9.0 release targets **asupersync 0.3.9**. The line
+`rust-toolchain.toml`). This checkout resolves **asupersync 0.3.9**. The line
 has no stable MSRV because its
 `nightly-outcome-try` feature (`try_trait_v2` + `try_trait_v2_residual`) is
-opt-in but on by default and reaches the build through the `oracledb`
-target `oracledb` 0.8.4 dependency, and on Windows `oraclemcp-core` also needs
-`windows_by_handle`. The `oracledb` 0.8.4 driver's own source is stable-clean
-in this pre-publish checkout; the target driver's own source is stable-clean — it is its
-asupersync dependency declaration that pulls the nightly feature in.
+opt-in but on by default and reaches the build through the `oracledb` 0.8.4
+dependency, and on Windows `oraclemcp-core` also needs
+`windows_by_handle`. The `oracledb` 0.8.4 driver's own source is stable-clean —
+it is its asupersync dependency declaration that pulls the nightly feature in.
 [`TOOLCHAIN.md`](TOOLCHAIN.md) §1 has the exact mechanism.
 
 **This is invisible at runtime.** Once compiled, `oraclemcp` is an ordinary
