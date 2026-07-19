@@ -5,6 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
+mod common;
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -17,7 +19,7 @@ fn repo_root() -> PathBuf {
 #[test]
 fn installer_lint_and_offline_smoke_passes() {
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/installer_lint_and_offline_smoke.sh"))
         .arg("--log")
         .current_dir(&root)
@@ -459,7 +461,7 @@ fn release_sbom_merge_script_includes_rust_and_dashboard_components() {
     )
     .expect("write dashboard SBOM fixture");
 
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/merge_release_sbom.sh"))
         .arg(&rust_sbom)
         .arg(&dashboard_sbom)
@@ -713,7 +715,7 @@ fn binstall_brew_winget_metadata_valid() {
         b"deterministic windows x86_64 release archive fixture",
     );
 
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/render_distribution_manifests.sh"))
         .env("VERSION", "9.9.9-test.1")
         .env("ARTIFACT_DIR", &artifacts)

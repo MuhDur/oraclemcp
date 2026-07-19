@@ -5,6 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
+mod common;
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -16,7 +18,7 @@ fn repo_root() -> PathBuf {
 
 fn run_script(script: &str, args: &[&str]) -> Output {
     let root = repo_root();
-    Command::new("bash")
+    Command::new(common::bash_bin())
         .arg(root.join(script))
         .args(args)
         .current_dir(&root)
@@ -126,7 +128,7 @@ fn write_valid_distribution_sidecars(artifact_dir: &Path, hashes: &[String; 3]) 
 }
 
 fn run_distribution_renderer(artifact_dir: &Path, output_dir: &Path) -> Output {
-    Command::new("bash")
+    Command::new(common::bash_bin())
         .arg(repo_root().join("scripts/render_distribution_manifests.sh"))
         .arg(artifact_dir)
         .current_dir(repo_root())
@@ -227,7 +229,7 @@ fn served_console_requires_live_oracle_and_dry_run_only_checks_wiring() {
         return;
     }
     let root = repo_root();
-    let mut command = Command::new("bash");
+    let mut command = Command::new(common::bash_bin());
     let missing_live = command
         .arg(root.join("scripts/e2e/served_console.sh"))
         .arg("--log")
@@ -259,7 +261,7 @@ fn served_console_requires_live_oracle_and_dry_run_only_checks_wiring() {
         "missing explicit live-input failure: {missing_events:?}"
     );
 
-    let dry_run = Command::new("bash")
+    let dry_run = Command::new(common::bash_bin())
         .arg(root.join("scripts/e2e/served_console.sh"))
         .args(["--log", "--dry-run"])
         .current_dir(&root)
@@ -305,7 +307,7 @@ fn time_diff_e2e_dry_run_uses_omcpb_and_reports_a_pass() {
         return;
     }
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/e2e/time_diff.sh"))
         .args(["--log", "--dry-run", "--lane", "xe18"])
         .current_dir(&root)
@@ -356,7 +358,7 @@ fn sql_policy_e2e_dry_run_is_registered_and_schedules_omcpb() {
         return;
     }
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/e2e/sql_policy.sh"))
         .args(["--log", "--dry-run"])
         .current_dir(&root)
@@ -414,7 +416,7 @@ fn verdict_certificate_e2e_dry_run_is_registered_and_schedules_omcpb() {
         return;
     }
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/e2e/verdict_certificate.sh"))
         .args(["--log", "--dry-run"])
         .current_dir(&root)
@@ -472,7 +474,7 @@ fn cost_gate_e2e_dry_run_is_registered_and_schedules_omcpb() {
         return;
     }
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/e2e/cost_gate.sh"))
         .args(["--log", "--dry-run", "--lane", "free23"])
         .current_dir(&root)
@@ -530,7 +532,7 @@ fn refusal_corpus_e2e_dry_run_is_registered_and_schedules_omcpb() {
         return;
     }
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/e2e/refusal_corpus.sh"))
         .args(["--log", "--dry-run"])
         .current_dir(&root)
@@ -586,7 +588,7 @@ fn incident_e2e_dry_run_is_registered_and_schedules_omcpb() {
         return;
     }
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/e2e/incident.sh"))
         .args(["--log", "--dry-run"])
         .current_dir(&root)
@@ -654,7 +656,7 @@ fn seeded_fault_injection_e2e_is_registered_and_never_database_gated() {
         return;
     }
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/e2e/seeded_fault_injection.sh"))
         .args(["--log", "--dry-run"])
         .current_dir(&root)
@@ -713,7 +715,7 @@ fn served_egress_e2e_dry_run_is_registered_and_schedules_omcpb() {
         return;
     }
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/e2e/served_egress.sh"))
         .args(["--log", "--dry-run"])
         .current_dir(&root)
@@ -773,7 +775,7 @@ fn reversible_e2e_dry_run_uses_omcpb_and_reports_a_pass() {
         return;
     }
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/e2e/reversible.sh"))
         .args(["--log", "--dry-run", "--lane", "xe18"])
         .current_dir(&root)
@@ -825,7 +827,7 @@ fn fleet_e2e_dry_run_is_registered_and_schedules_omcpb() {
         return;
     }
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/e2e/fleet.sh"))
         .args(["--log", "--dry-run", "--lane", "xe18", "--lane", "xe21"])
         .current_dir(&root)
@@ -880,7 +882,7 @@ fn fleet_e2e_dry_run_is_registered_and_schedules_omcpb() {
 #[test]
 fn live_lineage_dry_run_is_registered_and_reports_a_pass() {
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/e2e/live_lineage.sh"))
         .args(["--log", "--dry-run", "--lane", "xe18"])
         .current_dir(&root)
@@ -970,7 +972,7 @@ fn every_e2e_scenario_script_is_reachable_from_the_runner_or_its_own_test() {
 #[test]
 fn clean_machine_e2e_dry_run_schedules_h5_contract() {
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/e2e/clean_machine_e2e.sh"))
         .args(["--log", "--dry-run"])
         .current_dir(&root)
@@ -1019,7 +1021,7 @@ fn clean_machine_e2e_dry_run_schedules_h5_contract() {
 #[test]
 fn clean_machine_e2e_refuses_production_markers() {
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/e2e/clean_machine_e2e.sh"))
         .args(["--log", "--dry-run"])
         .current_dir(&root)
@@ -1564,7 +1566,7 @@ fn local_release_gate_check_validates_synthetic_proof() {
     )
     .expect("write proof");
 
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/local_release_gate_check.sh"))
         .args(["--proof", proof.to_str().expect("proof path is utf8")])
         .args(["--source-sha", "fixturesha", "--require"])
@@ -1817,7 +1819,7 @@ fn release_surface_drift_fails_fast() {
         "\"version\": \"0.0.0-drift-drill\"",
     );
     std::fs::write(&temp, bad).expect("write drift health fixture");
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/release_surface_sync_check.sh"))
         .current_dir(&root)
         .env("ORACLEMCP_RELEASE_SURFACE_SYNC_HEALTH_PATH", &temp)
@@ -1840,7 +1842,7 @@ fn release_surface_drift_fails_fast() {
 #[test]
 fn e2e_live_scripts_refuse_production_looking_targets() {
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg(root.join("scripts/e2e/live_oracle.sh"))
         .args(["--log", "--dry-run"])
         .current_dir(&root)
@@ -1872,7 +1874,7 @@ fn e2e_live_scripts_refuse_production_looking_targets() {
 #[test]
 fn e2e_failure_path_emits_crashpack_and_seed() {
     let root = repo_root();
-    let output = Command::new("bash")
+    let output = Command::new(common::bash_bin())
         .arg("-c")
         .arg(
             "source scripts/e2e/lib.sh; \
