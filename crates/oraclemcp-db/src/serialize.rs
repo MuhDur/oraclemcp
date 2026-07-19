@@ -354,6 +354,10 @@ pub fn classify_type(oracle_type: &str) -> TypeRepr {
 struct ColumnRepr {
     repr: TypeRepr,
     is_number_type: bool,
+    /// Native SQL `BOOLEAN` (23ai+, distinct from the wider PL/SQL BOOLEAN
+    /// history) — the driver renders this as the exact literal text `"true"`
+    /// or `"false"`, which must serialize as a JSON boolean, not a string.
+    is_boolean_type: bool,
 }
 
 impl ColumnRepr {
@@ -362,6 +366,7 @@ impl ColumnRepr {
         ColumnRepr {
             repr: classify_uppercased(&t),
             is_number_type: t.starts_with("NUMBER"),
+            is_boolean_type: t == "BOOLEAN",
         }
     }
 }
@@ -473,6 +478,22 @@ fn serialize_cell_classified(cell: &OracleCell, col: ColumnRepr, opts: &Serializ
     let Some(text) = cell.text() else {
         return Value::Null;
     };
+    if col.is_boolean_type {
+        // Fail-safe: the driver contract is the exact lowercase literal
+        // "true"/"false" (see `owned_value_to_cell`'s `QueryValue::Boolean`
+        // arm); any other text is an unrecognized representation, so emit the
+        // same explicit unsupported marker used elsewhere rather than
+        // guessing at truthiness.
+        return match text {
+            "true" => Value::Bool(true),
+            "false" => Value::Bool(false),
+            _ => json!({
+                "unsupported": cell.oracle_type,
+                "value": null,
+                "warning": "invalid BOOLEAN representation from driver"
+            }),
+        };
+    }
     match col.repr {
         TypeRepr::Numeric => {
             if opts.numbers_as_float {

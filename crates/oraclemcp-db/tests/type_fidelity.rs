@@ -175,6 +175,33 @@ fn character_types_are_strings() {
 }
 
 #[test]
+fn boolean_values_are_exact_json_booleans() {
+    // Values, not types: the raw driver-rendered text must map to the exact
+    // JSON boolean, never a string, and NULL BOOLEAN is JSON null like every
+    // other nullable column.
+    assert_eq!(ser("BOOLEAN", "true"), json!(true));
+    assert_eq!(ser("BOOLEAN", "false"), json!(false));
+    assert_eq!(
+        serialize_cell(
+            &OracleCell::new("BOOLEAN", None),
+            &SerializeOptions::default()
+        ),
+        Value::Null
+    );
+}
+
+#[test]
+fn boolean_invalid_representation_is_a_typed_marker_not_a_guess() {
+    // Fail-safe: an unrecognized BOOLEAN text (never expected from the
+    // driver, but must not be silently coerced) surfaces as the same
+    // explicit unsupported marker used elsewhere, never a truthiness guess.
+    let v = ser("BOOLEAN", "1");
+    assert_eq!(v["unsupported"], json!("BOOLEAN"));
+    assert_eq!(v["value"], Value::Null);
+    assert!(v["warning"].is_string());
+}
+
+#[test]
 fn date_and_timestamp_are_iso_8601() {
     // The driver renders DATE/TIMESTAMP with a space; output is canonical ISO.
     assert_eq!(
@@ -323,6 +350,7 @@ fn null_is_json_null_for_every_type() {
         "RAW(4)",
         "CLOB",
         "BLOB",
+        "BOOLEAN",
         "INTERVAL YEAR(2) TO MONTH",
         "INTERVAL DAY(2) TO SECOND(9)",
     ] {
