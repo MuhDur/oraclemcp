@@ -294,10 +294,11 @@ jobs:
     name: Rust workspace (Windows)
     needs: web-build
     runs-on: windows-latest
-    # A cold full-workspace Windows compile of --all-targets runs ~45 min; with
+    # A cold full-workspace Windows compile of --all-targets runs ~60-70 min; with
     # the rust-cache below warm it is far shorter, but the first (cold) run needs
-    # headroom, and windows-msvc linking is slow.
-    timeout-minutes: 75
+    # headroom, and windows-msvc linking is slow. 90 lets the cold run FINISH so
+    # the cache actually saves (a timed-out job never runs the save post-step).
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
         with:
@@ -315,6 +316,12 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # rust-cache defaults to cache-on-failure:false. While a Windows test
+          # is red the job fails, so the cache would never save and every run
+          # would cold-compile (~60-70 min) and time out — a vicious cycle.
+          # Save the compiled artifacts even on test failure so the NEXT run is
+          # warm and fast; this is what lets us iterate on Windows test fixes.
+          cache-on-failure: true
       - name: cargo test workspace on Windows
         run: cargo test --workspace --all-targets
 
