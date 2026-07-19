@@ -151,6 +151,11 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/feature_powerset_disk_preflight.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/oraclemcp_honesty_grep.sh",
       "kind": "entry_point",
       "trace": "required-quality"

@@ -187,6 +187,11 @@ jobs:
       - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
         with:
           tool: cargo-hack
+      # Retro C5: assert (and, if needed, reclaim) free disk right before the
+      # heavy build so a low-disk runner fails fast with a clear message
+      # instead of dying mid-`cargo hack clippy` with an opaque ENOSPC.
+      - name: Disk-free preflight (fail fast before ENOSPC mid-build)
+        run: bash scripts/feature_powerset_disk_preflight.sh
       - run: bash scripts/oraclemcp_feature_powerset.sh
 
   ergonomics:
