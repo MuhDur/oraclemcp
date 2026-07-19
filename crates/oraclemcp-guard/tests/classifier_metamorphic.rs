@@ -1002,6 +1002,13 @@ fn two_decisions_that_differ_are_not_equal() {
     );
 
     // And a decision is equal to itself — the rule is not vacuously "never equal".
+    // fixture-lint:allow: deliberate reflexivity check, not a value fixture — it
+    // proves Decision's PartialEq isn't vacuously-false, which the assert_ne!
+    // calls above and below depend on to have any teeth at all (a broken
+    // always-unequal impl would make every assert_ne! in this file pass for
+    // free). Classifier::classify takes no interior-mutable/ambient state, so a
+    // real regression here is "classify became nondeterministic", exactly what
+    // this call-it-twice shape is built to catch.
     assert_eq!(
         classifier.classify("DELETE FROM orders"),
         classifier.classify("DELETE FROM orders"),

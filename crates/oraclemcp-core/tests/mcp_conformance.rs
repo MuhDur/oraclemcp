@@ -604,8 +604,10 @@ fn initialize_returns_mcp_2025_11_25_server_info_and_tools_capability() {
     // E6: the server emits notifications/tools/list_changed (e.g. after a
     // profile switch alters the served tool set), so it advertises the capability.
     assert_eq!(result["capabilities"]["tools"]["listChanged"], json!(true));
-    // E7: completion/complete is served, so completions is advertised.
-    assert!(result["capabilities"]["completions"].is_object());
+    // E7: completion/complete is served, so completions is advertised. Value-exact:
+    // `served_capabilities_json` (server.rs) inserts `"completions": json!({})`
+    // verbatim — an empty object is the whole contract, not merely "an object".
+    assert_eq!(result["capabilities"]["completions"], json!({}));
     assert_eq!(
         result["capabilities"]["resources"]["subscribe"],
         json!(false)
@@ -660,8 +662,9 @@ fn capabilities_degrade_to_the_negotiated_revision_per_conformance() {
             vec![frame(&initialize_with_version(revision))],
         );
         assert_eq!(replies[0]["result"]["protocolVersion"], json!(revision));
-        assert!(
-            replies[0]["result"]["capabilities"]["completions"].is_object(),
+        assert_eq!(
+            replies[0]["result"]["capabilities"]["completions"],
+            json!({}),
             "completions advertised at {revision}"
         );
     }
@@ -949,16 +952,14 @@ fn resources_and_prompts_are_advertised_and_served_without_unserved_arms() {
         .find(|reply| reply["id"] == json!("completion-complete"))
         .expect("completion/complete reply");
     let completion = &reply["result"]["completion"];
-    assert!(
-        completion["values"]
-            .as_array()
-            .expect("values array")
-            .iter()
-            .any(|v| v == &json!("TABLE")),
-        "type completion offers TABLE for prefix TA: {reply}"
-    );
+    // Value-exact, not presence-only: `COMPLETION_OBJECT_TYPES` (server.rs) has
+    // exactly one entry prefixed "TA" (TABLE; TYPE/TRIGGER/TYPE BODY are "TY"/"TR"),
+    // so the filtered set and its `total` (== values.len() before capping, per
+    // `completion_result_json`) are fully deterministic — pin both exactly rather
+    // than checking "TABLE is present somewhere" and "total is some number".
+    assert_eq!(completion["values"], json!(["TABLE"]), "{reply}");
     assert_eq!(completion["hasMore"], json!(false));
-    assert!(completion["total"].is_number());
+    assert_eq!(completion["total"], json!(1));
 }
 
 #[test]
@@ -1607,13 +1608,16 @@ fn completion_complete_is_served_and_capped_for_owner_type_object() {
     };
 
     let type_reply = by_id("complete-type");
-    let type_values = type_reply["result"]["completion"]["values"]
-        .as_array()
-        .expect("type values");
-    assert!(type_values.iter().any(|v| v == &json!("VIEW")));
+    // Value-exact: `COMPLETION_OBJECT_TYPES` has exactly one "VI"-prefixed entry
+    // (VIEW), so the filtered values/total are deterministic (see the sibling "TA"
+    // completion test above for the same reasoning).
+    assert_eq!(
+        type_reply["result"]["completion"]["values"],
+        json!(["VIEW"])
+    );
     // The cap envelope is present and well-formed.
     assert_eq!(type_reply["result"]["completion"]["hasMore"], json!(false));
-    assert!(type_reply["result"]["completion"]["total"].is_number());
+    assert_eq!(type_reply["result"]["completion"]["total"], json!(1));
 
     let owner_reply = by_id("complete-owner");
     let owner_values = owner_reply["result"]["completion"]["values"]
@@ -1696,14 +1700,19 @@ fn progress_notification_is_emitted_for_a_tools_call_with_a_progress_token() {
         "the tool call still returns its result"
     );
 
-    // The progress notifications (no id; method+token), at least a start and end.
+    // The progress notifications (no id; method+token): dispatch is one atomic
+    // blocking round trip (server.rs's tools/call handler), so the bracket is
+    // EXACTLY a 0.0/1.0 "started" notification and a 1.0/1.0 "completed"
+    // notification, never more — pin the count and the values/order exactly
+    // rather than "at least 2" and "progress is some number".
     let progress: Vec<&Value> = replies
         .iter()
         .filter(|reply| reply["method"] == json!("notifications/progress"))
         .collect();
-    assert!(
-        progress.len() >= 2,
-        "a started + completed progress bracket is emitted: {replies:?}"
+    assert_eq!(
+        progress.len(),
+        2,
+        "exactly a started + completed progress bracket is emitted: {replies:?}"
     );
     for note in &progress {
         assert!(
@@ -1711,8 +1720,18 @@ fn progress_notification_is_emitted_for_a_tools_call_with_a_progress_token() {
             "progress is a notification (no id)"
         );
         assert_eq!(note["params"]["progressToken"], json!("op-42"));
-        assert!(note["params"]["progress"].is_number());
+        assert_eq!(note["params"]["total"], json!(1.0));
     }
+    assert_eq!(progress[0]["params"]["progress"], json!(0.0));
+    assert_eq!(
+        progress[0]["params"]["message"],
+        json!("oracle_schema_inspect started")
+    );
+    assert_eq!(progress[1]["params"]["progress"], json!(1.0));
+    assert_eq!(
+        progress[1]["params"]["message"],
+        json!("oracle_schema_inspect completed")
+    );
 
     // Without a progressToken, no progress is emitted (opt-in per the spec).
     let no_token = run_script(vec![json!({

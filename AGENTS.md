@@ -24,6 +24,41 @@ in-session go-ahead. crates.io publishes and registry listings are permanent
 (versions immutable, names claimed forever); treat publishing as a gated,
 deliberate step.
 
+## Swarm operating constitution
+
+Twelve rules mined from the 2026-07 multi-repo swarm retrospective
+(`docs/plan/RETRO_SWARM_CAMPAIGN_2026-07.md` §3G,
+`docs/plan/PLAN_ENGINEERING_PROGRAM.md` §27.3). Binding on every agent in this
+repo, solo or swarmed — most are new; a few name-and-link existing rules above
+so the constitution stays the one place to check:
+
+1. Never defer planned work on your own initiative — deferral is the
+   operator's call, not an agent's judgment call.
+2. Green means *honestly* green; surface red before the operator finds it.
+3. Claims must be evidence-backed — never assert what you haven't just run
+   and checked.
+4. Reread this file (and `README.md`) until understood, every session,
+   before acting.
+5. Think before acting ("ultrathink"): verify, then execute — don't patch on
+   a hunch.
+6. Be resource-disciplined: don't trash the host, the disk, or the
+   token/session budget (`CARGO_BUILD_JOBS` caps, scoped `-p` builds over
+   full-workspace ones, no unbounded concurrent compiles).
+7. Keep driving autonomously, but follow explicit operator choices — model,
+   agent freshness, scope — *exactly*; deviation is the fastest path to anger.
+8. The fail-closed guard is sacred and tighten-only — see "The safety
+   invariant" below; this rule doesn't restate it, it just makes the
+   constitution complete.
+9. Confidentiality is absolute: field-test/live-customer identifiers never
+   leave quarantine (`todelete/`, gitignored) or enter a committed artifact.
+10. No surprise costs — cloud resources (OCI, etc.) stay free-tier; a hard
+    rule, not a target.
+11. Land complete, not sliced across version bumps or half-shipped across
+    sessions.
+12. Escalate blockers to the operator; delegate unforeseen work to the
+    tracker (`br create`), don't quietly derail the authoritative prompt's
+    scope.
+
 ## Rust toolchain & gates
 
 - Cargo workspace, `resolver = "2"`, pinned nightly

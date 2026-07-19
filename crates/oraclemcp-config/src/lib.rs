@@ -2740,8 +2740,9 @@ mod tests {
             Err(SiemEndpointError::InvalidAuthority)
         );
         assert_eq!(
-            // sensitive-lint:allow deliberate invalid fixture
-            SiemEndpoint::parse("https://user:secret@siem.example.com/ingest"),
+            SiemEndpoint::parse(
+                "https://user:secret@siem.example.com/ingest", // sensitive-lint:allow deliberate invalid fixture
+            ),
             Err(SiemEndpointError::UserInfo),
             "embedded URL userinfo must be its own distinct variant, not folded \
              into InvalidAuthority"

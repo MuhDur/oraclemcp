@@ -35,6 +35,7 @@ scenarios=(
   scripts/e2e/mcp_and_operator_v1_conformance_matrix.sh
   scripts/e2e/doctor_fixtures.sh
   scripts/e2e/offline_stdio.sh
+  scripts/e2e/capability_smoke.sh
   scripts/e2e/http_oauth_lanes.sh
   scripts/e2e/dashboard_readonly.sh
   scripts/e2e/served_console.sh

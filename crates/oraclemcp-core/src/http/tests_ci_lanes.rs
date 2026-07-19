@@ -145,6 +145,10 @@ fn drive<F: std::future::Future>(future: F) -> F::Output {
         .with_reactor(reactor)
         .build()
         .expect("test fetch runtime builds");
+    // block-on-boundary: test-only helper driving fetch_ci_lane_snapshot; there
+    // is no production caller (the ci_lanes route is sync/file-backed). The
+    // concurrency lint's cfg(test) skip is path-based (/tests/ or tests.rs) and
+    // does not match this tests_-prefixed src file, so sanction it explicitly.
     runtime.block_on(async {
         let _cx = Cx::current().expect("block_on installs a current Cx");
         future.await

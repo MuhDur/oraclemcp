@@ -703,7 +703,10 @@ fn golden_stdio_resource_subscribe_and_updated_notification() {
             "params": { "uri": uri },
         }),
     );
-    assert!(subscribe_reply["result"].is_object());
+    // Value-exact, not type-only: `handle_resource_subscribe` (server.rs) returns
+    // `jsonrpc_result(id, json!({}))` on success — an empty object is the entire
+    // MCP-spec result shape, so pin it exactly rather than merely "is an object".
+    assert_eq!(subscribe_reply["result"], json!({}));
 
     // Build the server we will drive for the change scenario, then change the
     // resource and run a request whose post-flush carries resources/updated.
