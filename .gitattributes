@@ -18,6 +18,8 @@
 *.dict  text eol=lf
 *.tsv   text eol=lf
 
-# PowerShell/batch installer scripts are left to git's default handling; the
-# bash e2e suite never reads them, and pinning their EOL here would only churn
-# the working tree.
+# install.ps1 is checked as a static fixture (installer_e2e asserts it contains
+# "    Invoke-OptionalDiscovery\n"); a CRLF checkout breaks the \n-terminated
+# needle. Pin LF (PowerShell + PSScriptAnalyzer read LF fine); all .ps1 are
+# already LF in-repo so this is checkout-only, no churn.
+*.ps1   text eol=lf

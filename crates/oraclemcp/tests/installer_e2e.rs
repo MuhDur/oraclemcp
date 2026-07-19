@@ -17,6 +17,13 @@ fn repo_root() -> PathBuf {
 }
 
 #[test]
+// Exercises the bash install.sh lint + offline smoke — the Linux/macOS installer.
+// On Windows the installer is install.ps1 (covered by the PowerShell PSSA job),
+// and install.sh runs only on the Linux/macOS install lane. Scoped to Unix.
+#[cfg_attr(
+    windows,
+    ignore = "linux/macos bash installer smoke; windows uses install.ps1"
+)]
 fn installer_lint_and_offline_smoke_passes() {
     let root = repo_root();
     let output = Command::new(common::bash_bin())
@@ -637,6 +644,12 @@ fn cargo_binstall_metadata_matches_release_assets() {
 }
 
 #[test]
+// Runs the bash render_distribution_manifests.sh (same Linux release-distribution
+// tooling scoped in e2e_harness). Runs on the Linux CI release lane; scoped to Unix.
+#[cfg_attr(
+    windows,
+    ignore = "linux release-distribution renderer; runs on the linux ci lane"
+)]
 fn binstall_brew_winget_metadata_valid() {
     let root = repo_root();
     let manifest =
