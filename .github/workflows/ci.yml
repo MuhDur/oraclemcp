@@ -366,10 +366,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: bash scripts/release_acceptance_ci_suite.sh --skip-feature-powerset
 
-  # The thin-native line is pinned to nightly because asupersync requires
-  # nightly-only language features (oracledb 0.8.4 is stable-clean). This is a
-  # build-only ratchet separate from the test job so toolchain installation
-  # failures stay obvious.
+  # The thin-native line is pinned to nightly. Asupersync depends on specific nightly-only language features,
+  # pulled in transitively by its dependency declaration; oracledb 0.8.4 is stable-clean
+  # (see docs/TOOLCHAIN.md). This is a build-only ratchet separate from the test job
+  # so toolchain installation failures stay obvious.
   pinned-nightly:
     name: build on pinned nightly
     needs: web-build
