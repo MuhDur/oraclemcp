@@ -228,7 +228,10 @@ impl Drop for AuditLogLock {
 }
 
 /// Read a pid previously written to the lock sidecar. Best-effort: any I/O or
-/// parse failure yields `None` (the contention message just omits the pid).
+/// parse failure yields `None` (the contention message just omits the pid). On
+/// Windows the holder's exclusive `LockFileEx` lock is mandatory and blocks this
+/// read, so a contender's pid hint is legitimately absent there; the fail-closed
+/// refusal itself does not depend on it.
 fn read_holder_pid(lock_path: &Path) -> Option<u32> {
     std::fs::read_to_string(lock_path)
         .ok()?
@@ -1407,11 +1410,21 @@ mod tests {
                     p.contains("audit.jsonl"),
                     "the fail-closed message names the log path, got {p}"
                 );
+                // The pid hint is a best-effort operator convenience. On Unix
+                // `flock` is advisory, so the contender can read the holder's
+                // recorded pid. On Windows `File::try_lock` is a MANDATORY
+                // `LockFileEx` lock that blocks the contender's read of the
+                // sidecar, so `read_holder_pid` legitimately yields `None` while
+                // the lock is held — the important guarantee (fail-closed with
+                // the typed `Locked` error naming the path) is unchanged.
+                #[cfg(unix)]
                 assert_eq!(
                     holder_pid,
                     Some(std::process::id()),
                     "the lock sidecar records the holder pid for the operator hint"
                 );
+                #[cfg(not(unix))]
+                let _ = holder_pid;
             }
             Err(other) => panic!("expected AuditError::Locked, got {other:?}"),
             Ok(_) => panic!("a second writer on the same audit log must fail closed"),
