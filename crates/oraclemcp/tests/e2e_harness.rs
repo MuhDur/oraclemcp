@@ -1054,6 +1054,14 @@ fn clean_machine_e2e_refuses_production_markers() {
 }
 
 #[test]
+// Exercises the Linux release-distribution pipeline (bash render script + GNU/BSD/
+// certutil checksum formats). That script runs only on the Linux CI release lane;
+// under Windows Git Bash it hits path/tool-format differences irrelevant to where
+// it actually executes. Scoped to Unix, where it provides its real coverage.
+#[cfg_attr(
+    windows,
+    ignore = "linux release-distribution pipeline; runs on the linux ci lane"
+)]
 fn distribution_renderer_accepts_bound_platform_checksums_and_hashes_exact_archives() {
     let artifact_dir = distribution_fixture("formats-pass");
     let hashes = write_distribution_archives(&artifact_dir);
@@ -1322,6 +1330,14 @@ fn local_release_gate_dry_run_schedules_synthetic_tcps_proof() {
 }
 
 #[test]
+// Exercises the Linux OCI ADB signoff pipeline (bash + realpath-based
+// target/ containment check). `realpath -m` yields inconsistent MSYS-vs-Windows
+// path formats under Git Bash; the script runs only on the Linux CI lane, so it
+// is scoped to Unix where it provides its real coverage.
+#[cfg_attr(
+    windows,
+    ignore = "linux oci adb signoff pipeline; runs on the linux ci lane"
+)]
 fn real_adb_signoff_dry_run_schedules_wallet_and_iam_doctor_paths() {
     let output = run_script(
         "scripts/e2e/real_adb_tcps_signoff.sh",
@@ -1639,6 +1655,13 @@ fn hardening_acceptance_suite_schedules_b11_component_gates() {
 }
 
 #[test]
+// Exercises the Linux release-rollback runbook (bash + `cargo metadata | jq`
+// crate enumeration). The tool output carries stray CR under Git Bash and the
+// runbook only ever runs on the Linux CI release lane; scoped to Unix.
+#[cfg_attr(
+    windows,
+    ignore = "linux release-rollback runbook; runs on the linux ci lane"
+)]
 fn rollback_runbook_dry_run_covers_release_surfaces() {
     let missing_versions = run_script(
         "scripts/e2e/release_rollback_dry_run.sh",
@@ -1762,6 +1785,14 @@ fn rollback_runbook_dry_run_covers_release_surfaces() {
 }
 
 #[test]
+// Exercises the Linux release-surface sync check (bash + `cargo metadata | jq`
+// version enumeration). Same class as the rollback runbook: stray CR in tool
+// output under Git Bash, and the gate runs only on the Linux CI release lane
+// (the release-metadata-sync job). Scoped to Unix.
+#[cfg_attr(
+    windows,
+    ignore = "linux release-surface sync gate; runs on the linux ci lane"
+)]
 fn release_surface_sync_check_passes_on_workspace() {
     // Invariant (D3.1): every WORKSPACE-pinned release surface matches the single
     // workspace version. User-facing install/pull EXAMPLES (README curl/docker/
