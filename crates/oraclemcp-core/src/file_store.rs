@@ -814,10 +814,35 @@ fn open_append_private_file(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
+/// Flush a directory's entries to disk so a freshly created/renamed child is
+/// durable across a crash.
+///
+/// On Unix this opens the directory read-only and `fsync`s the handle — the
+/// portable POSIX idiom.
+#[cfg(unix)]
 fn fsync_dir(path: &Path) -> Result<()> {
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|e| FileStoreError::Io(e.to_string()))
+}
+
+/// Windows (and any non-Unix target) has no directory-`fsync` analogue, so this
+/// is a deliberate no-op rather than the hard failure the Unix path's approach
+/// would produce: `std::fs::File::open` cannot obtain a *directory* handle
+/// without `FILE_FLAG_BACKUP_SEMANTICS`, and even with it `FlushFileBuffers`
+/// (what `sync_all` calls) returns `ERROR_ACCESS_DENIED` on a directory handle.
+/// Running the Unix code here would make every durable write in this store fail
+/// on Windows (the observed symptom: `acquire_service_owner` panics in tests).
+///
+/// Directory-entry durability is still provided on NTFS by metadata journaling
+/// plus this store's create-temp-then-atomically-rename pattern; the child
+/// file's own `sync_all` (which succeeds on Windows) still runs before the
+/// rename. This is the standard cross-platform treatment — directory fsync is a
+/// Unix concept — and it is confined to the metadata-durability step, never the
+/// data-durability step.
+#[cfg(not(unix))]
+fn fsync_dir(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn validate_segment(kind: &'static str, value: &str) -> Result<()> {

@@ -1313,10 +1313,25 @@ fn create_new_private_file(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
+/// Flush a directory's entries so a freshly created/renamed child is durable
+/// across a crash. Unix opens the directory and `fsync`s it (the POSIX idiom).
+#[cfg(unix)]
 fn fsync_dir(path: &Path) -> Result<(), ConfigOpsError> {
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|e| ConfigOpsError::Io(e.to_string()))
+}
+
+/// Non-Unix (Windows) has no directory-`fsync`: `File::open` cannot open a
+/// directory handle without `FILE_FLAG_BACKUP_SEMANTICS`, and `FlushFileBuffers`
+/// (`sync_all`) returns `ERROR_ACCESS_DENIED` on a directory handle regardless.
+/// Running the Unix path here would fail every durable config write on Windows.
+/// NTFS metadata journaling plus the atomic temp-write-then-rename this module
+/// uses (with the file's own `sync_all` still run) provide the directory-entry
+/// durability, so this is a deliberate no-op, matching `file_store`'s `fsync_dir`.
+#[cfg(not(unix))]
+fn fsync_dir(_path: &Path) -> Result<(), ConfigOpsError> {
+    Ok(())
 }
 
 #[cfg(test)]
