@@ -85,6 +85,10 @@ pub fn serve_http_until(
         }
         match listener.accept() {
             Ok((mut stream, addr)) => {
+                if let Err(e) = restore_accepted_socket_blocking(&stream) {
+                    tracing::debug!(error = %e, "native HTTP accepted socket could not be set blocking");
+                    continue;
+                }
                 let transport_permit = match try_admit_http_transport(
                     &config.transport_admission,
                     addr.ip().is_loopback(),
@@ -163,6 +167,10 @@ pub fn serve_https_until(
         }
         match listener.accept() {
             Ok((stream, addr)) => {
+                if let Err(e) = restore_accepted_socket_blocking(&stream) {
+                    tracing::debug!(error = %e, "native HTTPS accepted socket could not be set blocking");
+                    continue;
+                }
                 let transport_permit = match try_admit_http_transport(
                     &config.transport_admission,
                     addr.ip().is_loopback(),
@@ -224,6 +232,10 @@ pub fn serve_control_https_until(
         reap_finished_workers(&mut workers);
         match listener.accept() {
             Ok((stream, _)) => {
+                if let Err(e) = restore_accepted_socket_blocking(&stream) {
+                    tracing::debug!(error = %e, "control HTTPS accepted socket could not be set blocking");
+                    continue;
+                }
                 let cx = detached_admission_cx();
                 let preauth_permit =
                     match preauth_admission.try_admit(&cx, HTTP_CONTROL_PREAUTH_CAPACITY_SUBJECT) {
@@ -365,6 +377,22 @@ pub(super) fn reap_idle_stateful_sessions(
         }
     }
     count
+}
+
+/// Restore blocking mode on a freshly accepted socket.
+///
+/// A socket accepted from a non-blocking listener inherits the listener's
+/// non-blocking mode on Windows (Winsock accept semantics), whereas on Unix the
+/// accepted socket is always blocking regardless of the listener. Every
+/// per-connection code path here is blocking-with-timeout — it relies on
+/// `SO_RCVTIMEO`/`SO_SNDTIMEO`, which a non-blocking socket simply ignores while
+/// returning `WouldBlock` immediately. On Windows that turned every TLS
+/// handshake and request read into an instant spurious timeout (and released the
+/// transport permit before it was ever observed as held). Put the accepted
+/// socket back into blocking mode on every platform so the timeout-bounded I/O
+/// below behaves identically; on Unix this is a harmless no-op.
+fn restore_accepted_socket_blocking(stream: &TcpStream) -> std::io::Result<()> {
+    stream.set_nonblocking(false)
 }
 
 fn handle_connection(
