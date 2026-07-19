@@ -294,14 +294,14 @@ jobs:
     name: Rust workspace (Windows)
     needs: web-build
     runs-on: windows-latest
-    # Even with the rust-cache warm, a --workspace --all-targets Windows build
-    # recompiles oraclemcp-core + all dependents + every integration-test binary
-    # on any core change (~75-80 min; windows-msvc linking is slow), leaving too
-    # little room for the tests under a 90m cap. 120 lets the whole job finish so
-    # results are trustworthy and the cache saves. (Follow-up: scope this job to
-    # --lib --bins to cut compile time — the Windows-relevant unit tests live
-    # there, and the dedicated windows-installer job covers the PS installer.)
-    timeout-minutes: 120
+    # Scope: --lib --bins (see the test step). All Windows-specific risk (file
+    # locking, subprocess spawn, TLS, paths, durable state) lives in unit tests;
+    # the integration tests are covered on Linux and by the dedicated
+    # windows-installer job, and recompiling every integration-test binary here
+    # made an --all-targets build ~75-80 min (windows-msvc linking is slow). With
+    # --lib --bins + reduced debuginfo this is far shorter; keep some headroom for
+    # the first cold run after the profile/cache-key change.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6
         with:
@@ -326,7 +326,15 @@ jobs:
           # warm and fast; this is what lets us iterate on Windows test fixes.
           cache-on-failure: true
       - name: cargo test workspace on Windows
-        run: cargo test --workspace --all-targets
+        env:
+          # windows-msvc link time is dominated by debuginfo; drop it to cut the
+          # compile. Tests run identically and panic `file:line` (via
+          # #[track_caller]) is unaffected — only RUST_BACKTRACE frame detail is.
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        # --lib --bins, not --all-targets: the Windows-specific behaviour is in
+        # unit tests; the integration-test binaries add little Windows signal,
+        # are covered on Linux, and roughly double the windows-msvc compile.
+        run: cargo test --workspace --lib --bins
 
   release-acceptance:
     name: release acceptance suite (B.12)
