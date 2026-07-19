@@ -729,7 +729,13 @@ mod tests {
         let local = Arc::new(MemoryAuditSink::new());
         let delivery = DurableShippingForwarder::open(
             config(directory.path(), "concurrent"),
-            Box::new(SleepForwarder(Duration::from_millis(400))),
+            // Ship delay deliberately large so the "appends don't block on
+            // shipping" check has a wide margin: a non-blocking run finishes far
+            // under the threshold below even on a slow/loaded CI runner, while a
+            // blocking run would wait at least one whole ship delay. (The spool
+            // is durable/async, so this delay only affects the background ship,
+            // not the test's own wall-clock.)
+            Box::new(SleepForwarder(Duration::from_millis(2000))),
         )
         .expect("open spool");
         let sink = crate::ShippingAuditSink::new(
@@ -752,7 +758,7 @@ mod tests {
             worker.join().expect("append thread");
         }
         assert!(
-            started.elapsed() < Duration::from_millis(250),
+            started.elapsed() < Duration::from_millis(1000),
             "concurrent appends waited for the stalled destination"
         );
         let records = local.records();
