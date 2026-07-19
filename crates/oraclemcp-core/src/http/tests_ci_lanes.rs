@@ -417,3 +417,27 @@ fn operator_ci_lanes_route_serves_a_fresh_configured_snapshot() {
         "lanes absent from the stored snapshot must render unknown, never green"
     );
 }
+
+#[test]
+fn crate_local_ci_taxonomy_matches_repo_root() {
+    // `ci_lanes.rs` embeds a crate-local copy of `docs/ci_taxonomy.json` (not
+    // the repo-root file directly) so `cargo package`'s tarball is
+    // self-contained -- see the comment on `CI_LANE_TAXONOMY`. This must stay
+    // byte-identical to the repo-root original, exactly like
+    // `embedded_installers_match_repo_root` in crates/oraclemcp/main_tests.rs.
+    // Skips when the repo-root file is absent (e.g. inside a published crate).
+    let embedded = include_str!("../../ci_taxonomy.json");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("docs")
+        .join("ci_taxonomy.json");
+    let Ok(original) = std::fs::read_to_string(&root) else {
+        return;
+    };
+    assert_eq!(
+        embedded, original,
+        "crates/oraclemcp-core/ci_taxonomy.json drifted from docs/ci_taxonomy.json; \
+         they must stay byte-identical (copy the repo-root file into the crate)"
+    );
+}

@@ -58,7 +58,13 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::sync::OnceLock;
 
-const CI_LANE_TAXONOMY: &str = include_str!("../../../../docs/ci_taxonomy.json");
+// Embedded from a crate-local copy, not `docs/ci_taxonomy.json` directly:
+// `include_str!` on a path outside this crate directory would compile fine in
+// a full checkout but leaves `cargo package`'s tarball missing the file (the
+// exact class of bug fixed in cfc650b for install.sh/install.ps1 — see
+// `crate_local_ci_taxonomy_matches_repo_root` in tests_ci_lanes.rs, which
+// keeps this copy byte-identical to the source of truth).
+const CI_LANE_TAXONOMY: &str = include_str!("../../ci_taxonomy.json");
 const CI_LANE_TAXONOMY_SCHEMA: &str = "ci-taxonomy/v1";
 const CI_LANE_REPO: &str = "oraclemcp";
 const CI_LANE_GITHUB_REPO: &str = "MuhDur/oraclemcp";
