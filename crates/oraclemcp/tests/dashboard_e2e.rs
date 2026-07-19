@@ -14,9 +14,31 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Resolve a usable `bash`. On Windows, `Command::new("bash")` resolves to
+/// `C:\Windows\System32\bash.exe` — the WSL launcher — which on the CI runner
+/// has no distribution installed and exits 1 (`Windows Subsystem for Linux has
+/// no installed distributions`) without ever running the script. Prefer Git
+/// Bash, which the GitHub windows runners ship, before falling back to the bare
+/// name (correct on Unix).
+fn bash_bin() -> PathBuf {
+    #[cfg(windows)]
+    {
+        for candidate in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+        ] {
+            let path = Path::new(candidate);
+            if path.exists() {
+                return path.to_path_buf();
+            }
+        }
+    }
+    PathBuf::from("bash")
+}
+
 fn run_script(script: &str, args: &[&str]) -> Output {
     let root = repo_root();
-    Command::new("bash")
+    Command::new(bash_bin())
         .arg(root.join(script))
         .args(args)
         .current_dir(&root)
