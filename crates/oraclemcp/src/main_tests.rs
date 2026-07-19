@@ -2041,7 +2041,12 @@ fn stdout_exit_treats_broken_pipe_as_success_path() {
         Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe closed")),
         ExitCode::from(2),
     );
-    assert_eq!(format!("{code:?}"), "ExitCode(unix_exit_status(0))");
+    // A broken pipe collapses to success. Compare against ExitCode::SUCCESS's
+    // own Debug rather than a hardcoded string: the representation is
+    // platform-specific (`unix_exit_status(0)` on Unix, a different inner type
+    // on Windows), so pinning the Unix spelling fails the Windows lane for no
+    // real reason.
+    assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::SUCCESS));
 }
 
 #[test]
