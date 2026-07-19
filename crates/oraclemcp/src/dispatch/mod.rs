@@ -11080,8 +11080,18 @@ fn response_reports_terminal_effect(name: &str, value: &Value) -> bool {
         "oracle_compile_object" => bool_field("compiled"),
         "oracle_patch_source" | "oracle_create_or_replace" | "deploy_ddl" => bool_field("applied"),
         "oracle_execute" | "execute_approved" => {
+            // F-DI1: a held statement (Arc I) already ran inside the open
+            // workspace transaction and its effect persists there — pending,
+            // but real — exactly like a committed or non-transactional
+            // effect. Judging it non-terminal would let a late client
+            // cancellation report `Cancelled` for a statement that already
+            // executed; a caller who reasonably retries after `Cancelled`
+            // would then apply the same held statement a second time on top
+            // of the still-pending first one.
             bool_field("executed")
-                && (bool_field("committed") || bool_field("non_transactional_effect"))
+                && (bool_field("committed")
+                    || bool_field("non_transactional_effect")
+                    || bool_field("held"))
         }
         _ => false,
     }

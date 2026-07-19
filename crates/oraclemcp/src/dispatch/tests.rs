@@ -1211,6 +1211,7 @@ struct ExecState {
     call_timeout_sets: Mutex<Vec<Option<Duration>>>,
     cancel_on_commit: AtomicUsize,
     cancel_on_rollback: AtomicUsize,
+    cancel_on_execute: AtomicUsize,
     commits: AtomicUsize,
     rollbacks: AtomicUsize,
 }
@@ -1589,7 +1590,7 @@ impl OracleConnection for ExecRecordingMock {
         Ok(Vec::new())
     }
 
-    async fn execute(&self, _cx: &Cx, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, cx: &Cx, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
         self.state
             .executed
             .lock()
@@ -1603,6 +1604,9 @@ impl OracleConnection for ExecRecordingMock {
             .clone()
         {
             return Err(error);
+        }
+        if self.state.cancel_on_execute.load(Ordering::SeqCst) != 0 {
+            cx.set_cancel_requested(true);
         }
         Ok(self.rows_affected)
     }
@@ -9283,6 +9287,77 @@ mod qa85_terminal_boundaries {
         );
         assert_eq!(state.commits.load(Ordering::SeqCst), 0);
         assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+    }
+
+    /// F-DI1: a held statement's effect already ran inside the open workspace
+    /// transaction (Arc I) — pending, but real. Before the fix,
+    /// `response_reports_terminal_effect` judged a `hold=true` result
+    /// non-terminal (it only checked `committed`/`non_transactional_effect`),
+    /// so a late client cancellation was reported as `Cancelled` even though
+    /// the DML had already executed and was sitting in the workspace. An
+    /// agent that reasonably retries after a `Cancelled` result would then
+    /// call `oracle_execute(hold=true, ...)` again and apply the SAME
+    /// statement a second time on top of the still-pending first one — a
+    /// held-execute double-apply. The fix adds `held` to the terminal check;
+    /// this test proves the late-cancelled held call now completes honestly.
+    #[test]
+    fn held_execute_survives_late_cancellation_and_is_not_reported_as_cancelled() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+        dispatcher
+            .dispatch("oracle_checkpoint", json!({ "name": "before_change" }))
+            .expect("checkpoint opens the workspace");
+
+        // Only the held DML's execute (not the checkpoint's SAVEPOINT) should
+        // observe a late cancellation.
+        state.cancel_on_execute.store(1, Ordering::SeqCst);
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("asupersync test runtime builds");
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            ToolDispatch::dispatch(
+                &dispatcher,
+                &cx,
+                DispatchContext::default(),
+                "oracle_execute",
+                json!({
+                    "sql": "UPDATE employees SET salary = salary * 2 WHERE employee_id = :1",
+                    "binds": [100],
+                    "hold": true,
+                }),
+            )
+            .await
+        });
+
+        let Outcome::Ok(value) = outcome else {
+            panic!(
+                "a held statement's effect already ran and must not be reported as cancelled, got {outcome:?}"
+            );
+        };
+        assert_eq!(value["executed"], json!(true));
+        assert_eq!(value["held"], json!(true));
+        assert_eq!(value["committed"], json!(false));
+        assert_eq!(
+            state.executed.lock().expect("exec mutex").len(),
+            2,
+            "the checkpoint SAVEPOINT plus exactly one held DML execution"
+        );
+        assert_eq!(
+            state.commits.load(Ordering::SeqCst),
+            0,
+            "holding never commits"
+        );
+        assert_eq!(
+            state.rollbacks.load(Ordering::SeqCst),
+            0,
+            "holding must not end the transaction"
+        );
     }
 
     #[test]
