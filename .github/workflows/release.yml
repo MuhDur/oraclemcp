@@ -183,7 +183,13 @@ jobs:
 
   build:
     name: build ${{ matrix.target }}
-    needs: [checks, release-acceptance, pinned-nightly, web-build]
+    # release-acceptance is intentionally NOT a dependency here: it consumes
+    # nothing this job produces and produces nothing this job consumes (both
+    # only need `checks` + `web-build`), so serializing them wastes ~14 min of
+    # wall-clock on every release/rehearsal run (plan §25.3 P1.1). Publishing
+    # stays fully gated: publish-crates.needs includes release-acceptance, so
+    # nothing ships before that suite is green.
+    needs: [checks, pinned-nightly, web-build]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -341,13 +347,20 @@ jobs:
 
   release:
     name: publish GitHub release
-    needs: [build, publish-crates, web-build]
+    # release-acceptance is a DIRECT need (not only transitive through
+    # publish-crates) because publish-crates is skipped outright for
+    # prerelease tags (its own `if`); without this edge + the matching
+    # `result == 'success'` check below, a prerelease could publish without
+    # ever waiting on the acceptance suite once `build` stopped depending on
+    # it (plan §25.3 P1.1 — see the comment on `build.needs`).
+    needs: [build, publish-crates, release-acceptance, web-build]
     if: >-
       ${{
         always() &&
         startsWith(github.ref, 'refs/tags/') &&
         needs.web-build.result == 'success' &&
         needs.build.result == 'success' &&
+        needs.release-acceptance.result == 'success' &&
         (contains(github.ref_name, '-') || needs.publish-crates.result == 'success')
       }}
     runs-on: ubuntu-latest
@@ -516,7 +529,11 @@ jobs:
   # skips exact versions that are already on crates.io.
   publish-crates:
     name: Publish to crates.io
-    needs: build
+    # release-acceptance now runs concurrently with `build` (see build.needs);
+    # requiring it here (rather than on `build`) is what keeps publishing
+    # gated on the full acceptance suite while still letting the two long
+    # jobs overlap instead of serializing.
+    needs: [build, release-acceptance]
     if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     environment: crates-io
