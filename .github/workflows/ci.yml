@@ -395,25 +395,29 @@ jobs:
       - run: cargo build -p oraclemcp --features dashboard-bundle
 
   # Multi-nightly early-warning (bead D4 / WP-D). ADVISORY ONLY — NOT a required
-  # gate. The pinned nightly above is the gate; this job builds and tests against
-  # an *additional, more recent* nightly so an upcoming toolchain that will break
-  # the Asupersync stack is surfaced early, before we deliberately re-pin
-  # (see docs/TOOLCHAIN.md + ADR-0001). The line has no stable MSRV — both
-  # Asupersync depends on specific nightly-only language features — so
-  # a red square here is an early warning to investigate, never a release blocker.
-  # continue-on-error keeps it from reddening required CI. The matrix carries the
-  # pinned date (so the comparison is apples-to-apples) plus the floating
-  # `nightly` channel; add a second pinned date here when bisecting a regression.
+  # gate. The pinned nightly (nightly-2026-05-11) is already exhaustively covered
+  # by the required jobs above (`build on pinned nightly`, `cargo test`, clippy),
+  # so this job only builds and tests against the *floating* `nightly` channel:
+  # an upcoming toolchain that will break the Asupersync stack surfaces here early,
+  # before we deliberately re-pin (see docs/TOOLCHAIN.md + ADR-0001). A red square
+  # here is an early warning to investigate, never a release blocker.
+  #
+  # continue-on-error keeps a *failure* from reddening required CI — but note a job
+  # *timeout* (unlike a failure) still marks the whole run "cancelled" regardless of
+  # continue-on-error. The redundant pinned leg used to live in this matrix too and
+  # its `--all-targets` test kept hitting the 45m cap, cancelling the job and
+  # poisoning otherwise-green run conclusions; it was removed and the timeout raised
+  # to 60m for headroom. When bisecting a regression, temporarily add a pinned date
+  # back to the matrix.
   multi-nightly:
     name: multi-nightly early-warning (advisory)
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         toolchain:
-          - nightly-2026-05-11   # the pinned gate, repeated here as the baseline
           - nightly              # floating: the next toolchain we may have to adopt
     steps:
       - uses: actions/checkout@v6

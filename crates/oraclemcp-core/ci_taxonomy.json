@@ -208,18 +208,6 @@
       "path_filtered": false
     },
     {
-      "check_name": "multi-nightly early-warning (advisory) (nightly-2026-05-11)",
-      "tier": "advisory",
-      "workflow": "CI",
-      "workflow_file": "ci.yml",
-      "job_id": "multi-nightly",
-      "triggers": [
-        "pull_request",
-        "push"
-      ],
-      "path_filtered": false
-    },
-    {
       "check_name": "public-API lock (cargo public-api + semver-checks)",
       "tier": "required",
       "workflow": "CI",
@@ -620,7 +608,6 @@
         "fuzz targets compile (nightly)",
         "installer lint and built-artifact smoke",
         "multi-nightly early-warning (advisory) (nightly)",
-        "multi-nightly early-warning (advisory) (nightly-2026-05-11)",
         "public-API lock (cargo public-api + semver-checks)",
         "release acceptance suite (B.12)",
         "release metadata sync",
@@ -718,8 +705,7 @@
   "groups": {
     "advisory": [
       "fuzz targets compile (nightly)",
-      "multi-nightly early-warning (advisory) (nightly)",
-      "multi-nightly early-warning (advisory) (nightly-2026-05-11)"
+      "multi-nightly early-warning (advisory) (nightly)"
     ],
     "manual": [
       "OCI ADB acceptance",
