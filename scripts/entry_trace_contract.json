@@ -211,6 +211,16 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/release_tarball_contents_check.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/release_tarball_contents_check.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/render_distribution_manifests.sh",
       "kind": "entry_point",
       "trace": "required-quality"

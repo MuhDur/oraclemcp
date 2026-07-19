@@ -3,8 +3,20 @@ name: Release
 # Tag-driven full release. A pushed vX.Y.Z tag is the source of truth: it must
 # match Cargo/package metadata, runs the release gates, publishes crates.io in
 # dependency order, builds GitHub assets, pushes the GHCR image, then publishes
-# server.json to the MCP registry. `workflow_dispatch` validates the gates/build
-# without publishing anything.
+# server.json to the MCP registry.
+#
+# `workflow_dispatch` (run against a candidate branch/SHA from the Actions UI
+# or `gh workflow run release.yml --ref <branch>`) is the PRE-TAG RELEASE
+# REHEARSAL (plan §29.3): every publish-gating job below (`checks`,
+# `pinned-nightly`, `release-acceptance`, and the full 7-target `build` matrix
+# incl. the binary-size check) runs exactly as it would on the real tag — the
+# only difference is that every job past `build` (`release`, `publish-crates`,
+# `docker`, `publish-mcp-registry`, `verify-mcp-registry`) is gated on
+# `startsWith(github.ref, 'refs/tags/')` and is skipped, so nothing publishes.
+# Rehearsing a candidate SHA this way, once, replaces the 0.9.0-style loop of
+# discovering one release-mechanics gate per re-tag (binary-size budget,
+# packaged-tarball self-containment, release-gates timeout — see §29.3's
+# postmortem) with a single dry run before the tag is ever pushed.
 # ROLLBACK_COVERAGE: crates.io=publish-crates github-release=release signed-artifacts=release ghcr=docker mcp-registry=publish-mcp-registry
 on:
   push:
@@ -117,6 +129,17 @@ jobs:
       # per-crate packaged verification runs in dependency order immediately
       # before each publish in scripts/publish_crates.sh.
       - run: cargo package --workspace --locked --no-verify
+      # `--no-verify` above means the tarball is never actually COMPILED here,
+      # so it cannot catch a file an embedding macro needs but packaging left
+      # out (0.9.0 attempt #2 — cfc650b — was exactly this: install.sh/
+      # install.ps1 embedded from outside crates/oraclemcp/, so the tarball
+      # assembled fine and only failed to COMPILE, minutes into the real
+      # `cargo publish --dry-run`). This check proves the same property
+      # without needing sibling crates to already be published: every
+      # `include_bytes!`/`include_str!` literal path in each crate's non-test
+      # source must resolve to a file `cargo package --list` actually
+      # includes.
+      - run: bash scripts/release_tarball_contents_check.sh
       - run: bash scripts/dashboard_bundle_check.sh --check-crates
 
   pinned-nightly:
@@ -194,35 +217,48 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
+      # binary_warn_bytes is a ratchet, not a second hard cap (plan §27.2 C10 /
+      # §29.3): crossing it prints a visible ::warning:: annotation but never
+      # fails the job, so growth toward binary_limit_bytes becomes visible run
+      # after run instead of arriving as a silent-until-it-isn't cliff (the
+      # 0.9.0 attempt #1 failure — 62dff28 — was exactly a stale hard limit
+      # discovered only by an outright tag-pipeline failure).
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             build_tool: cargo
+            binary_warn_bytes: 43000000
             binary_limit_bytes: 48000000
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             build_tool: cargo
+            binary_warn_bytes: 43000000
             binary_limit_bytes: 48000000
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             build_tool: cargo
+            binary_warn_bytes: 43000000
             binary_limit_bytes: 48000000
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             build_tool: cargo-zigbuild
+            binary_warn_bytes: 43000000
             binary_limit_bytes: 48000000
           - os: macos-latest
             target: x86_64-apple-darwin
             build_tool: cargo
+            binary_warn_bytes: 43000000
             binary_limit_bytes: 48000000
           - os: macos-latest
             target: aarch64-apple-darwin
             build_tool: cargo
+            binary_warn_bytes: 43000000
             binary_limit_bytes: 48000000
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             build_tool: cargo
+            binary_warn_bytes: 36000000
             binary_limit_bytes: 40000000
     steps:
       - uses: actions/checkout@v6
@@ -289,14 +325,19 @@ jobs:
             exit 1
           fi
           size="$(wc -c < "$bin" | tr -d '[:space:]')"
+          warn="${{ matrix.binary_warn_bytes }}"
           limit="${{ matrix.binary_limit_bytes }}"
           echo "binary=$bin"
           echo "target=${{ matrix.target }}"
           echo "size_bytes=$size"
+          echo "warn_bytes=$warn"
           echo "budget_bytes=$limit"
           if [ "$size" -gt "$limit" ]; then
             echo "release binary exceeds size budget for ${{ matrix.target }}: $size > $limit bytes" >&2
             exit 1
+          fi
+          if [ "$size" -gt "$warn" ]; then
+            echo "::warning::release binary for ${{ matrix.target }} is $size bytes, past the $warn-byte ratchet warn line (hard budget $limit bytes) — consider raising both bounds deliberately before this becomes a tag-time failure"
           fi
           case "${{ matrix.target }}" in
             *-unknown-linux-musl)
