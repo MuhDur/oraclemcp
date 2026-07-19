@@ -1139,7 +1139,11 @@ mod tests {
         for dir in dirs {
             let candidate = std::path::Path::new(dir).join(format!("{name}{suffix}"));
             if candidate.exists() {
-                return candidate.to_string_lossy().into_owned();
+                // Forward slashes: this string is embedded verbatim into TOML
+                // profiles (`token_exec = ["…"]`) in some tests, where Windows
+                // backslashes would be TOML escapes; `Command::new` accepts `/`
+                // on Windows just as well. No-op on Unix.
+                return candidate.to_string_lossy().replace('\\', "/");
             }
         }
         panic!("hermetic test requires `{name}` (looked in {dirs:?})");
@@ -1507,7 +1511,7 @@ mod tests {
             token_env = "OMCP_TEST_IAM_TOKEN"
             token_key_file = "{}"
             "#,
-            key_path.display()
+            key_path.display().to_string().replace('\\', "/")
         ));
         let mut opts = connect_options_for(&profile);
         inject_iam_token_with(
@@ -1588,7 +1592,7 @@ mod tests {
             token_exec = ["{touch}", "{marker}"]
             "#,
             touch = touch,
-            marker = marker.display()
+            marker = marker.display().to_string().replace('\\', "/")
         ))
         .expect("config")
         .profiles
