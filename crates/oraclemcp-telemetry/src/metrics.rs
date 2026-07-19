@@ -43,6 +43,37 @@ impl Histogram {
     }
 }
 
+/// Hard ceiling on the number of distinct label combinations any single
+/// metric instrument tracks. Set comfortably above the server's entire
+/// legitimate tool/status/reason-class surface (a few dozen combinations at
+/// most — see `oraclemcp::registry::TOOL_NAMES` plus the bounded operator
+/// custom-tool budget), so ordinary traffic never collides with it, while
+/// staying finite: a caller that feeds an unvalidated label per request (for
+/// example the MCP `tools/call` name, which reaches metrics before any
+/// tool-registry check) cannot grow a metric map without bound.
+const MAX_SERIES_PER_INSTRUMENT: usize = 512;
+
+/// Substituted for every label of a metric key once its instrument has
+/// reached [`MAX_SERIES_PER_INSTRUMENT`] distinct combinations, so continued
+/// attacker-driven cardinality growth collapses into one visible, bounded
+/// bucket instead of either growing the process's memory unboundedly or being
+/// silently dropped.
+const CARDINALITY_OVERFLOW_LABEL: &str = "__cardinality_limit__";
+
+/// Return `key` unless recording it under `map` would create a new series
+/// beyond [`MAX_SERIES_PER_INSTRUMENT`] distinct existing combinations, in
+/// which case return the bounded overflow key from `overflow` instead. An
+/// already-tracked key is always preserved verbatim (that's not new growth).
+/// Must be called while holding `map`'s lock so the size check is atomic with
+/// the subsequent insert.
+fn bounded_key<K: Ord, V>(map: &BTreeMap<K, V>, key: K, overflow: impl FnOnce() -> K) -> K {
+    if map.contains_key(&key) || map.len() < MAX_SERIES_PER_INSTRUMENT {
+        key
+    } else {
+        overflow()
+    }
+}
+
 /// A serializable histogram snapshot.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistogramSnapshot {
@@ -79,13 +110,19 @@ impl Metrics {
     }
 
     /// Record an MCP request outcome (`status` = `ok` / `error` / `busy` / …).
+    ///
+    /// `tool` reaches this call before any tool-registry validation (an MCP
+    /// `tools/call` name is caller-supplied), so it is not itself a bounded
+    /// label; cardinality is capped here rather than trusted upstream.
     pub fn record_request(&self, tool: &str, status: &str) {
-        *self
-            .requests
-            .lock()
-            .expect("metrics mutex poisoned")
-            .entry((tool.to_owned(), status.to_owned()))
-            .or_insert(0) += 1;
+        let mut requests = self.requests.lock().expect("metrics mutex poisoned");
+        let key = bounded_key(&requests, (tool.to_owned(), status.to_owned()), || {
+            (
+                CARDINALITY_OVERFLOW_LABEL.to_owned(),
+                CARDINALITY_OVERFLOW_LABEL.to_owned(),
+            )
+        });
+        *requests.entry(key).or_insert(0) += 1;
     }
 
     /// Record an MCP request outcome scoped to the server-derived lane and
@@ -98,12 +135,13 @@ impl Metrics {
         status: &str,
     ) {
         self.record_request(tool, status);
-        *self
-            .lane_requests
-            .lock()
-            .expect("metrics mutex poisoned")
-            .entry(LaneRequestKey::new(lane_id, subject_id_hash, tool, status))
-            .or_insert(0) += 1;
+        let mut lane_requests = self.lane_requests.lock().expect("metrics mutex poisoned");
+        let key = bounded_key(
+            &lane_requests,
+            LaneRequestKey::new(lane_id, subject_id_hash, tool, status),
+            LaneRequestKey::overflow,
+        );
+        *lane_requests.entry(key).or_insert(0) += 1;
     }
 
     /// Record a per-lane MCP request latency (ms).
@@ -114,12 +152,16 @@ impl Metrics {
         tool: &str,
         ms: u64,
     ) {
-        self.lane_request_duration_ms
+        let mut histograms = self
+            .lane_request_duration_ms
             .lock()
-            .expect("metrics mutex poisoned")
-            .entry(LaneRequestDurationKey::new(lane_id, subject_id_hash, tool))
-            .or_default()
-            .observe(ms);
+            .expect("metrics mutex poisoned");
+        let key = bounded_key(
+            &histograms,
+            LaneRequestDurationKey::new(lane_id, subject_id_hash, tool),
+            LaneRequestDurationKey::overflow,
+        );
+        histograms.entry(key).or_default().observe(ms);
     }
 
     /// Record a request that was blocked before useful DB work could happen,
@@ -136,17 +178,13 @@ impl Metrics {
         reason_class: &str,
         operating_level: &str,
     ) {
-        *self
-            .lane_blocked
-            .lock()
-            .expect("metrics mutex poisoned")
-            .entry(LaneBlockedKey::new(
-                lane_id,
-                subject_id_hash,
-                reason_class,
-                operating_level,
-            ))
-            .or_insert(0) += 1;
+        let mut lane_blocked = self.lane_blocked.lock().expect("metrics mutex poisoned");
+        let key = bounded_key(
+            &lane_blocked,
+            LaneBlockedKey::new(lane_id, subject_id_hash, reason_class, operating_level),
+            LaneBlockedKey::overflow,
+        );
+        *lane_blocked.entry(key).or_insert(0) += 1;
     }
 
     /// Record a DB query duration (ms).
@@ -397,6 +435,15 @@ impl LaneBlockedKey {
             operating_level: operating_level.to_owned(),
         }
     }
+
+    fn overflow() -> Self {
+        Self::new(
+            CARDINALITY_OVERFLOW_LABEL,
+            CARDINALITY_OVERFLOW_LABEL,
+            CARDINALITY_OVERFLOW_LABEL,
+            CARDINALITY_OVERFLOW_LABEL,
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -416,6 +463,15 @@ impl LaneRequestKey {
             status: status.to_owned(),
         }
     }
+
+    fn overflow() -> Self {
+        Self::new(
+            CARDINALITY_OVERFLOW_LABEL,
+            CARDINALITY_OVERFLOW_LABEL,
+            CARDINALITY_OVERFLOW_LABEL,
+            CARDINALITY_OVERFLOW_LABEL,
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -432,6 +488,14 @@ impl LaneRequestDurationKey {
             subject_id_hash: subject_id_hash.to_owned(),
             tool: tool.to_owned(),
         }
+    }
+
+    fn overflow() -> Self {
+        Self::new(
+            CARDINALITY_OVERFLOW_LABEL,
+            CARDINALITY_OVERFLOW_LABEL,
+            CARDINALITY_OVERFLOW_LABEL,
+        )
     }
 }
 
@@ -641,6 +705,57 @@ mod tests {
         assert!(text.contains("mcp_active_lanes 1"));
         assert!(text.contains("db_errors_total{ora_code=\"942\"} 1"));
         assert!(text.contains("db_pool_active_connections 2"));
+    }
+
+    #[test]
+    fn tool_label_cardinality_is_bounded_against_attacker_controlled_names() {
+        // The MCP `tools/call` name reaches `record_request`/`record_lane_request`
+        // before any tool-registry validation, so it is effectively
+        // attacker-controlled free text. Without a cap, a request per unique
+        // name would grow every label-keyed map without bound (a DoS via
+        // unbounded process memory / Prometheus exposition size). Prove that
+        // many thousands of distinct inputs still leave every instrument
+        // capped at `MAX_SERIES_PER_INSTRUMENT` (+1 for the overflow bucket).
+        let m = Metrics::new();
+        let attempted = MAX_SERIES_PER_INSTRUMENT * 4;
+        for i in 0..attempted {
+            let tool = format!("attacker-tool-{i}");
+            m.record_lane_request("lane-a", "subject-sha256:abc", &tool, "error");
+            m.record_lane_request_duration_ms("lane-a", "subject-sha256:abc", &tool, 1);
+            m.record_lane_blocked("lane-a", "subject-sha256:abc", &tool, &tool);
+        }
+        let s = m.snapshot();
+        assert!(
+            s.requests.len() <= MAX_SERIES_PER_INSTRUMENT + 1,
+            "requests grew to {} distinct series",
+            s.requests.len()
+        );
+        assert!(
+            s.lane_requests.len() <= MAX_SERIES_PER_INSTRUMENT + 1,
+            "lane_requests grew to {} distinct series",
+            s.lane_requests.len()
+        );
+        assert!(
+            s.lane_request_duration_ms.len() <= MAX_SERIES_PER_INSTRUMENT + 1,
+            "lane_request_duration_ms grew to {} distinct series",
+            s.lane_request_duration_ms.len()
+        );
+        assert!(
+            s.lane_blocked.len() <= MAX_SERIES_PER_INSTRUMENT + 1,
+            "lane_blocked grew to {} distinct series",
+            s.lane_blocked.len()
+        );
+        // The overflow bucket itself must have absorbed the excess, not
+        // dropped it: total observations across all lane_requests series
+        // still equals every attempted call.
+        let total: u64 = s.lane_requests.iter().map(|r| r.count).sum();
+        assert_eq!(total, attempted as u64);
+        assert!(
+            s.lane_requests
+                .iter()
+                .any(|r| r.tool == CARDINALITY_OVERFLOW_LABEL),
+            "overflow bucket must be visible once the cap is exceeded"
+        );
     }
 
     #[test]
