@@ -1,10 +1,31 @@
 //! Structured `tracing` JSON logging + OTLP telemetry wiring (plan §10; WP-D D1).
 //!
-//! A span per request carries `request_id` / `tool_name` / `db_user`; logs go to
-//! stderr as JSON, filtered by `RUST_LOG` (default `info`). **Bind values and
-//! secrets are never logged** — that discipline is the caller's, enforced by
-//! only ever logging SQL SHA-256 + previews (see `oraclemcp-audit`) and, on the
-//! OTLP path, by [`crate::otlp::Redactor`].
+//! Logs go to stderr as JSON, filtered by `RUST_LOG` (default `info`).
+//!
+//! **Redaction scope (§31.2 correction — read this before adding a log site):**
+//! [`crate::otlp::Redactor`] is wired into the **OTLP export path only**
+//! (`OtlpLogLayer`/`OtlpTraceLayer`, see [`crate::otlp::logs`]/[`crate::otlp::traces`]).
+//! The local stderr JSON layer installed below has **no structural redaction
+//! backstop** — it is the raw `tracing_subscriber` JSON formatter, unfiltered.
+//! Bind values and secrets are never logged only because callers are
+//! disciplined about it (SQL is logged as SHA-256 + preview, never binds — see
+//! `oraclemcp-audit`); nothing in this module enforces that on the stderr path.
+//! If a log call ever interpolates a raw error message that could carry a
+//! secret (a connect string, a bearer token), it reaches stderr unredacted.
+//! See [`crate::otlp::redact`] for the policy enforced on the OTLP path only.
+//!
+//! **Correlation:** there is no per-request span created anywhere in this
+//! crate or wired automatically by [`init_telemetry`] — that would be a
+//! decision for the request-dispatch path, which lives outside
+//! `oraclemcp-telemetry`. What *is* real: when a caller does create a span
+//! (`#[instrument]` / `info_span!`) while the OTLP traces layer is installed,
+//! [`crate::otlp::logs::OtlpLogLayer`] correlates any log event emitted inside
+//! it by attaching that span's `trace_id`/`span_id` (see
+//! `crate::otlp::traces::current_span_trace_context`, crate-private). Today
+//! only test code and one trace-level span (`catalog_extract.rs`, in
+//! `oraclemcp-db`) create spans, so this plumbing is real but mostly dormant —
+//! it activates automatically wherever a span gets created, without another
+//! change to this crate.
 //!
 //! [`init_telemetry`] is the wired entry point: it installs the JSON stderr
 //! layer and, when an [`OtlpConfig`](crate::otlp::OtlpConfig) is supplied, also
@@ -26,6 +47,25 @@ use crate::otlp::{ExportPump, Redactor};
 
 static INIT: OnceLock<()> = OnceLock::new();
 
+/// Build the local JSON layer at the one spot both entry points (and the
+/// redaction-scope test below) share, so the test exercises the exact
+/// production construction rather than a hand copy that could drift.
+///
+/// **No redaction runs here.** This is the raw `tracing_subscriber` JSON
+/// formatter over `writer` — see the module docs' "Redaction scope" note.
+fn json_fmt_layer<S, W>(writer: W) -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + 'static,
+{
+    tracing_subscriber::fmt::layer()
+        .json()
+        .with_current_span(true)
+        .with_span_list(false)
+        .with_target(true)
+        .with_writer(writer)
+}
+
 /// Initialize JSON logging to stderr, filtered by `RUST_LOG` (default `level`).
 /// Idempotent: returns `true` on the first call that installs the subscriber,
 /// `false` if logging was already initialized (so tests / repeated `serve`
@@ -40,13 +80,9 @@ pub fn init_json_logging(default_level: &str) -> bool {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
         // `try_init` returns Err if a global subscriber is already set; we treat
         // that as "already initialized" rather than a hard error.
-        let _ = tracing_subscriber::fmt()
-            .json()
-            .with_current_span(true)
-            .with_span_list(false)
-            .with_target(true)
-            .with_writer(std::io::stderr)
-            .with_env_filter(filter)
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(json_fmt_layer(std::io::stderr))
             .try_init();
         installed = true;
     });
@@ -97,12 +133,7 @@ pub fn init_telemetry(default_level: &str, otlp: Option<OtlpConfig>) -> Telemetr
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
 
-    let json_layer = tracing_subscriber::fmt::layer()
-        .json()
-        .with_current_span(true)
-        .with_span_list(false)
-        .with_target(true)
-        .with_writer(std::io::stderr);
+    let json_layer = json_fmt_layer(std::io::stderr);
 
     match otlp {
         Some(config) => {
@@ -174,5 +205,59 @@ mod tests {
         assert!(guard.otlp_enabled(), "endpoint -> export pump started");
         assert!(guard.pump_handle().is_some());
         // Dropping the guard must perform a bounded drain + join without hanging.
+    }
+
+    /// An in-memory [`tracing_subscriber::fmt::MakeWriter`] so the redaction
+    /// scope test below can inspect what the local JSON layer actually wrote,
+    /// without touching the process's real stderr.
+    #[derive(Clone, Default)]
+    struct CapturingWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturingWriter {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl std::io::Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn local_stderr_layer_has_no_redaction_backstop_matching_the_doc() {
+        // Proves the module doc's "Redaction scope" claim: `json_fmt_layer`
+        // (the exact construction both init_json_logging and init_telemetry
+        // use for the local stderr path) runs no Redactor pass, so a
+        // secret-shaped field reaches the formatted line verbatim.
+        //
+        // Contrast with the OTLP path, which DOES redact the same shape of
+        // value before export — see otlp/logs.rs's
+        // `secret_attributes_are_dropped_and_bodies_redacted` and
+        // otlp/redact.rs's redaction tests. Together these two tests are the
+        // executable proof that the doc's scope claim matches reality.
+        let writer = CapturingWriter::default();
+        let subscriber = tracing_subscriber::registry().with(json_fmt_layer(writer.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(password = "QA_H8_SECRET_SENTINEL", "auth failed");
+        });
+        let out = writer.contents();
+        assert!(
+            out.contains("QA_H8_SECRET_SENTINEL"),
+            "local stderr JSON layer has no redaction backstop (matches the \
+             module doc's 'Redaction scope' note); captured: {out}"
+        );
     }
 }

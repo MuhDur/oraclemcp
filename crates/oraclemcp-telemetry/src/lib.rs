@@ -11,9 +11,13 @@
 //! [`otlp::OtlpConfig`]). With no endpoint set, logs stay local (JSON to stderr),
 //! metrics stay Prometheus-text/JSON-snapshot only, and traces stay `tracing`-only.
 //!
-//! **Secrets are never emitted**: SQL bind values, passwords, tokens, and wallet
-//! secrets are stripped by [`otlp::Redactor`] before any log/metric/span leaves
-//! the process.
+//! **Secrets are never emitted on the OTLP path**: SQL bind values, passwords,
+//! tokens, and wallet secrets are stripped by [`otlp::Redactor`] before any
+//! metric/span/OTLP-log leaves the process. That structural backstop covers
+//! OTLP export only — the always-on local stderr JSON layer
+//! (`init_json_logging`/`init_telemetry`) has no redaction pass and relies on
+//! caller discipline (never log SQL binds or raw secrets). See the `logging`
+//! module docs for the full scope + correlation notes.
 
 mod health;
 mod logging;

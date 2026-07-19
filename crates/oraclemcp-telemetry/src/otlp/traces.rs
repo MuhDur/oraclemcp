@@ -346,6 +346,29 @@ struct SpanState {
     trace_state: String,
 }
 
+/// Look up the enclosing span's threaded W3C trace/span id (and whether it was
+/// head-sampled), if [`OtlpTraceLayer`] has instrumented a span that is current
+/// on `ctx`. `None` when there is no current span, or `OtlpTraceLayer` is not
+/// installed on this subscriber (no `SpanState` extension present).
+///
+/// This is the correlation seam [`super::logs::OtlpLogLayer`] uses to attach
+/// `trace_id`/`span_id` to a log record emitted inside a span — real threading,
+/// not a stub, but it only fires for spans that actually get created. Whether
+/// the served request path creates a root span at all is a caller decision
+/// outside this crate.
+#[must_use]
+pub(crate) fn current_span_trace_context<S>(
+    ctx: &Context<'_, S>,
+) -> Option<([u8; 16], [u8; 8], bool)>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    let span = ctx.lookup_current()?;
+    let ext = span.extensions();
+    let state = ext.get::<SpanState>()?;
+    Some((state.trace_id, state.span_id, state.sampled))
+}
+
 // ===========================================================================
 // The Layer
 // ===========================================================================
@@ -745,5 +768,65 @@ mod tests {
                         super::super::redact::REDACTED.to_owned(),
                     ))
         }));
+    }
+
+    #[test]
+    fn current_span_trace_context_correlates_events_to_the_enclosing_span() {
+        // This is the exact seam `OtlpLogLayer::on_event` (otlp/logs.rs) calls
+        // to attach a log event's trace_id/span_id to the enclosing span, when
+        // one exists — the real fix behind the "correlation is aspirational"
+        // finding (plan §31.2 item 3). Outside any span there is nothing to
+        // correlate with; inside a span, the ids must match what the span
+        // itself threads through to the exported `FinishedSpan`.
+        type Capture = Option<([u8; 16], [u8; 8], bool)>;
+
+        // Mirrors `OtlpLogLayer::on_event`'s call into `current_span_trace_context`,
+        // recording the result instead of building a `LogRecordInput` from it.
+        struct Probe(Arc<Mutex<Vec<Capture>>>);
+        impl<S> Layer<S> for Probe
+        where
+            S: Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_event(&self, _event: &Event<'_>, ctx: Context<'_, S>) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(current_span_trace_context(&ctx));
+            }
+        }
+
+        let sink = Arc::new(CollectingSink::default());
+        let trace_layer = OtlpTraceLayer::new(sink.clone(), Redactor::new(), 1.0);
+        let captured: Arc<Mutex<Vec<Capture>>> = Arc::new(Mutex::new(Vec::new()));
+        let probe = Probe(captured.clone());
+        let subscriber = Registry::default().with(trace_layer).with(probe);
+
+        with_default(subscriber, || {
+            tracing::info!("outside any span");
+            let root = tracing::info_span!("request");
+            let _g = root.enter();
+            tracing::info!("inside the span");
+        });
+
+        let captures = captured.lock().unwrap();
+        assert_eq!(captures.len(), 2, "one event outside + one inside the span");
+        assert!(
+            captures[0].is_none(),
+            "no enclosing span -> nothing to correlate with"
+        );
+        let (trace_id, span_id, sampled) =
+            captures[1].expect("event inside an instrumented span correlates");
+        assert!(sampled, "sample ratio 1.0 -> sampled");
+
+        let spans = sink.spans.lock().unwrap();
+        assert_eq!(spans.len(), 1, "root span closed and reached the sink");
+        assert_eq!(
+            spans[0].trace_id, trace_id,
+            "correlated trace_id matches the span's own"
+        );
+        assert_eq!(
+            spans[0].span_id, span_id,
+            "correlated span_id matches the span's own"
+        );
     }
 }

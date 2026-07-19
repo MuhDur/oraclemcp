@@ -159,6 +159,108 @@ fn tstz_round_trips_with_offset_in_structured_carrier() {
 }
 
 #[test]
+fn vector_dense_int8_boundary_values_round_trip_exactly() {
+    // 23ai VECTOR(*, INT8): dense storage, raw i8 values (the driver's exact
+    // representation range, per connection.rs's `structured_vector_values`).
+    // `serialize_cell` treats a structured cell as verbatim — this proves that
+    // passthrough really is byte-for-byte, not just "the right shape": the
+    // boundary values -128/127 must survive, not saturate or reformat.
+    let structured = json!({
+        "kind": "vector",
+        "storage": "dense",
+        "format": "int8",
+        "values": [-128, -1, 0, 1, 127]
+    });
+    let rendered = serialize_cell(
+        &OracleCell::structured("VECTOR", structured.clone()),
+        &SerializeOptions::default(),
+    );
+    assert_eq!(rendered, structured);
+    assert_eq!(rendered["values"], json!([-128, -1, 0, 1, 127]));
+}
+
+#[test]
+fn vector_dense_float_values_round_trip_exactly() {
+    // float32/float64 dense vectors: fractional + negative values must reach
+    // JSON as exact numbers, not truncated/rounded/re-stringified.
+    for (format, values) in [
+        ("float32", vec![-3.5_f64, 0.0, 1.25, 100.0]),
+        ("float64", vec![-0.000_001, 2.718_181_828, -42.0, 0.0]),
+    ] {
+        let structured = json!({
+            "kind": "vector",
+            "storage": "dense",
+            "format": format,
+            "values": values
+        });
+        let rendered = serialize_cell(
+            &OracleCell::structured("VECTOR", structured.clone()),
+            &SerializeOptions::default(),
+        );
+        assert_eq!(rendered, structured, "{format} dense vector round-trips");
+        assert_eq!(rendered["values"], json!(values), "{format} values exact");
+    }
+}
+
+#[test]
+fn vector_dense_binary_format_values_round_trip_exactly() {
+    // BINARY-format VECTOR: bit-packed bytes surfaced as a plain byte array
+    // (0..=255), per connection.rs's `VectorValues::Binary` arm.
+    let structured = json!({
+        "kind": "vector",
+        "storage": "dense",
+        "format": "binary",
+        "values": [0, 255, 128, 1]
+    });
+    let rendered = serialize_cell(
+        &OracleCell::structured("VECTOR", structured.clone()),
+        &SerializeOptions::default(),
+    );
+    assert_eq!(rendered, structured);
+    assert_eq!(rendered["values"], json!([0, 255, 128, 1]));
+}
+
+#[test]
+fn vector_sparse_indices_and_values_round_trip_exactly() {
+    // Sparse storage carries num_dimensions + parallel indices/values arrays;
+    // both must line up exactly after passthrough (distinct from the
+    // sparse example already covered inside `tstz_round_trips_with_offset_in_
+    // structured_carrier`'s nested array, so this pins sparse VECTOR as its
+    // own top-level cell rather than only as one item of a composite).
+    let structured = json!({
+        "kind": "vector",
+        "storage": "sparse",
+        "format": "float64",
+        "num_dimensions": 8,
+        "indices": [1, 2, 5],
+        "values": [-2.5, 0.0, 3.75]
+    });
+    let rendered = serialize_cell(
+        &OracleCell::structured("VECTOR", structured.clone()),
+        &SerializeOptions::default(),
+    );
+    assert_eq!(rendered, structured);
+    assert_eq!(rendered["indices"], json!([1, 2, 5]));
+    assert_eq!(rendered["values"], json!([-2.5, 0.0, 3.75]));
+    assert_eq!(rendered["num_dimensions"], json!(8));
+}
+
+#[test]
+fn vector_structured_cell_carries_the_current_contract_version() {
+    // Every `OracleCell::structured` cell (VECTOR included) is tagged with the
+    // structured-payload contract version so a future shape bump is detectable
+    // by consumers, not just by the schema golden test.
+    let cell = OracleCell::structured(
+        "VECTOR",
+        json!({"kind": "vector", "storage": "dense", "format": "int8", "values": [1]}),
+    );
+    assert_eq!(
+        cell.structured_contract_version,
+        Some(oraclemcp_db::ORACLE_CELL_STRUCTURED_CONTRACT_VERSION)
+    );
+}
+
+#[test]
 fn character_types_are_strings() {
     assert_eq!(ser("VARCHAR2(50)", "hello"), json!("hello"));
     assert_eq!(ser("CHAR(3)", "abc"), json!("abc"));

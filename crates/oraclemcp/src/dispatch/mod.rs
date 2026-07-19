@@ -54,20 +54,20 @@ use oraclemcp_core::{
 use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
     AsOf, CatalogInvalidation, DbError, DbRequestQuota, DbmsOutput, DependentObject,
-    DependentsProbe, IncomparableMaskedColumn, MaskComparabilityBreak, OracleBackend, OracleBind,
-    OracleCatalogResolverCache, OracleCell, OracleConnection, OracleConnectionInfo, OracleRow,
-    OrientForeignKey, OrientHotObject, OrientRecentDdlObject, OrientSchemaObject, PlanCostEstimate,
-    QuarantineOutcome, QueryCaps, QueryDiffSource, QueryResponse, QueryRowStream,
-    QueryRowStreamStart, ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate,
-    ResultMaskingDecisionAction, ResultMaskingDecisionSource, ResultMaskingPolicy,
-    ResultMaskingRule, SearchObject, SemanticSearchMetric, SerializeOptions, StructuredDecodeCaps,
-    compile_errors, compile_object_statements, describe_columns, describe_constraints,
-    describe_index, describe_trigger, describe_view, diff_query_responses, execute_immediate_audit,
-    explain_plan, find_unused_declarations, get_ddl, get_source, get_sources_by_name,
-    incomparable_masked_columns, list_objects, list_schemas, orient_fks, orient_hot_objects,
-    orient_recent_ddl, orient_schema, paginated_sql, plan_cost_estimate, plscope_identifiers,
-    plscope_statements, primary_key_columns, probe_dependents, read_lob, read_query,
-    read_query_as_of, read_query_named, resolved_relations_read_purity, sample_rows,
+    DependentsProbe, FlashbackRefusalKind, IncomparableMaskedColumn, MaskComparabilityBreak,
+    OracleBackend, OracleBind, OracleCatalogResolverCache, OracleCell, OracleConnection,
+    OracleConnectionInfo, OracleRow, OrientForeignKey, OrientHotObject, OrientRecentDdlObject,
+    OrientSchemaObject, PlanCostEstimate, QuarantineOutcome, QueryCaps, QueryDiffSource,
+    QueryResponse, QueryRowStream, QueryRowStreamStart, ResultColumnMatch, ResultMaskingAction,
+    ResultMaskingCertificate, ResultMaskingDecisionAction, ResultMaskingDecisionSource,
+    ResultMaskingPolicy, ResultMaskingRule, SearchObject, SemanticSearchMetric, SerializeOptions,
+    StructuredDecodeCaps, compile_errors, compile_object_statements, describe_columns,
+    describe_constraints, describe_index, describe_trigger, describe_view, diff_query_responses,
+    execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
+    get_sources_by_name, incomparable_masked_columns, list_objects, list_schemas, orient_fks,
+    orient_hot_objects, orient_recent_ddl, orient_schema, paginated_sql, plan_cost_estimate,
+    plscope_identifiers, plscope_statements, primary_key_columns, probe_dependents, read_lob,
+    read_query, read_query_as_of, read_query_named, resolved_relations_read_purity, sample_rows,
     search_objects, search_source, semantic_search_query, semantic_search_query_with_filter,
     semantic_search_text_query, semantic_search_text_query_with_filter, serialize_row,
 };
@@ -7151,6 +7151,74 @@ fn append_audit_with_observed_scn(
     Ok(())
 }
 
+/// Fixed, server-owned marker recorded when the `DBMS_FLASHBACK`-backed
+/// SCN-capture probe ([`AsOf::current_system_change_number`]) finds the
+/// capability absent (F-S1; SEC-4: self-heal DOWN, never silently UP). Never a
+/// real tool name or SQL statement — greppable in the audit trail so a
+/// probed, explicitly-degraded read is never confused with an ordinary one.
+const SCN_CAPABILITY_PROBE_TOOL: &str = "scn_capability_probe";
+
+/// Durably record that the SCN-capture probe found `DBMS_FLASHBACK`
+/// unavailable for this session, before the caller proceeds without an
+/// observed SCN. Reuses the existing audit-append surface
+/// ([`append_audit_with_observed_scn`]) with a fixed, server-owned marker
+/// `tool`/`sql` — never real SQL, never agent-controlled text — so the
+/// degradation is explicit and durable rather than folded invisibly into the
+/// SQL the agent actually ran.
+fn append_scn_capability_degraded_audit(
+    ctx: AuditEntryCtx<'_>,
+    detail: &str,
+) -> Result<(), ErrorEnvelope> {
+    append_audit_with_observed_scn(
+        ctx,
+        SCN_CAPABILITY_PROBE_TOOL,
+        &format!(
+            "-- SCN-capture probe: DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER capability \
+             unavailable; the surrounding read proceeds without an observed SCN ({detail})"
+        ),
+        "READ_ONLY",
+        None,
+        AuditOutcome::Failed,
+        None,
+    )
+}
+
+/// Capture the SCN of the current read snapshot for audit provenance without
+/// ever silently swapping the mechanism used underneath a `Ok` result (F-S1;
+/// SEC-4: self-heal DOWN, never silently UP).
+///
+/// [`AsOf::current_system_change_number`] types a missing `DBMS_FLASHBACK`
+/// grant (ORA-00904) as [`DbError::FlashbackRefusal`] /
+/// [`FlashbackRefusalKind::CapabilityUnavailable`] instead of quietly
+/// re-issuing a different server-owned query and returning `Ok` as though
+/// nothing changed. This is where that typed signal becomes policy: the read
+/// is not blocked on it — a hard refusal here would break every audited
+/// profile that has not separately granted `DBMS_FLASHBACK` execute, an
+/// ordinary deployment gap rather than a security event — but the
+/// degradation is explicit and durably audited (via
+/// [`append_scn_capability_degraded_audit`]) before the caller proceeds with
+/// `observed_scn = None`. Any OTHER error (privilege, connection,
+/// cancellation, …) still propagates untouched, exactly as before.
+async fn observed_scn_for_audit(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    ctx: AuditEntryCtx<'_>,
+) -> Result<Option<u64>, DbError> {
+    match AsOf::current_system_change_number(cx, conn).await {
+        Ok(scn) => Ok(Some(scn)),
+        Err(DbError::FlashbackRefusal {
+            kind: FlashbackRefusalKind::CapabilityUnavailable,
+            message,
+            ..
+        }) => {
+            append_scn_capability_degraded_audit(ctx, &message)
+                .map_err(db_internal_from_envelope)?;
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn audit_masking_action(action: ResultMaskingDecisionAction) -> AuditResultMaskingAction {
     match action {
         ResultMaskingDecisionAction::Pass => AuditResultMaskingAction::Pass,
@@ -7195,17 +7263,21 @@ fn audit_result_masking_certificate(
     }
 }
 
-/// Durably record one phase of an `oracle_query` read with its replay SCN.
+/// Durably record one phase of an `oracle_query` read, with its replay SCN
+/// when one was captured.
 ///
 /// The pending record is written before the data query is issued, so an audit
 /// failure refuses the agent-visible read. The terminal record binds any result
 /// masking certificate to the same replayable snapshot before rows leave the
-/// process.
+/// process. `observed_scn` is `None` only for the F-S1 explicit-degraded-mode
+/// case (the `DBMS_FLASHBACK` capability probe found it unavailable and
+/// [`observed_scn_for_audit`] already recorded that fact); the read is still
+/// durably audited, just without a captured snapshot.
 fn append_query_read_audit(
     ctx: AuditEntryCtx<'_>,
     tool: &str,
     sql: &str,
-    observed_scn: u64,
+    observed_scn: Option<u64>,
     verdict_certificate: &oraclemcp_audit::AuditVerdictCertificate,
     outcome: AuditOutcome,
     response: Option<&mut QueryResponse>,
@@ -7238,7 +7310,7 @@ fn append_query_read_audit(
             audit_timestamp(),
             true,
             None,
-            Some(observed_scn),
+            observed_scn,
             Some(verdict_certificate),
         )
         .map_err(audit_error_to_envelope)?;
@@ -7635,7 +7707,7 @@ impl GuardedGeneratedReadConn<'_> {
         let danger = ensure_generated_read_sql_allowed(sql).map_err(db_internal_from_envelope)?;
         let danger = audit_danger_string(danger);
         let observed_scn = match self.audit.entry.auditor {
-            Some(_) => Some(AsOf::current_system_change_number(cx, self.inner).await?),
+            Some(_) => observed_scn_for_audit(cx, self.inner, self.audit.entry).await?,
             None => None,
         };
         append_audit_with_observed_scn(
@@ -13856,11 +13928,21 @@ impl OracleDispatcher {
                     ));
                 }
 
+                let read_audit_evidence =
+                    collect_read_audit_db_evidence(cx, auditor, &read_conn).await?;
+                let read_audit = AuditEntryCtx {
+                    auditor,
+                    subject: &request_subject,
+                    db_evidence: read_audit_evidence.as_ref(),
+                };
+
                 // Resolve every structured flashback target before execution,
                 // regardless of whether audit is configured. Timestamp input
                 // becomes the exact SCN Oracle selected, which the response
                 // echoes as a replay handle; the guard still sees only the
-                // unchanged base SQL.
+                // unchanged base SQL. A missing DBMS_FLASHBACK grant here
+                // still typed-refuses (K9's replay contract genuinely needs
+                // the capability — there is no snapshot-less AS-OF read).
                 let replay_target = match as_of.as_ref() {
                     Some(as_of) => Some(AsOf::Scn(
                         as_of
@@ -13870,25 +13952,34 @@ impl OracleDispatcher {
                     )),
                     None => None,
                 };
+                // F-S1 (SEC-4: self-heal DOWN, never silently UP): an ordinary
+                // (non-AS-OF) audited read only probes the SCN for audit
+                // provenance, so a missing DBMS_FLASHBACK grant degrades this
+                // read explicitly via `observed_scn_for_audit` (which audits
+                // the degradation itself) rather than blocking every audited
+                // profile that has not separately granted the capability.
                 let observed_scn = match (auditor, replay_target.as_ref()) {
                     (Some(_), Some(AsOf::Scn(scn))) => Some(*scn),
                     (Some(_), Some(AsOf::Timestamp(_))) => unreachable!(
                         "audited timestamp flashback targets are resolved to SCNs before execution"
                     ),
-                    (Some(_), None) => Some(
-                        AsOf::current_system_change_number(cx, &read_conn)
-                            .await
-                            .map_err(DbError::into_envelope)?,
-                    ),
+                    (Some(_), None) => observed_scn_for_audit(cx, &read_conn, read_audit)
+                        .await
+                        .map_err(DbError::into_envelope)?,
                     (None, _) => None,
                 };
-                let audit_certificate = observed_scn
-                    .map(|observed_scn| {
+                // The certificate is built whenever an auditor is configured,
+                // even when `observed_scn` degraded to `None` above: the read
+                // stays durably audited, just without a captured snapshot
+                // (`VerdictCertificate::with_observed_scn` already accepts
+                // `Option<u64>`, so this needs no new API).
+                let audit_certificate = auditor
+                    .map(|_| {
                         verdict_certificate
                             .as_ref()
                             .expect("a successful prepared read gate always retains its certificate")
                             .clone()
-                            .with_observed_scn(Some(observed_scn))
+                            .with_observed_scn(observed_scn)
                             .audit_certificate()
                     })
                     .transpose()
@@ -13898,16 +13989,7 @@ impl OracleDispatcher {
                             format!("cannot persist registered verdict certificate: {error}"),
                         )
                     })?;
-                let read_audit_evidence =
-                    collect_read_audit_db_evidence(cx, auditor, &read_conn).await?;
-                let read_audit = AuditEntryCtx {
-                    auditor,
-                    subject: &request_subject,
-                    db_evidence: read_audit_evidence.as_ref(),
-                };
-                if let (Some(observed_scn), Some(audit_certificate)) =
-                    (observed_scn, audit_certificate.as_ref())
-                {
+                if let Some(audit_certificate) = audit_certificate.as_ref() {
                     append_query_read_audit(
                         read_audit,
                         audit_tool,
@@ -13949,9 +14031,7 @@ impl OracleDispatcher {
                 let mut response = match read {
                     Ok(response) => response,
                     Err(error) => {
-                        if let (Some(observed_scn), Some(audit_certificate)) =
-                            (observed_scn, audit_certificate.as_ref())
-                        {
+                        if let Some(audit_certificate) = audit_certificate.as_ref() {
                             append_query_read_audit(
                                 read_audit,
                                 audit_tool,
@@ -13965,9 +14045,7 @@ impl OracleDispatcher {
                         return Err(DbError::into_envelope(error));
                     }
                 };
-                if let (Some(observed_scn), Some(audit_certificate)) =
-                    (observed_scn, audit_certificate.as_ref())
-                {
+                if let Some(audit_certificate) = audit_certificate.as_ref() {
                     append_query_read_audit(
                         read_audit,
                         audit_tool,

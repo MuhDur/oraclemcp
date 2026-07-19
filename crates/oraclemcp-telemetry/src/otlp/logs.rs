@@ -205,6 +205,14 @@ impl Visit for EventVisitor {
 /// become OTLP log records (in addition to the local JSON-to-stderr layer). The
 /// layer only `submit`s into the pump's bounded queue — it never blocks or
 /// exports inline.
+///
+/// **Correlation:** when the event is emitted inside a span that
+/// [`super::traces::OtlpTraceLayer`] has instrumented (i.e. some caller created
+/// one — via `#[instrument]` or `info_span!`), the record's `trace_id`/`span_id`
+/// are set from that span via [`super::traces::current_span_trace_context`], so
+/// the log line and the span line up in the OTLP backend. Outside any span
+/// (which is most of the codebase today — see the crate root docs), the record
+/// carries no trace context; this layer does not manufacture one.
 pub struct OtlpLogLayer {
     pump: PumpHandle,
     target_prefix_filter: Option<String>,
@@ -239,7 +247,7 @@ impl<S> Layer<S> for OtlpLogLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let target = event.metadata().target();
         // Never re-capture our own export-failure logs (feedback-loop guard).
         if target.starts_with(self.exclude_prefix.as_str()) {
@@ -261,6 +269,12 @@ where
         let mut record =
             LogRecordInput::new(map_level(event.metadata().level()), visitor.body, now)
                 .with_attribute("target", event.metadata().target());
+        // Correlate with the enclosing span, when one exists (see the type doc).
+        if let Some((trace_id, span_id, sampled)) = super::traces::current_span_trace_context(&ctx)
+        {
+            let flags = u32::from(sampled);
+            record = record.with_trace_context(trace_id.to_vec(), span_id.to_vec(), flags);
+        }
         for (key, value) in visitor.attributes {
             record = record.with_attribute(key, value);
         }

@@ -9874,6 +9874,138 @@ mod audit_wiring {
         );
     }
 
+    /// F-S1 discriminating fixture: a profile whose Oracle account lacks
+    /// EXECUTE on `SYS.DBMS_FLASHBACK`. Every other read succeeds normally
+    /// (mirroring [`OneRowMock`]); only `DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER`
+    /// fails ORA-00904 — the exact real-world capability gap F-S1 targets.
+    /// Before the fix, `AsOf::current_system_change_number` caught this ORA
+    /// code and silently re-issued `V$DATABASE.CURRENT_SCN` under the same
+    /// `Ok` result; this mock has no branch for that legacy query, so a
+    /// regression back to the silent substitution would surface as a parse
+    /// failure ("Oracle returned no current system change number") rather
+    /// than quietly succeeding.
+    struct ScnCapabilityUnavailableMock;
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for ScnCapabilityUnavailableMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo {
+                current_schema: Some("APP".to_owned()),
+                ..Default::default()
+            })
+        }
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+                return Ok(rows);
+            }
+            if sql
+                .to_ascii_lowercase()
+                .contains("get_system_change_number")
+            {
+                return Err(DbError::Query(
+                    "ORA-00904: \"SYS\".\"DBMS_FLASHBACK\": invalid identifier".to_owned(),
+                ));
+            }
+            Ok(vec![OracleRow {
+                columns: vec![(
+                    "C".to_owned(),
+                    OracleCell::new("NUMBER", Some("1".to_owned())),
+                )],
+            }])
+        }
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    /// F-S1 / SEC-4 discriminating test (bead oraclemcp-eng-program-bp8ia.8.3):
+    /// when the SCN-capture capability is absent, `oracle_query` must degrade
+    /// EXPLICITLY and AUDIT the degradation — never silently substitute a
+    /// different SQL source under an unmarked `Ok`. Before the fix this test
+    /// fails: the pre-fix probe swallowed ORA-00904 internally and returned a
+    /// plain `Some(424242)`-shaped success indistinguishable from the
+    /// capability actually being present, so none of the assertions below
+    /// (the dedicated `scn_capability_probe` record, or `observed_scn: None`
+    /// on the read's own records) would hold.
+    #[test]
+    fn scn_capability_absent_degrades_explicitly_and_audits_instead_of_silently_falling_back() {
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher =
+            dispatcher_with_conn(Box::new(ScnCapabilityUnavailableMock), ddl_level(), auditor);
+        let out = dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("a missing DBMS_FLASHBACK grant degrades the read; it must not refuse it");
+        assert!(
+            out.get("rows").is_some(),
+            "F-S1 degrades explicitly rather than blocking every audited profile \
+             that has not granted DBMS_FLASHBACK"
+        );
+        assert!(
+            out.get("observed_scn").is_none_or(|v| v.is_null()),
+            "no SCN was captured, so none is echoed to the client"
+        );
+
+        let records = sink.records();
+        assert_eq!(
+            records.len(),
+            3,
+            "an explicit degradation marker, then Pending then Succeeded for the read itself"
+        );
+        assert_eq!(records[0].tool, "scn_capability_probe");
+        assert_eq!(records[0].outcome, AuditOutcome::Failed);
+        assert_eq!(
+            records[0].observed_scn, None,
+            "the probe failure record carries no SCN"
+        );
+        assert_eq!(records[1].tool, "oracle_query");
+        assert_eq!(records[1].outcome, AuditOutcome::Pending);
+        assert_eq!(records[2].tool, "oracle_query");
+        assert_eq!(records[2].outcome, AuditOutcome::Succeeded);
+        assert_eq!(
+            records[1].observed_scn, None,
+            "the read is audited without ever fabricating a substitute SCN"
+        );
+        assert_eq!(records[2].observed_scn, None);
+        assert_eq!(records[2].prev_hash, records[1].entry_hash);
+
+        // The verdict certificate still binds the (SCN-less) read records —
+        // the read stays proof-carrying even in the degraded case.
+        let certificates = sink.certificates();
+        assert!(
+            certificates[1]
+                .as_ref()
+                .is_some_and(|certificate| certificate.matches_record(&records[1])),
+            "Pending record still carries a bound verdict certificate"
+        );
+        assert!(
+            certificates[2]
+                .as_ref()
+                .is_some_and(|certificate| certificate.matches_record(&records[2])),
+            "Succeeded record still carries a bound verdict certificate"
+        );
+    }
+
     #[test]
     fn masked_read_carries_audit_bound_certificate() {
         let (auditor, sink) = auditor_with_sink();
