@@ -294,7 +294,10 @@ jobs:
     name: Rust workspace (Windows)
     needs: web-build
     runs-on: windows-latest
-    timeout-minutes: 45
+    # A cold full-workspace Windows compile of --all-targets runs ~45 min; with
+    # the rust-cache below warm it is far shorter, but the first (cold) run needs
+    # headroom, and windows-msvc linking is slow.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6
         with:
@@ -306,6 +309,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # This job previously had NO cache, so every run cold-compiled the whole
+      # workspace and eventually exceeded the timeout. Cache like the Linux jobs
+      # (separate key: rust-cache keys include the OS/target, so no collision).
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo test workspace on Windows
         run: cargo test --workspace --all-targets
 
