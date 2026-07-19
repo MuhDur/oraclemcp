@@ -1191,9 +1191,15 @@ mod tests {
             .expect("helper service lock");
         let ready = PathBuf::from(ready);
         fs::write(&ready, b"ready\n").expect("publish helper readiness");
-        File::open(ready.parent().expect("ready parent"))
-            .and_then(|dir| dir.sync_all())
-            .expect("fsync helper readiness");
+        // Directory fsync is a Unix concept and a no-op elsewhere. Doing it
+        // inline via `File::open(dir).sync_all()` panics on Windows, where a
+        // directory handle needs `FILE_FLAG_BACKUP_SEMANTICS` that
+        // `std::fs::File::open` never sets. That panic would unwind this helper,
+        // drop the service lock, and release the OS lock *after* the readiness
+        // file already exists — letting the parent contender win a lock it must
+        // be excluded from. Route the durability step through the same
+        // cross-platform helper the store itself uses (see `fsync_dir`).
+        fsync_dir(ready.parent().expect("ready parent")).expect("fsync helper readiness");
         loop {
             thread::sleep(Duration::from_secs(60));
         }
