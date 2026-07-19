@@ -1487,6 +1487,17 @@ impl PreparedRestore {
         // Identity captured before the swap to detect a post-commit dir swap.
         let staging_ident = dir_identity(&staging_dir).ok();
 
+        // Close our directory handle to the staging tree before the commit
+        // renames it into place. cap-std opens directories without
+        // FILE_SHARE_DELETE, so on Windows a still-live `staging_dir` here makes
+        // the staging->state rename (and any rollback `remove_dir_all`) fail
+        // with a sharing violation (os error 32). Everything Phase 2 needs is
+        // already captured by value — the path (`staging_dir_path`) and the
+        // directory identity (`staging_ident`); the committed tree is re-opened
+        // fresh for post-swap verification, so the dev/ino swap check is
+        // unaffected. Harmless on Unix, where rename tolerates open handles.
+        drop(staging_dir);
+
         // ---- Phase 2: commit transactionally; roll back on any failure. ----
         let mut undo: Vec<CommittedRename> = Vec::new();
         let mut report = RestoreApplyReport::default();
