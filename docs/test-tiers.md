@@ -75,7 +75,7 @@ gates a tag push, not a merge).
 | `mutation-safety.yml` — `cargo-mutants` over guard + audit | `mutation-safety.yml` | cron `17 2 * * *` (nightly) | 2 | scheduled |
 | `multi-nightly` floating-toolchain early warning | `ci.yml:multi-nightly` | every push+PR (not a schedule — see §4.3) | 1-shaped but advisory | advisory |
 | fuzz targets **compile** check (4 targets across `oraclemcp-guard`, `oraclemcp-audit`, and `oraclemcp-auth`; `cargo fuzz build`) | `ci.yml:fuzz-build` | every push+PR | 1-shaped but advisory | advisory |
-| fuzz targets **run** (actual corpus execution) | none automated — `cargo +nightly-2026-05-11 fuzz run <target>` locally only | manual | — (gap; see §4.4) | n/a |
+| bounded fuzz campaigns (5 matrix shards: guard ×2, config, audit, auth) | `fuzz.yml:fuzz` | daily + manual dispatch | 2 | scheduled |
 | gvenzl 23ai matrix + VECTOR smoke (real live DB) | `ci.yml:oracle-free23` (`scripts/e2e/oracle_version_matrix.sh --log --lane free23`) | every push+PR | 1 (should be 2; see §4.1) | required |
 | gvenzl full ladder (XE 18 / XE 21 / FREE 23ai) | `scripts/e2e/oracle_version_matrix.sh --log` | operator/agent-run, no schedule | 2-shaped, executed as 3 | manual |
 | `scripts/coverage_baseline.sh` (code-coverage baseline, bead D1; `tests/coverage/BASELINE.{json,md}`) | local / not wired into CI | on demand (deliberate dispatch) | 2 | n/a (local generator, not a CI job yet; see §4.5, §6) |
@@ -112,12 +112,15 @@ prevent. As of this writing:
    `continue-on-error`, not from running off the per-PR path. The floating
    Rust nightly and the fuzz-compile check both execute every time, they just
    never fail the merge.
-3. **No automated fuzz-campaign lane exists.** `fuzz-build` only proves the 4
-   current targets across guard, audit, and auth still *compile*; running them against
-   a corpus (`cargo fuzz run <target>`) is a local-only, manual action today.
-   Plan §30.6 describes a Tier 2 aspiration of "22 protocol targets + the new
-   guard/config/sql targets" — the target count itself is aspirational too,
-   not just the scheduled-run lane; today there are 4 across those 3 crates.
+3. **Partially closed by D4: bounded campaigns now exist; the target-count goal
+   remains aspirational.** `fuzz-build` still provides a per-PR compile-only
+   check for the 4 guard/audit/auth targets. Separately,
+   `.github/workflows/fuzz.yml` runs all 5 current targets (guard ×2, config,
+   audit, auth) as independent daily/manual Tier-2 shards. Each campaign is
+   capped at 300 seconds, 2 GiB RSS, 10 seconds per input, two Cargo build jobs,
+   and a 20-minute job timeout. Plan §30.6's "22 protocol targets + the new
+   guard/config/sql targets" remains a breadth goal; D4 makes the 5 real
+   targets runnable on a bounded schedule without claiming the larger count.
 4. **Closed by beads D1 (§6) + D2 (§7): a code-coverage baseline and a
    changed-line ratchet now exist.** Before D1 there was no code-coverage
    measurement at all (`cargo llvm-cov` or equivalent) anywhere in
@@ -180,8 +183,9 @@ prevent. As of this writing:
    which this pass did not do. Flagged as a thing to check before treating
    "Tier 1 is <15 min" as true today.
 
-H6 closes item 5 and broadens the compile-only fuzz surface described in item
-3; it does not create a long-running fuzz campaign. The other gaps remain.
+H6 closes item 5 and broadens the compile-only fuzz surface; D4 closes the
+missing-campaign half of item 3 with five bounded shards. The larger fuzz-target
+breadth goal and the other gaps remain.
 H4/H7's earlier test-**integrity** pass covered value-blind assertions,
 self-fulfilling fixtures, and this manifest; H6 updates the manifest with the
 now-real concurrency lane.

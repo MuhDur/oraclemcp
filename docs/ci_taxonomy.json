@@ -314,6 +314,66 @@
       "path_filtered": false
     },
     {
+      "check_name": "fuzz oraclemcp-audit / chain_verify",
+      "tier": "scheduled",
+      "workflow": "Fuzz Campaign",
+      "workflow_file": "fuzz.yml",
+      "job_id": "fuzz",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "fuzz oraclemcp-auth / oauth_token_validate",
+      "tier": "scheduled",
+      "workflow": "Fuzz Campaign",
+      "workflow_file": "fuzz.yml",
+      "job_id": "fuzz",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "fuzz oraclemcp-config / config_toml",
+      "tier": "scheduled",
+      "workflow": "Fuzz Campaign",
+      "workflow_file": "fuzz.yml",
+      "job_id": "fuzz",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "fuzz oraclemcp-guard / alter_session_parse",
+      "tier": "scheduled",
+      "workflow": "Fuzz Campaign",
+      "workflow_file": "fuzz.yml",
+      "job_id": "fuzz",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "fuzz oraclemcp-guard / classify_fuzz",
+      "tier": "scheduled",
+      "workflow": "Fuzz Campaign",
+      "workflow_file": "fuzz.yml",
+      "job_id": "fuzz",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "guard + audit BMC proofs",
       "tier": "required",
       "workflow": "Kani Safety",
@@ -771,6 +831,20 @@
         "verify immutable release source"
       ]
     },
+    "fuzz.yml": {
+      "name": "Fuzz Campaign",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "jobs": [
+        "fuzz oraclemcp-audit / chain_verify",
+        "fuzz oraclemcp-auth / oauth_token_validate",
+        "fuzz oraclemcp-config / config_toml",
+        "fuzz oraclemcp-guard / alter_session_parse",
+        "fuzz oraclemcp-guard / classify_fuzz"
+      ]
+    },
     "kani-safety.yml": {
       "name": "Kani Safety",
       "triggers": [
@@ -933,6 +1007,11 @@
       "db shard offset 1",
       "dispatch shard offset 0",
       "dispatch shard offset 1",
+      "fuzz oraclemcp-audit / chain_verify",
+      "fuzz oraclemcp-auth / oauth_token_validate",
+      "fuzz oraclemcp-config / config_toml",
+      "fuzz oraclemcp-guard / alter_session_parse",
+      "fuzz oraclemcp-guard / classify_fuzz",
       "guard shard offset 0",
       "guard shard offset 1",
       "manual mutation shard",

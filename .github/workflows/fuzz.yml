@@ -1,0 +1,68 @@
+name: Fuzz Campaign
+
+on:
+  schedule:
+    - cron: "43 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "2"
+  RUST_TOOLCHAIN: nightly-2026-05-11
+  FUZZ_SECONDS: "300"
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.crate }} / ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: oraclemcp-audit
+            target: chain_verify
+          - crate: oraclemcp-auth
+            target: oauth_token_validate
+          - crate: oraclemcp-guard
+            target: alter_session_parse
+          - crate: oraclemcp-guard
+            target: classify_fuzz
+          - crate: oraclemcp-config
+            target: config_toml
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: crates/${{ matrix.crate }}/fuzz -> target
+          shared-key: fuzz-${{ matrix.crate }}-${{ matrix.target }}
+          save-if: ${{ github.event_name == 'schedule' }}
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
+        with:
+          tool: cargo-fuzz
+      - name: Run bounded corpus campaign
+        working-directory: crates/${{ matrix.crate }}/fuzz
+        run: >-
+          cargo +${{ env.RUST_TOOLCHAIN }} fuzz run ${{ matrix.target }} --
+          -max_total_time=${{ env.FUZZ_SECONDS }}
+          -rss_limit_mb=2048
+          -timeout=10
+      - name: Upload crash and timeout artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: crates/${{ matrix.crate }}/fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
