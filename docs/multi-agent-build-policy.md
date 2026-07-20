@@ -11,10 +11,12 @@ so these are operating rules, not suggestions.
    artifacts there compete with the machine for memory, and `/tmp` here is
    additionally mounted `usrquota`, so one user's artifacts hit a quota long
    before the filesystem looks full. Keep it on real disk.
-2. **Bound concurrent full builds.** Acquire an Agent Mail build slot
-   (cap **2** concurrent full builds per repo) before any full
-   `cargo build/test/clippy --workspace`. See the caveat below — this is
-   currently unenforceable.
+2. **Bound concurrent full builds — through the build lease.** Any heavy cargo
+   operation (workspace-wide build/test/clippy, `cargo mutants`, `cargo hack`)
+   runs as `scripts/build_lease.sh -- <cmd>`: a machine-wide flock(2) lease,
+   one slot by default, so N agents queue instead of compiling simultaneously.
+   Enforced, not advisory: `scripts/check_build_lease.sh` is wired into the
+   heavy entry points and refuses an un-leased heavy build (exit 75).
 3. **Iterate with scoped builds.** `cargo check -p <crate>` / `cargo test -p <crate>`
    for normal work. A full `--workspace` build is a deliberate, slot-gated act.
 4. **Cap per-build parallelism.** `~/.cargo/config.toml` sets `[build] jobs = 4`
@@ -55,12 +57,16 @@ df -h /tmp                   # LAST, and do not trust it
   `tmpfs`.
 - `[build] jobs = 4` is set.
 
-**Known gap — rule 2 is currently unenforceable.** `acquire_build_slot` returns
-`Build slots are disabled. Enable WORKTREES_ENABLED to use this tool.` Until
-that is enabled, an agent told to take a slot before a full build can only block
-or bypass, and neither is good: blocking stalls real work, bypassing is how the
-incident happened. Blocking is the correct choice of the two. Enable
-`WORKTREES_ENABLED`, or name an explicit alternative in the swarm brief.
+**Rule 2 gap closed (2026-07-20).** The original rule leaned on Agent Mail's
+`acquire_build_slot`, which was disabled server-side (`Build slots are
+disabled. Enable WORKTREES_ENABLED to use this tool.`) — an advisory cap
+nobody could actually take is how the incident happened. The enforced
+replacement is `scripts/build_lease.sh` (flock-based, no server dependency,
+lease retained by the wrapper until the command exits and released by the
+kernel when the wrapper exits) plus the
+`scripts/check_build_lease.sh` preflight wired into `resource_budget.sh` and
+`oraclemcp_feature_powerset.sh`. Agent Mail build slots, if ever enabled,
+are additional coordination — the lease does not depend on them.
 
 ## Working in a shared checkout
 

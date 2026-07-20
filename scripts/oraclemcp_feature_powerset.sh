@@ -32,6 +32,11 @@ need() {
 need cargo
 need cargo-hack
 
+# Powerset fanout is a heavy build by definition: it must hold the machine-wide
+# build lease (scripts/build_lease.sh) on a shared dev box, and must never run
+# against a shared or RAM-backed target dir. CI runners are waived inside.
+"$ROOT/scripts/check_build_lease.sh" --require-lease
+
 common=(
   -p oraclemcp-db
   -p oraclemcp-core

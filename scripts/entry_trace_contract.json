@@ -26,6 +26,16 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/build_lease.sh",
+      "kind": "helper",
+      "excluded_reason": "interactive-build-wrapper"
+    },
+    {
+      "path": "scripts/check_build_lease.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/check_entry_trace_contract.sh",
       "kind": "entry_point",
       "trace": "required-quality"

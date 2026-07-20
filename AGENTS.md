@@ -91,6 +91,35 @@ so the constitution stays the one place to check:
   Live database access uses the thin `oracledb` driver and does not require
   Oracle Instant Client, ODPI-C, `libclntsh`, or a C toolchain.
 
+## Build lease & dedicated build targets
+
+Heavy cargo operations — anything workspace-wide (`--workspace`, `cargo hack`,
+`cargo mutants`, or an unscoped bare `cargo build/test/...`) — serialize
+through a machine-wide flock(2) build lease. This is mechanism, not
+discipline: the preflight (`scripts/check_build_lease.sh`) is wired into the
+heavy entry points (`resource_budget.sh`, `oraclemcp_feature_powerset.sh`) and
+refuses an un-leased heavy build (exit 75) or any build against a shared or
+RAM-backed target dir (exit 78).
+
+```bash
+scripts/build_lease.sh -- cargo test --workspace   # take a slot, then run
+scripts/build_lease.sh --status                    # who holds the lease
+cargo check -p <crate>                             # scoped iteration: never gated
+```
+
+- Default is **one slot** (`ORACLEMCP_BUILD_LEASE_SLOTS` to widen): concurrent
+  heavy builds queue instead of running simultaneously — the 2026-07
+  fork-EAGAIN / OOM / tmpfs-exhaustion class came from N simultaneous full
+  compiles. The wrapper retains the lease while the command runs, and the
+  kernel releases it when the wrapper exits, crash included; there is no unlock
+  step to forget and no stale-lock cleanup.
+- Heavy builds use a **dedicated per-agent `CARGO_TARGET_DIR`** — the
+  checkout's own `target/` or a `scripts/resource_budget.sh` per-run dir. The
+  shared caches (`/tmp/cargo-target`, `~/.cache/cargo-target`) and any tmpfs
+  path are refused even under a lease.
+- CI runners are single-tenant and waive the lease requirement automatically;
+  the target-dir rules still apply everywhere.
+
 ## The safety invariant (do not weaken)
 
 The core invariant is the **fail-closed SQL guard** — NOT "read-only forever".

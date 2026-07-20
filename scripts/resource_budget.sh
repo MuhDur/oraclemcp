@@ -164,6 +164,13 @@ fi
 
 [ "${#CMD[@]}" -gt 0 ] || { echo "resource_budget: no command given" >&2; usage; }
 
+# Build-lease preflight (E1/W3): a heavy cargo command must hold the machine-
+# wide build lease, and the target dir this run will actually use must be
+# per-run and disk-backed. Classified against the REAL command and the REAL
+# target dir, so `-- bash -c ...` selftests stay un-gated while
+# `-- cargo test --workspace` cannot run un-leased.
+CARGO_TARGET_DIR="$TARGET_DIR" "$ROOT/scripts/check_build_lease.sh" -- "${CMD[@]}"
+
 if ! command -v systemd-run >/dev/null 2>&1; then
   echo "resource_budget: systemd-run is required to enforce the budget; refusing to run unbounded" >&2
   exit 78
