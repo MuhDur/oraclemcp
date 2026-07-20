@@ -1,0 +1,53 @@
+{
+  "schema": "wave1-cross-repo-handoff/v1",
+  "generated_at": "2026-07-20T11:19:12Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.5.5",
+  "summary": "Checksum-bound handoff for the rust-oracledb reusable quality split and fail-closed local Required parser.",
+  "driver": {
+    "repo": "rust-oracledb",
+    "implementation_commit_sha": "ab8abc409843d4624a25dde6d126123dde6919ac",
+    "implementation_tree_sha": "280d763af443de4999a2c83355a405c19d33672d",
+    "verified_head_sha": "4f1eb3abd3af604ad29f1899251025499b0a3869",
+    "verified_tree_sha": "bf6fbba2faa40f736d4ac3f956a54311beacde00",
+    "files_at_verified_head": [
+      {
+        "path": ".github/workflows/_quality.yml",
+        "sha256": "de9dd53a562deeaab558802161121fcf272dfc000f9218f83d1b0a0f25b4cc80"
+      },
+      {
+        "path": "docs/CI_TAXONOMY.md",
+        "sha256": "4b6593d48708de2f1c89590914e7d0c54c37deeb416eb0e3d9bdb4272965f90c"
+      },
+      {
+        "path": "docs/ci_taxonomy.json",
+        "sha256": "2676aa6a72071b91b49b7e70e321914d786410963f1c124acb63486b6ed7d7f2"
+      },
+      {
+        "path": "scripts/verify_required_local.py",
+        "sha256": "d3cc964ac425870db38fd9a4427024d0687ca0a9057701a3192f8e291d02b13b"
+      }
+    ]
+  },
+  "acceptance": [
+    {
+      "claim": "The reusable quality workflow is split into independently observable gates with a stable aggregate.",
+      "evidence": "The verified _quality.yml has validate, core, contracts, features, release-surface, musl, perf, and fuzz gate jobs plus one quality aggregate; strict aggregation fails closed on any required result."
+    },
+    {
+      "claim": "The local Required parser derives the workflow graph and rejects structural drift.",
+      "evidence": "python3 scripts/verify_required_local.py --self-test passed at verified_head_sha, including unknown-step, changed-condition, missing-prep-result, incomplete-aggregate, and strict-evidence reachability negatives."
+    },
+    {
+      "claim": "The generated taxonomy matches the concrete workflow checks.",
+      "evidence": "python3 scripts/ci_taxonomy.py --check reports 72 jobs matching YAML: 2 advisory, 15 manual, 4 release, 23 required, and 28 scheduled."
+    },
+    {
+      "claim": "The current Required projection remains explicit after the later D4 extension.",
+      "evidence": "python3 scripts/verify_required_local.py --plan derives 28 required-command records across core, contracts, features, and release-surface; later matrix/prep work did not bypass parser classification."
+    }
+  ],
+  "limitations": [
+    "No GitHub-hosted reusable-workflow run is claimed by this handoff.",
+    "No driver workspace compile was started because the mandatory Agent Mail build-slot service was unavailable; parser and workflow-contract gates are the evidence basis."
+  ]
+}
