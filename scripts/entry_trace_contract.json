@@ -81,6 +81,16 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/coverage_ratchet.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/coverage_ratchet.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/ci_taxonomy.py",
       "kind": "entry_point",
       "trace": "required-quality"

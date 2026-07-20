@@ -144,6 +144,36 @@ jobs:
           cargo test -p oraclemcp-core --test golden_behavior --test doctor_secret_golden
           cargo test -p oraclemcp-db   --test structured_schema_golden
 
+  # D2 / TRI-1: measure only source lines changed by this PR, then enforce the
+  # committed mutation floor. This deliberately does not gate on total line
+  # coverage: unrelated or assertion-free tests can game a global percentage.
+  # The evaluator's offline self-test pins both pass and fail behavior.
+  coverage-ratchet:
+    name: changed-line coverage + mutation floor
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TARGET_DIR: target/coverage-ratchet
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: false
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
+        with:
+          tool: cargo-llvm-cov
+      - run: bash scripts/coverage_ratchet.sh --self-test
+      - name: Ratchet changed-line coverage against the change base
+        run: bash scripts/coverage_ratchet.sh run --base "${{ github.event.pull_request.base.sha || github.event.before }}"
+
   feature-powerset:
     name: feature powerset (cargo hack)
     needs: web-build

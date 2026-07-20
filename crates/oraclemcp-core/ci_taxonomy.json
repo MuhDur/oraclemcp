@@ -136,6 +136,18 @@
       "path_filtered": false
     },
     {
+      "check_name": "changed-line coverage + mutation floor",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "coverage-ratchet",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "clippy (-D warnings)",
       "tier": "required",
       "workflow": "CI",
@@ -602,6 +614,7 @@
         "cargo deny (advisories, licenses, bans, sources)",
         "cargo doc (builds)",
         "cargo test",
+        "changed-line coverage + mutation floor",
         "clippy (-D warnings)",
         "engine-free boundary + surface + driver-seam + honesty + conformance accounting",
         "feature powerset (cargo hack)",
@@ -745,6 +758,7 @@
       "cargo deny (advisories, licenses, bans, sources)",
       "cargo doc (builds)",
       "cargo test",
+      "changed-line coverage + mutation floor",
       "clippy (-D warnings)",
       "engine-free boundary + surface + driver-seam + honesty + conformance accounting",
       "feature powerset (cargo hack)",
