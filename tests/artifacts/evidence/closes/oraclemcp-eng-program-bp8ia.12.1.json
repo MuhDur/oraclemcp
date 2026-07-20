@@ -1,0 +1,79 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-20T12:13:22Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.12.1",
+  "scope": {
+    "summary": "Define a strict two-line test-attestation/v1 format that binds named test outcomes, source commit, command, toolchain, and artifacts to the existing keyed-MAC signing primitive without over-claiming correctness.",
+    "in_scope": [
+      "Cargo.lock",
+      "crates/oraclemcp-audit/src/record.rs",
+      "crates/oraclemcp-verifier/Cargo.toml",
+      "crates/oraclemcp-verifier/src/attestation.rs",
+      "crates/oraclemcp-verifier/src/lib.rs",
+      "crates/oraclemcp-verifier/tests/fixtures/test-attestation-v1.golden.jsonl",
+      "crates/oraclemcp-verifier/tests/test_attestation.rs",
+      "docs/adr/0012-test-attestation-schema.md",
+      "docs/adr/README.md",
+      "tests/conformance/PROVENANCE.md"
+    ],
+    "out_of_scope": [
+      "Claiming that a PASS proves program correctness or says anything about tests not named in the signed payload.",
+      "Public-key authenticity; HMAC verification requires independently trusted symmetric key material and does not replace cosign/Sigstore provenance.",
+      "The K2 browser presentation and K3 CI-lane emission integrations, which are separate dependent beads."
+    ]
+  },
+  "source": {
+    "sha": "b6bed9dd205dc403cee75cf040beafdab4ee5bdb",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Rust sign and verify API",
+        "kind": "api",
+        "trace": "Implementation commit 0c115340f127fd9cfd5ae4b2c06acf0c5e9e5261 exports TestAttestation, sign_test_attestation, and verify_test_attestation from oraclemcp-verifier while reusing oraclemcp-audit SigningKey over the exact payload digest."
+      },
+      {
+        "name": "current attestation contract suite",
+        "kind": "api",
+        "trace": "With CARGO_BUILD_JOBS=2, dedicated real-disk CARGO_TARGET_DIR=target/h6-loom, and a fail-closed 300-second outer timeout, cargo +nightly-2026-05-11 test -p oraclemcp-verifier --test test_attestation -- --test-threads=1 passed 10/10 at source b6bed9d in 37.64s with zero failures or ignored tests."
+      },
+      {
+        "name": "tamper and over-claim refusal",
+        "kind": "api",
+        "trace": "The 10-test suite covers byte-level payload tamper, recomputed-digest forgery without the MAC key, wrong and unknown keys, ambiguous key identity, malformed framing and fields, altered honesty frame, producer-side malformed drafts, and the rule that recorded SKIP or FAIL never counts as all-passed."
+      },
+      {
+        "name": "byte-stable cross-language golden",
+        "kind": "config-gate",
+        "trace": "The committed two-line golden was independently checked with Python hashlib and hmac: exact line framing, 2 named PASS outcomes, payload digest sha256:1cdcd991037f28b39a5dbd813cb3b1e77b67259826452ef416e697a27356a09b, and HMAC hmac-sha256:72f8af48b1d7ce04916f00be5cf03d8857beb75c396990755c1771d0241ad208 all matched; editing one outcome changed the digest and invalidated the old signature."
+      },
+      {
+        "name": "honest wire-format contract",
+        "kind": "config-gate",
+        "trace": "ADR-0012 and tests/conformance/PROVENANCE.md pin the exact two-LF-line JSONL format, strict schemas, fixed evidence-of-testing frame, synthetic fixture provenance, symmetric-key trust boundary, and versioning/review triggers."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The current 10-test Rust suite and independent golden oracle are scoped local evidence; this close does not claim an external GitHub-hosted CI run or required-proof/v1 artifact.",
+    "HMAC is symmetric, so a party holding the verification key can also forge an attestation; the signed frame and ADR state that trust boundary rather than presenting the MAC as public provenance.",
+    "This format records named outcomes honestly but cannot independently prove that the producer ran the claimed command; trustworthy lane operation additionally depends on K3 workflow controls and secret custody.",
+    "Readiness remains not-ready because scoped tests cannot support a required-graph readiness claim."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-eng-program-bp8ia.12.3"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
