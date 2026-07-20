@@ -1,0 +1,58 @@
+{
+  "schema": "wave1-cross-repo-handoff/v1",
+  "generated_at": "2026-07-20T11:23:36Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.7",
+  "summary": "Checksum-bound handoff for rust-oracledb PyShim exact-value parity, negative INTERVAL flooring, blocking-I/O GIL release, cancellation, and injected-regression assertions.",
+  "driver": {
+    "repo": "rust-oracledb",
+    "implementation_commit_sha": "b364f0c596d2a1bc298467582e2e66f643944402",
+    "implementation_tree_sha": "bcfc619b63ea08ce66206e0ab31cd851115516b2",
+    "verified_head_sha": "4f1eb3abd3af604ad29f1899251025499b0a3869",
+    "verified_tree_sha": "bf6fbba2faa40f736d4ac3f956a54311beacde00",
+    "files_at_verified_head": [
+      {
+        "path": "crates/oracledb-pyshim/src/conn.rs",
+        "sha256": "e2dfc5abc043326fcc0c9a5542826013317af010c4e6fb74b381af57c9fb0644"
+      },
+      {
+        "path": "crates/oracledb-pyshim/src/convert.rs",
+        "sha256": "de5e3c0816ed51a3cc27004fe634929e6aa5122eb0b7cabade0f000385d3dfaa"
+      },
+      {
+        "path": "crates/oracledb-pyshim/src/cursor.rs",
+        "sha256": "e1dcc35dc4eb7a1268fdd07d9e570eaa4aff9095a4cfb763a9a5cd8e5cd535cf"
+      },
+      {
+        "path": "crates/oracledb/src/lib.rs",
+        "sha256": "47559246edba4cfcab8b0b53a6bcf4b40b38832cb7e55c60cfa850b6eaf1176d"
+      },
+      {
+        "path": "harness/differential/diff_oracle.py",
+        "sha256": "a72e2d9bf2d56311caf5e058f5e44fba057597ce5aad563a1afa6994322c8699"
+      },
+      {
+        "path": "harness/tests/test_regressions.py",
+        "sha256": "18816b089bccc365400dfa3b544728437cc593cdfeaebf2c134a07441ed51f2d"
+      }
+    ]
+  },
+  "acceptance": [
+    {
+      "claim": "Arbitrary-precision Python integers bind without f64 loss and negative sub-microsecond INTERVAL-DS conversion floors correctly.",
+      "evidence": "The isolated implementation run passed the targeted PY3/PY5 conversion cases and the committed regression tests assert exact Python types and values."
+    },
+    {
+      "claim": "Blocking connect/fetch I/O releases the GIL so cancellation can run and the connection remains reusable.",
+      "evidence": "The isolated implementation run passed the targeted PY4 threaded cancel-and-reuse case."
+    },
+    {
+      "claim": "The differential oracle rejects wrong types and wrong values rather than accepting Python equality alone.",
+      "evidence": "The isolated implementation run completed 40/40 exact comparisons and the committed harness contains injected wrong-type and wrong-value self-tests."
+    }
+  ],
+  "limitations": [
+    "This evidence pass did not rerun the configured-database regression suite: collection succeeded in the repository Python environment but execution was blocked by absent PYO_TEST_MAIN_USER, PYO_TEST_MAIN_PASSWORD, and PYO_TEST_CONNECT_STRING environment inputs.",
+    "No secrets, connection strings, usernames, or database identifiers are copied into this handoff.",
+    "The broader optional PROC_TEST2 fixture is outside this bead's PY3/PY4/PY5 acceptance scope."
+  ]
+}
