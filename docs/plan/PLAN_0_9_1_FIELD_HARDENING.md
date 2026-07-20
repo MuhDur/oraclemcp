@@ -56,9 +56,10 @@ streak, `12.3` K3 attestation lanes (P3), `izk5` stale driver-version comment (P
 - cached images: `gvenzl/oracle-xe:11/18/21-slim`, `gvenzl/oracle-free:23-slim`,
   `oraclelinux9-instantclient:23`
 
-**OCI:** `~/.oci/oraclemcp_adb_api_key.pem` and `~/.oci/oraclemcp-adb.env` exist; **`~/.oci/config` is
-ABSENT**, and `~/bin/oci` is installed. → **Operator action required (§4.F0)**: authenticate the OCI CLI
-on this machine. Until then Cluster I cannot start. Everything else in this plan proceeds without it.
+**OCI: ✅ authenticated (2026-07-20).** `~/.oci/config` written against the existing API key; `oci iam
+region list` returns 44 regions; **zero-cost baseline asserted — 0 Autonomous DBs** in both
+`oraclemcp-ci` and root. **Cluster I (Workstream F) is unblocked.** See §4.F0 for the two traps hit
+(user-OCID-in-tenancy-field, and empty-list vs broken-query).
 
 ### 1.4 Field input
 Round-3 field test against **0.9.0**: **5 P0 adoption blockers, 14 P1, 13 P2**, against a product whose
@@ -469,10 +470,28 @@ Build on the existing `e2e_harness` and golden-artifact discipline rather than d
 ### Workstream F — OCI Always-Free campaign (Cluster I)
 *[P1. **Blocked on F0 — operator action.**]*
 
-- **F0 — [OPERATOR] authenticate the OCI CLI on this machine.** `~/.oci/config` is absent; the API key
-  (`~/.oci/oraclemcp_adb_api_key.pem`) and harness env (`~/.oci/oraclemcp-adb.env`) exist and `~/bin/oci`
-  is installed. Nothing in Cluster I can start until `oci` can authenticate. **Everything else in this
-  plan proceeds without it.**
+- **F0 — ✅ DONE (2026-07-20). OCI CLI authenticated on this machine.** `oci setup config` written to
+  `~/.oci/config` (perms 600) against the existing key `~/.oci/oraclemcp_adb_api_key.pem`
+  (fingerprint `c6:72:…:63`). One trap hit and fixed: the first run put a **user OCID into the
+  `tenancy` field**, producing a `NotAuthenticated` 401 that looks exactly like an unregistered key —
+  check OCID *types* (`ocid1.user` vs `ocid1.tenancy`) before suspecting the key.
+  Verified: `oci iam region list` → 44 regions.
+
+  **Zero-cost baseline asserted (constitution #10):** Autonomous DB count is **0** in both the
+  `oraclemcp-ci` compartment and the root compartment.
+
+  **Gotcha to reuse — the check needs a control.** The OCI CLI omits the `data` key entirely when a
+  list is empty, so `--query 'length(data)'` *errors* rather than printing `0`, which is
+  indistinguishable from a broken query or a permissions failure. Correct form:
+  ```sh
+  OUT=$(oci db autonomous-database list --compartment-id "$CID" --all 2>/dev/null)
+  [ -z "$OUT" ] && N=0 || N=$(printf '%s' "$OUT" | jq '(.data // []) | length')
+  ```
+  and **always run a control query against a resource known to be non-empty** (e.g. compartment list
+  → 1) in the same invocation, so "empty" is proven distinct from "broken".
+
+  Remaining operator nicety (not blocking): `~/.oci/oraclemcp-adb.env` is still the unfilled template
+  with `<...>` placeholders; `scripts/e2e/oci_adb_terraform.sh` sources it, so F1 will need it filled.
 - **F1 (bead `10.1`)** — Always-Free provisioning + **teardown-as-incident** harness. Teardown failure is
   treated as an incident, not a warning — an orphaned ADB is a cost event.
 - **F2 (bead `10.2`)** — capability sweep: open, exercise the full tool surface, close.
