@@ -285,8 +285,9 @@ use ci_lanes::operator_ci_lane_health_data;
 #[cfg(test)]
 use ci_lanes::{
     CI_LANE_MAX_RESPONSE_BYTES, CiLaneCatalogEntry, CiLaneObservation, CiLaneSnapshot,
-    ci_lane_health_from_observations, ci_lane_health_json, fetch_ci_lane_snapshot,
-    load_ci_lane_snapshot, parse_ci_lane_catalog, write_ci_lane_snapshot,
+    ci_lane_health_from_observations, ci_lane_health_json, ci_lane_snapshot_from_heartbeat,
+    fetch_ci_lane_snapshot, load_ci_lane_snapshot, parse_ci_heartbeat_generated_at,
+    parse_ci_lane_catalog, render_ci_lane_health_data, write_ci_lane_snapshot,
 };
 // Reached by the inline test module through `use super::*`.
 use operator::{

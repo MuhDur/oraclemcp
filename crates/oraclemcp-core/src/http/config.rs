@@ -351,10 +351,12 @@ pub struct HttpTransportConfig {
     /// Optional audit JSONL path used by `/operator/v1/audit-tail`. The route
     /// summarizes records and never exposes bind values or raw identities.
     pub operator_audit_tail_path: Option<PathBuf>,
-    /// Optional path to a durably stored `/operator/v1/ci-lanes` snapshot
-    /// (schema `ci-lane-snapshot/v1`, produced by the `ci_lanes` module's
-    /// `fetch_ci_lane_snapshot` / `write_ci_lane_snapshot` pair). Unset renders
-    /// the tile as an honest `"unavailable"` catalog listing rather than a
+    /// Optional path to a durably stored `/operator/v1/ci-lanes` snapshot:
+    /// either the native `ci-lane-snapshot/v1` format or the CI heartbeat
+    /// notifier's `ci-heartbeat/v1` output (`scripts/ci_heartbeat.sh`, default
+    /// `$XDG_STATE_HOME/oraclemcp/ci-heartbeat.json` — `oraclemcp serve` wires
+    /// that default). Unset, missing, malformed, or stale renders the tile as
+    /// an honest `"unavailable"`/`unknown` catalog listing rather than a
     /// fabricated green — nothing polls GitHub automatically from this
     /// transport.
     pub ci_lane_snapshot_path: Option<PathBuf>,

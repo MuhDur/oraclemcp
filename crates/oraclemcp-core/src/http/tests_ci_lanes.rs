@@ -75,6 +75,247 @@ fn fixture_catalog_entry() -> CiLaneCatalogEntry {
     }
 }
 
+fn heartbeat_lane(
+    state: &str,
+    conclusion: Option<&str>,
+    run_url: Option<&str>,
+    updated_at: Option<&str>,
+) -> Value {
+    serde_json::json!({
+        "repo": "MuhDur/oraclemcp",
+        "check_name": "scheduled:mutation-safety.yml",
+        "tier": "scheduled",
+        "state": state,
+        "conclusion": conclusion,
+        "run_url": run_url,
+        "head_sha": run_url.map(|_| "e004ebd5b5532a4b85984a62f8ad48a81aa3460c"),
+        "updated_at": updated_at,
+    })
+}
+
+fn heartbeat_document(blocked: bool, any_red: bool, any_unknown: bool, lane: Value) -> String {
+    serde_json::json!({
+        "schema": "ci-heartbeat/v1",
+        "generated_at": "2026-07-20T07:00:00Z",
+        "blocked": blocked,
+        "any_red": any_red,
+        "any_unknown": any_unknown,
+        "lanes": [lane],
+        "errors": [],
+    })
+    .to_string()
+}
+
+#[test]
+fn heartbeat_snapshot_maps_real_success_and_failure_without_upgrading_unknown() {
+    let catalog = vec![fixture_catalog_entry()];
+    let success = heartbeat_document(
+        false,
+        false,
+        false,
+        heartbeat_lane(
+            "success",
+            Some("success"),
+            Some("https://github.com/MuhDur/oraclemcp/actions/runs/42"),
+            Some("2026-07-20T06:59:00Z"),
+        ),
+    );
+    let snapshot =
+        ci_lane_snapshot_from_heartbeat(&catalog, &success).expect("heartbeat success parses");
+    assert!(snapshot.errors.is_empty());
+    assert_eq!(ci_lane_health_json(&snapshot.lanes[0], false)["state"], "success");
+    assert_eq!(
+        snapshot.lanes[0].latest.as_ref().map(|latest| latest.run_id),
+        Some(42)
+    );
+
+    let failure = heartbeat_document(
+        false,
+        false,
+        false,
+        heartbeat_lane(
+            "not_green",
+            Some("failure"),
+            Some("https://github.com/MuhDur/oraclemcp/actions/runs/43"),
+            Some("2026-07-20T06:59:30Z"),
+        ),
+    );
+    let snapshot =
+        ci_lane_snapshot_from_heartbeat(&catalog, &failure).expect("heartbeat failure parses");
+    assert_eq!(
+        ci_lane_health_json(&snapshot.lanes[0], false)["state"],
+        "not_green"
+    );
+
+    let unknown = heartbeat_document(
+        false,
+        false,
+        false,
+        heartbeat_lane("unknown", None, None, None),
+    );
+    let snapshot =
+        ci_lane_snapshot_from_heartbeat(&catalog, &unknown).expect("heartbeat unknown parses");
+    assert_eq!(ci_lane_health_json(&snapshot.lanes[0], false)["state"], "unknown");
+}
+
+#[test]
+fn durable_snapshot_loader_accepts_the_heartbeat_writer_schema() {
+    let raw = heartbeat_document(
+        false,
+        false,
+        false,
+        heartbeat_lane(
+            "success",
+            Some("success"),
+            Some("https://github.com/MuhDur/oraclemcp/actions/runs/42"),
+            Some("2026-07-20T06:59:00Z"),
+        ),
+    );
+    let dir = dashboard_test_dir("ci-heartbeat-storage");
+    let path = dir.join("ci-heartbeat.json");
+    std::fs::write(&path, raw).expect("write heartbeat fixture");
+
+    let snapshot = load_ci_lane_snapshot(&path).expect("heartbeat schema loads");
+    let watched = snapshot
+        .lanes
+        .iter()
+        .find(|lane| lane.catalog.workflow_file == "mutation-safety.yml")
+        .expect("heartbeat-backed scheduled lane exists");
+    assert_eq!(ci_lane_health_json(watched, false)["state"], "success");
+    assert_eq!(watched.latest.as_ref().map(|latest| latest.run_id), Some(42));
+}
+
+#[test]
+fn heartbeat_snapshot_rejects_or_quarantines_contradictory_evidence() {
+    let catalog = vec![fixture_catalog_entry()];
+    let inconsistent_verdict = heartbeat_document(
+        false,
+        true,
+        false,
+        heartbeat_lane(
+            "success",
+            Some("success"),
+            Some("https://github.com/MuhDur/oraclemcp/actions/runs/42"),
+            Some("2026-07-20T06:59:00Z"),
+        ),
+    );
+    assert!(
+        ci_lane_snapshot_from_heartbeat(&catalog, &inconsistent_verdict)
+            .expect_err("blocked=false cannot contradict any_red=true")
+            .contains("blocked verdict")
+    );
+
+    for (name, lane) in [
+        (
+            "state/conclusion contradiction",
+            heartbeat_lane(
+                "not_green",
+                Some("success"),
+                Some("https://github.com/MuhDur/oraclemcp/actions/runs/42"),
+                Some("2026-07-20T06:59:00Z"),
+            ),
+        ),
+        (
+            "foreign run URL",
+            heartbeat_lane(
+                "success",
+                Some("success"),
+                Some("https://github.com/other/repo/actions/runs/42"),
+                Some("2026-07-20T06:59:00Z"),
+            ),
+        ),
+        (
+            "trailing run URL data",
+            heartbeat_lane(
+                "success",
+                Some("success"),
+                Some("https://github.com/MuhDur/oraclemcp/actions/runs/42/attempts/1"),
+                Some("2026-07-20T06:59:00Z"),
+            ),
+        ),
+        (
+            "missing completion timestamp",
+            heartbeat_lane(
+                "success",
+                Some("success"),
+                Some("https://github.com/MuhDur/oraclemcp/actions/runs/42"),
+                None,
+            ),
+        ),
+        (
+            "completion after snapshot",
+            heartbeat_lane(
+                "success",
+                Some("success"),
+                Some("https://github.com/MuhDur/oraclemcp/actions/runs/42"),
+                Some("2026-07-20T08:00:01Z"),
+            ),
+        ),
+    ] {
+        let raw = heartbeat_document(false, false, false, lane);
+        let snapshot = ci_lane_snapshot_from_heartbeat(&catalog, &raw)
+            .unwrap_or_else(|error| panic!("{name} should quarantine one lane, not abort: {error}"));
+        assert_eq!(
+            ci_lane_health_json(&snapshot.lanes[0], false)["state"],
+            "unknown",
+            "{name} must never render green"
+        );
+    }
+}
+
+#[test]
+fn blocked_or_stale_heartbeat_never_renders_a_green_summary() {
+    let catalog = vec![fixture_catalog_entry()];
+    let raw = heartbeat_document(
+        true,
+        true,
+        false,
+        heartbeat_lane(
+            "success",
+            Some("success"),
+            Some("https://github.com/MuhDur/oraclemcp/actions/runs/42"),
+            Some("2026-07-20T06:59:00Z"),
+        ),
+    );
+    let mut snapshot =
+        ci_lane_snapshot_from_heartbeat(&catalog, &raw).expect("blocked heartbeat parses");
+    snapshot.refreshed_at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs();
+    let blocked = render_ci_lane_health_data(&catalog, Some(&snapshot), None);
+    assert_eq!(blocked["summary"]["posture"], "unknown");
+    assert_ne!(blocked["source"], "github_actions");
+
+    snapshot.errors.clear();
+    snapshot.refreshed_at_unix = 0;
+    let stale = render_ci_lane_health_data(&catalog, Some(&snapshot), None);
+    assert_eq!(stale["freshness"], "stale");
+    assert_eq!(stale["lanes"][0]["state"], "unknown");
+    assert_eq!(stale["summary"]["posture"], "unknown");
+}
+
+#[test]
+fn heartbeat_timestamp_parser_is_strict_and_leap_year_aware() {
+    assert_eq!(
+        parse_ci_heartbeat_generated_at("1970-01-01T00:00:00Z"),
+        Ok(0)
+    );
+    assert!(parse_ci_heartbeat_generated_at("2000-02-29T23:59:59Z").is_ok());
+    for malformed in [
+        "1969-12-31T23:59:59Z",
+        "2026-02-29T00:00:00Z",
+        "2026-07-20T07:00:00+00:00",
+        "2026-07-20T07:00:00.000Z",
+        "2026-07-20t07:00:00Z",
+    ] {
+        assert!(
+            parse_ci_heartbeat_generated_at(malformed).is_err(),
+            "accepted malformed timestamp {malformed}"
+        );
+    }
+}
+
 #[test]
 fn ci_lane_streak_is_exact_and_missing_evidence_is_never_green() {
     let catalog = fixture_catalog_entry();

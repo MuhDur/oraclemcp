@@ -126,6 +126,31 @@ fn target_tmp_file(name: &str) -> PathBuf {
 }
 
 #[test]
+fn ci_lane_snapshot_default_never_overwrites_an_explicit_transport_path() {
+    let explicit = PathBuf::from("/operator/configured/ci-lanes.json");
+    let mut transport = HttpTransportConfig {
+        ci_lane_snapshot_path: Some(explicit.clone()),
+        ..Default::default()
+    };
+
+    apply_ci_lane_snapshot_default(&mut transport, || {
+        panic!("the default resolver must not run when an explicit path exists")
+    });
+
+    assert_eq!(transport.ci_lane_snapshot_path.as_ref(), Some(&explicit));
+}
+
+#[test]
+fn ci_lane_snapshot_default_fills_only_an_unconfigured_transport() {
+    let fallback = PathBuf::from("/state/oraclemcp/ci-heartbeat.json");
+    let mut transport = HttpTransportConfig::default();
+
+    apply_ci_lane_snapshot_default(&mut transport, || Some(fallback.clone()));
+
+    assert_eq!(transport.ci_lane_snapshot_path.as_ref(), Some(&fallback));
+}
+
+#[test]
 fn runtime_profile_selection_does_not_resolve_secret_refs() {
     let cfg = OracleMcpConfig::from_toml_str(
         r#"
