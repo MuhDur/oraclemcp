@@ -45,7 +45,7 @@ failure on the HEAD run. The "full local gate ✅" row above is true and insuffi
 |---|---:|---|
 | F-LOW children `7.11.1..20` (P3 real defects, `file:line` specified) | 20 | Workstream G3 — triaged, not all in 0.9.1 |
 | Epics (close as children drain) | 11 | Bookkeeping; close at the end |
-| Work beads | 11 | Workstreams G1/G2/G4 |
+| Work beads | 11 | Workstreams G1/G2/G4–G9 + H (bead `13`) |
 | Cluster I — OCI Always-Free e2e | 4 | **Workstream F (in scope)** |
 | Cluster J — GCP/Vertex launch | 5 | **DEFERRED by operator — out of scope** |
 
@@ -214,7 +214,7 @@ fresh seal.
 ### Workstream A — P0 adoption blockers
 
 #### A1 [P0] Make row-level security visible; stop silent-empty reads
-*Field: P0-4. §A.2.3, §2.4, §2.5, §2.7.*
+*Field: P0-4. §A.2.3, §A.2.4, §A.2.5, §A.2.7.*
 
 The field symptom (VPD-protected objects read as empty) decomposes into four defects. **The tester's own
 root cause was wrong** — session statements *are* applied to the serving connection (§A.2.1). Ship
@@ -581,8 +581,9 @@ server **refuses to start**). Nothing that can mutate is silently unaudited.
   `expire_time`/keepalive "parsed but not yet wired" — a green the runtime contradicts. **First
   verify which side is stale**: driver GH#14 closed in 0.8.4, so check 15's claim may itself be
   outdated (the izk5 class); then either make check 12 observe (probe the socket option / driver
-  state) or mark it config-derived. Also: check 13 (`check_state_layout`, `:2263-2337`) asserts
-  audit-in-place from paths (confirmed = B8a's target); checks 1 and 2 are Pass from a compile flag
+  state) or mark it config-derived. Also: check 13 (`check_state_layout`, layout fields at
+  `doctor.rs:396-404`, audit-path logic at `:781-868` — the same site B8a targets) asserts
+  audit-in-place from paths; checks 1 and 2 are Pass from a compile flag
   and `Path::is_dir()` respectively — reword so a ✓ never reads as more than what was observed.
   Checks verified genuinely observing: 3, 10, 11, 14, 15.
 
@@ -853,16 +854,6 @@ confirms TLS") was retracted by the tester — no action, listed so nobody chase
   the two tools are designed to be used together.
 - **P-U3 [fix]** (unnumbered, MEDIUM in the round) — the dashboard 403 is bare text while every other
   error is a structured JSON envelope. Unify; rides A5's dashboard work.
-- **P-U6 [fix/doc]** (rig design review) — no `Strict-Transport-Security` header is emitted
-  anywhere. When native TLS is active on a **non-loopback** listener, emit HSTS (never on loopback
-  HTTP — pinning localhost breaks local dev). One header, standard posture.
-- **P-U5 [doc]** (sibling sweep, review round 2) — the wallet support table is STALE and
-  **understates** shipped behavior: `README.md:994`/`:1221` and `docs/configuration.md:421` claim
-  `cwallet.sso` is "recognized and reported with structured wallet diagnostics" (diagnostic-only),
-  but `oraclemcp-db/src/oci.rs` treats it as a first-class working mode (`mode: "cwallet.sso"`,
-  `oci.rs:340`; required-files probe `:33`) and the field used `cwallet.sso` as **the working OCI
-  path**. Pre-0.8.4 wording — refresh the truth table (and re-check `ewallet.p12`'s row while
-  there).
 - **P-U4 [verify]** (unnumbered) — legacy-3DES `ewallet.pem` (`pbeWithSHA1And3-KeyTripleDES-CBC`)
   still reported `KeyDecrypt` in the field, although driver 0.8.4's release scope included legacy-3DES
   decrypt with committed synthetic fixtures. Cosmetic in the field (the `cwallet.sso` auto-login
@@ -870,11 +861,24 @@ confirms TLS") was retracted by the tester — no action, listed so nobody chase
   3DES fixture through the **server's** wallet path (doctor + connect), not only the driver's own
   unit test — either the driver fixture is self-consistent-but-unreachable (§3's class, again) or the
   server's wallet diagnostics bypass the driver's decryptor. §A.6.12. D6 rider.
+- **P-U5 [doc]** (sibling sweep, review round 2) — the wallet support table is STALE and
+  **understates** shipped behavior: `README.md:994`/`:1221` and `docs/configuration.md:421` claim
+  `cwallet.sso` is "recognized and reported with structured wallet diagnostics" (diagnostic-only),
+  but `oraclemcp-db/src/oci.rs` treats it as a first-class working mode (`mode: "cwallet.sso"`,
+  `oci.rs:340`; required-files probe `:33`) and the field used `cwallet.sso` as **the working OCI
+  path**. Pre-0.8.4 wording — refresh the truth table (and re-check `ewallet.p12`'s row while
+  there).
+- **P-U6 [fix/doc]** (rig design review) — no `Strict-Transport-Security` header is emitted
+  anywhere. When native TLS is active on a **non-loopback** listener, emit HSTS (never on loopback
+  HTTP — pinning localhost breaks local dev). One header, standard posture.
 
 ---
 
 ### Workstream C — Wire-contract fixtures (the anti-recurrence pillar)
-*[P0 for the release's credibility. Cheap, entirely offline, no database.]*
+*[P0 for the release's credibility. Cheap and mostly offline — C1–C3, C5–C8 need no database; C4
+(headless browser) and C9 (snippet-truth) run against a live `serve` and are implemented by the rig's
+R3/R1 lanes. §5 ordering rule 1 ("failing fixture first") applies to the offline members; C4/C9's
+"before" proof is the rig demonstrating the field failure against today's `main`.]*
 
 **Rule:** where a contract crosses a process or wire boundary, at least one test must use a **literal,
 externally-authored** value committed as an opaque string — never a value produced by the same helper
@@ -1154,7 +1158,9 @@ authoritative AVAILABLE=0 check before and after every run.
 
 - **G1 [P1] `8.1` IAM subject-mapping config** (`he7t` residual) — last product gap from the OCI/IAM work.
 - **G2 [P1] `5.2` D2 coverage ratchet** — changed-line coverage + per-crate mutation floor on
-  guard/audit/db, per plan §32.2 TRI-1. Deliberately **not** a naive never-decrease total. Builds on the
+  guard/audit/db (TRI-1: changed-line coverage on modified `src/*.rs` lines gated at the crate floor,
+  AND a per-crate mutation kill-rate floor on the three safety crates — the D2 `check-floor-report`
+  seal Z2 produces). Deliberately **not** a naive never-decrease total. Builds on the
   D1 baselines already landed (server 88.68% lines, driver 80.08%).
 - **G3 [P2] F-LOW children `7.11.1..20`** — 20 grounded defects with `file:line`. **Triage, don't
   bulk-fix.** Prioritise those that intersect this plan's themes:
@@ -1182,7 +1188,10 @@ authoritative AVAILABLE=0 check before and after every run.
   and is closable after review.
 - **G12 [P1] — driver bug-bead un-deferral. OPERATOR RULING (2026-07-20): among the driver's 83
   deferred beads, only FEATURES (and deliberate better-than-original enhancements) stay deferred;
-  everything bug/fix/parity-shaped joins the 0.9.0 train.** Census by type: 16 bugs, 10 features,
+  everything bug/fix/parity-shaped joins the 0.9.0 train.** Census by type: 16 `bug`-typed beads
+  (the un-defer list below expands two of them — `dc5-py5` and `dk1-dk2` — into their paired sub-fixes,
+  and folds two adjacent `task`-typed items, `retry-leading-comment-contract` and `upstream-sync-….3`,
+  which are parity work), 10 features,
   10 epics, 5 chores, 42 tasks (process — stay deferred as the "deferred for good reason" class).
   The 16 bugs split three ways:
   - **Already in-train:** `4sfc` (B5 verify+close), `s0se` (§A.6.11 + Z4 evidence commit).
@@ -1224,7 +1233,7 @@ done. §10's conversion requirements enforce this structurally.
 
 ```
 Z (restore main to green: Z1 branches, Z2 mutation seal, Z3 Windows, Z4 driver bookkeeping)
-        │  ← precedes everything below; Z1/Z2 run while C is being written
+        │  ← precedes everything below; Z1 DONE (§Z1), Z2 runs while C is being written
         ┌─ C (wire-contract fixtures) ──────────────┐  offline, start immediately
         │                                            │
 F0 (operator: OCI auth) ─────────────┐               ▼
@@ -1240,7 +1249,7 @@ F0 (operator: OCI auth) ─────────────┐              
 ```
 
 **Critical path:** `D → E/R → H`. **Z (CI green) precedes everything** — a red `main` makes every later
-green claim dishonest (constitution #2); Z1/Z2 are mechanical and can run while C is being written.
+green claim dishonest (constitution #2); Z1 is DONE (§Z1) and Z2 (mechanical) runs while C is being written.
 **C is off the critical path and should start first among the build work** — it is offline, cheap,
 and its failures define "done" for A/B. **F is parallel** and gated only on F0 (done).
 
@@ -1312,7 +1321,7 @@ stage-aware TLS work already on `main`. Added public API is *minor*-compatible, 
 | Risk | Mitigation |
 |---|---|
 | **A1a turns silent-empty into visible refusals** in deployments with restricted catalog visibility | Release-note it prominently; consider a one-release warn-then-refuse period |
-| **A5 weakens a security surface** if `Origin: null` is accepted too broadly | Prefer option (a) `same-origin`; require a written security review; keep the one-time code as the authenticator |
+| **A5 weakens a security surface** if `Origin: null` is accepted too broadly | Option (c) fetch-first (ruled §4.A5): mutating routes require `Content-Type: application/json` + default-mode `fetch()` (real Origin structurally guaranteed) behind the retained hard Origin gate; literal `Origin: null` is never accepted; written security review required; pairing URL stays secret-free |
 | **B12a widens what the guard admits** | Operator-declared allowlist only; never automatic inference; guard stays tighten-only; audit every admitted routine |
 | **The customer's VPD issue is H1 (a privilege difference), not our bug** | A1e ships value either way — visibility is the deliverable, not a remote diagnosis |
 | **Local containers drift from the field's 19c** | The field DB is 19c; we have 18/21/23. Document the gap; do not claim 19c coverage we lack |
@@ -1340,11 +1349,12 @@ class must fail locally, not first in CI — learned in §A.9) · **evidence-SHA
 gate).
 **driver:** fmt · clippy · tests · **`scripts/gen_baseline.sh --check`** · `verify_required_local.py`.
 Heavy builds go through `scripts/build_lease.sh` with a dedicated `CARGO_TARGET_DIR` (E1's guard
-enforces this — it blocked the orchestrator's own build, correctly).
+enforces this via `scripts/check_build_lease.sh` / the repo-local Cargo compiler wrapper — which
+blocked the orchestrator's own build tonight, correctly).
 
 ### 9.2 Release acceptance
 1. All **P0** items closed or explicitly deferred **with an operator-recorded reason**.
-2. **C1–C8** demonstrably failed before their fixes and pass after.
+2. **C1–C9** demonstrably failed before their fixes and pass after.
 3. The **local environment (D)** reproduces D3–D7's finding classes and passes post-fix.
 4. **E** green across all three container generations.
 5. **F** green, or explicitly deferred if F0 does not happen.
@@ -1384,9 +1394,6 @@ operator "go" — do not ask for it; wait for it.** Requirements:
   anything else is open (operator ruling 2026-07-20; G9's lint verifies the sink property);
 - Cluster J beads are **not** touched (Cluster J = the GCP/Vertex launch campaign: ADK/Gemini demo,
   evidence bundle, site page, launch video, coordination — deferred by operator ruling).
-
----
-
 
 ---
 
@@ -2208,7 +2215,7 @@ wallet diagnostics bypass the driver's decryptor. Workstream P item P-U4; D6 rid
     wallet-implies-SNI default should flip (§A.6.10); the reference retries terminal TLS errors too,
     so B5's stage-aware fix is a deliberate strictly-better deviation to record in the parity ledger
     (§A.6.5); the reference also hard-errors on unknown message types, so B13 targets our desync
-    source, not graceful handling (§B13a). P1-2's union fix is straight reference parity (§A.6.8).
+    source, not graceful handling (B13a). P1-2's union fix is straight reference parity (§A.6.8).
 
 ## A.8. Test-shape rules this round earned
 
