@@ -2,9 +2,9 @@
 
 ## Status
 
-Accepted for the K1 format (Cluster K, plan §32.3; bead
-`oraclemcp-eng-program-bp8ia.12.1`). K2 adds the browser implementation and K3
-adds lane producers in follow-on commits.
+Accepted for the K1 format and K2 browser verifier (Cluster K, plan §32.3;
+beads `oraclemcp-eng-program-bp8ia.12.1` and `.12.2`). K3 adds lane producers
+in a follow-on commit.
 
 ## Context
 
@@ -76,8 +76,9 @@ producers in different languages cannot disagree on float rendering.
 any document that is not exactly two lines, fails to parse, carries an unknown
 schema or unknown payload field, has an altered frame, malformed field, digest
 mismatch, unknown or ambiguous `key_id`, or invalid MAC. An attestation that cannot be
-verified is **rejected, never assumed valid**. The K2 browser re-verifier will
-implement the same checks over the same bytes with WebCrypto; the committed golden
+verified is **rejected, never assumed valid**. The K2 browser re-verifier
+(`web/src/lib/attestation.ts`) implements the same checks over the same bytes
+with WebCrypto; the committed golden
 `crates/oraclemcp-verifier/tests/fixtures/test-attestation-v1.golden.jsonl`
 pins the wire format for both implementations.
 
