@@ -1,0 +1,62 @@
+{
+  "schema": "wave1-cross-repo-handoff/v1",
+  "generated_at": "2026-07-20T11:21:58Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.6.6",
+  "summary": "Checksum-bound two-repository cass-memory seed and live cm-context retrieval evidence for the four retrospective anti-patterns.",
+  "server": {
+    "repo": "oraclemcp",
+    "commit_sha": "e1616e14d89726003d4a1e5d9c923ea179136093",
+    "tree_sha": "9f005a6c9b122ab0a41b8287db39e15a955ec7df",
+    "files": [
+      {
+        "path": ".cass/playbook.yaml",
+        "sha256": "c2dc7e0ac5daa71d509be53756551e62b908629651d1faddfeaa101b71ead9eb"
+      },
+      {
+        "path": ".cass/traumas.jsonl",
+        "sha256": "93259ea0dc92305d9785653f640e21b0a2363c5c63089da58d001af66d7361bc"
+      }
+    ],
+    "context_ids": [
+      "b-omcp-e6-fixture-oracle",
+      "b-omcp-e6-quota-death",
+      "b-omcp-e6-publish-persist",
+      "b-omcp-e6-gates-lie"
+    ]
+  },
+  "driver": {
+    "repo": "rust-oracledb",
+    "commit_sha": "88a1c5f44154c59242ce8986b5ce2183aeb31311",
+    "tree_sha": "e6e08c897774816c39264957cb36e0db2cfb5860",
+    "files": [
+      {
+        "path": ".cass/playbook.yaml",
+        "sha256": "2bc3edca7855dc0db3d90c0100604da47b4f5c31a6622d34bd9da2fa6e6b3b1a"
+      },
+      {
+        "path": ".cass/traumas.jsonl",
+        "sha256": "79392f1963b014d9f5fde4fc22f0c400d2252b43f94d944e2e462dcf0f7dc102"
+      }
+    ],
+    "context_ids": [
+      "b-rodb-e6-fixture-oracle",
+      "b-rodb-e6-quota-death",
+      "b-rodb-e6-publish-persist",
+      "b-rodb-e6-gates-lie"
+    ]
+  },
+  "acceptance": [
+    {
+      "claim": "cm context surfaces all four required anti-patterns in oraclemcp.",
+      "evidence": "cm context 'swarm quota gates publish persist self-fulfilling fixtures' --json returned success=true and all four b-omcp-e6 IDs in antiPatterns."
+    },
+    {
+      "claim": "cm context surfaces the mirrored anti-patterns in rust-oracledb.",
+      "evidence": "The same command from the driver repo returned success=true and all four b-rodb-e6 IDs in antiPatterns."
+    }
+  ],
+  "limitations": [
+    "The seeded memories are candidate/draft procedural rules with no helpful/harmful feedback history yet.",
+    "Session search history snippets returned by cm are not copied into this artifact; only the committed rule IDs and secret-safe acceptance result are recorded."
+  ]
+}
