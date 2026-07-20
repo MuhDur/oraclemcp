@@ -1019,6 +1019,28 @@ scrubbed by the existing secret/sensitive-data lints.
   JWT via `token_exec`, held across a pool checkout) → B16; credential rotation → B4. The idle-kill
   and token-expiry lanes are the two no unit test can reach — they need a live DB plus elapsed time.
 
+**Isolation contract (host safety — added on operator question, 2026-07-20).** The rig must never
+risk this machine. Two tiers:
+- **Tier A (default, nearly all lanes): disposable pseudo-home.** One throwaway root per run
+  (`target/rig-home-<runid>/`) with `HOME` + all `XDG_*` + `PATH` redirected into it; the installer
+  runs with `--prefix` inside it (the product's own config-discovery order — `$ORACLEMCP_CONFIG` →
+  `$XDG_CONFIG_HOME` — makes the redirection airtight for config/state/audit/credentials/tickets);
+  `serve` runs as a rig-supervised foreground child on rig-chosen loopback ports, never as a host
+  service. Per-run state dirs mean the product's own instance lock prevents any collision with a
+  real install. Teardown kills the process group, removes the root, and runs a **host-hygiene
+  assertion** — real `~/.config/oraclemcp` untouched, no new user systemd units, `git status`
+  clean — so non-contamination is itself a failing-able test. This is honest black-box fidelity:
+  a real integrator on a locked-down host uses `--prefix` + XDG overrides identically, and the
+  P0-1/P1-7/doctor classes reproduce unchanged in a pseudo-home. (`installer_e2e.rs` already
+  drives the installer against temp prefixes; the serve-attach live-test pattern already
+  supervises a spawned server — Tier A is wiring, not invention.)
+- **Tier B (the genuinely invasive lanes only): systemd-capable throwaway container.**
+  `service install/uninstall/restart/backup/restore`, `self-update`, the uninstaller, and
+  `doctor --fix` run inside a disposable OS container (the cached `oraclelinux9` image) joined to
+  the DB containers' Docker network — the host service manager is never touched; on the host those
+  commands are exercised only via their `--dry-run` forms (the product's own preview-first
+  contract). Worst case in Tier B is deleting the container, which is normal teardown.
+
 **Placement: Tier-3 operator/nightly lane, NEVER required CI** (same posture as F3) — the rig must
 not be able to red the front page; the required-lanes-only heartbeat is preserved.
 **Phasing:** 0.9.1 = R1 + R2 (free23 lane) + R3 + R4 + D9. Deferred: the multi-generation sweep
