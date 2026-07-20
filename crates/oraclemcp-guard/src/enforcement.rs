@@ -261,24 +261,29 @@ fn alter_session_params(rest: &str) -> Option<Vec<String>> {
 
     // Walk the token stream as repeated `WORD = (WORD|STR)` clauses; collect the
     // WORD before each `=` as a parameter name. Reject any other shape.
-    let mut params: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < toks.len() {
+    // Fixed-size chunks make parser progress structural rather than dependent
+    // on a mutable index. This keeps malformed input fail-closed and prevents
+    // a corrupted/non-progressing index from repeatedly allocating forever.
+    let mut clauses = toks.chunks_exact(3);
+    if !clauses.remainder().is_empty() {
+        return None;
+    }
+    let mut params: Vec<String> = Vec::with_capacity(clauses.len());
+    for clause in &mut clauses {
         // param name
-        let Tok::Word(name) = &toks[i] else {
+        let Tok::Word(name) = &clause[0] else {
             return None;
         };
         // `=`
-        if toks.get(i + 1) != Some(&Tok::Eq) {
+        if clause[1] != Tok::Eq {
             return None;
         }
         // value: a word or a string literal
-        match toks.get(i + 2) {
-            Some(Tok::Word(_)) | Some(Tok::Str) => {}
+        match &clause[2] {
+            Tok::Word(_) | Tok::Str => {}
             _ => return None,
         }
         params.push(name.trim().to_owned());
-        i += 3;
     }
     Some(params)
 }
@@ -381,6 +386,20 @@ mod tests {
         assert!(is_allowed_alter_session(
             "ALTER SESSION SET NLS_DATE_FORMAT='YYYY-MM-DD' NLS_LANGUAGE = AMERICAN"
         ));
+    }
+
+    #[test]
+    fn alter_session_parser_advances_exactly_one_clause_per_iteration() {
+        assert_eq!(
+            alter_session_params(
+                "CURRENT_SCHEMA = HR OPTIMIZER_MODE = ALL_ROWS NLS_LANGUAGE = AMERICAN"
+            ),
+            Some(vec![
+                "CURRENT_SCHEMA".to_owned(),
+                "OPTIMIZER_MODE".to_owned(),
+                "NLS_LANGUAGE".to_owned(),
+            ])
+        );
     }
 
     #[test]

@@ -44,6 +44,7 @@ MEMMAX="${MUTATION_MEMMAX:-12G}"
 TASKSMAX="${MUTATION_TASKSMAX:-8192}"
 MAX_MUTANTS="${MUTATION_MAX_MUTANTS_PER_SHARD:-32}"
 OUTPUT_BASE="${MUTATION_OUTPUT:-$ROOT/target/mutants}"
+SCRATCH_BASE="${MUTATION_SCRATCH:-$ROOT/target/mutation-scratch}"
 REPORT="${MUTATION_REPORT:-$ROOT/docs/quality/mutation-safety.md}"
 SCOPE=""
 SHARD=""
@@ -157,8 +158,9 @@ cmd_capped() {
     "$before" "$after" "$((after - before))" >"$status_file"
 }
 
-write_integrity() { # <path> <status> <outcomes-or-empty> <inventory> <full-inventory> <cgroup-status>
+write_integrity() { # <path> <status> <outcomes-or-empty> <inventory> <full-inventory> <cgroup-status> <scratch> <scratch-fs>
   local integrity="$1" status="$2" outcomes="$3" inventory="$4" full_inventory="$5" cgroup_status="$6"
+  local scratch="$7" scratch_fs="$8"
   local source_sha state file_count scope_hash
   source_sha="$(git rev-parse HEAD)"
   state="$(scope_state "$SCOPE")"
@@ -166,7 +168,7 @@ write_integrity() { # <path> <status> <outcomes-or-empty> <inventory> <full-inve
   scope_hash="${state##* }"
   python3 - "$integrity" "$status" "$outcomes" "$inventory" "$full_inventory" \
     "$cgroup_status" "$SCOPE" "$SHARD_INDEX" "$SHARD_TOTAL" "$source_sha" \
-    "$file_count" "$scope_hash" "$(cargo mutants --version)" <<'PY'
+    "$file_count" "$scope_hash" "$(cargo mutants --version)" "$scratch" "$scratch_fs" <<'PY'
 import hashlib
 import json
 import sys
@@ -175,7 +177,7 @@ from pathlib import Path
 (
     output, status, outcomes_name, inventory_name, full_inventory_name,
     cgroup_name, scope, shard_index, shard_total, source_sha,
-    covered_file_count, scope_sha256, tool_version,
+    covered_file_count, scope_sha256, tool_version, scratch_path, scratch_filesystem,
 ) = sys.argv[1:]
 inventory = json.loads(Path(inventory_name).read_text())
 full_inventory = json.loads(Path(full_inventory_name).read_text())
@@ -207,6 +209,9 @@ doc = {
     "pid_max_delta": cgroup.get("pid_max_delta"),
     "oom_policy": "continue",
     "cargo_mutants_version": tool_version,
+    "scratch_path": scratch_path,
+    "scratch_filesystem": scratch_filesystem,
+    "rustc_wrapper_disabled": True,
 }
 Path(output).write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
 PY
@@ -225,7 +230,7 @@ cmd_run_shard() {
     die "run-shard requires a clean tracked tree so its source SHA is reproducible"
   fi
 
-  local package file out inventory full_inventory run_log cgroup_status outcomes integrity
+  local package file out inventory full_inventory run_log cgroup_status outcomes integrity scratch scratch_fs
   package="$(scope_package "$SCOPE")"
   file="$(scope_file "$SCOPE")"
   out="$OUTPUT_BASE/$SCOPE/shard-${SHARD_INDEX}of${SHARD_TOTAL}"
@@ -236,6 +241,15 @@ cmd_run_shard() {
   run_log="$out/run.log"
   cgroup_status="$out/cgroup.status"
   integrity="$out/integrity.json"
+  scratch="$SCRATCH_BASE/$SCOPE/shard-${SHARD_INDEX}of${SHARD_TOTAL}"
+  [ ! -e "$scratch" ] || die "scratch already exists; preserve it and choose a new MUTATION_SCRATCH: $scratch"
+  mkdir -p "$scratch"
+  command -v findmnt >/dev/null 2>&1 || die "findmnt is required to verify mutation scratch storage"
+  scratch_fs="$(findmnt -n -o FSTYPE --target "$scratch" | head -1)"
+  [ -n "$scratch_fs" ] || die "cannot determine scratch filesystem: $scratch"
+  case "$scratch_fs" in
+    tmpfs|ramfs) die "mutation scratch must be disk-backed, not $scratch_fs: $scratch" ;;
+  esac
 
   cargo mutants -p "$package" --file "$file" --list --json --no-shuffle >"$full_inventory"
   cargo mutants -p "$package" --file "$file" --list --json --no-shuffle \
@@ -246,13 +260,14 @@ cmd_run_shard() {
   [ "$selected" -le "$MAX_MUTANTS" ] ||
     die "$SCOPE shard $SHARD selects $selected mutants, above deterministic budget $MAX_MUTANTS; increase N"
 
-  echo "mutation-gate: scope=$SCOPE shard=$SHARD mutants=$selected max=$MAX_MUTANTS j=1 timeout=${TIMEOUT}s memory=$MEMMAX tasks=$TASKSMAX" >&2
+  echo "mutation-gate: scope=$SCOPE shard=$SHARD mutants=$selected max=$MAX_MUTANTS j=1 timeout=${TIMEOUT}s memory=$MEMMAX tasks=$TASKSMAX scratch_fs=$scratch_fs" >&2
   set +e
   systemd-run --user --scope --quiet --collect \
     -p "MemoryMax=$MEMMAX" -p MemorySwapMax=0 -p "TasksMax=$TASKSMAX" \
     -p OOMPolicy=continue -- \
     "$ROOT/scripts/mutation_safety_gate.sh" __capped "$cgroup_status" \
-    env -u CARGO_TARGET_DIR CARGO_BUILD_JOBS=2 cargo mutants -p "$package" \
+    env -u CARGO_TARGET_DIR RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= \
+      SCCACHE_DISABLE=1 TMPDIR="$scratch" CARGO_BUILD_JOBS=2 cargo mutants -p "$package" \
       --file "$file" --no-shuffle --shard "$SHARD" -j 1 \
       --copy-target=false --timeout "$TIMEOUT" --no-times --output "$out" \
       >"$run_log" 2>&1
@@ -260,36 +275,36 @@ cmd_run_shard() {
   set -e
   outcomes="$out/mutants.out/outcomes.json"
   if [ "$wrapper_rc" -ne 0 ] || [ ! -f "$cgroup_status" ]; then
-    write_integrity "$integrity" errored "" "$inventory" "$full_inventory" "$cgroup_status"
+    write_integrity "$integrity" errored "" "$inventory" "$full_inventory" "$cgroup_status" "$scratch" "$scratch_fs"
     die "$SCOPE shard $SHARD controller failed before a complete cgroup status was recorded (rc=$wrapper_rc)"
   fi
   local oom_delta
   oom_delta="$(awk -F= '$1 == "oom_kill_delta" {print $2}' "$cgroup_status")"
   if [ -z "$oom_delta" ] || [ "$oom_delta" -ne 0 ]; then
-    write_integrity "$integrity" errored "$outcomes" "$inventory" "$full_inventory" "$cgroup_status"
+    write_integrity "$integrity" errored "$outcomes" "$inventory" "$full_inventory" "$cgroup_status" "$scratch" "$scratch_fs"
     die "E_OOM_MUTANT: $SCOPE shard $SHARD observed oom_kill delta ${oom_delta:-unknown}; graded ERRORED, never caught"
   fi
   local pid_delta
   pid_delta="$(awk -F= '$1 == "pid_max_delta" {print $2}' "$cgroup_status")"
   if [ -z "$pid_delta" ] || [ "$pid_delta" -ne 0 ]; then
-    write_integrity "$integrity" errored "$outcomes" "$inventory" "$full_inventory" "$cgroup_status"
+    write_integrity "$integrity" errored "$outcomes" "$inventory" "$full_inventory" "$cgroup_status" "$scratch" "$scratch_fs"
     die "E_TASK_CAP: $SCOPE shard $SHARD hit TasksMax ${pid_delta:-unknown} time(s); graded ERRORED, never caught"
   fi
   [ -f "$outcomes" ] || {
-    write_integrity "$integrity" incomplete "" "$inventory" "$full_inventory" "$cgroup_status"
+    write_integrity "$integrity" incomplete "" "$inventory" "$full_inventory" "$cgroup_status" "$scratch" "$scratch_fs"
     die "$SCOPE shard $SHARD produced no outcomes.json"
   }
   jq -e '.end_time != null' "$outcomes" >/dev/null || {
-    write_integrity "$integrity" incomplete "$outcomes" "$inventory" "$full_inventory" "$cgroup_status"
+    write_integrity "$integrity" incomplete "$outcomes" "$inventory" "$full_inventory" "$cgroup_status" "$scratch" "$scratch_fs"
     die "$SCOPE shard $SHARD has null end_time; partial counters cannot seal"
   }
   local accounted
   accounted="$(jq '.caught + .missed + .timeout + .unviable' "$outcomes")"
   [ "$accounted" -eq "$selected" ] || {
-    write_integrity "$integrity" incomplete "$outcomes" "$inventory" "$full_inventory" "$cgroup_status"
+    write_integrity "$integrity" incomplete "$outcomes" "$inventory" "$full_inventory" "$cgroup_status" "$scratch" "$scratch_fs"
     die "$SCOPE shard $SHARD accounts for $accounted/$selected mutants; partial counters cannot seal"
   }
-  write_integrity "$integrity" complete "$outcomes" "$inventory" "$full_inventory" "$cgroup_status"
+  write_integrity "$integrity" complete "$outcomes" "$inventory" "$full_inventory" "$cgroup_status" "$scratch" "$scratch_fs"
   echo "mutation-gate: COMPLETE scope=$SCOPE shard=$SHARD mutants=$selected integrity=$integrity"
 }
 
