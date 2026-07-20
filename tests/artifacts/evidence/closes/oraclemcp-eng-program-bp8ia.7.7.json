@@ -1,0 +1,60 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-20T11:25:34Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.7",
+  "scope": {
+    "summary": "Record and verify the driver PyShim's exact Python type/value parity for PY3/PY5 and its GIL-safe cancellation/reuse behavior for PY4.",
+    "in_scope": [
+      "tests/artifacts/evidence/oraclemcp-eng-program-bp8ia.7.7-driver-handoff.json"
+    ],
+    "out_of_scope": [
+      "The broader optional PROC_TEST2 fixture and unrelated python-oracledb parity modules.",
+      "Copying database credentials or service identifiers into committed evidence."
+    ]
+  },
+  "source": {
+    "sha": "adb693a6b534cdb9504362609b3836f21b7dedf2",
+    "tree_clean": true,
+    "branch": "codex/wave1-close-evidence-20260720"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "PyShim bind and fetch conversion",
+        "kind": "api",
+        "trace": "The checksum handoff binds rust-oracledb commit b364f0c596d2a1bc298467582e2e66f643944402; its isolated verification passed the targeted arbitrary-precision integer and negative INTERVAL-DS cases."
+      },
+      {
+        "name": "PyShim blocking I/O and cancellation",
+        "kind": "api",
+        "trace": "The implementation run passed the targeted threaded cancel-and-reuse case after connect/fetch blocking sections were moved outside the GIL."
+      },
+      {
+        "name": "exact differential oracle",
+        "kind": "cli",
+        "trace": "The implementation run completed 40/40 exact comparisons; harness/differential/diff_oracle.py and harness/tests/test_regressions.py include wrong-type and wrong-value injected-regression assertions."
+      },
+      {
+        "name": "cross-repo checksum handoff",
+        "kind": "api",
+        "trace": "tests/artifacts/evidence/oraclemcp-eng-program-bp8ia.7.7-driver-handoff.json binds implementation and verified driver commits/trees plus SHA-256 digests for all six changed paths; every value was independently recomputed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The configured-database regression suite was not rerun in this evidence pass because the PYO_TEST_MAIN_USER, PYO_TEST_MAIN_PASSWORD, and PYO_TEST_CONNECT_STRING inputs were absent; the exact blocker is recorded in the handoff.",
+    "This close does not claim a committed exact-SHA live artifact or required-proof/v1 artifact and remains not-ready on scoped evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
