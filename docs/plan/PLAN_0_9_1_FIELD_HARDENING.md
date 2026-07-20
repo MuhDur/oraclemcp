@@ -358,11 +358,34 @@ dashboard that pairs and then still cannot do anything.
 - **Option (b):** accept `Origin: null` when `sec-fetch-site: same-origin` is present (re-order the
   checks in `enforce_dashboard_post_headers` so the modern, spec-reliable signal can vouch), plus the
   loopback + one-time-code rule for the pairing endpoint specifically.
-- **OPERATOR RULING (2026-07-20): choose the best engineering option, informed by how MCP Agent
-  Mail (Dicklesworthstone's Rust implementation) secures its own local web dashboard** — a reference
-  study of its headers/origin/CSRF/cookie model is in flight; its findings and the final (a)-vs-(b)
-  choice are recorded here when it lands. Until then (a) remains the working preference; the choice
-  changes implementation detail, not A5's scope or tests.
+- **OPERATOR RULING (2026-07-20): best engineering option, informed by MCP Agent Mail
+  (Dicklesworthstone's Rust implementation). DECIDED — option (c), "fetch-first", which neither (a)
+  nor (b) named.** The reference study (repo `mcp_agent_mail_rust`, evidence in the study report)
+  showed agent mail never hits `Origin: null` because its dashboard mutates exclusively via
+  same-origin `fetch()` + `Content-Type: application/json` — no form-navigation POSTs exist — with
+  a layered CSRF check (`mail_csrf_reject_reason`: POST + require `application/json` as the primary
+  gate + Origin/Referer-if-present-must-be-same-origin). **The precise mechanism (verified against
+  the Fetch spec, correcting one detail of the study):** the Origin header on *non-CORS* requests
+  (form navigations) is serialized to `null` under `no-referrer`, while *CORS-mode* requests —
+  default-mode `fetch()` — always carry the real Origin regardless of referrer policy. That is
+  exactly why the pairing FORM broke and why fetch-based flows don't. Decision:
+  1. All mutating dashboard routes require `Content-Type: application/json` (new primary CSRF
+     layer, copied from agent mail) and are invoked via **default-mode `fetch()`** (never form
+     navigation, never `mode:'same-origin'`/`'no-cors'`) so the real Origin is structurally
+     guaranteed.
+  2. The **strict Origin requirement stays** — stricter than agent mail, deliberately: our
+     dashboard auth is an ambient HttpOnly cookie, theirs is a stateless bearer; ambient
+     credentials demand a hard Origin gate. **Literal `Origin: null` is never accepted** (agent
+     mail's `origin_is_trusted` also rejects it — an opaque-origin signal a fail-closed tool must
+     not trust).
+  3. The pairing page (script-free by design): either a tiny same-origin `pairing.js` doing the
+     fetch POST (CSP `script-src 'self'` already permits it), or that single page switches to
+     `Referrer-Policy: same-origin` so its form POST carries a real Origin — implementer's choice,
+     both fail-closed; our pairing URL is deliberately secret-free, so `same-origin` leaks nothing
+     (agent mail keeps `no-referrer` only because their token rides the URL — ours does not).
+  4. `Sec-Fetch-Site` stays a positive-only, never-required signal.
+  R3's browser lane asserts the whole matrix (form-vs-fetch, pairing, authenticated action POST);
+  the security review documents points 1–4.
 - Either way, **all four check sites must agree**, and the tests asserting `no-referrer` must be updated
   deliberately with a recorded rationale — not silently.
 - **Security review required** (this is an auth surface): document why the chosen option does not weaken
@@ -529,7 +552,11 @@ server **refuses to start**). Nothing that can mutate is silently unaudited.
   `audit: DISABLED · unsigned refusal trail: ACTIVE at <path>`. Rationale: the field's 15 blocked
   statements were exactly the evidence an operator wanted and got nothing; agents get the same
   signal via the refusal corpus. Honest labeling keeps it from masquerading as the signed chain.
-  The agent-mail reference study (see A5 ruling) may refine the record format; posture is settled.
+  **Reference study CONFIRMED the posture** (agent mail's always-on durable record — the git-backed
+  archive — is entirely unsigned; cryptographic signing exists only at its optional export/share
+  boundary; observability is never gated on a key). Our two refinements stand: honest per-entry
+  authenticity labeling, and the signed chain remains the higher tier when a key exists — the
+  unsigned log is the floor, not a replacement.
 - **B8d — the doctor asserts-vs-observes sweep (round 2, §A.10).** Beyond check 13: **check 12
   (`check_call_timeout`, `doctor.rs:2428-2524`) reports keepalive/timeouts as Pass derived purely
   from CONFIG**, while doctor's own check 15 (`:2532-2537`) states the driver leaves
@@ -641,6 +668,12 @@ classification grounds **and takes the server down** (`main.rs:3515-3522` → `E
   who want a bad file to stop the world. Rationale: one malformed tool file taking down the whole
   server for every client (the field outage) is an availability failure of a non-critical component;
   the guard's tighten-only philosophy is untouched because a skipped tool grants nothing.
+  **Reference study CONFIRMED the shape** (agent mail: per-item collect-and-continue preflight,
+  configurable Warn/Abort/AutoRepair posture defaulting to Warn, an invalid posture value itself
+  failing safe-and-alive with a warning, runtime bad input → structured error, server stays up).
+  One deliberate divergence, kept: agent mail warns-and-continues even on genuine security
+  boundaries; we stay fail-fast for security-critical invariants — skip-and-warn applies to
+  config-quality failures only.
 - **B12d [P2]** — consult Oracle purity metadata (`DETERMINISTIC`, `ALL_PROCEDURES`) as *evidence*
   feeding the oracle. Design carefully: `DETERMINISTIC` is a developer assertion, not a proof.
 
