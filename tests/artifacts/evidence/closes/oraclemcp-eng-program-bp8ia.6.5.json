@@ -1,7 +1,7 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-07-20T10:48:49Z",
+  "generated_at": "2026-07-20T10:51:36Z",
   "bead_id": "oraclemcp-eng-program-bp8ia.6.5",
   "scope": {
     "summary": "Enforce evidence-bound bead closure through native br policy plus Required/CI audit, and restore the canonical tracker to a lossless 1092-record state.",
@@ -12,6 +12,7 @@
       ".github/workflows/ci.yml",
       "docs/BEAD_CLOSE_EVIDENCE.md",
       "scripts/audit_bead_closes.py",
+      "scripts/bead_tracker_guard.sh",
       "scripts/check_bead_close_evidence.sh"
     ],
     "out_of_scope": [
@@ -21,7 +22,7 @@
     ]
   },
   "source": {
-    "sha": "b0a596ade6be602a2b0346e126c4446ec1406d2c",
+    "sha": "f16cb13e886d43882f733bb34373ebba6d4b52ac",
     "tree_clean": true,
     "branch": "main"
   },
@@ -42,6 +43,11 @@
         "name": "canonical tracker import and integrity",
         "kind": "cli",
         "trace": "br sync --import-only created 2, updated 9, skipped 1081; SQLite and JSONL both contain 1092 unique records, br dep cycles reports 0, and flush-only plus repeat validation remains green."
+      },
+      {
+        "name": "parent-only child closure",
+        "kind": "cli",
+        "trace": "bead_tracker_guard self-test permits --force only for open parent-child dependencies and rejects an open blocks dependency; the initial guarded E5 close was refused without this explicit classification."
       }
     ]
   },
