@@ -1,0 +1,79 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-20T11:56:06Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.12.2",
+  "scope": {
+    "summary": "Provide a fail-closed browser WebCrypto verifier for K1 test attestations, expose it through the production dashboard, and gate the real Chromium interaction path in CI.",
+    "in_scope": [
+      ".github/workflows/ci.yml",
+      "docs/adr/0012-test-attestation-schema.md",
+      "web/e2e/test-attestation-verifier.spec.ts",
+      "web/package-lock.json",
+      "web/package.json",
+      "web/playwright.config.ts",
+      "web/src/app/App.tsx",
+      "web/src/app/test-attestation-verifier.tsx",
+      "web/src/lib/attestation.test.ts",
+      "web/src/lib/attestation.ts"
+    ],
+    "out_of_scope": [
+      "Publishing or disclosing an active HMAC secret; verifiers obtain symmetric key material through an independently trusted channel.",
+      "Claiming public-key authenticity from HMAC; public release provenance remains the separate asymmetric cosign/Sigstore layer.",
+      "Operating signed coverage, mutation, or Loom lane emission, which is tracked by oraclemcp-eng-program-bp8ia.12.3."
+    ]
+  },
+  "source": {
+    "sha": "b6bed9dd205dc403cee75cf040beafdab4ee5bdb",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "browser WebCrypto verifier contract",
+        "kind": "api",
+        "trace": "Implementation commit 3ca531e9019e2755c7231bbbbade5912a728e018 added the byte-exact test-attestation/v1 parser and WebCrypto HMAC verifier. An independent Bun WebCrypto contract smoke at integrated source b6bed9d verified the Rust golden and rejected 7 fail-closed cases: edited payload, recomputed-digest forgery, untrusted key, ambiguous key identity, undersized key material, malformed framing, and an over-claiming frame."
+      },
+      {
+        "name": "production dashboard attestation route",
+        "kind": "route",
+        "trace": "Completion commit 4073d6e08c734587f11af693d34576d193c94110 wired the verifier into the dashboard. The independent integrated-source command cd web && npm run test:e2e:k2 passed Chromium 3/3: a third party verified the Rust golden through real controls, PASS became visibly rejected after byte tampering with no stale-success residue, and missing trusted key material failed closed."
+      },
+      {
+        "name": "browser diagnostics and secret handling",
+        "kind": "route",
+        "trace": "The same Playwright proof observed zero console errors and zero uncaught page errors, exercised desktop and mobile viewport fit, cleared the supplied HMAC secret after verification, and found it in neither rendered page content nor localStorage/sessionStorage."
+      },
+      {
+        "name": "dashboard build and unit gate",
+        "kind": "config-gate",
+        "trace": "The independent integrated-source command cd web && npm run check passed 175 tests with 7 existing explicit typed skips; TypeScript checking, the production Vite build, SBOM/hash generation, and the WebCrypto unit contract all completed."
+      },
+      {
+        "name": "required CI browser gate",
+        "kind": "config-gate",
+        "trace": ".github/workflows/ci.yml web-build installs the pinned Node/npm dependencies and Chromium runtime, runs npm run check, then runs npm run test:e2e:k2 before the dashboard artifact is accepted."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The local Chromium and WebCrypto executions are scoped browser evidence at source b6bed9d; this close does not claim an external GitHub-hosted CI run or required-proof/v1 artifact.",
+    "HMAC verification is symmetric: a party trusted with the verification secret can also forge a document, and the dashboard states that boundary explicitly.",
+    "The full dashboard suite reported 7 existing typed skips alongside 175 passes; the K2-specific Chromium suite itself ran and passed all 3 tests.",
+    "Readiness remains not-ready because scoped tests cannot support a required-graph readiness claim."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-eng-program-bp8ia.12.3"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
