@@ -1,0 +1,58 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-20T11:13:02Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.6.3",
+  "scope": {
+    "summary": "Fail closed before a swarm wave spawns when model, quota, context, wave-size, memory, PID/task, or file-descriptor headroom is unsafe.",
+    "in_scope": [
+      "AGENTS.md",
+      "docs/multi-agent-build-policy.md",
+      "scripts/entry_trace_contract.json",
+      "scripts/swarm_spawn_preflight.sh"
+    ],
+    "out_of_scope": [
+      "Spawning agents itself; the preflight deliberately only returns a decision to the orchestrator.",
+      "Provider quota discovery and orchestrator context calculation, which are supplied by the calling harness."
+    ]
+  },
+  "source": {
+    "sha": "b6bed9dd205dc403cee75cf040beafdab4ee5bdb",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "swarm spawn preflight CLI",
+        "kind": "cli",
+        "trace": "scripts/swarm_spawn_preflight.sh --selftest passed all 8 deterministic cases: healthy admission plus fail-closed wave ceiling, model mismatch, quota, context, memory, PID/task, and file-descriptor refusals."
+      },
+      {
+        "name": "operator wave runbook",
+        "kind": "config-gate",
+        "trace": "AGENTS.md and docs/multi-agent-build-policy.md place the preflight before agent launch, document the eight-agent default ceiling and 20 percent context floor, and require the candidate model to match the requested model."
+      },
+      {
+        "name": "entry-trace contract",
+        "kind": "config-gate",
+        "trace": "scripts/entry_trace_contract.json records scripts/swarm_spawn_preflight.sh as the E3 entry point so repository contract checks cannot silently lose it."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This close does not claim a required-proof/v1 artifact; readiness remains not-ready on the exact scoped self-test.",
+    "Quota and remaining-context values cannot be derived from Linux host state and therefore remain explicit trusted inputs from the orchestrator harness."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
