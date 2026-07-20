@@ -1,0 +1,73 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-20T11:11:33Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.6.1",
+  "scope": {
+    "summary": "Enforce a machine-wide flock lease and dedicated disk-backed Cargo targets for heavy multi-agent builds, including direct Cargo interception before rustc.",
+    "in_scope": [
+      ".cargo/config.toml",
+      ".github/workflows/ci.yml",
+      ".github/workflows/release.yml",
+      "AGENTS.md",
+      "docs/multi-agent-build-policy.md",
+      "scripts/build_lease.sh",
+      "scripts/cargo_build_guard.sh",
+      "scripts/cargo_build_guard_test.sh",
+      "scripts/check_build_lease.sh",
+      "scripts/entry_trace_contract.json",
+      "scripts/oraclemcp_feature_powerset.sh",
+      "scripts/resource_budget.sh"
+    ],
+    "out_of_scope": [
+      "How the external agent harness creates isolated source checkouts.",
+      "Local macOS or Windows multi-agent workspace builds; those require an isolated runner.",
+      "Protecting against an operator deliberately overriding Cargo configuration or RUSTC_WRAPPER to bypass the repository safety control."
+    ]
+  },
+  "source": {
+    "sha": "b6bed9dd205dc403cee75cf040beafdab4ee5bdb",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "machine-wide build lease",
+        "kind": "cli",
+        "trace": "CARGO_SWARM_BUILD_LEASE_DIR=/home/durakovic/.cache/oraclemcp-build-lease-evidence-e1 scripts/build_lease.sh --selftest ran two concurrent critical sections and proved non-overlap; both children ran exactly once."
+      },
+      {
+        "name": "heavy-build and target preflight",
+        "kind": "config-gate",
+        "trace": "scripts/check_build_lease.sh --selftest passed 8 checks: unleased workspace and cargo-mutants refusal, live-flock acceptance, spoof rejection, scoped-package allowance, CI waiver, shared-cache refusal, and tmpfs refusal."
+      },
+      {
+        "name": "direct Cargo compiler interception",
+        "kind": "config-gate",
+        "trace": ".cargo/config.toml installs scripts/cargo_build_guard.sh as build.rustc-wrapper; scripts/cargo_build_guard_test.sh asserts direct workspace Cargo exits through gate 75 before any Compiling line while scoped package iteration remains available."
+      },
+      {
+        "name": "heavy repository entry points",
+        "kind": "config-gate",
+        "trace": "scripts/resource_budget.sh and scripts/oraclemcp_feature_powerset.sh invoke scripts/check_build_lease.sh, and CI/release explicitly apply the documented single-tenant wrapper waiver on non-Linux runners."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This close does not claim a required-proof/v1 artifact; readiness remains not-ready on scoped mechanism tests.",
+    "The full direct-Cargo integration script includes a scoped Cargo compile and was not rerun in this evidence-only worktree while the serialized D2 mutation campaign held the machine-wide build lease; the no-build lease and classification self-tests were rerun at this exact source tree.",
+    "An explicit Cargo config or RUSTC_WRAPPER override can defeat any repo-local wrapper and is documented as bypassing a safety control, not as supported repository use."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
