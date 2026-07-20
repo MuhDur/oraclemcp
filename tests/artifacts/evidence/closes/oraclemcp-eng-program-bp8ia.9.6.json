@@ -61,22 +61,22 @@
       {
         "name": "shipping-spool lost-wakeup sensitivity",
         "kind": "api",
-        "trace": "LOOM_MAX_PREEMPTIONS=3 RUSTFLAGS=--cfg loom cargo +nightly-2026-05-11 test -p oraclemcp-audit --test loom_shipping_spool --release -- --test-threads=1 passed 4/4 in 37.23s including the child-process proof that the pre-fix store-plus-notify shape deadlocks while the mutex-bridged fix always exits."
+        "trace": "With a fail-closed 600-second outer timeout, LOOM_MAX_PREEMPTIONS=3 RUSTFLAGS=--cfg loom cargo +nightly-2026-05-11 test -p oraclemcp-audit --test loom_shipping_spool --release -- --test-threads=1 passed 4/4 in 37.23s including the child-process proof that the pre-fix store-plus-notify shape deadlocks while the mutex-bridged fix always exits."
       },
       {
         "name": "admission and lane lock-order sensitivity",
         "kind": "api",
-        "trace": "The matching bounded Loom commands passed admission 4/4 in 277.17s and lane lock order 2/2 in 2.00s, including the injected check/admit TOCTOU cap overshoot and the injected Registry-to-Lifecycle AB-BA deadlock detectors."
+        "trace": "Each matching Loom command had its own fail-closed 600-second outer timeout; admission passed 4/4 in 277.17s and lane lock order passed 2/2 in 2.00s, including the injected check/admit TOCTOU cap overshoot and the injected Registry-to-Lifecycle AB-BA deadlock detectors."
       },
       {
         "name": "audit-chain fuzz target",
         "kind": "config-gate",
-        "trace": "cargo +nightly-2026-05-11 fuzz run chain_verify against a copy of all 5 committed seeds completed 200/200 sanitizer-instrumented runs without a crash in 48.15s; the target exercises streaming verify_reader and buffered parse_jsonl plus verify_records."
+        "trace": "With a fail-closed 900-second outer timeout and libFuzzer -max_total_time=120 -timeout=10, cargo +nightly-2026-05-11 fuzz run chain_verify against a copy of all 5 committed seeds completed 200/200 sanitizer-instrumented runs without a crash in 48.15s; the target exercises streaming verify_reader and buffered parse_jsonl plus verify_records."
       },
       {
         "name": "OAuth-token fuzz target",
         "kind": "config-gate",
-        "trace": "cargo +nightly-2026-05-11 fuzz run oauth_token_validate against a copy of all 5 committed seeds completed 200/200 sanitizer-instrumented runs without a crash in 152.86s; the target exercises raw JWT validation and bearer extraction followed by validation."
+        "trace": "With a fail-closed 900-second outer timeout and libFuzzer -max_total_time=120 -timeout=10, cargo +nightly-2026-05-11 fuzz run oauth_token_validate against a copy of all 5 committed seeds completed 200/200 sanitizer-instrumented runs without a crash in 152.86s; the target exercises raw JWT validation and bearer extraction followed by validation."
       },
       {
         "name": "repository contract gates",
