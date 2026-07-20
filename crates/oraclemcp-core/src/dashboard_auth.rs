@@ -1031,6 +1031,14 @@ mod tests {
             let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
             while !shutdown_flag.load(Ordering::Relaxed) {
                 if let Ok((mut stream, _)) = listener.accept() {
+                    // Winsock: an accepted socket inherits the listener's
+                    // non-blocking mode (Unix accepted sockets are always
+                    // blocking). Restore blocking so the 50ms read timeout
+                    // below governs the read; otherwise the read returns
+                    // instant WouldBlock, the stub responds + closes with the
+                    // request still unread, and the RST races the client out
+                    // of the typed refusal this stub exists to provoke.
+                    let _ = stream.set_nonblocking(false);
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
                     let mut buf = [0u8; 2048];
                     let _ = stream.read(&mut buf);
