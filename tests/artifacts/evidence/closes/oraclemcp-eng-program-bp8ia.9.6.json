@@ -1,0 +1,103 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-20T11:54:23Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.9.6",
+  "scope": {
+    "summary": "Add bounded Loom models for shipping-spool shutdown, admission permits, switch-at-capacity, and lane lock order, prove sensitivity to injected ordering bugs, and broaden fuzz coverage with audit-chain and OAuth-token targets plus seed corpora.",
+    "in_scope": [
+      ".github/workflows/ci.yml",
+      ".github/workflows/loom.yml",
+      "Cargo.lock",
+      "Cargo.toml",
+      "crates/oraclemcp-audit/Cargo.toml",
+      "crates/oraclemcp-audit/fuzz/.gitignore",
+      "crates/oraclemcp-audit/fuzz/Cargo.lock",
+      "crates/oraclemcp-audit/fuzz/Cargo.toml",
+      "crates/oraclemcp-audit/fuzz/corpus/chain_verify/bad_hash_chain",
+      "crates/oraclemcp-audit/fuzz/corpus/chain_verify/json_array",
+      "crates/oraclemcp-audit/fuzz/corpus/chain_verify/malformed_json",
+      "crates/oraclemcp-audit/fuzz/corpus/chain_verify/truncated_record",
+      "crates/oraclemcp-audit/fuzz/corpus/chain_verify/valid_v1_signed",
+      "crates/oraclemcp-audit/fuzz/fuzz_targets/chain_verify.rs",
+      "crates/oraclemcp-audit/tests/loom_shipping_spool.rs",
+      "crates/oraclemcp-auth/fuzz/.gitignore",
+      "crates/oraclemcp-auth/fuzz/Cargo.lock",
+      "crates/oraclemcp-auth/fuzz/Cargo.toml",
+      "crates/oraclemcp-auth/fuzz/corpus/oauth_token_validate/malformed_compact",
+      "crates/oraclemcp-auth/fuzz/corpus/oauth_token_validate/missing_bearer_token",
+      "crates/oraclemcp-auth/fuzz/corpus/oauth_token_validate/valid_hs256_access_token",
+      "crates/oraclemcp-auth/fuzz/corpus/oauth_token_validate/valid_hs256_bare_token",
+      "crates/oraclemcp-auth/fuzz/corpus/oauth_token_validate/wrong_scheme",
+      "crates/oraclemcp-auth/fuzz/fuzz_targets/oauth_token_validate.rs",
+      "crates/oraclemcp-core/Cargo.toml",
+      "crates/oraclemcp-core/ci_taxonomy.json",
+      "crates/oraclemcp-core/tests/loom_admission.rs",
+      "crates/oraclemcp-core/tests/loom_lane_lock_order.rs",
+      "docs/ci_taxonomy.json",
+      "docs/release-checklist.md",
+      "docs/test-tiers.md",
+      "docs/threat-model.md"
+    ],
+    "out_of_scope": [
+      "Replacing parking_lot and real file I/O in production with Loom primitives; the tests are reviewed mirror models of those synchronization skeletons.",
+      "A long-running or continuously scheduled fuzz campaign; this bead adds targets, seed corpora, CI compilation, and bounded local smoke campaigns.",
+      "Claiming an external GitHub Actions run or a required-proof/v1 artifact."
+    ]
+  },
+  "source": {
+    "sha": "b6bed9dd205dc403cee75cf040beafdab4ee5bdb",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "weekly and manual Loom invariant workflow",
+        "kind": "config-gate",
+        "trace": ".github/workflows/loom.yml runs all three H6 test targets with LOOM_MAX_PREEMPTIONS=3, RUSTFLAGS=--cfg loom, two Cargo jobs, per-target result capture, a 30-minute job timeout, and an uploaded oraclemcp.loom-invariant-results/v1 contract."
+      },
+      {
+        "name": "shipping-spool lost-wakeup sensitivity",
+        "kind": "api",
+        "trace": "LOOM_MAX_PREEMPTIONS=3 RUSTFLAGS=--cfg loom cargo +nightly-2026-05-11 test -p oraclemcp-audit --test loom_shipping_spool --release -- --test-threads=1 passed 4/4 in 37.23s including the child-process proof that the pre-fix store-plus-notify shape deadlocks while the mutex-bridged fix always exits."
+      },
+      {
+        "name": "admission and lane lock-order sensitivity",
+        "kind": "api",
+        "trace": "The matching bounded Loom commands passed admission 4/4 in 277.17s and lane lock order 2/2 in 2.00s, including the injected check/admit TOCTOU cap overshoot and the injected Registry-to-Lifecycle AB-BA deadlock detectors."
+      },
+      {
+        "name": "audit-chain fuzz target",
+        "kind": "config-gate",
+        "trace": "cargo +nightly-2026-05-11 fuzz run chain_verify against a copy of all 5 committed seeds completed 200/200 sanitizer-instrumented runs without a crash in 48.15s; the target exercises streaming verify_reader and buffered parse_jsonl plus verify_records."
+      },
+      {
+        "name": "OAuth-token fuzz target",
+        "kind": "config-gate",
+        "trace": "cargo +nightly-2026-05-11 fuzz run oauth_token_validate against a copy of all 5 committed seeds completed 200/200 sanitizer-instrumented runs without a crash in 152.86s; the target exercises raw JWT validation and bearer extraction followed by validation."
+      },
+      {
+        "name": "repository contract gates",
+        "kind": "config-gate",
+        "trace": "cargo fmt --all -- --check, scripts/ci_taxonomy.py --check, scripts/ci_taxonomy.py --check-fixtures, scripts/oraclemcp_concurrency_lint.sh, git diff --check, and scripts/secret_scan.sh all passed in this evidence worktree."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The bounded local execution proves the scoped models and 200-run fuzz smokes at source b6bed9d; it does not claim that the weekly GitHub-hosted workflow has run at that exact SHA.",
+    "Loom cannot instrument parking_lot mutexes, std threads, or real file I/O, so the concurrency tests deliberately mirror the reviewed production synchronization skeleton and must change when that skeleton changes.",
+    "No full required-proof/v1 document was produced, so readiness remains not-ready on scoped-test evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
