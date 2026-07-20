@@ -1,6 +1,6 @@
 # Round-3 field-test findings — code-level grounding annex
 
-**Status:** grounding complete for P0-1, P0-4, P0-5, P1-10..P1-14; partial for P0-2, P0-3, P1-1..P1-3, P1-8, P1-9.
+**Status:** grounding COMPLETE for every finding except P1-2 (driver wallet-only trust store, §6.8).
 **Purpose:** map every field-test finding to an exact code site, root cause, minimal fix, and the test that
 would have caught it — so the 0.9.1 / 0.8.5 plan is built on verified facts rather than claims.
 
@@ -446,18 +446,184 @@ out-of-process revoke would **not** propagate to a running server until restart.
 
 ---
 
-## 6. Still to ground (carry into the plan)
+## 6. Remaining findings — grounded
 
-| Finding | What is missing |
-|---|---|
-| **P0-2** flashback quarantine | Is the capability probe before or after the point of no return? Exact site where a cleanly-refused optional feature becomes a discarded connection. |
-| **P0-3** dashboard `Origin: null` | Where `Referrer-Policy: no-referrer` is set; the second `dashboard_same_origin_required` check; the minimal change that accepts `Origin: null` on loopback + valid one-time code **without weakening the fail-closed posture**. |
-| **P1-1** `user[schema]` proxy syntax | Where `username` is parsed; where to add desugaring or a fail-fast diagnostic. |
-| **P1-2** driver wallet-only trust store | Confirm platform roots excluded; minimal change to add them while keeping the wallet authoritative. |
-| **P1-3** terminal errors retried into a timeout | **Do pushed driver commits `880134e` ("fail fast on configuration errors") + `d99927d` ("prove configuration errors precede public dial") already close this and driver bead `rust-oracledb-4sfc`?** Highest-value open question — it changes release scope. |
-| **P1-8** session-record leak | Confirm no logoff/teardown counterpart to the connect-side hooks; abrupt transport close vs missing logical Oracle logoff (cross-check driver bead `rust-oracledb-s0se`). |
-| **P1-9** audit chain wrote nothing | Exact condition under which the audit sink silently no-ops, and why doctor check 13 reports healthy — i.e. whether doctor prints an audit path it never verified (**a "gate that lies"**). |
-| **P0-5** | Driver default `ping_interval_secs`. |
+### 6.1 P0-2 flashback quarantine — VERIFIED, and **there is no pre-flight privilege probe**
+
+The teardown-failure path, `crates/oraclemcp-db/src/query.rs:380-399`:
+
+```rust
+(disable, rollback) => {
+    ...
+    if let Err(disable_err) = disable { cleanup_failures.push(format!("DBMS_FLASHBACK.DISABLE failed: {disable_err}")); }
+    if let Err(rollback_err) = rollback { cleanup_failures.push(format!("final rollback failed: {rollback_err}")); }
+    Err(DbError::Quarantined {
+        outcome: QuarantineOutcome::UnknownDiscarded,
+        message: format!("{primary}; teardown could not prove the session clean: {}", cleanup_failures.join("; ")),
+    })
+}
+```
+
+The quarantine is then **structural and permanent** for that connection: the slot carries
+`quarantine_reason` and every later operation fails — pinned by
+`crates/oraclemcp-db/src/connection.rs` test `quarantined_thin_connection_refuses_subsequent_use`
+(asserts `ping` returns `DbError::Quarantined { UnknownDiscarded, "flashback teardown failed" }`).
+
+**No capability/privilege probe runs before entering the path.** The flashback block
+(`query.rs:271-320`) rolls back (Oracle refuses `ENABLE` inside a transaction, `ORA-08183`), enables,
+reads, then always tears down. `ErrorClass::FlashbackCapabilityUnavailable` /
+`FLASHBACK_CAPABILITY_UNAVAILABLE` (`crates/oraclemcp-error/src/lib.rs:88`, `:778-779`) is a
+**classification of an error that already happened**, not a pre-flight check. So a principal without
+`EXECUTE ON DBMS_FLASHBACK` reaches `DISABLE`, fails `PLS-00201`, and the session is poisoned.
+
+**The quarantine itself is defensible** — a session whose teardown could not be proven clean might
+still be reading a stale snapshot, so refusing it is fail-closed. The defect is that a **deterministic,
+knowable, cleanly-refused optional feature** is indistinguishable from a genuine teardown fault.
+
+**Fix (in order):** (a) probe `EXECUTE ON DBMS_FLASHBACK` (or attempt `ENABLE` and classify its
+refusal) **before** the point of no return, returning the typed
+`FLASHBACK_CAPABILITY_UNAVAILABLE` without touching the session; (b) distinguish "feature refused
+before any state change" from "teardown could not prove clean" and never quarantine the former;
+(c) self-recycle a poisoned session — today `next_steps` tells clients to "acquire a fresh
+connection", which **no MCP client can do**. Note both entry points: `oracle_query{as_of}` and
+`oracle_diff{scn_a,scn_b}`.
+
+### 6.2 P0-3 dashboard `Origin: null` — VERIFIED, and the tests pin the breakage
+
+- `Referrer-Policy: no-referrer` is emitted as **both** a header and a meta tag —
+  `crates/oraclemcp-core/src/http/mod.rs:1260` (`<meta name="referrer" content="no-referrer">`).
+- `dashboard_same_origin_required` is checked at **four** sites — `http/mod.rs:1392`, `:1400`,
+  `:1413`, `:1421` — which is why clearing the generic origin filter with
+  `--http-allowed-origin null` still fails: a second check refuses independently.
+- **The tests assert the very policy that breaks browsers**: `tests_dashboard.rs:25`
+  (`assert_eq!(pair.header("referrer-policy"), Some("no-referrer"))`), `:467`, `:480`, and `:341`
+  asserts the `dashboard_same_origin_required` refusal. The suite is internally consistent and
+  browser-blind — the same self-referential class as §0, and precisely why `curl` passed testing.
+
+**Fix options:** (a) switch the pairing page to `Referrer-Policy: same-origin` (CSP already carries
+`form-action 'self'`), or (b) accept `Origin: null` **only** for this endpoint when `Host` is loopback
+and the one-time pairing code is valid — the code is the real authenticator. Either way the four
+check sites must agree, and the tests asserting `no-referrer` must be updated deliberately, not
+silently.
+
+### 6.3 P0-5 — CORRECTION: the server has its own pool, and it validates on **return**, not checkout
+
+Two corrections to earlier notes in this annex:
+
+1. The **driver** default is `ping_interval_secs: 60` (`crates/oracledb/src/pool.rs:105`, `:120`) —
+   validation is armed by default there, so "the server never arms it" was **wrong**.
+2. **oraclemcp does not use the driver's pool.** `crates/oraclemcp-db/src/pool.rs` is its own
+   implementation (`PoolState { idle: Vec<RustOracleConnection>, .. }`, `:186-187`).
+
+The server pool *does* have liveness primitives — `conn.ping(cx)` (`pool.rs:58`) and
+`has_broken` (`:61-62`) — **but `has_broken` is called on the RETURN path, after the call completes**
+(`pool.rs:405-420`):
+
+```rust
+let result = f(cx, checkout.connection()).await;      // the call already ran
+let broken = should_discard_after_call(&result, || false);
+let broken = if broken { true } else { self.manager.has_broken(cx, checkout.connection()).await };
+checkout.finish(broken || restore_error.is_some())?;
+```
+
+**There is no validate-on-checkout.** A connection that dies *while idle in the idle set* is handed
+straight to the next caller, so the first query after an idle period always hits the dead socket and
+surfaces the raw `Broken pipe (os error 32)`.
+
+**Fix:** validate (or evict) on **checkout**, not only on return — the driver's own
+`_check_connection` (`oracledb/src/pool/engine.rs:35-90`) is the reference shape; retry once on a
+fresh connection after a transport I/O error; make `oracle_connection_info` perform a real round trip
+(it reported `connected:true` with every liveness field null); stop leaking raw driver errors.
+
+**Still open:** whether the *pinned* session (which `oracle_query` uses — see §2.8) is pooled at all,
+or is a single long-lived connection with no validation path. That determines whether the checkout fix
+alone is sufficient. Needs the local environment to settle.
+
+### 6.4 P1-1 `user[schema]` proxy syntax — VERIFIED absent
+`crates/oraclemcp-core/src/connect.rs:84-101` requires an explicit `[profiles.proxy_auth]` block with
+non-empty `proxy_user` and `target_schema`, and additionally requires `username` to **match**
+`proxy_user` when both are set. **No `user[schema]` detection exists anywhere in config parsing** —
+the string is passed through literally and Oracle answers `ORA-01017`, indistinguishable from a wrong
+password.
+
+**Fix:** detect `^(.+)\[(.+)\]$` at config load and either auto-desugar into `proxy_auth` or fail fast
+naming the correct shape. Cheap, and it was the single reason none of the operator's real profiles
+authenticated out of the box.
+
+### 6.5 P1-3 driver retry-masking — **LARGELY CLOSED by pushed commit `880134e`**
+`880134e` ("fix(tls): fail fast on configuration errors", now on driver `main` @ `d99927d`) rewrites
+the failover boundary to be **stage-aware**. From its own diff:
+
+- a distinct post-configuration failure type whose doc states: *"The type deliberately has no
+  configuration/auth/wallet variants: every value is therefore safe to aggregate and retry against the
+  next address."*
+- *"Only errors constructible inside `dial` can reach the failover loop. Configuration/auth errors
+  remain ordinary `Error` values and have no [path in]."*
+- all deterministic TLS configuration (client-config construction, wallet key validation, SNI
+  decision) is validated **before** any transport attempt, so it *"fails closed here without consuming
+  failover retries or the call budget."*
+
+That is exactly the P1-3 prescription — retryable vs terminal separated **at the type level**, so a
+terminal error is now *structurally incapable* of being retried into a generic timeout. `d99927d`
+("test(tls): prove configuration errors precede public dial") adds the proof.
+
+**Consequence for the plan:** P1-3 and driver bead `rust-oracledb-4sfc` are believed closed by work
+already on `main`. **Verify before closing the bead**: confirm the specific field symptom (a cert
+`UnknownIssuer` under stock `retry_count=20`) now surfaces in ~1s rather than as
+`call timeout of 20000 ms exceeded`. This is a local-environment test (§ local TCPS lane), not a
+production one.
+
+### 6.6 P1-8 session-record leak — VERIFIED: no teardown counterpart exists
+Searched `connect.rs`, `oraclemcp-db/src/pool.rs`, and `oraclemcp-db/src/connection.rs` for any
+logoff / logout / session-release / teardown hook. **The only "teardown" in the codebase is the
+flashback window teardown** (`connection.rs:1231`, `:6233`) — unrelated. There is **no**
+`logoff_statements` / `session_release_statements` counterpart to the three connect-side hooks
+(`login_statements`, `login_script`, `trusted_session_statements`).
+
+**Fix:** add a teardown hook executed before a pooled session is released and before process exit, and
+ensure a clean logical Oracle logoff so `AFTER LOGOFF` triggers fire. Cross-check driver bead
+`rust-oracledb-s0se` (close_notify): if sessions end by abrupt transport close rather than a logical
+logoff, the trigger never runs regardless of a hook — both halves may be needed.
+
+### 6.7 P1-9 audit chain wrote nothing — ANSWERED: **by design**, but doctor misreports it
+`crates/oraclemcp/src/main.rs:1630-1655`:
+
+```rust
+let Some(keyring) = keyring else {
+    if write_reachable {                      // reachable_ceiling > READ_ONLY
+        return Err(("ORACLEMCP_AUDIT_KEY_REQUIRED", "...refusing to start..."));
+    }
+    // Read-only everywhere reachable: no writes/escalations can occur, so no auditor needed.
+    return Ok(None);                          // ← no auditor at all
+};
+```
+
+So: **no `[audit]` key + a profile that is READ_ONLY everywhere reachable ⇒ `Ok(None)` ⇒ no auditor**.
+The field profile was pinned `max_level = READ_ONLY` with no audit key, so no `audit.jsonl` was ever
+created and the 15 blocked statements were never recorded.
+
+**The design is genuinely fail-closed and good**: if writes *are* reachable without a signing key the
+server **refuses to start** (`ORACLEMCP_AUDIT_KEY_REQUIRED`). Nothing is silently unaudited that could
+mutate.
+
+**The real defect is the doctor report.** Doctor check 13 shows ✓ and prints an audit path for an
+auditor that was **never constructed** — it reasons about paths (`doctor.rs:396-404`:
+`legacy_audit_path`, `current_audit_path`, `audit_path_configured`) without knowing whether
+`build_auditor` returned `Some`. That is a **gate that lies**, the class AGENTS.md forbids.
+
+**Fix:** (a) doctor must report `audit: DISABLED (no signing key configured; profile is read-only
+everywhere reachable)` instead of ✓-with-a-path; (b) document a concrete `[audit]` block (there is no
+example anywhere in the README); (c) **product decision**: whether refusals should still be recorded
+on a local unsigned trail even when no writes are possible — the tester's point that "silently
+recording nothing is a weaker default than operators will assume" is fair, since the 15 refusals were
+exactly the evidence an operator would want.
+
+### 6.8 P1-2 driver wallet-only trust store — NOT YET GROUNDED
+The one item still unverified. Needs: confirmation that the rustls trust anchors are built from the
+wallet only (platform roots excluded), the exact site in the driver's TLS/wallet path, and the minimal
+change to add platform roots while keeping the wallet authoritative — plus the security argument for
+doing so. The field fix (copying a DigiCert Global Root G2 PEM into the wallet dir as `ewallet.pem`)
+made an ADB endpoint connect, which is strong evidence the claim is correct.
 
 ---
 
@@ -468,9 +634,39 @@ out-of-process revoke would **not** propagate to a running server until restart.
    **ordering defect** (§2.2) is catchable offline in one line today.
 3. **P1-10 unblocks P1-13** (§5.1, §5.4) — sequence them together.
 4. **P1-11 is documentation + diagnostics**, not a verifier rewrite (§5.2).
-5. **P0-5 is configuration, not new machinery** (§4) — the driver already validates on checkout.
-6. **The dominant theme of the whole round** — correct behaviour reported through a misleading message —
+5. **P0-5 is a missing validate-on-checkout in the server's OWN pool** (§6.3) — not driver config, and
+   not missing machinery: `has_broken` exists but runs only on return.
+6. **P1-3 is believed already closed** by work now on driver `main` (§6.5) — verify the field symptom
+   locally, then close driver bead `rust-oracledb-4sfc`. This is the one finding the release scope
+   shrinks by.
+7. **P0-2 needs a pre-flight capability probe** (§6.1); the quarantine itself is correct and should stay.
+8. **P1-9 is a doctor honesty fix, not an audit engine fix** (§6.7) — the audit design is fail-closed
+   and correct; doctor lies about it. Plus one product decision on recording refusals.
+9. **The dominant theme of the whole round** — correct behaviour reported through a misleading message —
    is cheap to fix and, per the tester, would return more value per line changed than any 0.8.0/0.9.0
-   feature. Every §here has a concrete instance.
-7. **Wire-contract fixtures + a local live environment** are the structural answer to §0; without them
-   this class recurs no matter how many of the above we fix.
+   feature. Every § here has a concrete instance: locked store → "config workflow failed"; unnormalized
+   fingerprint → silent RST; missing `_meta` key → "token missing"; no EXECUTE privilege → permanent
+   pool quarantine; blind catalog → silently empty reads.
+10. **Wire-contract fixtures + a local live environment** are the structural answer to §0; without them
+    this class recurs no matter how many of the above we fix. Note how many findings turned out to be
+    catchable **offline**: §2.2 (one assertion), §2.4 (unit test), §2.3 (mock-conn test), §5.1/§5.2/§5.3
+    (literal fixtures), §1 (CLI-vs-running-server test). The live environment is needed for a smaller
+    set than it first appeared — mainly §2.7 (H1/H2 principal + catalog visibility), §6.3 (pinned vs
+    pooled), §6.5 (P1-3 symptom), and §6.6 (logoff triggers).
+
+## 8. Test-shape rules this round earned
+
+Distilled for the plan and for AGENTS.md:
+
+1. **Never build a test's client side with the helper the server side consumes.** Where a contract
+   crosses a process/wire boundary, at least one test must use a **literal, externally-authored**
+   value (a committed JWT string, a raw JSON frame, a hand-typed fingerprint).
+2. **Any config field with more than one accepted spelling must be tested in its ugliest accepted
+   spelling** (uppercase, unprefixed, whitespace) — normalization asymmetry is invisible otherwise (§5.1).
+3. **A gate that reports health must observe the thing it reports on**, never infer it from
+   configuration (§6.7 doctor vs `build_auditor`).
+4. **An empty result from a privileged catalog query is not evidence of absence** — distinguish "no
+   rows" from "cannot see" before making a security decision on it (§2.3).
+5. **Ordering of session-setup statements is part of the contract** — assert the built list for each
+   profile *posture* (protected / unprotected), not just the default (§2.2).
+6. **Resource validation belongs on checkout, not only on return** (§6.3).
