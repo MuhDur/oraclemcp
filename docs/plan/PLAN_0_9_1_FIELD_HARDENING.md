@@ -1,6 +1,6 @@
 # PLAN — oraclemcp 0.9.1 / driver 0.9.0: field-hardening, self-sufficient testing, OCI
 
-**Version:** v1 (pre-review). **Date:** 2026-07-20.
+**Version:** v5 (v2: review round 1 — CI-red ground truth → Workstream Z, P2 tail → Workstream P, P1-2 grounded, 17/17 Appendix-A claims re-verified. v3: inferred-sibling sweep S1–S15 → §A.10, new B14/B15/B16. v4: **Workstream R — the Local Integrator Rig**. v5: **operator rulings recorded on every open decision** (marked "OPERATOR RULING (2026-07-20)" inline), Z1 RESOLVED in-session — root cause was CI shallow checkout, `codex/d2-completion` merged as `38db4c3`, `ci.yml` fetch-depth fixed — and the driver bug-bead un-deferral ruling folded as G12). **Date:** 2026-07-20.
 **Owner:** lead orchestrator. **Release is operator-gated** — agents never tag or publish.
 
 **How to use this document.** It is written to be self-contained: an agent that has never seen this
@@ -18,8 +18,9 @@ is required to start work.
 | | oraclemcp | rust-oracledb (driver) |
 |---|---|---|
 | Released | 0.9.0 (2026-07-18) | 0.8.4 (2026-07-18) |
-| `main` HEAD | `5058690` | `537373a` |
+| `main` HEAD | `6519a57` (docs-only since `5058690`) | `537373a` |
 | Full local gate | clippy ✅ + `cargo test --workspace` ✅ | clippy ✅ + tests ✅ + `gen_baseline.sh --check` ✅ |
+| **Remote CI on `main`** | **RED on every push since `6da3997`** (last green `46e53c3`) — §A.9, **Workstream Z** | **GREEN** (Required + CI + live version matrix + Kani) |
 | Test binaries | — | 169 across both repos, **0 failures** |
 
 **CI honesty note.** The driver push at `d99927d` went **red** (2 of 25 checks): `required/quality-contracts`
@@ -31,6 +32,14 @@ omitted `scripts/gen_baseline.sh --check`. Fixed and pushed as `537373a`. **Rule
 **Public-surface delta from that regen: `oracledb` went 908 → 915 public source items** (the new
 stage-aware TLS types). This has a release consequence — see §7.
 
+**oraclemcp CI honesty note (review round 1).** The SERVER's remote CI has been **red on every push
+since `6da3997`** (last green `46e53c3`, 06:34 2026-07-20) — three root causes, all diagnosed in §A.9
+and owned by **Workstream Z**: (1) bead-close evidence on `main` citing commits that exist only on
+**unpushed local `codex/*` branches** (`SOURCE_SHA_ABSENT` × 15+ hard findings in CI, **0 locally** —
+the local gate resolves the SHAs through local branches, so it structurally cannot see this class);
+(2) a stale committed mutation seal (`E_STALE_SEAL`), failing **two** jobs; (3) a new Windows-lane
+failure on the HEAD run. The "full local gate ✅" row above is true and insufficient.
+
 ### 1.2 Bead inventory (oraclemcp `.beads/issues.jsonl`, 51 open/in_progress)
 | Group | Count | Disposition in this plan |
 |---|---:|---|
@@ -40,8 +49,13 @@ stage-aware TLS types). This has a release consequence — see §7.
 | Cluster I — OCI Always-Free e2e | 4 | **Workstream F (in scope)** |
 | Cluster J — GCP/Vertex launch | 5 | **DEFERRED by operator — out of scope** |
 
-Driver beads: `rust-oracledb-4sfc` (**believed closed** — see §4.B5) and `rust-oracledb-s0se`
-(close_notify; relates to P1-8). 21 further driver beads are `deferred` and stay deferred.
+Driver beads (**corrected in review round 1**): the driver tracker holds **83 deferred, 0 open** —
+including `rust-oracledb-4sfc` (retry-masking; §4.B5) and `rust-oracledb-s0se` (close_notify;
+§A.6.11), both currently `deferred` with **uncommitted close-evidence files already sitting in the
+driver working tree** (`tests/artifacts/evidence/closes/…` — see Z4). All other deferred driver beads
+stay deferred (operator ruling); the deferred `0.8.5`-named driver release beads (`5jdu`/`5swy`) are
+retitled per §7 at bead conversion. Also relevant: deferred server bead `oraclemcp-vzui` (Windows
+`file_store` durable-state "Access is denied") — see Z3.
 
 The 11 work beads: `plan-bead-graph-lint-eshv` (P0), `13` release train (P1, versions now fixed: driver 0.9.0 / server 0.9.1), `5.2` D2 coverage
 ratchet (P1), `8.1` G1 IAM subject-mapping (P1), `4.3` C3 stash triage, `4.5` C5 moves/renames,
@@ -62,9 +76,24 @@ the CI compartment and root. **Cluster I (Workstream F) is unblocked.** See §4.
 (user-OCID-in-tenancy-field, and empty-list vs broken-query).
 
 ### 1.4 Field input
-Round-3 field test against **0.9.0**: **5 P0 adoption blockers, 14 P1, 13 P2**, against a product whose
-CI was fully green. Raw round is quarantined (`livesting-*/`, gitignored, constitution #9); the scrubbed code-level
-grounding is **Appendix A**. **Grounding is complete for every finding except P1-2.**
+Round-3 field test against **0.9.0**: **5 P0 adoption blockers, 14 punch-list P1** (plus two
+unnumbered body-level P1s, folded into B11 and B13), **13 P2** (P2-2 was retracted by the tester; the
+12 active ones plus four unnumbered P2/P3-grade findings are enumerated in **Workstream P** so this
+file stays self-contained), against a product whose CI was fully green. Raw round is quarantined
+(`livesting-*/`, gitignored, constitution #9); the scrubbed code-level grounding is **Appendix A**.
+**Grounding is now complete for every finding, P1-2 included** (§A.6.8, review round 1).
+
+**Artifacts received** (all quarantined): the report itself; the refusal-corpus export (23 redacted
+records); a deterministic incident bundle (manifest, redacted config, cassette) whose **0-byte
+redacted audit tail independently corroborates P1-9**. **Not delivered**, although the report's own
+artifact table names them as keep-worthy: the corrected multi-profile config, the working OCI config,
+and the wallet dir with the added public root. **OPERATOR RULING (2026-07-20): these are not
+available at this time — everything we have is the quarantined folder; the plan proceeds without
+them.** The §A.2.7 H1-vs-H2 diagnosis therefore rests on D3/D9's synthetic VPD fixture plus A1e's
+shipped visibility, which was the design intent anyway.
+One report-internal inconsistency, recorded so nobody retraces it: a late "authentication modes"
+matrix claims mTLS / control-listener / OAuth were "not tested", but the findings sections that DID
+test them are authoritative — the matrix is a mid-round draft remnant.
 
 ---
 
@@ -107,11 +136,61 @@ the live environment must cover (§4.D).
 
 **Test-shape rules** (§A.8) become binding repo policy and go into AGENTS.md.
 
+Review round 1 found the same defect one level up, in our own process: the bead-close-evidence gate
+passed **locally** while failing in CI. The final diagnosis (Z1, resolved): the cited SHAs were all
+main-reachable — CI's **shallow checkout** simply could not see them; the local/full-history view
+and the CI/depth-1 view were two different repositories pretending to be one. The rule earns a
+place beside §A.8 regardless: **close evidence must cite commits reachable from `origin/main`**, and
+the gate that checks it must run against full history (fixed in `ci.yml`).
+
 ---
 
 ## 4. Workstreams
 
 Priority notation: **[P0]** blocks the release; **[P1]** should ship; **[P2]** ship if it lands cleanly.
+
+### Workstream Z — restore oraclemcp `main` to green [P0 — do this FIRST]
+*oraclemcp remote CI is red on every push since `6da3997`; the driver is green. §A.9 is the evidence
+base. Nothing else in this plan can show honest green until Z lands (constitution #2).*
+
+- **Z1 [P0] — ✅ RESOLVED in-session (2026-07-20 evening, operator ruling A2: "resolve now").**
+  The investigation inverted the v2 diagnosis: **every one of the 10 evidence-cited SHAs is
+  main-reachable** (`git merge-base --is-ancestor` sweep) — the `SOURCE_SHA_ABSENT` red was the
+  audit job's **shallow checkout** (`actions/checkout` default depth-1 in the `boundary` job), which
+  cannot resolve commits older than HEAD. Fixed: `fetch-depth: 0` on that job's checkout (with an
+  explanatory comment). Branch verification via `git cherry`: **five of six wave branches are 100%
+  patch-equivalent to `main`** (rebase-twins; the "84 commits" were already pushed);
+  `codex/d2-completion-20260720` held the only two real unmerged commits — `fecfa06` (guard: ALTER
+  SESSION structural clause parsing, a strict tightening, reviewed) and `e11632a` (D2 independent
+  per-crate mutation floors, bead `5.2`) — **merged as `38db4c3`** (merge commit, SHAs preserved).
+  Remaining Z1 tail: branch deletion is operator-gated (RULE 1) — branches left in place.
+  **Rule (stays; goes into AGENTS.md alongside §A.8):** close evidence must cite commits **reachable
+  from `origin/main`** at close time — the shallow-checkout episode proves the reachability check
+  must also run against a full-history view.
+- **Z2 [P0] — fresh mutation campaign (the `E_STALE_SEAL` red). OPERATOR RULING (2026-07-20):
+  authorized, in-plan, and MUST be executed by Codex ("Spark") so it does not consume Claude
+  usage.** The committed mutation marker (sealed at `4dca0b2`, scopes guard+audit, 27 files, 1889
+  mutants, 3/3 shards) carries `status=stale`; the gate fails **both** the coverage-ratchet and
+  release-preflight jobs on it. Post-Z1 note: `38db4c3` landed D2's `check-floor-report`, so the
+  fresh campaign must produce **independent per-crate seals for guard, audit, AND db** (complete
+  exact-SHA shards, OOM-honest), using the new disk-backed scratch + wrapper hygiene from `fecfa06`'s
+  gate-script half. Memory-cap every run, take the build lease, dedicated target dir. This also
+  closes out G2/bead `5.2`'s enforcement leg.
+- **Z3 [P1→P0-disposition] — the Windows workspace lane. OPERATOR RULING (2026-07-20): MUST be
+  fixed — re-deferral is off the table.** "Rust workspace (Windows) → cargo test workspace on
+  Windows" went red on the `6519a57` run (previous run green; only docs commits in between ⇒ flake or
+  environment). Pull logs when available (job conclusion beats truncated logs), rerun once; if it
+  reproduces, first suspect deferred bead `oraclemcp-vzui` (Windows `file_store` durable-state
+  "Access is denied") — **un-defer it and fix** (also mandated by the G12 ruling: bugs do not stay
+  deferred).
+- **Z4 [P1] — driver-side bookkeeping.** The driver tree holds **uncommitted** close-evidence files
+  for `4sfc` and `s0se` (`tests/artifacts/evidence/closes/…`) and four local agent branches whose
+  content is already merged to `main` (§A.9). Commit the evidence through the guarded close flow once
+  B5 / §A.6.11 verification passes. Do not delete branches without explicit operator approval.
+
+**Acceptance:** both repos' front pages fully green measured as *every check-run on HEAD* (see
+`frontpage-green-mechanics`), bead-evidence audit **0 hard findings in CI**, mutation gate green on a
+fresh seal.
 
 ### Workstream A — P0 adoption blockers
 
@@ -131,6 +210,12 @@ the general fix regardless of what the customer's database turns out to be doing
   **Blast radius:** deployments whose DB user lacks catalog visibility begin refusing instead of
   silently emptying. Strictly more correct, but user-visible — gate behind a release note.
   **Test (offline):** mock-conn test where the policy probe returns empty *because of privilege*.
+  **Sibling (round-2 sweep, §A.10): the VIRTUAL-COLUMN gate has the identical fail-open** —
+  `catalog_resolver.rs:364-376` probes `ALL_TAB_COLS … virtual_column='YES'` and treats empty as
+  "no virtual columns"; a principal blind to the table's columns silently passes a gate meant to
+  catch function-based virtual columns (user PL/SQL invoked by a plain fetch). Fix BOTH probes with
+  the same rule: an empty result from a visibility-filtered dictionary view yields `Unknown`
+  (refuse), never `ProvenReadOnly`. All other resolver probes verified fail-closed (§A.10).
 - **A1b — fix the session-setup ordering.** Emit `SET TRANSACTION READ ONLY` **after**
   `trusted_session_statements`, re-asserting the backstop immediately after (`connect.rs:306-335`).
   Today, on `protected`/READ_ONLY profiles — the posture the README recommends — trusted setup runs
@@ -147,6 +232,9 @@ the general fix regardless of what the customer's database turns out to be doing
   flag policy-protected results so a filtered read is never indistinguishable from an empty table.
   **Why:** this is the fix that survives regardless of which hypothesis (H1/H2) the customer's database
   confirms.
+- **A1f — fix the wrong docs.** `robot_docs.rs:412` and `:574` claim login setup "remains on the
+  pinned main session"; the code applies session statements on **every** pool connect (§A.2.1,
+  re-verified). Correct both sites while in this area.
 
 **Depends on:** none. **Unblocks:** the field's top blocker.
 **Diagnostic to ship alongside (no code change needed to run):** the server already has
@@ -166,6 +254,14 @@ and `RUST_LOG=debug` added nothing.
 - **A2a [P0] — stop discarding the error.** Map `FileStoreError::Locked` to a distinct code
   (e.g. `ORACLEMCP_STATE_STORE_LOCKED`) whose message names the holding service and the remedy. *One
   match arm.* This alone converts an unsolvable mystery into a 10-second fix for the user.
+  **Siblings (round-2 sweep, §A.10) — fix all four sites with the same pattern:** the `_ =>` arm at
+  `main.rs:4613` collapses five distinct, individually-actionable preview-flow variants
+  (`PreviewRequired` / `InvalidPreviewToken` / `PreviewExpired` / `PreviewDraftChanged` /
+  `PreviewConfirmationRequired`, `config_ops.rs:60-73`) into the same generic code; the incident trio
+  `main.rs:5313/:5375/:5408` reports config-load, disk/IO, and missing-file failures as policy
+  "refusals" ("invalid or unsafe bundle" for a path typo). The correct pattern already exists
+  in-repo: `client_credential_error_message` (`main.rs:5987-5994`) special-cases `Locked` then
+  preserves the inner error text — copy it.
 - **A2b [P1] — `clients issue` must print a usable revocation command.** When a service lock is
   detected, emit the **HTTP** form (`/operator/v1/client-credentials/revoke`) rather than a CLI command
   that cannot run (`main.rs:5843`).
@@ -192,7 +288,8 @@ READ_ONLY — the recommended posture — this is a remote DoS via `oracle_query
   not prove the session clean". **Keep the quarantine for the latter** — it is correct fail-closed
   behaviour; a session whose teardown failed may still hold a stale snapshot.
 - **A3c** — self-recycle a poisoned session. Today `next_steps` tells clients to "acquire a fresh
-  connection", which **no MCP client can do**.
+  connection", which **no MCP client can do**. **Same missing capability as A4e (§A.6.9): today the
+  ONLY recovery is an explicit profile switch — build the recycle path once, use it for both.**
 
 #### A4 [P0] A pooled connection that dies while idle must be replaced
 *Field: P0-5. §A.6.3 (corrected twice — read §A.6.3 before implementing).*
@@ -204,13 +301,37 @@ first query fails with a raw `Broken pipe (os error 32)`.
 
 - **A4a** — validate (or evict) on **checkout**. Reference shape: the driver's own `_check_connection`
   (`oracledb/src/pool/engine.rs:35-90`, default `ping_interval_secs: 60`).
-- **A4b** — retry once on a fresh connection after a transport I/O error.
+- **A4b** — retry once on a fresh connection after a transport I/O error. **Round-2 sweep facts
+  (§A.10):** the retry machinery already exists but is DEAD (`RetryPolicy`/`is_transient_error`,
+  `resilience.rs:17`, zero call sites) — wire it rather than building new; and the server keeps
+  THREE hand-rolled, mutually-disagreeing connection-lost lists (`oraclemcp-error/src/lib.rs:450-485`,
+  `oraclemcp-db/src/error.rs:413-430`, `resilience.rs:17`) while the driver already exports the
+  correct broader set (`CONNECTION_LOST_ORA_CODES` incl. 28/1012/2396/3135, `recovery.rs:546-547`,
+  `Error::is_connection_lost()`). **Unify on the driver's classification.** Today ORA-03135, 02396,
+  00028, 01012 and raw broken-pipe are all non-retryable `CONNECTION_FAILED`; worse, 02396 + 00028 +
+  broken-pipe are also missing from the lease discard-markers (`error.rs:636-651`) so a **dead
+  LEASED session is retained and reused** — a live bug beyond messaging. ORA-04068 is misclassified
+  entirely (package-state reset: the connection is fine, a plain re-call succeeds; today it says
+  `CONNECTION_FAILED` and points at a fresh connection — the wrong remedy).
 - **A4c** — `oracle_connection_info` must do a **real round trip** (it returned `connected:true` with
-  every liveness field null); `doctor` must not show a green check for a dead pool.
+  every liveness field null — mechanism found: `connected: true` is set unconditionally whenever
+  `describe()` returns Ok, `dispatch/mod.rs:11063-11073`, even when every liveness field is null);
+  `doctor` must not show a green check for a dead pool. **And the startup banner must stop lying:**
+  `live-db: true` is a **compile-time constant** (`const LIVE_DB: bool = true`, `main.rs:110`,
+  printed at `:4115/:4119` and echoed in capabilities) — a build-capability flag masquerading as
+  runtime state. Rename it (`built-with-live-db`) or bind it to the readiness probe.
 - **A4d** — stop leaking raw driver errors to callers; map to typed envelopes.
-- **Open question for §4.D:** whether the *pinned* session (which `oracle_query` uses, §A.2.8) is
-  pooled at all. If it is a single long-lived connection outside the pool, A4a is insufficient and it
-  needs its own liveness/reconnect path. **Settle this in the local environment before implementing.**
+- **ANSWERED (review round 1, §A.6.9): the pinned session is NOT pooled.** It is a single long-lived
+  connection with no liveness path, whose only recovery today is an explicit profile switch. A4a fixes
+  only the stateless/pool surface — **the field's P0-5 symptom ran on the pinned path.**
+- **A4e — pinned-session liveness/reconnect (the primary fix).** Cheap pre-use ping after idle (or
+  reconnect on transport I/O error), then transparently reopen: re-apply session setup, re-arm the
+  read-only backstop, re-resolve `CURRENT_SCHEMA` (the Arc-N cache), and clear the quarantine through
+  the same audited path a profile switch uses (§A.6.9). **Build once, share with A3c.** D5 validates
+  both surfaces (kill the pinned session AND an idle pooled one). Infrastructure hint (round-2
+  sweep): a background DB pinger already exists and is verified honest — the readiness prober
+  (`readiness.rs:33-116`, 5s interval, fail-closed default, drives `/readyz` correctly) — reuse its
+  pattern (or its signal) rather than inventing a new liveness loop.
 
 #### A5 [P0] The dashboard must work in a browser
 *Field: P0-3. §A.6.2.*
@@ -220,15 +341,34 @@ form POST carries `Origin: null`, which `dashboard_same_origin_required` refuses
 (`http/mod.rs:1392/1400/1413/1421`) — hence `--http-allowed-origin null` does not help. `curl` passed
 because it sends no referrer policy. **The tests assert the breaking policy** (`tests_dashboard.rs:25/467/480`).
 
-- **Option (a), preferred:** use `Referrer-Policy: same-origin` for the pairing page. CSP already carries
-  `form-action 'self'`.
-- **Option (b):** accept `Origin: null` for this endpoint **only** when `Host` is loopback and the
-  one-time pairing code is valid (the code is the real authenticator).
+**Sibling sweep (review round 2) — the breakage is dashboard-WIDE, not pairing-only.**
+`with_dashboard_security_headers` (`http/mod.rs:1458-1464`) stamps `referrer-policy: no-referrer` on
+**every** dashboard response (12 call sites), and `enforce_dashboard_post_headers`
+(`http/mod.rs:1387-1405`) rejects an empty or non-matching `Origin` **before** it ever consults
+`sec-fetch-site` (which real browsers send and which would pass). Under the same Fetch-spec
+mechanics, therefore, **every browser POST to the authenticated dashboard — Workbench, Reviews,
+every action route — fails exactly like pairing did**; the field never observed it only because
+P0-3 blocked entry, and `curl` cannot observe it at all. Fixing the pairing page alone would ship a
+dashboard that pairs and then still cannot do anything.
+
+- **Option (a), preferred:** switch the **site-wide** `with_dashboard_security_headers` helper to
+  `Referrer-Policy: same-origin` (not just the pairing page — the sweep above shows every dashboard
+  POST is affected). CSP already carries `form-action 'self'`.
+- **Option (b):** accept `Origin: null` when `sec-fetch-site: same-origin` is present (re-order the
+  checks in `enforce_dashboard_post_headers` so the modern, spec-reliable signal can vouch), plus the
+  loopback + one-time-code rule for the pairing endpoint specifically.
+- **OPERATOR RULING (2026-07-20): choose the best engineering option, informed by how MCP Agent
+  Mail (Dicklesworthstone's Rust implementation) secures its own local web dashboard** — a reference
+  study of its headers/origin/CSRF/cookie model is in flight; its findings and the final (a)-vs-(b)
+  choice are recorded here when it lands. Until then (a) remains the working preference; the choice
+  changes implementation detail, not A5's scope or tests.
 - Either way, **all four check sites must agree**, and the tests asserting `no-referrer` must be updated
   deliberately with a recorded rationale — not silently.
 - **Security review required** (this is an auth surface): document why the chosen option does not weaken
   the fail-closed posture.
-- **Test:** a real headless-browser POST (the repo already installs Chromium for the K2 e2e lane), not curl.
+- **Test:** a real headless-browser flow (the repo already installs Chromium for the K2 e2e lane) that
+  **pairs AND then performs an authenticated dashboard action POST** — pairing alone would have passed
+  while the rest of the dashboard stayed broken; `curl` structurally cannot make either assertion.
 
 ---
 
@@ -246,13 +386,23 @@ check normalizes both sides. A config with `allowed_subjects = ["mtls:AABB…"]`
 - **B1a** — normalize at enforcement for `mtls:` subjects (reuse `normalize_cert_fingerprint`), or
   normalize at load (`main.rs:3352-3357`). **Prefer normalize-at-load** so the stored value and the
   runtime key are identical, and validation cannot pass a value enforcement will reject.
+  Round-2 sweep sharpened the anchor: the validator itself normalizes via
+  `normalize_sha256_fingerprint` (`oraclemcp-config/src/lib.rs:648-660`) while the build path stores
+  trim-only (`main.rs:3355-3360`) — so BOTH case and the `sha256:` prefix diverge, and both are
+  default openssl renderings. **The correct symmetric pattern already exists in-repo:**
+  `MtlsClientRegistry` normalizes on store AND lookup (`http/config.rs:92/:107`) — copy it. See B15
+  for the other config fields with the same asymmetry.
 - **B1b** — promote the drop log from `debug!` to `warn!` including the **computed** fingerprint and the
   reason (`serve.rs:238/259`). `computed mtls:sha256:aabb… not in allowed_subjects` is a 30-second fix
   for an operator.
 - **B1c** — raise or document the 1-second control ingress budget (`serve.rs:46`, `:649-653`); it is an
   independent second path to the same silent reset and makes `openssl s_client` probing impossible.
-- **B1d** — confirm with the tester whether the *main* listener reset was real; no silent-drop path was
-  found there (unregistered fingerprint → 403; operator-authority failure → typed response).
+- **B1d** — the *main*-listener reset could not be confirmed with the tester. **OPERATOR RULING
+  (2026-07-20): the tester/channel is not available at this time** — so the rig answers it
+  ourselves: R1's HTTP lane and R3's browser lane exercise the main listener with registered and
+  unregistered principals and assert typed 403/429 responses, never silent resets. No silent-drop
+  path was found in code (unregistered fingerprint → 403; operator-authority failure → typed
+  response); treat the field report's main-listener claim as unconfirmed until R1/R3 prove it.
 
 **Unblocks B4** (online credential revocation is reachable only through this listener).
 
@@ -279,6 +429,13 @@ The path is `params._meta["oraclemcp/initToken"]` — the key contains a **slash
 
 - Document the exact JSON path; put the literal path into the error text (`init_token.rs:36`); note that
   a non-string value also yields `Missing`.
+- **Sibling (review round 2):** the `setup` payload's `secure_stdio` snippet (`main.rs:4447-4451`)
+  actively recommends this flow while providing only the server half (`ORACLEMCP_STDIO_TOKEN`) — and
+  mainstream MCP clients have no configuration surface for injecting `params._meta` into
+  `initialize` at all. The documentation must name which clients CAN supply it and exactly how (or
+  ship a thin client-side wrapper that injects it), or the snippet must stop advertising a flow that
+  cannot be completed. A security feature that can be enabled but not used reads as protection while
+  providing none — the tester's words, now with the snippet as the delivery vector.
 
 #### B4 [P1] Credential lifecycle without downtime
 *Field: P1-13. §A.5.4. **Premise partly refuted** — the online route already exists.*
@@ -296,17 +453,36 @@ any transport attempt, so terminal errors are *structurally* unable to enter the
 
 - **Action:** reproduce the field symptom locally (§4.D TCPS lane) — a cert `UnknownIssuer` under stock
   `retry_count=20` must now surface in ~1s, not as `call timeout of 20000 ms exceeded`. Then **close
-  driver bead `rust-oracledb-4sfc`** with landed evidence.
+  driver bead `rust-oracledb-4sfc`** with landed evidence. Note (review round 1): `4sfc` is currently
+  `deferred`, not closed, and an **uncommitted** close-evidence file for it already sits in the driver
+  working tree — reconcile via Z4 rather than re-authoring evidence.
 - **Do not re-implement.** This is the one finding where the plan's scope *shrinks*.
 
 #### B6 [P1] Driver: trust the wallet **and** the platform roots
-*Field: P1-2. **The one finding still ungrounded — §A.6.8.***
+*Field: P1-2. §A.6.8 — **grounded and confirmed in review round 1: a real reference-parity bug.
+Implement directly** (the "ground it first" step is done; full evidence incl. the reference's own
+behavior is in §A.6.8).*
 
-Field evidence is strong (copying a DigiCert Global Root G2 PEM into the wallet dir made an ADB endpoint
-connect). **First task is to ground it**: confirm the rustls trust anchors are wallet-only, name the
-site, and state the security argument for adding platform roots while keeping the wallet authoritative.
-Then implement, and add a **DigiCert-signed ADB endpoint** to regression — today's lane only exercises
-the self-signed-ADB-CA chain.
+- **B6a** — union the trust anchors in `build_client_config` (`tls.rs:297-300`): seed with system
+  roots, extend with wallet CAs, keep the empty-set guard — the wallet stays authoritative (always
+  included), public-root validation is restored, matching python-oracledb 4.0.1's
+  `create_default_context()` + `load_verify_locations()` exactly. Lives in the deterministic pre-dial
+  prepare stage (`prepare_tls_handshake`), so trust failures remain typed config errors, never
+  timeouts.
+- **B6b — RULING RECORDED (2026-07-20, "best engineering decision" delegated): adopt
+  `rustls-native-certs`** for true platform-store parity on Linux/macOS/Windows (the reference loads
+  the platform store everywhere via `create_default_context()`), keep the existing Unix bundle-file
+  reads as fallback, and honor `SSL_CERT_FILE`/`SSL_CERT_DIR` overrides (reference parity AND the
+  hermetic-test seam D6 needs). New dependency goes through the cargo-deny review like any other.
+  Rationale: a driver whose no-wallet TCPS path has ZERO trust anchors on Windows is a worse defect
+  than one small, ecosystem-standard dependency.
+- **B6c — OPERATOR RULING (2026-07-20): strict python-oracledb parity, NO `trust_store` knob.**
+  System roots are always unioned with wallet CAs, exactly like the reference; no wallet-only mode
+  is added. Anyone needing a private-CA-only posture controls the OS trust store, as they would with
+  the reference client.
+- **Regression:** F4 (a real publicly-signed ADB endpoint — the field's actual failure) + a D6 local
+  lane with a synthetic "public" root injected via B6b's override. Today's lane only exercises the
+  self-signed-ADB-CA chain.
 
 #### B7 [P1] Session teardown: stop leaking session records
 *Field: P1-8. §A.6.6. Confirmed: **no teardown counterpart exists**.*
@@ -316,10 +492,21 @@ logoff counterpart anywhere in the codebase.
 
 - **B7a** — add `logoff_statements` / `session_release_statements` executed before a pooled session is
   released and before process exit (including SIGTERM).
-- **B7b** — ensure a **clean logical Oracle logoff** so `AFTER LOGOFF` triggers fire. Cross-check driver
-  bead `rust-oracledb-s0se` (missing `close_notify`): if sessions end by abrupt transport close, the
-  trigger never runs regardless of a hook — **both halves may be required**. Treat B7b and `s0se` as one
-  investigation.
+- **B7c (round-2 sweep — the structural root cause, do this FIRST):** the `OracleConnection` trait
+  has **no close/logoff/disconnect method at all** (`connection.rs:934-1221`; zero close call sites
+  across oraclemcp-db), so a clean Oracle logoff is impossible through the abstraction. Confirmed
+  consequences: `oracle_switch_profile` drops the old pinned conn + stateless pool by move-assign
+  (`dispatch/mod.rs:11802-11803`, no logoff); SIGTERM/clean shutdown only stops the pinger
+  (`main.rs:3886/:4039`) and drops everything (`OraclePool` has no Drop/close/drain). Add
+  `close()` to the trait (delegating to the driver's verified `Connection::close` → close_notify
+  path, §A.6.11) and call it at: profile switch, process exit/SIGTERM, and pool eviction. B7a's
+  hooks then run inside it.
+- **B7b** — ensure a **clean logical Oracle logoff** so `AFTER LOGOFF` triggers fire. **Driver half
+  RESOLVED in review round 1 (§A.6.11): close_notify IS sent on the normal close path**, deliberately
+  skipped only when the peer already hard-closed — `s0se` needs only its evidence commit + guarded
+  close (Z4). The remaining investigation is **entirely server-side**: confirm oraclemcp actually
+  calls `Connection::close` on the pinned AND the pooled connections at clean exit **and** on SIGTERM
+  (the field saw leaks on both); D7's `AFTER LOGOFF` lane proves it either way.
 
 #### B8 [P1] Audit: doctor must stop lying
 *Field: P1-9. §A.6.7. **The audit design is correct and fail-closed** — doctor misreports it.*
@@ -329,19 +516,48 @@ server **refuses to start**). Nothing that can mutate is silently unaudited.
 
 - **B8a [P0-for-honesty]** — doctor must report `audit: DISABLED (no signing key configured; profile is
   read-only everywhere reachable)` instead of a check-mark plus a path for an auditor that was never
-  constructed (`doctor.rs:396-404` reasons about paths without consulting `build_auditor`).
+  constructed (`crates/oraclemcp-core/src/doctor.rs` — layout fields `:396-404`; the audit logic at
+  `:781-868` reasons about file paths and legacy→XDG migration only and **never calls `build_auditor`**;
+  path + line spans re-verified in review round 1).
 - **B8b** — document a concrete `[audit]` block; there is no example anywhere in the README.
-- **B8c — product decision (operator):** should refusals be recorded on a local unsigned trail even when
-  no writes are possible? The 15 blocked statements were exactly the evidence an operator would want,
-  and "silently recording nothing is a weaker default than operators will assume."
+- **B8c — RULING RECORDED (2026-07-20, "best engineering decision for agents AND humans"
+  delegated): YES — an unsigned local refusal/security-event trail is ON by default** whenever the
+  signed audit chain is off (no key + read-only-everywhere): a separate `refusals.jsonl` (never the
+  `audit.jsonl` name), first record and doctor both stating plainly UNSIGNED — NOT TAMPER-EVIDENT,
+  with an `[audit] unsigned_refusal_log = false` opt-out. Doctor reports
+  `audit: DISABLED · unsigned refusal trail: ACTIVE at <path>`. Rationale: the field's 15 blocked
+  statements were exactly the evidence an operator wanted and got nothing; agents get the same
+  signal via the refusal corpus. Honest labeling keeps it from masquerading as the signed chain.
+  The agent-mail reference study (see A5 ruling) may refine the record format; posture is settled.
+- **B8d — the doctor asserts-vs-observes sweep (round 2, §A.10).** Beyond check 13: **check 12
+  (`check_call_timeout`, `doctor.rs:2428-2524`) reports keepalive/timeouts as Pass derived purely
+  from CONFIG**, while doctor's own check 15 (`:2532-2537`) states the driver leaves
+  `expire_time`/keepalive "parsed but not yet wired" — a green the runtime contradicts. **First
+  verify which side is stale**: driver GH#14 closed in 0.8.4, so check 15's claim may itself be
+  outdated (the izk5 class); then either make check 12 observe (probe the socket option / driver
+  state) or mark it config-derived. Also: check 13 (`check_state_layout`, `:2263-2337`) asserts
+  audit-in-place from paths (confirmed = B8a's target); checks 1 and 2 are Pass from a compile flag
+  and `Path::is_dir()` respectively — reword so a ✓ never reads as more than what was observed.
+  Checks verified genuinely observing: 3, 10, 11, 14, 15.
 
-#### B9 [P1] Proxy-auth syntax: accept or explain `user[schema]`
-*Field: P1-1. §A.6.4. Confirmed absent.*
+#### B9 [P1] Proxy-auth syntax: accept or explain `user[schema]` — BOTH repos
+*Field: P1-1. §A.6.4. Confirmed absent in the server — and (review round 1) **confirmed a driver
+parity gap too**: python-oracledb desugars the bracket form inside `ConnectParams` itself
+(`impl/base/connect_params.pyx:511-516`, documented at `connect_params.py:121-123`), while our driver
+only offers the explicit `with_proxy_user` API (`crates/oracledb/src/lib.rs:2488`; wire support
+exists, `oracledb-protocol/src/thin/auth.rs:204-235`) and performs no bracket parsing.*
 
 Every Oracle client accepts `username = 'user[schema]'`; oraclemcp passes it through literally →
 `ORA-01017`, indistinguishable from a wrong password. All 13 of the operator's real profiles used it, so
-**nothing authenticated out of the box**. Detect `^(.+)\[(.+)\]$` at config load and either auto-desugar
-into `[profiles.proxy_auth]` or fail fast naming the correct shape.
+**nothing authenticated out of the box**.
+
+- **B9a (server)** — detect `^(.+)\[(.+)\]$` at config load and either auto-desugar into
+  `[profiles.proxy_auth]` (keeps validation + redaction typed) or fail fast naming the correct shape.
+- **B9b (driver, parity)** — desugar `user[target]` in the driver's username handling exactly like
+  the reference, keeping the explicit API authoritative when both are supplied (explicit wins,
+  conflict = typed config error). This stands on its own for library users regardless of B9a.
+- Rider (the round's related LOW finding): `setup`'s output never shows how to configure proxy auth
+  at all — add the `[profiles.proxy_auth]` shape to the setup templates.
 
 #### B10 [P1] The misleading-message sweep
 *The round's dominant theme, and per the tester the highest value-per-line change available.*
@@ -354,13 +570,53 @@ message":
 - `ORA-31603` surfaced as `CONNECTION_FAILED`;
 - refusals that name no sanctioned alternative (**P1-6**): all raw-SQL view access is refused at
   READ_ONLY, but `next_steps` never mentions `oracle_schema_inspect`, `oracle_list_schemas`,
-  `oracle_db_health`, `oracle_capabilities`. **Turn a wall into a redirect.**
+  `oracle_db_health`, `oracle_capabilities`. **Turn a wall into a redirect.** (Refusing raw-SQL view
+  access at READ_ONLY is itself by design — views can hide unproven function calls — and stays; the
+  fix here is the message, deliberately.)
+- **P1-7** — `setup`'s HTTP onboarding line omits the mandatory auth header: the printed
+  `claude mcp add … --transport http <url>` cannot connect while the same output block issues the
+  bearer two lines above. Source site found in review round 2: the `claude_mcp_add` array in the
+  setup payload (`main.rs:4456`) carries no `--header`. Emit
+  `--header "Authorization: Bearer <token>"`, and add a `client_command`
+  field to `clients issue --json` beside the existing `revocation_command`/`rotation_command`.
+  **Sibling in the same payload:** the `secure_stdio` snippet (`main.rs:4447-4451`) configures the
+  SERVER side of the init token and offers no client-side mechanism whatsoever (see B3) — the
+  printed "secure" path cannot be completed by a mainstream MCP client as written. Fix both under
+  one rule, pinned by fixture **C9**: *every printed onboarding snippet must work verbatim under the
+  auth mode it claims to configure.*
+- **one error grammar (unnumbered P2)** — under HTTP, `oracle_connection_info` returned bare prose
+  ("Unable to connect…") with no envelope, no `error_class`, no `next_steps` — evidently from the
+  transport layer — while sibling tool calls in the same batch succeeded; the tool the server
+  nominates for diagnosing connection trouble was the only thing that failed. Error shapes must be
+  uniform across transport and tool layers (ties to A4c).
+- the transient-driver-error mis-remediation (B13b) rides this sweep.
 
-#### B11 [P1] `oracle_orient` must be capped
-*Field: P1-5.* Returns ~344 KB (~86k tokens) by default with **no `max_rows`/byte cap**, mostly INDEX
-rows — on the tool named for agent orientation (`get_schema` ≈ 67 KB; `fleet=true` multiplies it). Apply
-the capping `oracle_query` already has; default the schema projection to TABLE/VIEW/PACKAGE; return a
-truncation marker plus a cursor.
+#### B11 [P1] The orientation trio must be capped: `oracle_orient`, `oracle_capabilities`, `get_schema`
+*Field: P1-5 plus the round's unnumbered "P1-x". The tester's framing is systemic and worth keeping
+verbatim in spirit: **the three tools an agent reaches for first to orient itself are the three
+largest responses in the product.***
+
+- `oracle_orient` returns ~344 KB (~86k tokens) by default with **no `max_rows`/byte cap**, mostly
+  INDEX rows (`fleet=true` multiplies it).
+- `oracle_capabilities` is **58.5 KB** — and the server's own `instructions` field tells every fresh
+  agent to call it first, so the mandated first action can consume a fifth of a small context window.
+- `get_schema` ≈ 67 KB with no arguments.
+
+Apply the capping `oracle_query` already has; default the schema projection to TABLE/VIEW/PACKAGE;
+return a truncation marker plus a cursor; give `capabilities` a compact default with a `detail_level`
+escape hatch. The fix pattern already exists in-product: `oracle_search_objects`'
+`detail_level:"names"` is what the field's subagent praised as "the right first move".
+
+**Round-2 caps matrix (§A.10) — extend the same treatment to the uncapped metadata tools:**
+`oracle_compile_errors` is UNCAPPED and schema-wide when `name` is omitted
+(`intelligence.rs:1438-1441`); `oracle_describe`'s constraints join is UNCAPPED
+(`intelligence.rs:1355-1394`); `oracle_plscope_inspect` returns full identifier/statement arrays
+uncapped (`plscope.rs:138-139/:167-168`); and `oracle_get_ddl` is **silently LOSSY** — a hard
+4000-byte `DBMS_LOB.SUBSTR` slice (`intelligence.rs:1413-1414`) truncates large DDL (any partitioned
+table) with **no truncation flag and no continuation** — silent data loss on a metadata tool, the
+worst variant of this class. The `max_result_bytes` backstop covers only the query/sample data path
+(`dispatch/mod.rs:3227/:3495`). Verified already capped: `search_objects` (100 default, ≤5000),
+`db_health` (bounded by construction), `get_source`/`search_source` (their knobs).
 
 #### B12 [P1] PL/SQL purity: make read-only functions reachable
 *Field: P1-14. §A.3. Fully by design today.*
@@ -374,10 +630,194 @@ classification grounds **and takes the server down** (`main.rs:3515-3522` → `E
   tighten-only: an allowlist is operator authority, never an automatic inference.**
 - **B12b** — pass the profile's **real ceiling** to custom-tool loading (`main.rs:1349/1357/1366`
   hard-code `ReadOnly`).
-- **B12c** — decide whether one bad tool should remain fatal; a `--skip-invalid-tools` posture with loud
-  reporting would have kept the field server running.
+- **B12c — RULING RECORDED (2026-07-20; operator leaned skip-and-warn, reasoning requested and
+  recorded): default becomes SKIP-AND-WARN, uniformly.** An invalid custom tool is not loaded (that
+  alone is fail-closed — skipping never grants anything); the server keeps serving. Loudness is the
+  contract: a prominent stderr warning per skipped tool, doctor reports each skipped tool + reason
+  as a warn/fail, `oracle_capabilities` carries a `skipped_custom_tools` list so AGENTS see it too,
+  and signature-verification failures are additionally recorded as security events on the B8c trail
+  (tamper evidence must never be silent). `--strict-custom-tools` restores fail-fast for operators
+  who want a bad file to stop the world. Rationale: one malformed tool file taking down the whole
+  server for every client (the field outage) is an availability failure of a non-critical component;
+  the guard's tighten-only philosophy is untouched because a skipped tool grants nothing.
 - **B12d [P2]** — consult Oracle purity metadata (`DETERMINISTIC`, `ALL_PROCEDURES`) as *evidence*
   feeding the oracle. Design carefully: `DETERMINISTIC` is a developer assertion, not a proof.
+
+#### B13 [P1] Driver: transient "unknown TTC message type 129" mid-session
+*Field: unnumbered body-level P1 from the round's independent subagent. Flagged by the tester as **the
+same error family as Round 1's P0 (`type 11`)** — that class is not fully eliminated; it now appears
+transiently mid-session rather than at connect. Added in review round 1; absent from plan v1.*
+
+A metadata read failed with `CONNECTION_FAILED: query: unknown TTC message type 129 at position 35`;
+the **identical call succeeded on retry** with nothing changed. Three defects in one event: a
+transient wire condition, misclassified as durable (`CONNECTION_FAILED` implies a dead connection and
+nothing suggests retrying), with wire internals leaked into agent-facing text, and a suggested remedy
+(`oracle_connection_info`) that itself failed (see B10's grammar bullet).
+
+- **B13a (driver)** — investigate: which server message can legitimately appear mid-stream carrying
+  type 129 (out-of-band break/marker handling? an unconsumed trailer?); attempt a repro in the D lanes
+  (long-lived session + concurrent metadata reads across all three container generations); capture
+  with `ORACLEDB_TRACE_QUERY=1`; fix the decode path or classify the condition as retryable at the
+  protocol layer. **Reference cross-check (review round 1):** python-oracledb also hard-errors on an
+  unknown protocol message type (`errors.py:811`, "internal error: unknown protocol message type"),
+  so the target is our **desync source** (residual bytes read as a message type), not graceful
+  handling of 129 — diff our dispatch against the reference's messages/base.pyx at the same read
+  position. If it cannot be reproduced locally, record that honestly and keep the bead open —
+  do not close on "cannot reproduce" alone (constitution #2).
+- **B13b (server)** — independent of the driver outcome, the server must classify this as
+  transient/retryable, retry once on a fresh round trip (rides A4b), and map it to a typed envelope
+  instead of leaking `unknown TTC message type N` (rides A4d).
+
+#### B14 [P1] DRCP `purity=reuse`: clear-before-set, and decide the dead lease subsystem
+*Round-2 sweep (§A.10). Security-relevant: cross-tenant identity bleed on pooled server sessions.
+Not a field finding — the field never exercised DRCP — which is exactly why it belongs here.*
+
+With `[profiles.drcp] purity = "reuse"` (the DEFAULT — `drcp.rs:38-45`, `profile.rs:257-258`), the
+server session handed back may still carry a prior client's `CLIENT_IDENTIFIER` / `MODULE` /
+app-context. The wired identity path, `apply_session_identity` (`connection.rs:1897-1954`, called on
+connect at `:1580`), **never clears before setting** — it early-returns when identity is None and
+otherwise sets only the fields present, so anything the new profile omits **keeps the previous
+session's value**. Meanwhile the correct clear-and-reset machinery exists and is DEAD:
+`session_tag_statements` (`lease.rs:68-102`: `CLEAR_IDENTIFIER` + `SET_MODULE(NULL,NULL)` +
+`SET_CLIENT_INFO(NULL)` then set) belongs to a `LeaseManager`/`oracle_session` subsystem with **zero
+production callers and no tool registration** (constructed only in tests; `LeaseAcquirer` impls are
+test-only).
+
+- **B14a** — make the wired path clear-before-set (unconditionally reassert the full identity set on
+  every connect; on DRCP that is the only safe posture). `CLIENT_IDENTIFIER` is a canonical VPD key —
+  this also feeds the A1/H1 story.
+- **B14b — OPERATOR RULING (2026-07-20): DELETE it** ("delete it if truly not needed, no dead
+  code"). Verified truly unwired: `LeaseManager::acquire` has zero production callers, all
+  `LeaseAcquirer` impls are test-only, `oracle_session` has no dispatch or registry entry. Removal
+  keeps B14a's clear-before-set as the single identity path; salvage the `session_tag_statements`
+  clear-sequence (CLEAR_IDENTIFIER → SET_MODULE(NULL,NULL) → SET_CLIENT_INFO(NULL) → set) into B14a
+  before deleting the module.
+- **Test:** D-lane DRCP fixture — two profiles alternating on a pooled server session, asserting no
+  identity/context bleed.
+
+#### B15 [P1] HTTP-guard normalization: the rest of the B1 class
+*Round-2 sweep (§A.10). Same defect shape as B1 (validate-side and enforce-side disagree), different
+fields — all shipping today.*
+
+- **B15a `allowed_origins`** — the allowlist branch compares the FULL origin string exactly
+  (`http_guard.rs:125`) while a normalization helper (`origin_authority`, `:91-96`) exists but is
+  applied **only to the loopback branch**. Browsers send lowercase, no-default-port, no-trailing-slash
+  serialized origins — so operator values like an uppercase host, a trailing slash, or an explicit
+  `:443` validate and never match. Normalize both sides with the existing helper.
+- **B15b `allowed_hosts`** — loopback path lowercases (`http_guard.rs:85`) but the operator allowlist
+  compares case-sensitively (`:137`); `Host` is case-insensitive per RFC. Casefold at comparison.
+- **B15c** — weak sibling everywhere: `validate_non_empty_list`/`validate_required_string`
+  (`oraclemcp-config/src/lib.rs:883-901`) trim for the emptiness CHECK but store verbatim, so
+  whitespace survives into exact-match enforcement across all list fields. Trim on store.
+- Verified SAFE in the same sweep (do not churn): issuer/aud exact-match (RFC-correct), scopes
+  (case-sensitive per RFC 6749), client_id/bearer (machine-generated, constant-time), profile-name
+  lookups (symmetric, fail-closed).
+
+#### B16 [P1] OCI IAM token lifecycle: wire the driver's `TokenSource` seam; stop embedding a one-shot token
+*Round-2/3 sweep (§A.10 S15). The field never tested IAM auth (its own auth matrix marks it "not
+tested"), so this class was structurally invisible to the round — exactly the kind of sibling the
+sweep exists to catch.*
+
+The reference refreshes expired tokens automatically: `access_token` accepts `str | 2-tuple |
+Callable`, and the callable is **re-invoked whenever the stored token is expired**
+(`connect_params.py:64/:140`; `impl/base/connect_params.pyx:227-233` — expired + no callable ⇒
+error). Our **driver has full parity machinery already shipped**: static `with_access_token`
+(`lib.rs:2308`), PoP `with_access_token_and_key` (`:2326`), and a pluggable **`TokenSource`** trait
+with async `get_token` + typed redacted `Error::TokenSource` (`lib.rs:1805/:1379-1383`).
+
+**The server bypasses the seam:** `inject_iam_token` runs once during `ResolvedProfile` construction
+(`main.rs:870-880`) and embeds a static token string into the connect options; the pool manager
+holds those options for its whole lifetime (`pool.rs:42`), so **every later pool-member open,
+discarded-member replacement, or A4e reconnect reuses the stale token** — OCI database tokens live
+~1 hour, after which every new physical connection fails auth (an ORA-01017-class error with no
+hint the token expired). Compounding honesty defect: `doctor.rs:2394-2395` prints "it is re-read on
+every connect" — true of the resolver's *intent* (`iam_token.rs:706` "re-read fresh on every
+connect"), false of the wiring — the S12 assert-vs-observe class again.
+
+- **B16a** — implement `TokenSource` over the existing hardened resolver (`iam_token.rs`
+  env/file/exec sources, keeping the exec sandboxing/caps) and pass it through the driver seam
+  instead of a one-shot injected string; delete the one-shot path.
+- **B16b** — fix the doctor text (or better: make it observe — report the token source *kind* and
+  when it was last successfully invoked).
+- **B16c (driver)** — the `TokenSource` docs advertise refresh-on-rejection, but the implementation
+  makes a single `get_token` call per connect with no expiry inspection and no retry-on-auth-reject
+  (`lib.rs:2902-2907`). Implement the advertised behavior or correct the docs — the seam's contract
+  must be honest before the server builds on it.
+- **Test:** offline — a `token_exec` source backed by a counter file, assert the source is invoked
+  per physical connect (pool grow + reconnect), not once; live acceptance of a rotated token needs
+  ADB → rides F2.
+
+---
+
+### Workstream P — the P2 tail, enumerated [P2 — ship-if-clean]
+*Plan v1's traceability row said "P2-1..P2-13 → B10 / G-tail", which pointed at the quarantined
+report — a self-containedness violation. Enumerated here, scrubbed. **P2-2 ("the startup banner never
+confirms TLS") was retracted by the tester — no action, listed so nobody chases it.** Dispositions:
+[fix] code, [doc] documentation, [verify] verify-then-close.*
+
+- **P2-1 [doc]** — Claude Code over HTTPS with a self-signed/private CA needs `NODE_EXTRA_CA_CERTS`;
+  the failure is a bare "Failed to connect". One README line under the TLS section.
+- **P2-3 [fix]** — `current_database` redacts 19 fields **including `current_schema` and
+  `service_name`** — the answers the tool exists to give. Field cost: the subagent had to pass
+  `owner` explicitly on every single call because "defaults to current schema when available" was
+  never available. Add a loopback/stdio opt-out or a narrower default redaction set; keep
+  redaction-by-default for remote transports.
+- **P2-4 [verify]** — default `use_sni = true` rejected Oracle's ADB SNI routing token (the
+  service-form token with underscores and a numeric version suffix) as an invalid rustls DNS name,
+  failing a stock ADB wallet out of the box. **The driver fix already shipped in 0.8.4** — §A.6.10
+  has the sites and the two open leads (carve-out predicate; the server's wallet-implies-SNI
+  default). Verify-then-close in D6/F, not new machinery.
+- **P2-5 [fix]** — config-load failures are reported under doctor's "Connectivity" check, sending
+  users to debug firewalls/DSNs. File them under a config check.
+- **P2-6 [doc/fix]** — `--allow-no-auth` help says "stdio … development only" but it also gates
+  HTTP. Make the help text match the behavior.
+- **P2-7 [doc]** — one `serve` instance per state directory at any port: reasonable, but
+  undocumented; "one profile per box" surprises operators. Document it where `serve` is introduced.
+- **P2-8 [doc/fix]** — `serve` opens **2** Oracle sessions while reporting
+  `connection_strategy: single_session`. Not a leak (proven in the field) — it is the pinned +
+  stateless pair (§A.6.9). Document the expected session footprint, point at the pool knob, and make
+  the reported strategy honest.
+- **P2-9 [fix]** — stale-lock reclaim leaks a raw `kill: (<pid>): No such process` line to stderr.
+  Capture it.
+- **P2-10 [fix]** — `setup --discover` prints a "fastest path" that non-interactive runs cannot use
+  without `--discover-tns`/`--yes` (say so in the printed line); `sh install.sh` dies under dash with
+  a cryptic `set -o pipefail` error — detect a non-bash interpreter and say "run with bash".
+- **P2-11 [fix]** — `oracle_semantic_search`'s documented typed `requires_23ai` refusal is masked by
+  the resolver's generic `FORBIDDEN_STATEMENT` on pre-23ai servers. Let the typed refusal through.
+- **P2-12 [doc]** — `base=` does not cap a child at its parent's `max_level`, and a README sentence
+  reads as though it does; a reader could build a READ_ONLY base as a safety net that isn't one.
+  Probably intended (config is operator-owned): **clarify the doc; do NOT silently change inheritance
+  semantics** — that would be a behavior change needing its own review.
+- **P2-13 [fix]** — `sign-tool` says "copy each signature into its matching `[[tool]]` block", but
+  appending at end-of-file silently lands it inside a trailing `[[tool.params]]` block. Add
+  `--write`/`--in-place`.
+- **P-U1 [fix]** (unnumbered) — `oracle_search_source` has `max_rows` but no
+  `max_line_chars`/`context_chars`; source with 2000+-character generated lines produced ~25 KB of
+  noise for one search. Add a line-length cap — for a source-grep tool it is the most obvious missing
+  parameter.
+- **P-U2 [fix]** (unnumbered) — `oracle_get_source` cannot fetch a line range although
+  `oracle_search_source` returns exact line numbers; `max_chars` truncates from the top, so reading a
+  function deep in a large package body means guessing a byte budget. Add `from_line`/`to_line` —
+  the two tools are designed to be used together.
+- **P-U3 [fix]** (unnumbered, MEDIUM in the round) — the dashboard 403 is bare text while every other
+  error is a structured JSON envelope. Unify; rides A5's dashboard work.
+- **P-U6 [fix/doc]** (rig design review) — no `Strict-Transport-Security` header is emitted
+  anywhere. When native TLS is active on a **non-loopback** listener, emit HSTS (never on loopback
+  HTTP — pinning localhost breaks local dev). One header, standard posture.
+- **P-U5 [doc]** (sibling sweep, review round 2) — the wallet support table is STALE and
+  **understates** shipped behavior: `README.md:994`/`:1221` and `docs/configuration.md:421` claim
+  `cwallet.sso` is "recognized and reported with structured wallet diagnostics" (diagnostic-only),
+  but `oraclemcp-db/src/oci.rs` treats it as a first-class working mode (`mode: "cwallet.sso"`,
+  `oci.rs:340`; required-files probe `:33`) and the field used `cwallet.sso` as **the working OCI
+  path**. Pre-0.8.4 wording — refresh the truth table (and re-check `ewallet.p12`'s row while
+  there).
+- **P-U4 [verify]** (unnumbered) — legacy-3DES `ewallet.pem` (`pbeWithSHA1And3-KeyTripleDES-CBC`)
+  still reported `KeyDecrypt` in the field, although driver 0.8.4's release scope included legacy-3DES
+  decrypt with committed synthetic fixtures. Cosmetic in the field (the `cwallet.sso` auto-login
+  fallthrough works and is the intended path) but a truth-in-shipping question: run the committed
+  3DES fixture through the **server's** wallet path (doctor + connect), not only the driver's own
+  unit test — either the driver fixture is self-consistent-but-unreachable (§3's class, again) or the
+  server's wallet diagnostics bypass the driver's decryptor. §A.6.12. D6 rider.
 
 ---
 
@@ -396,17 +836,25 @@ the server consumes.
 - **C3** — **mTLS allow-list**: an operator-style hand-written `allowed_subjects` entry (uppercase, bare
   hex, `sha256:`-prefixed) asserted to match a real certificate's runtime principal key — the exact axis
   B1 breaks on. Plus a unit test that all three accepted spellings authorize.
-- **C4** — **dashboard**: a real headless-browser form POST (Chromium already available in CI), asserting
-  a 200 rather than a reset — the assertion `curl` structurally cannot make.
+- **C4** — **dashboard**: a real headless-browser flow (Chromium already available in CI) that pairs
+  **and then performs an authenticated dashboard action POST**, asserting 200s rather than resets —
+  the assertions `curl` structurally cannot make, covering both the pairing instance (P0-3) and the
+  dashboard-wide sibling (§4.A5 sweep note).
 - **C5** — **session-setup ordering**: assert the built statement list for **each profile posture**
   (`protected = true` and `false`), catching A1b offline.
 - **C6** — **CLI vs running server**: with a server running, assert `setup --write` and `clients revoke`
   produce specific actionable errors (catches A2a).
 - **C7** — **`QueryPageBuilder` with zero rows** asserts `columns` is populated (catches A1c).
-- **C8** — **blind-catalog mock**: policy probe returns empty *because of privilege*; assert refusal, not
-  pass-through (catches A1a).
+- **C8** — **blind-catalog mock**: the policy probe AND the virtual-column probe each return empty
+  *because of privilege*; assert refusal, not pass-through, for both (catches A1a and its
+  virtual-column twin).
+- **C9** — **snippet truth**: every onboarding snippet `setup` prints (`claude_mcp_json`,
+  `codex_config_toml`, `secure_stdio`, `http_client_credentials.claude_mcp_add` — `main.rs:4434-4459`)
+  is executed **verbatim** against a live server configured with the auth mode the snippet claims,
+  asserting a completed MCP `initialize` (catches P1-7 and its `secure_stdio` sibling; the class rule:
+  a printed command is a contract, and today none of them is ever executed by any test).
 
-**Acceptance:** C1–C8 all fail against today's `main` and pass after Workstreams A/B. That two-sided
+**Acceptance:** C1–C9 all fail against today's `main` and pass after Workstreams A/B. That two-sided
 proof is the deliverable — a fixture that never failed proves nothing.
 
 ---
@@ -435,6 +883,17 @@ catchable offline (Workstream C). The live lane is needed for a specific short l
 - **D7 — a session-lifecycle lane**: an `AFTER LOGOFF` trigger writing to a table, asserting sessions
   close logically (validates B7 and driver `s0se`).
 - **D8 — doctor-style preflight**: refuse to run with a clear message if Docker/images/ports are missing.
+- **D9 — realistic schema + data (rig rider). RULING RECORDED (2026-07-20, "best engineering
+  decision" delegated): VENDOR it** — vendor `oracle-samples/db-sample-schemas`
+  (**verified MIT-licensed** — pin the upstream commit, copy its LICENSE; HR/CO/SH) and layer the
+  synthetic governance fixtures on top, since the sample schemas ship **no** VPD/RLS: D3's
+  policy-protected table + synonym-over-protected-base + the two catalog-visibility principals, the
+  proxy `CONNECT THROUGH` pair (`bootstrap_live_schema.sh:60-63` already has one), and D7's
+  `AFTER LOGOFF` trigger. Field-shaped data without a byte of customer data (constitution #9).
+- **D10 — idle-kill against the REAL pool (rig rider)**: the kill-session mechanics exist
+  (`bootstrap_live_schema.sh:41-43`); wire them against the server's own checkout path
+  (`pool.rs:471-483`) AND the pinned session, asserting replace-on-checkout / reconnect instead of
+  silent reuse — validates A4a/A4e end to end.
 
 **Hard constraints:** zero-cost (constitution #10); **synthetic data only** — no live-OCI or customer
 identifiers ever (constitution #9); containers are ephemeral and torn down deterministically.
@@ -458,12 +917,80 @@ oraclemcp-db → oracledb driver → real Oracle container.**
 - **E3** — the **audit hash-chain** records every privileged action, and `audit verify` detects tail
   truncation (exercise the anchor sidecar).
 - **E4** — the **operator/dashboard HTTP surface** including the pairing flow (browser-based, per C4).
+  **Implemented by the rig's R3 lane — build once there, do not duplicate.**
 - **E5** — **failure/recovery paths**: killed connections, refused optional features, expired elevation,
   revoked credentials mid-session.
 - **E6** — emit **signed attestations** from e2e runs (ties to K1–K3 already landed) so an e2e result is
   evidence, not a claim.
 
 Build on the existing `e2e_harness` and golden-artifact discipline rather than duplicating them.
+
+---
+
+### Workstream R — Local Integrator Rig [P1; R3 is P0 — C4/E4 already commit to it]
+*Operator-initiated, deep-designed 2026-07-20. Depends on: C (fixture rules), D (containers +
+fixtures). **The gap it closes, proven:** no external MCP client has EVER driven the shipped
+artifact — every "e2e" we own frames JSON-RPC with our own helpers (`scripts/e2e/offline_stdio.sh:34`
+is literally `cargo test --test e2e_stdio`; `served_console.sh:106` spawns the real binary but
+asserts through the web app's own parsers; repo-wide grep for any external MCP client: zero hits).
+The rig makes US the field tester, so a production round becomes a confirmation, not a discovery.*
+
+Six layers, one command (`scripts/rig/rig.sh up|run|report|down`; `rig doctor` preflight = D8):
+**L1 DB** — the containers already running on this machine (xe18:1518, xe21:1520, free23:1522 —
+`living_db.sh:67-74`; readiness via driver `container.sh` log sentinel). **L2 schema+data** — D9.
+**L3 server-under-test = the ARTIFACT** — installed via the real installer, configured via real
+`setup --discover`/`--write`, run as the real systemd `--user` service, never `cargo run`; the
+snippets `setup` prints (`main.rs:4434-4459`) are the literal harness inputs (C9, live). **L4
+harness** — PRIMARY: `@modelcontextprotocol/inspector --cli` plus a ~120-line committed raw
+JSON-RPC probe (shares NO code with the server or `e2e_harness.rs` — enforced by a boundary lint),
+both fed from hand-authored `mcp.json`, over stdio AND Streamable HTTP; SECONDARY: R5. **L5
+browser** — Playwright/Chromium against a live `serve` listener (the existing `web/e2e` Playwright
+config targets `vite preview` and validates none of the Rust security surface — this lane is new).
+**L6 report** — field-shaped punch list built on the existing `scripts/e2e/lib.sh` JSON-line logger,
+scrubbed by the existing secret/sensitive-data lints.
+
+- **R1 [P1] — external-client reachability.** Inspector + probe complete `initialize`, `tools/list`,
+  and a governed read over BOTH transports against the installed binary, from literal
+  externally-authored configs. Must demonstrably fail against today's `main` where the field said it
+  fails (two-sided proof, same rule as C).
+- **R2 [P1] — tool-surface sweep with wire assertions.** Every advertised tool across the posture
+  matrix {read_only, protected, proxy_auth, pooled, drcp}; write tools through the real
+  preview→grant→apply gate. Tool counts derive from `registry.rs:18-81` (**34 canonical + 25 compat
+  aliases**, +9 `oracle_plsql_*` builds — note: earlier "43 tools + 13 aliases" phrasing was the
+  FIELD's sweep scope, not the registry; R2 asserts `oracle_capabilities` == `TOOL_NAMES` to pin
+  runtime-vs-source drift mechanically). Three wire-only assertions per response: (1) well-formed
+  envelope / `outputSchema` validation — every error is a known-class `ErrorEnvelope`; (2)
+  **serialized-byte budget** (catches S11/B11, including the honest-truncation flag on `get_ddl`);
+  (3) refusal-grammar uniformity — every refusal carries a `structured_reason` with a known
+  category, and the same construct yields the same category across tools.
+- **R3 [P0] — browser lane against live `serve`.** Chromium pairs (POST → 303 → `/`), performs an
+  authenticated operator action POST asserting **200, not 403** (S2's assertion), and holds an
+  `/operator/v1/events` SSE subscription with Last-Event-ID resume. **This IS C4's and E4's
+  implementation — build once here.**
+- **R4 [P1] — round-N report + refusal-corpus regression gate.** `rig report` emits scrubbed
+  `findings.jsonl`/`.md` in the field punch-list shape; diffs the refusal-corpus export against the
+  committed baseline — a category change or a newly-ALLOWED construct is itself a finding.
+- **R5 [P2, operator-gated, deferred]** — LLM secondary harness: `RIG_LLM=1` + explicit operator
+  confirm; real `claude -p … --mcp-config <literal>` first (codex exec / opencode = deferred
+  matrix). Finds ergonomics defects (the oversized-orientation class) nothing deterministic finds.
+  Never automatic — token cost. *(Deferral was the one decision the operator left unanswered in the
+  2026-07-20 ruling round — the standing recommendation (defer past 0.9.1) applies until overridden.)*
+- **Failure-injection lanes** (via D10 + B16's test): idle-session kill → P0-5/A4; privilege revoke
+  mid-run → P0-2/A3 + A1a; container restart → S3/reconnect honesty; token expiry (30-second-`exp`
+  JWT via `token_exec`, held across a pool checkout) → B16; credential rotation → B4. The idle-kill
+  and token-expiry lanes are the two no unit test can reach — they need a live DB plus elapsed time.
+
+**Placement: Tier-3 operator/nightly lane, NEVER required CI** (same posture as F3) — the rig must
+not be able to red the front page; the required-lanes-only heartbeat is preserved.
+**Phasing:** 0.9.1 = R1 + R2 (free23 lane) + R3 + R4 + D9. Deferred: the multi-generation sweep
+matrix, R5, the HTTPS+mTLS+OAuth browser matrix (needs B1/B15 landed first), chaos beyond
+idle-kill/token-expiry.
+**Open items (recorded, non-blocking):** inspector-CLI flag surface not build-verified (fallback:
+lean on the probe); `claude -p` headless behavior on this box unverified (R5 is deferred anyway);
+sample CO schema on xe18 unverified (worst case the realistic-data lane runs free23/xe21 only).
+**Acceptance:** one documented command brings the rig up on this machine and produces a round-N
+report; R1/R3 demonstrably fail against today's `main` and pass after the A/B fixes; zero customer
+identifiers in any rig artifact (F5's scanner runs on rig output too).
 
 ---
 
@@ -490,14 +1017,23 @@ Build on the existing `e2e_harness` and golden-artifact discipline rather than d
   and **always run a control query against a resource known to be non-empty** (e.g. compartment list
   → 1) in the same invocation, so "empty" is proven distinct from "broken".
 
-  Remaining operator nicety (not blocking): `~/.oci/oraclemcp-adb.env` is still the unfilled template
-  with `<...>` placeholders; `scripts/e2e/oci_adb_terraform.sh` sources it, so F1 will need it filled.
+  Env-file note — **OPERATOR RULING (2026-07-20): "figure it out" — no operator action needed.**
+  `~/.oci/oraclemcp-adb.env` is still the unfilled `<...>` template that
+  `scripts/e2e/oci_adb_terraform.sh` sources; at F1 start the agent fills it **itself** from data
+  already on this machine: `~/.oci/config` (tenancy/user/region/key) plus the compartment OCID from
+  the existing tfstate backup (the same source the zero-cost check uses). Values stay local; none
+  enter committed artifacts (constitution #9, F5 guard).
 - **F1 (bead `10.1`)** — Always-Free provisioning + **teardown-as-incident** harness. Teardown failure is
   treated as an incident, not a warning — an orphaned ADB is a cost event.
 - **F2 (bead `10.2`)** — capability sweep: open, exercise the full tool surface, close.
 - **F3 (bead `10.4`)** — wire the OCI e2e into a **Tier-3 operator-gated lane** (never automatic).
 - **F4** — validate **B6** against a real DigiCert-signed ADB endpoint (the field's actual failure), not
-  only the self-signed-ADB-CA chain.
+  only the self-signed-ADB-CA chain. Also verify **P2-4** (§A.6.10) on the same endpoint.
+- **F5 (bead `10.3` — was missing from plan v1)** — the OCI-artifact confidentiality guard: a
+  secret-scan/redaction check wired into the OCI lane so a run **cannot commit live identifiers**
+  (OCIDs, tenancy/compartment names, IPs, wallet secrets, tokens). Acceptance: the scan blocks a
+  fixture containing a live-shaped OCID; synthetic fixtures pass. Treat as part of F1's DoD — a
+  provisioning harness without this guard is incomplete (constitution #9).
 
 **Hard constraint: zero-cost / Always-Free only** (constitution #10) — verified per-run via the
 authoritative AVAILABLE=0 check before and after every run.
@@ -530,9 +1066,34 @@ authoritative AVAILABLE=0 check before and after every run.
 - **G8 [P3] `izk5`** — `doctor.rs` wallet-variant comments cite a stale `=0.7.4` driver.
 - **G9 [P0-hygiene] `plan-bead-graph-lint-eshv`** — lint normalized plan-to-bead graphs before promotion.
   **Run it on this plan's own bead conversion (§10)** — it exists precisely for this moment.
-- **G10** — driver `s0se` (close_notify) — merge into B7b as one investigation.
+- **G10** — driver `s0se` (close_notify) — **driver side resolved (§A.6.11)**; remaining work is the
+  Z4 evidence commit + guarded close, plus B7's server-side half.
 - **G11** — close the 11 epics once their children drain; Cluster B (`.3`) already has zero open children
   and is closable after review.
+- **G12 [P1] — driver bug-bead un-deferral. OPERATOR RULING (2026-07-20): among the driver's 83
+  deferred beads, only FEATURES (and deliberate better-than-original enhancements) stay deferred;
+  everything bug/fix/parity-shaped joins the 0.9.0 train.** Census by type: 16 bugs, 10 features,
+  10 epics, 5 chores, 42 tasks (process — stay deferred as the "deferred for good reason" class).
+  The 16 bugs split three ways:
+  - **Already in-train:** `4sfc` (B5 verify+close), `s0se` (§A.6.11 + Z4 evidence commit).
+  - **Already IMPLEMENTED on driver `main`, bead left deferred → verify + guarded-close with
+    evidence:** `dc1` arrow-TSTZ (`3dbb72b`), `dc2`+`dc3` DSN cert-DN pin / DN_MATCH=OFF
+    (`be26a50`), `dc4` configured TLS timeout (`abc4dd3`), `py1` NUMBER scale (`25ee76e`).
+  - **Un-defer and implement:** `dc5-py5` sub-minute offsets + negative interval fractions, `dc6`
+    Arrow NUMBER sentinel, `dk1-dk2` pool close races + per-waiter OS threads, `pr1` lone-quote bind
+    panic-free, `py2` Decimal exact bind, `py3` bigint exact bind, `py4` GIL around blocking I/O,
+    `retry-leading-comment-contract`, and `upstream-sync-….3` proxy bracket parsing — **which IS
+    B9b's bead; do not create a duplicate.**
+  Features verified staying deferred: `1s2`, `8eo`, `8pp`, `cco`, `cn4`, `dgi`, `j1w`,
+  `kerberos-radius`, `nnnz`, `upstream-sync-….9` (security-gated legacy verifier).
+- **G13 [P1] — server deferred-bug dedup (same ruling, server side).** The server holds 13 deferred
+  bugs; most are **consolidated duplicates of the OPEN F-LOW `7.11.x` children already in G3**
+  (cc1-cc2 ↔ 7.11.14/15, cf3 ↔ 7.11.19, di4 ↔ 7.11.7, g1-vector ↔ 7.11.10, au-hardening ↔ 7.11.16-17,
+  db-value-fidelity ↔ 7.11.13, di2/di5 ↔ 7.11.6/8). At bead conversion: dedup to ONE canonical per
+  defect (keep the 7.11.x child, close the deferred twin as duplicate-of). Genuinely new, pulled in
+  per the ruling: `met-…-na6y` (metric label cardinality), `di1-…-h0d4` (terminal held-effect
+  retry), `he7t` (IAM subject-mapping ORA-01017 — it is G1's residual anyway), `vzui` (rides Z3,
+  must-fix).
 
 ---
 
@@ -546,6 +1107,8 @@ See §7 for the version decision, §9 for the gate.
 ## 5. Sequencing and dependencies
 
 ```
+Z (restore main to green: Z1 branches, Z2 mutation seal, Z3 Windows, Z4 driver bookkeeping)
+        │  ← precedes everything below; Z1/Z2 run while C is being written
         ┌─ C (wire-contract fixtures) ──────────────┐  offline, start immediately
         │                                            │
 F0 (operator: OCI auth) ─────────────┐               ▼
@@ -553,22 +1116,27 @@ F0 (operator: OCI auth) ─────────────┐              
         ▼                            │               │
    D (local environment) ────────────┼───────────────┤
         │                            │               ▼
-        │                            └────────► E (cross-repo e2e)
+        │                            └────────► E (cross-repo e2e) + R (integrator rig)
         ▼                                            │
    F (OCI campaign, Cluster I) ──────────────────────┤
                                                      ▼
                               G (remaining beads) ─► H (release cut)
 ```
 
-**Critical path:** `D → E → H`. **C is off the critical path and should start first** — it is offline,
-cheap, and its failures define "done" for A/B. **F is parallel** and gated only on F0.
+**Critical path:** `D → E/R → H`. **Z (CI green) precedes everything** — a red `main` makes every later
+green claim dishonest (constitution #2); Z1/Z2 are mechanical and can run while C is being written.
+**C is off the critical path and should start first among the build work** — it is offline, cheap,
+and its failures define "done" for A/B. **F is parallel** and gated only on F0 (done).
 
 **Ordering rules:**
+0. **Z first** — do not stack fix commits onto a red `main`; every push until Z lands reds the front page.
 1. **C before A/B where possible** — write the failing fixture first, then fix. Two-sided proof.
 2. **B1 before B4** — online revocation is unreachable until the control listener works.
 3. **A1a is the single highest-priority code change** (fail-open in a fail-closed system).
-4. **D3/D4/D5 before finalising A1/A3/A4** — they settle the open questions Appendix A flags.
-5. **B5 is verify-then-close, not implement.**
+4. **D3/D4/D5 before finalising A1/A3** — they settle the remaining open questions Appendix A flags
+   (A4's pinned-vs-pooled question is already answered — §A.6.9 — so A4/A4e can start immediately).
+5. **B5 and P2-4 are verify-then-close, not implement** (§A.6.5, §A.6.10). **B6 is
+   implement-directly** — its grounding is complete (§A.6.8).
 6. **G4 (janitor) last** — it is conflict-heavy and must not disturb a release-candidate tree.
 
 ---
@@ -616,6 +1184,8 @@ stage-aware TLS work already on `main`. Added public API is *minor*-compatible, 
    **gates**.
 3. The server's `oracledb` dependency pin moves to `=0.9.0`; the release-surface sync check and the
    driver-version references (bead `izk5`, `doctor.rs` comments) must be updated in the same train.
+   Bead titles still carrying `0.8.5` — server bead `13` and the deferred driver release beads
+   `5jdu`/`5swy` — are retitled to the ruled versions during bead conversion (§10).
 4. **Any breaking change in the driver is out of scope.** 0.9.0 is additive-only. If something requires
    a break, it waits for 1.0 (the `road-to-1-0` line, still deferred).
 
@@ -633,6 +1203,8 @@ stage-aware TLS work already on `main`. Added public API is *minor*-compatible, 
 | **OCI cost** | Always-Free only, verified AVAILABLE=0 before and after each run; teardown-as-incident (F1) |
 | **Scope is large for one release** | P0/P1 gate the cut; P2/P3 ship if clean. Land complete, not sliced (constitution #11) |
 | **cosign/attest v4 majors** (from Dependabot #19) live on tag-only paths CI cannot exercise | The first release run is the only proof — watch it deliberately |
+| **B6 broadens trust** (system roots trusted alongside a private-CA wallet) | It restores reference parity, the wallet stays included, and no accept-all mode exists or is added; record the B6c knob decision either way |
+| **Z2's fresh mutation campaign is heavy** (1889 mutants, guard+audit) | Memory-cap every run + build lease + dedicated target dir (the standing OOM lesson); reuse the 3-shard shape the stale seal records |
 
 ---
 
@@ -646,7 +1218,10 @@ Learned twice this week the hard way (a ci.yml comment broke `release_surface_sy
 (+ the two `dashboard-bundle` invocations) · `cargo test --workspace` · `cargo deny check` ·
 `check_entry_trace_contract.sh` · `ci_taxonomy.py --check` (+ crate-copy sync) ·
 `release_surface_sync_check.sh` · honesty/provenance/concurrency lints ·
-`check_bead_close_evidence.sh`.
+`check_bead_close_evidence.sh` · **`mutation_safety_gate.sh` seal-freshness** (the `E_STALE_SEAL`
+class must fail locally, not first in CI — learned in §A.9) · **evidence-SHA reachability from
+`origin/main`** (Z1's rule; plain local resolution is exactly how §A.9's red slipped past the local
+gate).
 **driver:** fmt · clippy · tests · **`scripts/gen_baseline.sh --check`** · `verify_required_local.py`.
 Heavy builds go through `scripts/build_lease.sh` with a dedicated `CARGO_TARGET_DIR` (E1's guard
 enforces this — it blocked the orchestrator's own build, correctly).
@@ -663,18 +1238,32 @@ enforces this — it blocked the orchestrator's own build, correctly).
    conclusions (see `frontpage-green-mechanics`).
 8. `cargo-semver-checks` result recorded and the version decision (§7) made on its evidence.
 9. **The operator pushes the tag.** Agents never tag or publish.
+10. **Workstream Z landed first and stayed landed** — oraclemcp `main` green (bead-evidence audit 0
+    hard **in CI**, fresh mutation seal, Windows lane resolved) before any A/B fix is claimed done,
+    and kept green at every subsequent push.
+11. **The rig ran on the release candidate** — R1–R4 executed against the RC build; the round-N
+    report contains no untriaged P0/P1 finding (findings either fixed in-train or operator-deferred
+    with a recorded reason).
 
 ---
 
 ## 10. Conversion to beads
 
 Convert this plan with the beads workflow, then **run `plan-bead-graph-lint-eshv` (G9) on the result** —
-it exists exactly for this. Requirements:
+it exists exactly for this. **OPERATOR RULING (2026-07-20): conversion starts only on an explicit
+operator "go" — do not ask for it; wait for it.** Requirements:
 - every task self-contained (no need to re-read this plan), citing its Appendix A `§` for `file:line`;
-- dependency edges per §5, especially `C → A/B`, `B1 → B4`, `D → E → H`, `F0 → F`;
+- dependency edges per §5, especially `Z → everything`, `C → A/B`, `B1 → B4`, `D → E/R → H`,
+  `F0 → F`, `D9/D10 → R`, `R3 → C4/E4`;
 - each bead names its acceptance test, and for a fix bead, the fixture that must fail first;
-- **no bead closes without landed evidence** (§9.2 item 6);
-- Cluster J beads are **not** touched.
+- **no bead closes without landed evidence** (§9.2 item 6), and evidence SHAs must be reachable from
+  `origin/main` (Z1's rule);
+- Workstream P converts to **individually-closable** P2/P3 beads — no umbrella bead;
+- bead titles still saying `0.8.5` (server `13`, driver `5jdu`/`5swy`) are retitled per §7;
+- G12's driver bug beads are un-deferred (not re-created) and G13's server duplicates are
+  dedup-closed against their `7.11.x` canonicals — one bead per defect, ever;
+- Cluster J beads are **not** touched (Cluster J = the GCP/Vertex launch campaign: ADK/Gemini demo,
+  evidence bundle, site page, launch video, coordination — deferred by operator ruling).
 
 ---
 
@@ -693,7 +1282,8 @@ body of the plan above is normative for scope, ordering and acceptance.
 names or package names appear. Where the report named a customer object, this text says "the field
 schema" or "a customer package".
 
-**Grounding is complete for every finding except P1-2** (§A.6.8).
+**Grounding is complete for every finding, P1-2 included** (§A.6.8; completed in review round 1,
+which also re-verified every code-level claim in this appendix at HEAD — §A.7 item 11).
 
 ---
 
@@ -772,6 +1362,8 @@ This is why `--json` and `RUST_LOG=debug` added nothing.
    config/credential mutations. Note `clients.json` is loaded **once** at open
    (`client_credentials.rs:339`) with no reload/watch, so out-of-process mutation would not propagate
    to a running server anyway — granularity work must include reload.
+4. **Comment nit while in the file** (review round 1): the comment at `file_store.rs:261` calls the
+   lock "shared"; `try_lock()` at `:247-249` is exclusive. Fix the comment.
 
 ### Test that would have caught it
 A CLI-vs-running-server collision test: start a server, then run `setup --write` and
@@ -986,9 +1578,12 @@ expose both in `[profiles.pool]`; retry once on a fresh connection after a trans
 `oracle_connection_info` perform a **real round trip** (it returned `connected:true` with every
 liveness field null); stop leaking raw driver errors (`Broken pipe (os error 32)`) to callers.
 
-**TODO (not yet grounded):** confirm the driver's default `ping_interval_secs` value, and complete
-P0-2 (flashback quarantine) grounding — specifically whether the capability probe happens **before**
-the point of no return, and where a cleanly-refused optional feature becomes a discarded connection.
+**RESOLVED — do not implement from this section alone; §A.6.3 and §A.6.9 supersede it.** The driver's
+default is `ping_interval_secs: 60` (validation IS armed by default — in the **driver's** pool), but
+oraclemcp does not use the driver's pool at all: it has its own (§A.6.3), and `oracle_query` runs on a
+pinned connection outside even that (§A.6.9). The "server never arms it" framing above is therefore
+the wrong lens — kept only as the investigation record. P0-2's grounding is complete in §A.6.1 (no
+pre-flight probe; quarantine structural and permanent).
 
 ---
 
@@ -1218,20 +1813,29 @@ surfaces the raw `Broken pipe (os error 32)`.
 fresh connection after a transport I/O error; make `oracle_connection_info` perform a real round trip
 (it reported `connected:true` with every liveness field null); stop leaking raw driver errors.
 
-**Still open:** whether the *pinned* session (which `oracle_query` uses — see §A.2.8) is pooled at all,
-or is a single long-lived connection with no validation path. That determines whether the checkout fix
-alone is sufficient. Needs the local environment to settle.
+**RESOLVED — §A.6.9:** the pinned session is a single long-lived connection **outside** the pool,
+with no validation path and no same-session recovery. The checkout fix alone is NOT sufficient; A4e
+is required and is the primary fix for the field symptom.
 
-### A.6.4 P1-1 `user[schema]` proxy syntax — VERIFIED absent
+### A.6.4 P1-1 `user[schema]` proxy syntax — VERIFIED absent in the server, AND a driver parity gap
 `crates/oraclemcp-core/src/connect.rs:84-101` requires an explicit `[profiles.proxy_auth]` block with
 non-empty `proxy_user` and `target_schema`, and additionally requires `username` to **match**
 `proxy_user` when both are set. **No `user[schema]` detection exists anywhere in config parsing** —
 the string is passed through literally and Oracle answers `ORA-01017`, indistinguishable from a wrong
 password.
 
-**Fix:** detect `^(.+)\[(.+)\]$` at config load and either auto-desugar into `proxy_auth` or fail fast
-naming the correct shape. Cheap, and it was the single reason none of the operator's real profiles
-authenticated out of the box.
+**Reference cross-check (review round 1):** python-oracledb 4.0.1 desugars the bracket form in
+`ConnectParams` itself — `reference/python-oracledb/src/oracledb/impl/base/connect_params.pyx:511-516`
+("string may be in the form user[proxy_user]"; split at the bracket), documented at
+`connect_params.py:121-123`, recomposed at `:452-453`. Our driver has the **wire** support
+(`oracledb-protocol/src/thin/auth.rs:190-235`, comment citing the reference's messages/auth.pyx) and
+an explicit `with_proxy_user` API (`crates/oracledb/src/lib.rs:2488-2494`), but **no bracket
+desugaring anywhere in `ConnectOptions`** — so a library user porting from the reference silently
+gets `ORA-01017` too. That makes P1-1 a two-repo fix (B9a server + B9b driver parity).
+
+**Fix:** B9a — detect `^(.+)\[(.+)\]$` at config load and either auto-desugar into `proxy_auth` or
+fail fast naming the correct shape; B9b — reference-parity desugaring in the driver. Cheap, and it
+was the single reason none of the operator's real profiles authenticated out of the box.
 
 ### A.6.5 P1-3 driver retry-masking — **LARGELY CLOSED by pushed commit `880134e`**
 `880134e` ("fix(tls): fail fast on configuration errors", now on driver `main` @ `d99927d`) rewrites
@@ -1249,6 +1853,14 @@ the failover boundary to be **stage-aware**. From its own diff:
 That is exactly the P1-3 prescription — retryable vs terminal separated **at the type level**, so a
 terminal error is now *structurally incapable* of being retried into a generic timeout. `d99927d`
 ("test(tls): prove configuration errors precede public dial") adds the proof.
+
+**Reference cross-check (review round 1):** python-oracledb has the SAME masking behavior we fixed —
+its retry loop (`reference/python-oracledb/src/oracledb/impl/thin/connection.pyx:449-467`) swallows
+every per-address exception until the very last attempt of the last address (`raise_exc` only on the
+final iteration), TLS-terminal errors included; the field never saw it there only because
+system-root trust made the handshake succeed (§A.6.8). So our stage-aware fix is a **deliberate,
+strictly-better deviation from the reference**, not a parity regression — record it in the parity
+deviations ledger (docs/PARITY_SKIPS.md conventions) so a future parity audit doesn't "fix" it back.
 
 **Consequence for the plan:** P1-3 and driver bead `rust-oracledb-4sfc` are believed closed by work
 already on `main`. **Verify before closing the bead**: confirm the specific field symptom (a cert
@@ -1290,9 +1902,11 @@ server **refuses to start** (`ORACLEMCP_AUDIT_KEY_REQUIRED`). Nothing is silentl
 mutate.
 
 **The real defect is the doctor report.** Doctor check 13 shows ✓ and prints an audit path for an
-auditor that was **never constructed** — it reasons about paths (`doctor.rs:396-404`:
-`legacy_audit_path`, `current_audit_path`, `audit_path_configured`) without knowing whether
-`build_auditor` returned `Some`. That is a **gate that lies**, the class AGENTS.md forbids.
+auditor that was **never constructed**. Verified sites (review round 1 — note the correct crate):
+`crates/oraclemcp-core/src/doctor.rs`, layout fields `:396-404` (`legacy_audit_path`,
+`current_audit_path`, `audit_path_configured`); the audit logic at `:781-868` reasons about file
+paths and legacy→XDG migration only and **never calls `build_auditor`**, so doctor cannot know
+whether an auditor exists. That is a **gate that lies**, the class AGENTS.md forbids.
 
 **Fix:** (a) doctor must report `audit: DISABLED (no signing key configured; profile is read-only
 everywhere reachable)` instead of ✓-with-a-path; (b) document a concrete `[audit]` block (there is no
@@ -1301,12 +1915,135 @@ on a local unsigned trail even when no writes are possible — the tester's poin
 recording nothing is a weaker default than operators will assume" is fair, since the 15 refusals were
 exactly the evidence an operator would want.
 
-### A.6.8 P1-2 driver wallet-only trust store — NOT YET GROUNDED
-The one item still unverified. Needs: confirmation that the rustls trust anchors are built from the
-wallet only (platform roots excluded), the exact site in the driver's TLS/wallet path, and the minimal
-change to add platform roots while keeping the wallet authoritative — plus the security argument for
-doing so. The field fix (copying a DigiCert Global Root G2 PEM into the wallet dir as `ewallet.pem`)
-made an ADB endpoint connect, which is strong evidence the claim is correct.
+### A.6.8 P1-2 driver wallet-only trust store — GROUNDED AND CONFIRMED (review round 1): a real reference-parity bug
+
+**The bug.** `crates/oracledb/src/tls.rs:297-300` (`build_client_config`) selects trust anchors as an
+either/or:
+
+```rust
+let trust_anchor_ders: Vec<Vec<u8>> = match &params.wallet {
+    Some(w) if !w.ca_certificates.is_empty() => w.ca_certificates.clone(), // wallet ONLY
+    _ => load_system_roots(),                                              // system ONLY
+};
+```
+
+Wallet present ⇒ wallet CAs only, platform roots excluded — never the union. Those anchors are the
+entire trust set handed to the verifier (`tls.rs:309-315`); chain validation runs against exactly them
+(`OracleServerCertVerifier::verify_server_cert`, `tls.rs:141-169`). The comment at `:294-296` claims
+`ssl.create_default_context()` parity, but only the no-wallet branch reaches system roots.
+`load_system_roots()` (`tls.rs:364-384`) hand-reads well-known **Unix** CA-bundle paths — empty on
+Windows, no macOS keychain, and it ignores `SSL_CERT_FILE` (also the testability gap B6b closes).
+Neither `webpki-roots` nor `rustls-native-certs` is a dependency (root `Cargo.toml:30-41`, absent
+from `Cargo.lock`).
+
+**The reference does the union** (python-oracledb 4.0.1, vendored at
+`reference/python-oracledb/src/oracledb/impl/thin/transport.pyx`): `create_ssl_context` always loads
+platform roots first (`ssl.create_default_context()`, `:135-138`; macOS keychain extras `:148-155`),
+then `load_verify_locations(ewallet.pem)` **adds** the wallet CAs (`:161-168`). Reference trust set =
+system roots ∪ wallet CAs — exactly why the reference client connected to the field's ADB endpoint
+with the same wallet while we failed `UnknownIssuer`, and why dropping the missing public root into
+the wallet dir fixed us.
+
+**Field mechanics (scrubbed).** ADB endpoints present either Oracle's self-signed ADB-CA chain
+(anchored by the downloaded wallet — the implementer's free-tier lane, which is why it always passed)
+or a publicly-signed chain whose root the downloaded wallet does not carry (the field's region). A
+wallet-only store can never verify the second kind; the driver's `UnknownIssuer` was *correct* for
+the trust set it built — the defect is the trust set.
+
+**Fix, stage, knobs** — see B6 (union in `build_client_config`; pre-dial prepare stage via
+`prepare_tls_handshake`, `tls.rs:759-789`, so failures stay typed config errors). Existing knobs
+(`resolve_tls_params`, `tls.rs:415-448`): `ssl_server_dn_match` (false skips only the post-handshake
+identity match, never chain validation — audited WARN at `:428-441`), `ssl_server_cert_dn`,
+`use_sni`. There is **no accept-all/danger mode** — keep it that way. The `SYSTEM` wallet-location
+sentinel ("use OS store") is already handled (`oracledb-protocol/src/tls/wallet.rs:281-286`).
+
+### A.6.9 The pinned session is NOT pooled (answers §A.6.3's open question; drives A4e/A3c)
+
+`oracle_query` selects the pinned connection at `dispatch/mod.rs:12355`
+(`state.conn.as_ref()`); it is `DispatcherState.conn: Box<dyn OracleConnection>`
+(`dispatch/mod.rs:499`) — a single owned connection created once at startup and moved into the
+dispatcher (constructors `:1047`/`:1108`/`:1146`, stored at `:1160`). The oraclemcp-db pool feeds
+only `stateless_conn` (`:500`; selection `:12356-12359`, falling back to the pinned conn when
+absent).
+
+**No per-request liveness exists on the pinned path** — no ping/validate before use (contrast
+`pool.rs:418`: return-path only, stateless conns only). A torn or cancelled round trip sets a
+`ConnectionQuarantine` marker (`dispatch/mod.rs:539`) that **fail-closes** subsequent requests — a
+refusal mechanism, not a reconnect. The pinned connection is re-established **only via an explicit
+profile switch** (`state.conn = conn` at `:11802`, quarantine cleared at `:11786`, schema/level/
+grants reset in the same commit).
+
+**Consequences:** (1) A4a fixes only the stateless surface — the field's P0-5 ran on the pinned
+path; (2) A4e (pinned liveness/reconnect with session-setup re-application, backstop re-arming,
+`CURRENT_SCHEMA` re-resolution, audited quarantine clear) is the primary fix; (3) A3c's
+"self-recycle a poisoned session" is the **same** missing capability — build once; (4) this explains
+P2-8's "2 sessions vs `single_session`" observation.
+
+### A.6.10 P2-4 ADB SNI routing token — the driver fix ALREADY SHIPPED; find why the field still failed
+
+Driver `main` **and tag v0.8.4** (commit `0a1c7c6`) contain the fix the tester proposed: `decide_sni`
+(`crates/oracledb/src/tls.rs:732-755`) sends an SNI only when rustls-valid, and for OCI ADB endpoints
+falls back to sending the **descriptor host** as SNI (`is_oci_adb_endpoint`, `tls.rs:710-716`) — the
+post-handshake DN/name match stays authoritative either way. A non-encodable token under
+`use_sni=true` otherwise fails closed with typed `Error::UnsupportedSni` (pinned by tests — no silent
+degrade).
+
+Yet the field on 0.9.0 (pins `=0.8.4`) still got "use_sni=true cannot be honored… not a valid rustls
+DNS name". Two leads to verify in D6/F4: (a) whether `is_oci_adb_endpoint`'s predicate missed the
+field's host/service shape; (b) the **server** force-defaults `use_sni=true` whenever
+`wallet_location` is set (`crates/oraclemcp-db/src/connection.rs:1863-1867`) while the driver's own
+default sends no SNI — decide that server default deliberately. Verify-then-close.
+
+**OPERATOR RULING (2026-07-20): "python-oracledb parity, fully done this time, completely and
+utterly."** Concretely that means ALL of: (1) run down why the 0.8.4 carve-out did not engage in the
+field (predicate verify); (2) flip the server's wallet-implies-SNI default OFF (align with driver +
+reference opt-in — this is what makes a stock ADB wallet work out of the box); (3) record the one
+structural parity limit honestly in the parity-deviations ledger: rustls's `ServerName` cannot carry
+Oracle's routing token, so `use_sni=true` sends the host (handshake completes; Oracle's
+one-negotiation-fast-path routing benefit is forgone — a documented performance nuance, not a
+functional gap); (4) F4 regression on a real publicly-signed ADB endpoint. No half state survives
+the train.
+
+**Reference cross-check (review round 1) — corrects the field report's premise.** python-oracledb
+does **not** send the host as SNI: it computes the Oracle service-form token
+(`_calc_sni_data`, `reference/python-oracledb/src/oracledb/impl/thin/transport.pyx:47-59`:
+`S{len}.{service_name}[.T1.{type}].V3.{version}`) and passes it as `server_hostname` when
+`description.use_sni` is set (`:182-183`, used at `:266`/`:294`) — CPython's ssl accepts an
+arbitrary ASCII token there, which is how Oracle's SNI fast-path routing (skipping one TLS
+negotiation) works. rustls's `ServerName` type structurally cannot carry that token (underscores /
+numeric labels fail its DNS-name grammar), so **true reference parity is impossible without patching
+rustls**; the 0.8.4 host-as-SNI carve-out completes the handshake but does NOT trigger Oracle's
+routing fast-path (a benign performance loss, worth one doc sentence). Sharpened conclusion for lead
+(b): the server's wallet-implies-`use_sni=true` default is more aggressive than BOTH the driver
+default and the reference's opt-in — flip it to omit/`false` so a stock ADB wallet works out of the
+box, and let operators opt in explicitly.
+
+### A.6.11 Driver close_notify (bead `s0se`) — VERIFIED: no driver gap; B7 moves server-side
+
+The normal close path sends TLS close_notify: `Connection::close` (`crates/oracledb/src/lib.rs:7749`)
+→ `finish_session_close` (`:756-783`) → `shutdown_write` (`:781`) → `shutdown_write_shared`
+(`:9182-9189`) → transport write-half `poll_shutdown` (`transport.rs:255-263`, TLS arm `:260`) →
+asupersync `TlsStream::poll_shutdown` → `send_close_notify()` (asupersync-0.3.9
+`src/tls/stream.rs:631-660`, send at `:638`). The rollback-timeout path also shuts down the write
+half (`lib.rs:7762`). The only skip is the intentional terminal peer-hard-close disposition
+(`lib.rs:769-771`; asupersync no-ops on a terminal stream, `stream.rs:632-634`) — correct, since the
+peer already closed the socket; that hardening IS what `s0se`'s merged work delivered.
+
+**Consequence for B7/P1-8:** the session-record leak cannot be blamed on missing close_notify. The
+open question is whether the **server** ever invokes `Connection::close` on its pinned and pooled
+connections at clean exit and on SIGTERM (the field saw leaks on both) — plus the B7a hooks. `s0se`
+itself: evidence commit + guarded close only (Z4).
+
+### A.6.12 Legacy-3DES `ewallet.pem` — field still reports KeyDecrypt despite 0.8.4 shipping 3DES support
+
+The field round (server 0.9.0 = driver 0.8.4) still recorded password-protected `ewallet.pem` →
+`KeyDecrypt` on a legacy `pbeWithSHA1And3-KeyTripleDES-CBC` PKCS#12 key. Cosmetic in the field — the
+`cwallet.sso` auto-login fallthrough works and is the intended path; it only downgraded a doctor
+check to a warning. But 0.8.4's release scope included legacy-3DES decrypt with committed synthetic
+fixtures, so this is a truth-in-shipping question: **verify by running the committed 3DES fixture
+through the SERVER's wallet path** (doctor + connect), not only the driver's own unit test. Either
+the driver fixture is self-consistent-but-unreachable (§A.0's class, once more) or the server's
+wallet diagnostics bypass the driver's decryptor. Workstream P item P-U4; D6 rider.
 
 ---
 
@@ -1334,8 +2071,24 @@ made an ADB endpoint connect, which is strong evidence the claim is correct.
     this class recurs no matter how many of the above we fix. Note how many findings turned out to be
     catchable **offline**: §A.2.2 (one assertion), §A.2.4 (unit test), §A.2.3 (mock-conn test), §A.5.1/§A.5.2/§A.5.3
     (literal fixtures), §A.1 (CLI-vs-running-server test). The live environment is needed for a smaller
-    set than it first appeared — mainly §A.2.7 (H1/H2 principal + catalog visibility), §A.6.3 (pinned vs
-    pooled), §A.6.5 (P1-3 symptom), and §A.6.6 (logoff triggers).
+    set than it first appeared — mainly §A.2.7 (H1/H2 principal + catalog visibility), §A.6.5 (P1-3
+    symptom), §A.6.6 (logoff triggers), and the A4e/D5 pinned-session lane (§A.6.9 settled the
+    architecture question offline; D5 proves the fix).
+11. **Review round 1 (2026-07-20) independently re-verified all 17 code-level claims in this appendix
+    at HEAD — every `file:line` current, zero contradictions** — and resolved the three open
+    questions: P1-2 grounded and confirmed (§A.6.8), the pinned session is not pooled (§A.6.9),
+    close_notify has no driver gap (§A.6.11). New evidence sections added in that round: §A.6.10
+    (the SNI fix already shipped — verify why it did not engage), §A.6.12 (3DES verify), §A.9
+    (CI-red root causes). Scope deltas: B6 implement-directly; B5 + P2-4 verify-then-close; B7
+    server-side only; A4 pinned-first.
+12. **Reference cross-checks (review round 1, vendored python-oracledb 4.0.1)** informed four driver
+    verdicts: P1-1 is ALSO a driver parity gap (reference desugars `user[…]` in ConnectParams —
+    §A.6.4, new B9b); the reference sends the Oracle SNI **token**, not the host, which rustls
+    structurally cannot carry — the field report's parity premise was wrong, and the server's
+    wallet-implies-SNI default should flip (§A.6.10); the reference retries terminal TLS errors too,
+    so B5's stage-aware fix is a deliberate strictly-better deviation to record in the parity ledger
+    (§A.6.5); the reference also hard-errors on unknown message types, so B13 targets our desync
+    source, not graceful handling (§B13a). P1-2's union fix is straight reference parity (§A.6.8).
 
 ## A.8. Test-shape rules this round earned
 
@@ -1353,6 +2106,98 @@ Distilled for the plan and for AGENTS.md:
 5. **Ordering of session-setup statements is part of the contract** — assert the built list for each
    profile *posture* (protected / unprotected), not just the default (§A.2.2).
 6. **Resource validation belongs on checkout, not only on return** (§A.6.3).
+7. **Close evidence must cite commits reachable from `origin/main`** — a SHA that resolves only via a
+   local branch is invisible to CI and to every other machine (§A.9, Z1). The local gate's pass is
+   not evidence; reachability from the shared remote is.
+
+---
+
+## A.9. CI-red grounding (Workstream Z's evidence base)
+
+Verified 2026-07-20, review round 1.
+
+**Timeline.** Last green oraclemcp CI on `main`: `46e53c3` (06:34). Every run since `6da3997` (13:41)
+red: `6da3997`, `5058690`, `6c0d5fb`, `f9a9679`, `6519a57`. Driver `main` green at `537373a`
+(Required + CI + live version matrix + Kani).
+
+**Failing jobs (run on `6519a57`).**
+1. *"engine-free boundary + surface + driver-seam + honesty + conformance accounting"* → step
+   "bead close evidence (native policy + post-close binding)".
+2. *"changed-line coverage + mutation floor"* → step "Ratchet changed-line coverage against the
+   change base".
+3. *"release metadata sync"* → `scripts/release_preflight.sh`.
+4. *"Rust workspace (Windows)"* → "cargo test workspace on Windows" — **new on this run**; the
+   previous run's Windows lane was green on a docs-only delta (⇒ flake or environment; logs were
+   unavailable at review time — only the generic exit-1 annotation).
+
+**Mechanism ① — RESOLVED (the v2 hypothesis was wrong in the right direction).**
+`SOURCE_SHA_ABSENT` hard findings for ≥15 beads. The v2 read ("SHAs exist only on unpushed
+branches") was **refuted by the Z1 investigation**: a `git merge-base --is-ancestor` sweep over every
+cited SHA showed **all 10 unique SHAs main-reachable**. The real cause: the `boundary` job's
+`actions/checkout` had no `fetch-depth`, so its depth-1 clone could not resolve any commit older
+than HEAD — the audit was auditing against a one-commit repository. Fixed by `fetch-depth: 0` (+
+comment) in the same session. Branch census (`git cherry` vs `origin/main`): five of six wave
+branches 100% patch-equivalent (rebase-twins — the wave's work had already been pushed via rebased
+`main`); only `codex/d2-completion-20260720` carried real work (`fecfa06` guard tightening +
+`e11632a` D2 floors), merged as `38db4c3`. Local `check_bead_close_evidence.sh` reported **0 hard,
+227 advisory** throughout — correct, since it sees full history; the "local gate can't catch it"
+lesson still stands, inverted: gate environments must match on HISTORY VISIBILITY, not only on
+checks.
+
+**Mechanism ②③** — both jobs run the mutation gate, which reads the committed marker:
+`marker v=2 source=4dca0b2… scopes=guard,audit files=27 mutants=1889 shards=3/3 status=stale` →
+`E_STALE_SEAL: committed mutation marker status=stale; a fresh complete five-surface campaign is
+required` (`scripts/mutation_safety_gate.sh`). Fix = run the campaign fresh (Z2), not gate surgery.
+
+**Driver working tree** — untracked `tests/artifacts/evidence/closes/rust-oracledb-4sfc.json` and
+`…-s0se.json`; local agent branches `agent-d4-completion`, `agent-d5-recovery`,
+`agent-pyshim-recovery` each 1 ahead with content already on `main` (same-message rebase duplicates;
+the pyshim branch diffs empty against `main`), `agent-s0se-completion-20260720` 0 ahead (fully
+merged). The local driver branch is named `master`, tracking `origin/main`, in sync.
+
+---
+
+## A.10. Inferred-sibling sweep (review round 2) — method and verdicts
+
+**Method.** Every field finding was treated as an *instance of a defect class*, and both codebases
+were swept for uncaught members of each class — because a field round samples instances, it does not
+enumerate classes, and unswept siblings become the next round's discoveries. Classes swept:
+blind-catalog fail-open (A1a's shape), assert-instead-of-observe (B8a's shape), swallowed-error
+catch-alls (A2a's shape), normalize-on-validate vs exact-match-on-enforce (B1's shape),
+terminal/transient conflation (B5/B13's shape), session-lifecycle asymmetry (B7's shape), unbounded
+responses (B11's shape), broken printed onboarding (P1-7's shape), docs contradicting code (P2-6's
+shape).
+
+**Confirmed siblings (all folded into their workstream homes):**
+
+| # | Sibling | Site | Folded into |
+|---|---|---|---|
+| S1 | Virtual-column gate: empty probe = "no virtual columns" (twin of the VPD gate) | `catalog_resolver.rs:364-376` | A1a, C8 |
+| S2 | Dashboard-wide `no-referrer` → every browser POST 403s, not just pairing | `http/mod.rs:1458-1464`, `:1387-1405` | A5, C4 |
+| S3 | Banner `live-db: true` is a compile-time const; `connected:true` set on any describe-Ok | `main.rs:110/:4115/:4119`; `dispatch/mod.rs:11063-11073` | A4c |
+| S4 | Three divergent connection-lost lists; driver's correct set unused; 02396/00028/broken-pipe missing from lease discard-markers → **dead leased session reused**; ORA-04068 wrong-remedy | `oraclemcp-error/lib.rs:450-485`, `oraclemcp-db/error.rs:413-430/:636-651`, `resilience.rs:17` vs driver `recovery.rs:546-547` | A4b |
+| S5 | Latent dead retry machinery (`RetryPolicy` zero call sites) | `resilience.rs:17` | A4b |
+| S6 | `OracleConnection` trait has NO close(); switch_profile + shutdown DROP connections, never log off | `connection.rs:934-1221`; `dispatch/mod.rs:11802-11803`; `main.rs:3886/:4039` | B7c |
+| S7 | DRCP `purity=reuse` identity bleed: wired path never clears-before-set; safe machinery is unwired dead code | `connection.rs:1897-1954`; `lease.rs:68-102` (dead) | B14 |
+| S8 | `allowed_origins` normalization applied only to loopback branch; `allowed_hosts` case-sensitive; trim-on-validate-only | `http_guard.rs:125/:91-96/:137/:85`; config `lib.rs:883-901` | B15 |
+| S9 | `allowed_subjects` anchor worse than v1 stated: validator normalizes, build stores raw; symmetric pattern exists in `MtlsClientRegistry` | `lib.rs:648-660`, `main.rs:3355-3360` vs `http/config.rs:92/:107` | B1a |
+| S10 | Catch-all collapses: 5 preview-flow variants; incident trio reports IO as policy refusals | `main.rs:4613/:5313/:5375/:5408` | A2a |
+| S11 | Uncapped metadata tools; `get_ddl` silently truncates at 4000 bytes, no flag | `intelligence.rs:1438-1441/:1355-1394/:1413-1414`; `plscope.rs:138-168` | B11 |
+| S12 | Doctor check 12 asserts keepalive/timeouts from config (contradicted by its own check 15 / driver state — verify which is stale, GH#14 closed in 0.8.4); checks 1/2 pass on compile-flag / `is_dir()` | `doctor.rs:2428-2524/:2532-2537/:1043-1097` | B8d |
+| S13 | Onboarding snippets never executed by any test: header-less `claude_mcp_add`; `secure_stdio` has no client half | `main.rs:4434-4459` | B10 (P1-7), B3, C9 |
+| S14 | Wallet docs claim `cwallet.sso` diagnostic-only; code + field say first-class | `README.md:994/:1221`, `configuration.md:421` vs `oci.rs:33/:340` | P-U5 |
+| S15 | IAM token resolved ONCE at profile resolution, embedded static; pool re-opens/reconnects reuse the stale token; driver's `TokenSource` refresh seam (reference-parity with the callable, `connect_params.pyx:227-233`) exists but is unwired by the server; doctor claims "re-read on every connect" | `main.rs:870-880`, `pool.rs:42`, driver `lib.rs:1805/:2308/:2326`, `doctor.rs:2394-2395` | B16 |
+
+**Verified SAFE in the same sweep (do not churn):** `/healthz`+`/readyz` (cached-observed, fail-closed
+default, background pinger — `readiness.rs:33-116`, `http/mod.rs:1621-1665`); all other resolver
+probes (object/synonym/db-link/arguments/column-conflict/session-context/roles) fail closed;
+issuer/aud/scopes/client_id/profile-name comparisons; the stateless pool's discard-on-error
+(`pool.rs:746-751`); doctor checks 3/10/11/14/15 genuinely observe.
+
+**Correct in-repo patterns to copy (named so fixes converge):** `MtlsClientRegistry`'s symmetric
+normalization (B1a/B15); `client_credential_error_message`'s preserve-inner-error (A2a); the
+readiness prober's observe-and-cache honesty (A4c/A4e); `oracle_search_objects`' `detail_level`
+(B11); the driver's `CONNECTION_LOST_ORA_CODES` + `is_connection_lost()` (A4b).
 
 ---
 
@@ -1365,8 +2210,8 @@ Distilled for the plan and for AGENTS.md:
 | P0-3 dashboard | A5 | §A.6.2 |
 | P0-4 VPD silent-empty | A1 | §A.2 |
 | P0-5 idle connection | A4 | §A.6.3 |
-| P1-1 proxy syntax | B9 | §A.6.4 |
-| P1-2 wallet trust store | B6 | §A.6.8 (ungrounded) |
+| P1-1 proxy syntax | B9a (server) + B9b (driver parity) | §A.6.4 |
+| P1-2 wallet trust store | B6 | §A.6.8 (grounded + confirmed) |
 | P1-3 retry masking | B5 (verify+close) | §A.6.5 |
 | P1-4 typo → security refusal | B10 | — |
 | P1-5 `oracle_orient` size | B11 | — |
@@ -1379,4 +2224,38 @@ Distilled for the plan and for AGENTS.md:
 | P1-12 stdio token | B3 | §A.5.3 |
 | P1-13 credential lifecycle | B4 | §A.5.4 |
 | P1-14 PL/SQL purity | B12 | §A.3 |
-| P2-1..P2-13 | B10 / G-tail | — |
+| P1-x `oracle_capabilities` 58.5 KB (unnumbered) | B11 | — |
+| P1-x transient TTC type 129 (unnumbered) | B13 | — |
+| P2-1 NODE_EXTRA_CA_CERTS doc | P | — |
+| P2-2 (retracted by the tester) | none | — |
+| P2-3 `current_database` over-redaction | P | — |
+| P2-4 ADB SNI routing token | P (verify-then-close) | §A.6.10 |
+| P2-5 config errors filed under Connectivity | P | — |
+| P2-6 `--allow-no-auth` help text | P | — |
+| P2-7 one `serve` per state dir | P | — |
+| P2-8 2 sessions vs `single_session` | P | §A.6.9 |
+| P2-9 stale-lock `kill` stderr leak | P | — |
+| P2-10 discover flags + dash installer | P | — |
+| P2-11 `requires_23ai` refusal masked | P | — |
+| P2-12 `base=` ceiling doc | P | — |
+| P2-13 `sign-tool` placement footgun | P | — |
+| P2-x `oracle_search_source` line cap (unnumbered) | P-U1 | — |
+| P2-x `oracle_get_source` line range (unnumbered) | P-U2 | — |
+| P2-x error-grammar uniformity (unnumbered) | B10 | — |
+| P2-x dashboard 403 bare text (unnumbered) | P-U3 (rides A5) | — |
+| P3-x `setup` shows no proxy-auth help (unnumbered) | B9 rider | — |
+| wallet legacy-3DES KeyDecrypt (unnumbered) | P-U4 (verify) | §A.6.12 |
+| CI red on `main` (process, not a field finding) | Z | §A.9 |
+| S1 virtual-column gate fail-open (sweep) | A1a / C8 | §A.10 |
+| S2 dashboard-wide browser breakage (sweep) | A5 / C4 | §A.10 |
+| S3 banner + `connected:true` honesty (sweep) | A4c | §A.10 |
+| S4/S5 connection-lost classification + dead-lease reuse (sweep) | A4b | §A.10 |
+| S6 no close() on the connection trait (sweep) | B7c | §A.10 |
+| S7 DRCP reuse identity bleed (sweep) | B14 | §A.10 |
+| S8/S9 guard-field normalization (sweep) | B15 / B1a | §A.10 |
+| S10 catch-all error collapses (sweep) | A2a | §A.10 |
+| S11 metadata caps + lossy `get_ddl` (sweep) | B11 | §A.10 |
+| S12 doctor asserts-from-config (sweep) | B8d | §A.10 |
+| S13 onboarding snippets never executed (sweep) | B10 / B3 / C9 | §A.10 |
+| S14 stale wallet docs (sweep) | P-U5 | §A.10 |
+| S15 IAM token no-refresh / unwired TokenSource seam (sweep) | B16 | §A.10 |
