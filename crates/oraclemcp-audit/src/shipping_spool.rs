@@ -176,6 +176,16 @@ impl DurableShippingForwarder {
     /// leave every unacknowledged record durably queued for restart replay.
     pub fn shutdown(&self) {
         self.shared.stopping.store(true, Ordering::Release);
+        // Bridge the store above and the notify below with the queue mutex:
+        // the worker evaluates `stopping` under this mutex right before
+        // parking in `wake.wait`, so without this lock both the store and the
+        // notify can land inside that check-to-park window — the notify finds
+        // no parked waiter, the worker parks forever, and the `join` below
+        // hangs the caller (observed as a 75-minute Windows CI timeout in
+        // a_spool_refuses_a_second_concurrent_worker). Acquiring the mutex
+        // here blocks until the worker either parks (wait releases the lock)
+        // or re-checks `stopping`, so the notify always lands.
+        drop(self.shared.queue.lock());
         self.shared.wake.notify_all();
         if let Some(worker) = self.worker.lock().take()
             && worker.join().is_err()
