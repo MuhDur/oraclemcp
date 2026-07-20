@@ -1,0 +1,388 @@
+schema_version: 2
+name: repo-playbook
+description: Project-specific rules for this repository
+metadata:
+  createdAt: 2026-07-20T07:19:13.729Z
+  totalReflections: 0
+  totalSessionsProcessed: 0
+deprecatedPatterns: []
+bullets:
+  - id: b-omcp-e6-quota-death
+    scope: global
+    category: multi-agent
+    content: For oraclemcp swarms, treat model quota, session limit, context
+      headroom, host memory, and build slots as scheduler resources. Size waves
+      to remaining capacity, never route release finalization to a near-full
+      session, and reconcile every bead when an agent dies silently (retro O5
+      quota-death).
+    source: learned
+    type: rule
+    isNegative: true
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.419Z
+    updatedAt: 2026-07-20T07:26:15.419Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
+  - id: b-omcp-e6-gates-lie
+    scope: global
+    category: testing
+    content: "PITFALL - gates that lie: never derive green from a crash, KeyError,
+      timeout, OOM, partial counter, truncated stream, blocked lane, unknown
+      lane, or self-skip. Require a typed verdict plus sealed per-job evidence
+      at the exact SHA; anything missing or ambiguous is red or an explicit
+      typed skip."
+    source: learned
+    type: rule
+    isNegative: true
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.420Z
+    updatedAt: 2026-07-20T07:26:15.420Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
+  - id: b-omcp-e6-publish-persist
+    scope: global
+    category: release
+    content: "PITFALL - publish-before-persist: do not expose success, consume a
+      grant, close a bead, or publish an outward artifact before the durable
+      audit or evidence record is persisted and verified. On persistence
+      failure, fail closed and retain a retry-safe state."
+    source: learned
+    type: rule
+    isNegative: true
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.420Z
+    updatedAt: 2026-07-20T07:26:15.420Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
+  - id: b-omcp-e6-fixture-oracle
+    scope: global
+    category: testing
+    content: "PITFALL - self-fulfilling fixtures: a fixture hand-built in the
+      already-expected representation cannot validate its decoder or transform.
+      Prefer decoder-produced wire fixtures, an independent oracle,
+      value-and-type assertions, or a metamorphic comparison against a
+      separately implemented path."
+    source: learned
+    type: rule
+    isNegative: true
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.420Z
+    updatedAt: 2026-07-20T07:26:15.420Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
+  - id: b-omcp-e6-worktree-target
+    scope: global
+    category: multi-agent
+    content: Use one git worktree and one real-disk CARGO_TARGET_DIR per build-heavy
+      agent. Agent Mail reservations coordinate ownership but do not isolate
+      half-finished trees or shared Cargo targets. Cap CARGO_BUILD_JOBS and
+      serialize expensive full-suite, mutation, fuzz, and benchmark lanes.
+    source: learned
+    type: rule
+    isNegative: false
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.420Z
+    updatedAt: 2026-07-20T07:26:15.420Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
+  - id: b-omcp-e6-no-deferral
+    scope: global
+    category: workflow
+    content: Do not defer planned or discovered work on agent initiative. Finish the
+      scoped lane, or surface the exact blocker and record unforeseen work in
+      the repo-local tracker; deferral and scope changes belong to the operator.
+    source: learned
+    type: rule
+    isNegative: false
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.420Z
+    updatedAt: 2026-07-20T07:26:15.420Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
+  - id: b-omcp-e6-honest-green
+    scope: global
+    category: testing
+    content: Green means honestly green. State lane-by-lane PASS, FAIL, or typed
+      SKIP with the exact command, SHA, artifact, and blocker; never summarize a
+      mixed or partial matrix as green.
+    source: learned
+    type: rule
+    isNegative: false
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.420Z
+    updatedAt: 2026-07-20T07:26:15.420Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
+  - id: b-omcp-e6-ground-first
+    scope: global
+    category: workflow
+    content: Before acting in oraclemcp, reread AGENTS.md and README.md and verify
+      the live repository, tracker, process, and reservation state. Claims must
+      come from commands just run, not plausible or stale session summaries.
+    source: learned
+    type: rule
+    isNegative: false
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.420Z
+    updatedAt: 2026-07-20T07:26:15.420Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
+  - id: b-omcp-e6-guard-tighten
+    scope: global
+    category: security
+    content: "The fail-closed SQL guard is tighten-only: never bypass
+      classification, exceed profile max_level, make a protected profile
+      writable, auto-commit DML, or admit a statement whose safety cannot be
+      proved at the active level."
+    source: learned
+    type: rule
+    isNegative: false
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.420Z
+    updatedAt: 2026-07-20T07:26:15.420Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
+  - id: b-omcp-e6-confidentiality
+    scope: global
+    category: security
+    content: "Confidentiality is absolute: live-customer and field-test identifiers
+      remain in gitignored quarantine and never enter commits, logs, evidence
+      bundles, playbooks, or external messages."
+    source: learned
+    type: rule
+    isNegative: false
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.420Z
+    updatedAt: 2026-07-20T07:26:15.420Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
+  - id: b-omcp-e6-no-cost
+    scope: global
+    category: operations
+    content: "No surprise costs: cloud work stays inside operator-approved free-tier
+      boundaries. Separate cost-bearing or secret-gated signoff from autonomous
+      repo-local work and stop at the external boundary."
+    source: learned
+    type: rule
+    isNegative: false
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.421Z
+    updatedAt: 2026-07-20T07:26:15.421Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
+  - id: b-omcp-e6-land-complete
+    scope: global
+    category: release
+    content: Land complete, not sliced across version bumps or sessions. A release
+      claim requires all intended code, tests, docs, tracker evidence, and
+      artifact checks; local implementation alone is not shipped.
+    source: learned
+    type: rule
+    isNegative: false
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.421Z
+    updatedAt: 2026-07-20T07:26:15.421Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
+  - id: b-omcp-e6-tracker-proof
+    scope: global
+    category: tracker
+    content: "Tracker discipline: use the checkout-local .beads database, validate
+      JSON output and tracker health before mutation, bind closure to landed
+      evidence, and never use br update --status open as a claim-release
+      shortcut."
+    source: learned
+    type: rule
+    isNegative: false
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.421Z
+    updatedAt: 2026-07-20T07:26:15.421Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
+  - id: b-omcp-e6-mutant-integrity
+    scope: global
+    category: testing
+    content: "Mutation integrity: cap each mutant, classify OOM and timeout as
+      errored rather than caught, cover every required crate or explicit shard,
+      and seal mutant count plus covered-file hashes so stale percentages cannot
+      certify a changed surface."
+    source: learned
+    type: rule
+    isNegative: false
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.421Z
+    updatedAt: 2026-07-20T07:26:15.421Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
+  - id: b-omcp-e6-expensive-oracle
+    scope: global
+    category: testing
+    content: "Expensive-oracle discipline: capture all diagnostics in one live run,
+      falsify wire hypotheses offline first, then spend another live Oracle or
+      cloud run only on a discriminating test."
+    source: learned
+    type: rule
+    isNegative: false
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.421Z
+    updatedAt: 2026-07-20T07:26:15.421Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
+  - id: b-omcp-e6-progress-external
+    scope: global
+    category: operations
+    content: Externalize marathon progress in orders, tracker state, exact artifact
+      paths, and a running scratch summary so compaction or session limits can
+      restart cheaply without redoing completed proof.
+    source: learned
+    type: rule
+    isNegative: false
+    kind: stack_pattern
+    state: draft
+    maturity: candidate
+    helpfulCount: 0
+    harmfulCount: 0
+    feedbackEvents: []
+    confidenceDecayHalfLifeDays: 90
+    createdAt: 2026-07-20T07:26:15.421Z
+    updatedAt: 2026-07-20T07:26:15.421Z
+    pinned: false
+    deprecated: false
+    sourceSessions: []
+    sourceAgents: []
+    tags: []
