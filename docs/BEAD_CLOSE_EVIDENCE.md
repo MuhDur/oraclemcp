@@ -167,6 +167,13 @@ does not take this repository-level lock, which is why the operating contract
 above prohibits raw close and claim-release commands rather than presenting the
 wrapper as protection from a non-compliant writer.
 
+`br` also treats an open parent epic as a blocking dependency when closing a
+completed child. The guarded close inspects every open dependency before using
+`br close --force`: it permits that flag only when all open dependencies are
+`parent-child`, and refuses any open `blocks` or other non-parent dependency.
+This keeps the tracker hierarchy from stranding completed children without
+turning `--force` into a general dependency bypass.
+
 ```bash
 # Release only an actual in-progress claim; a concurrently closed bead is kept.
 scripts/bead_tracker_guard.sh release-claim <bead-id>

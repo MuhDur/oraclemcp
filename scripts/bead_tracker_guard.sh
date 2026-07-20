@@ -21,6 +21,8 @@ Usage:
 close
   Requires canonical, committed close evidence; clean in-scope paths; and an
   exact source/closing-commit binding. The evidence file must already be in HEAD.
+  An open parent epic may be crossed with br --force only when every open
+  dependency is parent-child; any real open blocker is still refused.
 
 release-claim
   Changes in_progress to open under the shared transition lock. A bead observed
@@ -80,6 +82,51 @@ tracker_field() {
   local bead_id="$1" field="$2" payload
   payload="$("$BR_BIN" show "$bead_id" --json)"
   printf '%s' "$payload" | json_field "$field"
+}
+
+dependency_close_mode() {
+  "$PYTHON_BIN" -c '
+import json, sys
+payload = json.load(sys.stdin)
+if isinstance(payload, list):
+    rows = payload
+elif isinstance(payload, dict) and isinstance(payload.get("issues"), list):
+    rows = payload["issues"]
+elif isinstance(payload, dict):
+    rows = [payload]
+else:
+    raise SystemExit("unexpected br show JSON shape")
+if len(rows) != 1 or not isinstance(rows[0], dict):
+    raise SystemExit(f"expected exactly one issue, got {len(rows)}")
+open_dependencies = [
+    dependency
+    for dependency in rows[0].get("dependencies", [])
+    if isinstance(dependency, dict) and dependency.get("status") != "closed"
+]
+real_blockers = [
+    dependency
+    for dependency in open_dependencies
+    if dependency.get("dependency_type") != "parent-child"
+]
+if real_blockers:
+    details = ", ".join(
+        "{}({}:{})".format(
+            dependency.get("id", "<unknown>"),
+            dependency.get("dependency_type", "<unknown>"),
+            dependency.get("status", "<unknown>"),
+        )
+        for dependency in real_blockers
+    )
+    print(f"refusing open non-parent dependencies: {details}", file=sys.stderr)
+    raise SystemExit(65)
+print("force-parent-only" if open_dependencies else "normal")
+'
+}
+
+tracker_close_mode() {
+  local bead_id="$1" payload
+  payload="$("$BR_BIN" show "$bead_id" --json)"
+  printf '%s' "$payload" | dependency_close_mode
 }
 
 release_decision() {
@@ -165,6 +212,18 @@ verify_closed() {
     || die "postcondition failed: close_reason does not match the exact commit binding"
 }
 
+perform_close() {
+  local bead_id="$1" close_mode
+  local -a close_args=("$bead_id" --reason "$CLOSE_REASON" --json)
+  close_mode="$(tracker_close_mode "$bead_id")"
+  case "$close_mode" in
+    normal) ;;
+    force-parent-only) close_args+=(--force) ;;
+    *) die "unexpected dependency close mode: $close_mode" ;;
+  esac
+  "$BR_BIN" close "${close_args[@]}"
+}
+
 close_bead() {
   local bead_id="$1" status
   shift
@@ -178,7 +237,7 @@ close_bead() {
     closed) die "$bead_id is already closed; use correct-false-close for a correction" ;;
     *) die "$bead_id is $status; refusing close transition" ;;
   esac
-  "$BR_BIN" close "$bead_id" --reason "$CLOSE_REASON" --json
+  perform_close "$bead_id"
   verify_closed "$bead_id"
   printf 'bead-tracker-guard: closed %s at %s\n' "$bead_id" "$CLOSING_SHA"
 }
@@ -225,7 +284,7 @@ correct_false_close() {
   [[ "$status" == closed ]] \
     || die "$original_bead is $status; false-close correction requires the closed original bead"
   "$BR_BIN" reopen "$original_bead" --json
-  "$BR_BIN" close "$original_bead" --reason "$CLOSE_REASON" --json
+  perform_close "$original_bead"
   verify_closed "$original_bead"
   printf 'bead-tracker-guard: corrected original bead %s at %s\n' \
     "$original_bead" "$CLOSING_SHA"
@@ -246,6 +305,18 @@ selftest() {
   [[ "$(release_decision in_progress)" == release ]] \
     || die "selftest: in-progress claim was not releasable"
   printf 'PASS selftest: in-progress claim is releasable\n'
+  status="$(printf '%s' \
+    '[{"id":"child","dependencies":[{"id":"parent","status":"open","dependency_type":"parent-child"}]}]' \
+    | dependency_close_mode)"
+  [[ "$status" == force-parent-only ]] \
+    || die "selftest: open parent-child dependency was not narrowly forceable"
+  printf 'PASS selftest: open parent epic is narrowly forceable\n'
+  if printf '%s' \
+    '[{"id":"child","dependencies":[{"id":"blocker","status":"open","dependency_type":"blocks"}]}]' \
+    | dependency_close_mode >/dev/null 2>&1; then
+    die "selftest: real open blocker was accepted"
+  fi
+  printf 'PASS selftest: real open blocker is refused\n'
 }
 
 command_name="${1:-}"
