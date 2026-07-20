@@ -1,0 +1,65 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-20T11:18:54Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.5.4",
+  "scope": {
+    "summary": "Bound server and driver fuzz work across explicit shards and make driver release-qualification prep execute and aggregate the same quality graph as strict mode.",
+    "in_scope": [
+      ".github/workflows/fuzz.yml",
+      "crates/oraclemcp-core/ci_taxonomy.json",
+      "docs/ci_taxonomy.json",
+      "docs/test-tiers.md",
+      "tests/artifacts/evidence/oraclemcp-eng-program-bp8ia.5.4-driver-handoff.json"
+    ],
+    "out_of_scope": [
+      "Changing individual fuzz-target semantics or reducing their configured target-time budgets.",
+      "Claiming that an external GitHub Actions fuzz or release-qualification run executed at this source SHA."
+    ]
+  },
+  "source": {
+    "sha": "b5e97386e9747a383fc5de1cbb2b8441975a139d",
+    "tree_clean": true,
+    "branch": "codex/wave1-close-evidence-20260720"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "server scheduled fuzz campaign",
+        "kind": "config-gate",
+        "trace": ".github/workflows/fuzz.yml defines five independent crate/target jobs, each with an explicit 300-second target budget, 20-minute job cap, isolated fuzz cache key, and crash/timeout upload; python3 scripts/ci_taxonomy.py --check passed."
+      },
+      {
+        "name": "driver quality fuzz matrix",
+        "kind": "config-gate",
+        "trace": "The checksum-verified cross-repo handoff records rust-oracledb commit 4f1eb3abd3af604ad29f1899251025499b0a3869: concrete shards 0,1,2,3 retain the 120-second release/soak target budget and cache the standalone fuzz workspace."
+      },
+      {
+        "name": "driver release-qualification prep",
+        "kind": "config-gate",
+        "trace": "At driver commit 4f1eb3abd3af604ad29f1899251025499b0a3869, python3 scripts/verify_required_local.py --self-test passed the prep/strict graph, complete prep-result aggregation including fuzz-0 through fuzz-3, and strict-only evidence negative controls."
+      },
+      {
+        "name": "cross-repo checksum handoff",
+        "kind": "api",
+        "trace": "tests/artifacts/evidence/oraclemcp-eng-program-bp8ia.5.4-driver-handoff.json binds both repository commit/tree SHAs and SHA-256 digests for every D4 delivery path; an independent local verifier recomputed all values successfully."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No external GitHub Actions fuzz or release-qualification run is claimed; this close is based on the checked workflow/parser contracts.",
+    "The driver's full workspace compile graph was not rerun because its mandatory Agent Mail build-slot service was unavailable; no unleased full build was substituted.",
+    "This close has no required-proof/v1 artifact and remains not-ready on scoped workflow tests."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
