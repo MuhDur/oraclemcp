@@ -19,7 +19,7 @@ number while proving nothing (§30.9-C, §32.2 TRI-1). This gate therefore:
      tests/coverage/BASELINE.json (bead D1), never hard-gated; and
   3. delegates the "are the tests asserting anything" question to the
      per-crate MUTATION floor on the safety crates
-     (scripts/mutation_safety_gate.sh check-report), which coverage cannot
+     (scripts/mutation_safety_gate.sh check-floor-report), which coverage cannot
      answer by construction: a mutant survives an assertion-free test.
 
 Subcommands:
@@ -165,7 +165,7 @@ def evaluate(
             "coverage-ratchet: SAFETY-CRITICAL DIFF (" + ", ".join(safety_touched) + "): "
             "review must name the invariant or negative test this change is pinned by "
             "(plan §30.2 item 2 / §32.2 TRI-1); the per-crate mutation floor "
-            "(scripts/mutation_safety_gate.sh check-report) guards that requirement mechanically."
+            "(scripts/mutation_safety_gate.sh check-floor-report) guards that requirement mechanically."
         )
     return ok, lines
 
@@ -190,6 +190,23 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
 
 
 def cmd_self_test(_args: argparse.Namespace) -> int:
+    fixture_dir = ROOT / "tests/fixtures/coverage_ratchet"
+    fixture_diff = (fixture_dir / "changed-line.diff").read_text()
+    fixture_covered = (fixture_dir / "changed-line-covered.lcov").read_text()
+    fixture_lowered = (fixture_dir / "changed-line-lowered.lcov").read_text()
+    fixture_exists = lambda _rel: True  # noqa: E731
+    fixture_ok, _ = evaluate(
+        fixture_diff, fixture_covered, 80.0, 90.0, file_exists=fixture_exists
+    )
+    lowered_ok, lowered_lines = evaluate(
+        fixture_diff, fixture_lowered, 80.0, 90.0, file_exists=fixture_exists
+    )
+    fixture_failures: list[str] = []
+    if not fixture_ok:
+        fixture_failures.append("tracked legitimate changed-line fixture was rejected")
+    if lowered_ok or not any("uncovered changed line" in line for line in lowered_lines):
+        fixture_failures.append("tracked lowered changed-line fixture was accepted")
+
     diff = """\
 diff --git a/crates/oraclemcp-error/src/lib.rs b/crates/oraclemcp-error/src/lib.rs
 --- a/crates/oraclemcp-error/src/lib.rs
@@ -216,7 +233,7 @@ DA:21,3
 end_of_record
 """
     exists = lambda _rel: True  # noqa: E731
-    failures: list[str] = []
+    failures: list[str] = fixture_failures
 
     # 1. An uncovered changed line drags oraclemcp-error to 50% < 80% floor.
     ok, lines = evaluate(diff, lcov, 80.0, 90.0, file_exists=exists)
@@ -259,8 +276,9 @@ end_of_record
         for failure in failures:
             print(f"coverage-ratchet: SELF-TEST FAIL: {failure}", file=sys.stderr)
         return 1
-    print("coverage-ratchet: self-test OK (fails uncovered changed lines; passes covered; "
-          "excludes non-instrumentable; safety floor stricter; no-data is fail-closed)")
+    print("coverage-ratchet: self-test OK (tracked legitimate/lowered fixtures; fails "
+          "uncovered changed lines; excludes non-instrumentable; safety floor stricter; "
+          "no-data is fail-closed)")
     return 0
 
 

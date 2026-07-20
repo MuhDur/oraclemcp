@@ -22,6 +22,30 @@ def mutant(name: str, line: int) -> dict:
     }
 
 
+def scope_state(scope: str, source_sha: str) -> tuple[int, str]:
+    roots = {
+        "guard": "crates/oraclemcp-guard/src",
+        "audit": "crates/oraclemcp-audit/src",
+        "db": "crates/oraclemcp-db/src",
+    }
+    paths = subprocess.check_output(
+        ["git", "ls-tree", "-r", "--name-only", source_sha, "--", roots[scope]],
+        cwd=root,
+        text=True,
+    ).splitlines()
+    paths = sorted(path for path in paths if path.endswith(".rs"))
+    digest = hashlib.sha256()
+    for path in paths:
+        content = subprocess.check_output(
+            ["git", "show", f"{source_sha}:{path}"], cwd=root
+        )
+        digest.update(path.encode())
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(content).hexdigest().encode())
+        digest.update(b"\n")
+    return len(paths), digest.hexdigest()
+
+
 # Do not clean this directory: the repository contract forbids test cleanup
 # without an explicit operator command. It also makes a failed test inspectable.
 workdir = Path(tempfile.mkdtemp(prefix="oraclemcp-mutation-result-", dir="/var/tmp"))
@@ -101,6 +125,9 @@ integrity_document = {
     "pid_max_delta": 0,
     "oom_policy": "continue",
     "cargo_mutants_version": "cargo-mutants fixture",
+    "scratch_path": "/var/tmp/oraclemcp-mutation-result-scratch",
+    "scratch_filesystem": "ext4",
+    "rustc_wrapper_disabled": True,
 }
 budget = workdir / "budget.json"
 budget.write_text(
@@ -271,4 +298,119 @@ unfinished = subprocess.run(
 assert unfinished.returncode == 1, unfinished.stderr
 assert "unfinished archived outcomes" in unfinished.stderr
 assert not unfinished_output.exists()
+
+# End-to-end D2 path: three complete exact-SHA scope shards -> raw
+# mutation-result/v1 + compact floor report -> current-tree floor checker.
+d2_outcomes: list[Path] = []
+d2_integrities: list[Path] = []
+for scope_index, scope in enumerate(("guard", "audit", "db"), start=1):
+    scope_mutant = mutant(f"{scope}-caught", scope_index)
+    scope_outcomes_document = {
+        "start_time": f"2026-01-01T00:0{scope_index}:00Z",
+        "end_time": f"2026-01-01T00:0{scope_index}:30Z",
+        "caught": 1,
+        "missed": 0,
+        "timeout": 0,
+        "unviable": 0,
+        "outcomes": [
+            {
+                "scenario": "Baseline",
+                "phase_results": [
+                    {
+                        "phase": "Test",
+                        "process_status": "Success",
+                        "argv": baseline_command,
+                    }
+                ],
+            },
+            {
+                "scenario": scope_mutant,
+                "summary": "CaughtMutant",
+                "phase_results": [
+                    {
+                        "phase": "Test",
+                        "process_status": "Failure",
+                        "argv": [
+                            "cargo",
+                            "test",
+                            "--package=example@0.1.0",
+                            f"{scope}-caught",
+                        ],
+                    }
+                ],
+            },
+        ],
+    }
+    scope_outcomes = workdir / f"d2-{scope}-outcomes.json"
+    scope_outcomes.write_text(json.dumps(scope_outcomes_document))
+    covered_file_count, scope_sha256 = scope_state(scope, sha)
+    scope_integrity_document = dict(integrity_document)
+    scope_integrity_document.update(
+        scope=scope,
+        covered_file_count=covered_file_count,
+        scope_sha256=scope_sha256,
+        campaign_mutant_total=1,
+        mutant_count=1,
+        mutant_ids=[f"{scope}-caught"],
+        outcomes_sha256=hashlib.sha256(scope_outcomes.read_bytes()).hexdigest(),
+    )
+    scope_integrity = workdir / f"d2-{scope}-integrity.json"
+    scope_integrity.write_text(json.dumps(scope_integrity_document))
+    d2_outcomes.append(scope_outcomes)
+    d2_integrities.append(scope_integrity)
+
+d2_output = workdir / "d2-result.json"
+d2_report = workdir / "d2-report.md"
+d2_command = [sys.executable, str(root / "scripts/migrate_mutation_result.py")]
+for scope_outcomes, scope_integrity in zip(d2_outcomes, d2_integrities, strict=True):
+    d2_command.extend(["--outcomes", str(scope_outcomes), "--integrity", str(scope_integrity)])
+d2_command.extend(
+    [
+        "--source-sha",
+        sha,
+        "--scope-target",
+        "crates/oraclemcp-guard/src/**/*.rs",
+        "--scope-target",
+        "crates/oraclemcp-audit/src/**/*.rs",
+        "--scope-target",
+        "crates/oraclemcp-db/src/**/*.rs",
+        "--required-scope",
+        "guard",
+        "--required-scope",
+        "audit",
+        "--required-scope",
+        "db",
+        "--description",
+        "D2 exact-SHA floor fixture",
+        "--resource-budget",
+        str(budget),
+        "--output",
+        str(d2_output),
+        "--floor-report",
+        str(d2_report),
+        "--floor",
+        "guard=90",
+        "--floor",
+        "audit=90",
+        "--floor",
+        "db=90",
+        "--generated-at",
+        "2026-01-01T00:05:00Z",
+    ]
+)
+subprocess.run(d2_command, check=True)
+subprocess.run(
+    [sys.executable, str(root / "scripts/validate_evidence.py"), str(d2_output)],
+    check=True,
+)
+subprocess.run(
+    [
+        "bash",
+        str(root / "scripts/mutation_safety_gate.sh"),
+        "check-floor-report",
+        "--report",
+        str(d2_report),
+    ],
+    check=True,
+)
 print(f"migrate-mutation-result: contract OK ({workdir})")

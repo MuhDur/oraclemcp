@@ -13,9 +13,9 @@
 #      workspace per PR). Floors: 80% default, 90% for the safety crates
 #      (guard/audit/db). Evaluation logic + fixtures live in
 #      scripts/coverage_ratchet.py.
-#   2. MUTATION floor: `scripts/mutation_safety_gate.sh check-report`
-#      enforces the committed per-crate mutation kill-rate floor on the
-#      safety crates. This is what makes leg 1 non-gameable: coverage proves
+#   2. MUTATION floor: `scripts/mutation_safety_gate.sh check-floor-report`
+#      enforces independent committed mutation kill-rate floors on guard,
+#      audit, and db. This is what makes leg 1 non-gameable: coverage proves
 #      the changed code RAN; the mutation floor proves the tests ASSERT.
 #
 # Deliberately NOT a "total coverage never decreases" gate: that design is
@@ -23,11 +23,9 @@
 # nothing (§30.9-C / §32.2 TRI-1). The global per-crate numbers stay
 # recorded and trend-watched in tests/coverage/BASELINE.json (bead D1),
 # never hard-gated. Scope caveat, stated exactly: the per-crate mutation
-# floor currently covers guard + audit (the committed
-# docs/quality/mutation-safety.md seal); oraclemcp-db has NO committed
-# mutation result yet -- extending the mutation lane to db (and
-# core/dispatch) is §32.2 TRI-2 follow-up work, and this gate says so
-# rather than pretending db is mutation-guarded.
+# floor is sealed independently in docs/quality/mutation-safety-d2.md for
+# guard + audit + db. D3's broader guard/audit/core/db/dispatch seal remains a
+# separate contract; D2 never claims those extra scopes.
 #
 # Modes:
 #   scripts/coverage_ratchet.sh run [--base <ref>]
@@ -79,10 +77,7 @@ done
 
 mutation_floor_leg() {
   echo "coverage-ratchet: mutation-floor leg (per-crate kill-rate floor on the safety crates):"
-  bash "$ROOT/scripts/mutation_safety_gate.sh" check-report
-  echo "coverage-ratchet: NOTE oraclemcp-db has no committed mutation result yet" \
-       "(mutation-lane extension to db/core/dispatch is §32.2 TRI-2 follow-up work" \
-       "-- not silently claimed as covered here)."
+  bash "$ROOT/scripts/mutation_safety_gate.sh" check-floor-report
 }
 
 case "$MODE" in

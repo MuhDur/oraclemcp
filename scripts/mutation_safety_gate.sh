@@ -24,6 +24,10 @@
 #                 OOM-free, current five-surface seal above the floor.
 #                 Called by scripts/release_preflight.sh so the tag is gated by
 #                 committed evidence without rerunning a mutation campaign.
+#   check-floor-report
+#                 cheap D2 gate: require the independent guard/audit/db floor
+#                 report to describe a complete current exact-SHA campaign,
+#                 with per-crate counts, floors, hashes, and zero OOM/task hits.
 #   self-test     DB/build-free marker acceptance and stale-hash rejection.
 #   __capped      internal cgroup wrapper; not an operator entry point.
 #
@@ -46,6 +50,7 @@ MAX_MUTANTS="${MUTATION_MAX_MUTANTS_PER_SHARD:-32}"
 OUTPUT_BASE="${MUTATION_OUTPUT:-$ROOT/target/mutants}"
 SCRATCH_BASE="${MUTATION_SCRATCH:-$ROOT/target/mutation-scratch}"
 REPORT="${MUTATION_REPORT:-$ROOT/docs/quality/mutation-safety.md}"
+FLOOR_REPORT="${MUTATION_FLOOR_REPORT:-$ROOT/docs/quality/mutation-safety-d2.md}"
 SCOPE=""
 SHARD=""
 
@@ -372,8 +377,130 @@ cmd_check_report() {
   echo "mutation-gate: OK — complete OOM-free five-surface seal is current and meets ${thresh}%"
 }
 
+# D2 intentionally has a narrower seal than D3: the ratchet's literal contract
+# is guard/audit/db, while D3 remains red until core and dispatch are also
+# complete. Both use the same shard integrity mechanism and confirmed-failure
+# denominator; neither can borrow partial or OOM-affected counters from the other.
+cmd_check_floor_report() {
+  [ -f "$FLOOR_REPORT" ] || die "committed D2 mutation-floor report missing: $FLOOR_REPORT"
+  local marker
+  marker="$(grep -oE '<!-- MUTATION-FLOOR [^>]*-->' "$FLOOR_REPORT" | tail -1)" \
+    || die "report $FLOOR_REPORT has no MUTATION-FLOOR marker"
+  marker_value() {
+    local key="$1" value
+    value="$(grep -oE "(^|[[:space:]])${key}=[^[:space:]]+" <<<"${marker#<!-- MUTATION-FLOOR }" | head -1 | sed -E "s/^[[:space:]]*${key}=//")"
+    [ -n "$value" ] || die "D2 mutation-floor marker is missing $key"
+    printf '%s\n' "$value"
+  }
+
+  local version source declared_scopes mutants shards oom task_cap status
+  version="$(marker_value v)"
+  source="$(marker_value source)"
+  declared_scopes="$(marker_value scopes)"
+  mutants="$(marker_value mutants)"
+  shards="$(marker_value shards)"
+  oom="$(marker_value oom)"
+  task_cap="$(marker_value task_cap)"
+  status="$(marker_value status)"
+  [ "$version" = 1 ] || die "unsupported D2 mutation-floor marker version: $version"
+  [ "$status" = enforcing ] || die "E_STALE_SEAL: D2 mutation-floor marker status=$status"
+  [[ "$source" =~ ^[0-9a-f]{40}$ ]] || die "D2 enforcing marker has invalid source SHA"
+  [ "$declared_scopes" = guard,audit,db ] ||
+    die "D2 enforcing marker scope is incomplete: $declared_scopes"
+  [[ "$mutants" =~ ^[1-9][0-9]*$ ]] || die "D2 enforcing marker has invalid mutant count"
+  [[ "$shards" =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] ||
+    die "D2 enforcing marker has invalid shard count"
+  [ "${BASH_REMATCH[1]}" -eq "${BASH_REMATCH[2]}" ] ||
+    die "E_SHARD_INCOMPLETE: D2 marker shards=$shards"
+  [ "$oom" = 0 ] || die "E_OOM_MUTANT: D2 marker records oom=$oom"
+  [ "$task_cap" = 0 ] || die "E_TASK_CAP: D2 marker records task_cap=$task_cap"
+  git cat-file -e "$source^{commit}" 2>/dev/null ||
+    die "D2 enforcing marker source commit does not exist: $source"
+
+  local total_mutants=0 total_shards=0
+  local scope rate floor caught missed timeout unviable scope_mutants scope_shards scope_shard_count
+  local files recorded_hash sealed_state sealed_files sealed_hash current_state current_files current_hash
+  for scope in guard audit db; do
+    rate="$(marker_value "${scope}_rate")"
+    floor="$(marker_value "${scope}_floor")"
+    caught="$(marker_value "${scope}_caught")"
+    missed="$(marker_value "${scope}_missed")"
+    timeout="$(marker_value "${scope}_timeout")"
+    unviable="$(marker_value "${scope}_unviable")"
+    scope_mutants="$(marker_value "${scope}_mutants")"
+    scope_shards="$(marker_value "${scope}_shards")"
+    files="$(marker_value "${scope}_files")"
+    recorded_hash="$(marker_value "${scope}_sha256")"
+
+    [[ "$rate" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "$scope has no numeric confirmed-failure rate"
+    [[ "$floor" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "$scope has no numeric mutation floor"
+    for value in "$caught" "$missed" "$timeout" "$unviable"; do
+      [[ "$value" =~ ^[0-9]+$ ]] || die "$scope marker has a non-numeric outcome count"
+    done
+    [[ "$scope_mutants" =~ ^[1-9][0-9]*$ ]] || die "$scope marker has invalid mutant count"
+    [[ "$scope_shards" =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] ||
+      die "$scope marker has invalid shard count"
+    [ "${BASH_REMATCH[1]}" -eq "${BASH_REMATCH[2]}" ] ||
+      die "E_SHARD_INCOMPLETE: $scope marker shards=$scope_shards"
+    scope_shard_count="${BASH_REMATCH[1]}"
+    [[ "$files" =~ ^[1-9][0-9]*$ ]] || die "$scope marker has invalid covered-file count"
+    [[ "$recorded_hash" =~ ^[0-9a-f]{64}$ ]] || die "$scope marker has invalid scope hash"
+
+    python3 - "$scope" "$rate" "$floor" "$caught" "$missed" "$timeout" "$unviable" "$scope_mutants" <<'PY'
+import math
+import sys
+
+scope, rate_text, floor_text, caught, missed, timeout, unviable, mutants = sys.argv[1:]
+rate = float(rate_text)
+floor = float(floor_text)
+counts = [int(caught), int(missed), int(timeout), int(unviable)]
+mutant_total = int(mutants)
+if sum(counts) != mutant_total:
+    raise SystemExit(
+        f"mutation-gate: {scope} counts account for {sum(counts)}/{mutant_total} mutants"
+    )
+denominator = counts[0] + counts[1] + counts[2]
+if denominator == 0:
+    raise SystemExit(f"mutation-gate: {scope} has an empty confirmed-failure denominator")
+expected = 100.0 * counts[0] / denominator
+if not math.isclose(rate, expected, rel_tol=0.0, abs_tol=0.0000005):
+    raise SystemExit(
+        f"mutation-gate: {scope} rate {rate}% disagrees with counts ({expected:.6f}%)"
+    )
+if rate < floor:
+    raise SystemExit(
+        f"mutation-gate: {scope} confirmed-failure rate {rate}% is below its floor {floor}%"
+    )
+PY
+
+    sealed_state="$(scope_state "$scope" "$source")"
+    sealed_files="${sealed_state%% *}"
+    sealed_hash="${sealed_state##* }"
+    [ "$sealed_files" -eq "$files" ] ||
+      die "E_SEAL_SOURCE_MISMATCH: $scope source has $sealed_files files, marker records $files"
+    [ "$sealed_hash" = "$recorded_hash" ] ||
+      die "E_SEAL_SOURCE_MISMATCH: $scope marker hash does not describe source $source"
+    current_state="$(scope_state "$scope")"
+    current_files="${current_state%% *}"
+    current_hash="${current_state##* }"
+    [ "$current_files" -eq "$files" ] ||
+      die "E_STALE_SCOPE: $scope covered-file count changed (sealed=$files current=$current_files)"
+    [ "$current_hash" = "$recorded_hash" ] ||
+      die "E_STALE_SCOPE: $scope covered-file hash changed (sealed=$recorded_hash current=$current_hash)"
+
+    total_mutants=$((total_mutants + scope_mutants))
+    total_shards=$((total_shards + scope_shard_count))
+    echo "mutation-gate: D2 $scope ${rate}% >= ${floor}% (mutants=$scope_mutants shards=$scope_shards)"
+  done
+  [ "$total_mutants" -eq "$mutants" ] ||
+    die "D2 aggregate mutant count mismatch: scopes=$total_mutants marker=$mutants"
+  [ "$total_shards" -eq "${shards%/*}" ] ||
+    die "D2 aggregate shard count mismatch: scopes=$total_shards marker=$shards"
+  echo "mutation-gate: OK — current exact-SHA guard/audit/db floor seal is complete and OOM-free"
+}
+
 cmd_self_test() {
-  local work state files hash source good bad stale_output
+  local work state files hash source good bad stale_output fixture output scope
   work="$(mktemp -d /var/tmp/oraclemcp-mutation-gate-self-test.XXXXXX)"
   state="$(scope_state guard,audit,core,db,dispatch)"
   files="${state%% *}"
@@ -391,7 +518,36 @@ cmd_self_test() {
   fi
   [[ "$stale_output" == *E_SEAL_SOURCE_MISMATCH* ]] ||
     die "self-test stale marker failed for the wrong reason: $stale_output"
-  echo "mutation-gate: self-test OK (complete v2 seal accepted; source/hash mismatch rejected; fixtures=$work)"
+
+  local guard_state audit_state db_state guard_files guard_hash audit_files audit_hash db_files db_hash
+  guard_state="$(scope_state guard)"; guard_files="${guard_state%% *}"; guard_hash="${guard_state##* }"
+  audit_state="$(scope_state audit)"; audit_files="${audit_state%% *}"; audit_hash="${audit_state##* }"
+  db_state="$(scope_state db)"; db_files="${db_state%% *}"; db_hash="${db_state##* }"
+  for fixture in "$ROOT"/tests/fixtures/coverage_ratchet/mutation-floor-*.md.in; do
+    output="$work/$(basename "${fixture%.in}")"
+    sed -e "s/@SOURCE@/$source/g" \
+      -e "s/@GUARD_FILES@/$guard_files/g" -e "s/@GUARD_HASH@/$guard_hash/g" \
+      -e "s/@AUDIT_FILES@/$audit_files/g" -e "s/@AUDIT_HASH@/$audit_hash/g" \
+      -e "s/@DB_FILES@/$db_files/g" -e "s/@DB_HASH@/$db_hash/g" \
+      "$fixture" >"$output"
+    case "$(basename "$fixture")" in
+      mutation-floor-valid.md.in)
+        "$ROOT/scripts/mutation_safety_gate.sh" check-floor-report --report "$output" >/dev/null
+        ;;
+      mutation-floor-low-guard.md.in) scope=guard ;;
+      mutation-floor-low-audit.md.in) scope=audit ;;
+      mutation-floor-low-db.md.in) scope=db ;;
+      *) die "unexpected D2 mutation-floor fixture: $fixture" ;;
+    esac
+    if [ "$(basename "$fixture")" != mutation-floor-valid.md.in ]; then
+      if stale_output="$("$ROOT/scripts/mutation_safety_gate.sh" check-floor-report --report "$output" 2>&1)"; then
+        die "self-test accepted the lowered $scope mutation floor fixture"
+      fi
+      [[ "$stale_output" == *"$scope confirmed-failure rate"* ]] ||
+        die "lowered $scope fixture failed for the wrong reason: $stale_output"
+    fi
+  done
+  echo "mutation-gate: self-test OK (D3 stale-hash rejection + D2 valid pass and lowered guard/audit/db failures; fixtures=$work)"
 }
 
 sub="${1:-check-report}"; shift || true
@@ -404,6 +560,7 @@ while [ "$#" -gt 0 ]; do
     --timeout) TIMEOUT="$2"; shift ;;
     --output) OUTPUT_BASE="$2"; shift ;;
     --report) REPORT="$2"; shift ;;
+    --floor-report) FLOOR_REPORT="$2"; shift ;;
     --scope) SCOPE="$2"; shift ;;
     --shard) SHARD="$2"; shift ;;
     --max-mutants) MAX_MUTANTS="$2"; shift ;;
@@ -415,6 +572,10 @@ done
 case "$sub" in
   run-shard) cmd_run_shard ;;
   check-report) cmd_check_report ;;
+  check-floor-report)
+    [ "$REPORT" = "$ROOT/docs/quality/mutation-safety.md" ] || FLOOR_REPORT="$REPORT"
+    cmd_check_floor_report
+    ;;
   self-test) cmd_self_test ;;
-  *) die "unknown subcommand '$sub' (expected: run-shard | check-report | self-test)" ;;
+  *) die "unknown subcommand '$sub' (expected: run-shard | check-report | check-floor-report | self-test)" ;;
 esac

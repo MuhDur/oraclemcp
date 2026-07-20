@@ -4,7 +4,9 @@
 This is intentionally a verifier/converter, not a mutation runner. Every raw
 outcomes document needs its runner-produced mutation-shard-integrity/v1
 sidecar. A partial, OOM-affected, mismatched, duplicated, or missing shard is
-rejected before an evidence artifact can exist.
+rejected before an evidence artifact can exist. It can also render the compact
+D2 guard/audit/db mutation-floor report from the same validated inputs; the
+report is never accepted as a substitute for the raw mutation-result artifact.
 """
 
 from __future__ import annotations
@@ -38,6 +40,154 @@ def mutant_location(mutant: dict) -> str:
     return f"{mutant['file']}:{mutant['span']['start']['line']}"
 
 
+def parse_floors(raw_floors: list[str]) -> dict[str, float]:
+    floors: dict[str, float] = {}
+    for raw in raw_floors:
+        match = re.fullmatch(r"(guard|audit|db)=([0-9]+(?:\.[0-9]+)?)", raw)
+        if match is None:
+            raise SystemExit(
+                f"invalid --floor {raw!r}; expected guard|audit|db=<percentage>"
+            )
+        scope, value = match.groups()
+        if scope in floors:
+            raise SystemExit(f"duplicate --floor for scope {scope}")
+        floor = float(value)
+        if not 0.0 <= floor <= 100.0:
+            raise SystemExit(f"mutation floor outside 0..100 for scope {scope}: {floor}")
+        floors[scope] = floor
+    return floors
+
+
+def percentage(caught: int, missed: int, timeout: int) -> float:
+    denominator = caught + missed + timeout
+    return 100.0 * caught / denominator if denominator else 0.0
+
+
+def marker_number(value: float) -> str:
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def write_floor_report(
+    output: Path,
+    *,
+    source_sha: str,
+    evidence_path: Path,
+    scopes: dict[str, list[dict]],
+    outcomes_docs: list[dict],
+    integrity_docs: list[dict],
+    floors: dict[str, float],
+) -> None:
+    required = ["guard", "audit", "db"]
+    if set(scopes) != set(required):
+        raise SystemExit(
+            "D2 floor report requires exactly guard,audit,db; got "
+            + ",".join(sorted(scopes))
+        )
+    if set(floors) != set(required):
+        raise SystemExit(
+            "D2 floor report requires explicit per-crate floors for guard,audit,db"
+        )
+
+    results: dict[str, dict] = {}
+    for scope in required:
+        scope_outcomes = [
+            outcomes
+            for outcomes, integrity in zip(outcomes_docs, integrity_docs, strict=True)
+            if integrity["scope"] == scope
+        ]
+        counts = {
+            key: sum(outcomes[key] for outcomes in scope_outcomes)
+            for key in ("caught", "missed", "timeout", "unviable")
+        }
+        first = scopes[scope][0]
+        shard_total = first["shard_total"]
+        if len(scopes[scope]) != shard_total:
+            raise SystemExit(
+                f"E_SHARD_INCOMPLETE: scope {scope} has {len(scopes[scope])}/{shard_total} shards"
+            )
+        results[scope] = {
+            "counts": counts,
+            "rate": percentage(counts["caught"], counts["missed"], counts["timeout"]),
+            "floor": floors[scope],
+            "mutants": first["campaign_mutant_total"],
+            "shards": shard_total,
+            "covered_files": first["covered_file_count"],
+            "scope_sha256": first["scope_sha256"],
+        }
+
+    total_mutants = sum(result["mutants"] for result in results.values())
+    total_shards = sum(result["shards"] for result in results.values())
+    fields = [
+        "v=1",
+        f"source={source_sha}",
+        "scopes=guard,audit,db",
+        f"mutants={total_mutants}",
+        f"shards={total_shards}/{total_shards}",
+        "oom=0",
+        "task_cap=0",
+        "status=enforcing",
+    ]
+    for scope in required:
+        result = results[scope]
+        counts = result["counts"]
+        fields.extend(
+            [
+                f"{scope}_rate={marker_number(result['rate'])}",
+                f"{scope}_floor={marker_number(result['floor'])}",
+                f"{scope}_caught={counts['caught']}",
+                f"{scope}_missed={counts['missed']}",
+                f"{scope}_timeout={counts['timeout']}",
+                f"{scope}_unviable={counts['unviable']}",
+                f"{scope}_mutants={result['mutants']}",
+                f"{scope}_shards={result['shards']}/{result['shards']}",
+                f"{scope}_files={result['covered_files']}",
+                f"{scope}_sha256={result['scope_sha256']}",
+            ]
+        )
+
+    rows = []
+    for scope in required:
+        result = results[scope]
+        counts = result["counts"]
+        verdict = "PASS" if result["rate"] >= result["floor"] else "FAIL"
+        rows.append(
+            "| `oraclemcp-{scope}` | {caught} | {missed} | {timeout} | {unviable} | "
+            "{rate}% | {floor}% | {verdict} |".format(
+                scope=scope,
+                caught=counts["caught"],
+                missed=counts["missed"],
+                timeout=counts["timeout"],
+                unviable=counts["unviable"],
+                rate=marker_number(result["rate"]),
+                floor=marker_number(result["floor"]),
+                verdict=verdict,
+            )
+        )
+
+    report = "\n".join(
+        [
+            "# D2 Mutation Floor Seal",
+            "",
+            "<!-- MUTATION-FLOOR " + " ".join(fields) + " -->",
+            "",
+            "This report is generated only after every deterministic guard/audit/db shard",
+            "passes the D3 integrity verifier: exact source SHA, complete population,",
+            "non-null end time, matching raw-outcomes hash, zero cgroup OOM kills, zero",
+            "task-cap hits, disk-backed scratch, and no ambient Rust compiler wrapper.",
+            "Timeouts remain in the denominator and are never counted as confirmed kills.",
+            "",
+            f"Raw evidence: `{evidence_path.as_posix()}`",
+            "",
+            "| Crate | Caught | Missed | Timeout | Unviable | Confirmed-failure rate | Floor | Verdict |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+            *rows,
+            "",
+        ]
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(report)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--outcomes", type=Path, action="append", required=True)
@@ -50,9 +200,26 @@ def main() -> int:
     )
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--scope-target", action="append", required=True)
+    parser.add_argument(
+        "--required-scope",
+        action="append",
+        choices=("guard", "audit", "core", "db", "dispatch", "fixture"),
+        help="fail unless the campaign contains exactly this repeated set of scopes",
+    )
     parser.add_argument("--description", required=True)
     parser.add_argument("--resource-budget", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--floor-report",
+        type=Path,
+        help="also render the compact D2 guard/audit/db floor report",
+    )
+    parser.add_argument(
+        "--floor",
+        action="append",
+        default=[],
+        help="per-crate D2 floor as guard|audit|db=<percentage>",
+    )
     parser.add_argument("--generated-at", default=None)
     args = parser.parse_args()
 
@@ -60,6 +227,9 @@ def main() -> int:
         parser.error("--integrity must be supplied once for every --outcomes file")
     if re.fullmatch(r"[0-9a-f]{40}", args.source_sha) is None:
         parser.error("--source-sha must be a full lowercase 40-character Git SHA")
+    floors = parse_floors(args.floor)
+    if bool(args.floor_report) != bool(floors):
+        parser.error("--floor-report and at least one --floor must be supplied together")
 
     budget = json.loads(args.resource_budget.read_text())
     outcomes_docs = [json.loads(path.read_text()) for path in args.outcomes]
@@ -82,6 +252,13 @@ def main() -> int:
             )
         if integrity.get("oom_policy") != "continue":
             raise SystemExit(f"shard did not enforce OOMPolicy=continue: {integrity_path}")
+        scratch_filesystem = integrity.get("scratch_filesystem")
+        if not isinstance(scratch_filesystem, str) or not scratch_filesystem:
+            raise SystemExit(f"shard has no verified scratch filesystem: {integrity_path}")
+        if scratch_filesystem in {"tmpfs", "ramfs"}:
+            raise SystemExit(f"shard used RAM-backed scratch: {integrity_path}")
+        if integrity.get("rustc_wrapper_disabled") is not True:
+            raise SystemExit(f"shard did not prove Rust compiler wrappers were disabled: {integrity_path}")
         for field in ("memory_max_bytes", "pid_task_max"):
             if integrity.get(field) != budget.get(field):
                 raise SystemExit(
@@ -136,6 +313,18 @@ def main() -> int:
         if not isinstance(covered_files, int) or covered_files < 1:
             raise SystemExit(f"invalid covered-file count: {integrity_path}")
         scopes.setdefault(scope, []).append(integrity)
+
+    if args.required_scope:
+        required_scopes = set(args.required_scope)
+        if len(required_scopes) != len(args.required_scope):
+            raise SystemExit("duplicate --required-scope")
+        if set(scopes) != required_scopes:
+            raise SystemExit(
+                "campaign scope mismatch: expected "
+                + ",".join(sorted(required_scopes))
+                + " got "
+                + ",".join(sorted(scopes))
+            )
 
     for scope, shards in scopes.items():
         totals = {shard.get("shard_total") for shard in shards}
@@ -258,6 +447,16 @@ def main() -> int:
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(doc, indent=2) + "\n")
+    if args.floor_report is not None:
+        write_floor_report(
+            args.floor_report,
+            source_sha=args.source_sha,
+            evidence_path=args.output,
+            scopes=scopes,
+            outcomes_docs=outcomes_docs,
+            integrity_docs=integrity_docs,
+            floors=floors,
+        )
     return 0
 
 

@@ -279,7 +279,11 @@ Non-instrumentable lines, such as comments, do not inflate the denominator.
 
 For a safety-critical diff the report also requires review to name the invariant
 or negative test that pins the change. The second leg calls
-`scripts/mutation_safety_gate.sh check-report`; this is the anti-gaming guard,
+`scripts/mutation_safety_gate.sh check-floor-report` and requires independent,
+current mutation floors for `oraclemcp-guard`, `oraclemcp-audit`, and
+`oraclemcp-db`. Its committed seal is generated from the same complete,
+exact-SHA, OOM-honest shard integrity mechanism as D3, while D3's broader
+core/dispatch requirement remains independent. This is the anti-gaming guard,
 because a test that only executes the new line but asserts nothing can improve
 line coverage while still leaving a mutant alive. The workspace-wide D1 numbers
 remain trend evidence, not a never-decrease merge gate.

@@ -1,0 +1,6 @@
+diff --git a/crates/oraclemcp-error/src/lib.rs b/crates/oraclemcp-error/src/lib.rs
+--- a/crates/oraclemcp-error/src/lib.rs
++++ b/crates/oraclemcp-error/src/lib.rs
+@@ -1,0 +10,2 @@
++fn covered_line() {}
++fn uncovered_line() {}

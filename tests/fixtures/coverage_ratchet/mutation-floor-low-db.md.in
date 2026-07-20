@@ -1,0 +1,3 @@
+# D2 fixture: db below its independent floor
+
+<!-- MUTATION-FLOOR v=1 source=@SOURCE@ scopes=guard,audit,db mutants=300 shards=3/3 oom=0 task_cap=0 status=enforcing guard_rate=95 guard_floor=90 guard_caught=95 guard_missed=5 guard_timeout=0 guard_unviable=0 guard_mutants=100 guard_shards=1/1 guard_files=@GUARD_FILES@ guard_sha256=@GUARD_HASH@ audit_rate=95 audit_floor=90 audit_caught=95 audit_missed=5 audit_timeout=0 audit_unviable=0 audit_mutants=100 audit_shards=1/1 audit_files=@AUDIT_FILES@ audit_sha256=@AUDIT_HASH@ db_rate=89 db_floor=90 db_caught=89 db_missed=11 db_timeout=0 db_unviable=0 db_mutants=100 db_shards=1/1 db_files=@DB_FILES@ db_sha256=@DB_HASH@ -->
