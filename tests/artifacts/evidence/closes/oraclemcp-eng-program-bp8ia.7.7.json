@@ -14,9 +14,9 @@
     ]
   },
   "source": {
-    "sha": "adb693a6b534cdb9504362609b3836f21b7dedf2",
+    "sha": "50fba3b098978936aade6de4fb8d6c01fc159885",
     "tree_clean": true,
-    "branch": "codex/wave1-close-evidence-20260720"
+    "branch": "main"
   },
   "proofs": [],
   "integration_evidence": {
