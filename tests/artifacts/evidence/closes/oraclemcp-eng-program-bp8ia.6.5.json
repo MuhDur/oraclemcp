@@ -1,0 +1,63 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-20T10:48:49Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.6.5",
+  "scope": {
+    "summary": "Enforce evidence-bound bead closure through native br policy plus Required/CI audit, and restore the canonical tracker to a lossless 1092-record state.",
+    "in_scope": [
+      ".beads/issues.jsonl",
+      ".beads/policy.yaml",
+      ".github/required/_quality.yml",
+      ".github/workflows/ci.yml",
+      "docs/BEAD_CLOSE_EVIDENCE.md",
+      "scripts/audit_bead_closes.py",
+      "scripts/check_bead_close_evidence.sh"
+    ],
+    "out_of_scope": [
+      "Rewriting legacy close reasons or resolving the 227 advisory-only historical findings.",
+      "Treating an uncommitted or self-skipping artifact as close evidence.",
+      "Any Wave 1 or Wave 2 implementation outside E5 tracker discipline."
+    ]
+  },
+  "source": {
+    "sha": "b0a596ade6be602a2b0346e126c4446ec1406d2c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "native br close policy",
+        "kind": "config-gate",
+        "trace": "Isolated br 0.2.15 fixture: raw close exits 4 POLICY_VIOLATION, --bypass-policy exits 4 VALIDATION_FAILED, and an exactly evidence-bound close succeeds."
+      },
+      {
+        "name": "Required and boundary CI bead-close audit",
+        "kind": "config-gate",
+        "trace": "scripts/check_bead_close_evidence.sh exits 0 on the repaired 1092-record tracker with 0 hard findings and 0 required evidence missing; the gate is present in both .github/required/_quality.yml and .github/workflows/ci.yml."
+      },
+      {
+        "name": "canonical tracker import and integrity",
+        "kind": "cli",
+        "trace": "br sync --import-only created 2, updated 9, skipped 1081; SQLite and JSONL both contain 1092 unique records, br dep cycles reports 0, and flush-only plus repeat validation remains green."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Native immediate policy applies to br close and rejects status-update closure; br create --status closed is instead caught fail-closed by the post-close Required/CI auditor before merge.",
+    "No required-proof/v1 producer artifact was committed for this close, so readiness is honestly recorded as not-ready on scoped-test evidence despite the full workspace fmt, clippy, test, and deny gates passing in the isolated E5 worktree.",
+    "The byte-for-byte pre-repair tracker and database backups remain untracked under .doctor/manual-e5-tracker-repair-20260720T104533Z for operator-controlled recovery."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
