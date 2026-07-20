@@ -327,6 +327,18 @@
       "path_filtered": false
     },
     {
+      "check_name": "bounded loom model checks",
+      "tier": "scheduled",
+      "workflow": "Loom Concurrency Invariants",
+      "workflow_file": "loom.yml",
+      "job_id": "loom",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "audit shard offset 0",
       "tier": "scheduled",
       "workflow": "Mutation Safety",
@@ -770,6 +782,16 @@
         "guard + audit BMC proofs"
       ]
     },
+    "loom.yml": {
+      "name": "Loom Concurrency Invariants",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "jobs": [
+        "bounded loom model checks"
+      ]
+    },
     "mutation-safety.yml": {
       "name": "Mutation Safety",
       "triggers": [
@@ -904,6 +926,7 @@
     "scheduled": [
       "audit shard offset 0",
       "audit shard offset 1",
+      "bounded loom model checks",
       "core shard offset 0",
       "core shard offset 1",
       "db shard offset 0",

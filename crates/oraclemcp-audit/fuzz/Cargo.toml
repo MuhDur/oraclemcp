@@ -1,0 +1,28 @@
+# cargo-fuzz target for the audit-chain verify surface (bead H6 /
+# oraclemcp-eng-program-bp8ia.9.6). A standing artifact: run with
+# `cargo +nightly-2026-05-11 fuzz run chain_verify` (needs nightly +
+# cargo-fuzz). The empty [workspace] table detaches this from the parent
+# workspace so it is not built by `cargo build --workspace`.
+[package]
+name = "oraclemcp-audit-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oraclemcp-audit]
+path = ".."
+
+[[bin]]
+name = "chain_verify"
+path = "fuzz_targets/chain_verify.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

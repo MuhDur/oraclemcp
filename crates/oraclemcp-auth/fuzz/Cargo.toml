@@ -1,0 +1,28 @@
+# cargo-fuzz target for the OAuth resource-server token surface (bead H6 /
+# oraclemcp-eng-program-bp8ia.9.6). A standing artifact: run with
+# `cargo +nightly-2026-05-11 fuzz run oauth_token_validate` (needs nightly +
+# cargo-fuzz). The empty [workspace] table detaches this from the parent
+# workspace so it is not built by `cargo build --workspace`.
+[package]
+name = "oraclemcp-auth-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oraclemcp-auth]
+path = ".."
+
+[[bin]]
+name = "oauth_token_validate"
+path = "fuzz_targets/oauth_token_validate.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

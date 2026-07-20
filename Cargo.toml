@@ -96,7 +96,7 @@ plsql-output = { version = "=0.7.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(loom)"] }
 
 [workspace.lints.clippy]
 dbg_macro = "deny"

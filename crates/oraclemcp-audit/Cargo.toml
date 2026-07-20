@@ -24,5 +24,12 @@ tracing.workspace = true
 proptest = "1"
 tempfile = "3"
 
+# Loom model checks for the shipping-spool worker/shutdown/enqueue sync
+# skeleton (tests/loom_shipping_spool.rs, bead H6). Compiled ONLY when
+# RUSTFLAGS="--cfg loom" is set (the tokio pattern), so it never enters the
+# production dependency graph and adds nothing to ordinary `cargo test` builds.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
 [lints]
 workspace = true

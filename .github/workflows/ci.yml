@@ -746,8 +746,9 @@ jobs:
           persist-credentials: false
       - run: bash scripts/secret_scan.sh
 
-  # Compile the cargo-fuzz targets so they cannot silently rot (the classifier
-  # and ALTER SESSION allowlist each ship one). Build-only; campaigns run
+  # Compile every cargo-fuzz target so it cannot silently rot: guard classifier
+  # + ALTER SESSION, audit-chain verification, and OAuth bearer validation.
+  # Build-only; campaigns run
   # locally with `cargo +nightly-2026-05-11 fuzz run <target>`. Non-blocking:
   # cargo-fuzz + build-std is inherently churn-prone, so a transient toolchain
   # break here must not redden the rest of CI.
@@ -773,5 +774,12 @@ jobs:
           tool: cargo-fuzz
         # Pin the gnu target: cargo-fuzz otherwise defaults to musl here, whose
         # static libc is incompatible with the ASan sanitizer.
-      - run: cargo +${{ env.RUST_TOOLCHAIN }} fuzz build --target x86_64-unknown-linux-gnu
+      - name: Build guard fuzz targets
+        run: cargo +${{ env.RUST_TOOLCHAIN }} fuzz build --target x86_64-unknown-linux-gnu
         working-directory: crates/oraclemcp-guard
+      - name: Build audit fuzz targets
+        run: cargo +${{ env.RUST_TOOLCHAIN }} fuzz build --target x86_64-unknown-linux-gnu
+        working-directory: crates/oraclemcp-audit
+      - name: Build auth fuzz targets
+        run: cargo +${{ env.RUST_TOOLCHAIN }} fuzz build --target x86_64-unknown-linux-gnu
+        working-directory: crates/oraclemcp-auth

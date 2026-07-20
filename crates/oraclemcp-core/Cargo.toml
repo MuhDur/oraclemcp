@@ -71,5 +71,12 @@ regex = "1"
 trybuild = "1.0"
 asupersync = { workspace = true, features = ["test-internals"] }
 
+# Loom model checks for the admission permit/promotion accounting
+# (tests/loom_admission.rs, bead H6). Compiled ONLY when
+# RUSTFLAGS="--cfg loom" is set (the tokio pattern), so it never enters the
+# production dependency graph and adds nothing to ordinary `cargo test` builds.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
 [lints]
 workspace = true

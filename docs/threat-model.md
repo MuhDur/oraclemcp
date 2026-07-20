@@ -71,6 +71,10 @@ allowlist validator never over-accepts. See
 - `crates/oraclemcp-guard/fuzz/fuzz_targets/alter_session_parse.rs` —
   **differential** fuzz target: the allowlist validator never clears a statement
   whose assigned-parameter set escapes an independent quote-aware scan.
+- `crates/oraclemcp-audit/fuzz/fuzz_targets/chain_verify.rs` — exercises both
+  streaming and buffered audit JSONL verification over arbitrary bytes.
+- `crates/oraclemcp-auth/fuzz/fuzz_targets/oauth_token_validate.rs` — exercises
+  fail-closed bearer extraction and HS256 resource-server validation.
 
 > Fuzzing gate: the targets **compile in CI** (`fuzz-build` job in
 > `.github/workflows/ci.yml`) and ship a committed seed corpus. A long fuzzing
@@ -414,8 +418,20 @@ cargo test -p oraclemcp-core --test chaos
 # Audit forgery + shipping tamper-evidence (T5)
 cargo test -p oraclemcp-audit
 
-# Fuzz targets COMPILE (T1) — the CI gate; a campaign is operator-run
-cargo +nightly fuzz build --target x86_64-unknown-linux-gnu   # in crates/oraclemcp-guard
+# Fuzz targets COMPILE (T1) — the CI gate; campaigns are operator-run
+for crate in oraclemcp-guard oraclemcp-audit oraclemcp-auth; do
+  (cd "crates/$crate" && cargo +nightly-2026-05-11 fuzz build \
+    --target x86_64-unknown-linux-gnu)
+done
+
+# Bounded concurrency model-checks (T2) — also weekly/dispatch in loom.yml
+RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 CARGO_BUILD_JOBS=2 \
+  cargo +nightly-2026-05-11 test -p oraclemcp-audit \
+    --test loom_shipping_spool --release -- --test-threads=1
+RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 CARGO_BUILD_JOBS=2 \
+  cargo +nightly-2026-05-11 test -p oraclemcp-core \
+    --test loom_admission --test loom_lane_lock_order --release -- \
+    --test-threads=1
 ```
 
 ## Release gate status

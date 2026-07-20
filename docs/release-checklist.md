@@ -85,6 +85,13 @@ investigate, not a blocker:
   channel as an early warning for an upcoming toolchain break
   (`continue-on-error`; see [`TOOLCHAIN.md`](TOOLCHAIN.md) §6).
 
+The separate Tier-2 `.github/workflows/loom.yml` lane runs weekly and by manual
+dispatch. Its `loom` job is bounded to two Cargo build jobs, three loom
+preemptions, and 30 minutes; every run uploads
+`target/loom-invariant-results` as `loom-invariant-results`, including a
+machine-readable `result.json`. A failed loom result is a release investigation
+signal even though this scheduled workflow is not a per-commit required check.
+
 ---
 
 ## Release-day procedure

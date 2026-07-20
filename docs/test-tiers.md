@@ -74,13 +74,13 @@ gates a tag push, not a merge).
 | release-acceptance suite (B.12) | `ci.yml:release-acceptance` **and** `release.yml:release-acceptance` | every push+PR, **and again** at tag push | 1 and 3 | required (PR copy) / release (tag copy) |
 | `mutation-safety.yml` — `cargo-mutants` over guard + audit | `mutation-safety.yml` | cron `17 2 * * *` (nightly) | 2 | scheduled |
 | `multi-nightly` floating-toolchain early warning | `ci.yml:multi-nightly` | every push+PR (not a schedule — see §4.3) | 1-shaped but advisory | advisory |
-| fuzz targets **compile** check (`oraclemcp-guard`'s 2 targets — `alter_session_parse`, `classify_fuzz`; `cargo fuzz build`) | `ci.yml:fuzz-build` | every push+PR | 1-shaped but advisory | advisory |
+| fuzz targets **compile** check (4 targets across `oraclemcp-guard`, `oraclemcp-audit`, and `oraclemcp-auth`; `cargo fuzz build`) | `ci.yml:fuzz-build` | every push+PR | 1-shaped but advisory | advisory |
 | fuzz targets **run** (actual corpus execution) | none automated — `cargo +nightly-2026-05-11 fuzz run <target>` locally only | manual | — (gap; see §4.4) | n/a |
 | gvenzl 23ai matrix + VECTOR smoke (real live DB) | `ci.yml:oracle-free23` (`scripts/e2e/oracle_version_matrix.sh --log --lane free23`) | every push+PR | 1 (should be 2; see §4.1) | required |
 | gvenzl full ladder (XE 18 / XE 21 / FREE 23ai) | `scripts/e2e/oracle_version_matrix.sh --log` | operator/agent-run, no schedule | 2-shaped, executed as 3 | manual |
 | `scripts/coverage_baseline.sh` (code-coverage baseline, bead D1; `tests/coverage/BASELINE.{json,md}`) | local / not wired into CI | on demand (deliberate dispatch) | 2 | n/a (local generator, not a CI job yet; see §4.5, §6) |
 | `scripts/coverage_ratchet.sh` (D2: changed-line coverage + mutation floor; deliberately not a global percentage gate) | `ci.yml:coverage-ratchet` | every push+PR | 1 | required |
-| loom model-checks | not implemented — no `loom` dependency in the workspace | — | 2 — **not built yet** | n/a (gap; see §4.6) |
+| bounded loom model-checks (shipping-spool lost wakeup, admission permits/switch-at-cap, lane lock order) | `loom.yml:loom` | weekly + manual dispatch | 2 | scheduled |
 | `scripts/e2e/oci_adb_terraform.sh`, `real_adb_tcps_signoff.sh`, `oci_adb_iam_bootstrap/` (real OCI Always-Free ADB) | `oci-adb.yml:acceptance` | `workflow_dispatch` only | 3 | manual |
 | `scripts/local_release_gate.sh` (D3.2: synthetic TCPS proof, optional real-ADB delegation) | local, pre-tag | on demand before a release tag | 3 | n/a (local, not a CI job) |
 | full release pipeline (cross-platform build, sign, publish crates.io/GHCR/MCP registry) | `release.yml` | push tag `v*` | 3 | release |
@@ -112,13 +112,12 @@ prevent. As of this writing:
    `continue-on-error`, not from running off the per-PR path. The floating
    Rust nightly and the fuzz-compile check both execute every time, they just
    never fail the merge.
-3. **No automated fuzz-campaign lane exists.** `fuzz-build` only proves
-   `oraclemcp-guard`'s 2 current targets still *compile*; running them against
+3. **No automated fuzz-campaign lane exists.** `fuzz-build` only proves the 4
+   current targets across guard, audit, and auth still *compile*; running them against
    a corpus (`cargo fuzz run <target>`) is a local-only, manual action today.
    Plan §30.6 describes a Tier 2 aspiration of "22 protocol targets + the new
    guard/config/sql targets" — the target count itself is aspirational too,
-   not just the scheduled-run lane; today there are 2, both in
-   `oraclemcp-guard`.
+   not just the scheduled-run lane; today there are 4 across those 3 crates.
 4. **Closed by beads D1 (§6) + D2 (§7): a code-coverage baseline and a
    changed-line ratchet now exist.** Before D1 there was no code-coverage
    measurement at all (`cargo llvm-cov` or equivalent) anywhere in
@@ -146,8 +145,15 @@ prevent. As of this writing:
    plsql-intelligence` / `live-xe` variant of the server baseline (D1
    deliberately scoped to default features, matching Tier 1 `cargo test
    --workspace`; see `tests/coverage/BASELINE.md`).
-5. **No loom model-checking exists** — no `loom` dependency appears anywhere
-   in the workspace. The plan's Tier 2 loom line item is aspirational.
+5. **Closed by H6: loom model-checking now has a real Tier 2 lane.**
+   `.github/workflows/loom.yml` runs weekly and by manual dispatch with
+   `RUSTFLAGS="--cfg loom"`, `LOOM_MAX_PREEMPTIONS=3`, two Cargo build jobs,
+   and a 30-minute job timeout. It executes the audit shipping-spool model and
+   the core admission + lane-lock-order models, including child-process
+   sensitivity proofs for the historical lost-wakeup and an injected AB-BA
+   edge. Every run uploads `target/loom-invariant-results` as the
+   `loom-invariant-results` artifact; its `result.json` is the machine-readable
+   `oraclemcp.loom-invariant-results/v1` outcome contract.
 6. **`.github/required/_quality.yml`'s "Live matrix" step references a
    nonexistent script.** Line 24 runs `bash scripts/version_matrix.sh full
    all`; no such file exists (`scripts/version_matrix.sh` is not in the repo).
@@ -174,10 +180,11 @@ prevent. As of this writing:
    which this pass did not do. Flagged as a thing to check before treating
    "Tier 1 is <15 min" as true today.
 
-None of the above are fixed by this pass. H4/H7 is test-**integrity**
-hardening (value-blind assertions, self-fulfilling fixtures, and this
-manifest); CI retiming/rewiring is separate work already named in plan §25/§27
-and is out of scope for the files this pass touches.
+H6 closes item 5 and broadens the compile-only fuzz surface described in item
+3; it does not create a long-running fuzz campaign. The other gaps remain.
+H4/H7's earlier test-**integrity** pass covered value-blind assertions,
+self-fulfilling fixtures, and this manifest; H6 updates the manifest with the
+now-real concurrency lane.
 
 ## 5. What this pass (H7) added
 

@@ -1,0 +1,94 @@
+name: Loom Concurrency Invariants
+
+on:
+  schedule:
+    - cron: "41 3 * * 0"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "2"
+  CARGO_TARGET_DIR: /home/runner/work/_cargo-target-loom
+  LOOM_MAX_PREEMPTIONS: "3"
+  RUST_TOOLCHAIN: nightly-2026-05-11
+  LOOM_RESULTS_DIR: target/loom-invariant-results
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  loom:
+    name: bounded loom model checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: loom
+
+      - name: Run all H6 loom models and write the result contract
+        run: |
+          mkdir -p "$LOOM_RESULTS_DIR"
+          set +e
+          set -o pipefail
+
+          RUSTFLAGS="--cfg loom" cargo +"$RUST_TOOLCHAIN" test \
+            -p oraclemcp-audit --test loom_shipping_spool --release -- \
+            --test-threads=1 2>&1 | tee "$LOOM_RESULTS_DIR/audit-shipping-spool.log"
+          audit_status=${PIPESTATUS[0]}
+
+          RUSTFLAGS="--cfg loom" cargo +"$RUST_TOOLCHAIN" test \
+            -p oraclemcp-core --test loom_admission --release -- \
+            --test-threads=1 2>&1 | tee "$LOOM_RESULTS_DIR/core-admission.log"
+          admission_status=${PIPESTATUS[0]}
+
+          RUSTFLAGS="--cfg loom" cargo +"$RUST_TOOLCHAIN" test \
+            -p oraclemcp-core --test loom_lane_lock_order --release -- \
+            --test-threads=1 2>&1 | tee "$LOOM_RESULTS_DIR/core-lane-lock-order.log"
+          lock_order_status=${PIPESTATUS[0]}
+
+          jq -n \
+            --arg sha "$GITHUB_SHA" \
+            --arg toolchain "$RUST_TOOLCHAIN" \
+            --argjson max_preemptions "$LOOM_MAX_PREEMPTIONS" \
+            --argjson audit "$audit_status" \
+            --argjson admission "$admission_status" \
+            --argjson lock_order "$lock_order_status" \
+            '{
+              schema: "oraclemcp.loom-invariant-results/v1",
+              workflow: ".github/workflows/loom.yml",
+              job: "loom",
+              commit_sha: $sha,
+              toolchain: $toolchain,
+              loom_max_preemptions: $max_preemptions,
+              outcome: (if ($audit + $admission + $lock_order) == 0 then "passed" else "failed" end),
+              models: [
+                {crate: "oraclemcp-audit", test_target: "loom_shipping_spool", exit_code: $audit},
+                {crate: "oraclemcp-core", test_target: "loom_admission", exit_code: $admission},
+                {crate: "oraclemcp-core", test_target: "loom_lane_lock_order", exit_code: $lock_order}
+              ]
+            }' > "$LOOM_RESULTS_DIR/result.json"
+
+          if (( audit_status != 0 || admission_status != 0 || lock_order_status != 0 )); then
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: loom-invariant-results
+          path: target/loom-invariant-results
+          if-no-files-found: error
+          retention-days: 30
