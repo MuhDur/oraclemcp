@@ -1,0 +1,61 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-20T11:20:44Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.5.5",
+  "scope": {
+    "summary": "Record and verify the driver-side split reusable quality graph, stable aggregate, taxonomy expansion, and fail-closed local Required projection.",
+    "in_scope": [
+      "tests/artifacts/evidence/oraclemcp-eng-program-bp8ia.5.5-driver-handoff.json"
+    ],
+    "out_of_scope": [
+      "Changing oraclemcp's own Required workflow.",
+      "Claiming a GitHub-hosted driver workflow run or full driver workspace compile at the verified SHA."
+    ]
+  },
+  "source": {
+    "sha": "907036e1ebf7d355234c721dc3094d30222e87b2",
+    "tree_clean": true,
+    "branch": "codex/wave1-close-evidence-20260720"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "driver reusable quality workflow",
+        "kind": "config-gate",
+        "trace": "The checksum handoff binds rust-oracledb implementation commit ab8abc409843d4624a25dde6d126123dde6919ac and verified head 4f1eb3abd3af604ad29f1899251025499b0a3869; _quality.yml contains eight observable gate jobs plus a stable quality aggregate."
+      },
+      {
+        "name": "driver local Required projection",
+        "kind": "cli",
+        "trace": "At the verified driver head, python3 scripts/verify_required_local.py --self-test passed structural fail-closed negatives and --plan derived 28 explicit required-command records from the live workflow."
+      },
+      {
+        "name": "driver CI taxonomy",
+        "kind": "config-gate",
+        "trace": "At the verified driver head, python3 scripts/ci_taxonomy.py --check matched all 72 concrete checks in workflow YAML with no unresolved matrix names or phantom jobs."
+      },
+      {
+        "name": "cross-repo checksum handoff",
+        "kind": "api",
+        "trace": "tests/artifacts/evidence/oraclemcp-eng-program-bp8ia.5.5-driver-handoff.json records exact commits, trees, paths, and SHA-256 digests; an independent local verifier recomputed every value."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No GitHub-hosted reusable-workflow execution is claimed.",
+    "The driver's mandatory build-slot service was unavailable, so no unleased full workspace compile was substituted.",
+    "This close has no required-proof/v1 artifact and remains not-ready on scoped workflow/parser evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
