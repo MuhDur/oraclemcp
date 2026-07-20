@@ -1,0 +1,128 @@
+name: Emit test attestation
+description: Emit a signed K1 lane attestation or a typed SKIP/BLOCKED status
+
+inputs:
+  enabled:
+    description: Exact repository-variable opt-in (`true` enables signing)
+    required: true
+  trusted-context:
+    description: Exact workflow trust decision (`true` permits secret use)
+    required: true
+  lane:
+    description: test-attestation/v1 lane slug
+    required: true
+  command:
+    description: Exact command represented by the named outcomes
+    required: true
+  tests:
+    description: Newline-delimited NAME=PASS outcomes
+    required: true
+  artifacts:
+    description: Newline-delimited repo-relative evidence files to hash
+    required: false
+    default: ""
+  output-name:
+    description: Filename below target/test-attestations
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Emit signed document or typed non-attestation status
+      shell: bash
+      env:
+        ATTESTATION_ARTIFACTS: ${{ inputs.artifacts }}
+        ATTESTATION_COMMAND: ${{ inputs.command }}
+        ATTESTATION_ENABLED: ${{ inputs.enabled }}
+        ATTESTATION_LANE: ${{ inputs.lane }}
+        ATTESTATION_OUTPUT_NAME: ${{ inputs.output-name }}
+        ATTESTATION_TESTS: ${{ inputs.tests }}
+        ATTESTATION_TRUSTED_CONTEXT: ${{ inputs.trusted-context }}
+      run: |
+        set -euo pipefail
+        output_dir="target/test-attestations"
+        mkdir -p "$output_dir"
+        [[ "$ATTESTATION_OUTPUT_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.jsonl$ ]] || {
+          echo "::error title=test-attestation blocked::output-name must be a portable .jsonl filename"
+          exit 2
+        }
+
+        reason=""
+        if [ "$ATTESTATION_TRUSTED_CONTEXT" != "true" ]; then
+          reason="untrusted-context"
+        elif [ "$ATTESTATION_ENABLED" != "true" ]; then
+          reason="operator-not-enabled"
+        fi
+
+        if [ -n "$reason" ]; then
+          status_name="${ATTESTATION_OUTPUT_NAME%.jsonl}.status.json"
+          status_path="$output_dir/$status_name"
+          created_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          python3 - "$status_path" "$ATTESTATION_LANE" "$reason" "$GITHUB_SHA" \
+            "$RUST_TOOLCHAIN" "$created_at" <<'PY'
+        import json
+        import sys
+
+        path, lane, reason, git_sha, toolchain, created_at = sys.argv[1:]
+        status = {
+            "attestation_emitted": False,
+            "blocked": True,
+            "created_at": created_at,
+            "git_sha": git_sha,
+            "lane": lane,
+            "outcome": "SKIP",
+            "reason": reason,
+            "schema": "test-attestation-status/v1",
+            "toolchain": toolchain,
+        }
+        with open(path, "x", encoding="utf-8") as output:
+            json.dump(status, output, separators=(",", ":"), sort_keys=True)
+            output.write("\n")
+        PY
+          echo "::notice title=test-attestation SKIP/BLOCKED::lane=$ATTESTATION_LANE reason=$reason; no attestation emitted"
+          printf 'test-attestation: **SKIP/BLOCKED** (`%s`); no signed attestation was emitted.\n' \
+            "$reason" >>"$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+
+        test -n "${ORACLEMCP_TEST_ATTESTATION_KEY:-}" || {
+          echo "::error title=test-attestation blocked::ENABLE_TEST_ATTESTATION=true but ORACLEMCP_TEST_ATTESTATION_KEY is absent"
+          exit 2
+        }
+        test -n "${ORACLEMCP_TEST_ATTESTATION_KEY_ID:-}" || {
+          echo "::error title=test-attestation blocked::ENABLE_TEST_ATTESTATION=true but ORACLEMCP_TEST_ATTESTATION_KEY_ID is absent"
+          exit 2
+        }
+
+        arguments=(
+          --lane "$ATTESTATION_LANE"
+          --repo oraclemcp
+          --git-sha "$GITHUB_SHA"
+          --toolchain "$RUST_TOOLCHAIN"
+          --command "$ATTESTATION_COMMAND"
+          --created-at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          --output "$output_dir/$ATTESTATION_OUTPUT_NAME"
+        )
+        while IFS= read -r test_case; do
+          [ -z "$test_case" ] || arguments+=(--test "$test_case")
+        done <<<"$ATTESTATION_TESTS"
+        while IFS= read -r artifact; do
+          [ -z "$artifact" ] || arguments+=(--artifact "$artifact")
+        done <<<"$ATTESTATION_ARTIFACTS"
+
+        # Do not expose the signing secret to dependency build scripts. Build
+        # and resolve Cargo's target directory with both key variables removed,
+        # then give the secret only to the already-built emitter process.
+        env -u ORACLEMCP_TEST_ATTESTATION_KEY \
+          -u ORACLEMCP_TEST_ATTESTATION_KEY_ID \
+          cargo build --quiet --locked -p oraclemcp-verifier \
+            --bin oraclemcp-test-attest
+        target_dir="$(
+          env -u ORACLEMCP_TEST_ATTESTATION_KEY \
+            -u ORACLEMCP_TEST_ATTESTATION_KEY_ID \
+            cargo metadata --quiet --locked --no-deps --format-version 1 \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
+        )"
+        "$target_dir/debug/oraclemcp-test-attest" "${arguments[@]}"
+        printf 'test-attestation: signed `%s`; HMAC verification requires the independently trusted secret.\n' \
+          "$ATTESTATION_OUTPUT_NAME" >>"$GITHUB_STEP_SUMMARY"

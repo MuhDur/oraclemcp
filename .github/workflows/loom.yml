@@ -85,10 +85,32 @@ jobs:
             exit 1
           fi
 
+      - name: Record loom-lane attestation status
+        uses: ./.github/actions/test-attestation
+        env:
+          ORACLEMCP_TEST_ATTESTATION_KEY: ${{ secrets.ORACLEMCP_TEST_ATTESTATION_KEY }}
+          ORACLEMCP_TEST_ATTESTATION_KEY_ID: ${{ vars.TEST_ATTESTATION_KEY_ID || 'github-actions-v1' }}
+        with:
+          enabled: ${{ vars.ENABLE_TEST_ATTESTATION == 'true' }}
+          trusted-context: "true"
+          lane: loom-invariants
+          command: >-
+            RUSTFLAGS="--cfg loom" cargo +nightly-2026-05-11 test -p oraclemcp-audit --test loom_shipping_spool --release -- --test-threads=1;
+            RUSTFLAGS="--cfg loom" cargo +nightly-2026-05-11 test -p oraclemcp-core --test loom_admission --release -- --test-threads=1;
+            RUSTFLAGS="--cfg loom" cargo +nightly-2026-05-11 test -p oraclemcp-core --test loom_lane_lock_order --release -- --test-threads=1
+          tests: |
+            loom:loom_shipping_spool:test-target=PASS
+            loom:loom_admission:test-target=PASS
+            loom:loom_lane_lock_order:test-target=PASS
+          artifacts: target/loom-invariant-results/result.json
+          output-name: loom-invariants.jsonl
+
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: loom-invariant-results
-          path: target/loom-invariant-results
+          path: |
+            target/loom-invariant-results
+            target/test-attestations/
           if-no-files-found: error
           retention-days: 30

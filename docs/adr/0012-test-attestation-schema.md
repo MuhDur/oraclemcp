@@ -2,9 +2,10 @@
 
 ## Status
 
-Accepted for the K1 format and K2 browser verifier (Cluster K, plan §32.3;
-beads `oraclemcp-eng-program-bp8ia.12.1` and `.12.2`). K3 adds lane producers
-in a follow-on commit.
+Accepted for the K1 format, K2 browser verifier, and K3 opt-in lane producer
+(Cluster K, plan §32.3; beads `oraclemcp-eng-program-bp8ia.12.1`–`.12.3`).
+Signed-lane operation remains blocked until the repository variable and trusted
+secret described in `docs/operations.md` §6.7 are provisioned.
 
 ## Context
 
@@ -99,6 +100,20 @@ For public release verification, the keyed-MAC document must additionally be
 wrapped in the repository's existing cosign/Sigstore attestation flow. That
 asymmetric, identity-bound layer—not the HMAC alone—is what permits a public
 third party to verify provenance without acquiring forge capability.
+
+### Lane emission and disabled state
+
+The K3 emitter (`oraclemcp-test-attest`) consumes secret material only from
+`ORACLEMCP_TEST_ATTESTATION_KEY`, hashes any named evidence files itself, and
+creates a new output without overwriting an existing path. The shared workflow
+action builds it with the key variables removed from Cargo's environment, then
+exposes them only to the emitter process in trusted, explicitly enabled
+contexts. An absent opt-in or an untrusted pull-request context produces a
+separate `test-attestation-status/v1` `SKIP/BLOCKED` document and **no** K1
+attestation;
+an enabled context with a missing/invalid secret fails. This preserves existing
+required CI while making the not-yet-provisioned acceptance gap machine-visible
+instead of silently green.
 
 ## Consequences
 

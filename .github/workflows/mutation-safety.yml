@@ -90,6 +90,7 @@ jobs:
       - name: Install pinned cargo-mutants
         run: cargo install cargo-mutants --version 27.1.0 --locked
       - name: Select and run deterministic shard
+        id: mutation
         env:
           SCOPE: ${{ matrix.scope }}
           TOTAL: ${{ matrix.total }}
@@ -99,11 +100,30 @@ jobs:
           shard="${index}/${TOTAL}"
           echo "mutation shard: scope=${SCOPE} shard=${shard}"
           bash scripts/mutation_safety_gate.sh run-shard --scope "$SCOPE" --shard "$shard"
+          echo "shard=$shard" >> "$GITHUB_OUTPUT"
+          echo "shard_dir=shard-${index}of${TOTAL}" >> "$GITHUB_OUTPUT"
+      - name: Record mutation-lane attestation status
+        uses: ./.github/actions/test-attestation
+        env:
+          ORACLEMCP_TEST_ATTESTATION_KEY: ${{ secrets.ORACLEMCP_TEST_ATTESTATION_KEY }}
+          ORACLEMCP_TEST_ATTESTATION_KEY_ID: ${{ vars.TEST_ATTESTATION_KEY_ID || 'github-actions-v1' }}
+        with:
+          enabled: ${{ vars.ENABLE_TEST_ATTESTATION == 'true' }}
+          trusted-context: "true"
+          lane: mutation-safety
+          command: bash scripts/mutation_safety_gate.sh run-shard --scope ${{ matrix.scope }} --shard ${{ steps.mutation.outputs.shard }}
+          tests: mutation-shard:${{ matrix.scope }}:${{ steps.mutation.outputs.shard }}:complete=PASS
+          artifacts: target/mutants/${{ matrix.scope }}/${{ steps.mutation.outputs.shard_dir }}/integrity.json
+          output-name: mutation-${{ matrix.scope }}-${{ steps.mutation.outputs.shard_dir }}.jsonl
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutation-${{ matrix.scope }}-${{ github.run_number }}-${{ matrix.offset }}
-          path: target/mutants/${{ matrix.scope }}/
+          # A disabled signer emits only a typed SKIP/BLOCKED status, never an
+          # unsigned document shaped like a K1 attestation.
+          path: |
+            target/mutants/${{ matrix.scope }}/
+            target/test-attestations/
           if-no-files-found: error
           retention-days: 90
 
@@ -126,13 +146,34 @@ jobs:
       - name: Install pinned cargo-mutants
         run: cargo install cargo-mutants --version 27.1.0 --locked
       - name: Run requested deterministic shard
-        run: >-
-          bash scripts/mutation_safety_gate.sh run-shard
-          --scope "${{ inputs.scope }}" --shard "${{ inputs.shard }}"
+        id: mutation
+        env:
+          SCOPE: ${{ inputs.scope }}
+          SHARD: ${{ inputs.shard }}
+        run: |
+          set -euo pipefail
+          bash scripts/mutation_safety_gate.sh run-shard --scope "$SCOPE" --shard "$SHARD"
+          IFS=/ read -r shard_index shard_total <<<"$SHARD"
+          echo "shard_dir=shard-${shard_index}of${shard_total}" >> "$GITHUB_OUTPUT"
+      - name: Record mutation-lane attestation status
+        uses: ./.github/actions/test-attestation
+        env:
+          ORACLEMCP_TEST_ATTESTATION_KEY: ${{ secrets.ORACLEMCP_TEST_ATTESTATION_KEY }}
+          ORACLEMCP_TEST_ATTESTATION_KEY_ID: ${{ vars.TEST_ATTESTATION_KEY_ID || 'github-actions-v1' }}
+        with:
+          enabled: ${{ vars.ENABLE_TEST_ATTESTATION == 'true' }}
+          trusted-context: "true"
+          lane: mutation-safety
+          command: bash scripts/mutation_safety_gate.sh run-shard --scope ${{ inputs.scope }} --shard ${{ inputs.shard }}
+          tests: mutation-shard:${{ inputs.scope }}:${{ inputs.shard }}:complete=PASS
+          artifacts: target/mutants/${{ inputs.scope }}/${{ steps.mutation.outputs.shard_dir }}/integrity.json
+          output-name: mutation-${{ inputs.scope }}-${{ steps.mutation.outputs.shard_dir }}.jsonl
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutation-${{ inputs.scope }}-${{ github.run_number }}
-          path: target/mutants/${{ inputs.scope }}/
+          path: |
+            target/mutants/${{ inputs.scope }}/
+            target/test-attestations/
           if-no-files-found: error
           retention-days: 90

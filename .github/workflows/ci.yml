@@ -172,7 +172,39 @@ jobs:
           tool: cargo-llvm-cov
       - run: bash scripts/coverage_ratchet.sh --self-test
       - name: Ratchet changed-line coverage against the change base
-        run: bash scripts/coverage_ratchet.sh run --base "${{ github.event.pull_request.base.sha || github.event.before }}"
+        id: coverage
+        env:
+          COVERAGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/test-attestation-evidence
+          bash scripts/coverage_ratchet.sh run --base "$COVERAGE_BASE" 2>&1 \
+            | tee target/test-attestation-evidence/coverage-ratchet.log
+          echo "base=$COVERAGE_BASE" >> "$GITHUB_OUTPUT"
+      - name: Record coverage-lane attestation status
+        uses: ./.github/actions/test-attestation
+        env:
+          ORACLEMCP_TEST_ATTESTATION_KEY: ${{ secrets.ORACLEMCP_TEST_ATTESTATION_KEY }}
+          ORACLEMCP_TEST_ATTESTATION_KEY_ID: ${{ vars.TEST_ATTESTATION_KEY_ID || 'github-actions-v1' }}
+        with:
+          enabled: ${{ vars.ENABLE_TEST_ATTESTATION == 'true' }}
+          trusted-context: ${{ github.event_name == 'push' }}
+          lane: coverage-ratchet
+          command: bash scripts/coverage_ratchet.sh run --base ${{ steps.coverage.outputs.base }}
+          tests: |
+            coverage-ratchet:changed-line-floor=PASS
+            coverage-ratchet:mutation-floor=PASS
+          artifacts: target/test-attestation-evidence/coverage-ratchet.log
+          output-name: coverage-ratchet.jsonl
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: coverage-ratchet-${{ github.run_number }}
+          path: |
+            target/test-attestation-evidence/coverage-ratchet.log
+            target/test-attestations/
+          if-no-files-found: error
+          retention-days: 30
 
   feature-powerset:
     name: feature powerset (cargo hack)

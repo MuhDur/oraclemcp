@@ -1276,6 +1276,34 @@ The image additionally carries an SBOM attestation you can pull directly:
 cosign download sbom "ghcr.io/muhdur/oraclemcp:${VERSION}"
 ```
 
+### 6.7 Opt in to signed CI test attestations
+
+The coverage-ratchet, mutation-shard, and resource-bounded loom lanes can emit
+`test-attestation/v1` JSONL through the shared
+`.github/actions/test-attestation` action. Signing is deliberately off until an
+operator provisions both parts of the trust boundary:
+
+1. set the repository variable `ENABLE_TEST_ATTESTATION` to the exact string
+   `true`;
+2. set the Actions secret `ORACLEMCP_TEST_ATTESTATION_KEY` to 64 or more
+   lowercase hexadecimal characters (at least 32 secret bytes); and
+3. optionally set `TEST_ATTESTATION_KEY_ID` to the rotatable non-secret key id
+   distributed with the verifier trust policy (default `github-actions-v1`).
+
+Distribute the HMAC secret to authorized verifiers through an independent
+secret channel. Never commit it, attach it to the workflow artifact, embed it
+in the dashboard, or paste it into an argv value. HMAC is symmetric: a verifier
+who receives the secret can also forge a document. Public authenticity still
+requires the release's asymmetric cosign/Sigstore provenance (§6.2–6.4).
+
+When the opt-in variable is false or absent, the action writes a separate
+`test-attestation-status/v1` artifact with `outcome: "SKIP"`, `blocked: true`,
+and `attestation_emitted: false`; it does **not** emit an unsigned document that
+looks like a K1 attestation. Pull-request contexts follow the same typed
+`untrusted-context` path and never consume the secret. If the opt-in is true
+but the secret is absent or malformed, the lane fails closed. Therefore an
+ordinary green lane plus a SKIP/BLOCKED status is not signed-lane acceptance.
+
 > A release is "verifiable" only when 6.2–6.4 succeed against the **release**
 > OIDC identity above. A signature that verifies under any other identity, or a
 > provenance that names a different repo/workflow, is not this project's release
