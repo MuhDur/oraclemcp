@@ -6,19 +6,17 @@
   "scope": {
     "summary": "Delete the four dead metadata-gate retry tags v0.6.2-v0.6.5 from local and origin, leaving every published tag intact.",
     "in_scope": [
-      "refs/tags/v0.6.2",
-      "refs/tags/v0.6.3",
-      "refs/tags/v0.6.4",
-      "refs/tags/v0.6.5"
+      ".beads/issues.jsonl"
     ],
     "out_of_scope": [
       "Any tag that was actually published (v0.6.0, v0.6.1, v0.6.6 remain untouched).",
-      "Deleting GitHub Release objects: the bead's precondition was that none exist for these tags, which was re-verified before deletion."
+      "Deleting GitHub Release objects: none existed for these four tags, re-verified before deletion.",
+      "Any source-code change: this close is a remote-ref cleanup plus its tracker record."
     ]
   },
   "source": {
-    "sha": "903ea2741ccd89bf9f575dd8ec906bb590469716",
-    "tree_clean": false,
+    "sha": "72258581c78380fb2a9785384910b850985593a5",
+    "tree_clean": true,
     "branch": "main"
   },
   "proofs": [],
@@ -26,8 +24,8 @@
     "entry_points": [
       {
         "name": "dead-tag precondition re-verified",
-        "kind": "operator-gate",
-        "trace": "gh release list showed no GitHub Release object attached to v0.6.2, v0.6.3, v0.6.4 or v0.6.5; the bead records only 0.6.0/0.6.1/0.6.6 were ever published. Operator approval to proceed was recorded in the bead description on 2026-07-21 before any deletion."
+        "kind": "cli",
+        "trace": "gh release list showed no GitHub Release object attached to v0.6.2, v0.6.3, v0.6.4 or v0.6.5; the bead records only 0.6.0/0.6.1/0.6.6 were ever published. Operator approval to proceed was recorded in the bead description on 2026-07-21 before any deletion. Operator approval was recorded in the bead description on 2026-07-21 before any deletion (RULE 1 satisfied; executed by the lead, not an agent)."
       },
       {
         "name": "deletion executed local + origin",
@@ -41,5 +39,20 @@
       }
     ]
   },
-  "notes": "Executed by the lead orchestrator, not an agent. RULE 1 satisfied: the operator gave explicit in-session approval for this specific deletion and it was recorded in the bead before execution."
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Tag deletion is an outward-facing, irreversible remote mutation; it was performed only after explicit in-session operator approval was recorded in the bead.",
+    "No GitHub Release object existed for any of the four tags, so nothing published was affected; this close does not claim any release-pipeline run.",
+    "Verification is the post-deletion git ls-remote listing, not a CI artifact.",
+    "Verification was a targeted git ls-remote check, not a Required-graph proof at this SHA; the close therefore claims not-ready."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
 }
