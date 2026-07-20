@@ -44,6 +44,7 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parent.parent
 CLOSES_DIR = ROOT / "tests" / "artifacts" / "evidence" / "closes"
 LOCAL_REPOSITORY = "oraclemcp"
+TRACKER_POLICY = ROOT / ".beads" / "policy.yaml"
 # The first implementation of E5/T1-T4. Historical closes remain coverage debt;
 # closes at or after this UTC instant are subject to the hard gate.
 ENFORCEMENT_EPOCH_TEXT = "2026-07-20T07:36:00Z"
@@ -74,6 +75,11 @@ _CLOSE_BINDING_RE = re.compile(
 
 _SELF_SKIP_RE = re.compile(r"#\s*\[\s*ignore\s*\]|self[- ]skip(?:ping)?", re.I)
 
+_NATIVE_CLOSE_REASON_REGEX = (
+    r"\[closing=[0-9a-f]{40} source=[0-9a-f]{40} "
+    r"evidence=tests/artifacts/evidence/closes/[A-Za-z0-9._-]+\.json\]$"
+)
+
 
 class Finding:
     def __init__(self, tier: str, bead: str, code: str, message: str) -> None:
@@ -84,6 +90,52 @@ class Finding:
 
     def __str__(self) -> str:
         return f"[{self.tier}] {self.bead}: {self.code} — {self.message}"
+
+
+def _tracker_policy_errors(document: object) -> list[str]:
+    """Pin the fail-closed native `br close` policy consumed by br itself."""
+    if not isinstance(document, dict):
+        return ["policy document must be an object"]
+    errors: list[str] = []
+    if set(document) != {"allow_bypass", "close_policy"}:
+        errors.append("policy keys must be exactly allow_bypass and close_policy")
+    if document.get("allow_bypass") is not False:
+        errors.append("allow_bypass must be false")
+    close_policy = document.get("close_policy")
+    if not isinstance(close_policy, dict):
+        return errors + ["close_policy must be an object"]
+    if set(close_policy) != {"require_close_reason"}:
+        errors.append("close_policy keys must be exactly require_close_reason")
+    reason = close_policy.get("require_close_reason")
+    if not isinstance(reason, dict):
+        return errors + ["close_policy.require_close_reason must be an object"]
+    if set(reason) != {"enabled", "min_length", "regex"}:
+        errors.append(
+            "close_policy.require_close_reason keys must be exactly enabled, "
+            "min_length, and regex"
+        )
+    if reason.get("enabled") is not True:
+        errors.append("close_policy.require_close_reason.enabled must be true")
+    if reason.get("min_length") != 0:
+        errors.append("close_policy.require_close_reason.min_length must be 0")
+    if reason.get("regex") != _NATIVE_CLOSE_REASON_REGEX:
+        errors.append("close_policy.require_close_reason.regex drifted")
+    return errors
+
+
+def _check_tracker_policy() -> int:
+    try:
+        document = json.loads(TRACKER_POLICY.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        print(
+            f"audit: native tracker policy is unavailable or invalid: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    errors = _tracker_policy_errors(document)
+    for error in errors:
+        print(f"audit: native tracker policy invalid: {error}", file=sys.stderr)
+    return int(bool(errors))
 
 
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -778,6 +830,25 @@ def self_test() -> int:
     if binding is None or binding["closing"] != "a" * 40:
         print("audit: self-test failed: close binding was not parsed", file=sys.stderr)
         return 1
+    raw_close = {
+        "id": "raw-close",
+        "closed_at": ENFORCEMENT_EPOCH_TEXT,
+        "close_reason": "done without the guarded binding",
+    }
+    raw_close_findings = _close_binding_findings(raw_close, fixture, foreign_doc)
+    if not any(f.code == "CLOSE_REASON_UNBOUND" for f in raw_close_findings):
+        print("audit: self-test failed: raw br close bypass was accepted", file=sys.stderr)
+        return 1
+    permissive_policy = {
+        "allow_bypass": True,
+        "close_policy": {"require_close_reason": {"enabled": False, "regex": None}},
+    }
+    if not _tracker_policy_errors(permissive_policy):
+        print(
+            "audit: self-test failed: permissive native close policy was accepted",
+            file=sys.stderr,
+        )
+        return 1
     self_skip_doc = json.loads(json.dumps(foreign_doc))
     self_skip_doc["proofs"] = []
     self_skip_doc["live_evidence"] = {"claimed": False, "artifacts": []}
@@ -964,6 +1035,8 @@ def main() -> int:
         return template(args.template)
     if bool(args.pre_close) != bool(args.evidence):
         parser.error("--pre-close and --evidence must be supplied together")
+    if _check_tracker_policy() != 0:
+        return 1
     self_test_result = self_test()
     if args.self_test:
         if self_test_result == 0:

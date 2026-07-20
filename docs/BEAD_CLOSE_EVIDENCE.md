@@ -153,6 +153,15 @@ Use `scripts/bead_tracker_guard.sh`, which holds a lock in the repository's
 shared git directory across the preflight, state read, and mutation. The lock is
 common to every linked worktree.
 
+Defense in depth is repository-native. `.beads/policy.yaml` makes `br close`
+itself require the exact closing/source/evidence binding suffix and disables
+`--bypass-policy`. The Required graph and the `boundary` CI job both run
+`scripts/check_bead_close_evidence.sh`, which validates that native policy and
+then proves the referenced evidence was committed, belongs to the bead, and
+matches the bound commits. A direct raw close therefore fails immediately when
+it omits the binding and cannot silently merge when it forges a binding without
+the corresponding landed evidence.
+
 The serialization guarantee covers guarded transitions. A raw tracker mutation
 does not take this repository-level lock, which is why the operating contract
 above prohibits raw close and claim-release commands rather than presenting the

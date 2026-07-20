@@ -555,6 +555,8 @@ jobs:
       - run: bash scripts/oraclemcp_concurrency_lint.sh
       - run: bash scripts/oraclemcp_honesty_grep.sh
       - run: bash scripts/oraclemcp_fixture_lint.sh
+      - name: bead close evidence (native policy + post-close binding)
+        run: bash scripts/check_bead_close_evidence.sh
       - name: entry-trace contract (required SKIP=FAIL)
         run: bash scripts/check_entry_trace_contract.sh
       # D6.3a: regenerate tests/conformance/COVERAGE.md from the clause manifest

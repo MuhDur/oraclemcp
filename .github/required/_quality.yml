@@ -17,6 +17,8 @@ jobs:
         run: bash scripts/oraclemcp_honesty_grep.sh
       - name: Fixture lint
         run: bash scripts/oraclemcp_fixture_lint.sh
+      - name: Bead close evidence
+        run: bash scripts/check_bead_close_evidence.sh
       - name: API lock
         run: bash scripts/oraclemcp_api_lock.sh
       - name: Supply-chain checks

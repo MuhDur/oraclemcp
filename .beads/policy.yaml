@@ -1,0 +1,10 @@
+{
+  "allow_bypass": false,
+  "close_policy": {
+    "require_close_reason": {
+      "enabled": true,
+      "min_length": 0,
+      "regex": "\\[closing=[0-9a-f]{40} source=[0-9a-f]{40} evidence=tests/artifacts/evidence/closes/[A-Za-z0-9._-]+\\.json\\]$"
+    }
+  }
+}
