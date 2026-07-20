@@ -1,0 +1,75 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-20T11:15:28Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.5.3",
+  "scope": {
+    "summary": "Make mutation shards deterministic and resource-capped, grade OOM/task-cap events as errored, and refuse partial, stale, or population-incomplete seals.",
+    "in_scope": [
+      ".cargo/mutants.toml",
+      ".github/workflows/mutation-safety.yml",
+      "crates/oraclemcp-core/ci_taxonomy.json",
+      "docs/ci_taxonomy.json",
+      "docs/quality/mutation-safety.md",
+      "scripts/migrate_mutation_result.py",
+      "scripts/mutation_safety_gate.sh",
+      "scripts/test_migrate_mutation_result.py"
+    ],
+    "out_of_scope": [
+      "Producing the fresh exact-SHA five-surface mutation floor seal owned by D2.",
+      "Treating timeouts as confirmed test-failure kills.",
+      "Weakening the fail-closed SQL guard to improve a mutation score."
+    ]
+  },
+  "source": {
+    "sha": "b6bed9dd205dc403cee75cf040beafdab4ee5bdb",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "bounded deterministic mutation shard",
+        "kind": "cli",
+        "trace": "scripts/mutation_safety_gate.sh run-shard fixes cargo-mutants at -j1, caps a shard at 32 mutants, requires systemd MemoryMax/MemorySwapMax/TasksMax with OOMPolicy=continue, and records cgroup deltas in an integrity sidecar."
+      },
+      {
+        "name": "fail-closed shard-to-seal migration",
+        "kind": "cli",
+        "trace": "scripts/mutation_safety_gate.sh self-test passed complete-v2 acceptance and stale/hash mismatch rejection; python3 scripts/test_migrate_mutation_result.py passed its contract fixture."
+      },
+      {
+        "name": "scheduled mutation workflow",
+        "kind": "config-gate",
+        "trace": ".github/workflows/mutation-safety.yml rotates two deterministic <=32-mutant shards per scope per night with 90-day artifacts and exposes exact scope/shard recovery through workflow_dispatch."
+      },
+      {
+        "name": "release mutation report gate",
+        "kind": "config-gate",
+        "trace": "scripts/mutation_safety_gate.sh check-report returns E_STALE_SEAL on the deliberately stale legacy marker; it does not upgrade partial legacy percentages into a current green seal."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The committed mutation report is intentionally stale and the release mutation gate is red until D2 lands a fresh complete exact-SHA campaign; this close certifies D3's integrity mechanism, not a current mutation score.",
+    "This close does not claim a required-proof/v1 or mutation-result/v1 proof artifact and therefore remains not-ready on scoped mechanism tests."
+  ],
+  "known_defects": [
+    {
+      "description": "No fresh complete exact-SHA five-surface mutation floor seal is committed yet; check-report correctly returns E_STALE_SEAL.",
+      "bead_id": "oraclemcp-eng-program-bp8ia.5.2"
+    }
+  ],
+  "follow_ups": [
+    "oraclemcp-eng-program-bp8ia.5.2"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
