@@ -54,6 +54,16 @@ venv/
 
 # Strictly local live-test reports (never publish)
 /todelete/
+# Operator live-test rounds: raw uploads + everything extracted from them.
+# These carry field-test/live-customer identifiers and must NEVER be committed
+# (AGENTS.md constitution #9). Anything lifted into a committed plan is
+# scrubbed/synthesized first.
+/livesting-*/
+/livesting-*.zip
+/livetest-*/
+/livetest-*.zip
+# doctor run artifacts (regenerable: runs/<ts>/report.json + actions.jsonl)
+/.doctor/
 
 # C4 secret scan: operator denylist + optional policy (never commit)
 .secret_scan_denylist

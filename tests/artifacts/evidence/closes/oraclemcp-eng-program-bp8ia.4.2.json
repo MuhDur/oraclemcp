@@ -1,0 +1,45 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-20T13:21:14Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.4.2",
+  "scope": {
+    "summary": "Delete the four dead metadata-gate retry tags v0.6.2-v0.6.5 from local and origin, leaving every published tag intact.",
+    "in_scope": [
+      "refs/tags/v0.6.2",
+      "refs/tags/v0.6.3",
+      "refs/tags/v0.6.4",
+      "refs/tags/v0.6.5"
+    ],
+    "out_of_scope": [
+      "Any tag that was actually published (v0.6.0, v0.6.1, v0.6.6 remain untouched).",
+      "Deleting GitHub Release objects: the bead's precondition was that none exist for these tags, which was re-verified before deletion."
+    ]
+  },
+  "source": {
+    "sha": "903ea2741ccd89bf9f575dd8ec906bb590469716",
+    "tree_clean": false,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "dead-tag precondition re-verified",
+        "kind": "operator-gate",
+        "trace": "gh release list showed no GitHub Release object attached to v0.6.2, v0.6.3, v0.6.4 or v0.6.5; the bead records only 0.6.0/0.6.1/0.6.6 were ever published. Operator approval to proceed was recorded in the bead description on 2026-07-21 before any deletion."
+      },
+      {
+        "name": "deletion executed local + origin",
+        "kind": "cli",
+        "trace": "git tag -d and git push origin :refs/tags/<tag> ran for all four tags; each reported deletion."
+      },
+      {
+        "name": "published tags intact after deletion",
+        "kind": "cli",
+        "trace": "git ls-remote --tags origin filtered to the v0.6.x line returned exactly v0.6.0, v0.6.1, v0.6.6 - the four dead tags absent, every published tag still present."
+      }
+    ]
+  },
+  "notes": "Executed by the lead orchestrator, not an agent. RULE 1 satisfied: the operator gave explicit in-session approval for this specific deletion and it was recorded in the bead before execution."
+}
