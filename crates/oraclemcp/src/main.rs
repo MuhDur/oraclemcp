@@ -1382,14 +1382,12 @@ fn default_audit_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("oraclemcp-audit.jsonl"))
 }
 
-/// Where the CI heartbeat notifier (`scripts/ci_heartbeat.sh`) durably writes
-/// its `ci-heartbeat/v1` snapshot, which the dashboard's `/operator/v1/ci-lanes`
-/// tile ingests read-only (bead oraclemcp-eng-program-bp8ia.6.8). Resolution
+/// Where the CI-lane background poller and the independent heartbeat notifier
+/// (`scripts/ci_heartbeat.sh`) durably write their compatible snapshots for
+/// `/operator/v1/ci-lanes` (bead oraclemcp-eng-program-bp8ia.6.8). Resolution
 /// mirrors the script's own `OUT_PATH` default exactly: `CI_HEARTBEAT_OUTPUT`
 /// when set, else `$XDG_STATE_HOME/oraclemcp/ci-heartbeat.json`. `None` (no
-/// resolvable state home) leaves the tile on its honest "unavailable" posture;
-/// a missing, malformed, or stale file at the returned path fails closed to
-/// `unknown` lanes inside the tile itself — never a fabricated green.
+/// resolvable state home) leaves the tile on its honest "unavailable" posture.
 fn ci_heartbeat_snapshot_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("CI_HEARTBEAT_OUTPUT").filter(|path| !path.is_empty()) {
         return Some(PathBuf::from(path));
@@ -1406,7 +1404,8 @@ fn ci_heartbeat_snapshot_path() -> Option<PathBuf> {
 }
 
 /// Fill the heartbeat path only when the resolved transport has no explicit
-/// source. Keeping this as a small seam makes the precedence contract
+/// source, then enable the production poller only when a durable path exists.
+/// Keeping this as a small seam makes the precedence and enablement contracts
 /// testable without mutating process-wide environment variables.
 fn apply_ci_lane_snapshot_default(
     transport: &mut HttpTransportConfig,
@@ -1415,6 +1414,7 @@ fn apply_ci_lane_snapshot_default(
     if transport.ci_lane_snapshot_path.is_none() {
         transport.ci_lane_snapshot_path = default_path();
     }
+    transport.ci_lane_polling_enabled = transport.ci_lane_snapshot_path.is_some();
 }
 
 /// The legacy 0.4.x default audit path under the config home.
@@ -3790,9 +3790,9 @@ fn run_serve(
                     .unwrap_or_else(default_audit_path)
             });
             transport.operator_auditor = auditor;
-            // The CI-lane tile reads the CI heartbeat's snapshot file (if the
-            // operator runs scripts/ci_heartbeat.sh locally or syncs its
-            // output down); the server itself never polls GitHub.
+            // The CI-lane tile reads a durable snapshot. The ordinary HTTP(S)
+            // listener starts one bounded background poller that refreshes it
+            // from the fixed public GitHub API; the request path only reads.
             apply_ci_lane_snapshot_default(&mut transport, ci_heartbeat_snapshot_path);
             let config_ops_backend =
                 match ConfigOpsBackend::open_with_owner(http_service_owner.clone()) {

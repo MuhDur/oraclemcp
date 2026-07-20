@@ -138,6 +138,7 @@ fn ci_lane_snapshot_default_never_overwrites_an_explicit_transport_path() {
     });
 
     assert_eq!(transport.ci_lane_snapshot_path.as_ref(), Some(&explicit));
+    assert!(transport.ci_lane_polling_enabled);
 }
 
 #[test]
@@ -148,6 +149,15 @@ fn ci_lane_snapshot_default_fills_only_an_unconfigured_transport() {
     apply_ci_lane_snapshot_default(&mut transport, || Some(fallback.clone()));
 
     assert_eq!(transport.ci_lane_snapshot_path.as_ref(), Some(&fallback));
+    assert!(transport.ci_lane_polling_enabled);
+}
+
+#[test]
+fn ci_lane_polling_stays_disabled_without_a_resolvable_snapshot_path() {
+    let mut transport = HttpTransportConfig::default();
+    apply_ci_lane_snapshot_default(&mut transport, || None);
+    assert!(transport.ci_lane_snapshot_path.is_none());
+    assert!(!transport.ci_lane_polling_enabled);
 }
 
 #[test]

@@ -93,6 +93,28 @@ fn heartbeat_lane(
     })
 }
 
+fn heartbeat_job_lane(
+    catalog: &CiLaneCatalogEntry,
+    state: &str,
+    conclusion: Option<&str>,
+    run_url: Option<&str>,
+    updated_at: Option<&str>,
+) -> Value {
+    serde_json::json!({
+        "repo": "MuhDur/oraclemcp",
+        "check_name": catalog.check_name,
+        "tier": catalog.tier,
+        "workflow_file": catalog.workflow_file,
+        "job_id": catalog.job_id,
+        "event": catalog.event,
+        "state": state,
+        "conclusion": conclusion,
+        "run_url": run_url,
+        "head_sha": run_url.map(|_| "e004ebd5b5532a4b85984a62f8ad48a81aa3460c"),
+        "updated_at": updated_at,
+    })
+}
+
 fn heartbeat_document(blocked: bool, any_red: bool, any_unknown: bool, lane: Value) -> String {
     serde_json::json!({
         "schema": "ci-heartbeat/v1",
@@ -160,11 +182,18 @@ fn heartbeat_snapshot_maps_real_success_and_failure_without_upgrading_unknown() 
 
 #[test]
 fn durable_snapshot_loader_accepts_the_heartbeat_writer_schema() {
+    let catalog = parse_ci_lane_catalog(include_str!("../../../../docs/ci_taxonomy.json"))
+        .expect("current taxonomy parses");
+    let watched = catalog
+        .iter()
+        .find(|lane| lane.workflow_file == "mutation-safety.yml")
+        .expect("current mutation lane");
     let raw = heartbeat_document(
         false,
         false,
         false,
-        heartbeat_lane(
+        heartbeat_job_lane(
+            watched,
             "success",
             Some("success"),
             Some("https://github.com/MuhDur/oraclemcp/actions/runs/42"),
@@ -176,13 +205,91 @@ fn durable_snapshot_loader_accepts_the_heartbeat_writer_schema() {
     std::fs::write(&path, raw).expect("write heartbeat fixture");
 
     let snapshot = load_ci_lane_snapshot(&path).expect("heartbeat schema loads");
-    let watched = snapshot
+    let loaded = snapshot
         .lanes
         .iter()
-        .find(|lane| lane.catalog.workflow_file == "mutation-safety.yml")
+        .find(|lane| lane.catalog.check_name == watched.check_name)
         .expect("heartbeat-backed scheduled lane exists");
-    assert_eq!(ci_lane_health_json(watched, false)["state"], "success");
-    assert_eq!(watched.latest.as_ref().map(|latest| latest.run_id), Some(42));
+    assert_eq!(ci_lane_health_json(loaded, false)["state"], "success");
+    assert_eq!(loaded.latest.as_ref().map(|latest| latest.run_id), Some(42));
+}
+
+#[test]
+fn current_multi_job_taxonomy_maps_only_exact_per_job_heartbeat_evidence() {
+    let catalog = parse_ci_lane_catalog(include_str!("../../../../docs/ci_taxonomy.json"))
+        .expect("current taxonomy parses");
+    let mutation = catalog
+        .iter()
+        .filter(|lane| lane.workflow_file == "mutation-safety.yml")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(mutation.len(), 10, "current scheduled mutation shards");
+    assert!(mutation.iter().all(|lane| !lane.whole_workflow));
+    assert!(
+        catalog
+            .iter()
+            .all(|lane| lane.check_name != "manual mutation shard"),
+        "workflow-dispatch-only jobs are not scheduled heartbeat lanes"
+    );
+
+    let lanes = mutation
+        .iter()
+        .map(|lane| {
+            heartbeat_job_lane(
+                lane,
+                "success",
+                Some("success"),
+                Some("https://github.com/MuhDur/oraclemcp/actions/runs/420"),
+                Some("2026-07-20T06:59:00Z"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let raw = serde_json::json!({
+        "schema": "ci-heartbeat/v1",
+        "generated_at": "2026-07-20T07:00:00Z",
+        "blocked": false,
+        "any_red": false,
+        "any_unknown": false,
+        "lanes": lanes,
+        "errors": [],
+    })
+    .to_string();
+    let snapshot = ci_lane_snapshot_from_heartbeat(&catalog, &raw)
+        .expect("exact per-job heartbeat maps current taxonomy");
+    for lane in snapshot
+        .lanes
+        .iter()
+        .filter(|lane| lane.catalog.workflow_file == "mutation-safety.yml")
+    {
+        assert_eq!(
+            ci_lane_health_json(lane, false)["state"],
+            "success",
+            "{} should use its own exact evidence",
+            lane.catalog.check_name
+        );
+    }
+
+    let legacy = heartbeat_document(
+        false,
+        false,
+        false,
+        heartbeat_lane(
+            "success",
+            Some("success"),
+            Some("https://github.com/MuhDur/oraclemcp/actions/runs/420"),
+            Some("2026-07-20T06:59:00Z"),
+        ),
+    );
+    let legacy_snapshot = ci_lane_snapshot_from_heartbeat(&catalog, &legacy)
+        .expect("legacy workflow evidence is structurally valid");
+    assert!(
+        legacy_snapshot
+            .lanes
+            .iter()
+            .filter(|lane| lane.catalog.workflow_file == "mutation-safety.yml")
+            .all(|lane| ci_lane_health_json(lane, false)["state"] == "unknown"),
+        "workflow-level green must never fan out over current per-job lanes"
+    );
 }
 
 #[test]
@@ -375,10 +482,8 @@ fn ci_lane_streak_is_exact_and_missing_evidence_is_never_green() {
 
 /// Drives an async future on a dedicated test-only runtime. `block_on` is
 /// allowed here because the concurrency lint scans production code only
-/// (`#[cfg(test)]` items are skipped) — this mirrors the sanctioned CLI-entry
-/// idiom in `main::block_on_connect` and `dashboard_auth`'s own test probe. No
-/// production code path in this crate drives `fetch_ci_lane_snapshot`; see the
-/// `ci_lanes` module docs for why.
+/// (`#[cfg(test)]` items are skipped). Production drives the same future from
+/// its dedicated CI-lane worker; neither path runs on an HTTP request thread.
 fn drive<F: std::future::Future>(future: F) -> F::Output {
     let reactor =
         asupersync::runtime::reactor::create_reactor().expect("test fetch reactor builds");
@@ -386,8 +491,8 @@ fn drive<F: std::future::Future>(future: F) -> F::Output {
         .with_reactor(reactor)
         .build()
         .expect("test fetch runtime builds");
-    // block-on-boundary: test-only helper driving fetch_ci_lane_snapshot; there
-    // is no production caller (the ci_lanes route is sync/file-backed). This
+    // block-on-boundary: test-only helper driving fetch_ci_lane_snapshot; the
+    // production caller has its own marked background-worker boundary. This
     // marker predates E7 (oraclemcp-eng-program-bp8ia.6.7): the lint's
     // git_files() skip was path-based (/tests/ or tests.rs) and did not match
     // this tests_-prefixed src file (included into a #[cfg(test)] mod via
@@ -424,7 +529,7 @@ fn spawn_json_mock(body: &'static str) -> (u16, std::thread::JoinHandle<()>) {
     (port, handle)
 }
 
-/// Client settings that mirror what a production caller would configure
+/// Client settings that mirror what the production poller configures
 /// (bounded body, no redirects/retries/cookies) so the test proves the same
 /// shape of client asupersync's HTTP/1 client would actually be built with.
 fn ci_lane_test_client() -> asupersync::http::h1::http_client::HttpClient {
@@ -451,6 +556,71 @@ fn spawn_status_mock(status_line: &'static str) -> (u16, std::thread::JoinHandle
         let _ = stream.write_all(response.as_bytes());
     });
     (port, handle)
+}
+
+fn spawn_ci_lane_poll_mock() -> (u16, std::thread::JoinHandle<()>) {
+    const RUNS_BODY: &str = r#"{"workflow_runs":[{
+        "id": 42,
+        "status": "completed",
+        "conclusion": "failure",
+        "html_url": "https://github.com/MuhDur/oraclemcp/actions/runs/42",
+        "head_sha": "e004ebd5b5532a4b85984a62f8ad48a81aa3460c",
+        "updated_at": "2026-07-20T00:00:00Z"
+    }]}"#;
+    const JOBS_BODY: &str = r#"{"jobs":[
+        {
+            "name": "scheduled alpha",
+            "status": "completed",
+            "conclusion": "success",
+            "html_url": "https://github.com/MuhDur/oraclemcp/actions/runs/42/job/1",
+            "completed_at": "2026-07-20T00:00:00Z"
+        },
+        {
+            "name": "scheduled beta",
+            "status": "completed",
+            "conclusion": "failure",
+            "html_url": "https://github.com/MuhDur/oraclemcp/actions/runs/42/job/2",
+            "completed_at": "2026-07-20T00:00:00Z"
+        }
+    ]}"#;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind CI poll mock");
+    let port = listener.local_addr().expect("mock address").port();
+    let handle = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().expect("accept poll request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set mock read timeout");
+            let mut buf = [0_u8; 16 * 1024];
+            let read = stream.read(&mut buf).expect("read mock request");
+            let request = String::from_utf8_lossy(&buf[..read]);
+            let body = if request.contains("/actions/runs/42/jobs?") {
+                JOBS_BODY
+            } else {
+                assert!(request.contains("/actions/workflows/mock.yml/runs?"));
+                RUNS_BODY
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write mock response");
+        }
+    });
+    (port, handle)
+}
+
+fn wait_for_snapshot(path: &Path) -> CiLaneSnapshot {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(snapshot) = load_ci_lane_snapshot(path) {
+            return snapshot;
+        }
+        assert!(Instant::now() < deadline, "poller did not deliver a snapshot");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
@@ -507,6 +677,75 @@ fn fetch_ci_lane_snapshot_never_upgrades_a_transport_failure_to_green() {
         fetch_ci_lane_snapshot(&cx, &client, &base_url, &catalog).await
     });
     handle.join().expect("mock server thread joins");
+
+    assert!(!snapshot.errors.is_empty());
+    assert_eq!(snapshot.lanes.len(), 1);
+    assert_eq!(ci_lane_health_json(&snapshot.lanes[0], false)["state"], "unknown");
+}
+
+#[test]
+fn production_poller_delivers_current_per_job_state_outside_the_request_path() {
+    let catalog = vec![
+        CiLaneCatalogEntry {
+            check_name: "scheduled alpha".to_owned(),
+            tier: "scheduled".to_owned(),
+            workflow: "Mock".to_owned(),
+            workflow_file: "mock.yml".to_owned(),
+            job_id: "matrix".to_owned(),
+            event: "schedule".to_owned(),
+            path_filtered: false,
+            whole_workflow: false,
+        },
+        CiLaneCatalogEntry {
+            check_name: "scheduled beta".to_owned(),
+            tier: "scheduled".to_owned(),
+            workflow: "Mock".to_owned(),
+            workflow_file: "mock.yml".to_owned(),
+            job_id: "matrix".to_owned(),
+            event: "schedule".to_owned(),
+            path_filtered: false,
+            whole_workflow: false,
+        },
+    ];
+    let (port, mock) = spawn_ci_lane_poll_mock();
+    let dir = dashboard_test_dir("ci-lane-production-poller");
+    let path = dir.join("ci-lanes.json");
+    let poller = CiLanePoller::start(
+        path.clone(),
+        format!("http://127.0.0.1:{port}"),
+        catalog,
+        Duration::from_secs(60),
+    )
+    .expect("production poller starts");
+    let snapshot = wait_for_snapshot(&path);
+    drop(poller);
+    mock.join().expect("poll mock joins");
+
+    assert!(snapshot.errors.is_empty(), "errors: {:?}", snapshot.errors);
+    assert_eq!(snapshot.lanes.len(), 2);
+    assert_eq!(ci_lane_health_json(&snapshot.lanes[0], false)["state"], "success");
+    assert_eq!(
+        ci_lane_health_json(&snapshot.lanes[1], false)["state"],
+        "not_green"
+    );
+}
+
+#[test]
+fn production_poller_persists_unknown_when_github_is_unavailable() {
+    let catalog = vec![fixture_catalog_entry()];
+    let (port, mock) = spawn_status_mock("HTTP/1.1 503 Service Unavailable");
+    let dir = dashboard_test_dir("ci-lane-production-poller-failure");
+    let path = dir.join("ci-lanes.json");
+    let poller = CiLanePoller::start(
+        path.clone(),
+        format!("http://127.0.0.1:{port}"),
+        catalog,
+        Duration::from_secs(60),
+    )
+    .expect("production poller starts");
+    let snapshot = wait_for_snapshot(&path);
+    drop(poller);
+    mock.join().expect("poll mock joins");
 
     assert!(!snapshot.errors.is_empty());
     assert_eq!(snapshot.lanes.len(), 1);

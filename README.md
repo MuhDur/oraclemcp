@@ -448,6 +448,15 @@ reviewable migration script. The diff view omits raw DDL and shows hashes/counts
 any executable export step must be drafted into the normal Change Proposal board
 before apply, where the server re-classifies and re-checks the statement.
 
+The Ground Control CI-lane tile is refreshed outside request handling by one
+bounded background poller. It reads the repository's generated scheduled and
+advisory lane taxonomy, polls the fixed public GitHub Actions API immediately
+and every 30 minutes, and atomically stores a local snapshot. Missing, stale,
+contradictory, or unavailable evidence renders `unknown`, never green. The
+separate CI Heartbeat workflow remains the notification path for required-lane
+red/unknown transitions; the dashboard does not depend on manually copying its
+ephemeral artifact onto the service host.
+
 The Streamable HTTP transport (`--listen`) fails closed. It starts only when
 service-owned per-client credentials, OAuth bearer enforcement, mTLS
 client-certificate verification, or `--allow-no-auth` is supplied, and mTLS

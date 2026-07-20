@@ -35,7 +35,7 @@ use super::wire::{DeadlineRead, parse_error_status, read_http_request, write_htt
 use super::{
     EffectiveHttpScheme, HttpExchange, HttpResponse, HttpResultStore, HttpSessionStore,
     HttpTransportConfig, STATEFUL_IDLE_REAP_INTERVAL, cert_fingerprint_sha256,
-    detached_admission_cx, handle_http_exchange, try_admit_http_transport,
+    detached_admission_cx, handle_http_exchange, start_ci_lane_poller, try_admit_http_transport,
 };
 
 const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -75,6 +75,7 @@ pub fn serve_http_until(
 ) -> std::io::Result<()> {
     listener.set_nonblocking(true)?;
     let config = Arc::new(listener_config(config, EffectiveHttpScheme::Http));
+    let _ci_lane_poller = start_ci_lane_poller(&config);
     let mut last_idle_reap = Instant::now();
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
     while !shutdown.load(Ordering::SeqCst) {
@@ -157,6 +158,7 @@ pub fn serve_https_until(
 ) -> std::io::Result<()> {
     listener.set_nonblocking(true)?;
     let config = Arc::new(listener_config(config, EffectiveHttpScheme::Https));
+    let _ci_lane_poller = start_ci_lane_poller(&config);
     let mut last_idle_reap = Instant::now();
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
     while !shutdown.load(Ordering::SeqCst) {

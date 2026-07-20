@@ -7,16 +7,23 @@
 //! goes red should be visible on the dashboard, not only in a GitHub Actions
 //! inbox nobody is watching.
 //!
-//! # Two halves
+//! # Three parts
 //!
-//! 1. `fetch_ci_lane_snapshot` (test-only — see below) is a
+//! 1. [`fetch_ci_lane_snapshot`] is a
 //!    genuine `async fn`: it polls the GitHub Actions REST API through
 //!    asupersync's Tokio-free HTTP/1 client (the same engine-free egress path
 //!    `crate::audit_shipping::SiemHttpForwarder` and the OTLP exporter use) and
 //!    produces a [`CiLaneSnapshot`]. Every step is `.await`-driven; this file
 //!    constructs no reactor, no runtime, and calls `block_on` nowhere in
 //!    production code.
-//! 2. `/operator/v1/ci-lanes` itself ([`operator_ci_lane_health_data`]) is a
+//! 2. [`start_ci_lane_poller`] owns one dedicated background thread for the
+//!    production service. It creates one bounded current-thread runtime, polls
+//!    immediately and every 30 minutes, and atomically replaces the durable
+//!    snapshot. The API origin is the fixed public GitHub endpoint; there is
+//!    no token, secret, redirect, cookie store, or operator-controlled URL.
+//!    Shutdown wakes and joins the worker. Network I/O never runs on a request
+//!    thread.
+//! 3. `/operator/v1/ci-lanes` itself ([`operator_ci_lane_health_data`]) is a
 //!    plain **synchronous** handler, because the native HTTP transport
 //!    (`http/serve.rs`) is a thread-per-connection blocking-I/O server with no
 //!    async executor backing an individual request — there is no "current
@@ -34,22 +41,21 @@
 //!
 //! # Production evidence source: the CI heartbeat snapshot (E4 follow-up)
 //!
-//! The production writer of that file is the E4 CI heartbeat notifier
+//! The production service now polls GitHub itself and writes the native
+//! `ci-lane-snapshot/v1` schema. The E4 CI heartbeat notifier
 //! (`scripts/ci_heartbeat.sh`, driven every 30 minutes by
-//! `.github/workflows/ci-heartbeat.yml`, or run locally / from cron by the
-//! operator). It durably writes a `ci-heartbeat/v1` JSON snapshot to
-//! `CI_HEARTBEAT_OUTPUT` (default `$XDG_STATE_HOME/oraclemcp/ci-heartbeat.json`),
-//! and `oraclemcp serve` points [`HttpTransportConfig::ci_lane_snapshot_path`]
-//! at that same default. [`load_ci_lane_snapshot`] accepts either the native
-//! `ci-lane-snapshot/v1` schema or `ci-heartbeat/v1`, converting the latter
-//! onto the taxonomy catalog. The ingest is deliberately conservative:
+//! `.github/workflows/ci-heartbeat.yml`) remains the independent notification
+//! path and can write the same configured file when run locally. Its extended
+//! `ci-heartbeat/v1` output includes per-job identity for multi-job scheduled
+//! workflows. [`load_ci_lane_snapshot`] accepts either schema and converts the
+//! heartbeat document onto the taxonomy catalog. The ingest is deliberately
+//! conservative:
 //!
-//! - The heartbeat records **workflow-level** run conclusions, so only a
-//!   whole-workflow `scheduled` lane may adopt one. Advisory per-job lanes
-//!   (`continue-on-error` jobs whose failure never reddens their workflow run)
-//!   and the heartbeat's own lane (which it excludes from self-observation)
-//!   stay `unknown` — a green required workflow must never paint an advisory
-//!   job green.
+//! - New heartbeat writers record exact workflow/job/event identity. Legacy
+//!   workflow-level observations are accepted only for a single-job scheduled
+//!   workflow. A workflow verdict is never spread across multiple jobs.
+//!   Advisory jobs and the heartbeat's own self-excluded lane stay `unknown`
+//!   in heartbeat documents; the production poller observes those directly.
 //! - The heartbeat's exit-code semantics are untouched and not re-derived
 //!   here: required lanes drive its exit code, scheduled lanes are
 //!   advisory-only. Its `blocked` flag is surfaced as a tile error so a red or
@@ -61,23 +67,14 @@
 //!   (repository-scoped run URL, 40-hex SHA, completed conclusion, state and
 //!   conclusion in agreement) before it may render at all.
 //!
-//! Because no in-tree caller drives it, `fetch_ci_lane_snapshot` and its
-//! HTTP-fetch helpers below still compile only under `#[cfg(test)]` — Rust's
-//! own dead-code analysis is correctly strict about code with zero non-test
-//! call sites, and adding a speculative production caller just to silence it
-//! would be worse than being honest about the current wiring. This crate's
-//! test suite drives that pipeline end to end against a local mock GitHub
-//! server (see `tests_ci_lanes.rs`), proving the async design. A future bead
-//! that adds a per-job-granular Rust-side scheduled caller (richer than the
-//! heartbeat's workflow-level view) removes those `#[cfg(test)]` gates
-//! without changing the implementation underneath them.
+//! The crate's test suite drives both the async fetch and the production
+//! scheduler against local mock GitHub servers (see `tests_ci_lanes.rs`).
 use super::*;
-#[cfg(test)]
 use asupersync::http::h1::http_client::HttpClient;
-#[cfg(test)]
 use asupersync::http::h1::types::Method;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write as IoWrite;
 use std::sync::OnceLock;
 
 // Embedded from a crate-local copy, not `docs/ci_taxonomy.json` directly:
@@ -90,8 +87,11 @@ const CI_LANE_TAXONOMY: &str = include_str!("../../ci_taxonomy.json");
 const CI_LANE_TAXONOMY_SCHEMA: &str = "ci-taxonomy/v1";
 const CI_LANE_REPO: &str = "oraclemcp";
 const CI_LANE_GITHUB_REPO: &str = "MuhDur/oraclemcp";
+const CI_LANE_GITHUB_API: &str = "https://api.github.com";
 const CI_LANE_STREAK_WINDOW: usize = 4;
 const CI_LANE_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const CI_LANE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const CI_LANE_REFRESH_TIMEOUT: Duration = Duration::from_secs(45);
 /// The explicit freshness window with fail-closed expiry: a stored snapshot
 /// older than this renders every lane `unknown`. Sized to exactly two CI
 /// heartbeat cycles (`.github/workflows/ci-heartbeat.yml` runs `*/30 * * * *`),
@@ -123,6 +123,7 @@ const CI_HEARTBEAT_SCHEMA: &str = "ci-heartbeat/v1";
 const CI_HEARTBEAT_SCHEDULED_PREFIX: &str = "scheduled:";
 
 static CI_LANE_CATALOG: OnceLock<Result<Vec<CiLaneCatalogEntry>, String>> = OnceLock::new();
+static CI_LANE_SNAPSHOT_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Deserialize)]
 struct CiTaxonomyDocument {
@@ -155,13 +156,11 @@ pub(super) struct CiLaneCatalogEntry {
     pub(super) whole_workflow: bool,
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug, Deserialize)]
 struct GitHubWorkflowRuns {
     workflow_runs: Vec<GitHubWorkflowRun>,
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug, Deserialize)]
 struct GitHubWorkflowRun {
     id: u64,
@@ -172,13 +171,11 @@ struct GitHubWorkflowRun {
     updated_at: String,
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug, Deserialize)]
 struct GitHubWorkflowJobs {
     jobs: Vec<GitHubWorkflowJob>,
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug, Deserialize)]
 struct GitHubWorkflowJob {
     name: String,
@@ -223,12 +220,9 @@ pub(super) struct CiLaneSnapshot {
     pub(super) errors: Vec<String>,
 }
 
-#[cfg(test)]
 impl CiLaneSnapshot {
     /// Build a fresh, currently-timestamped snapshot from computed lane health.
-    /// Production never constructs one in-process (see the module docs) — it
-    /// only deserializes one via [`load_ci_lane_snapshot`]. Tests use this to
-    /// build fixtures and to build what [`fetch_ci_lane_snapshot`] returns.
+    /// The production poller and tests use this to build fresh snapshots.
     #[must_use]
     pub(super) fn new(lanes: Vec<CiLaneHealth>, errors: Vec<String>) -> Self {
         Self {
@@ -366,14 +360,12 @@ fn ci_lane_catalog() -> Result<&'static [CiLaneCatalogEntry], &'static str> {
 
 // ---------------------------------------------------------------------------
 // Async fetch: genuine `.await` all the way, no `block_on`, no reactor/runtime
-// construction. Not called from the request path (see module docs) — driven
-// by tests here, and available for a future scheduled caller.
+// construction. The background poller drives it; the request path never does.
 // ---------------------------------------------------------------------------
 
 /// Poll GitHub Actions for every lane in `catalog` and build a fresh
 /// [`CiLaneSnapshot`]. `base_url` is the GitHub REST API origin
 /// (`https://api.github.com` in production; a loopback mock in tests).
-#[cfg(test)]
 pub(super) async fn fetch_ci_lane_snapshot(
     cx: &Cx,
     client: &HttpClient,
@@ -419,7 +411,6 @@ pub(super) async fn fetch_ci_lane_snapshot(
     CiLaneSnapshot::new(lanes, errors)
 }
 
-#[cfg(test)]
 async fn fetch_ci_lane_group(
     cx: &Cx,
     client: &HttpClient,
@@ -489,14 +480,25 @@ async fn fetch_ci_lane_group(
         .collect())
 }
 
-#[cfg(test)]
 async fn github_get_json<T: for<'de> Deserialize<'de>>(
     cx: &Cx,
     client: &HttpClient,
     url: &str,
 ) -> Result<T, String> {
     let response = client
-        .request(cx, Method::Get, url, Vec::new(), Vec::new())
+        .request(
+            cx,
+            Method::Get,
+            url,
+            vec![
+                (
+                    "Accept".to_owned(),
+                    "application/vnd.github+json".to_owned(),
+                ),
+                ("X-GitHub-Api-Version".to_owned(), "2022-11-28".to_owned()),
+            ],
+            Vec::new(),
+        )
         .await
         .map_err(|error| format!("GitHub Actions request failed: {error}"))?;
     if response.status != 200 {
@@ -518,7 +520,6 @@ async fn github_get_json<T: for<'de> Deserialize<'de>>(
         .map_err(|error| format!("GitHub Actions response shape was invalid: {error}"))
 }
 
-#[cfg(test)]
 fn workflow_run_observation(run: GitHubWorkflowRun) -> Result<CiLaneObservation, String> {
     validate_github_observation(
         run.status,
@@ -530,7 +531,6 @@ fn workflow_run_observation(run: GitHubWorkflowRun) -> Result<CiLaneObservation,
     )
 }
 
-#[cfg(test)]
 fn workflow_job_observation(
     run: &GitHubWorkflowRun,
     job: &GitHubWorkflowJob,
@@ -657,6 +657,12 @@ struct CiHeartbeatLane {
     repo: String,
     check_name: String,
     tier: String,
+    #[serde(default)]
+    workflow_file: Option<String>,
+    #[serde(default)]
+    job_id: Option<String>,
+    #[serde(default)]
+    event: Option<String>,
     state: String,
     conclusion: Option<String>,
     run_url: Option<String>,
@@ -665,9 +671,10 @@ struct CiHeartbeatLane {
 }
 
 /// Convert a raw `ci-heartbeat/v1` document into the catalog-shaped
-/// [`CiLaneSnapshot`] the tile renders. Only a whole-workflow `scheduled`
-/// catalog lane may adopt a heartbeat observation (the heartbeat records
-/// workflow-level run conclusions); every other lane stays `unknown` with an
+/// [`CiLaneSnapshot`] the tile renders. A current heartbeat observation must
+/// carry exact workflow/job/event identity. A legacy workflow-only observation
+/// may still populate a whole-workflow scheduled lane, but is never spread
+/// across a multi-job workflow. Every unproved lane stays `unknown` with an
 /// honest reason. `Err` covers structural failure of the document itself.
 pub(super) fn ci_lane_snapshot_from_heartbeat(
     catalog: &[CiLaneCatalogEntry],
@@ -721,24 +728,54 @@ fn heartbeat_lane_health(
     lanes: &[CiHeartbeatLane],
     refreshed_at_unix: u64,
 ) -> CiLaneHealth {
-    if entry.tier != "scheduled" || !entry.whole_workflow {
+    if entry.tier != "scheduled" {
         return unknown_ci_lane(
             entry.clone(),
-            "the CI heartbeat records workflow-level conclusions only; \
-             this per-job lane has no heartbeat evidence",
+            "the CI heartbeat does not observe advisory per-job lanes",
         );
     }
-    let check_name = format!("{CI_HEARTBEAT_SCHEDULED_PREFIX}{}", entry.workflow_file);
-    let matches = lanes
+
+    let exact_matches = lanes
         .iter()
-        .filter(|lane| lane.repo == CI_LANE_GITHUB_REPO && lane.check_name == check_name)
+        .filter(|lane| {
+            lane.repo == CI_LANE_GITHUB_REPO
+                && lane.check_name == entry.check_name
+                && lane.workflow_file.as_deref() == Some(entry.workflow_file.as_str())
+        })
         .collect::<Vec<_>>();
-    let lane = match matches.as_slice() {
+    let lane = match exact_matches.as_slice() {
         [lane] => *lane,
+        [] if entry.whole_workflow => {
+            let legacy_check_name =
+                format!("{CI_HEARTBEAT_SCHEDULED_PREFIX}{}", entry.workflow_file);
+            let legacy_matches = lanes
+                .iter()
+                .filter(|lane| {
+                    lane.repo == CI_LANE_GITHUB_REPO
+                        && lane.check_name == legacy_check_name
+                        && lane.workflow_file.is_none()
+                })
+                .collect::<Vec<_>>();
+            match legacy_matches.as_slice() {
+                [lane] => *lane,
+                [] => {
+                    return unknown_ci_lane(
+                        entry.clone(),
+                        "the CI heartbeat snapshot has no observation for this lane",
+                    );
+                }
+                _ => {
+                    return unknown_ci_lane(
+                        entry.clone(),
+                        "the CI heartbeat snapshot records this lane ambiguously",
+                    );
+                }
+            }
+        }
         [] => {
             return unknown_ci_lane(
                 entry.clone(),
-                "the CI heartbeat snapshot has no observation for this lane",
+                "the CI heartbeat snapshot has no exact per-job observation for this lane",
             );
         }
         _ => {
@@ -752,6 +789,15 @@ fn heartbeat_lane_health(
         return unknown_ci_lane(
             entry.clone(),
             "the CI heartbeat lane tier contradicts its scheduled identity",
+        );
+    }
+    if lane.workflow_file.is_some()
+        && (lane.job_id.as_deref() != Some(entry.job_id.as_str())
+            || lane.event.as_deref() != Some(entry.event.as_str()))
+    {
+        return unknown_ci_lane(
+            entry.clone(),
+            "the CI heartbeat lane job or event identity contradicts the taxonomy",
         );
     }
     // The recorded `state` and `conclusion` must agree before either may
@@ -886,6 +932,198 @@ fn parse_ci_heartbeat_timestamp(value: &str, field_name: &str) -> Result<u64, St
 }
 
 // ---------------------------------------------------------------------------
+// Production scheduler: a single dedicated worker owns the async runtime and
+// performs all GitHub I/O away from request threads. The durable file is the
+// only handoff to the synchronous route.
+// ---------------------------------------------------------------------------
+
+struct CiLanePollerStop {
+    stopped: Mutex<bool>,
+    wake: Condvar,
+}
+
+/// Handle obligation for the CI-lane background worker. Dropping it wakes and
+/// joins the worker so listener shutdown cannot strand an unowned poller.
+pub(super) struct CiLanePoller {
+    stop: Arc<CiLanePollerStop>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CiLanePoller {
+    pub(super) fn start(
+        path: PathBuf,
+        base_url: String,
+        catalog: Vec<CiLaneCatalogEntry>,
+        interval: Duration,
+    ) -> Result<Self, String> {
+        let stop = Arc::new(CiLanePollerStop {
+            stopped: Mutex::new(false),
+            wake: Condvar::new(),
+        });
+        let worker_stop = Arc::clone(&stop);
+        let failure_path = path.clone();
+        let failure_catalog = catalog.clone();
+        let handle = std::thread::Builder::new()
+            .name("oraclemcp-ci-lane-poller".to_owned())
+            .spawn(move || {
+                let reactor = match asupersync::runtime::reactor::create_reactor() {
+                    Ok(reactor) => reactor,
+                    Err(error) => {
+                        persist_ci_lane_poller_failure(
+                            &path,
+                            &catalog,
+                            format!("CI lane poller reactor could not start: {error}"),
+                        );
+                        return;
+                    }
+                };
+                let runtime = match asupersync::runtime::RuntimeBuilder::current_thread()
+                    .with_reactor(reactor)
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        persist_ci_lane_poller_failure(
+                            &path,
+                            &catalog,
+                            format!("CI lane poller runtime could not start: {error}"),
+                        );
+                        return;
+                    }
+                };
+                let client = ci_lane_http_client();
+                loop {
+                    // block-on-boundary: dedicated CI-lane background worker;
+                    // the native HTTP request path only reads the durable file.
+                    let snapshot = runtime.block_on(async {
+                        let Some(cx) = Cx::current() else {
+                            return failed_ci_lane_snapshot(
+                                &catalog,
+                                "CI lane poller runtime installed no current Cx".to_owned(),
+                            );
+                        };
+                        match asupersync::time::timeout(
+                            cx.now(),
+                            CI_LANE_REFRESH_TIMEOUT,
+                            fetch_ci_lane_snapshot(&cx, &client, &base_url, &catalog),
+                        )
+                        .await
+                        {
+                            Ok(snapshot) => snapshot,
+                            Err(_) => failed_ci_lane_snapshot(
+                                &catalog,
+                                format!(
+                                    "CI lane refresh exceeded its {}-second cycle bound",
+                                    CI_LANE_REFRESH_TIMEOUT.as_secs()
+                                ),
+                            ),
+                        }
+                    });
+                    if let Err(error) = write_ci_lane_snapshot(&path, &snapshot) {
+                        tracing::warn!(error = %error, "CI lane poller could not persist snapshot");
+                    }
+
+                    let mut stopped = worker_stop.stopped.lock();
+                    if *stopped {
+                        break;
+                    }
+                    worker_stop.wake.wait_for(&mut stopped, interval);
+                    if *stopped {
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| {
+                let message = format!("CI lane poller thread could not start: {error}");
+                persist_ci_lane_poller_failure(&failure_path, &failure_catalog, message.clone());
+                message
+            })?;
+        Ok(Self {
+            stop,
+            handle: Some(handle),
+        })
+    }
+}
+
+impl Drop for CiLanePoller {
+    fn drop(&mut self) {
+        *self.stop.stopped.lock() = true;
+        self.stop.wake.notify_all();
+        if let Some(handle) = self.handle.take()
+            && handle.join().is_err()
+        {
+            tracing::warn!("CI lane poller thread panicked during shutdown");
+        }
+    }
+}
+
+fn ci_lane_http_client() -> HttpClient {
+    HttpClient::builder()
+        .no_redirects()
+        .no_retries()
+        .no_cookie_store()
+        .user_agent(format!(
+            "oraclemcp/{} ci-lane-poller",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .request_timeout(CI_LANE_REQUEST_TIMEOUT)
+        .max_body_size(CI_LANE_MAX_RESPONSE_BYTES)
+        .max_connections_per_host(2)
+        .max_total_connections(2)
+        .build()
+}
+
+fn failed_ci_lane_snapshot(catalog: &[CiLaneCatalogEntry], error: String) -> CiLaneSnapshot {
+    CiLaneSnapshot::new(
+        catalog
+            .iter()
+            .cloned()
+            .map(|entry| unknown_ci_lane(entry, "CI lane refresh failed"))
+            .collect(),
+        vec![error],
+    )
+}
+
+fn persist_ci_lane_poller_failure(path: &Path, catalog: &[CiLaneCatalogEntry], error: String) {
+    let snapshot = failed_ci_lane_snapshot(catalog, error);
+    if let Err(write_error) = write_ci_lane_snapshot(path, &snapshot) {
+        tracing::warn!(error = %write_error, "CI lane poller failure snapshot could not be persisted");
+    }
+}
+
+/// Start the production poller when the resolved transport explicitly enables
+/// it. The endpoint is fixed in code to the public repository API, so transport
+/// config cannot turn this worker into an arbitrary network client.
+pub(super) fn start_ci_lane_poller(config: &HttpTransportConfig) -> Option<CiLanePoller> {
+    if !config.ci_lane_polling_enabled {
+        return None;
+    }
+    let Some(path) = config.ci_lane_snapshot_path.clone() else {
+        tracing::warn!("CI lane polling is enabled without a snapshot path");
+        return None;
+    };
+    let catalog = match ci_lane_catalog() {
+        Ok(catalog) => catalog.to_vec(),
+        Err(error) => {
+            tracing::warn!(error = %error, "CI lane poller taxonomy is unavailable");
+            return None;
+        }
+    };
+    match CiLanePoller::start(
+        path,
+        CI_LANE_GITHUB_API.to_owned(),
+        catalog,
+        CI_LANE_REFRESH_INTERVAL,
+    ) {
+        Ok(poller) => Some(poller),
+        Err(error) => {
+            tracing::warn!(error = %error, "CI lane poller could not start");
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Durable storage: plain synchronous file I/O (no async, no block_on — this is
 // local disk access from an already-synchronous request handler, exactly like
 // every other file-backed operator route).
@@ -925,26 +1163,50 @@ pub(super) fn load_ci_lane_snapshot(path: &Path) -> Result<CiLaneSnapshot, Strin
     }
 }
 
-/// Durably write `snapshot` to `path` (write-temp then rename, so a reader
-/// never observes a torn file). Used by tests today; a future scheduled
-/// refresher is the production caller (see the module docs). Never called
-/// from the request path.
-#[cfg(test)]
+/// Durably write `snapshot` to `path` (write-temp, fsync, then rename, so a
+/// reader never observes a torn file). Called by the background poller and
+/// tests, never from the request path.
 pub(super) fn write_ci_lane_snapshot(path: &Path, snapshot: &CiLaneSnapshot) -> Result<(), String> {
     let body = serde_json::to_vec(snapshot)
         .map_err(|error| format!("CI lane snapshot does not serialize: {error}"))?;
     let mut tmp_path = path.to_path_buf();
     let tmp_name = match path.file_name().and_then(|name| name.to_str()) {
-        Some(name) => format!(".{name}.tmp"),
+        Some(name) => format!(
+            ".{name}.tmp.{}.{}",
+            std::process::id(),
+            CI_LANE_SNAPSHOT_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ),
         None => return Err("CI lane snapshot path has no file name".to_owned()),
     };
     tmp_path.set_file_name(tmp_name);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("cannot create snapshot directory: {error}"))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create snapshot directory: {error}"))?;
+    let mut options = fs::OpenOptions::new();
+    // `create_new` refuses a pre-planted symlink at the staging name. The
+    // process id + monotonic sequence keeps concurrent writers disjoint.
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    fs::write(&tmp_path, &body).map_err(|error| format!("cannot write snapshot: {error}"))?;
+    let mut file = options
+        .open(&tmp_path)
+        .map_err(|error| format!("cannot open snapshot staging file: {error}"))?;
+    file.write_all(&body)
+        .map_err(|error| format!("cannot write snapshot: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("cannot fsync snapshot: {error}"))?;
+    drop(file);
     fs::rename(&tmp_path, path).map_err(|error| format!("cannot install snapshot: {error}"))?;
+    #[cfg(unix)]
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("cannot fsync snapshot directory: {error}"))?;
     Ok(())
 }
 

@@ -277,17 +277,18 @@ use stores::{
     HttpBufferedEvent, HttpResultWait, HttpSessionCapacityRejection,
     STATEFUL_SESSION_RETRY_AFTER_MS,
 };
-// Façade: the CI-lane-health tile moved to `ci_lanes`; the route dispatch in
-// `operator` only needs the handler entry point.
-use ci_lanes::operator_ci_lane_health_data;
+// Façade: the CI-lane-health tile and its out-of-request-path refresh worker
+// live in `ci_lanes`.
+use ci_lanes::{operator_ci_lane_health_data, start_ci_lane_poller};
 // The rest of `ci_lanes`' internals are exercised directly by the inline test
-// module (through `use super::*`); production code never names them.
+// module (through `use super::*`).
 #[cfg(test)]
 use ci_lanes::{
-    CI_LANE_MAX_RESPONSE_BYTES, CiLaneCatalogEntry, CiLaneObservation, CiLaneSnapshot,
-    ci_lane_health_from_observations, ci_lane_health_json, ci_lane_snapshot_from_heartbeat,
-    fetch_ci_lane_snapshot, load_ci_lane_snapshot, parse_ci_heartbeat_generated_at,
-    parse_ci_lane_catalog, render_ci_lane_health_data, write_ci_lane_snapshot,
+    CI_LANE_MAX_RESPONSE_BYTES, CiLaneCatalogEntry, CiLaneObservation, CiLanePoller,
+    CiLaneSnapshot, ci_lane_health_from_observations, ci_lane_health_json,
+    ci_lane_snapshot_from_heartbeat, fetch_ci_lane_snapshot, load_ci_lane_snapshot,
+    parse_ci_heartbeat_generated_at, parse_ci_lane_catalog, render_ci_lane_health_data,
+    write_ci_lane_snapshot,
 };
 // Reached by the inline test module through `use super::*`.
 use operator::{

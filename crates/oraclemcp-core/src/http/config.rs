@@ -357,9 +357,13 @@ pub struct HttpTransportConfig {
     /// `$XDG_STATE_HOME/oraclemcp/ci-heartbeat.json` — `oraclemcp serve` wires
     /// that default). Unset, missing, malformed, or stale renders the tile as
     /// an honest `"unavailable"`/`unknown` catalog listing rather than a
-    /// fabricated green — nothing polls GitHub automatically from this
-    /// transport.
+    /// fabricated green.
     pub ci_lane_snapshot_path: Option<PathBuf>,
+    /// Start the bounded CI-lane background poller with the ordinary HTTP(S)
+    /// listener. Off by default for library embedders; `oraclemcp serve`
+    /// enables it after resolving the service-owned snapshot path. The poller
+    /// uses a fixed public GitHub API origin and never runs on request threads.
+    pub ci_lane_polling_enabled: bool,
     /// Safe config draft/apply backend for `/operator/v1/config/*`.
     pub config_ops: Option<Arc<ConfigOpsService>>,
     /// Durable change proposal board for `/operator/v1/change-proposals/*`.
@@ -425,6 +429,7 @@ impl std::fmt::Debug for HttpTransportConfig {
                 "ci_lane_snapshot_path",
                 &self.ci_lane_snapshot_path.as_ref().map(|_| "<configured>"),
             )
+            .field("ci_lane_polling_enabled", &self.ci_lane_polling_enabled)
             .field("config_ops", &self.config_ops.is_some())
             .field("change_proposals", &self.change_proposals.is_some())
             .field("source_history", &self.source_history.is_some())
@@ -460,6 +465,7 @@ impl Default for HttpTransportConfig {
             operator_auditor: None,
             operator_audit_tail_path: None,
             ci_lane_snapshot_path: None,
+            ci_lane_polling_enabled: false,
             config_ops: None,
             change_proposals: None,
             source_history: None,

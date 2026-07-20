@@ -4,10 +4,15 @@ name: CI Heartbeat
 # O3 + C8): "the deepest operator-trust wound was the operator discovering red
 # CI himself." This is the driving cron for scripts/ci_heartbeat.sh — it polls
 # the real GitHub Actions state for this repo's required + scheduled lanes
-# plus the sibling driver repo's required lane and Live nightly, then fails
-# THIS job when any of them is red, blocked, or unknown. A failing scheduled
+# plus the sibling driver repo's required lane and Live nightly. Scheduled
+# server workflows are recorded per job (workflow-level green is not spread
+# over a matrix). The notifier fails THIS job when any required lane is red,
+# blocked, or unknown. A failing scheduled
 # run rides GitHub's own scheduled-workflow-failure notification, so a red
 # lane surfaces within one cycle instead of waiting for someone to look.
+# The dashboard does not depend on this runner's ephemeral artifact: a bounded
+# background poller in `oraclemcp serve` writes the same durable lane state on
+# the dashboard host, outside the request path.
 #
 # Every 30 minutes is the cycle; that bounds how long a red can sit unseen.
 # This job does no build — it is a handful of read-only `gh api` calls — so

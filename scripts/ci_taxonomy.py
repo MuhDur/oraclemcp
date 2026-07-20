@@ -29,6 +29,9 @@ TAXONOMY_PATH = ROOT / "docs" / "ci_taxonomy.json"
 MAPPING_KEY = re.compile(r"^(?P<key>[A-Za-z0-9_.\-/]+):(?:[ \t]*(?P<value>.*))?$")
 EXPRESSION = re.compile(r"\$\{\{.*?\}\}")
 MATRIX_EXPRESSION = re.compile(r"\$\{\{\s*matrix\.([A-Za-z0-9_.-]+)\s*\}\}")
+EVENT_NAME_CONDITION = re.compile(
+    r"^\s*github\.event_name\s*==\s*['\"]([A-Za-z0-9_-]+)['\"]\s*$"
+)
 
 
 class WorkflowError(ValueError):
@@ -48,6 +51,7 @@ class Job:
     advisory: bool = False
     timeout_minutes: int | None = None
     has_permissions: bool = False
+    condition: str | None = None
     matrix_values: dict[str, list[str]] = field(default_factory=dict)
     matrix_includes: list[dict[str, str]] = field(default_factory=list)
 
@@ -246,6 +250,8 @@ def parse_workflow(path: Path) -> Workflow:
             matrix_include = None
             if key == "name":
                 current_job.display_name = plain_scalar(value)
+            elif key == "if":
+                current_job.condition = plain_scalar(value)
             elif key == "continue-on-error":
                 current_job.advisory = plain_scalar(value).lower() == "true"
             elif key == "timeout-minutes":
@@ -321,14 +327,26 @@ def load_workflows(workflow_dir: Path) -> list[Workflow]:
     return triggered
 
 
+def job_triggers(workflow: Workflow, job: Job) -> set[str]:
+    """Narrow workflow triggers when a job has an exact event-name guard."""
+
+    if job.condition is None:
+        return set(workflow.triggers)
+    exact_guard = EVENT_NAME_CONDITION.fullmatch(job.condition)
+    if exact_guard is None:
+        return set(workflow.triggers)
+    return workflow.triggers & {exact_guard.group(1)}
+
+
 def job_tier(workflow: Workflow, job: Job) -> str:
+    triggers = job_triggers(workflow, job)
     if job.advisory:
         return "advisory"
-    if "pull_request" in workflow.triggers or workflow.push_branches:
+    if "pull_request" in triggers or ("push" in triggers and workflow.push_branches):
         return "required"
-    if workflow.push_tags:
+    if "push" in triggers and workflow.push_tags:
         return "release"
-    if "schedule" in workflow.triggers:
+    if "schedule" in triggers:
         return "scheduled"
     return "manual"
 
@@ -371,6 +389,14 @@ def check_names(job: Job) -> list[str]:
 
 def taxonomy_document(workflows: list[Workflow]) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
+    workflow_view: dict[str, dict[str, Any]] = {
+        workflow.path.name: {
+            "name": workflow.name,
+            "triggers": sorted(workflow.triggers),
+            "jobs": [],
+        }
+        for workflow in workflows
+    }
     for workflow in workflows:
         for job in workflow.jobs:
             for name in check_names(job):
@@ -381,18 +407,14 @@ def taxonomy_document(workflows: list[Workflow]) -> dict[str, Any]:
                         "workflow": workflow.name,
                         "workflow_file": workflow.path.name,
                         "job_id": job.identifier,
-                        "triggers": sorted(workflow.triggers),
+                        "triggers": sorted(job_triggers(workflow, job)),
                         "path_filtered": workflow.path_filtered,
                     }
                 )
     entries.sort(key=lambda entry: (entry["workflow_file"], entry["check_name"]))
-    workflow_view: dict[str, dict[str, Any]] = {}
     groups: dict[str, list[str]] = {}
     for entry in entries:
-        view = workflow_view.setdefault(
-            entry["workflow_file"],
-            {"name": entry["workflow"], "triggers": entry["triggers"], "jobs": []},
-        )
+        view = workflow_view[entry["workflow_file"]]
         view["jobs"].append(entry["check_name"])
         groups.setdefault(entry["tier"], []).append(entry["check_name"])
     return {
@@ -533,6 +555,34 @@ def check_fixtures() -> None:
     triggered = [candidate for candidate in (workflow, projection) if candidate.triggers]
     if [candidate.path.name for candidate in triggered] != ["valid-workflow.yml"]:
         raise WorkflowError("a YAML file without an on: trigger entered the CI taxonomy")
+
+    split_events = Workflow(
+        path=Path("split-events.yml"),
+        name="split-events",
+        triggers={"schedule", "workflow_dispatch"},
+        has_permissions=True,
+        jobs=[
+            Job(
+                identifier="nightly",
+                display_name="nightly",
+                condition="github.event_name == 'schedule'",
+            ),
+            Job(
+                identifier="manual",
+                display_name="manual",
+                condition="github.event_name == 'workflow_dispatch'",
+            ),
+        ],
+    )
+    split_jobs = {
+        job["job_id"]: (job["tier"], job["triggers"])
+        for job in taxonomy_document([split_events])["jobs"]
+    }
+    if split_jobs != {
+        "nightly": ("scheduled", ["schedule"]),
+        "manual": ("manual", ["workflow_dispatch"]),
+    }:
+        raise WorkflowError("job-level event guards did not narrow taxonomy triggers")
 
     try:
         parse_workflow(FIXTURE_DIR / "invalid-duplicate-with.yml")

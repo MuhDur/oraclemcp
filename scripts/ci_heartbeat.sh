@@ -21,6 +21,9 @@
 #     fail-closed rule `crates/oraclemcp-core/src/http/ci_lanes.rs` already
 #     enforces for the dashboard tile. `unknown` still counts as blocked: a
 #     silent gap is exactly what let CI go undiscovered before.
+#   - Scheduled server workflows are resolved to exact job names from the
+#     generated taxonomy. A workflow-level success is never copied across a
+#     matrix or onto a job that did not run for the observed event.
 #   - The exit code IS the notification path for the REQUIRED lanes: a non-zero
 #     exit turns THIS script's own scheduled workflow run red, which rides
 #     GitHub's existing scheduled-workflow-failure notification — no bespoke
@@ -118,6 +121,28 @@ record_lane() {
     }' >> "$tmp_lanes"
 }
 
+record_job_lane() {
+  # repo check_name tier workflow_file job_id event state conclusion run_url head_sha updated_at
+  jq -nc \
+    --arg repo "$1" --arg check_name "$2" --arg tier "$3" \
+    --arg workflow_file "$4" --arg job_id "$5" --arg event "$6" \
+    --arg state "$7" --arg conclusion "$8" --arg run_url "$9" \
+    --arg head_sha "${10}" --arg updated_at "${11}" \
+    '{
+      repo: $repo,
+      check_name: $check_name,
+      tier: $tier,
+      workflow_file: $workflow_file,
+      job_id: $job_id,
+      event: $event,
+      state: $state,
+      conclusion: (if $conclusion == "" then null else $conclusion end),
+      run_url: (if $run_url == "" then null else $run_url end),
+      head_sha: (if $head_sha == "" then null else $head_sha end),
+      updated_at: (if $updated_at == "" then null else $updated_at end)
+    }' >> "$tmp_lanes"
+}
+
 # Fetch the most recent COMPLETED, non-superseded run of one workflow file.
 # Echoes a single JSON object (or `null` if none exists) on success; returns
 # non-zero if the GitHub API call itself failed (network, auth, 404).
@@ -133,6 +158,20 @@ fetch_latest_run() {
     sleep 2
   done
   echo "ci-heartbeat: gh api failed for ${repo} ${workflow_file}: ${raw}" >&2
+  return 1
+}
+
+fetch_run_jobs() {
+  local repo="$1" run_id="$2" raw
+  # shellcheck disable=SC2034 # loop count only; the body ignores the index.
+  for attempt in 1 2; do
+    if raw="$(gh api "repos/${repo}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" 2>&1)"; then
+      printf '%s\n' "$raw"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "ci-heartbeat: gh api failed for ${repo} run ${run_id} jobs: ${raw}" >&2
   return 1
 }
 
@@ -174,6 +213,82 @@ watch_workflow() {
   record_lane "$repo" "$check_name" "$tier" "$state" "$conclusion" "$url" "$sha" "$updated"
 }
 
+record_unknown_server_scheduled_jobs() {
+  local workflow_file="$1" reason="$2"
+  while IFS=$'\t' read -r check_name job_id; do
+    record_job_lane \
+      "$SERVER_REPO" "$check_name" "scheduled" "$workflow_file" "$job_id" \
+      "schedule" "unknown" "" "" "" ""
+  done < <(
+    jq -r --arg workflow_file "$workflow_file" \
+      '.jobs[] | select(.tier == "scheduled" and .workflow_file == $workflow_file) |
+       [.check_name, .job_id] | @tsv' "$TAXONOMY"
+  )
+  report_errors+=("${SERVER_REPO} ${workflow_file}: ${reason}")
+}
+
+# Resolve one scheduled workflow run to exact job observations. Workflow-level
+# success is insufficient for a multi-job workflow: a skipped/manual-only job,
+# an advisory job, and a real successful scheduled job are different evidence.
+watch_server_scheduled_jobs() {
+  local workflow_file="$1" run_json jobs_json run_id run_url head_sha run_updated
+  if ! run_json="$(fetch_latest_run "$SERVER_REPO" "$workflow_file" "&event=schedule")"; then
+    record_unknown_server_scheduled_jobs "$workflow_file" "gh workflow API call failed"
+    return
+  fi
+  if [ "$run_json" = "null" ]; then
+    record_unknown_server_scheduled_jobs \
+      "$workflow_file" "no completed non-superseded scheduled run was found"
+    return
+  fi
+  run_id="$(jq -r '.id // ""' <<<"$run_json")"
+  run_url="$(jq -r '.html_url // ""' <<<"$run_json")"
+  head_sha="$(jq -r '.head_sha // ""' <<<"$run_json")"
+  run_updated="$(jq -r '.updated_at // ""' <<<"$run_json")"
+  if [ -z "$run_id" ] || ! jobs_json="$(fetch_run_jobs "$SERVER_REPO" "$run_id")"; then
+    record_unknown_server_scheduled_jobs "$workflow_file" "gh jobs API call failed"
+    return
+  fi
+
+  while IFS=$'\t' read -r check_name job_id; do
+    local matches count status conclusion completed_at state
+    matches="$(jq -c --arg check_name "$check_name" \
+      '[.jobs[]? | select(.name == $check_name)]' <<<"$jobs_json")"
+    count="$(jq 'length' <<<"$matches")"
+    if [ "$count" != "1" ]; then
+      record_job_lane \
+        "$SERVER_REPO" "$check_name" "scheduled" "$workflow_file" "$job_id" \
+        "schedule" "unknown" "" "" "" ""
+      report_errors+=(
+        "${SERVER_REPO} ${workflow_file}: expected one ${check_name} job, found ${count}"
+      )
+      continue
+    fi
+    status="$(jq -r '.[0].status // ""' <<<"$matches")"
+    conclusion="$(jq -r '.[0].conclusion // ""' <<<"$matches")"
+    completed_at="$(jq -r --arg fallback "$run_updated" \
+      '.[0].completed_at // $fallback' <<<"$matches")"
+    if [ "$status" != "completed" ] || [ -z "$conclusion" ]; then
+      state="unknown"
+      conclusion=""
+      report_errors+=(
+        "${SERVER_REPO} ${workflow_file}: ${check_name} has no completed conclusion"
+      )
+    elif [ "$conclusion" = "success" ]; then
+      state="success"
+    else
+      state="not_green"
+    fi
+    record_job_lane \
+      "$SERVER_REPO" "$check_name" "scheduled" "$workflow_file" "$job_id" \
+      "schedule" "$state" "$conclusion" "$run_url" "$head_sha" "$completed_at"
+  done < <(
+    jq -r --arg workflow_file "$workflow_file" \
+      '.jobs[] | select(.tier == "scheduled" and .workflow_file == $workflow_file) |
+       [.check_name, .job_id] | @tsv' "$TAXONOMY"
+  )
+}
+
 # --- Server (oraclemcp): required + scheduled workflow files, derived from
 # the generated taxonomy so this stays in sync automatically. Advisory lanes
 # (ci.yml's continue-on-error nightly-toolchain jobs) are already a live,
@@ -200,14 +315,14 @@ mapfile -t server_scheduled_files < <(
     '[.jobs[] | select(.tier == "scheduled") | .workflow_file] | unique | .[] | select(. != $self)' \
     "$TAXONOMY"
 )
-# Scheduled/nightly lanes are ADVISORY (notify=0): still recorded in the snapshot
+# Scheduled/nightly lanes are ADVISORY: still recorded in the snapshot
 # so the operator can see them, but a red nightly does NOT fail this heartbeat.
 # Nightlies are infra-dependent and intermittently red (e.g. the driver Live
 # nightly needs operator-only wallet secrets), and each already rides its OWN
 # repo's scheduled-workflow-failure notification. Only the required gates hard-fail
 # this heartbeat, so a flaky/pre-fix nightly never falsely reddens the repo.
 for file in "${server_scheduled_files[@]}"; do
-  watch_workflow "$SERVER_REPO" "$file" "scheduled" "&event=schedule" 0
+  watch_server_scheduled_jobs "$file"
 done
 
 # --- Driver (rust-oracledb): trivially-in-scope required + Live nightly.
