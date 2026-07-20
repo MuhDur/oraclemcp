@@ -256,6 +256,11 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/swarm_spawn_preflight.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/secret_scan.sh",
       "kind": "entry_point",
       "trace": "required-quality"

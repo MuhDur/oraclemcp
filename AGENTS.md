@@ -120,6 +120,20 @@ cargo check -p <crate>                             # scoped iteration: never gat
 - CI runners are single-tenant and waive the lease requirement automatically;
   the target-dir rules still apply everywhere.
 
+Before launching a multi-agent wave, run the host + scheduler preflight. It
+refuses wrong-model, insufficient-quota, near-full-context, oversized-wave, and
+low memory/PID/FD headroom states before a spawn occurs:
+
+```bash
+scripts/swarm_spawn_preflight.sh --agents 4 \
+  --requested-model fable --candidate-model fable \
+  --quota-remaining 4 --context-remaining-pct 80
+```
+
+The documented default ceiling is 8 agents per wave with at least 20% context
+remaining. The exact per-agent and fixed host reserves are documented in
+[`docs/multi-agent-build-policy.md`](docs/multi-agent-build-policy.md).
+
 ## The safety invariant (do not weaken)
 
 The core invariant is the **fail-closed SQL guard** — NOT "read-only forever".

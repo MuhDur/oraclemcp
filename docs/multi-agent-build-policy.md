@@ -68,6 +68,46 @@ kernel when the wrapper exits) plus the
 `oraclemcp_feature_powerset.sh`. Agent Mail build slots, if ever enabled,
 are additional coordination — the lease does not depend on them.
 
+## Spawn-wave preflight
+
+Run `scripts/swarm_spawn_preflight.sh` immediately before every multi-agent
+wave. The script is a check, not a launcher: an exit 75 means no agent in that
+wave may spawn until the reported constraint changes or the wave is reduced.
+
+The orchestrator supplies four scheduler facts that the host cannot discover:
+the requested and candidate model names (which must match exactly), remaining
+provider/harness spawn slots (which must cover the whole proposed wave), and
+its own remaining context percentage. A pane below the default 20% context
+floor does not receive new work, especially release-finalization work.
+
+The live host checks use the tightest finite cgroup/user/system task ceiling,
+`MemAvailable`, and the per-process/system file-descriptor ceilings. Defaults:
+
+| Limit | Default |
+|---|---:|
+| Agents in one wave | 8 maximum |
+| Context remaining | 20% minimum |
+| Memory reserve | 4096 MiB fixed + 2048 MiB per agent |
+| PID/task reserve | 1024 fixed + 512 per agent |
+| File-descriptor reserve | 256 fixed + 128 per agent |
+
+These are admission reserves, not promises that agents may consume the full
+amount. Build processes remain governed separately by the build lease and
+`resource_budget.sh`. Operators may tune the values with the documented
+`ORACLEMCP_SWARM_*` variables printed by `--help`; agents do not relax a failed
+preflight on their own.
+
+Example for a four-slot wave:
+
+```sh
+scripts/swarm_spawn_preflight.sh \
+  --agents 4 \
+  --requested-model claude-fable-5 \
+  --candidate-model claude-fable-5 \
+  --quota-remaining 4 \
+  --context-remaining-pct 80
+```
+
 ## Working in a shared checkout
 
 Two hazards that are not about disk, both observed the same day:
