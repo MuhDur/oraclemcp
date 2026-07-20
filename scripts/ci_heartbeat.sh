@@ -21,19 +21,27 @@
 #     fail-closed rule `crates/oraclemcp-core/src/http/ci_lanes.rs` already
 #     enforces for the dashboard tile. `unknown` still counts as blocked: a
 #     silent gap is exactly what let CI go undiscovered before.
-#   - The exit code IS the notification path: a non-zero exit turns THIS
-#     script's own scheduled workflow run red, which rides GitHub's existing
-#     scheduled-workflow-failure notification — no bespoke webhook, no new
-#     secret, no new always-on service (AGENTS.md: no surprise costs, don't
-#     invent a heavyweight service). Local/cron use gets the same signal via
-#     the process exit code and the stderr banner.
+#   - The exit code IS the notification path for the REQUIRED lanes: a non-zero
+#     exit turns THIS script's own scheduled workflow run red, which rides
+#     GitHub's existing scheduled-workflow-failure notification — no bespoke
+#     webhook, no new secret, no new always-on service (AGENTS.md: no surprise
+#     costs, don't invent a heavyweight service). Local/cron use gets the same
+#     signal via the process exit code and the stderr banner.
+#   - Scheduled/nightly lanes are ADVISORY: recorded in the snapshot for
+#     visibility but they do NOT drive the exit code. Nightlies are
+#     infra-dependent and intermittently red (the driver Live nightly, e.g.,
+#     self-skips its operator-only wallet secrets), and each already rides its
+#     own repo's scheduled-workflow-failure notification. Letting a flaky nightly
+#     fail this heartbeat would perpetually redden the repo and train the operator
+#     to ignore it — the opposite of this bead's operator-trust goal.
 #
 # Usage:
 #   scripts/ci_heartbeat.sh [--out PATH] [--no-driver] [--quiet]
 #
-# Exit codes: 0 = every watched lane confirmed green; 1 = at least one lane is
-# red or unknown (see the printed report for which); 2 = the harness itself
-# could not run (missing `gh`/`jq`/`python3`, or the local taxonomy is broken).
+# Exit codes: 0 = every REQUIRED lane confirmed green (advisory nightly reds are
+# reported but never fail the heartbeat); 1 = at least one required lane is red
+# or unknown (see the printed report for which); 2 = the harness itself could not
+# run (missing `gh`/`jq`/`python3`, or the local taxonomy is broken).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -44,8 +52,8 @@ SERVER_REPO="MuhDur/oraclemcp"
 DRIVER_REPO="MuhDur/rust-oracledb"
 # The driver repo's own CI taxonomy is not generated/embedded here (that would
 # be a second copy of a different repo's source of truth — out of proportion
-# for a heartbeat). Its required gate and the chronically-red Live nightly
-# (plan §27.7 F-D2) are small and stable enough to name directly; review this
+# for a heartbeat). Its required gate (hard-fail) and its Live nightly (advisory;
+# plan §27.7 F-D2) are small and stable enough to name directly; review this
 # list if the driver restructures its workflows.
 DRIVER_REQUIRED_WORKFLOWS=("required.yml")
 DRIVER_SCHEDULED_WORKFLOWS=("live.yml")
@@ -192,8 +200,14 @@ mapfile -t server_scheduled_files < <(
     '[.jobs[] | select(.tier == "scheduled") | .workflow_file] | unique | .[] | select(. != $self)' \
     "$TAXONOMY"
 )
+# Scheduled/nightly lanes are ADVISORY (notify=0): still recorded in the snapshot
+# so the operator can see them, but a red nightly does NOT fail this heartbeat.
+# Nightlies are infra-dependent and intermittently red (e.g. the driver Live
+# nightly needs operator-only wallet secrets), and each already rides its OWN
+# repo's scheduled-workflow-failure notification. Only the required gates hard-fail
+# this heartbeat, so a flaky/pre-fix nightly never falsely reddens the repo.
 for file in "${server_scheduled_files[@]}"; do
-  watch_workflow "$SERVER_REPO" "$file" "scheduled" "&event=schedule" 1
+  watch_workflow "$SERVER_REPO" "$file" "scheduled" "&event=schedule" 0
 done
 
 # --- Driver (rust-oracledb): trivially-in-scope required + Live nightly.
@@ -202,7 +216,10 @@ if [ "$INCLUDE_DRIVER" = "1" ]; then
     watch_workflow "$DRIVER_REPO" "$file" "driver_required" "&branch=main&event=push" 1
   done
   for file in "${DRIVER_SCHEDULED_WORKFLOWS[@]}"; do
-    watch_workflow "$DRIVER_REPO" "$file" "driver_scheduled" "&event=schedule" 1
+    # Advisory (see the scheduled note above): the Live nightly self-skips its
+    # operator-only real-wallet TCPS test, so an unattended nightly must never
+    # redden this heartbeat; it is still recorded for visibility.
+    watch_workflow "$DRIVER_REPO" "$file" "driver_scheduled" "&event=schedule" 0
   done
 fi
 
