@@ -184,7 +184,8 @@ repo root with `br`:
 ```bash
 br ready --json                      # unblocked work
 br update <id> --status in_progress  # claim
-br close  <id> --reason "…"          # finish; commit .beads/ with the code
+scripts/bead_tracker_guard.sh close <id> --evidence \
+  tests/artifacts/evidence/closes/<id>.json --summary "…"
 br create "Title" -t bug|feature|task -p 0-4 --deps discovered-from:<id>
 br sync --flush-only                 # export .beads/issues.jsonl before commit
 ```
@@ -192,6 +193,15 @@ br sync --flush-only                 # export .beads/issues.jsonl before commit
 Types: `bug`, `feature`, `task`, `epic`, `chore`. Priorities: `0` critical …
 `4` backlog (default `2`). Never use markdown TODO lists or a second tracker.
 Commit `.beads/` changes with the code or planning change they describe.
+
+Never use raw `br close` or `br update <id> --status open` in a swarm. The
+guarded close requires committed evidence and binds the work commit, evidence
+commit, and canonical evidence path into `close_reason`. Release a claim with
+`scripts/bead_tracker_guard.sh release-claim <id>`; it serializes with guarded
+closes and preserves a bead that became closed. When a false close is found,
+correct that original bead with `bead_tracker_guard.sh correct-false-close
+--original-bead <id> ...`, never only a sibling. See
+[`docs/BEAD_CLOSE_EVIDENCE.md`](docs/BEAD_CLOSE_EVIDENCE.md).
 
 ## bv - graph-aware triage sidecar
 

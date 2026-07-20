@@ -21,6 +21,11 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/bead_tracker_guard.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/check_bead_close_evidence.sh",
       "kind": "entry_point",
       "trace": "required-quality"
