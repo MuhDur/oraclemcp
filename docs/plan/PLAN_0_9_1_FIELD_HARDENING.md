@@ -1,6 +1,6 @@
 # PLAN — oraclemcp 0.9.1 / driver 0.9.0: field-hardening, self-sufficient testing, OCI
 
-**Version:** v5 (v2: review round 1 — CI-red ground truth → Workstream Z, P2 tail → Workstream P, P1-2 grounded, 17/17 Appendix-A claims re-verified. v3: inferred-sibling sweep S1–S15 → §A.10, new B14/B15/B16. v4: **Workstream R — the Local Integrator Rig**. v5: **operator rulings recorded on every open decision** (marked "OPERATOR RULING (2026-07-20)" inline), Z1 RESOLVED in-session — root cause was CI shallow checkout, `codex/d2-completion` merged as `38db4c3`, `ci.yml` fetch-depth fixed — and the driver bug-bead un-deferral ruling folded as G12). **Date:** 2026-07-20.
+**Version:** v5 (v2: review round 1 — CI-red ground truth → Workstream Z, P2 tail → Workstream P, P1-2 grounded, 17/17 Appendix-A claims re-verified. v3: inferred-sibling sweep S1–S15 → §A.10, new B14/B15/B16. v4: **Workstream R — the Local Integrator Rig**. v5: **operator rulings recorded on every open decision** (marked "OPERATOR RULING (2026-07-20)" inline), Z1 RESOLVED in-session — root cause was CI shallow checkout, `codex/d2-completion` landed as `5a52bf6`+`3f057e2`, `ci.yml` fetch-depth fixed — and the driver bug-bead un-deferral ruling folded as G12). **Date:** 2026-07-20.
 **Owner:** lead orchestrator. **Release is operator-gated** — agents never tag or publish.
 
 **How to use this document.** It is written to be self-contained: an agent that has never seen this
@@ -162,7 +162,8 @@ base. Nothing else in this plan can show honest green until Z lands (constitutio
   patch-equivalent to `main`** (rebase-twins; the "84 commits" were already pushed);
   `codex/d2-completion-20260720` held the only two real unmerged commits — `fecfa06` (guard: ALTER
   SESSION structural clause parsing, a strict tightening, reviewed) and `e11632a` (D2 independent
-  per-crate mutation floors, bead `5.2`) — **merged as `38db4c3`** (merge commit, SHAs preserved).
+  per-crate mutation floors, bead `5.2`) — **landed as `5a52bf6` + `3f057e2`** (linearized on push;
+  patch-identical to the branch commits, verified via `git cherry`).
   Remaining Z1 tail: branch deletion is operator-gated (RULE 1) — branches left in place.
   **Rule (stays; goes into AGENTS.md alongside §A.8):** close evidence must cite commits **reachable
   from `origin/main`** at close time — the shallow-checkout episode proves the reachability check
@@ -171,7 +172,7 @@ base. Nothing else in this plan can show honest green until Z lands (constitutio
   authorized, in-plan, and MUST be executed by Codex ("Spark") so it does not consume Claude
   usage.** The committed mutation marker (sealed at `4dca0b2`, scopes guard+audit, 27 files, 1889
   mutants, 3/3 shards) carries `status=stale`; the gate fails **both** the coverage-ratchet and
-  release-preflight jobs on it. Post-Z1 note: `38db4c3` landed D2's `check-floor-report`, so the
+  release-preflight jobs on it. Post-Z1 note: `3f057e2` landed D2's `check-floor-report`, so the
   fresh campaign must produce **independent per-crate seals for guard, audit, AND db** (complete
   exact-SHA shards, OOM-honest), using the new disk-backed scratch + wrapper hygiene from `fecfa06`'s
   gate-script half. Memory-cap every run, take the build lease, dedicated target dir. This also
@@ -2139,7 +2140,8 @@ than HEAD — the audit was auditing against a one-commit repository. Fixed by `
 comment) in the same session. Branch census (`git cherry` vs `origin/main`): five of six wave
 branches 100% patch-equivalent (rebase-twins — the wave's work had already been pushed via rebased
 `main`); only `codex/d2-completion-20260720` carried real work (`fecfa06` guard tightening +
-`e11632a` D2 floors), merged as `38db4c3`. Local `check_bead_close_evidence.sh` reported **0 hard,
+`e11632a` D2 floors), landed as `5a52bf6`+`3f057e2` (linearized on push). Local
+`check_bead_close_evidence.sh` reported **0 hard,
 227 advisory** throughout — correct, since it sees full history; the "local gate can't catch it"
 lesson still stands, inverted: gate environments must match on HISTORY VISIBILITY, not only on
 checks.
