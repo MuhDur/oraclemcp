@@ -1,0 +1,82 @@
+{
+  "schema": "wave1-cross-repo-handoff/v1",
+  "generated_at": "2026-07-20T11:17:11Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.5.4",
+  "summary": "Checksum-bound handoff for D4's server fuzz campaigns and driver four-shard fuzz plus release-qualification prep implementation.",
+  "server": {
+    "repo": "oraclemcp",
+    "commit_sha": "a4fec26dbd6dc91cc2a97b696935a756bc60f874",
+    "tree_sha": "b6087919fd417cd72823b41ea26f52b8dd625962",
+    "files": [
+      {
+        "path": ".github/workflows/fuzz.yml",
+        "sha256": "24bb7dcb8d2673efdf6d37aba010b3079145c92bb944c5429796c9c154f1f05d"
+      },
+      {
+        "path": "crates/oraclemcp-core/ci_taxonomy.json",
+        "sha256": "4397ab85b633e51d4ad0fe7ff33f5b5dd185c8496ca25a6cd50425f3478c5f5f"
+      },
+      {
+        "path": "docs/ci_taxonomy.json",
+        "sha256": "4397ab85b633e51d4ad0fe7ff33f5b5dd185c8496ca25a6cd50425f3478c5f5f"
+      },
+      {
+        "path": "docs/test-tiers.md",
+        "sha256": "0487c8f0e84d086606ea114a91c0862c7cbcfe9f7ec98b5ee5d9d1b1ecaf0f7c"
+      }
+    ]
+  },
+  "driver": {
+    "repo": "rust-oracledb",
+    "commit_sha": "4f1eb3abd3af604ad29f1899251025499b0a3869",
+    "tree_sha": "bf6fbba2faa40f736d4ac3f956a54311beacde00",
+    "files": [
+      {
+        "path": ".github/workflows/_quality.yml",
+        "sha256": "de9dd53a562deeaab558802161121fcf272dfc000f9218f83d1b0a0f25b4cc80"
+      },
+      {
+        "path": ".github/workflows/release-qualification.yml",
+        "sha256": "07eb5b6adf7252b08debc9fc37b15d707ddeca15c0807c8530f4c06547d2e95a"
+      },
+      {
+        "path": "docs/CI_TAXONOMY.md",
+        "sha256": "4b6593d48708de2f1c89590914e7d0c54c37deeb416eb0e3d9bdb4272965f90c"
+      },
+      {
+        "path": "docs/ci_taxonomy.json",
+        "sha256": "2676aa6a72071b91b49b7e70e321914d786410963f1c124acb63486b6ed7d7f2"
+      },
+      {
+        "path": "scripts/ci_taxonomy.py",
+        "sha256": "6812c800af5bf66ed00ceec868b9f0e30157b3581e4b31abc2b47931f9dcdce0"
+      },
+      {
+        "path": "scripts/verify_required_local.py",
+        "sha256": "d3cc964ac425870db38fd9a4427024d0687ca0a9057701a3192f8e291d02b13b"
+      }
+    ]
+  },
+  "acceptance": [
+    {
+      "claim": "The server fuzz lane is split into five independent bounded target campaigns.",
+      "evidence": "oraclemcp .github/workflows/fuzz.yml uses a five-entry crate/target matrix, a 300-second per-target libFuzzer budget, a 20-minute job ceiling, target-scoped cache keys, and crash/timeout artifact upload."
+    },
+    {
+      "claim": "The driver fuzz gate is a concrete four-way matrix with its 120-second target budget unchanged.",
+      "evidence": "rust-oracledb .github/workflows/_quality.yml expands shards 0,1,2,3, builds the standalone fuzz target directory once per shard cache, and retains max_total_time from the release/soak budget."
+    },
+    {
+      "claim": "Release-qualification prep executes the shared quality graph and aggregates every result without emitting strict evidence.",
+      "evidence": "rust-oracledb scripts/verify_required_local.py --self-test passed; the parser asserts prep continue-on-error coverage, all eight job result files including fuzz-0 through fuzz-3, and strict-only evidence reachability."
+    },
+    {
+      "claim": "Generated CI taxonomy reflects concrete matrix check names.",
+      "evidence": "Both repositories' ci_taxonomy.py --check passed; the driver taxonomy reports four concrete quality-fuzz checks for each of canary, required, soak, and release-qualification."
+    }
+  ],
+  "limitations": [
+    "No live GitHub Actions release-qualification or fuzz run is claimed by this handoff.",
+    "No driver workspace-wide Cargo compile was started for this evidence pass because the driver's Agent Mail build-slot service was unavailable and the repository contract forbids an unleased full build."
+  ]
+}
