@@ -41,6 +41,16 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/cargo_build_guard.sh",
+      "kind": "helper",
+      "excluded_reason": "cargo-rustc-interceptor"
+    },
+    {
+      "path": "scripts/cargo_build_guard_test.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/check_entry_trace_contract.sh",
       "kind": "entry_point",
       "trace": "required-quality"

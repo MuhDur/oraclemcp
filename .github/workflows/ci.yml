@@ -362,6 +362,11 @@ jobs:
     name: Rust workspace (Windows)
     needs: web-build
     runs-on: windows-latest
+    env:
+      # E1's mandatory direct-Cargo interceptor is the POSIX flock host guard.
+      # This runner is single-tenant (the documented CI lease waiver), and a
+      # Windows process cannot execute the repository's Bash rustc-wrapper.
+      RUSTC_WRAPPER: ""
     # Scope: --lib --bins (see the test step). All Windows-specific risk (file
     # locking, subprocess spawn, TLS, paths, durable state) lives in unit tests;
     # the integration tests are covered on Linux and by the dedicated

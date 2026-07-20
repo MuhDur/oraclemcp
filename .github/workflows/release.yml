@@ -301,6 +301,11 @@ jobs:
             echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
           fi
 
+      - name: Apply non-Linux single-tenant build waiver
+        if: runner.os != 'Linux'
+        shell: bash
+        run: echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
+
       - name: Build
         shell: bash
         run: |

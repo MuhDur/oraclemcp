@@ -15,8 +15,10 @@ so these are operating rules, not suggestions.
    operation (workspace-wide build/test/clippy, `cargo mutants`, `cargo hack`)
    runs as `scripts/build_lease.sh -- <cmd>`: a machine-wide flock(2) lease,
    one slot by default, so N agents queue instead of compiling simultaneously.
-   Enforced, not advisory: `scripts/check_build_lease.sh` is wired into the
-   heavy entry points and refuses an un-leased heavy build (exit 75).
+   Enforced, not advisory: `.cargo/config.toml` installs
+   `scripts/cargo_build_guard.sh` as Cargo's compiler wrapper, so even a direct
+   built-in heavy Cargo command reaches `scripts/check_build_lease.sh` before
+   rustc and is refused without the lease (exit 75).
 3. **Iterate with scoped builds.** `cargo check -p <crate>` / `cargo test -p <crate>`
    for normal work. A full `--workspace` build is a deliberate, slot-gated act.
 4. **Cap per-build parallelism.** `~/.cargo/config.toml` sets `[build] jobs = 4`
@@ -64,9 +66,23 @@ nobody could actually take is how the incident happened. The enforced
 replacement is `scripts/build_lease.sh` (flock-based, no server dependency,
 lease retained by the wrapper until the command exits and released by the
 kernel when the wrapper exits) plus the
-`scripts/check_build_lease.sh` preflight wired into `resource_budget.sh` and
-`oraclemcp_feature_powerset.sh`. Agent Mail build slots, if ever enabled,
-are additional coordination — the lease does not depend on them.
+`scripts/check_build_lease.sh` preflight. The preflight remains wired into
+`resource_budget.sh` and `oraclemcp_feature_powerset.sh`, and is also mandatory
+for ordinary direct Cargo compilation through `.cargo/config.toml`'s
+`rustc-wrapper`. `scripts/cargo_build_guard_test.sh` proves a real direct
+workspace compile attempt exits 75 before a `Compiling` line, a direct shared
+target exits 78, and scoped `-p` iteration still compiles. Those are the inner
+gate statuses; Cargo reports a rejected compiler wrapper with its standard exit
+101 while preserving the inner status in stderr. Agent Mail build slots, if
+ever enabled, are additional coordination — the lease does not depend on them.
+
+The compiler interceptor and flock lease are Linux-hosted. Non-Linux CI
+explicitly disables the wrapper under the documented single-tenant CI waiver;
+local macOS and Windows workspace-wide builds are not an E1-supported swarm
+path and must use an isolated runner. Like every repository-local Cargo config,
+an operator can deliberately override it with `RUSTC_WRAPPER` or `--config`.
+That is an explicit safety-control bypass, not a normal direct Cargo invocation;
+the negative integration proof covers the unmodified repository path.
 
 ## Spawn-wave preflight
 

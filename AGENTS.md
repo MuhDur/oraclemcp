@@ -98,8 +98,11 @@ Heavy cargo operations — anything workspace-wide (`--workspace`, `cargo hack`,
 through a machine-wide flock(2) build lease. This is mechanism, not
 discipline: the preflight (`scripts/check_build_lease.sh`) is wired into the
 heavy entry points (`resource_budget.sh`, `oraclemcp_feature_powerset.sh`) and
-refuses an un-leased heavy build (exit 75) or any build against a shared or
-RAM-backed target dir (exit 78).
+Cargo's repo-local compiler wrapper (`.cargo/config.toml`). A direct built-in
+`cargo test --workspace` therefore reaches the preflight before rustc and is
+refused when un-leased (the wrapper exits 75; Cargo reports that compiler
+failure with its standard exit 101). Direct Cargo against a shared or RAM-backed
+target is refused too (wrapper exit 78, Cargo exit 101).
 
 ```bash
 scripts/build_lease.sh -- cargo test --workspace   # take a slot, then run
@@ -107,7 +110,7 @@ scripts/build_lease.sh --status                    # who holds the lease
 cargo check -p <crate>                             # scoped iteration: never gated
 ```
 
-- Default is **one slot** (`ORACLEMCP_BUILD_LEASE_SLOTS` to widen): concurrent
+- Default is **one slot** (`CARGO_SWARM_BUILD_LEASE_SLOTS` to widen): concurrent
   heavy builds queue instead of running simultaneously — the 2026-07
   fork-EAGAIN / OOM / tmpfs-exhaustion class came from N simultaneous full
   compiles. The wrapper retains the lease while the command runs, and the
@@ -119,6 +122,14 @@ cargo check -p <crate>                             # scoped iteration: never gat
   path are refused even under a lease.
 - CI runners are single-tenant and waive the lease requirement automatically;
   the target-dir rules still apply everywhere.
+- The mandatory compiler interceptor and flock lease are Linux-hosted.
+  Non-Linux CI explicitly disables that shell wrapper under the same
+  single-tenant waiver; local macOS and Windows workspace-wide builds are not
+  an E1-supported swarm path and must be run in an isolated runner. On Linux
+  (the multi-agent host), ordinary direct Cargo compilation is intercepted. An
+  explicit Cargo config or
+  `RUSTC_WRAPPER` override can defeat any repo-local Cargo setting; treat such
+  an override as bypassing a safety control, not as normal repository use.
 
 Before launching a multi-agent wave, run the host + scheduler preflight. It
 refuses wrong-model, insufficient-quota, near-full-context, oversized-wave, and

@@ -31,8 +31,8 @@
 # are machine-wide. Two agents in two different checkouts still contend for the
 # same lease, which is the point.
 #
-#   ORACLEMCP_BUILD_LEASE_DIR    lease directory (default ~/.cache/oraclemcp-build-lease)
-#   ORACLEMCP_BUILD_LEASE_SLOTS  concurrent heavy builds allowed (default 1: serialize)
+#   CARGO_SWARM_BUILD_LEASE_DIR    lease directory (default ~/.cache/oraclemcp-build-lease)
+#   CARGO_SWARM_BUILD_LEASE_SLOTS  concurrent heavy builds allowed (default 1: serialize)
 #
 # Exit codes: 64 usage, 75 lease not acquired within the wait budget (EX_TEMPFAIL),
 # 78 configuration refusal from the target-dir preflight (EX_CONFIG).
@@ -41,8 +41,8 @@ set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-LEASE_DIR="${ORACLEMCP_BUILD_LEASE_DIR:-$HOME/.cache/oraclemcp-build-lease}"
-SLOTS="${ORACLEMCP_BUILD_LEASE_SLOTS:-1}"
+LEASE_DIR="${CARGO_SWARM_BUILD_LEASE_DIR:-$HOME/.cache/oraclemcp-build-lease}"
+SLOTS="${CARGO_SWARM_BUILD_LEASE_SLOTS:-1}"
 TIMEOUT=3600
 LABEL="${USER:-agent}-$$"
 
@@ -56,7 +56,7 @@ Acquire a machine-wide build-lease slot (flock-based), then exec CMD with the
 lease held for CMD's whole process tree. Default is ONE slot: concurrent heavy
 builds serialize instead of running simultaneously.
 
-  --slots N       number of concurrent slots (default $ORACLEMCP_BUILD_LEASE_SLOTS or 1)
+  --slots N       number of concurrent slots (default $CARGO_SWARM_BUILD_LEASE_SLOTS or 1)
   --timeout SECS  give up waiting for a slot after SECS (default 3600)
   --label TEXT    holder label recorded in the slot file for diagnosis
   --status        show each slot's state and last recorded holder
@@ -128,7 +128,9 @@ acquire_and_run() {
         printf 'label=%s pid=%s acquired=%s cmd=%s\n' \
           "$LABEL" "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${CMD[*]}" >"$slot"
         echo "build_lease: slot $i acquired ($LABEL); running: ${CMD[*]}" >&2
-        export ORACLEMCP_BUILD_LEASE="slot=$i pid=$$ label=$LABEL"
+        export CARGO_SWARM_BUILD_LEASE_DIR="$LEASE_DIR"
+        export CARGO_SWARM_BUILD_LEASE_SLOT="$i"
+        export CARGO_SWARM_BUILD_LEASE_PID="$$"
         set +e
         (
           # The wrapper is the lock owner. Do not leak its fd into compilers or
@@ -159,7 +161,9 @@ acquire_and_run() {
         printf 'label=%s pid=%s acquired=%s cmd=%s\n' \
           "$LABEL" "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${CMD[*]}" >"$slot"
         echo "build_lease: slot 0 acquired after wait ($LABEL); running: ${CMD[*]}" >&2
-        export ORACLEMCP_BUILD_LEASE="slot=0 pid=$$ label=$LABEL"
+        export CARGO_SWARM_BUILD_LEASE_DIR="$LEASE_DIR"
+        export CARGO_SWARM_BUILD_LEASE_SLOT="0"
+        export CARGO_SWARM_BUILD_LEASE_PID="$$"
         set +e
         (
           # See the immediate-acquire path above: only this wrapper retains the
@@ -194,7 +198,7 @@ selftest() {
   : >"$log"
 
   run_child() {
-    ORACLEMCP_BUILD_LEASE_DIR="$tmp/lease" ORACLEMCP_BUILD_LEASE_SLOTS=1 \
+    CARGO_SWARM_BUILD_LEASE_DIR="$tmp/lease" CARGO_SWARM_BUILD_LEASE_SLOTS=1 \
       "$SELF" --label "$1" --timeout 30 -- bash -c '
         echo "START $1 $(date +%s.%N)" >> "$2"
         sleep 0.7

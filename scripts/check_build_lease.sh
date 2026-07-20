@@ -6,8 +6,9 @@
 #   1. A HEAVY cargo operation (workspace-wide build/test/clippy, cargo-mutants,
 #      cargo-hack powerset, or an unscoped bare `cargo build/test/...`) running
 #      WITHOUT the build lease. Heavy builds go through scripts/build_lease.sh,
-#      which exports ORACLEMCP_BUILD_LEASE into the leased process tree; this
-#      check fails closed when that marker is absent.
+#      which exports a CARGO_SWARM_BUILD_LEASE_* identity into the leased
+#      process tree; this check verifies the named live flock rather than
+#      trusting a caller-supplied Boolean marker.
 #   2. Any cargo operation against a SHARED or RAM-backed target dir. The
 #      effective CARGO_TARGET_DIR must be per-agent: the checkout's own target/
 #      is fine (each agent checkout has its own), a resource_budget.sh per-run
@@ -71,7 +72,10 @@ check_target_dir() {
     probe="$(dirname "$probe")"
   done
   if [ -d "$probe" ]; then
-    fstype="$(stat -f -c %T "$probe")"
+    # GNU stat is used on Linux. BSD/macOS stat has different flags; leave the
+    # type unknown rather than turning every macOS Cargo invocation into a
+    # tooling failure. The explicit shared-target denylist still applies.
+    fstype="$(stat -f -c %T "$probe" 2>/dev/null || true)"
     if [ "$fstype" = "tmpfs" ] || [ "$fstype" = "ramfs" ]; then
       cat >&2 <<EOF
 check_build_lease: REFUSING — target dir is RAM-backed.
@@ -92,8 +96,11 @@ EOF
   local IFS=':'
   for raw in $deny; do
     [ -n "$raw" ] || continue
+    local raw_resolved
+    raw_resolved="$(readlink -f "$raw" 2>/dev/null || echo "$raw")"
     if [ "$target" = "$raw" ] || [ "$resolved" = "$raw" ] ||
-      [ "$resolved" = "$(readlink -f "$raw" 2>/dev/null || echo "$raw")" ]; then
+      [ "$resolved" = "$raw_resolved" ] ||
+      [[ "$resolved" == "$raw_resolved"/* ]]; then
       cat >&2 <<EOF
 check_build_lease: REFUSING — target dir is a SHARED build cache.
 
@@ -141,9 +148,32 @@ is_heavy() {
 
 require_lease() {
   local why="$1"
-  if [ -n "${ORACLEMCP_BUILD_LEASE:-}" ]; then
-    echo "check_build_lease: OK — running under build lease ($ORACLEMCP_BUILD_LEASE)." >&2
-    return 0
+  local lease_dir="${CARGO_SWARM_BUILD_LEASE_DIR:-}"
+  local lease_slot="${CARGO_SWARM_BUILD_LEASE_SLOT:-}"
+  local lease_pid="${CARGO_SWARM_BUILD_LEASE_PID:-}"
+  local slot_file record lease_fd
+  if [ -n "$lease_dir" ] && [ -n "$lease_slot" ] && [ -n "$lease_pid" ]; then
+    case "$lease_slot:$lease_pid" in
+      *[!0-9:]*|:*|*:) ;;
+      *)
+        slot_file="$lease_dir/slot.$lease_slot"
+        record=""
+        if [ -f "$slot_file" ]; then
+          IFS= read -r record <"$slot_file" || true
+        fi
+        if kill -0 "$lease_pid" 2>/dev/null &&
+          [[ " $record " == *" pid=$lease_pid "* ]]; then
+          exec {lease_fd}>>"$slot_file"
+          if ! flock -n "$lease_fd"; then
+            exec {lease_fd}>&-
+            echo "check_build_lease: OK — verified live build lease (slot=$lease_slot pid=$lease_pid)." >&2
+            return 0
+          fi
+          exec {lease_fd}>&-
+        fi
+        ;;
+    esac
+    echo "check_build_lease: supplied build-lease identity is not a live held flock; refusing." >&2
   fi
   if [ -n "${CI:-}" ]; then
     echo "check_build_lease: OK — CI runner is single-tenant; lease requirement waived." >&2
@@ -164,7 +194,7 @@ EOF
 }
 
 selftest() {
-  local self="$ROOT/scripts/check_build_lease.sh" rc tmp_target
+  local self="$ROOT/scripts/check_build_lease.sh" rc tmp_target lease_test_dir spoof_dir
   local pass=0 fail=0
   verdict() { # verdict WANT_RC GOT_RC DESCRIPTION
     if [ "$2" -eq "$1" ]; then
@@ -178,42 +208,60 @@ selftest() {
 
   # 1. heavy + un-leased + not CI => refused with exit 75
   rc=0
-  env -u ORACLEMCP_BUILD_LEASE -u CI -u CARGO_TARGET_DIR \
+  env -u CARGO_SWARM_BUILD_LEASE_DIR -u CARGO_SWARM_BUILD_LEASE_SLOT \
+    -u CARGO_SWARM_BUILD_LEASE_PID -u CI -u CARGO_TARGET_DIR \
     "$self" -- cargo test --workspace >/dev/null 2>&1 || rc=$?
   verdict 75 "$rc" "un-leased 'cargo test --workspace' refused"
 
   # 2. heavy + lease marker => passes
   rc=0
-  env -u CI -u CARGO_TARGET_DIR ORACLEMCP_BUILD_LEASE="slot=0 pid=1 label=t" \
-    "$self" -- cargo test --workspace >/dev/null 2>&1 || rc=$?
+  lease_test_dir="$HOME/.cache/oraclemcp-build-lease-check-selftest"
+  env -u CI -u CARGO_TARGET_DIR CARGO_SWARM_BUILD_LEASE_DIR="$lease_test_dir" \
+    "$ROOT/scripts/build_lease.sh" --timeout 30 --label check-selftest -- \
+      "$self" -- cargo test --workspace >/dev/null 2>&1 || rc=$?
   verdict 0 "$rc" "leased heavy build passes"
 
-  # 3. heavy + CI runner => passes with waiver
+  # 3. A caller cannot turn a string into a lease. The checker verifies that
+  # the named slot is currently flocked, not merely that marker variables exist.
+  spoof_dir="$lease_test_dir/spoof"
+  mkdir -p "$spoof_dir"
+  printf 'label=spoof pid=%s acquired=never cmd=none\n' "$$" >"$spoof_dir/slot.0"
   rc=0
-  env -u ORACLEMCP_BUILD_LEASE -u CARGO_TARGET_DIR CI=true \
+  env -u CI -u CARGO_TARGET_DIR \
+    CARGO_SWARM_BUILD_LEASE_DIR="$spoof_dir" \
+    CARGO_SWARM_BUILD_LEASE_SLOT=0 CARGO_SWARM_BUILD_LEASE_PID="$$" \
+    "$self" -- cargo test --workspace >/dev/null 2>&1 || rc=$?
+  verdict 75 "$rc" "spoofed marker without a held flock is refused"
+
+  # 4. heavy + CI runner => passes with waiver
+  rc=0
+  env -u CARGO_SWARM_BUILD_LEASE_DIR -u CARGO_SWARM_BUILD_LEASE_SLOT \
+    -u CARGO_SWARM_BUILD_LEASE_PID -u CARGO_TARGET_DIR CI=true \
     "$self" -- cargo test --workspace >/dev/null 2>&1 || rc=$?
   verdict 0 "$rc" "CI runner waiver applies"
 
-  # 4. scoped build, un-leased => passes (iteration path is never gated)
+  # 5. scoped build, un-leased => passes (iteration path is never gated)
   rc=0
-  env -u ORACLEMCP_BUILD_LEASE -u CI -u CARGO_TARGET_DIR \
+  env -u CARGO_SWARM_BUILD_LEASE_DIR -u CARGO_SWARM_BUILD_LEASE_SLOT \
+    -u CARGO_SWARM_BUILD_LEASE_PID -u CI -u CARGO_TARGET_DIR \
     "$self" -- cargo test -p oraclemcp-db >/dev/null 2>&1 || rc=$?
   verdict 0 "$rc" "scoped 'cargo test -p' passes without a lease"
 
-  # 5. cargo-mutants is heavy even when scoped
+  # 6. cargo-mutants is heavy even when scoped
   rc=0
-  env -u ORACLEMCP_BUILD_LEASE -u CI -u CARGO_TARGET_DIR \
+  env -u CARGO_SWARM_BUILD_LEASE_DIR -u CARGO_SWARM_BUILD_LEASE_SLOT \
+    -u CARGO_SWARM_BUILD_LEASE_PID -u CI -u CARGO_TARGET_DIR \
     "$self" -- cargo mutants -p oraclemcp-db >/dev/null 2>&1 || rc=$?
   verdict 75 "$rc" "cargo mutants classified heavy"
 
-  # 6. shared target dir refused with exit 78 even under a lease
+  # 7. shared target dir refused with exit 78 before checking the lease
   rc=0
-  env -u CI ORACLEMCP_BUILD_LEASE="slot=0 pid=1 label=t" \
-    CARGO_TARGET_DIR="$HOME/.cache/cargo-target" \
+  env -u CI -u CARGO_SWARM_BUILD_LEASE_DIR -u CARGO_SWARM_BUILD_LEASE_SLOT \
+    -u CARGO_SWARM_BUILD_LEASE_PID CARGO_TARGET_DIR="$HOME/.cache/cargo-target" \
     "$self" -- cargo test --workspace >/dev/null 2>&1 || rc=$?
   verdict 78 "$rc" "shared ~/.cache/cargo-target refused"
 
-  # 7. tmpfs target dir refused (skipped when /tmp is not tmpfs on this host).
+  # 8. tmpfs target dir refused (skipped when /tmp is not tmpfs on this host).
   # The target need not exist: check_target_dir deliberately probes its nearest
   # existing ancestor, so this test creates and deletes no scratch directory.
   tmp_target="/tmp/oraclemcp-build-lease-selftest-target"
@@ -221,8 +269,8 @@ selftest() {
     echo "  SKIP  /tmp is not tmpfs on this host; tmpfs refusal not exercisable"
   else
     rc=0
-    env -u CI ORACLEMCP_BUILD_LEASE="slot=0 pid=1 label=t" \
-      CARGO_TARGET_DIR="$tmp_target" \
+    env -u CI -u CARGO_SWARM_BUILD_LEASE_DIR -u CARGO_SWARM_BUILD_LEASE_SLOT \
+      -u CARGO_SWARM_BUILD_LEASE_PID CARGO_TARGET_DIR="$tmp_target" \
       "$self" -- cargo test --workspace >/dev/null 2>&1 || rc=$?
     verdict 78 "$rc" "tmpfs target dir refused"
   fi

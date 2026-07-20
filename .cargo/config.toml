@@ -1,0 +1,5 @@
+[build]
+# Cargo loads this for ordinary built-in commands, so a direct
+# `cargo test --workspace` cannot skip the build-lease preflight merely by not
+# using scripts/build_lease.sh. The wrapper chains sccache when it is present.
+rustc-wrapper = "scripts/cargo_build_guard.sh"
