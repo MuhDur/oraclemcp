@@ -1,0 +1,88 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-20T11:16:42Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11",
+  "scope": {
+    "summary": "Normalize every named Low and Very-Low finding from engineering-plan sections 28.3 and 28.4 into an individual implementation-ready bead, an evidence-backed already-resolved result, or an explicit evidence-backed wontfix decision.",
+    "in_scope": [
+      ".beads/issues.jsonl",
+      "tests/artifacts/evidence/f-low-normalization/oraclemcp-eng-program-bp8ia.7.11.json",
+      "docs/plan/PLAN_ENGINEERING_PROGRAM.md"
+    ],
+    "out_of_scope": [
+      "Implementing or closing the 20 normalized child beads.",
+      "Changing server or driver product source.",
+      "Release readiness, live Oracle validation, deployment, publication, or push.",
+      "Cleaning unrelated pre-existing .doctor recovery artifacts."
+    ]
+  },
+  "source": {
+    "sha": "49fcf85d5bc76751d62bff9182a80f02bd9c78ca",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "F-LOW plan-to-tracker coverage map",
+        "kind": "tool",
+        "trace": "tests/artifacts/evidence/f-low-normalization/oraclemcp-eng-program-bp8ia.7.11.json records 20 normalized beads, 6 already-resolved/non-beadable findings, 3 explicit wontfix decisions, and 0 unmapped findings across all 29 named items."
+      },
+      {
+        "name": "individual implementation-ready child records",
+        "kind": "cli",
+        "trace": "A structural jq audit found exactly 20 open P3 children matching the proof ID set; each has a plan external_ref, f-low and finding labels, parent-child dependency, exact Repo/site, Risk, Narrow fix, Negative acceptance, and Positive acceptance fields."
+      },
+      {
+        "name": "one-bead-per-commit serialization",
+        "kind": "cli",
+        "trace": "Twenty child-record commits from 5b3d2f904b914bec344c135eb2bc5b856787dfbf through c11f9f09bbf6501ded0ad1608205e8bae27b9e8b each add exactly one intended JSONL bead record; 7d0d384655d67d532c001ff39ce5e08288cbb3f5 separately makes the G2 risk field explicit."
+      },
+      {
+        "name": "canonical tracker integrity",
+        "kind": "cli",
+        "trace": "br sync --flush-only exported 1112 issues; JSONL line count and jq record count both equal 1112, IDs are unique, priority/compaction/original_size fields are numeric, database and JSONL counts match, sqlite integrity checks pass, and br dep cycles reports 0."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This closes normalization only: all 20 implementation beads remain open and no product fix is claimed.",
+    "The 6 already-resolved/non-beadable and 3 wontfix classifications are source-audit conclusions, not live Oracle tests.",
+    "br doctor reports pre-existing stale recovery artifacts and an old write-lock warning while all database/JSONL count, parse, orphan, dirty-bitmap, export-hash, and SQLite integrity checks pass; no cleanup was authorized.",
+    "The worktree is not globally clean because the unrelated pre-existing .doctor directory remains untracked and untouched.",
+    "No required-proof/v1 producer artifact exists for this planning-only close, so readiness remains not-ready with scoped-test basis."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-eng-program-bp8ia.7.11.1",
+    "oraclemcp-eng-program-bp8ia.7.11.2",
+    "oraclemcp-eng-program-bp8ia.7.11.3",
+    "oraclemcp-eng-program-bp8ia.7.11.4",
+    "oraclemcp-eng-program-bp8ia.7.11.5",
+    "oraclemcp-eng-program-bp8ia.7.11.6",
+    "oraclemcp-eng-program-bp8ia.7.11.7",
+    "oraclemcp-eng-program-bp8ia.7.11.8",
+    "oraclemcp-eng-program-bp8ia.7.11.9",
+    "oraclemcp-eng-program-bp8ia.7.11.10",
+    "oraclemcp-eng-program-bp8ia.7.11.11",
+    "oraclemcp-eng-program-bp8ia.7.11.12",
+    "oraclemcp-eng-program-bp8ia.7.11.13",
+    "oraclemcp-eng-program-bp8ia.7.11.14",
+    "oraclemcp-eng-program-bp8ia.7.11.15",
+    "oraclemcp-eng-program-bp8ia.7.11.16",
+    "oraclemcp-eng-program-bp8ia.7.11.17",
+    "oraclemcp-eng-program-bp8ia.7.11.18",
+    "oraclemcp-eng-program-bp8ia.7.11.19",
+    "oraclemcp-eng-program-bp8ia.7.11.20"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
