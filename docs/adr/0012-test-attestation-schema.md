@@ -79,7 +79,12 @@ schema or unknown payload field, has an altered frame, malformed field, digest
 mismatch, unknown or ambiguous `key_id`, or invalid MAC. An attestation that cannot be
 verified is **rejected, never assumed valid**. The K2 browser re-verifier
 (`web/src/lib/attestation.ts`) implements the same checks over the same bytes
-with WebCrypto; the committed golden
+with WebCrypto. The production dashboard exposes it at `/attestations`, where
+an auditor loads or pastes the document and supplies the trusted key ID and
+HMAC secret out of band; the secret is never embedded or persisted, and every
+failed verification visibly rejects the evidence. A real Chromium acceptance
+test drives those controls and proves both the Rust golden and tamper rejection.
+The committed golden
 `crates/oraclemcp-verifier/tests/fixtures/test-attestation-v1.golden.jsonl`
 pins the wire format for both implementations.
 

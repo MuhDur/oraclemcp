@@ -41,6 +41,12 @@ jobs:
         working-directory: web
       - run: npm run check
         working-directory: web
+      - name: Install K2 Chromium runtime
+        run: npx playwright install --with-deps chromium
+        working-directory: web
+      - name: Verify K2 attestation UI in Chromium
+        run: npm run test:e2e:k2
+        working-directory: web
       - run: bash scripts/dashboard_bundle_check.sh
       - uses: actions/upload-artifact@v7
         with:

@@ -35,6 +35,7 @@ import {
   Code2,
   Database,
   Download,
+  FileCheck2,
   FileClock,
   Gauge,
   GitPullRequest,
@@ -209,6 +210,7 @@ import {
   type WorkbenchMode,
   type WorkbenchPlsqlTool
 } from "./operator-client";
+import { TestAttestationVerifier } from "./test-attestation-verifier";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -230,6 +232,7 @@ const navItems: NavItem[] = [
   { to: "/", label: "Overview", icon: Activity },
   { to: "/sessions", label: "Sessions", icon: Database },
   { to: "/health", label: "Health", icon: CheckCircle2 },
+  { to: "/attestations", label: "Attestations", icon: FileCheck2 },
   { to: "/capacity", label: "Capacity", icon: Gauge },
   { to: "/config", label: "Config", icon: SlidersHorizontal },
   { to: "/clients", label: "Clients", icon: KeyRound },
@@ -273,6 +276,12 @@ const healthRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/health",
   component: HealthPage
+});
+
+const attestationsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/attestations",
+  component: TestAttestationsPage
 });
 
 const capacityRoute = createRoute({
@@ -334,6 +343,7 @@ const router = createRouter({
     overviewRoute,
     sessionsRoute,
     healthRoute,
+    attestationsRoute,
     capacityRoute,
     configRoute,
     clientsRoute,
@@ -369,7 +379,7 @@ function RootLayout(): React.ReactElement {
       data-dashboard-skin={skin.name}
       data-dashboard-theme={skin.theme.name}
     >
-      {/* Ahead of the 11-item sidebar nav in tab order, so keyboard users can
+      {/* Ahead of the sidebar nav in tab order, so keyboard users can
           reach content without traversing it on every route. */}
       <a href="#main" className={skin.layout.skipLink} data-omcp-skip-link="main">
         Skip to main content
@@ -8945,6 +8955,18 @@ function DoctorPage(): React.ReactElement {
       description="Service readiness and operator health."
     >
       <ProbeDashboard probes={doctorProbes} compact />
+    </PageFrame>
+  );
+}
+
+function TestAttestationsPage(): React.ReactElement {
+  return (
+    <PageFrame
+      title="Test attestations"
+      eyebrow="Independent verification"
+      description="Re-verify signed CI evidence locally with an independently trusted HMAC key."
+    >
+      <TestAttestationVerifier />
     </PageFrame>
   );
 }

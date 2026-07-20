@@ -14,10 +14,13 @@
     "preview": "vite preview",
     "sbom": "bash ../scripts/release_sbom_check.sh --generate-dashboard dist/oraclemcp-dashboard.cyclonedx.json",
     "test": "vitest run",
+    "test:e2e": "playwright test --config playwright.config.ts",
+    "test:e2e:k2": "playwright test e2e/test-attestation-verifier.spec.ts --config playwright.config.ts",
     "contract": "npm run build && vitest run",
     "check": "tsc --noEmit && npm run build && vitest run"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
     "@tailwindcss/vite": "4.3.2",
     "@types/node": "^22.20.0",
     "@types/react": "19.2.17",
