@@ -104,7 +104,9 @@ test them are authoritative — the matrix is a mid-round draft remnant.
 2. **Stop shipping features that cannot be reached from outside the repo** (§3).
 3. **Become self-sufficient in testing** — reproduce the field's finding classes on this machine, so a
    production field test is a confirmation, not a discovery mechanism.
-4. **Drain the backlog** — all remaining beads except Cluster J, including the OCI campaign.
+4. **Drain the backlog** — all remaining beads except Cluster J and the deliberately-deferred
+   driver feature beads (G12's ruling: bugs/fixes/parity never stay deferred; features may),
+   including the OCI campaign.
 5. **Cut one coordinated release** carrying all of it.
 
 ### Non-goals
@@ -142,6 +144,22 @@ main-reachable — CI's **shallow checkout** simply could not see them; the loca
 and the CI/depth-1 view were two different repositories pretending to be one. The rule earns a
 place beside §A.8 regardless: **close evidence must cite commits reachable from `origin/main`**, and
 the gate that checks it must run against full history (fixed in `ci.yml`).
+
+**The consolidated runtime view (operator question, 2026-07-20: "is this all over the place?").**
+The C/D/E/R/F workstream split is the **construction** view — it exists so the work beads cleanly
+(who builds which asset). At **runtime** there are exactly TWO surfaces, and only two:
+
+| Surface | What runs there | Trigger | Weight |
+|---|---|---|---|
+| **CI** (stays as it is today — already made lightweight) | required lanes (fmt/clippy/tests/deny/lints/goldens) **+ C's wire-contract fixtures** (they are plain `cargo test`s — zero new CI weight) + the existing scheduled advisory lanes (mutation-shard rotation, live nightly, driver version matrix) | every push / nightly | light, required-lanes-only heartbeat preserved |
+| **The rig** (`scripts/rig/rig.sh` — THE single local entry point) | everything live, as tiers: `--tier live` = D's environment + E's white-box e2e suites; `--tier integrator` = R1–R4 (+ R5-lite on an RC); `--tier oci` = F (operator-gated) | operator / nightly-optional / pre-release | heavy, never able to red the front page |
+
+**Consolidation rule (binding):** no new standalone test harness is ever added — everything live
+runs THROUGH `rig.sh`. D1's up/down IS the rig's L1; E's suites execute inside the rig's
+environment as its white-box tier (`scripts/e2e/run_all.sh` is invoked by the rig, not run beside
+it); F is the rig's cloud tier. Existing scripts get absorbed or invoked, never duplicated. So the
+operator's mental model is exactly right and is now the contract: **local vs CI** — five
+workstreams of construction, two surfaces of operation.
 
 ---
 
@@ -928,6 +946,29 @@ catchable offline (Workstream C). The live lane is needed for a specific short l
   (`bootstrap_live_schema.sh:41-43`); wire them against the server's own checkout path
   (`pool.rs:471-483`) AND the pinned session, asserting replace-on-checkout / reconnect instead of
   silent reuse — validates A4a/A4e end to end.
+- **D11 [P1] — the 19c version-branch parity ledger + 19c-caps offline lanes (operator question,
+  2026-07-20: "any way except live testing?"). Yes — three ways, two of them offline:**
+  1. **The ledger (subagent sweep, driver repo).** The vendored reference encodes every
+     version-dependent behavior as explicit branches: server-version comparisons, capability
+     constants (`TNS_CCAP_*`/`TNS_RCAP_*`) and their gating versions, feature floors (JSON 21c;
+     fast-auth / END_OF_RESPONSE / VECTOR / OSON-improvements 23ai; OOB; sessionless TPC …).
+     Sweep `reference/python-oracledb/src/oracledb/impl/thin/` for EVERY such branch and produce
+     `docs/PARITY_VERSIONS.md`: {reference `file:line`, version/cap gate, behavior on each side of
+     the gate, our driver's `file:line` or **MISSING**, disposition}. Every divergence becomes a
+     fix bead or a documented deviation — this is the "sniff out the if/elses" the field's 19c gap
+     demands, and it needs no server at all.
+  2. **19c-caps offline lanes.** Derive a **19c capability mask** from the ledger and drive it
+     through machinery the driver already has: `.tns-cassette` record/replay exchanges shaped to a
+     19c handshake, and the differential fuzz oracle (our decoder vs the reference's on identical
+     bytes) fed 19c-caps-profile corpora. Proves our branch SELECTION matches the reference's for a
+     19c-shaped server. Honest bound, stated: cassettes prove decode/branch behavior, not full
+     live-session semantics.
+  3. **Live 19c may be free after all** — see the F2 rider below (Always-Free ADB version choice).
+  **Parity-claim scope, stated honestly:** the existing headline claim (2462/2578 of the
+  reference's own suite) is behavioral parity **on 23ai**; version confidence today rests on the
+  4-generation matrix (11-inverted/18/21/23) bracketing 19c. The ledger converts that bracket
+  argument into an enumerated, per-branch proof — which is the strongest 19c statement possible
+  without a 19c server, and composes with rider 3 when it lands.
 
 **Hard constraints:** zero-cost (constitution #10); **synthetic data only** — no live-OCI or customer
 identifiers ever (constitution #9); containers are ephemeral and torn down deterministically.
@@ -1043,11 +1084,13 @@ risk this machine. Two tiers:
 
 **Placement: Tier-3 operator/nightly lane, NEVER required CI** (same posture as F3) — the rig must
 not be able to red the front page; the required-lanes-only heartbeat is preserved.
-**Phasing:** 0.9.1 = R1 + R2 (free23 lane) + R3 + R4 + D9. Deferred: the multi-generation sweep
-matrix, R5, the HTTPS+mTLS+OAuth browser matrix (needs B1/B15 landed first), chaos beyond
-idle-kill/token-expiry.
+**Phasing:** 0.9.1 = R1 + R2 (free23 lane) + R3 + R4 + D9, **plus R5-lite on the release candidate**
+(in-train per the 2026-07-20 ruling). Deferred: the multi-generation sweep matrix, the FULL R5
+harness matrix (`claude -p` / opencode), the HTTPS+mTLS+OAuth browser matrix (needs B1/B15 landed
+first), chaos beyond idle-kill/token-expiry.
 **Open items (recorded, non-blocking):** inspector-CLI flag surface not build-verified (fallback:
-lean on the probe); `claude -p` headless behavior on this box unverified (R5 is deferred anyway);
+lean on the probe); `claude -p` headless behavior on this box unverified (harmless: R5-lite uses
+the proven `codex exec` launch shape, and the `claude -p` lane sits in the deferred FULL matrix);
 sample CO schema on xe18 unverified (worst case the realistic-data lane runs free23/xe21 only).
 **Acceptance:** one documented command brings the rig up on this machine and produces a round-N
 report; R1/R3 demonstrably fail against today's `main` and pass after the A/B fixes; zero customer
@@ -1087,6 +1130,12 @@ identifiers in any rig artifact (F5's scanner runs on rig output too).
 - **F1 (bead `10.1`)** — Always-Free provisioning + **teardown-as-incident** harness. Teardown failure is
   treated as an incident, not a warning — an orphaned ADB is a cost event.
 - **F2 (bead `10.2`)** — capability sweep: open, exercise the full tool surface, close.
+  **19c rider (2026-07-20, ties to D11):** Always-Free ADB has historically offered a **database
+  version choice (19c or 23ai)** at provisioning. VERIFY at F1 provision time whether 19c is
+  selectable in our home region; if yes, provision the F2 sweep instance as **19c** — the field's
+  actual version — turning the 19c gap into a zero-cost LIVE lane; run a second (or re-provisioned)
+  sweep on 23ai for the feature-floor surface. If 19c is no longer offered, fall back to 23ai and
+  note it; the documented operator-run OCR 19c-EE container remains the manual alternative.
 - **F3 (bead `10.4`)** — wire the OCI e2e into a **Tier-3 operator-gated lane** (never automatic).
 - **F4** — validate **B6** against a real DigiCert-signed ADB endpoint (the field's actual failure), not
   only the self-signed-ADB-CA chain. Also verify **P2-4** (§A.6.10) on the same endpoint.
@@ -1163,6 +1212,12 @@ authoritative AVAILABLE=0 check before and after every run.
 
 See §7 for the version decision, §9 for the gate.
 
+**OPERATOR RULING (2026-07-20): publishing is the LAST bead, full stop.** The two publish beads —
+driver **0.9.0** and server **0.9.1** — are the bead graph's terminal sinks: **every other bead in
+the converted graph is their ancestor** (directly or transitively). Nothing tags, nothing
+publishes, until all P0/P1 work, the rig's §9.2 acceptance run, and every non-deferred bead are
+done. §10's conversion requirements enforce this structurally.
+
 ---
 
 ## 5. Sequencing and dependencies
@@ -1173,7 +1228,7 @@ Z (restore main to green: Z1 branches, Z2 mutation seal, Z3 Windows, Z4 driver b
         ┌─ C (wire-contract fixtures) ──────────────┐  offline, start immediately
         │                                            │
 F0 (operator: OCI auth) ─────────────┐               ▼
-        │                            │        A1..A5, B1..B12  ── fixes
+        │                            │        A1..A5, B1..B16, P  ── fixes
         ▼                            │               │
    D (local environment) ────────────┼───────────────┤
         │                            │               ▼
@@ -1324,6 +1379,9 @@ operator "go" — do not ask for it; wait for it.** Requirements:
 - bead titles still saying `0.8.5` (server `13`, driver `5jdu`/`5swy`) are retitled per §7;
 - G12's driver bug beads are un-deferred (not re-created) and G13's server duplicates are
   dedup-closed against their `7.11.x` canonicals — one bead per defect, ever;
+- **the two publish beads (driver 0.9.0, server 0.9.1) are the graph's terminal sinks** — every
+  other non-deferred bead is made their ancestor, so `br ready` can never surface publishing while
+  anything else is open (operator ruling 2026-07-20; G9's lint verifies the sink property);
 - Cluster J beads are **not** touched (Cluster J = the GCP/Vertex launch campaign: ADK/Gemini demo,
   evidence bundle, site page, launch video, coordination — deferred by operator ruling).
 
