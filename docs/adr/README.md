@@ -19,6 +19,7 @@ than treating it as permanent.
 | [0009](0009-policy-as-code-grammar.md) | Policy-as-code grammar and monotone decisions | Accepted |
 | [0010](0010-verdict-certificate-schema.md) | Verdict-certificate schema and classifier rule registry | Accepted |
 | [0011](0011-incident-artifact-manifest.md) | Incident-artifact manifest and bundle layout | Accepted |
+| [0012](0012-test-attestation-schema.md) | Signed test-attestation schema (`test-attestation/v1`) | Accepted |
 
 These records describe *why*, not *how*. For the runtime behavior they govern,
 see the [`README.md`](../../README.md) safety model and

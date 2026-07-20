@@ -12,10 +12,9 @@ categories.workspace = true
 [dependencies]
 oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.9.0" }
 oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.9.0" }
-thiserror.workspace = true
-
-[dev-dependencies]
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

@@ -11,6 +11,21 @@
 //! Certificates whose verdict depends on a server-only live purity oracle are
 //! deliberately rejected when this self-contained re-derivation differs. A
 //! false positive is safer than treating an unverifiable server claim as proof.
+//!
+//! The [`attestation`] module extends the same evidence-first stance to the
+//! test program itself: a signed `test-attestation/v1` document binds named
+//! tests to recorded outcomes with the audit chain's keyed MAC, so a lane's
+//! green can be re-verified offline by a holder of a trusted MAC key rather
+//! than remaining only a CI-log assertion.
+
+mod attestation;
+
+pub use attestation::{
+    AttestedArtifact, AttestedTest, TEST_ATTESTATION_FRAME, TEST_ATTESTATION_SCHEMA,
+    TEST_ATTESTATION_SIGNATURE_SCHEMA, TestAttestation, TestAttestationDraft,
+    TestAttestationFormatError, TestAttestationSignature, TestAttestationVerificationError,
+    TestOutcome, VerifiedTestAttestation, sign_test_attestation, verify_test_attestation,
+};
 
 use oraclemcp_audit::{AUDIT_SCHEMA_VERSION, AuditRecord, SigningKey, sha256_hex};
 use oraclemcp_guard::{

@@ -792,6 +792,15 @@ impl SigningKey {
         self.key.authenticate_hex(entry_hash.as_bytes())
     }
 
+    /// Constant-time check of a stored `hmac-sha256:<hex>` signature over
+    /// `message`. The exact inverse of [`Self::sign`], exposed so offline
+    /// evidence verifiers (verdict certificates, test attestations) can check
+    /// a keyed MAC using caller-supplied trusted secret material.
+    #[must_use]
+    pub fn verify(&self, message: &str, signature: &str) -> bool {
+        self.key.verify_hex(message.as_bytes(), signature)
+    }
+
     /// Compare secret material without exposing it. Used only to reject an
     /// ambiguous keyring that assigns the same key to multiple identifiers.
     #[must_use]
@@ -1289,7 +1298,7 @@ impl AuditRecord {
         let Some(signature) = self.signature.as_deref() else {
             return false;
         };
-        key.key.verify_hex(self.entry_hash.as_bytes(), signature)
+        key.verify(&self.entry_hash, signature)
     }
 }
 
