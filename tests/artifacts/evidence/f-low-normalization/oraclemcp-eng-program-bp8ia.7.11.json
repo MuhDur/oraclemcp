@@ -1,0 +1,214 @@
+{
+  "schema": "oraclemcp-f-low-normalization/v1",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11",
+  "plan": "docs/plan/PLAN_ENGINEERING_PROGRAM.md",
+  "plan_sections": ["28.3", "28.4", "33(b)"],
+  "observed_sources": {
+    "oraclemcp": {
+      "path": "/home/durakovic/projects/oraclemcp",
+      "sha": "b6bed9dd205dc403cee75cf040beafdab4ee5bdb"
+    },
+    "rust-oracledb": {
+      "path": "/home/durakovic/projects/rust-oracledb",
+      "sha": "4f1eb3abd3af604ad29f1899251025499b0a3869"
+    }
+  },
+  "method": "Each compact finding was re-read at its current code site. Live gaps were expanded into one open bead with repo/path/site, risk, narrow fix, negative acceptance, positive acceptance, labels, and parent dependency. Already-landed or rejected near-misses are explicitly non-beadable with current-code evidence; no product implementation was performed.",
+  "normalized_beads": [
+    {
+      "finding": "DC5",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.1",
+      "repo": "rust-oracledb",
+      "site": "crates/oracledb/src/sql_convert.rs:1233-1250",
+      "verified": "FixedOffset seconds are divided by 60 without a divisibility check."
+    },
+    {
+      "finding": "DC6",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.2",
+      "repo": "rust-oracledb",
+      "site": "crates/oracledb/src/arrow/builders.rs:101-119,350-415,1250-1310",
+      "verified": "Integer coercion parses the leading -1 from -1e126."
+    },
+    {
+      "finding": "DC7",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.3",
+      "repo": "rust-oracledb",
+      "site": "crates/oracledb/src/lib.rs:10945-10954,12198-12209",
+      "verified": "AUTH serial is parsed as u64 and cast with as u16; the test pins wrapping."
+    },
+    {
+      "finding": "DK1",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.4",
+      "repo": "rust-oracledb",
+      "site": "crates/oracledb/src/pool.rs:1123-1165",
+      "verified": "Last-handle election uses observational Arc::strong_count."
+    },
+    {
+      "finding": "DK2",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.5",
+      "repo": "rust-oracledb",
+      "site": "crates/oracledb/src/pool/acquire.rs:52-105",
+      "verified": "Every TimedAcquireDeadline spawns and detaches one std thread."
+    },
+    {
+      "finding": "DI2",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.6",
+      "repo": "oraclemcp",
+      "site": "crates/oraclemcp/src/registry.rs:717-739; crates/oraclemcp/src/dispatch/mod.rs:8415-8421",
+      "verified": "preview_dml max_rows has no schema maximum and is copied into QueryCaps unclamped."
+    },
+    {
+      "finding": "DI4",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.7",
+      "repo": "oraclemcp",
+      "site": "crates/oraclemcp/src/dispatch/mod.rs:6526-6540",
+      "verified": "Capacity pruning removes HashMap keys().next(), not the oldest live grant."
+    },
+    {
+      "finding": "DI5",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.8",
+      "repo": "oraclemcp",
+      "site": "crates/oraclemcp/src/dispatch/mod.rs:4281-4294,11590-11599,14082-14091",
+      "verified": "Central budgets filter zero while only selected tools call the rejecting helper."
+    },
+    {
+      "finding": "DI6",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.9",
+      "repo": "oraclemcp",
+      "site": "crates/oraclemcp/src/dispatch/mod.rs:8232-8307,11147-11170",
+      "verified": "Checkpoint and undo successes mutate transaction state but are absent from terminal-effect recognition."
+    },
+    {
+      "finding": "G1",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.10",
+      "repo": "oraclemcp",
+      "site": "crates/oraclemcp-guard/src/classifier.rs:141-143,2923-2930,3768-3794",
+      "verified": "Single statements normalize VECTOR_EMBEDDING but the outer multi-statement parser sees original syntax."
+    },
+    {
+      "finding": "DB2",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.11",
+      "repo": "oraclemcp",
+      "site": "crates/oraclemcp-db/src/connection.rs:2177-2194,4174-4190,5574-5650",
+      "verified": "Unmatched supplied named binds are appended positionally; the current test pins the tail."
+    },
+    {
+      "finding": "DB3",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.12",
+      "repo": "oraclemcp",
+      "site": "crates/oraclemcp-db/src/connection.rs:1358-1376,2670-2782",
+      "verified": "Recovery returns Quarantined but does not persist quarantine_reason in the emptied slot."
+    },
+    {
+      "finding": "DB4",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.13",
+      "repo": "oraclemcp",
+      "site": "crates/oraclemcp-db/src/connection.rs:2859-2869,3097-3107,3388-3408,3675-3695",
+      "verified": "Signed interval components are interpolated independently in four serializers."
+    },
+    {
+      "finding": "CC1",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.14",
+      "repo": "oraclemcp",
+      "site": "crates/oraclemcp-core/src/http/operator.rs:174-250,295-305",
+      "verified": "The in-progress lease stores only a key and has no Drop cleanup."
+    },
+    {
+      "finding": "CC2",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.15",
+      "repo": "oraclemcp",
+      "site": "crates/oraclemcp-core/src/http/stores.rs:340-360,493-704",
+      "verified": "One global Condvar and notify_all wake every session waiter on one-session append."
+    },
+    {
+      "finding": "AU2",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.16",
+      "repo": "oraclemcp",
+      "site": "crates/oraclemcp-audit/src/shipping.rs:366-407,1671-1710",
+      "verified": "CEF tests cover CR/LF and delimiters but not Unicode line separators."
+    },
+    {
+      "finding": "AU3",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.17",
+      "repo": "oraclemcp",
+      "site": "crates/oraclemcp-audit/src/rekor.rs:115-150",
+      "verified": "Offline binding uses an ASCII substring search over entry_body."
+    },
+    {
+      "finding": "CF2",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.18",
+      "repo": "oraclemcp",
+      "site": "crates/oraclemcp-telemetry/src/otlp/redact.rs:70-103,173-230",
+      "verified": "The value backstop has no OCID-in-prose recognizer."
+    },
+    {
+      "finding": "CF3",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.19",
+      "repo": "oraclemcp",
+      "site": "crates/oraclemcp-core/src/doctor.rs:800-950",
+      "verified": "Destination symlink checks and path-based rename are separate operations."
+    },
+    {
+      "finding": "G2",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.20",
+      "repo": "oraclemcp",
+      "site": "crates/oraclemcp-guard/src/classifier.rs:2777-2790,3044-3048,4992-5001",
+      "verified": "An empty collected base-object set is treated as ProvenReadOnly without independently proving absence of FROM."
+    }
+  ],
+  "non_beadable_resolved": [
+    {
+      "finding": "DC4",
+      "tracking": "oraclemcp-eng-program-bp8ia.7.4",
+      "evidence": "rust-oracledb commit abc4dd3 is an ancestor; lib.rs:2874-3010 now passes the configured transport timeout to TCP and TLS, with focused stalled-peer/full-descriptor tests."
+    },
+    {
+      "finding": "PY5",
+      "tracking": "oraclemcp-eng-program-bp8ia.7.7",
+      "evidence": "rust-oracledb commit b364f0c changes convert.rs:1225-1233 to div_euclid(1000) and tests negative sub-microsecond values."
+    },
+    {
+      "finding": "PR1",
+      "tracking": null,
+      "evidence": "rust-oracledb commit 6e01bc9 adds len() >= 2 in protocol/sql.rs:402-412, a lone-quote regression at 934-946, and the sql_statement_surface fuzz target. No remaining fix exists to bead."
+    },
+    {
+      "finding": "DB1",
+      "tracking": "oraclemcp-eng-program-bp8ia.7.10",
+      "evidence": "connection.rs:2819-2824 and 3057-3062 now map QueryValue::Boolean to exact Boolean cells; the existing individual bead is closed."
+    },
+    {
+      "finding": "AU1",
+      "tracking": null,
+      "evidence": "record.rs:1739-1807 uses stable numeric decision/outcome tags and length-frames every variable string in the v5+ canonical preimage; current schema is v10. The reported unprefixed Debug preimage is legacy-only, so no current-schema fix remains."
+    },
+    {
+      "finding": "AU4",
+      "tracking": null,
+      "evidence": "oraclemcp-auth secrets.rs:64-69 renders Malformed and NotFound without their stored raw reference, and main.rs:913-930 preserves the redacted summary. No raw ref is echoed through Display."
+    }
+  ],
+  "explicit_wontfix": [
+    {
+      "finding": "PR2",
+      "decision": "wontfix_as_live_bug",
+      "evidence": "protocol/vector.rs:239-247 documents the public infallible convenience panic, while untrusted bind and OSON re-encoders call encode_vector_checked at thin/bind.rs:1264 and oson.rs:1066. Invalid decoded input remains fallible; changing the convenience API is not a bug fix."
+    },
+    {
+      "finding": "PR3",
+      "decision": "wontfix_as_live_bug",
+      "evidence": "protocol/oson.rs bounds field-name and container counts through ProtocolLimits and with_capacity_limited before allocation, with object-element-count and oversized-count regressions. The reported count-times-size shape is already fail-closed."
+    },
+    {
+      "finding": "DK3",
+      "decision": "wontfix_redundant_best_effort",
+      "evidence": "pool.rs:1526-1529 sends the drop return and calls bounded notify_one; the region-owned reaper also drains the queue and has a periodic wake. Correctness does not depend on a separate off-lock broadcast, so adding one would be redundant."
+    }
+  ],
+  "counts": {
+    "new_individual_beads": 20,
+    "already_resolved_non_beadable": 6,
+    "explicit_wontfix": 3,
+    "unmapped": 0
+  }
+}
