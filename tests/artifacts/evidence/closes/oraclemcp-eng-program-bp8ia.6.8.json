@@ -1,0 +1,73 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-20T11:14:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.6.8",
+  "scope": {
+    "summary": "Feed exact per-job heartbeat observations into a durable CiLaneSnapshot through a bounded production poller while preserving unknown-on-missing-or-contradictory evidence.",
+    "in_scope": [
+      ".github/workflows/ci-heartbeat.yml",
+      "README.md",
+      "crates/oraclemcp-core/ci_taxonomy.json",
+      "crates/oraclemcp-core/src/http/ci_lanes.rs",
+      "crates/oraclemcp-core/src/http/config.rs",
+      "crates/oraclemcp-core/src/http/mod.rs",
+      "crates/oraclemcp-core/src/http/serve.rs",
+      "crates/oraclemcp-core/src/http/tests_ci_lanes.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs",
+      "docs/ci_taxonomy.json",
+      "scripts/ci_heartbeat.sh",
+      "scripts/ci_taxonomy.py"
+    ],
+    "out_of_scope": [
+      "Changing which required-lane failures make the heartbeat workflow red.",
+      "Adding a paid always-on external polling service or a bespoke notification webhook."
+    ]
+  },
+  "source": {
+    "sha": "b6bed9dd205dc403cee75cf040beafdab4ee5bdb",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "production CI lane poller",
+        "kind": "api",
+        "trace": "crates/oraclemcp-core/src/http/tests_ci_lanes.rs::production_poller_delivers_current_per_job_state_outside_the_request_path drives the production poller through a local HTTP server and proves the durable snapshot carries the exact job state."
+      },
+      {
+        "name": "fail-closed polling failure path",
+        "kind": "api",
+        "trace": "crates/oraclemcp-core/src/http/tests_ci_lanes.rs::production_poller_persists_unknown_when_github_is_unavailable proves an unavailable API persists unknown rather than green."
+      },
+      {
+        "name": "dashboard CI lane route",
+        "kind": "route",
+        "trace": "The isolated implementation verification ran the focused heartbeat suite 6/6, the production-poller tests 2/2, and the binary CI-lane tests 3/3; route tests prove stale, absent, and contradictory lanes render unknown."
+      },
+      {
+        "name": "heartbeat workflow artifact",
+        "kind": "config-gate",
+        "trace": ".github/workflows/ci-heartbeat.yml runs scripts/ci_heartbeat.sh and uploads its ci-heartbeat/v1 snapshot, while the service poller independently refreshes durable local state so dashboard delivery does not depend on copying that ephemeral artifact."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No live GitHub API poll is claimed by this close; production HTTP behavior and failure handling were exercised against a deterministic local HTTP server.",
+    "This close does not claim a required-proof/v1 artifact; readiness remains not-ready on scoped tests.",
+    "Scheduled and advisory lanes are visibility evidence and do not change the separate Required gate semantics."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
