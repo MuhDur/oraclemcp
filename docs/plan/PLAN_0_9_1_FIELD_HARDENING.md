@@ -1004,11 +1004,16 @@ scrubbed by the existing secret/sensitive-data lints.
 - **R4 [P1] — round-N report + refusal-corpus regression gate.** `rig report` emits scrubbed
   `findings.jsonl`/`.md` in the field punch-list shape; diffs the refusal-corpus export against the
   committed baseline — a category change or a newly-ALLOWED construct is itself a finding.
-- **R5 [P2, operator-gated, deferred]** — LLM secondary harness: `RIG_LLM=1` + explicit operator
-  confirm; real `claude -p … --mcp-config <literal>` first (codex exec / opencode = deferred
-  matrix). Finds ergonomics defects (the oversized-orientation class) nothing deterministic finds.
-  Never automatic — token cost. *(Deferral was the one decision the operator left unanswered in the
-  2026-07-20 ruling round — the standing recommendation (defer past 0.9.1) applies until overridden.)*
+- **R5 [P1, in-train as R5-LITE]. OPERATOR RULING (2026-07-20): option 2 — R5-lite via Codex Spark
+  on the release candidate, baked into the train.** One operator-gated
+  `codex exec -m gpt-5.3-codex-spark` session (the proven Z2 launch shape — near-zero Claude usage)
+  drives the INSTALLED release-candidate server over stdio AND Streamable HTTP from a literal
+  hand-authored config, through a fixed prompt list covering orientation → schema exploration →
+  governed read → refusal → error-recovery; the full transcript feeds R4's round-N report. This is
+  the only lane that discovers agent-ERGONOMICS defects (the 344 KB-orientation class) — a
+  deterministic sweep asserts what we thought to check; a real agent stumbles into what we didn't.
+  Runs as part of §9.2 release acceptance (item 11). The FULL R5 matrix (real `claude -p`,
+  opencode, multi-harness) stays deferred to the next train alongside the browser-auth matrix.
 - **Failure-injection lanes** (via D10 + B16's test): idle-session kill → P0-5/A4; privilege revoke
   mid-run → P0-2/A3 + A1a; container restart → S3/reconnect honesty; token expiry (30-second-`exp`
   JWT via `token_exec`, held across a pool checkout) → B16; credential rotation → B4. The idle-kill
@@ -1275,7 +1280,8 @@ enforces this — it blocked the orchestrator's own build, correctly).
 10. **Workstream Z landed first and stayed landed** — oraclemcp `main` green (bead-evidence audit 0
     hard **in CI**, fresh mutation seal, Windows lane resolved) before any A/B fix is claimed done,
     and kept green at every subsequent push.
-11. **The rig ran on the release candidate** — R1–R4 executed against the RC build; the round-N
+11. **The rig ran on the release candidate** — R1–R4 executed against the RC build, **plus the
+    R5-lite Codex-Spark agent session** (operator-gated, per the 2026-07-20 ruling); the round-N
     report contains no untriaged P0/P1 finding (findings either fixed in-train or operator-deferred
     with a recorded reason).
 
