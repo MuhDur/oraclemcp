@@ -545,6 +545,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          # Full history: the bead-close-evidence audit resolves commit SHAs
+          # cited by close evidence; a shallow checkout reports SOURCE_SHA_ABSENT
+          # for perfectly valid main-reachable commits (2026-07-20 red).
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
