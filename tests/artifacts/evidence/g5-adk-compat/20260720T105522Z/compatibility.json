@@ -1,0 +1,3071 @@
+{
+  "schema_version": "oraclemcp-adk-compat-v1",
+  "evidence_revision": "20260720T105522Z",
+  "created_at": "2026-07-20T10:55:27.514261Z",
+  "bead": {
+    "id": "oraclemcp-eng-program-bp8ia.8.5",
+    "status": "open",
+    "title": "G5: F-S3 - client-neutral MCP compat fixes (from GCP audit)",
+    "tracker_mutated_by_audit": false
+  },
+  "provenance": {
+    "target_source_sha": "24c1dff84abbf11daa26564754bf5d5db423251d",
+    "source_commit_verified_through": "a40fb560c9641acc7c44845d1e2f6c1d9fdc9ad4",
+    "runtime_source_paths": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      "crates/**"
+    ],
+    "runtime_source_diff_from_target": [],
+    "tracked_runtime_source_was_clean_at_build": true,
+    "binary_sha256": "57e19497419e92870713f3fa0f238b43dff4c3354f8a2e611670f40b57ea20b9",
+    "binary_info": {
+      "binary": "oraclemcp",
+      "engine": false,
+      "live_db": true,
+      "mcp_protocol_version": "2025-11-25",
+      "tools": [
+        "oracle_list_profiles",
+        "oracle_connection_info",
+        "oracle_switch_profile",
+        "oracle_set_session_level",
+        "oracle_query",
+        "oracle_semantic_search",
+        "oracle_diff",
+        "oracle_preview_sql",
+        "oracle_execute",
+        "oracle_checkpoint",
+        "oracle_undo_to",
+        "oracle_preview_dml",
+        "oracle_compile_object",
+        "oracle_create_or_replace",
+        "oracle_patch_source",
+        "oracle_list_schemas",
+        "oracle_schema_inspect",
+        "oracle_search_objects",
+        "oracle_orient",
+        "oracle_describe",
+        "oracle_describe_index",
+        "oracle_describe_trigger",
+        "oracle_describe_view",
+        "oracle_get_ddl",
+        "oracle_get_source",
+        "oracle_sample_rows",
+        "oracle_read_clob",
+        "oracle_compile_errors",
+        "oracle_search_source",
+        "oracle_plscope_inspect",
+        "oracle_explain_plan",
+        "oracle_top_queries",
+        "oracle_plan_timeline",
+        "oracle_db_health",
+        "current_database",
+        "switch_database",
+        "enable_writes",
+        "disable_writes",
+        "query",
+        "preview_sql",
+        "execute_approved",
+        "compile_object",
+        "compile_with_warnings",
+        "create_or_replace",
+        "patch_package",
+        "patch_view",
+        "read_patch_preview",
+        "deploy_ddl",
+        "list_objects",
+        "list_schemas",
+        "get_schema",
+        "describe_table",
+        "describe_index",
+        "describe_trigger",
+        "describe_view",
+        "get_ddl",
+        "get_object_source",
+        "get_errors",
+        "get_clob"
+      ],
+      "transports": [
+        "stdio",
+        "http"
+      ],
+      "version": "0.9.0"
+    },
+    "raw_capture_location": "untracked target/g5-adk-compat/evidence/20260720T105522Z"
+  },
+  "environment": {
+    "python": "3.12.13",
+    "uv": "uv 0.11.24 (x86_64-unknown-linux-gnu)",
+    "packages": {
+      "anyio": "4.14.2",
+      "google-adk": "2.5.0",
+      "google-genai": "2.11.0",
+      "httpx": "0.28.1",
+      "mcp": "1.28.1",
+      "pydantic": "2.13.4"
+    },
+    "direct_oracle_client_packages": [],
+    "network": "bubblewrap --unshare-net; loopback only inside namespace",
+    "cloud_network_calls": 0,
+    "database_round_trips": 0,
+    "successful_oracle_connections": 0,
+    "synthetic_oracle_connect_attempts": 5,
+    "lock_sha256": "4bc569cff70e42e41e2cdae03cbb6c4edf1a6f0b6a0da1a5e43f4b8838db574d",
+    "config_sha256": "bf700d1b4ba6002d8dc9299ab4f4321bc3892f967914a7c031a1379d9fcebde6"
+  },
+  "compatibility_matrix": [
+    {
+      "area": "stdio child process spawn",
+      "detail": "ADK launched the exact copied binary twice",
+      "state": "PASS"
+    },
+    {
+      "area": "stdio initialize",
+      "detail": "negotiated=['2025-11-25']",
+      "state": "PASS"
+    },
+    {
+      "area": "initialized notification",
+      "detail": "ADK initialization completed before tools/list",
+      "state": "PASS"
+    },
+    {
+      "area": "protected tools/list",
+      "detail": "43 protected READ_ONLY tools",
+      "state": "PASS"
+    },
+    {
+      "area": "full schema tools/list + ADK conversion",
+      "detail": "60/60 full-catalog declarations converted",
+      "state": "PASS"
+    },
+    {
+      "area": "representative tools/call",
+      "detail": "metadata, preview, query refusal, invalid arguments, connection-info classification",
+      "state": "PASS"
+    },
+    {
+      "area": "structured tool refusal",
+      "detail": "typed OPERATING_LEVEL_TOO_LOW returned as MCP tool result",
+      "state": "PASS"
+    },
+    {
+      "area": "same-session recovery",
+      "detail": "metadata call succeeded after refusal and invalid arguments",
+      "state": "PASS"
+    },
+    {
+      "area": "stderr isolation",
+      "detail": "diagnostics captured separately; no synthetic secret values found",
+      "state": "PASS"
+    },
+    {
+      "area": "graceful close + repeated session",
+      "detail": "idempotent close; no child remains",
+      "state": "PASS"
+    },
+    {
+      "area": "stdio cancellation",
+      "detail": "No long-running DB-free ADK tool call exists in this no-Oracle fixture",
+      "state": "NOT_TESTED"
+    },
+    {
+      "area": "Gemini declaration acceptance",
+      "detail": "Cloud/model calls expressly excluded from this audit",
+      "state": "NOT_TESTED"
+    },
+    {
+      "area": "Streamable HTTP bearer",
+      "detail": "loopback-only, service-owned bearer, initialize/list/call/recovery/shutdown",
+      "state": "PASS"
+    },
+    {
+      "area": "OAuth/mTLS/remote HTTP",
+      "detail": "Deferred by plan and outside local G5 scope",
+      "state": "NOT_TESTED"
+    },
+    {
+      "area": "live Oracle calls",
+      "detail": "Synthetic TEST-NET profiles in a network namespace; no database available or contacted",
+      "state": "NOT_TESTED"
+    }
+  ],
+  "coverage": [
+    {
+      "explicit_gaps": 1,
+      "passing": 10,
+      "required": 10,
+      "score": "10/10",
+      "section": "Plan 5.3 local stdio lifecycle"
+    },
+    {
+      "explicit_gaps": 60,
+      "passing": 60,
+      "required": 60,
+      "score": "60/60 ADK conversions; Gemini acceptance NOT_TESTED",
+      "section": "Plan 5.4 local full-schema conversion"
+    },
+    {
+      "explicit_gaps": 1,
+      "passing": 7,
+      "required": 7,
+      "score": "7/7; live nested-input call NOT_TESTED",
+      "section": "Plan 5.5 DB-free representative calls"
+    },
+    {
+      "explicit_gaps": 0,
+      "passing": 1,
+      "required": 1,
+      "score": "1/1",
+      "section": "Plan 5.7 local HTTP bearer"
+    }
+  ],
+  "catalogs": {
+    "protected_read_only": {
+      "count": 43,
+      "conversion_pass": 43,
+      "conversion_fail": 0,
+      "failures": [],
+      "tools": [
+        {
+          "name": "current_database",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "describe_index",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "describe_table",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "describe_trigger",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "describe_view",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "get_clob",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "get_ddl",
+          "required": [
+            "object_type"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "get_errors",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "get_object_source",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "get_schema",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "list_objects",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "list_schemas",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_capabilities",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_compile_errors",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_connection_info",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": true
+        },
+        {
+          "name": "oracle_db_health",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_describe",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_describe_index",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_describe_trigger",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_describe_view",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_diff",
+          "required": [
+            "sql"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [
+              "$/properties/binds",
+              "$/properties/key",
+              "$/properties/key_columns",
+              "$/properties/keys"
+            ],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_get_ddl",
+          "required": [
+            "object_type"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_get_source",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_list_profiles",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": true
+        },
+        {
+          "name": "oracle_list_schemas",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_orient",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [
+              "$/properties/include"
+            ],
+            "defaults": [],
+            "enums": [
+              "$/properties/include/items"
+            ],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_plan_timeline",
+          "required": [
+            "sql_id"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_plscope_inspect",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_preview_sql",
+          "required": [
+            "sql"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": true
+        },
+        {
+          "name": "oracle_query",
+          "required": [
+            "sql"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [
+              "$/properties/binds"
+            ],
+            "defaults": [],
+            "enums": [
+              "$/properties/format"
+            ],
+            "nested_objects": [
+              "$/properties/as_of"
+            ],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": true
+        },
+        {
+          "name": "oracle_read_clob",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_sample_rows",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_schema_inspect",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_search_objects",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [
+              "$/properties/detail_level"
+            ],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_search_source",
+          "required": [
+            "needle"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_semantic_search",
+          "required": [
+            "over"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false",
+              "$/properties/filter=false",
+              "$/properties/over=false"
+            ],
+            "all_of": [],
+            "any_of": [
+              "$/properties/filter/properties/value"
+            ],
+            "arrays": [
+              "$/properties/query_vector"
+            ],
+            "defaults": [],
+            "enums": [
+              "$/properties/metric"
+            ],
+            "nested_objects": [
+              "$/properties/filter",
+              "$/properties/over"
+            ],
+            "nullable": [
+              "$/properties/filter/properties/value",
+              "$/properties/filter/properties/value/anyOf/3"
+            ],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_set_session_level",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_switch_profile",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_top_queries",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [
+              "$/properties/metric"
+            ],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "preview_sql",
+          "required": [
+            "sql"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "query",
+          "required": [
+            "sql"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [
+              "$/properties/binds"
+            ],
+            "defaults": [],
+            "enums": [
+              "$/properties/export_format"
+            ],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "read_patch_preview",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "switch_database",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        }
+      ]
+    },
+    "schema_only_admin": {
+      "count": 60,
+      "conversion_pass": 60,
+      "conversion_fail": 0,
+      "failures": [],
+      "tools": [
+        {
+          "name": "compile_object",
+          "required": [
+            "object_type"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "compile_with_warnings",
+          "required": [
+            "object_type"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "create_or_replace",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "current_database",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "deploy_ddl",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "describe_index",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "describe_table",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "describe_trigger",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "describe_view",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "disable_writes",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "enable_writes",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "execute_approved",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "get_clob",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "get_ddl",
+          "required": [
+            "object_type"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "get_errors",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "get_object_source",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "get_schema",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "list_objects",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "list_schemas",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_capabilities",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_checkpoint",
+          "required": [
+            "name"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_compile_errors",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_compile_object",
+          "required": [
+            "object_type"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_connection_info",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": true
+        },
+        {
+          "name": "oracle_create_or_replace",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_db_health",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_describe",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_describe_index",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_describe_trigger",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_describe_view",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_diff",
+          "required": [
+            "sql"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [
+              "$/properties/binds",
+              "$/properties/key",
+              "$/properties/key_columns",
+              "$/properties/keys"
+            ],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_execute",
+          "required": [
+            "sql"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [
+              "$/properties/binds"
+            ],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_explain_plan",
+          "required": [
+            "sql"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_get_ddl",
+          "required": [
+            "object_type"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_get_source",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_list_profiles",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": true
+        },
+        {
+          "name": "oracle_list_schemas",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_orient",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [
+              "$/properties/include"
+            ],
+            "defaults": [],
+            "enums": [
+              "$/properties/include/items"
+            ],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_patch_source",
+          "required": [
+            "object_type"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_plan_timeline",
+          "required": [
+            "sql_id"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_plscope_inspect",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_preview_dml",
+          "required": [
+            "sql"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [
+              "$/properties/binds",
+              "$/properties/witness_binds"
+            ],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_preview_sql",
+          "required": [
+            "sql"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": true
+        },
+        {
+          "name": "oracle_query",
+          "required": [
+            "sql"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [
+              "$/properties/binds"
+            ],
+            "defaults": [],
+            "enums": [
+              "$/properties/format"
+            ],
+            "nested_objects": [
+              "$/properties/as_of"
+            ],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": true
+        },
+        {
+          "name": "oracle_read_clob",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_sample_rows",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_schema_inspect",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_search_objects",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [
+              "$/properties/detail_level"
+            ],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_search_source",
+          "required": [
+            "needle"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_semantic_search",
+          "required": [
+            "over"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false",
+              "$/properties/filter=false",
+              "$/properties/over=false"
+            ],
+            "all_of": [],
+            "any_of": [
+              "$/properties/filter/properties/value"
+            ],
+            "arrays": [
+              "$/properties/query_vector"
+            ],
+            "defaults": [],
+            "enums": [
+              "$/properties/metric"
+            ],
+            "nested_objects": [
+              "$/properties/filter",
+              "$/properties/over"
+            ],
+            "nullable": [
+              "$/properties/filter/properties/value",
+              "$/properties/filter/properties/value/anyOf/3"
+            ],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_set_session_level",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_switch_profile",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_top_queries",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [
+              "$/properties/metric"
+            ],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "oracle_undo_to",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "patch_package",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "patch_view",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "preview_sql",
+          "required": [
+            "sql"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "query",
+          "required": [
+            "sql"
+          ],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [
+              "$/properties/binds"
+            ],
+            "defaults": [],
+            "enums": [
+              "$/properties/export_format"
+            ],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "read_patch_preview",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        },
+        {
+          "name": "switch_database",
+          "required": [],
+          "schema_features": {
+            "additional_properties": [
+              "$=false"
+            ],
+            "all_of": [],
+            "any_of": [],
+            "arrays": [],
+            "defaults": [],
+            "enums": [],
+            "nested_objects": [],
+            "nullable": [],
+            "one_of": []
+          },
+          "adk_callable": true,
+          "adk_conversion_state": "PASS",
+          "gemini_declaration_acceptance": {
+            "reason": "No cloud/model API calls were authorized for this local audit.",
+            "state": "NOT_TESTED"
+          },
+          "representative_call": false
+        }
+      ]
+    }
+  },
+  "stdio": {
+    "runs": [
+      {
+        "lane": "protected",
+        "run_number": 1,
+        "state": "PASS",
+        "transport": "stdio",
+        "protocol_versions": [
+          "2025-11-25"
+        ],
+        "catalog": {
+          "count": 43,
+          "conversion_pass": 43,
+          "conversion_fail": 0,
+          "failures": []
+        },
+        "call_checks": [
+          {
+            "check": "low-argument metadata call",
+            "detail": "oracle_list_profiles returned both synthetic profiles without Oracle access",
+            "state": "PASS"
+          },
+          {
+            "check": "protected classifier refusal",
+            "detail": "CREATE TABLE classified DDL and blocked by READ_ONLY ceiling",
+            "state": "PASS"
+          },
+          {
+            "check": "structured tool refusal",
+            "detail": "oracle_query returned a typed MCP tool error, not an SDK exception",
+            "state": "PASS"
+          },
+          {
+            "check": "same-session recovery after refusal",
+            "detail": "subsequent oracle_list_profiles call succeeded in the same ADK session",
+            "state": "PASS"
+          },
+          {
+            "check": "invalid argument validation",
+            "detail": "unknown argument produced the expected typed error",
+            "state": "PASS"
+          },
+          {
+            "check": "same-session recovery after invalid arguments",
+            "detail": "subsequent oracle_list_profiles call succeeded in the same ADK session",
+            "state": "PASS"
+          },
+          {
+            "check": "connection-info environment classification",
+            "detail": "network-isolated synthetic profile returned typed CONNECTION_FAILED; live metadata was intentionally unavailable",
+            "state": "PASS"
+          }
+        ],
+        "graceful_close": "PASS",
+        "server_pids_after_close": [],
+        "stderr": {
+          "line_count": 7,
+          "sha256": "b1d4a47c1c675584052d64a71e356c12b9a7f3f7cfa8ba7b0bf2382914b3a8ce",
+          "secret_hits": [],
+          "stdout_frame_isolation": "PASS"
+        }
+      },
+      {
+        "lane": "protected",
+        "run_number": 2,
+        "state": "PASS",
+        "transport": "stdio",
+        "protocol_versions": [
+          "2025-11-25"
+        ],
+        "catalog": {
+          "count": 43,
+          "conversion_pass": 43,
+          "conversion_fail": 0,
+          "failures": []
+        },
+        "call_checks": [
+          {
+            "check": "low-argument metadata call",
+            "detail": "oracle_list_profiles returned both synthetic profiles without Oracle access",
+            "state": "PASS"
+          },
+          {
+            "check": "protected classifier refusal",
+            "detail": "CREATE TABLE classified DDL and blocked by READ_ONLY ceiling",
+            "state": "PASS"
+          },
+          {
+            "check": "structured tool refusal",
+            "detail": "oracle_query returned a typed MCP tool error, not an SDK exception",
+            "state": "PASS"
+          },
+          {
+            "check": "same-session recovery after refusal",
+            "detail": "subsequent oracle_list_profiles call succeeded in the same ADK session",
+            "state": "PASS"
+          },
+          {
+            "check": "invalid argument validation",
+            "detail": "unknown argument produced the expected typed error",
+            "state": "PASS"
+          },
+          {
+            "check": "same-session recovery after invalid arguments",
+            "detail": "subsequent oracle_list_profiles call succeeded in the same ADK session",
+            "state": "PASS"
+          },
+          {
+            "check": "connection-info environment classification",
+            "detail": "network-isolated synthetic profile returned typed CONNECTION_FAILED; live metadata was intentionally unavailable",
+            "state": "PASS"
+          }
+        ],
+        "graceful_close": "PASS",
+        "server_pids_after_close": [],
+        "stderr": {
+          "line_count": 7,
+          "sha256": "ceada863a39bbd53bd32b5b10915806c132eb9ce68323c4d466db8abb9c4a357",
+          "secret_hits": [],
+          "stdout_frame_isolation": "PASS"
+        }
+      },
+      {
+        "lane": "schema-only",
+        "run_number": 1,
+        "state": "PASS",
+        "transport": "stdio",
+        "protocol_versions": [
+          "2025-11-25"
+        ],
+        "catalog": {
+          "count": 60,
+          "conversion_pass": 60,
+          "conversion_fail": 0,
+          "failures": []
+        },
+        "call_checks": [],
+        "graceful_close": "PASS",
+        "server_pids_after_close": [],
+        "stderr": {
+          "line_count": 7,
+          "sha256": "0499302b0bad5981cfdf8041bbc3868a125f0045c867b609b11cb3dc678deffd",
+          "secret_hits": [],
+          "stdout_frame_isolation": "PASS"
+        }
+      }
+    ],
+    "repeated_protected_sessions": "PASS"
+  },
+  "streamable_http": {
+    "state": "PASS",
+    "transport": "streamable_http",
+    "auth": "service-owned per-client bearer",
+    "protocol_versions": [
+      "2025-11-25"
+    ],
+    "catalog": {
+      "count": 43,
+      "conversion_pass": 43,
+      "conversion_fail": 0,
+      "failures": []
+    },
+    "checks": [
+      {
+        "check": "authenticated metadata call",
+        "state": "PASS"
+      },
+      {
+        "check": "typed invalid-argument response",
+        "state": "PASS"
+      },
+      {
+        "check": "same-session HTTP recovery",
+        "state": "PASS"
+      }
+    ],
+    "graceful_close": "PASS",
+    "server_teardown": "ADK client session closed first; the local listener then received explicit SIGTERM",
+    "server_exit_code": -15,
+    "server_pids_after_close": [],
+    "stderr": {
+      "line_count": 7,
+      "sha256": "e5c0c7736962a206e23169a20fa1ffb78c42961292036c2b62bb58ffcceab794",
+      "secret_hits": [],
+      "stdout_frame_isolation": "PASS"
+    },
+    "stdout": {
+      "line_count": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "classification": {
+    "adk_defects": [],
+    "environment_limitations": [
+      "No live Oracle: connection_info typed CONNECTION_FAILED is expected for the synthetic network-isolated profile.",
+      "No cloud/model call: Gemini declaration acceptance and Vertex agent orchestration are NOT_TESTED.",
+      "Cancellation is NOT_TESTED because the DB-free fixture has no faithful long-running call."
+    ],
+    "server_defects": [],
+    "setup_failures": [
+      {
+        "cause": "StringIO was passed as stdio errlog; ADK subprocess launch requires a real file descriptor",
+        "error": "io.UnsupportedOperation: fileno",
+        "owner": "client_setup",
+        "resolution": "Use a real evidence log file"
+      },
+      {
+        "cause": "The cleared audit environment intentionally contained no Google ADC",
+        "error": "DefaultCredentialsError while probing optional ADC-backed mTLS configuration",
+        "owner": "client_optional_mtls_setup",
+        "resolution": "ADK continued successfully over the explicit plain loopback Streamable HTTP URL; no cloud request was made"
+      }
+    ]
+  },
+  "decision": "no server changes required",
+  "official_sources": [
+    "https://adk.dev/tools-custom/mcp-tools/",
+    "https://github.com/google/adk-python/releases/tag/v2.5.0",
+    "https://github.com/google/adk-python/blob/v2.5.0/pyproject.toml",
+    "https://pypi.org/project/google-adk/"
+  ],
+  "publication_boundary": {
+    "live_or_cloud_evidence_claimed": false,
+    "raw_logs_committed": false,
+    "note": "This normalized bundle preserves the local ADK/MCP proof. Raw secret-scanned logs remain untracked under target/ and are not claimed as durable repository evidence."
+  }
+}

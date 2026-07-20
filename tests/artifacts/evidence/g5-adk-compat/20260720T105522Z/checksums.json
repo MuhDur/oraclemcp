@@ -1,0 +1,29 @@
+{
+  "schema_version": "oraclemcp-adk-compat-checksums-v1",
+  "evidence_revision": "20260720T105522Z",
+  "algorithm": "sha256",
+  "tracked_files": {
+    "compatibility.json": "ab3c2ce760cb8eececb028ed68163198229cc8c5e69353b08c571717a342a9bd",
+    "compatibility-matrix.md": "0ffdf3534725ef4246edee2d8647b704ad13ef1c862d6ff379b91d75634e42b5"
+  },
+  "source_capture": {
+    "location": "untracked target/g5-adk-compat/evidence/20260720T105522Z",
+    "manifest_sha256": "bb37eb8163fd5047f4e00ff34540ab610afdac220b5d14c62a0b235cb69419a1",
+    "files": {
+      "compatibility.json": "38c76cad15b5eefa4f7da2e2e673b8ce5d8d0eeb4133f585a18822591342aac2",
+      "compatibility-matrix.md": "0ffdf3534725ef4246edee2d8647b704ad13ef1c862d6ff379b91d75634e42b5",
+      "harness.stderr.log": "c82f123b273add50d128b9a6d98dac2aa42fd22833f08714363d601ed7cf32a7",
+      "http-bearer.stderr.log": "e5c0c7736962a206e23169a20fa1ffb78c42961292036c2b62bb58ffcceab794",
+      "http-bearer.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdio-protected-1.stderr.log": "b1d4a47c1c675584052d64a71e356c12b9a7f3f7cfa8ba7b0bf2382914b3a8ce",
+      "stdio-protected-2.stderr.log": "ceada863a39bbd53bd32b5b10915806c132eb9ce68323c4d466db8abb9c4a357",
+      "stdio-schema-only-1.stderr.log": "0499302b0bad5981cfdf8041bbc3868a125f0045c867b609b11cb3dc678deffd"
+    },
+    "durable_repository_evidence": false
+  },
+  "pinned_inputs": {
+    "oraclemcp_binary": "57e19497419e92870713f3fa0f238b43dff4c3354f8a2e611670f40b57ea20b9",
+    "profiles.toml": "bf700d1b4ba6002d8dc9299ab4f4321bc3892f967914a7c031a1379d9fcebde6",
+    "uv.lock": "4bc569cff70e42e41e2cdae03cbb6c4edf1a6f0b6a0da1a5e43f4b8838db574d"
+  }
+}
