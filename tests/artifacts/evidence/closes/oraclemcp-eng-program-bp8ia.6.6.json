@@ -1,0 +1,57 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-20T11:23:39Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.6.6",
+  "scope": {
+    "summary": "Seed both repositories' cass-memory context with the quota-death, lying-gate, publish-before-persist, and self-fulfilling-fixture anti-patterns and prove they are retrievable.",
+    "in_scope": [
+      ".cass/playbook.yaml",
+      ".cass/traumas.jsonl",
+      "tests/artifacts/evidence/oraclemcp-eng-program-bp8ia.6.6-driver-handoff.json"
+    ],
+    "out_of_scope": [
+      "Backfilling feedback votes or promoting the new candidate rules to a higher maturity state.",
+      "Copying session-history snippets or any field-test/customer identifiers into committed evidence."
+    ]
+  },
+  "source": {
+    "sha": "7c8743e48454cd827760855e1dcf021275ad8ecd",
+    "tree_clean": true,
+    "branch": "codex/wave1-close-evidence-20260720"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oraclemcp cm context",
+        "kind": "cli",
+        "trace": "cm context 'swarm quota gates publish persist self-fulfilling fixtures' --json returned success=true with b-omcp-e6-fixture-oracle, b-omcp-e6-quota-death, b-omcp-e6-publish-persist, and b-omcp-e6-gates-lie."
+      },
+      {
+        "name": "rust-oracledb cm context",
+        "kind": "cli",
+        "trace": "The same command from rust-oracledb returned success=true with the four corresponding b-rodb-e6 anti-pattern IDs."
+      },
+      {
+        "name": "cross-repo checksum handoff",
+        "kind": "api",
+        "trace": "tests/artifacts/evidence/oraclemcp-eng-program-bp8ia.6.6-driver-handoff.json binds server commit e1616e14d89726003d4a1e5d9c923ea179136093 and driver commit 88a1c5f44154c59242ce8986b5ce2183aeb31311 to exact trees, paths, and SHA-256 digests; all values were independently recomputed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The new rules are candidate/draft memories and do not yet carry helpful or harmful feedback events.",
+    "This close has no required-proof/v1 artifact and remains not-ready on scoped retrieval evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
