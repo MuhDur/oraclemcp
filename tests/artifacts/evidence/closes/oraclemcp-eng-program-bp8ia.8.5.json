@@ -1,0 +1,70 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-20T11:03:51Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.8.5",
+  "scope": {
+    "summary": "Resolve the conditional F-S3 compatibility-fix bead as an evidence-backed no-op: the pinned local Google ADK audit reproduced no server or ADK defect requiring a client-specific or client-neutral server patch.",
+    "in_scope": [
+      "tests/artifacts/evidence/g5-adk-compat/20260720T105522Z/compatibility.json",
+      "tests/artifacts/evidence/g5-adk-compat/20260720T105522Z/compatibility-matrix.md",
+      "tests/artifacts/evidence/g5-adk-compat/20260720T105522Z/checksums.json"
+    ],
+    "out_of_scope": [
+      "Gemini declaration acceptance and live Vertex AI agent orchestration.",
+      "Successful Oracle connectivity, live database semantics, and database round trips.",
+      "Cancellation behavior, because the database-free fixture has no faithful long-running tool call.",
+      "OAuth, mTLS, and remote Streamable HTTP deployment.",
+      "Any GCP showcase, recording, documentation, release, or deployment work outside the conditional F-S3 fix bead."
+    ]
+  },
+  "source": {
+    "sha": "53c1050734908d01e4b4a21db088bacfe6350c59",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Google ADK McpToolset stdio lifecycle",
+        "kind": "api",
+        "trace": "compatibility.json records three PASS stdio sessions against the exact copied oraclemcp binary: two protected sessions plus one schema-only session, MCP 2025-11-25 negotiation, tools/list, representative tools/call, idempotent close, and zero remaining server PIDs."
+      },
+      {
+        "name": "full MCP tool-schema conversion",
+        "kind": "tool",
+        "trace": "compatibility.json records 43/43 protected declarations and 60/60 schema-only ADMIN declarations converted into ADK/GenAI callable declarations, with zero conversion failures and per-tool results."
+      },
+      {
+        "name": "fail-closed refusal and same-session recovery",
+        "kind": "tool",
+        "trace": "compatibility.json records a DDL preview blocked by the READ_ONLY ceiling, oracle_query returning typed OPERATING_LEVEL_TOO_LOW as a tool result, INVALID_ARGUMENTS classification, and successful metadata calls afterward in the same ADK session."
+      },
+      {
+        "name": "Streamable HTTP per-client bearer",
+        "kind": "api",
+        "trace": "compatibility.json records loopback-only bearer-authenticated initialize, tools/list, metadata call, typed invalid-argument response, same-session recovery, ADK client close, and explicit local listener teardown."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This closure proves only the local, network-isolated MCP compatibility surface for Python 3.12.13, google-adk 2.5.0, google-genai 2.11.0, and mcp 1.28.1.",
+    "Gemini declaration acceptance and live Vertex AI orchestration are NOT_TESTED; local ADK/GenAI declaration construction is not a model API acceptance test.",
+    "No successful Oracle connection occurred and no database round trip was made; live Oracle semantics are NOT_TESTED.",
+    "Cancellation is NOT_TESTED because the database-free fixture has no faithful long-running call.",
+    "OAuth, mTLS, and remote HTTP are NOT_TESTED; only explicit plain loopback Streamable HTTP with a service-owned per-client bearer was exercised.",
+    "The durable repository bundle is normalized and checksum-bound; raw secret-scanned logs remain untracked under target/g5-adk-compat and are not claimed as durable evidence.",
+    "No required-proof/v1 artifact exists for this close, so readiness remains not-ready with scoped-test basis."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
