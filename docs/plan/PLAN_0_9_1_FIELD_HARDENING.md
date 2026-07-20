@@ -1,4 +1,4 @@
-# PLAN — 0.9.1 / driver 0.8.5 (or 0.9.0): field-hardening, self-sufficient testing, OCI
+# PLAN — oraclemcp 0.9.1 / driver 0.9.0: field-hardening, self-sufficient testing, OCI
 
 **Version:** v1 (pre-review). **Date:** 2026-07-20.
 **Owner:** lead orchestrator. **Release is operator-gated** — agents never tag or publish.
@@ -43,7 +43,7 @@ stage-aware TLS types). This has a release consequence — see §7.
 Driver beads: `rust-oracledb-4sfc` (**believed closed** — see §4.B5) and `rust-oracledb-s0se`
 (close_notify; relates to P1-8). 21 further driver beads are `deferred` and stay deferred.
 
-The 11 work beads: `plan-bead-graph-lint-eshv` (P0), `13` release train (P1), `5.2` D2 coverage
+The 11 work beads: `plan-bead-graph-lint-eshv` (P0), `13` release train (P1, versions now fixed: driver 0.9.0 / server 0.9.1), `5.2` D2 coverage
 ratchet (P1), `8.1` G1 IAM subject-mapping (P1), `4.3` C3 stash triage, `4.5` C5 moves/renames,
 `4.6` C6 de-monolith, `5.4` D4 fuzz shard (reopened for a cold-start proof), `8.2` G2 Live-nightly
 streak, `12.3` K3 attestation lanes (P3), `izk5` stale driver-version comment (P3).
@@ -580,17 +580,25 @@ the change is reworked patch-safe or held — never silently bumped.
 **Complication discovered today:** the driver's public source inventory went **908 → 915** items with the
 stage-aware TLS work already on `main`. Added public API is *minor*-compatible, not patch.
 
-**Three options:**
-- **(a)** Keep the driver at **0.8.5** only if `cargo-semver-checks` proves the additions are not on the
-  published API surface (source-item count ≠ exported API; verify, don't assume).
-- **(b)** Cut the driver as **0.9.0** and the server as **0.9.1**. Honest, and the plan's content is
-  substantial enough to justify it.
-- **(c)** Hold the additions behind a feature gate to preserve patch. **Not recommended** — it adds
-  complexity to preserve a number.
+**OPERATOR DECISION (2026-07-20): driver → `0.9.0`, server → `0.9.1`.**
 
-**Recommendation: run `cargo-semver-checks` first, then choose (a) or (b) on evidence.** Do not decide
-the version before the tool speaks. The server's own additions (new doctor output, new config keys) need
-the same check.
+- **Driver `0.8.4 → 0.9.0`** — a **minor** bump. This is the honest call: the stage-aware TLS work
+  already on `main` grew the public source inventory 908 → 915, and this plan adds more (B6 platform
+  trust anchors, B7 teardown hooks). A minor bump removes the incentive to contort real improvements
+  into patch-safe shapes.
+- **Server `0.9.0 → 0.9.1`** — `+0.0.1` as instructed.
+
+**Consequences, and they are deliberate:**
+1. Bead `13`'s original "STRICTLY patch, rework or hold if semver-checks flags minor" constraint is
+   **superseded for the driver** by this ruling. It still applies to the **server**: if a server change
+   forces a minor, it is reworked patch-safe or held — the server is `+0.0.1`.
+2. `cargo-semver-checks` still runs on both, but its role changes: for the driver it **documents** the
+   surface delta (and must show no *breaking* change — 0.9.0 is minor, not major); for the server it
+   **gates**.
+3. The server's `oracledb` dependency pin moves to `=0.9.0`; the release-surface sync check and the
+   driver-version references (bead `izk5`, `doctor.rs` comments) must be updated in the same train.
+4. **Any breaking change in the driver is out of scope.** 0.9.0 is additive-only. If something requires
+   a break, it waits for 1.0 (the `road-to-1-0` line, still deferred).
 
 ---
 
