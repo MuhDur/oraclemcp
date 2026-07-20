@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Create a mutation-result/v1 artifact from archived cargo-mutants outcomes.
+"""Seal complete OOM-free cargo-mutants shards as mutation-result/v1.
 
-This is intentionally a converter, not a mutation runner.  It lets a release
-retain the raw outcome records from a completed frozen run without pretending a
-new mutation campaign happened during a documentation migration.
+This is intentionally a verifier/converter, not a mutation runner. Every raw
+outcomes document needs its runner-produced mutation-shard-integrity/v1
+sidecar. A partial, OOM-affected, mismatched, duplicated, or missing shard is
+rejected before an evidence artifact can exist.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shlex
@@ -39,7 +41,13 @@ def mutant_location(mutant: dict) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--outcomes", type=Path, action="append", required=True)
-    parser.add_argument("--shard-id", action="append", default=[])
+    parser.add_argument(
+        "--integrity",
+        type=Path,
+        action="append",
+        required=True,
+        help="mutation-shard-integrity/v1 sidecar paired positionally with --outcomes",
+    )
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--scope-target", action="append", required=True)
     parser.add_argument("--description", required=True)
@@ -48,23 +56,126 @@ def main() -> int:
     parser.add_argument("--generated-at", default=None)
     args = parser.parse_args()
 
-    if args.shard_id and len(args.shard_id) != len(args.outcomes):
-        parser.error("--shard-id must be supplied once for every --outcomes file")
+    if len(args.integrity) != len(args.outcomes):
+        parser.error("--integrity must be supplied once for every --outcomes file")
     if re.fullmatch(r"[0-9a-f]{40}", args.source_sha) is None:
         parser.error("--source-sha must be a full lowercase 40-character Git SHA")
 
     budget = json.loads(args.resource_budget.read_text())
     outcomes_docs = [json.loads(path.read_text()) for path in args.outcomes]
-    for path, outcomes in zip(args.outcomes, outcomes_docs, strict=True):
+    integrity_docs = [json.loads(path.read_text()) for path in args.integrity]
+    scopes: dict[str, list[dict]] = {}
+    for outcomes_path, outcomes, integrity_path, integrity in zip(
+        args.outcomes, outcomes_docs, args.integrity, integrity_docs, strict=True
+    ):
+        if integrity.get("schema") != "mutation-shard-integrity/v1":
+            raise SystemExit(f"unsupported shard integrity document: {integrity_path}")
+        if integrity.get("oom_kill_delta") != 0:
+            raise SystemExit(
+                f"E_OOM_MUTANT: {integrity_path} records "
+                f"oom_kill_delta={integrity.get('oom_kill_delta')!r}; never grade it caught"
+            )
+        if integrity.get("pid_max_delta") != 0:
+            raise SystemExit(
+                f"E_TASK_CAP: {integrity_path} records "
+                f"pid_max_delta={integrity.get('pid_max_delta')!r}; never grade it caught"
+            )
+        if integrity.get("oom_policy") != "continue":
+            raise SystemExit(f"shard did not enforce OOMPolicy=continue: {integrity_path}")
+        for field in ("memory_max_bytes", "pid_task_max"):
+            if integrity.get(field) != budget.get(field):
+                raise SystemExit(
+                    f"resource budget mismatch for {field}: {integrity_path} recorded "
+                    f"{integrity.get(field)!r}, budget declares {budget.get(field)!r}"
+                )
+        if integrity.get("status") != "complete":
+            raise SystemExit(
+                f"shard is not complete: {integrity_path} status={integrity.get('status')!r}"
+            )
+        if integrity.get("source_sha") != args.source_sha:
+            raise SystemExit(
+                f"source SHA mismatch: {integrity_path} has {integrity.get('source_sha')!r}"
+            )
+        actual_hash = hashlib.sha256(outcomes_path.read_bytes()).hexdigest()
+        if integrity.get("outcomes_sha256") != actual_hash:
+            raise SystemExit(f"outcomes hash mismatch: {outcomes_path}")
         if outcomes.get("end_time") is None:
-            raise SystemExit(f"unfinished archived outcomes: {path}")
+            raise SystemExit(f"unfinished archived outcomes: {outcomes_path}")
         baseline = next(
             (entry for entry in outcomes["outcomes"] if entry["scenario"] == "Baseline"),
             None,
         )
         if baseline is None:
-            raise SystemExit(f"no baseline record in {path}")
+            raise SystemExit(f"no baseline record in {outcomes_path}")
         test_command(baseline, "pass")
+        accounted = sum(outcomes[key] for key in ("caught", "missed", "timeout", "unviable"))
+        if accounted != integrity.get("mutant_count"):
+            raise SystemExit(
+                f"partial shard counters: {outcomes_path} accounts for {accounted}/"
+                f"{integrity.get('mutant_count')} mutants"
+            )
+        mutant_ids = integrity.get("mutant_ids")
+        if not isinstance(mutant_ids, list) or len(mutant_ids) != integrity.get(
+            "mutant_count"
+        ):
+            raise SystemExit(f"invalid mutant inventory: {integrity_path}")
+        outcome_ids = [
+            entry["scenario"]["Mutant"]["name"]
+            for entry in outcomes["outcomes"]
+            if entry["scenario"] != "Baseline"
+        ]
+        if sorted(outcome_ids) != sorted(mutant_ids):
+            raise SystemExit(f"outcomes mutant population differs from inventory: {outcomes_path}")
+        scope = integrity.get("scope")
+        if scope not in {"guard", "audit", "core", "db", "dispatch", "fixture"}:
+            raise SystemExit(f"invalid mutation scope: {scope!r}")
+        scope_hash = integrity.get("scope_sha256")
+        if not isinstance(scope_hash, str) or re.fullmatch(r"[0-9a-f]{64}", scope_hash) is None:
+            raise SystemExit(f"invalid covered-file hash: {integrity_path}")
+        covered_files = integrity.get("covered_file_count")
+        if not isinstance(covered_files, int) or covered_files < 1:
+            raise SystemExit(f"invalid covered-file count: {integrity_path}")
+        scopes.setdefault(scope, []).append(integrity)
+
+    for scope, shards in scopes.items():
+        totals = {shard.get("shard_total") for shard in shards}
+        populations = {shard.get("campaign_mutant_total") for shard in shards}
+        hashes = {shard.get("scope_sha256") for shard in shards}
+        file_counts = {shard.get("covered_file_count") for shard in shards}
+        tool_versions = {shard.get("cargo_mutants_version") for shard in shards}
+        if (
+            len(totals) != 1
+            or len(populations) != 1
+            or len(hashes) != 1
+            or len(file_counts) != 1
+            or len(tool_versions) != 1
+        ):
+            raise SystemExit(f"inconsistent campaign metadata for scope {scope}")
+        total = next(iter(totals))
+        population = next(iter(populations))
+        if (
+            not isinstance(total, int)
+            or total < 1
+            or not isinstance(population, int)
+            or population < 1
+        ):
+            raise SystemExit(f"invalid campaign totals for scope {scope}")
+        indices = [shard.get("shard_index") for shard in shards]
+        if not all(isinstance(index, int) and index >= 1 for index in indices):
+            raise SystemExit(f"invalid shard index for scope {scope}")
+        indices.sort()
+        if indices != list(range(1, total + 1)):
+            raise SystemExit(
+                f"E_SHARD_INCOMPLETE: scope {scope} has indices {indices}, expected 1..{total}"
+            )
+        mutant_ids = [mutant_id for shard in shards for mutant_id in shard["mutant_ids"]]
+        if len(mutant_ids) != len(set(mutant_ids)):
+            raise SystemExit(f"duplicate mutant across shards for scope {scope}")
+        if len(mutant_ids) != population:
+            raise SystemExit(
+                f"incomplete mutant population for scope {scope}: "
+                f"{len(mutant_ids)}/{population}"
+            )
 
     counts = {"caught": 0, "missed": 0, "timeout": 0, "unviable": 0}
     kills: list[dict] = []
@@ -121,8 +232,9 @@ def main() -> int:
     # timeout remains in the denominator but is never silently promoted to a
     # kill.
     rate = counts["caught"] / denominator if denominator else 0.0
-    shard_ids = args.shard_id or [
-        f"shard-{index + 1}of{len(outcomes_docs)}" for index in range(len(outcomes_docs))
+    shard_ids = [
+        f"{integrity['scope']}-{integrity['shard_index']}of{integrity['shard_total']}"
+        for integrity in integrity_docs
     ]
     doc = {
         "schema": "mutation-result/v1",

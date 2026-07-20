@@ -1,28 +1,24 @@
-# cargo-mutants configuration — D6.4 mutation-safety gate
-# (bead oraclemcp-release-073-iec3.4.4 / plan §D6.4).
+# cargo-mutants configuration — D3 / TRI-2 mutation-safety gate, expanding the
+# original D6.4 guard+audit lane (plan §27.2 C3 / §32.2 TRI-2).
 #
-# SCOPE: the two safety-critical crates only — the fail-closed statement
-# classifier / purity prover (`oraclemcp-guard`) and the append-only audit
-# hash-chain (`oraclemcp-audit`). These are THE proof the safety tests aren't
-# placebo: a mutant that survives is a classification (or a chain check) the
-# tests do not pin. Everything else in the workspace is out of scope for this
-# gate — it is invoked scoped per-crate with
-#   cargo mutants -p oraclemcp-guard -p oraclemcp-audit
-# by scripts/mutation_safety_gate.sh (nightly CI + the D3.2 local pre-tag gate).
+# SCOPE (TRI-2): guard, audit, core, db, and the server dispatch module. These
+# are the control surfaces where an assertion-free test is especially
+# dangerous: statement classification, audit integrity, runtime policy, DB
+# execution, and the final tool-dispatch boundary.
 #
 # The `examine_globs` below mean that even a bare `cargo mutants` in this repo
-# only mutates the safety core (the documented mutation surface); pass an
-# explicit --file / -p to mutate anything else deliberately.
+# only mutates the documented control surface. The runner always adds an
+# explicit package + file filter, so every integrity sidecar names one scope.
 examine_globs = [
   "crates/oraclemcp-guard/src/**/*.rs",
   "crates/oraclemcp-audit/src/**/*.rs",
+  "crates/oraclemcp-core/src/**/*.rs",
+  "crates/oraclemcp-db/src/**/*.rs",
+  "crates/oraclemcp/src/dispatch/*.rs",
 ]
 
-# Per-mutant timeout policy. The safety-core unit + proptest suites are fast
-# (proptest = 256 cases, a few seconds), so the auto-derived timeout (baseline
-# test time x multiplier) is small; the floor + multiplier below keep a mutant
-# that induces an infinite loop / hang from stalling the whole run without
-# spuriously timing out an honest-but-slightly-slower mutant.
+# Per-mutant timeout policy. The explicit runner timeout wins in CI; these
+# values keep a direct cargo-mutants invocation bounded too.
 minimum_test_timeout = 60
 timeout_multiplier = 6.0
 build_timeout_multiplier = 5.0

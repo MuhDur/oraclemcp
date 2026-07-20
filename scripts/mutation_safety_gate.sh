@@ -1,159 +1,405 @@
 #!/usr/bin/env bash
-# D6.4 — mutation-testing gate on the safety-critical crates.
-# (bead oraclemcp-release-073-iec3.4.4 / plan §D6.4.)
+# D3 / TRI-2 — deterministic, OOM-honest mutation shards.
+# (bead oraclemcp-eng-program-bp8ia.5.3; plan §27.2 C3 / §32.2 TRI-2.)
 #
-# Runs `cargo-mutants` over the two safety-core crates — the fail-closed
-# statement classifier / purity prover (`oraclemcp-guard`) and the append-only
-# audit hash-chain (`oraclemcp-audit`) — computes the per-crate kill-rate, and
-# enforces a floor (default 90%). This is THE proof the safety tests are not
-# placebo: a surviving mutant is a classification (or a chain check) the tests
-# do not pin.
+# The runner covers guard, audit, core, db, and the server dispatch module. It
+# runs exactly one deterministic cargo-mutants shard at -j1. The shard has a
+# hard mutant-count budget, an enforced cgroup MemoryMax/TasksMax, and
+# OOMPolicy=continue. The wrapper reads the shard cgroup's memory.events before
+# and after cargo-mutants. Any oom_kill delta grades the SHARD `errored`; its
+# cargo-mutants counters are never allowed into a seal (a killed test process
+# can otherwise be misreported as a caught mutant).
 #
-# Deliberately slow (the classifier is ~134 KB, ~400 mutants). Runs NIGHTLY and
-# in the D3.2 local pre-tag gate, NOT on every PR. The cheap, fast tag gate is
-# `check-report` below: it parses the committed report the nightly run refreshes.
+# A complete campaign is assembled by `migrate_mutation_result.py`, which
+# verifies the integrity sidecar for every shard, rejects OOM/error/incomplete
+# shards, and proves that each scope has every index 1..N with a duplicate-free
+# mutant population equal to the declared full count. Timeouts remain separate
+# evidence and are NEVER promoted to confirmed-test-failure kills.
 #
 # Subcommands:
-#   run           run cargo-mutants on the safety crates, print per-crate
-#                 kill-rate, write a machine summary, and (unless --advisory)
-#                 exit non-zero if any crate is below the threshold.
+#   run-shard     run one deterministic shard:
+#                 --scope guard|audit|core|db|dispatch --shard I/N
 #   check-report  cheap: parse the committed report (docs/quality/mutation-safety.md)
-#                 and assert the recorded per-crate kill-rate meets the floor.
+#                 and fail closed unless its v2 marker proves a complete,
+#                 OOM-free, current five-surface seal above the floor.
 #                 Called by scripts/release_preflight.sh so the tag is gated by
-#                 the committed proof without re-running the slow mutation pass.
+#                 committed evidence without rerunning a mutation campaign.
+#   self-test     DB/build-free marker acceptance and stale-hash rejection.
+#   __capped      internal cgroup wrapper; not an operator entry point.
 #
 # ─────────────────────────────────────────────────────────────────────────────
-# CORRECTNESS TRAP (do not "optimize" away): cargo-mutants MUST isolate a
-# separate target directory PER parallel job. Do NOT export a shared
-# CARGO_TARGET_DIR when running under `-j > 1` — a shared target races
-# incremental-compilation artifacts across concurrent mutant builds and yields
-# FALSE survivors (mutants get tested against a stale/unmutated test binary).
-# This script therefore UNSETS CARGO_TARGET_DIR and passes --copy-target=false
-# so every build dir owns its own target. (`./target` in this repo is huge, so
-# copy-target=true is also not an option.)
+# CORRECTNESS TRAP (do not "optimize" away): this lane is fixed at -j1 and
+# unsets CARGO_TARGET_DIR. Concurrent mutants sharing incremental artifacts have
+# already produced false survivors. `--copy-target=false` ensures each
+# cargo-mutants build directory owns its target; a scheduled workflow obtains
+# parallelism only from isolated runner VMs, never within one shard.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-CRATES=(oraclemcp-guard oraclemcp-audit)
-THRESHOLD="${MUTATION_THRESHOLD:-90}"
-# Default to one mutant build at a time. The cgroup cap protects the host, but
-# the 2026-07-08 guard baseline showed `-j4` can OOM-kill the cargo-mutants
-# controller before it writes a complete outcome set. Operators can still opt in
-# to higher concurrency with MUTATION_JOBS/--jobs on larger runners.
-JOBS="${MUTATION_JOBS:-1}"
 TIMEOUT="${MUTATION_TIMEOUT:-120}"
-# Hard cgroup memory cap on the whole mutation pass. A pathological mutant (e.g. a
-# mutated loop/size bound inducing an unbounded allocation) MUST NOT OOM the host:
-# on 2026-07-08 an uncapped guard test binary hit ~40GB RSS and triggered a GLOBAL
-# OOM that killed unrelated processes. This scope OOM-kills the runaway INSIDE the
-# cap instead (cargo-mutants grades a killed mutant as caught). Override w/ MUTATION_MEMMAX.
-MEMMAX="${MUTATION_MEMMAX:-24G}"
+MEMMAX="${MUTATION_MEMMAX:-12G}"
+TASKSMAX="${MUTATION_TASKSMAX:-8192}"
+MAX_MUTANTS="${MUTATION_MAX_MUTANTS_PER_SHARD:-32}"
 OUTPUT_BASE="${MUTATION_OUTPUT:-$ROOT/target/mutants}"
 REPORT="${MUTATION_REPORT:-$ROOT/docs/quality/mutation-safety.md}"
-ADVISORY=0
-
-# Memory-cap wrapper (transient user scope). Falls back to no cap with a loud
-# warning if the user systemd instance is unavailable (then -j + timeout only).
-MEMCAP=()
-if systemd-run --user --scope -q -p MemoryMax=64M -p MemorySwapMax=0 -- true 2>/dev/null; then
-  MEMCAP=(systemd-run --user --scope -q -p "MemoryMax=$MEMMAX" -p MemorySwapMax=0 --)
-else
-  echo "mutation-gate: WARNING — no systemd --user cgroup cap available; running UNCAPPED (-j=$JOBS, timeout only)" >&2
-fi
+SCOPE=""
+SHARD=""
 
 die() { echo "mutation-gate: $*" >&2; exit 1; }
 
-# Kill-rate policy: killed = caught + timeout (a timeout means the mutant was
-# detected — it broke or hung the tests). unviable (won't compile) is excluded
-# from the denominator. rate = 100 * killed / (caught + missed + timeout).
-kill_rate() { # <caught> <missed> <timeout>
-  awk -v c="$1" -v m="$2" -v t="$3" 'BEGIN{
-    v=c+m+t; if(v==0){print "0.0"; exit} printf "%.1f", 100*(c+t)/v
-  }'
+scope_package() {
+  case "$1" in
+    guard) echo oraclemcp-guard ;;
+    audit) echo oraclemcp-audit ;;
+    core) echo oraclemcp-core ;;
+    db) echo oraclemcp-db ;;
+    dispatch) echo oraclemcp ;;
+    *) die "unknown scope '$1' (expected guard | audit | core | db | dispatch)" ;;
+  esac
 }
 
-cmd_run() {
-  command -v cargo-mutants >/dev/null 2>&1 || die "cargo-mutants not installed (cargo install cargo-mutants)"
-  mkdir -p "$OUTPUT_BASE"
-  local overall_ok=1
-  local summary="$OUTPUT_BASE/summary.txt"
-  : >"$summary"
-  for crate in "${CRATES[@]}"; do
-    local out="$OUTPUT_BASE/$crate"
-    echo "mutation-gate: running cargo-mutants on $crate (j=$JOBS timeout=${TIMEOUT}s) ..." >&2
-    # NB: env -u CARGO_TARGET_DIR — see the correctness trap above.
-    "${MEMCAP[@]}" env -u CARGO_TARGET_DIR cargo mutants -p "$crate" \
-      -j "$JOBS" --copy-target=false --timeout "$TIMEOUT" \
-      --output "$out" >"$out.log" 2>&1 || true   # non-zero exit == survivors; we grade below
-    local oc="$out/mutants.out/outcomes.json"
-    [ -f "$oc" ] || die "$crate: no outcomes.json produced (see $out.log)"
-    local caught missed timeout unviable
-    caught="$(jq -r '.caught'  "$oc")"
-    missed="$(jq -r '.missed'  "$oc")"
-    timeout="$(jq -r '.timeout' "$oc")"
-    unviable="$(jq -r '.unviable' "$oc")"
-    local rate; rate="$(kill_rate "$caught" "$missed" "$timeout")"
-    printf '%s kill=%s%% caught=%s missed=%s timeout=%s unviable=%s\n' \
-      "$crate" "$rate" "$caught" "$missed" "$timeout" "$unviable" | tee -a "$summary"
-    if awk -v r="$rate" -v t="$THRESHOLD" 'BEGIN{exit !(r+0 < t+0)}'; then
-      echo "mutation-gate: $crate kill-rate ${rate}% is BELOW the ${THRESHOLD}% floor" >&2
-      overall_ok=0
-    fi
-  done
-  echo "mutation-gate: summary written to $summary" >&2
-  if [ "$overall_ok" -ne 1 ] && [ "$ADVISORY" -ne 1 ]; then
-    die "one or more safety crates are below the ${THRESHOLD}% kill-rate floor"
+scope_file() {
+  case "$1" in
+    guard) echo 'crates/oraclemcp-guard/src/**/*.rs' ;;
+    audit) echo 'crates/oraclemcp-audit/src/**/*.rs' ;;
+    core) echo 'crates/oraclemcp-core/src/**/*.rs' ;;
+    db) echo 'crates/oraclemcp-db/src/**/*.rs' ;;
+    dispatch) echo 'crates/oraclemcp/src/dispatch/*.rs' ;;
+    *) die "unknown scope '$1'" ;;
+  esac
+}
+
+parse_shard() {
+  [[ "$SHARD" =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] ||
+    die "--shard must be I/N with positive integers (got '$SHARD')"
+  SHARD_INDEX="${BASH_REMATCH[1]}"
+  SHARD_TOTAL="${BASH_REMATCH[2]}"
+  [ "$SHARD_INDEX" -le "$SHARD_TOTAL" ] || die "shard index exceeds total: $SHARD"
+}
+
+scope_state() { # <scope-csv> [git-ref] -> "count digest"
+  python3 - "$1" "${2:-}" <<'PY'
+import hashlib
+import subprocess
+import sys
+from pathlib import Path
+
+roots = {
+    "guard": "crates/oraclemcp-guard/src",
+    "audit": "crates/oraclemcp-audit/src",
+    "core": "crates/oraclemcp-core/src",
+    "db": "crates/oraclemcp-db/src",
+    "dispatch": "crates/oraclemcp/src/dispatch",
+}
+selected = sys.argv[1].split(",")
+git_ref = sys.argv[2]
+try:
+    requested = [roots[name] for name in selected]
+except KeyError as error:
+    raise SystemExit(f"mutation-gate: unknown marker scope: {error.args[0]}")
+if git_ref:
+    paths = subprocess.check_output(
+        ["git", "ls-tree", "-r", "--name-only", git_ref, "--", *requested], text=True
+    ).splitlines()
+else:
+    paths = subprocess.check_output(
+        ["git", "ls-files", "--", *requested], text=True
+    ).splitlines()
+paths = sorted(path for path in paths if path.endswith(".rs"))
+digest = hashlib.sha256()
+for name in paths:
+    content = (
+        subprocess.check_output(["git", "show", f"{git_ref}:{name}"])
+        if git_ref
+        else Path(name).read_bytes()
+    )
+    content_hash = hashlib.sha256(content).hexdigest()
+    digest.update(name.encode())
+    digest.update(b"\0")
+    digest.update(content_hash.encode())
+    digest.update(b"\n")
+print(len(paths), digest.hexdigest())
+PY
+}
+
+# Internal entry: execute a command in the already-created cgroup and preserve
+# the cgroup's oom_kill delta even when cargo-mutants returns non-zero. The
+# wrapper itself exits zero after writing status; a missing status file means
+# the controller/wrapper died and is therefore an error, never a verdict.
+cmd_capped() {
+  local status_file="$1"; shift
+  local cgroup_path events pid_events before after pid_before pid_after rc memory_max pid_max
+  cgroup_path="$(awk -F: '$1 == "0" {print $3}' /proc/self/cgroup)"
+  [ -n "$cgroup_path" ] || die "cannot locate cgroup-v2 path"
+  events="/sys/fs/cgroup${cgroup_path}/memory.events"
+  pid_events="/sys/fs/cgroup${cgroup_path}/pids.events"
+  [ -r "$events" ] || die "cannot read cgroup memory events: $events"
+  [ -r "$pid_events" ] || die "cannot read cgroup PID events: $pid_events"
+  before="$(awk '$1 == "oom_kill" {print $2}' "$events")"
+  pid_before="$(awk '$1 == "max" {print $2}' "$pid_events")"
+  [ -n "$before" ] || die "memory.events has no oom_kill counter: $events"
+  [ -n "$pid_before" ] || die "pids.events has no max counter: $pid_events"
+  memory_max="$(<"/sys/fs/cgroup${cgroup_path}/memory.max")"
+  pid_max="$(<"/sys/fs/cgroup${cgroup_path}/pids.max")"
+  [[ "$memory_max" =~ ^[1-9][0-9]*$ ]] || die "cgroup MemoryMax is not enforced: $memory_max"
+  [[ "$pid_max" =~ ^[1-9][0-9]*$ ]] || die "cgroup TasksMax is not enforced: $pid_max"
+  set +e
+  "$@"
+  rc=$?
+  set -e
+  after="$(awk '$1 == "oom_kill" {print $2}' "$events")"
+  pid_after="$(awk '$1 == "max" {print $2}' "$pid_events")"
+  printf 'command_exit=%s\nmemory_max_bytes=%s\npid_task_max=%s\npid_max_before=%s\npid_max_after=%s\npid_max_delta=%s\noom_kill_before=%s\noom_kill_after=%s\noom_kill_delta=%s\n' \
+    "$rc" "$memory_max" "$pid_max" "$pid_before" "$pid_after" "$((pid_after - pid_before))" \
+    "$before" "$after" "$((after - before))" >"$status_file"
+}
+
+write_integrity() { # <path> <status> <outcomes-or-empty> <inventory> <full-inventory> <cgroup-status>
+  local integrity="$1" status="$2" outcomes="$3" inventory="$4" full_inventory="$5" cgroup_status="$6"
+  local source_sha state file_count scope_hash
+  source_sha="$(git rev-parse HEAD)"
+  state="$(scope_state "$SCOPE")"
+  file_count="${state%% *}"
+  scope_hash="${state##* }"
+  python3 - "$integrity" "$status" "$outcomes" "$inventory" "$full_inventory" \
+    "$cgroup_status" "$SCOPE" "$SHARD_INDEX" "$SHARD_TOTAL" "$source_sha" \
+    "$file_count" "$scope_hash" "$(cargo mutants --version)" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+(
+    output, status, outcomes_name, inventory_name, full_inventory_name,
+    cgroup_name, scope, shard_index, shard_total, source_sha,
+    covered_file_count, scope_sha256, tool_version,
+) = sys.argv[1:]
+inventory = json.loads(Path(inventory_name).read_text())
+full_inventory = json.loads(Path(full_inventory_name).read_text())
+cgroup = {}
+if Path(cgroup_name).is_file():
+    for line in Path(cgroup_name).read_text().splitlines():
+        key, value = line.split("=", 1)
+        cgroup[key] = int(value)
+outcomes_sha256 = None
+if outcomes_name and Path(outcomes_name).is_file():
+    outcomes_sha256 = hashlib.sha256(Path(outcomes_name).read_bytes()).hexdigest()
+doc = {
+    "schema": "mutation-shard-integrity/v1",
+    "scope": scope,
+    "shard_index": int(shard_index),
+    "shard_total": int(shard_total),
+    "status": status,
+    "source_sha": source_sha,
+    "covered_file_count": int(covered_file_count),
+    "scope_sha256": scope_sha256,
+    "campaign_mutant_total": len(full_inventory),
+    "mutant_count": len(inventory),
+    "mutant_ids": [mutant["name"] for mutant in inventory],
+    "outcomes_sha256": outcomes_sha256,
+    "oom_kill_delta": cgroup.get("oom_kill_delta"),
+    "command_exit": cgroup.get("command_exit"),
+    "memory_max_bytes": cgroup.get("memory_max_bytes"),
+    "pid_task_max": cgroup.get("pid_task_max"),
+    "pid_max_delta": cgroup.get("pid_max_delta"),
+    "oom_policy": "continue",
+    "cargo_mutants_version": tool_version,
+}
+Path(output).write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+PY
+}
+
+cmd_run_shard() {
+  command -v cargo-mutants >/dev/null 2>&1 ||
+    die "cargo-mutants not installed (cargo install cargo-mutants --version 27.1.0 --locked)"
+  command -v jq >/dev/null 2>&1 || die "jq is required"
+  command -v systemd-run >/dev/null 2>&1 ||
+    die "systemd-run is required; refusing an unbounded mutation shard"
+  [ -n "$SCOPE" ] || die "run-shard requires --scope"
+  [ -n "$SHARD" ] || die "run-shard requires --shard I/N"
+  parse_shard
+  if ! git diff --quiet -- || ! git diff --cached --quiet --; then
+    die "run-shard requires a clean tracked tree so its source SHA is reproducible"
   fi
-  [ "$overall_ok" -eq 1 ] || echo "mutation-gate: ADVISORY mode — below floor but not failing" >&2
+
+  local package file out inventory full_inventory run_log cgroup_status outcomes integrity
+  package="$(scope_package "$SCOPE")"
+  file="$(scope_file "$SCOPE")"
+  out="$OUTPUT_BASE/$SCOPE/shard-${SHARD_INDEX}of${SHARD_TOTAL}"
+  [ ! -e "$out" ] || die "output already exists; preserve it and choose a new MUTATION_OUTPUT: $out"
+  mkdir -p "$out"
+  inventory="$out/mutants.json"
+  full_inventory="$out/mutants-full.json"
+  run_log="$out/run.log"
+  cgroup_status="$out/cgroup.status"
+  integrity="$out/integrity.json"
+
+  cargo mutants -p "$package" --file "$file" --list --json --no-shuffle >"$full_inventory"
+  cargo mutants -p "$package" --file "$file" --list --json --no-shuffle \
+    --shard "$SHARD" >"$inventory"
+  local selected
+  selected="$(jq 'length' "$inventory")"
+  [ "$selected" -gt 0 ] || die "$SCOPE shard $SHARD selected zero mutants"
+  [ "$selected" -le "$MAX_MUTANTS" ] ||
+    die "$SCOPE shard $SHARD selects $selected mutants, above deterministic budget $MAX_MUTANTS; increase N"
+
+  echo "mutation-gate: scope=$SCOPE shard=$SHARD mutants=$selected max=$MAX_MUTANTS j=1 timeout=${TIMEOUT}s memory=$MEMMAX tasks=$TASKSMAX" >&2
+  set +e
+  systemd-run --user --scope --quiet --collect \
+    -p "MemoryMax=$MEMMAX" -p MemorySwapMax=0 -p "TasksMax=$TASKSMAX" \
+    -p OOMPolicy=continue -- \
+    "$ROOT/scripts/mutation_safety_gate.sh" __capped "$cgroup_status" \
+    env -u CARGO_TARGET_DIR CARGO_BUILD_JOBS=2 cargo mutants -p "$package" \
+      --file "$file" --no-shuffle --shard "$SHARD" -j 1 \
+      --copy-target=false --timeout "$TIMEOUT" --no-times --output "$out" \
+      >"$run_log" 2>&1
+  local wrapper_rc=$?
+  set -e
+  outcomes="$out/mutants.out/outcomes.json"
+  if [ "$wrapper_rc" -ne 0 ] || [ ! -f "$cgroup_status" ]; then
+    write_integrity "$integrity" errored "" "$inventory" "$full_inventory" "$cgroup_status"
+    die "$SCOPE shard $SHARD controller failed before a complete cgroup status was recorded (rc=$wrapper_rc)"
+  fi
+  local oom_delta
+  oom_delta="$(awk -F= '$1 == "oom_kill_delta" {print $2}' "$cgroup_status")"
+  if [ -z "$oom_delta" ] || [ "$oom_delta" -ne 0 ]; then
+    write_integrity "$integrity" errored "$outcomes" "$inventory" "$full_inventory" "$cgroup_status"
+    die "E_OOM_MUTANT: $SCOPE shard $SHARD observed oom_kill delta ${oom_delta:-unknown}; graded ERRORED, never caught"
+  fi
+  local pid_delta
+  pid_delta="$(awk -F= '$1 == "pid_max_delta" {print $2}' "$cgroup_status")"
+  if [ -z "$pid_delta" ] || [ "$pid_delta" -ne 0 ]; then
+    write_integrity "$integrity" errored "$outcomes" "$inventory" "$full_inventory" "$cgroup_status"
+    die "E_TASK_CAP: $SCOPE shard $SHARD hit TasksMax ${pid_delta:-unknown} time(s); graded ERRORED, never caught"
+  fi
+  [ -f "$outcomes" ] || {
+    write_integrity "$integrity" incomplete "" "$inventory" "$full_inventory" "$cgroup_status"
+    die "$SCOPE shard $SHARD produced no outcomes.json"
+  }
+  jq -e '.end_time != null' "$outcomes" >/dev/null || {
+    write_integrity "$integrity" incomplete "$outcomes" "$inventory" "$full_inventory" "$cgroup_status"
+    die "$SCOPE shard $SHARD has null end_time; partial counters cannot seal"
+  }
+  local accounted
+  accounted="$(jq '.caught + .missed + .timeout + .unviable' "$outcomes")"
+  [ "$accounted" -eq "$selected" ] || {
+    write_integrity "$integrity" incomplete "$outcomes" "$inventory" "$full_inventory" "$cgroup_status"
+    die "$SCOPE shard $SHARD accounts for $accounted/$selected mutants; partial counters cannot seal"
+  }
+  write_integrity "$integrity" complete "$outcomes" "$inventory" "$full_inventory" "$cgroup_status"
+  echo "mutation-gate: COMPLETE scope=$SCOPE shard=$SHARD mutants=$selected integrity=$integrity"
 }
 
-# Parse the machine-readable marker the report carries, e.g.:
-#   <!-- MUTATION-GATE guard=93.5 audit=91.2 threshold=90 status=enforcing -->
+# Parse the machine-readable v2 marker. A percentage alone is not a seal: the
+# marker also binds the covered files, population, complete shard count, and
+# OOM total. Legacy/advisory/stale/partial markers fail closed.
 cmd_check_report() {
   [ -f "$REPORT" ] || die "committed mutation report missing: $REPORT"
   local marker
   marker="$(grep -oE '<!-- MUTATION-GATE [^>]*-->' "$REPORT" | tail -1)" \
     || die "report $REPORT has no MUTATION-GATE marker"
-  local guard audit thresh status
-  guard="$(sed -E 's/.*guard=([0-9.]+).*/\1/'  <<<"$marker")"
-  audit="$(sed -E 's/.*audit=([0-9.]+).*/\1/'  <<<"$marker")"
-  thresh="$(sed -E 's/.*threshold=([0-9.]+).*/\1/' <<<"$marker")"
-  status="$(sed -E 's/.*status=([a-z]+).*/\1/'  <<<"$marker")"
-  echo "mutation-gate: report marker guard=${guard}% audit=${audit}% threshold=${thresh}% status=${status}"
-  # 'advisory' status is allowed to gate softly while the suite is still being
-  # brought up to the floor; 'enforcing' hard-gates the tag.
-  if [ "$status" = "enforcing" ]; then
-    for pair in "guard:$guard" "audit:$audit"; do
-      local name="${pair%%:*}" val="${pair##*:}"
-      awk -v r="$val" -v t="$thresh" 'BEGIN{exit !(r+0 < t+0)}' \
-        && die "$name kill-rate ${val}% is below the enforcing floor ${thresh}%"
-    done
-    echo "mutation-gate: OK — both safety crates meet the enforcing ${thresh}% floor"
-  else
-    echo "mutation-gate: report is ADVISORY (status=$status); tag not hard-gated yet"
-  fi
+  marker_value() {
+    local key="$1" value
+    value="$(grep -oE "(^|[[:space:]])${key}=[^[:space:]]+" <<<"${marker#<!-- MUTATION-GATE }" | head -1 | sed -E "s/^[[:space:]]*${key}=//")"
+    [ -n "$value" ] || die "v2 report marker is missing $key"
+    printf '%s\n' "$value"
+  }
+  local version source scopes recorded_hash files mutants shards oom thresh status
+  version="$(marker_value v)"
+  source="$(marker_value source)"
+  scopes="$(marker_value scopes)"
+  recorded_hash="$(marker_value scope_sha256)"
+  files="$(marker_value covered_files)"
+  mutants="$(marker_value mutants)"
+  shards="$(marker_value shards)"
+  oom="$(marker_value oom)"
+  thresh="$(marker_value threshold)"
+  status="$(marker_value status)"
+  [ "$version" = 2 ] || die "unsupported mutation marker version: $version"
+  echo "mutation-gate: marker v=2 source=$source scopes=$scopes files=$files mutants=$mutants shards=$shards oom=$oom status=$status"
+  [ "$status" = "enforcing" ] ||
+    die "E_STALE_SEAL: committed mutation marker status=$status; a fresh complete five-surface campaign is required"
+  [[ "$source" =~ ^[0-9a-f]{40}$ ]] || die "enforcing marker has invalid source SHA"
+  [ "$scopes" = "guard,audit,core,db,dispatch" ] ||
+    die "enforcing marker scope is incomplete: $scopes"
+  [[ "$recorded_hash" =~ ^[0-9a-f]{64}$ ]] || die "enforcing marker has invalid scope_sha256"
+  [[ "$files" =~ ^[1-9][0-9]*$ ]] || die "enforcing marker has invalid covered_files"
+  [[ "$mutants" =~ ^[1-9][0-9]*$ ]] || die "enforcing marker has invalid mutant count"
+  [[ "$shards" =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] || die "enforcing marker has invalid shards"
+  [ "${BASH_REMATCH[1]}" -eq "${BASH_REMATCH[2]}" ] || die "E_SHARD_INCOMPLETE: marker shards=$shards"
+  [ "$oom" = 0 ] || die "E_OOM_MUTANT: enforcing marker records oom=$oom"
+  local sealed_state sealed_files sealed_hash current_state current_files current_hash
+  git cat-file -e "$source^{commit}" 2>/dev/null || die "enforcing marker source commit does not exist: $source"
+  sealed_state="$(scope_state "$scopes" "$source")"
+  sealed_files="${sealed_state%% *}"
+  sealed_hash="${sealed_state##* }"
+  [ "$sealed_files" -eq "$files" ] ||
+    die "E_SEAL_SOURCE_MISMATCH: source commit has $sealed_files files, marker records $files"
+  [ "$sealed_hash" = "$recorded_hash" ] ||
+    die "E_SEAL_SOURCE_MISMATCH: marker hash does not describe source $source"
+  current_state="$(scope_state "$scopes")"
+  current_files="${current_state%% *}"
+  current_hash="${current_state##* }"
+  [ "$current_files" -eq "$files" ] ||
+    die "E_STALE_SCOPE: covered file count changed (sealed=$files current=$current_files)"
+  [ "$current_hash" = "$recorded_hash" ] ||
+    die "E_STALE_SCOPE: covered-file hash changed (sealed=$recorded_hash current=$current_hash)"
+  local scope value
+  for scope in guard audit core db dispatch; do
+    value="$(marker_value "$scope")"
+    [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "$scope has no numeric confirmed-failure rate"
+    awk -v rate="$value" -v floor="$thresh" 'BEGIN { exit !(rate + 0 < floor + 0) }' &&
+      die "$scope confirmed-failure rate ${value}% is below the enforcing floor ${thresh}%"
+  done
+  echo "mutation-gate: OK — complete OOM-free five-surface seal is current and meets ${thresh}%"
 }
 
-sub="${1:-run}"; shift || true
+cmd_self_test() {
+  local work state files hash source good bad stale_output
+  work="$(mktemp -d /var/tmp/oraclemcp-mutation-gate-self-test.XXXXXX)"
+  state="$(scope_state guard,audit,core,db,dispatch)"
+  files="${state%% *}"
+  hash="${state##* }"
+  source="$(git rev-parse HEAD)"
+  good="$work/enforcing.md"
+  bad="$work/stale-scope.md"
+  printf '<!-- MUTATION-GATE v=2 source=%s scopes=guard,audit,core,db,dispatch scope_sha256=%s covered_files=%s mutants=1 shards=1/1 oom=0 guard=95 audit=95 core=95 db=95 dispatch=95 threshold=90 status=enforcing -->\n' \
+    "$source" "$hash" "$files" >"$good"
+  printf '<!-- MUTATION-GATE v=2 source=%s scopes=guard,audit,core,db,dispatch scope_sha256=%064d covered_files=%s mutants=1 shards=1/1 oom=0 guard=95 audit=95 core=95 db=95 dispatch=95 threshold=90 status=enforcing -->\n' \
+    "$source" 0 "$files" >"$bad"
+  "$ROOT/scripts/mutation_safety_gate.sh" check-report --report "$good" >/dev/null
+  if stale_output="$("$ROOT/scripts/mutation_safety_gate.sh" check-report --report "$bad" 2>&1)"; then
+    die "self-test accepted a stale covered-file hash"
+  fi
+  [[ "$stale_output" == *E_SEAL_SOURCE_MISMATCH* ]] ||
+    die "self-test stale marker failed for the wrong reason: $stale_output"
+  echo "mutation-gate: self-test OK (complete v2 seal accepted; source/hash mismatch rejected; fixtures=$work)"
+}
+
+sub="${1:-check-report}"; shift || true
+if [ "$sub" = "__capped" ]; then
+  cmd_capped "$@"
+  exit 0
+fi
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --advisory) ADVISORY=1 ;;
-    --threshold) THRESHOLD="$2"; shift ;;
-    --jobs) JOBS="$2"; shift ;;
     --timeout) TIMEOUT="$2"; shift ;;
     --output) OUTPUT_BASE="$2"; shift ;;
     --report) REPORT="$2"; shift ;;
-    --crate) CRATES=("$2"); shift ;;
+    --scope) SCOPE="$2"; shift ;;
+    --shard) SHARD="$2"; shift ;;
+    --max-mutants) MAX_MUTANTS="$2"; shift ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
 done
 
 case "$sub" in
-  run) cmd_run ;;
+  run-shard) cmd_run_shard ;;
   check-report) cmd_check_report ;;
-  *) die "unknown subcommand '$sub' (expected: run | check-report)" ;;
+  self-test) cmd_self_test ;;
+  *) die "unknown subcommand '$sub' (expected: run-shard | check-report | self-test)" ;;
 esac

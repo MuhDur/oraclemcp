@@ -4,11 +4,24 @@ on:
   schedule:
     - cron: "17 2 * * *"
   workflow_dispatch:
+    inputs:
+      scope:
+        description: Exact mutation surface
+        required: true
+        type: choice
+        options: [guard, audit, core, db, dispatch]
+      shard:
+        description: Deterministic shard as I/N (N must keep the shard at <=32 mutants)
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_BUILD_JOBS: "16"
-  CARGO_TARGET_DIR: /home/runner/work/_cargo-target-server
+  CARGO_BUILD_JOBS: "2"
+  # Keep child cgroups below the smaller hosted-runner parent ceilings so the
+  # events are attributed to, and observable in, the mutation shard itself.
+  MUTATION_MEMMAX: 6G
+  MUTATION_TASKSMAX: "384"
   RUST_TOOLCHAIN: nightly-2026-05-11
 
 permissions:
@@ -19,35 +32,107 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  mutation-safety:
-    name: guard + audit cargo-mutants
+  # Two <=32-mutant shards per scope per night. Each scope's fixed N is sized
+  # from the current population; the runner refuses if source growth makes a
+  # selected shard exceed the budget. `(run_number-1)*2 + offset` rotates every
+  # index deterministically, completing the longest (core, N=128) cycle in 64
+  # nights while artifacts remain available for 90 days.
+  scheduled-shard:
+    if: github.event_name == 'schedule'
+    name: ${{ matrix.scope }} shard offset ${{ matrix.offset }}
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scope: guard
+            total: 40
+            offset: 0
+          - scope: guard
+            total: 40
+            offset: 1
+          - scope: audit
+            total: 24
+            offset: 0
+          - scope: audit
+            total: 24
+            offset: 1
+          - scope: core
+            total: 128
+            offset: 0
+          - scope: core
+            total: 128
+            offset: 1
+          - scope: db
+            total: 72
+            offset: 0
+          - scope: db
+            total: 72
+            offset: 1
+          - scope: dispatch
+            total: 40
+            offset: 0
+          - scope: dispatch
+            total: 40
+            offset: 1
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-
+      - name: Prove seal and shard-integrity fail-closed behavior
+        run: |
+          bash scripts/mutation_safety_gate.sh self-test
+          python3 scripts/test_migrate_mutation_result.py
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-
-      - name: Install cargo-mutants
-        run: cargo install cargo-mutants --locked
-
-      - name: Run mutation safety gate
-        run: bash scripts/mutation_safety_gate.sh run
-
+      - name: Install pinned cargo-mutants
+        run: cargo install cargo-mutants --version 27.1.0 --locked
+      - name: Select and run deterministic shard
+        env:
+          SCOPE: ${{ matrix.scope }}
+          TOTAL: ${{ matrix.total }}
+          OFFSET: ${{ matrix.offset }}
+        run: |
+          index=$(( ((GITHUB_RUN_NUMBER - 1) * 2 + OFFSET) % TOTAL + 1 ))
+          shard="${index}/${TOTAL}"
+          echo "mutation shard: scope=${SCOPE} shard=${shard}"
+          bash scripts/mutation_safety_gate.sh run-shard --scope "$SCOPE" --shard "$shard"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: mutation-safety-results
-          path: |
-            target/mutants/summary.txt
-            target/mutants/*.log
-            target/mutants/*/mutants.out/outcomes.json
-            target/mutants/*/mutants.out/missed.txt
-          if-no-files-found: ignore
-          retention-days: 30
+          name: mutation-${{ matrix.scope }}-${{ github.run_number }}-${{ matrix.offset }}
+          path: target/mutants/${{ matrix.scope }}/
+          if-no-files-found: error
+          retention-days: 90
+
+  manual-shard:
+    if: github.event_name == 'workflow_dispatch'
+    name: manual mutation shard
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Prove seal and shard-integrity fail-closed behavior
+        run: |
+          bash scripts/mutation_safety_gate.sh self-test
+          python3 scripts/test_migrate_mutation_result.py
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Install pinned cargo-mutants
+        run: cargo install cargo-mutants --version 27.1.0 --locked
+      - name: Run requested deterministic shard
+        run: >-
+          bash scripts/mutation_safety_gate.sh run-shard
+          --scope "${{ inputs.scope }}" --shard "${{ inputs.shard }}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mutation-${{ inputs.scope }}-${{ github.run_number }}
+          path: target/mutants/${{ inputs.scope }}/
+          if-no-files-found: error
+          retention-days: 90

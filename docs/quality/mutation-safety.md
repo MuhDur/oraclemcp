@@ -1,16 +1,29 @@
 # Mutation Safety Gate
 
-<!-- MUTATION-GATE guard=92.6 audit=96.9 threshold=90 status=enforcing -->
+<!-- MUTATION-GATE v=2 source=4dca0b286bf12bd65810307e8c8d11a83e597622 scopes=guard,audit scope_sha256=317b00bb6268a599c3eea7909ca4c2a46f9a6c73ba5c78b7e66ad297dfd4885f covered_files=27 mutants=1889 shards=3/3 oom=unknown guard=92.6 audit=96.9 core=pending db=pending dispatch=pending threshold=90 status=stale -->
 
-D6.4 validates the safety-critical server crates with `cargo-mutants` through
-`scripts/mutation_safety_gate.sh`. The gate covers:
+D3 / TRI-2 validates the safety-critical server surfaces with `cargo-mutants`
+through `scripts/mutation_safety_gate.sh`. The campaign covers:
 
 - `oraclemcp-guard`: fail-closed classifier, purity plumbing, operating-level
   helpers.
 - `oraclemcp-audit`: signed audit records, head anchor, verifier, local sink,
   and shipping format helpers.
+- `oraclemcp-core`: runtime policy and protocol control surfaces.
+- `oraclemcp-db`: database execution and transaction boundaries.
+- `oraclemcp/src/dispatch`: the final tool-dispatch boundary.
 
-## Current Proof
+## Current Seal Status: Stale (Fail-Closed)
+
+The v2 marker is deliberately `status=stale`. The last completed proof predates
+the D3 integrity contract, recorded no cgroup OOM counter, covered only guard and
+audit, and the covered source has changed since its seal commit. It therefore
+cannot certify the expanded five-surface scope. `check-report` now returns
+`E_STALE_SEAL`; release preflight and the D2 mutation leg stay red until a fresh,
+complete, OOM-free campaign is assembled and reviewed. Keeping the old
+percentages visible is provenance, not an enforcing claim.
+
+## Legacy Proof (Not a Current Seal)
 
 Run date: 2026-07-14 (GATE-SEAL, bead `oraclemcp-epic-09x-alien-6sj8.16`).
 
@@ -23,10 +36,12 @@ survivor-killing campaign. Every mutant was run to a non-null `end_time`;
 survivor-killing tests were verified by applying each mutation and confirming the
 new test fails under it (generate-and-verify), never merely passing on HEAD.
 
-Method: `cargo-mutants` at `-j1` per mutant (the validated safe default), audit
+Legacy method: `cargo-mutants` at `-j1` per mutant, audit
 run sharded 2-way (`--shard i/2`, each `-j1`, isolated target + frozen HEAD
 snapshot) and merged. Kill rate = `(caught + timeout) / (caught + missed +
-timeout)`; `unviable` (won't compile) excluded.
+timeout)`; `unviable` (won't compile) excluded. D3 does **not** carry that
+denominator forward: timeouts are reported separately and never promoted to a
+confirmed-test-failure kill.
 
 Results:
 
@@ -35,9 +50,8 @@ Results:
 | `oraclemcp-guard` | 92.6% | 1017 | 82 | 2 | 142 |
 | `oraclemcp-audit` | 96.9% | 527 | 17 | 34 | 68 |
 
-The guard figure is a certified floor: it is a complete run whose guard *source*
-(non-test code) is unchanged on the current HEAD; additional kill-tests landed
-since can only raise it. The audit figure is fresh against the release HEAD.
+These figures were the certified floor for that historical tree. They are not a
+certified floor for current HEAD.
 
 ## Survivor Triage
 
@@ -64,10 +78,52 @@ pinned real safety contracts. The residue falls into honest classes:
   the (unreachable-in-unit-test) fsync-error path differs. No injectable fault
   seam; documented, not dismissed as equivalent.
 
+## D3 Shard Integrity Contract
+
+Run exactly one deterministic shard with:
+
+```bash
+bash scripts/mutation_safety_gate.sh self-test
+bash scripts/mutation_safety_gate.sh run-shard \
+  --scope guard --shard 1/40
+```
+
+The runner is fixed at `-j1`, unsets `CARGO_TARGET_DIR`, refuses a shard above 32
+mutants, and requires a systemd cgroup with explicit `MemoryMax`, `TasksMax`,
+`MemorySwapMax=0`, and `OOMPolicy=continue` (local defaults: 12G/8192; the
+smaller hosted runner uses 6G/384 so the child ceiling is below its parent).
+Its inner wrapper reads `memory.events:oom_kill` and `pids.events:max` before
+and after cargo-mutants. A non-zero delta writes an `errored` integrity sidecar
+and fails `E_OOM_MUTANT` or `E_TASK_CAP`; it is never counted as `caught`, even
+if cargo-mutants observed a killed or failed-to-spawn test process.
+
+Each shard retains:
+
+- the full and selected mutant inventories;
+- raw `outcomes.json` and logs;
+- `integrity.json`, binding the source SHA, covered-file hash, shard index/total,
+  full and selected mutant populations, raw-outcomes hash, command exit, and OOM
+  delta.
+
+`scripts/migrate_mutation_result.py` is the seal boundary. It requires one
+integrity sidecar per outcomes file and refuses OOM/task-cap/error/null-`end_time`
+shards, partial counters, a changed outcomes hash, missing shard indices,
+duplicate mutants, or a union smaller than the full declared population. Only
+then can it emit `mutation-result/v1`. That artifact reports confirmed test
+failures (`caught`) separately from `timeout` and `unviable`; timeout is in the
+declared denominator but never appears as a witnessed kill.
+
+The scheduled workflow rotates two deterministic shards per scope per night.
+Fixed shard totals keep every shard at at most 32 current mutants; if source
+growth crosses that budget, the runner fails and the total must be deliberately
+raised. The 128-shard core cycle completes in 64 nights, within the 90-day
+artifact retention window. `workflow_dispatch` accepts an exact scope and
+`I/N` shard for recovery or a deliberate full-campaign sweep.
+
 ## Gate Policy
 
-`scripts/mutation_safety_gate.sh run` is the authoritative slow proof and runs
-nightly. `scripts/release_preflight.sh` calls
-`scripts/mutation_safety_gate.sh check-report`, which enforces the committed
-marker above without rerunning the slow mutation pass during every release
-preflight.
+`scripts/mutation_safety_gate.sh check-report` accepts only a v2 marker with all
+five scopes, numeric per-scope confirmed-failure rates above the threshold,
+complete shard counts, `oom=0`, and a covered-file hash matching the current
+tree. There is no advisory-green path. The committed marker remains stale until
+the first complete D3 campaign is reviewed and its exact seal values replace it.

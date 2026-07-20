@@ -327,11 +327,131 @@
       "path_filtered": false
     },
     {
-      "check_name": "guard + audit cargo-mutants",
+      "check_name": "audit shard offset 0",
       "tier": "scheduled",
       "workflow": "Mutation Safety",
       "workflow_file": "mutation-safety.yml",
-      "job_id": "mutation-safety",
+      "job_id": "scheduled-shard",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "audit shard offset 1",
+      "tier": "scheduled",
+      "workflow": "Mutation Safety",
+      "workflow_file": "mutation-safety.yml",
+      "job_id": "scheduled-shard",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "core shard offset 0",
+      "tier": "scheduled",
+      "workflow": "Mutation Safety",
+      "workflow_file": "mutation-safety.yml",
+      "job_id": "scheduled-shard",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "core shard offset 1",
+      "tier": "scheduled",
+      "workflow": "Mutation Safety",
+      "workflow_file": "mutation-safety.yml",
+      "job_id": "scheduled-shard",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "db shard offset 0",
+      "tier": "scheduled",
+      "workflow": "Mutation Safety",
+      "workflow_file": "mutation-safety.yml",
+      "job_id": "scheduled-shard",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "db shard offset 1",
+      "tier": "scheduled",
+      "workflow": "Mutation Safety",
+      "workflow_file": "mutation-safety.yml",
+      "job_id": "scheduled-shard",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "dispatch shard offset 0",
+      "tier": "scheduled",
+      "workflow": "Mutation Safety",
+      "workflow_file": "mutation-safety.yml",
+      "job_id": "scheduled-shard",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "dispatch shard offset 1",
+      "tier": "scheduled",
+      "workflow": "Mutation Safety",
+      "workflow_file": "mutation-safety.yml",
+      "job_id": "scheduled-shard",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "guard shard offset 0",
+      "tier": "scheduled",
+      "workflow": "Mutation Safety",
+      "workflow_file": "mutation-safety.yml",
+      "job_id": "scheduled-shard",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "guard shard offset 1",
+      "tier": "scheduled",
+      "workflow": "Mutation Safety",
+      "workflow_file": "mutation-safety.yml",
+      "job_id": "scheduled-shard",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "manual mutation shard",
+      "tier": "scheduled",
+      "workflow": "Mutation Safety",
+      "workflow_file": "mutation-safety.yml",
+      "job_id": "manual-shard",
       "triggers": [
         "schedule",
         "workflow_dispatch"
@@ -657,7 +777,17 @@
         "workflow_dispatch"
       ],
       "jobs": [
-        "guard + audit cargo-mutants"
+        "audit shard offset 0",
+        "audit shard offset 1",
+        "core shard offset 0",
+        "core shard offset 1",
+        "db shard offset 0",
+        "db shard offset 1",
+        "dispatch shard offset 0",
+        "dispatch shard offset 1",
+        "guard shard offset 0",
+        "guard shard offset 1",
+        "manual mutation shard"
       ]
     },
     "oci-adb.yml": {
@@ -772,7 +902,17 @@
       "web bundle (npm ci + vite build)"
     ],
     "scheduled": [
-      "guard + audit cargo-mutants",
+      "audit shard offset 0",
+      "audit shard offset 1",
+      "core shard offset 0",
+      "core shard offset 1",
+      "db shard offset 0",
+      "db shard offset 1",
+      "dispatch shard offset 0",
+      "dispatch shard offset 1",
+      "guard shard offset 0",
+      "guard shard offset 1",
+      "manual mutation shard",
       "watch required + scheduled lanes (server + driver)"
     ]
   }

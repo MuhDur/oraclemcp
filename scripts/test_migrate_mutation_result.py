@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Deterministic DB-free contract test for the archive converter."""
+"""Deterministic DB-free contract test for the mutation shard sealer."""
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -80,6 +81,27 @@ outcomes_document = {
 }
 outcomes = workdir / "outcomes.json"
 outcomes.write_text(json.dumps(outcomes_document))
+integrity_document = {
+    "schema": "mutation-shard-integrity/v1",
+    "scope": "fixture",
+    "shard_index": 1,
+    "shard_total": 1,
+    "status": "complete",
+    "source_sha": None,
+    "covered_file_count": 1,
+    "scope_sha256": "0" * 64,
+    "campaign_mutant_total": 3,
+    "mutant_count": 3,
+    "mutant_ids": ["caught", "missed", "timeout"],
+    "outcomes_sha256": hashlib.sha256(outcomes.read_bytes()).hexdigest(),
+    "oom_kill_delta": 0,
+    "command_exit": 1,
+    "memory_max_bytes": 8_589_934_592,
+    "pid_task_max": 8_192,
+    "pid_max_delta": 0,
+    "oom_policy": "continue",
+    "cargo_mutants_version": "cargo-mutants fixture",
+}
 budget = workdir / "budget.json"
 budget.write_text(
     json.dumps(
@@ -92,12 +114,17 @@ budget.write_text(
 )
 output = workdir / "result.json"
 sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+integrity_document["source_sha"] = sha
+integrity = workdir / "integrity.json"
+integrity.write_text(json.dumps(integrity_document))
 subprocess.run(
     [
         sys.executable,
         str(root / "scripts/migrate_mutation_result.py"),
         "--outcomes",
         str(outcomes),
+        "--integrity",
+        str(integrity),
         "--source-sha",
         sha,
         "--scope-target",
@@ -139,16 +166,15 @@ assert result["survivors"] == [
     }
 ]
 
-for label, extra_arguments in [
-    ("invalid-sha", ["--source-sha", "not-a-sha"]),
-    ("mismatched-shards", ["--shard-id", "one", "--shard-id", "two"]),
-]:
+for label, extra_arguments in [("invalid-sha", ["--source-sha", "not-a-sha"])]:
     rejected_output = workdir / f"{label}.json"
     command = [
         sys.executable,
         str(root / "scripts/migrate_mutation_result.py"),
         "--outcomes",
         str(outcomes),
+        "--integrity",
+        str(integrity),
         "--source-sha",
         sha,
         "--scope-target",
@@ -164,4 +190,85 @@ for label, extra_arguments in [
     rejected = subprocess.run(command, capture_output=True, text=True)
     assert rejected.returncode == 2, rejected.stderr
     assert not rejected_output.exists()
+
+
+def run_rejection(label: str, changed_integrity: dict, expected: str) -> None:
+    rejected_integrity = workdir / f"{label}-integrity.json"
+    rejected_integrity.write_text(json.dumps(changed_integrity))
+    rejected_output = workdir / f"{label}.json"
+    rejected = subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts/migrate_mutation_result.py"),
+            "--outcomes",
+            str(outcomes),
+            "--integrity",
+            str(rejected_integrity),
+            "--source-sha",
+            sha,
+            "--scope-target",
+            "src/lib.rs",
+            "--description",
+            "rejection fixture",
+            "--resource-budget",
+            str(budget),
+            "--output",
+            str(rejected_output),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode == 1, rejected.stderr
+    assert expected in rejected.stderr, rejected.stderr
+    assert not rejected_output.exists()
+
+
+oom_integrity = dict(integrity_document)
+oom_integrity.update(status="errored", oom_kill_delta=1)
+run_rejection("oom", oom_integrity, "E_OOM_MUTANT")
+
+pid_integrity = dict(integrity_document)
+pid_integrity.update(status="errored", pid_max_delta=1)
+run_rejection("task-cap", pid_integrity, "E_TASK_CAP")
+
+missing_shard_integrity = dict(integrity_document)
+missing_shard_integrity.update(shard_total=2, campaign_mutant_total=6)
+run_rejection("missing-shard", missing_shard_integrity, "E_SHARD_INCOMPLETE")
+
+unfinished_document = dict(outcomes_document)
+unfinished_document["end_time"] = None
+unfinished_outcomes = workdir / "unfinished-outcomes.json"
+unfinished_outcomes.write_text(json.dumps(unfinished_document))
+unfinished_integrity = dict(integrity_document)
+unfinished_integrity["outcomes_sha256"] = hashlib.sha256(
+    unfinished_outcomes.read_bytes()
+).hexdigest()
+unfinished_integrity_path = workdir / "unfinished-integrity.json"
+unfinished_integrity_path.write_text(json.dumps(unfinished_integrity))
+unfinished_output = workdir / "unfinished.json"
+unfinished = subprocess.run(
+    [
+        sys.executable,
+        str(root / "scripts/migrate_mutation_result.py"),
+        "--outcomes",
+        str(unfinished_outcomes),
+        "--integrity",
+        str(unfinished_integrity_path),
+        "--source-sha",
+        sha,
+        "--scope-target",
+        "src/lib.rs",
+        "--description",
+        "unfinished fixture",
+        "--resource-budget",
+        str(budget),
+        "--output",
+        str(unfinished_output),
+    ],
+    capture_output=True,
+    text=True,
+)
+assert unfinished.returncode == 1, unfinished.stderr
+assert "unfinished archived outcomes" in unfinished.stderr
+assert not unfinished_output.exists()
 print(f"migrate-mutation-result: contract OK ({workdir})")
