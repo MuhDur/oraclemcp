@@ -41,10 +41,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -70,7 +70,7 @@ jobs:
     # binary) forces a recompile that tips it over. 60 gives headroom.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -78,7 +78,7 @@ jobs:
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -117,7 +117,7 @@ jobs:
       - run: bash scripts/oraclemcp_agent_surface_lint.sh
       - run: bash scripts/oraclemcp_concurrency_lint.sh
       - run: bash scripts/secret_scan.sh
-      - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
         with:
           tool: cargo-deny
       - run: cargo deny check
@@ -148,7 +148,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/download-artifact@v8
@@ -168,7 +168,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -187,7 +187,7 @@ jobs:
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -199,7 +199,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
         with:
           tool: cargo-hack
       - run: bash scripts/release_acceptance_ci_suite.sh
@@ -261,7 +261,7 @@ jobs:
             binary_warn_bytes: 36000000
             binary_limit_bytes: 40000000
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/download-artifact@v8
@@ -284,7 +284,7 @@ jobs:
 
       - name: Install cargo-zigbuild (aarch64 musl)
         if: matrix.build_tool == 'cargo-zigbuild'
-        uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
         with:
           tool: cargo-zigbuild
 
@@ -417,7 +417,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/download-artifact@v8
@@ -438,7 +438,7 @@ jobs:
       # dashboard SPA so operators (and a third party) can enumerate exactly
       # what each release artifact was built from.
       - name: Install CycloneDX SBOM generator
-        uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
         with:
           tool: cargo-cyclonedx@0.5.9
       - name: Generate Rust CycloneDX SBOM
@@ -461,7 +461,7 @@ jobs:
       # artifact and to the SBOM. The attestation is recorded in the repo's
       # attestation store and is verifiable with `gh attestation verify`.
       - name: Attest build provenance for release artifacts
-        uses: actions/attest-build-provenance@v3.2.0
+        uses: actions/attest-build-provenance@v4.1.1
         with:
           subject-path: |
             artifacts/*.tar.gz
@@ -469,7 +469,7 @@ jobs:
             artifacts/oraclemcp-${{ steps.version.outputs.version }}.cdx.json
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       # Downloadable cosign blob attestations for the installer and for
       # operators who want a cosign-only archive verification path. The GitHub
       # attestation above remains the canonical hosted provenance record.
@@ -542,7 +542,7 @@ jobs:
         run: bash scripts/render_distribution_manifests.sh artifacts
 
       - name: Publish release with checksums, SBOM, and signatures
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           name: ${{ github.ref_name }}
           files: |
@@ -580,7 +580,7 @@ jobs:
     environment: crates-io
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -612,7 +612,7 @@ jobs:
       attestations: write
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/download-artifact@v8
@@ -654,14 +654,14 @@ jobs:
       # GitHub-native build provenance attestation for the pushed image, keyed
       # by its immutable digest. Verifiable with `gh attestation verify oci://...`.
       - name: Attest image build provenance
-        uses: actions/attest-build-provenance@v3.2.0
+        uses: actions/attest-build-provenance@v4.1.1
         with:
           subject-name: ghcr.io/muhdur/oraclemcp
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
       # Keyless cosign signature over the image digest (not a mutable tag).
       - name: Install cosign
-        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Sign image (keyless)
         env:
           COSIGN_YES: "true"
@@ -697,7 +697,7 @@ jobs:
       contents: read
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Install mcp-publisher
