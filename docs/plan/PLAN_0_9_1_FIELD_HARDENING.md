@@ -370,7 +370,7 @@ every action route — fails exactly like pairing did**; the field never observe
 P0-3 blocked entry, and `curl` cannot observe it at all. Fixing the pairing page alone would ship a
 dashboard that pairs and then still cannot do anything.
 
-- **Option (a), preferred:** switch the **site-wide** `with_dashboard_security_headers` helper to
+- **Option (a) [not chosen — the ruling below selected (c); kept for the decision record]:** switch the **site-wide** `with_dashboard_security_headers` helper to
   `Referrer-Policy: same-origin` (not just the pairing page — the sweep above shows every dashboard
   POST is affected). CSP already carries `form-action 'self'`.
 - **Option (b):** accept `Origin: null` when `sec-fetch-site: same-origin` is present (re-order the
@@ -1277,7 +1277,8 @@ bad trade:
 - **credential issuance**
 - **config/argument error messages** and `setup --discover` reporting
 - **connect-failure envelopes**, the **refusal corpus**
-- the **Python-MCP compatibility surface** (all 13 aliases) and **multi-profile exposure** (13 profiles)
+- the **Python-MCP compatibility surface** (all 13 Python-MCP aliases — a subset of the registry's 25
+  compat aliases per R2) and **multi-profile exposure** (13 profiles)
 - the **audit design's fail-closed refusal to start** when writes are reachable without a key
 
 Add regression coverage for anything above that a planned change comes near.
@@ -1348,8 +1349,8 @@ class must fail locally, not first in CI — learned in §A.9) · **evidence-SHA
 `origin/main`** (Z1's rule; plain local resolution is exactly how §A.9's red slipped past the local
 gate).
 **driver:** fmt · clippy · tests · **`scripts/gen_baseline.sh --check`** · `verify_required_local.py`.
-Heavy builds go through `scripts/build_lease.sh` with a dedicated `CARGO_TARGET_DIR` (E1's guard
-enforces this via `scripts/check_build_lease.sh` / the repo-local Cargo compiler wrapper — which
+Heavy builds go through `scripts/build_lease.sh` with a dedicated `CARGO_TARGET_DIR` (the build-lease
+guard enforces this via `scripts/check_build_lease.sh` / the repo-local Cargo compiler wrapper — which
 blocked the orchestrator's own build tonight, correctly).
 
 ### 9.2 Release acceptance
