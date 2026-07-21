@@ -1190,9 +1190,8 @@ mod tests {
     // they were previously exercised only at their *construction* sites
     // (`matches!(err, DbError::Foo(_))`) and never through `into_envelope()` —
     // the actual agent-facing rendering. A regression that mapped one of these
-    // to the wrong `ErrorClass` (e.g. `LeaseNotFound` silently losing its
-    // `LeaseRequired` class, or `Quarantined` losing its `ConnectionFailed`
-    // class) would have passed every existing test.
+    // to the wrong `ErrorClass` (for example, `Quarantined` losing its
+    // `ConnectionFailed` class) would have passed every existing test.
 
     #[test]
     fn backend_not_compiled_is_runtime_state_required() {
