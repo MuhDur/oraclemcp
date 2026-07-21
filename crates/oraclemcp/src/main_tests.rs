@@ -3645,6 +3645,80 @@ fn robot_docs_guide_outputs_agent_workflows() {
     );
 }
 
+#[test]
+fn a2a_error_statuses_preserve_actionable_causes() {
+    let (code, message) = setup_config_error_status(&ConfigOpsError::FileStore(
+        oraclemcp_core::file_store::FileStoreError::Locked,
+    ));
+    assert_eq!(code, "ORACLEMCP_STATE_STORE_LOCKED");
+    assert!(message.contains("exclusively locked"));
+    assert!(message.contains("stop that service"));
+
+    let credential_store_locked =
+        ClientCredentialError::Store(oraclemcp_core::file_store::FileStoreError::Locked);
+    assert_eq!(
+        client_credential_error_code(&credential_store_locked),
+        "ORACLEMCP_STATE_STORE_LOCKED"
+    );
+    assert!(client_credential_error_message(&credential_store_locked).contains("stop the service"));
+
+    for (error, expected_code) in [
+        (
+            ConfigOpsError::PreviewRequired,
+            "ORACLEMCP_SETUP_PREVIEW_REQUIRED",
+        ),
+        (
+            ConfigOpsError::InvalidPreviewToken,
+            "ORACLEMCP_SETUP_PREVIEW_TOKEN_INVALID",
+        ),
+        (
+            ConfigOpsError::PreviewExpired,
+            "ORACLEMCP_SETUP_PREVIEW_EXPIRED",
+        ),
+        (
+            ConfigOpsError::PreviewDraftChanged,
+            "ORACLEMCP_SETUP_PREVIEW_DRAFT_CHANGED",
+        ),
+        (
+            ConfigOpsError::PreviewConfirmationRequired,
+            "ORACLEMCP_SETUP_PREVIEW_CONFIRMATION_REQUIRED",
+        ),
+    ] {
+        let (code, message) = setup_config_error_status(&error);
+        assert_eq!(code, expected_code);
+        assert!(!message.is_empty());
+    }
+
+    let (code, message) =
+        incident_capture_error_status(&IncidentCaptureError::Io("disk full".to_owned()));
+    assert_eq!(code, "ORACLEMCP_INCIDENT_CAPTURE_IO_FAILED");
+    assert!(message.contains("disk full"));
+
+    let (code, message) = incident_capture_error_status(&IncidentCaptureError::MissingFile {
+        operation: "read incident manifest",
+    });
+    assert_eq!(code, "ORACLEMCP_INCIDENT_BUNDLE_MISSING");
+    assert!(message.contains("read incident manifest"));
+
+    let (code, message) = incident_replay_error_status(&IncidentReplayError::Capture(
+        IncidentCaptureError::Io("audit volume is full".to_owned()),
+    ));
+    assert_eq!(code, "ORACLEMCP_INCIDENT_REPLAY_IO_FAILED");
+    assert!(message.contains("audit volume is full"));
+
+    let (code, message) = incident_replay_error_status(&IncidentReplayError::Capture(
+        IncidentCaptureError::MissingFile {
+            operation: "read incident manifest",
+        },
+    ));
+    assert_eq!(code, "ORACLEMCP_INCIDENT_BUNDLE_MISSING");
+    assert!(message.contains("read incident manifest"));
+
+    let (code, message) = incident_config_load_error_status("invalid profiles TOML");
+    assert_eq!(code, "ORACLEMCP_INCIDENT_CONFIG_LOAD_FAILED");
+    assert!(message.contains("invalid profiles TOML"));
+}
+
 fn custom_def(name: &str) -> CustomToolDef {
     CustomToolDef {
         name: name.to_owned(),

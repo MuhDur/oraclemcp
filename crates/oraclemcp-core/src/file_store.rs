@@ -258,8 +258,8 @@ impl FileStore {
         // A fork duplicates this descriptor's open file description. Dropping
         // only the parent descriptor after a failed initialization can therefore
         // leave the flock live until the child reaches exec, even though this
-        // acquisition has already failed. Explicit unlock releases the shared
-        // lock immediately on every failure path; the sidecar may remain
+        // acquisition has already failed. Explicit unlock releases that
+        // exclusive lock immediately on every failure path; the sidecar may remain
         // partial, but it is never interpreted as ownership by a future process.
         let initialization = (|| -> Result<()> {
             file.set_len(0)
@@ -772,7 +772,7 @@ fn private_open_error(path: &Path, error: &std::io::Error) -> FileStoreError {
 /// `flock` is associated with the open file description, so a child created by
 /// `fork` can transiently retain a duplicate while the parent reports an
 /// initialization failure. Calling `unlock` on the parent's descriptor releases
-/// that shared lock immediately; waiting for every duplicate to close would make
+/// that exclusive lock immediately; waiting for every duplicate to close would make
 /// the error path spuriously report [`FileStoreError::Locked`].
 fn release_failed_service_lock_initialization(
     file: &File,

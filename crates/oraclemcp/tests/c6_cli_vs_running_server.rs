@@ -170,7 +170,6 @@ fn c6_state_mutating_cli_verbs_fail_while_the_store_is_owned() {
 /// [`ACTIONABLE_LOCK_CODES`], or extend that list with a better name — what it
 /// may not do is keep emitting the generic write failure.
 #[test]
-#[ignore = "expected failure until A2a maps FileStoreError::Locked to an actionable code (bead oraclemcp-091-c6-cli-vs-server-collision-6o0m9)"]
 fn c6_a_store_collision_names_the_lock_holder_and_the_remedy() {
     let dir = temp_dir("owned-store-diagnostic");
     let state_home = dir.join("state");

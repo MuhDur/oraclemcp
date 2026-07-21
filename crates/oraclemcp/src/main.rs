@@ -67,7 +67,8 @@ use oraclemcp_config::{
 use oraclemcp_core::admission::DEFAULT_READ_PER_PROFILE_CAP;
 use oraclemcp_core::http::SinglePrincipalGuard;
 use oraclemcp_core::incident::{
-    Cassette, CassetteFrame, IncidentCaptureRequest, capture_bundle, replay_bundle,
+    Cassette, CassetteFrame, IncidentCaptureError, IncidentCaptureRequest, IncidentReplayError,
+    capture_bundle, replay_bundle,
 };
 use oraclemcp_core::{
     AdmissionController, CapabilitiesReport, ChangeProposalStore, ClientCredentialError,
@@ -3675,7 +3676,7 @@ fn run_serve(
                     Err(error) => {
                         emit_status_error(
                             robot_json,
-                            "ORACLEMCP_CLIENT_CREDENTIAL_STORE_UNAVAILABLE",
+                            client_credential_error_code(&error),
                             &client_credential_error_message(&error),
                         );
                         return ExitCode::from(2);
@@ -4638,13 +4639,39 @@ fn setup_config_error_status(error: &ConfigOpsError) -> (&'static str, String) {
             "ORACLEMCP_SETUP_ROLLBACK_UNKNOWN",
             "rollback id is unknown or already consumed".to_owned(),
         ),
-        ConfigOpsError::FileStore(_) | ConfigOpsError::Io(_) => (
-            "ORACLEMCP_SETUP_WRITE_FAILED",
-            "config workflow failed before completion".to_owned(),
+        ConfigOpsError::PreviewRequired => (
+            "ORACLEMCP_SETUP_PREVIEW_REQUIRED",
+            error.to_string(),
+        ),
+        ConfigOpsError::InvalidPreviewToken => (
+            "ORACLEMCP_SETUP_PREVIEW_TOKEN_INVALID",
+            error.to_string(),
+        ),
+        ConfigOpsError::PreviewExpired => ("ORACLEMCP_SETUP_PREVIEW_EXPIRED", error.to_string()),
+        ConfigOpsError::PreviewDraftChanged => (
+            "ORACLEMCP_SETUP_PREVIEW_DRAFT_CHANGED",
+            error.to_string(),
+        ),
+        ConfigOpsError::PreviewConfirmationRequired => (
+            "ORACLEMCP_SETUP_PREVIEW_CONFIRMATION_REQUIRED",
+            error.to_string(),
+        ),
+        ConfigOpsError::FileStore(oraclemcp_core::file_store::FileStoreError::Locked) => (
+            "ORACLEMCP_STATE_STORE_LOCKED",
+            "the state store is exclusively locked by a running oraclemcp service; stop that service before offline mutation or use its online operator workflow"
+                .to_owned(),
+        ),
+        ConfigOpsError::FileStore(_) => (
+            "ORACLEMCP_SETUP_STATE_STORE_FAILED",
+            error.to_string(),
+        ),
+        ConfigOpsError::Io(_) => (
+            "ORACLEMCP_SETUP_IO_FAILED",
+            error.to_string(),
         ),
         _ => (
             "ORACLEMCP_SETUP_WRITE_FAILED",
-            "config workflow failed before completion".to_owned(),
+            error.to_string(),
         ),
     }
 }
@@ -5401,6 +5428,37 @@ fn run_refusal_corpus_export(robot_json: bool, args: RefusalCorpusExportCliArgs)
     }
 }
 
+fn incident_capture_error_status(error: &IncidentCaptureError) -> (&'static str, String) {
+    match error {
+        IncidentCaptureError::Io(_) => ("ORACLEMCP_INCIDENT_CAPTURE_IO_FAILED", error.to_string()),
+        IncidentCaptureError::MissingFile { .. } => {
+            ("ORACLEMCP_INCIDENT_BUNDLE_MISSING", error.to_string())
+        }
+        _ => ("ORACLEMCP_INCIDENT_CAPTURE_REFUSED", error.to_string()),
+    }
+}
+
+fn incident_replay_error_status(error: &IncidentReplayError) -> (&'static str, String) {
+    match error {
+        IncidentReplayError::Capture(capture_error @ IncidentCaptureError::Io(_)) => (
+            "ORACLEMCP_INCIDENT_REPLAY_IO_FAILED",
+            capture_error.to_string(),
+        ),
+        IncidentReplayError::Capture(capture_error @ IncidentCaptureError::MissingFile { .. }) => (
+            "ORACLEMCP_INCIDENT_BUNDLE_MISSING",
+            capture_error.to_string(),
+        ),
+        _ => ("ORACLEMCP_INCIDENT_REPLAY_REFUSED", error.to_string()),
+    }
+}
+
+fn incident_config_load_error_status(error: impl std::fmt::Display) -> (&'static str, String) {
+    (
+        "ORACLEMCP_INCIDENT_CONFIG_LOAD_FAILED",
+        format!("incident capture could not load configuration: {error}"),
+    )
+}
+
 fn run_incident_capture(robot_json: bool, args: IncidentCaptureCliArgs) -> ExitCode {
     if args.bundle.exists() {
         emit_command_error(
@@ -5428,13 +5486,9 @@ fn run_incident_capture(robot_json: bool, args: IncidentCaptureCliArgs) -> ExitC
 
     let config = match OracleMcpConfig::load(None) {
         Ok(config) => config,
-        Err(_) => {
-            emit_command_error(
-                robot_json,
-                "incident capture",
-                "ORACLEMCP_INCIDENT_CONFIG_INVALID",
-                "incident capture could not load a validated configuration",
-            );
+        Err(error) => {
+            let (code, message) = incident_config_load_error_status(error);
+            emit_command_error(robot_json, "incident capture", code, &message);
             return ExitCode::from(2);
         }
     };
@@ -5490,13 +5544,9 @@ fn run_incident_capture(robot_json: bool, args: IncidentCaptureCliArgs) -> ExitC
     };
     let manifest = match capture_bundle(&args.bundle, &request) {
         Ok(manifest) => manifest,
-        Err(_) => {
-            emit_command_error(
-                robot_json,
-                "incident capture",
-                "ORACLEMCP_INCIDENT_CAPTURE_REFUSED",
-                "incident capture was refused before a bundle could be written",
-            );
+        Err(error) => {
+            let (code, message) = incident_capture_error_status(&error);
+            emit_command_error(robot_json, "incident capture", code, &message);
             return ExitCode::from(2);
         }
     };
@@ -5931,7 +5981,7 @@ fn run_client_credentials_cmd(robot_json: bool, command: ClientCredentialCliComm
         Err(error) => {
             emit_status_error(
                 robot_json,
-                "ORACLEMCP_CLIENT_CREDENTIAL_STORE_UNAVAILABLE",
+                client_credential_error_code(&error),
                 &client_credential_error_message(&error),
             );
             return ExitCode::from(2);
