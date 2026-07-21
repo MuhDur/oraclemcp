@@ -5976,14 +5976,11 @@ fn run_service_cmd(robot_json: bool, command: ServiceCliCommand) -> ExitCode {
 }
 
 fn run_client_credentials_cmd(robot_json: bool, command: ClientCredentialCliCommand) -> ExitCode {
+    let online_revocation = online_revocation_for_command(&command);
     let store = match ClientCredentialStore::open_default() {
         Ok(store) => store,
         Err(error) => {
-            emit_status_error(
-                robot_json,
-                client_credential_error_code(&error),
-                &client_credential_error_message(&error),
-            );
+            emit_client_credential_open_error(robot_json, &error, online_revocation.as_ref());
             return ExitCode::from(2);
         }
     };
@@ -6003,8 +6000,11 @@ fn run_client_credentials_cmd(robot_json: bool, command: ClientCredentialCliComm
                     "durability": issued.durability.as_str(),
                     "durability_warning": issued.durability.warning(),
                     "serve_args": ["serve", "--listen", "127.0.0.1:7070", "--client-credentials"],
+                    "client_command": client_credential_client_command(&bearer),
                     "rotation_command": ["oraclemcp", "clients", "rotate", client_id],
                     "revocation_command": ["oraclemcp", "clients", "revoke", issued.client_id],
+                    "offline_mutation_notice": "The local rotate and revoke commands require the service to be stopped; a running service keeps clients.json in memory.",
+                    "online_revocation_command": online_client_credential_revoke_command(&issued.client_id),
                 })
             }),
         ClientCredentialCliCommand::List => Ok(serde_json::json!({
@@ -6058,6 +6058,94 @@ fn run_client_credentials_cmd(robot_json: bool, command: ClientCredentialCliComm
             );
             ExitCode::from(2)
         }
+    }
+}
+
+fn client_credential_client_command(bearer: &str) -> serde_json::Value {
+    serde_json::json!([
+        "claude",
+        "mcp",
+        "add",
+        "oracle",
+        "--transport",
+        "http",
+        "--header",
+        format!("Authorization: Bearer {bearer}"),
+        "http://127.0.0.1:7070/mcp",
+    ])
+}
+
+fn online_client_credential_revoke_command(client_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "program": "curl",
+        "argv": [
+            "curl",
+            "--fail-with-body",
+            "--request",
+            "POST",
+            "${ORACLEMCP_CONTROL_URL}/operator/v1/client-credentials/revoke",
+            "--cert",
+            "${ORACLEMCP_OPERATOR_CERT}",
+            "--key",
+            "${ORACLEMCP_OPERATOR_KEY}",
+            "--cacert",
+            "${ORACLEMCP_CONTROL_CA}",
+            "--header",
+            "content-type: application/json",
+            "--data",
+            serde_json::json!({ "client_id": client_id }).to_string(),
+        ],
+        "method": "POST",
+        "path": "/operator/v1/client-credentials/revoke",
+        "requires": [
+            "ORACLEMCP_CONTROL_URL set to the running service's HTTPS control listener",
+            "an mTLS client certificate authorized by http.operator.allowed_subjects",
+        ],
+        "note": "This route mutates the running service's in-memory credential store and closes affected sessions without downtime. Expand or replace the ${...} placeholders before execution."
+    })
+}
+
+fn online_revocation_for_command(
+    command: &ClientCredentialCliCommand,
+) -> Option<serde_json::Value> {
+    match command {
+        ClientCredentialCliCommand::Revoke(args) => {
+            Some(online_client_credential_revoke_command(&args.client_id))
+        }
+        ClientCredentialCliCommand::Issue(_)
+        | ClientCredentialCliCommand::List
+        | ClientCredentialCliCommand::Rotate(_) => None,
+    }
+}
+
+fn emit_client_credential_open_error(
+    robot_json: bool,
+    error: &ClientCredentialError,
+    online_revocation: Option<&serde_json::Value>,
+) {
+    let code = client_credential_error_code(error);
+    let message = client_credential_error_message(error);
+    let is_locked = matches!(
+        error,
+        ClientCredentialError::Store(oraclemcp_core::file_store::FileStoreError::Locked)
+    );
+
+    if robot_json
+        && is_locked
+        && let Some(online_revocation) = online_revocation
+    {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "kind": "error",
+                "code": code,
+                "message": message,
+                "online_revocation_command": online_revocation,
+                "next_action": "Use the authenticated control-listener request above; do not edit clients.json out of process while the service is running."
+            })
+        );
+    } else {
+        emit_status_error(robot_json, code, &message);
     }
 }
 

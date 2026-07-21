@@ -4038,6 +4038,64 @@ fn build_capability_payloads_do_not_claim_live_connectivity() {
     assert!(capabilities["features"].get("live_db").is_none());
 }
 
+#[test]
+fn client_credential_commands_distinguish_offline_and_live_revocation() {
+    let client_id = "client-0123456789abcdef0123456789abcdef";
+    let client_command = client_credential_client_command("ocmcp_fixture_bearer");
+    assert_eq!(
+        client_command,
+        serde_json::json!([
+            "claude",
+            "mcp",
+            "add",
+            "oracle",
+            "--transport",
+            "http",
+            "--header",
+            "Authorization: Bearer ocmcp_fixture_bearer",
+            "http://127.0.0.1:7070/mcp",
+        ])
+    );
+
+    let online = online_client_credential_revoke_command(client_id);
+    assert_eq!(online["program"], serde_json::json!("curl"));
+    assert_eq!(online["method"], serde_json::json!("POST"));
+    assert_eq!(
+        online["path"],
+        serde_json::json!("/operator/v1/client-credentials/revoke")
+    );
+    assert_eq!(
+        online["argv"][4],
+        serde_json::json!("${ORACLEMCP_CONTROL_URL}/operator/v1/client-credentials/revoke")
+    );
+    assert_eq!(
+        online["argv"][14],
+        serde_json::json!(format!("{{\"client_id\":\"{client_id}\"}}"))
+    );
+    assert!(
+        online["requires"]
+            .as_array()
+            .expect("online command requirements")
+            .iter()
+            .any(|requirement| requirement
+                .as_str()
+                .is_some_and(|requirement| requirement.contains("mTLS")))
+    );
+
+    let revoke = ClientCredentialCliCommand::Revoke(ClientCredentialIdCliArgs {
+        client_id: client_id.to_owned(),
+    });
+    assert_eq!(
+        online_revocation_for_command(&revoke),
+        Some(online_client_credential_revoke_command(client_id))
+    );
+    let issue = ClientCredentialCliCommand::Issue(ClientCredentialIssueCliArgs {
+        label: "fixture".to_owned(),
+        scopes: vec!["oracle:read".to_owned()],
+    });
+    assert!(online_revocation_for_command(&issue).is_none());
+}
+
 // ---- K4: bounded reason_class + operating_level labels on the blocked counter ----
 
 #[test]
