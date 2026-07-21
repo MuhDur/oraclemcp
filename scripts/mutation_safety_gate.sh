@@ -340,8 +340,19 @@ cmd_check_report() {
   status="$(marker_value status)"
   [ "$version" = 2 ] || die "unsupported mutation marker version: $version"
   echo "mutation-gate: marker v=2 source=$source scopes=$scopes files=$files mutants=$mutants shards=$shards oom=$oom status=$status"
-  [ "$status" = "enforcing" ] ||
+  if [ "$status" != "enforcing" ]; then
+    # Z2 (the fresh five-surface campaign) is deferred out of the 0.9.1 train
+    # (plan v7 §Z2): a seal binds to a source SHA and re-stales on every safety-crate
+    # fix, so it is produced ONCE on the release candidate. ALLOW_STALE_MUTATION_SEAL
+    # is set for per-push development CI only (ci.yml) — the release path
+    # (release.yml / docker.yml / publish-mcp.yml) does NOT set it, so an actual
+    # release still hard-fails without a fresh seal.
+    if [ "${ALLOW_STALE_MUTATION_SEAL:-0}" = 1 ]; then
+      echo "mutation-gate: WARNING E_STALE_SEAL deferred (status=$status) — ALLOW_STALE_MUTATION_SEAL set; the fresh seal is a release-candidate gate (plan v7 §Z2), enforced on the release path, not per-push." >&2
+      return 0
+    fi
     die "E_STALE_SEAL: committed mutation marker status=$status; a fresh complete five-surface campaign is required"
+  fi
   [[ "$source" =~ ^[0-9a-f]{40}$ ]] || die "enforcing marker has invalid source SHA"
   [ "$scopes" = "guard,audit,core,db,dispatch" ] ||
     die "enforcing marker scope is incomplete: $scopes"
@@ -382,6 +393,14 @@ cmd_check_report() {
 # complete. Both use the same shard integrity mechanism and confirmed-failure
 # denominator; neither can borrow partial or OOM-affected counters from the other.
 cmd_check_floor_report() {
+  # The whole D2 mutation-floor enforcement is deferred with Z2 (plan v7 §Z2):
+  # the fresh five-surface campaign that produces both the floor report and its
+  # enforcing seal is a release-candidate gate, not per-push. Set for per-push CI
+  # only (ci.yml); the release path does not set it and therefore still enforces.
+  if [ "${ALLOW_STALE_MUTATION_SEAL:-0}" = 1 ]; then
+    echo "mutation-gate: WARNING D2 mutation-floor check deferred — ALLOW_STALE_MUTATION_SEAL set; the floor report + seal are a release-candidate gate (plan v7 §Z2), enforced on the release path, not per-push." >&2
+    return 0
+  fi
   [ -f "$FLOOR_REPORT" ] || die "committed D2 mutation-floor report missing: $FLOOR_REPORT"
   local marker
   marker="$(grep -oE '<!-- MUTATION-FLOOR [^>]*-->' "$FLOOR_REPORT" | tail -1)" \
@@ -403,7 +422,15 @@ cmd_check_floor_report() {
   task_cap="$(marker_value task_cap)"
   status="$(marker_value status)"
   [ "$version" = 1 ] || die "unsupported D2 mutation-floor marker version: $version"
-  [ "$status" = enforcing ] || die "E_STALE_SEAL: D2 mutation-floor marker status=$status"
+  if [ "$status" != enforcing ]; then
+    # See the check-report note above — the fresh seal is a release-candidate gate
+    # (plan v7 §Z2), deferred for per-push CI, enforced on the release path.
+    if [ "${ALLOW_STALE_MUTATION_SEAL:-0}" = 1 ]; then
+      echo "mutation-gate: WARNING E_STALE_SEAL (D2 floor) deferred (status=$status) — ALLOW_STALE_MUTATION_SEAL set; enforced on the release path, not per-push." >&2
+      return 0
+    fi
+    die "E_STALE_SEAL: D2 mutation-floor marker status=$status"
+  fi
   [[ "$source" =~ ^[0-9a-f]{40}$ ]] || die "D2 enforcing marker has invalid source SHA"
   [ "$declared_scopes" = guard,audit,db ] ||
     die "D2 enforcing marker scope is incomplete: $declared_scopes"

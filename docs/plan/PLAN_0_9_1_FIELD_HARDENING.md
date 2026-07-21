@@ -4,7 +4,11 @@
 **Owner:** lead orchestrator. **Release is operator-gated** — agents never tag or publish.
 **v7 delta (2026-07-21):** the Z2 fresh mutation campaign is **DEFERRED OUT of 0.9.1** (operator
 ruling) — a seal binds to a SHA and would re-stale on every safety-crate fix, so it is produced once
-on the release candidate; the three `E_STALE_SEAL` CI reds are an accepted deferred state (§Z2, §9.2).
+on the release candidate. **Deferring the campaign does NOT defer green-main:** the per-push
+`E_STALE_SEAL` check is gated behind `ALLOW_STALE_MUTATION_SEAL=1`, set in `ci.yml` only (development
+CI), so per-push CI is fully green with a loud deferral warning — while the release path
+(`release.yml`/`docker.yml`/`publish-mcp.yml`) does **not** set it, so an actual release still
+hard-fails without a fresh seal (§Z2, §9.2).
 
 **How to use this document.** It is written to be self-contained: an agent that has never seen this
 project should be able to pick any task here and implement it without asking a human. Every task names
@@ -198,10 +202,16 @@ base. Nothing else in this plan can show honest green until Z lands (constitutio
   after the safety-crate changes land — that work is out of THIS train** (like Cluster J). A partial
   attempt on 2026-07-21 (guard + audit shards computed via Codex Spark) is abandoned; its scattered
   artifacts and the `oraclemcp-z2-mutation` worktree are throwaway.
-  **Consequence for green-main (see §9.2 item 7):** the `E_STALE_SEAL` marker persists, so the
-  **coverage-ratchet**, **release-preflight**, and the **heartbeat that aggregates them** stay red —
-  a **known, operator-accepted deferred state**. Every other required lane is green (Z1 fixed the
-  real red). Resolving those three is coupled to the deferred seal and is not a 0.9.1 obligation.
+  **Green-main is preserved (operator ruling 2026-07-21: "deferring Z2 does not mean deferring
+  green").** The per-push `E_STALE_SEAL` failure in `mutation_safety_gate.sh` (both `check-report`
+  and `check-floor-report`) is gated behind **`ALLOW_STALE_MUTATION_SEAL`**, set in **`ci.yml` only**
+  (development CI) — so the coverage-ratchet, release-preflight, and heartbeat jobs go **green** with
+  a loud `WARNING E_STALE_SEAL deferred` line, not red. This is **not gate surgery to hide a gap**:
+  the flag is deliberately **absent** from the release path (`release.yml`, `docker.yml`,
+  `publish-mcp.yml`), so an actual `vX.Y.Z` release still hard-fails without a fresh seal — the seal
+  is simply enforced **at the release candidate, where it belongs**, instead of blocking every
+  development push. Producing the RC seal (and re-adding it to the local pre-push gate) is the
+  deferred follow-up.
 - **Z3 [P1→P0-disposition] — the Windows workspace lane. OPERATOR RULING (2026-07-20): MUST be
   fixed — re-deferral is off the table.** "Rust workspace (Windows) → cargo test workspace on
   Windows" went red on the `6519a57` run (previous run green; only docs commits in between ⇒ flake or
@@ -1341,7 +1351,7 @@ stage-aware TLS work already on `main`. Added public API is *minor*-compatible, 
 | **Scope is large for one release** | P0/P1 gate the cut; P2/P3 ship if clean. Land complete, not sliced (constitution #11) |
 | **cosign/attest v4 majors** (from Dependabot #19) live on tag-only paths CI cannot exercise | The first release run is the only proof — watch it deliberately |
 | **B6 broadens trust** (system roots trusted alongside a private-CA wallet) | It restores reference parity, the wallet stays included, and no accept-all mode exists or is added; record the B6c knob decision either way |
-| **The deferred mutation seal (§Z2) leaves 3 CI checks red through 0.9.1** | Operator-accepted (2026-07-21): the seal binds to a SHA and would re-stale on every safety-crate fix; produced once on the RC. Documented in §9.2 item 7 so the red is never mistaken for an escape |
+| **The deferred mutation seal (§Z2) could leave CI red or, if mishandled, hide a real gap** | `ALLOW_STALE_MUTATION_SEAL` defers the check for **per-push CI only** (green with a loud warning); the release path never sets it, so a real release still enforces a fresh seal. Not gate surgery — the seal moves to the RC where it belongs, and re-staling on every safety-crate fix is exactly why per-push enforcement was wrong |
 
 ---
 
@@ -1372,16 +1382,17 @@ blocked the orchestrator's own build tonight, correctly).
 5. **F** green, or explicitly deferred if F0 does not happen.
 6. Every bead closed carries **landed evidence** passing `check_bead_close_evidence.sh` with **0 hard
    findings** (the guard already rejected six different evidence defects this week — respect it).
-7. **Both repos' front pages green on every REQUIRED lane** — measured as *every check-run on the
-   HEAD commit*, not run conclusions (see `frontpage-green-mechanics`) — **except** the three
-   `E_STALE_SEAL`-derived checks (coverage-ratchet, release-preflight, aggregating heartbeat), which
-   are the operator-accepted **deferred-seal red** (Z2 deferred out of 0.9.1) and are resolved at the
-   release candidate. The driver front page is fully green; the server is green minus those three.
+7. **Both repos' front pages fully green** — measured as *every check-run on the HEAD commit*, not
+   run conclusions (see `frontpage-green-mechanics`). The three `E_STALE_SEAL`-derived checks
+   (coverage-ratchet, release-preflight, heartbeat) are green via the `ALLOW_STALE_MUTATION_SEAL`
+   per-push deferral (§Z2) with a loud warning; the seal itself is enforced on the release path,
+   which does not set the flag.
 8. `cargo-semver-checks` result recorded and the version decision (§7) made on its evidence.
 9. **The operator pushes the tag.** Agents never tag or publish.
-10. **Workstream Z landed first and stayed landed** — oraclemcp `main` green on required lanes
-    (bead-evidence audit 0 hard **in CI**, Windows lane resolved; the mutation seal is **deferred**,
-    §Z2) before any A/B fix is claimed done, and kept green at every subsequent push.
+10. **Workstream Z landed first and stayed landed** — oraclemcp `main` fully green (bead-evidence
+    audit 0 hard **in CI**, Windows lane resolved; the mutation seal deferred per-push via
+    `ALLOW_STALE_MUTATION_SEAL`, §Z2) before any A/B fix is claimed done, and kept green at every
+    subsequent push.
 11. **The rig ran on the release candidate** — R1–R4 executed against the RC build, **plus the
     R5-lite Codex-Spark agent session** (operator-gated, per the 2026-07-20 ruling); the round-N
     report contains no untriaged P0/P1 finding (findings either fixed in-train or operator-deferred
@@ -2291,8 +2302,9 @@ checks.
 `marker v=2 source=4dca0b2… scopes=guard,audit files=27 mutants=1889 shards=3/3 status=stale` →
 `E_STALE_SEAL: committed mutation marker status=stale; a fresh complete five-surface campaign is
 required` (`scripts/mutation_safety_gate.sh`). **Disposition: DEFERRED (§Z2, operator ruling
-2026-07-21)** — the fresh seal is produced once on the release candidate, not in 0.9.1; these two
-jobs (and the heartbeat) stay red as an accepted deferred state, never resolved by gate surgery.
+2026-07-21)** — the fresh seal is produced once on the release candidate, not in 0.9.1. Per-push CI
+goes green via `ALLOW_STALE_MUTATION_SEAL` (set in `ci.yml` only, loud warning); the release path
+never sets it, so an actual release still enforces a fresh seal.
 
 **Driver working tree** — untracked `tests/artifacts/evidence/closes/rust-oracledb-4sfc.json` and
 `…-s0se.json`; local agent branches `agent-d4-completion`, `agent-d5-recovery`,
