@@ -1145,9 +1145,8 @@ fn write_new_atomic_file_at(
     display_path: &Path,
     bytes: &[u8],
 ) -> Result<(), String> {
-    match regular_file_status_at(parent, name, display_path)? {
-        true => return Err(format!("{} already exists", display_path.display())),
-        false => {}
+    if regular_file_status_at(parent, name, display_path)? {
+        return Err(format!("{} already exists", display_path.display()));
     }
     let temp_name = OsString::from(format!(
         ".{}.tmp.{}.{}",

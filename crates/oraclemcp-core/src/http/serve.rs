@@ -692,6 +692,11 @@ fn tls_handshake_timed_out() -> std::io::Error {
     )
 }
 
+// One request-handling seam threading transport, server, config and peer facts
+// together; splitting it would only move the same values into a struct that
+// exists for the lint's benefit. Suppressed so the required clippy lane is
+// green; reshape it deliberately if this grows further.
+#[allow(clippy::too_many_arguments)]
 fn handle_stream(
     stream: &mut (impl DeadlineRead + Write),
     server: &OracleMcpServer,
