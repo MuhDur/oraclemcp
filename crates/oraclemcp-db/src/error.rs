@@ -510,9 +510,13 @@ impl DbError {
                 let env = oracle_error_envelope(&msg);
                 if env.error_class == ErrorClass::Internal {
                     // No ORA- code recognised: keep it as a connection-class
-                    // failure rather than a bare Internal — and never surface
-                    // a raw driver string without concrete next actions.
-                    ErrorEnvelope::new(ErrorClass::ConnectionFailed, msg)
+                    // failure rather than a bare Internal. Driver transport
+                    // detail is not an operator contract and may disclose
+                    // socket internals, so never render it on a tool surface.
+                    ErrorEnvelope::new(
+                        ErrorClass::ConnectionFailed,
+                        "Oracle connection failed; driver detail suppressed",
+                    )
                         .with_next_step(
                             "verify the connect string (host, port, service name), credentials, \
                              and listener reachability",
@@ -526,6 +530,9 @@ impl DbError {
                 connect_handshake_envelope(&kind, &message)
             }
             DbError::Query(msg) | DbError::Execute(msg) => {
+                if raw_connection_lost_marker(&msg) {
+                    return transport_lost_envelope(&msg);
+                }
                 // Classify via the embedded ORA- code where present.
                 let env = oracle_error_envelope(&msg);
                 if env.error_class == ErrorClass::Internal {
@@ -544,9 +551,7 @@ impl DbError {
                 }
             }
             DbError::ConnectionLost(msg) => {
-                let mut env = ErrorEnvelope::new(ErrorClass::Transient, msg.clone()).with_next_step(
-                    "the Oracle connection was lost; discard it and retry this idempotent read once on a fresh connection",
-                );
+                let mut env = transport_lost_envelope(&msg);
                 if let Some(code) = parse_ora_code(&msg) {
                     env = env.with_ora_code(code);
                 }
@@ -798,6 +803,23 @@ fn raw_connection_lost_marker(message: &str) -> bool {
     ]
     .iter()
     .any(|marker| message.contains(marker))
+}
+
+/// Raw socket/driver text is not a stable operator contract and can include
+/// transport internals. Preserve retryability without rendering the driver's
+/// display text on an MCP tool surface.
+fn transport_lost_envelope(message: &str) -> ErrorEnvelope {
+    let mut env = ErrorEnvelope::new(
+        ErrorClass::Transient,
+        "Oracle transport connection was lost; driver detail suppressed",
+    )
+    .with_next_step(
+        "discard the connection and retry this idempotent read once on a fresh connection",
+    );
+    if let Some(code) = parse_ora_code(message) {
+        env = env.with_ora_code(code);
+    }
+    env
 }
 
 #[cfg(test)]
@@ -1355,6 +1377,31 @@ mod tests {
                 .iter()
                 .any(|step| step.contains("same connection"))
         );
+    }
+
+    #[test]
+    fn raw_transport_display_never_reaches_an_agent_envelope() {
+        for error in [
+            DbError::Connect("Broken pipe (os error 32)".to_owned()),
+            DbError::ConnectionLost("Broken pipe (os error 32)".to_owned()),
+            DbError::Query("connection reset by peer (os error 104)".to_owned()),
+            DbError::Execute("the connection is closed".to_owned()),
+        ] {
+            let envelope = error.into_envelope();
+            assert!(
+                matches!(
+                    envelope.error_class,
+                    ErrorClass::ConnectionFailed | ErrorClass::Transient
+                ),
+                "unexpected class: {:?}",
+                envelope.error_class
+            );
+            assert!(!envelope.next_steps.is_empty());
+            let rendered = envelope.to_json().to_string();
+            assert!(!rendered.contains("Broken pipe"));
+            assert!(!rendered.contains("connection reset by peer"));
+            assert!(!rendered.contains("the connection is closed"));
+        }
     }
 
     #[test]
