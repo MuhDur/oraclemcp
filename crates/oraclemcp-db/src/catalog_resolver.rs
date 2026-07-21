@@ -2009,4 +2009,167 @@ mod tests {
         assert!(!publish_one(&cache, &name, &context, resolved_table(74)));
         assert_eq!(cache.resolve(&name, &context), Resolution::Unresolved);
     }
+
+    // ---------------------------------------------------------------------
+    // C8 fixture — a blind catalog probe is not evidence of absence.
+    // Plan §4-C8 / §A.2.3 / §A.10 S1,
+    // bead oraclemcp-091-c8-blind-catalog-refuse-w9iie.
+    // ---------------------------------------------------------------------
+
+    /// A connection whose dictionary visibility is a property of the
+    /// *principal*, not of the object being asked about.
+    ///
+    /// Both purity probes return empty either way — that is the whole point.
+    /// A table with no SELECT VPD policy and no virtual columns is
+    /// indistinguishable, through those two queries alone, from a principal
+    /// who cannot read `ALL_POLICIES` and `ALL_TAB_COLS` at all. The only way
+    /// to tell them apart is to ask something whose answer is known to be
+    /// non-empty for a sighted principal, which is why every other query here
+    /// answers according to `dictionary_readable`.
+    struct CatalogVisibility {
+        dictionary_readable: bool,
+        queries: Mutex<Vec<String>>,
+    }
+
+    impl CatalogVisibility {
+        fn blind() -> Self {
+            Self {
+                dictionary_readable: false,
+                queries: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn sighted() -> Self {
+            Self {
+                dictionary_readable: true,
+                queries: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for CatalogVisibility {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.queries
+                .lock()
+                .expect("queries lock")
+                .push(sql.to_owned());
+            if sql == SELECT_POLICY_SQL || sql == VIRTUAL_COLUMN_SQL {
+                // No policy row and no virtual column — for the sighted
+                // principal because the table is clean, for the blind one
+                // because it cannot see the view. Same bytes on the wire.
+                return Ok(Vec::new());
+            }
+            // Any other dictionary read stands in for a visibility control:
+            // a sighted principal gets an answer, a blind one does not.
+            Ok(if self.dictionary_readable {
+                vec![row(&[("ANY_VISIBLE_ROW", Some("1"))])]
+            } else {
+                Vec::new()
+            })
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Err(DbError::Execute("unexpected execute".to_owned()))
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Err(DbError::Execute("unexpected commit".to_owned()))
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Err(DbError::Execute("unexpected rollback".to_owned()))
+        }
+    }
+
+    /// The green half, and it must stay green: a principal that can genuinely
+    /// read the dictionary, asking about a genuinely clean table, still gets a
+    /// read-only proof.
+    ///
+    /// Without this, the fix has a trivial wrong answer available — return
+    /// `Unknown` unconditionally and call the fail-open closed. That would
+    /// refuse every ordinary table on every profile.
+    #[test]
+    fn c8_a_sighted_principal_on_a_clean_table_still_proves_read_only() {
+        run_with_cx(|cx| async move {
+            let sighted = CatalogVisibility::sighted();
+            assert_eq!(
+                resolved_relations_read_purity(&cx, &sighted, &[table_object()])
+                    .await
+                    .expect("clean table proof"),
+                oraclemcp_guard::Purity::ProvenReadOnly,
+                "a readable dictionary plus a clean table is a real read-only proof"
+            );
+            // Both gates are reached, so the red case below is about both of
+            // them and not merely the first one short-circuiting.
+            let asked = sighted.queries.lock().expect("queries lock");
+            assert!(
+                asked.iter().any(|sql| sql == SELECT_POLICY_SQL),
+                "the SELECT VPD policy probe must run: {asked:?}"
+            );
+            assert!(
+                asked.iter().any(|sql| sql == VIRTUAL_COLUMN_SQL),
+                "the virtual-column probe must run: {asked:?}"
+            );
+        });
+    }
+
+    /// The failing half of C8.
+    ///
+    /// Both probes decide on `!rows.is_empty()`, so a principal blind to the
+    /// dictionary falls through to `ProvenReadOnly`: a fail-OPEN inside a
+    /// fail-closed system, which is the one thing AGENTS.md forbids outright.
+    /// The practical consequence is worse than a missing proof — a
+    /// catalog-blind principal reads a VPD-protected table, receives rows
+    /// silently filtered by a policy the server just certified as absent, and
+    /// exits success. Nothing anywhere reports that the proof was made blind.
+    ///
+    /// Test-shape rule §A.8-4: an empty result from a privileged catalog query
+    /// is not evidence of absence.
+    ///
+    /// Bead `oraclemcp-091-a1a-*` (A1a) makes both probes require positive
+    /// visibility evidence. Flipping this green means removing the `#[ignore]`;
+    /// the assertion must not change. Note for A1a:
+    /// `relation_purity_requires_plain_policy_free_non_virtual_tables` pins
+    /// `queries.len() == 2` and will need updating deliberately when a
+    /// visibility probe is added.
+    #[test]
+    #[ignore = "expected failure until A1a requires positive catalog visibility (bead oraclemcp-091-c8-blind-catalog-refuse-w9iie)"]
+    fn c8_a_catalog_blind_principal_must_not_yield_a_read_only_proof() {
+        run_with_cx(|cx| async move {
+            let blind = CatalogVisibility::blind();
+            let purity = resolved_relations_read_purity(&cx, &blind, &[table_object()])
+                .await
+                .expect("the probe itself does not error; the principal is merely blind");
+            assert_eq!(
+                purity,
+                oraclemcp_guard::Purity::Unknown,
+                "a principal that cannot read ALL_POLICIES or ALL_TAB_COLS has proven nothing; \
+                 treating its empty probe as absence certifies a VPD-protected table as \
+                 side-effect-free and hands back silently filtered rows with exit-success"
+            );
+        });
+    }
 }
