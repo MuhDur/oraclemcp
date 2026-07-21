@@ -234,3 +234,58 @@ fn doctor_wallet_posture_never_leaks_a_secret() {
         }
     }
 }
+
+/// P-U4 (D6 rider) — a LEGACY-3DES `ewallet.p12` must decrypt through the SERVER
+/// wallet path, not merely be recognised by filename.
+///
+/// `oci::classify_wallet` only ever sees that a file called `ewallet.p12` exists
+/// (`has_p12`); it never opens it. The decryption that matters happens here, in
+/// the doctor probe, over the driver's `parse_ewallet_p12`. Oracle wallets in the
+/// field are still frequently sealed with PKCS#12's legacy
+/// `pbeWithSHA1And3-KeyTripleDES-CBC` (OID 1.2.840.113549.1.12.1.3), which
+/// OpenSSL 3 will not even produce without `-legacy`, so a loader that quietly
+/// handled only modern PBES2 would pass every other fixture in this file.
+///
+/// The fixture is synthetic (`CN=oracle-test.invalid`; see PROVENANCE.md) and its
+/// committed bytes are authoritative — PKCS#12 is not byte-deterministic, so the
+/// test reads them and never regenerates.
+#[test]
+fn legacy_3des_p12_decrypts_through_the_server_wallet_path() {
+    let dir = wallet_fixture_dir("legacy_3des_p12");
+    let report = probe_wallet_posture(&dir, Some(FIXTURE_RIGHT_PASSWORD));
+
+    assert_eq!(
+        report.posture,
+        DoctorWalletPosture::PrimaryUsable,
+        "a legacy-3DES ewallet.p12 must be directly usable; got {:?} ({:?})",
+        report.posture,
+        report.error_kind
+    );
+    assert_eq!(
+        report.usable_file,
+        Some("ewallet.p12"),
+        "the p12 must be the primary; the fixture directory holds no ewallet.pem"
+    );
+    assert_eq!(report.error_kind, None, "no error kind on a usable wallet");
+}
+
+/// The control for the test above, without which it proves nothing: a probe that
+/// merely noticed the FILE would report the same `PrimaryUsable` no matter what
+/// the bytes said. Feeding the identical fixture the WRONG password must fail —
+/// only real decryption can tell the two runs apart.
+#[test]
+fn the_legacy_3des_probe_actually_decrypts_rather_than_noticing_the_file() {
+    let dir = wallet_fixture_dir("legacy_3des_p12");
+    let wrong = probe_wallet_posture(&dir, Some(WRONG_WALLET_PASSWORD));
+
+    assert_ne!(
+        wrong.posture,
+        DoctorWalletPosture::PrimaryUsable,
+        "the wrong password still reported a usable wallet, so the probe is not \
+         decrypting the p12 at all and the sibling test passes vacuously"
+    );
+    assert!(
+        wrong.error_kind.is_some(),
+        "a failed decrypt must carry a structured error kind"
+    );
+}
