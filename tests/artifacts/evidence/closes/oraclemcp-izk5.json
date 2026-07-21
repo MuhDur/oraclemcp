@@ -1,0 +1,54 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T20:55:00Z",
+  "bead_id": "oraclemcp-izk5",
+  "scope": {
+    "summary": "The stale '=0.7.4' comments were already gone, but confirming the 0.8.4 wallet-error variant set (which the bead required before any bump) found WalletError::TooLarge unmapped: doctor reported an oversized wallet as a malformed PEM.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/doctor.rs"
+    ],
+    "out_of_scope": [
+      "The driver version doctor reports, which is already derived from oraclemcp_db::DRIVER_VERSION (a re-export of the driver's own VERSION const) and therefore cannot go stale by hand.",
+      "scripts/release_surface_sync_check.sh and scripts/release_preflight.sh, which mention 0.7.4 only as an illustrative example of driver/server drift, not as a claim about the current pin.",
+      "The string-based classify_wallet_error path: TooLarge is mapped through the typed wallet_error_kind path, and the driver's message ('wallet data exceeds maximum size of N bytes') is not one the string classifier's outer gate admits."
+    ]
+  },
+  "source": {
+    "sha": "d694aa9cc0932155b6f741fd7f67bef991739b7c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "wallet_error_kind (crates/oraclemcp-core/src/doctor.rs)",
+        "kind": "api",
+        "trace": "The doc comment claimed every variant the pinned =0.8.4 driver can produce was mapped explicitly; oracledb-protocol-0.8.4 src/tls/wallet.rs declares WalletError::TooLarge { maximum_bytes } (MAX_WALLET_FILE_BYTES = 16 MiB) and it was absent, so it hit `_ => Pem` and produced the remediation 'regenerate ewallet.pem with valid PEM certificate material' for bytes that were never parsed. TooLarge is now a distinct DoctorWalletErrorKind with its own label, remediation, and ErrorClass::InvalidArguments. wallet_error_kind_maps_every_pinned_driver_variant exhausts the driver enum WITHOUT a wildcard, so a future variant fails compilation instead of silently landing on Pem; it also pins that TooLarge is not fallthrough-eligible, matching the driver's falls_through_to_autologin (KeyDecrypt/Pkcs12/PasswordRequired/UnsupportedFormat) exactly."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Discriminating, verified by mutation: deleting the TooLarge arm fails the new test with 'mapping drifted for wallet data exceeds maximum size of 16777216 bytes \u2014 left: Pem, right: TooLarge'.",
+    "PRE-EXISTING RED, not caused by this change: cargo test -p oraclemcp-core --lib doctor:: reports 2 failures, legacy_migration_refuses_symlink_swaps_at_atomic_install and legacy_state_layout_detects_and_migrates_audit_jsonl_once. Both were introduced by commit ee1b23ad (another agent's atomic-migration hardening): its new parent-traversal refusal rejects the test helper doctor_tmp_dir, which returns a path containing literal '..'. PROVEN independent of this work by running those two tests in a clean worktree at HEAD with none of my changes present \u2014 they fail there identically. All other doctor tests pass (55 of 57), including both wallet tests.",
+    "No live Oracle wallet over 16 MiB was produced; the mapping is exercised through the driver's own typed error value, not a filesystem fixture."
+  ],
+  "known_defects": [
+    {
+      "description": "cargo test -p oraclemcp-core --lib doctor:: is red at HEAD from ee1b23ad: doctor_tmp_dir returns a '..'-containing path that the new parent-traversal refusal rejects, failing legacy_migration_refuses_symlink_swaps_at_atomic_install and legacy_state_layout_detects_and_migrates_audit_jsonl_once.",
+      "bead_id": "oraclemcp-7f4o9"
+    }
+  ],
+  "follow_ups": [
+    "oraclemcp-7f4o9"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
