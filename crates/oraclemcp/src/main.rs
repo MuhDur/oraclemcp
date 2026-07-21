@@ -7394,7 +7394,10 @@ fn run_doctor_oauth_cmd(robot_json: bool, token: &str) -> ExitCode {
     let config = match OracleMcpConfig::load(None) {
         Ok(config) => config,
         Err(_) => {
-            return render_doctor_oauth_diagnostic(robot_json, DoctorOauthDiagnostic::unavailable());
+            return render_doctor_oauth_diagnostic(
+                robot_json,
+                DoctorOauthDiagnostic::unavailable(),
+            );
         }
     };
     let resolver = SystemSecretResolver;
@@ -7406,7 +7409,10 @@ fn run_doctor_oauth_cmd(robot_json: bool, token: &str) -> ExitCode {
     ) {
         Ok(resolved) => resolved,
         Err(_) => {
-            return render_doctor_oauth_diagnostic(robot_json, DoctorOauthDiagnostic::unavailable());
+            return render_doctor_oauth_diagnostic(
+                robot_json,
+                DoctorOauthDiagnostic::unavailable(),
+            );
         }
     };
     let Some(enforcement) = resolved.transport.oauth else {
