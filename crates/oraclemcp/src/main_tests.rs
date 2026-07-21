@@ -2981,6 +2981,136 @@ fn json_alias_is_accepted_before_and_after_subcommand() {
 }
 
 #[test]
+fn doctor_oauth_command_is_a_local_cli_subcommand() {
+    let parsed = Cli::try_parse_from([
+        "oraclemcp",
+        "--json",
+        "doctor",
+        "oauth",
+        "--token",
+        "synthetic-token-not-rendered",
+    ])
+    .expect("parse doctor oauth");
+    assert!(parsed.robot_json);
+    assert!(matches!(
+        parsed.command,
+        Some(Command::Doctor {
+            command: Some(DoctorCommand::Oauth { .. }),
+            ..
+        })
+    ));
+}
+
+const DOCTOR_OAUTH_TEST_SECRET: &str = "doctor-oauth-test-secret-at-least-32-bytes";
+
+fn doctor_oauth_test_config(required_scopes: Vec<&str>) -> ResourceServerConfig {
+    ResourceServerConfig {
+        resource: "https://oraclemcp.example/mcp".to_owned(),
+        allowed_issuers: vec!["https://issuer.example".to_owned()],
+        authorization_servers: vec!["https://issuer.example".to_owned()],
+        required_scopes: required_scopes.into_iter().map(str::to_owned).collect(),
+    }
+}
+
+fn doctor_oauth_test_claims() -> serde_json::Value {
+    serde_json::json!({
+        "iss": "https://issuer.example",
+        "sub": "synthetic-subject",
+        "client_id": "synthetic-client",
+        "jti": "synthetic-jti",
+        "iat": 1_500_000_000,
+        "aud": "https://oraclemcp.example/mcp",
+        "exp": 2_000_000_000,
+        "scope": "oracle:read",
+    })
+}
+
+fn mint_doctor_oauth_test_token(header: serde_json::Value, claims: serde_json::Value) -> String {
+    use base64::Engine as _;
+
+    let encoder = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header = encoder.encode(serde_json::to_vec(&header).expect("header serializes"));
+    let claims = encoder.encode(serde_json::to_vec(&claims).expect("claims serialize"));
+    let signing_input = format!("{header}.{claims}");
+    let key = HmacSha256Key::new(DOCTOR_OAUTH_TEST_SECRET.as_bytes().to_vec())
+        .expect("test HMAC key is valid");
+    let signature = encoder.encode(key.authenticate(signing_input.as_bytes()));
+    format!("{signing_input}.{signature}")
+}
+
+#[test]
+fn doctor_oauth_diagnostic_is_precise_and_never_renders_token_material() {
+    let verifier = Hs256Verifier::new(DOCTOR_OAUTH_TEST_SECRET.as_bytes().to_vec())
+        .expect("test HMAC key is valid");
+    let config = doctor_oauth_test_config(Vec::new());
+    let header = serde_json::json!({ "alg": "HS256", "typ": "at+jwt" });
+    let valid_token = mint_doctor_oauth_test_token(header.clone(), doctor_oauth_test_claims());
+    let valid = doctor_oauth_diagnostic(&config, &verifier, &valid_token, 1_600_000_000);
+    assert_eq!(valid.status, "valid");
+    assert_eq!(valid.token_error, None);
+
+    let malformed = doctor_oauth_diagnostic(&config, &verifier, "not-a-jwt", 1_600_000_000);
+    assert_eq!(malformed.token_error, Some("malformed"));
+
+    let mut tampered = valid_token.clone();
+    tampered.pop();
+    tampered.push(if tampered.ends_with('A') { 'B' } else { 'A' });
+    let bad_signature = doctor_oauth_diagnostic(&config, &verifier, &tampered, 1_600_000_000);
+    assert_eq!(bad_signature.token_error, Some("bad_signature"));
+
+    let mut expired_claims = doctor_oauth_test_claims();
+    expired_claims["exp"] = serde_json::json!(1_500_000_000);
+    let expired_token = mint_doctor_oauth_test_token(header.clone(), expired_claims);
+    let expired = doctor_oauth_diagnostic(&config, &verifier, &expired_token, 1_600_000_000);
+    assert_eq!(expired.token_error, Some("expired"));
+    assert_eq!(expired.expires_at_unix, Some(1_500_000_000));
+
+    let mut missing_claim = doctor_oauth_test_claims();
+    missing_claim
+        .as_object_mut()
+        .expect("claims are an object")
+        .remove("client_id");
+    let missing_claim_token = mint_doctor_oauth_test_token(header.clone(), missing_claim);
+    let missing_claim =
+        doctor_oauth_diagnostic(&config, &verifier, &missing_claim_token, 1_600_000_000);
+    assert_eq!(missing_claim.token_error, Some("missing_required_claim"));
+    assert_eq!(missing_claim.missing_claim, Some("client_id"));
+
+    let unsupported_token = mint_doctor_oauth_test_token(
+        serde_json::json!({ "alg": "RS256", "typ": "at+jwt" }),
+        doctor_oauth_test_claims(),
+    );
+    let unsupported =
+        doctor_oauth_diagnostic(&config, &verifier, &unsupported_token, 1_600_000_000);
+    assert_eq!(unsupported.token_error, Some("unsupported_algorithm"));
+    assert_eq!(unsupported.supported_algorithms, vec!["HS256"]);
+
+    let scoped = doctor_oauth_test_config(vec!["oracle:admin"]);
+    let insufficient_scope =
+        doctor_oauth_diagnostic(&scoped, &verifier, &valid_token, 1_600_000_000);
+    assert_eq!(insufficient_scope.token_error, Some("insufficient_scope"));
+
+    for diagnostic in [
+        valid,
+        malformed,
+        bad_signature,
+        expired,
+        missing_claim,
+        unsupported,
+        insufficient_scope,
+    ] {
+        let rendered = diagnostic.to_json().to_string();
+        assert!(
+            !rendered.contains(&valid_token)
+                && !rendered.contains(DOCTOR_OAUTH_TEST_SECRET)
+                && !rendered.contains("synthetic-subject")
+                && !rendered.contains("RS256"),
+            "doctor OAuth output leaked token material: {rendered}"
+        );
+    }
+}
+
+#[test]
 fn setup_and_sign_tool_commands_parse() {
     let setup = Cli::try_parse_from([
         "oraclemcp",

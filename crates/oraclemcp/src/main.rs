@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use asupersync::Cx;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
@@ -59,8 +59,8 @@ use oraclemcp_audit::{
     SigningKey, WormFileForwarder,
 };
 use oraclemcp_auth::{
-    Hs256Verifier, ResourceServerConfig, SecretError, SecretResolver, SystemSecretResolver,
-    resolve_secret_with,
+    Hs256Verifier, ResourceServerConfig, SecretError, SecretResolver, SignatureVerifier,
+    SystemSecretResolver, TokenError, resolve_secret_with,
 };
 use oraclemcp_config::{
     AuditConfig, CONFIG_PATH_ENV, ConnectionProfile, CumulativeQueryCostBudgetConfig, HttpConfig,
@@ -195,6 +195,9 @@ enum Command {
         /// Plan scoped self-repair. Out-of-scope targets are refused with exit 4.
         #[arg(long)]
         fix: bool,
+        /// Local-only doctor diagnostics.
+        #[command(subcommand)]
+        command: Option<DoctorCommand>,
     },
     /// List configured connection profiles without opening a database connection.
     #[command(alias = "list-profiles")]
@@ -303,6 +306,18 @@ enum Command {
     RefusalCorpus {
         #[command(subcommand)]
         command: RefusalCorpusCommand,
+    },
+}
+
+/// Local-only `doctor` diagnostics. These are never part of an MCP or HTTP
+/// request path.
+#[derive(Subcommand, Debug)]
+enum DoctorCommand {
+    /// Validate one supplied OAuth token against the local resource-server config.
+    Oauth {
+        /// JWT to diagnose. It is never logged, persisted, or rendered.
+        #[arg(long, value_name = "JWT")]
+        token: String,
     },
 }
 
@@ -663,7 +678,11 @@ fn main() -> ExitCode {
             profile,
             online,
             fix,
-        } => run_doctor_cmd(robot_json, profile, online, fix),
+            command,
+        } => match command {
+            Some(DoctorCommand::Oauth { token }) => run_doctor_oauth_cmd(robot_json, &token),
+            None => run_doctor_cmd(robot_json, profile, online, fix),
+        },
         Command::Profiles => run_profiles(robot_json),
         Command::Capabilities => run_capabilities(robot_json),
         Command::Completions { shell } => run_completions_cmd(binary_name, shell),
@@ -7185,6 +7204,239 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
             iam_token,
             wallet_password,
         },
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DoctorOauthDiagnostic {
+    status: &'static str,
+    token_error: Option<&'static str>,
+    detail: String,
+    expires_at_unix: Option<i64>,
+    missing_claim: Option<&'static str>,
+    supported_algorithms: Vec<&'static str>,
+}
+
+impl DoctorOauthDiagnostic {
+    fn accepted() -> Self {
+        Self {
+            status: "valid",
+            token_error: None,
+            detail: "token is valid for the configured OAuth resource server".to_owned(),
+            expires_at_unix: None,
+            missing_claim: None,
+            supported_algorithms: Vec::new(),
+        }
+    }
+
+    fn unavailable() -> Self {
+        Self {
+            status: "unavailable",
+            token_error: None,
+            detail: "the local OAuth resource-server verifier is unavailable".to_owned(),
+            expires_at_unix: None,
+            missing_claim: None,
+            supported_algorithms: Vec::new(),
+        }
+    }
+
+    fn rejected(error: &TokenError) -> Self {
+        let (token_error, detail, expires_at_unix, missing_claim, supported_algorithms) =
+            match error {
+                TokenError::Missing => (
+                    "missing_bearer",
+                    "no bearer token was supplied".to_owned(),
+                    None,
+                    None,
+                    Vec::new(),
+                ),
+                TokenError::Malformed => (
+                    "malformed",
+                    "token is not a well-formed JWT".to_owned(),
+                    None,
+                    None,
+                    Vec::new(),
+                ),
+                TokenError::MissingRequiredClaim(claim) => (
+                    "missing_required_claim",
+                    format!("token is missing required claim `{claim}`"),
+                    None,
+                    Some(*claim),
+                    Vec::new(),
+                ),
+                TokenError::UnexpectedTokenType => (
+                    "unexpected_token_type",
+                    "token is not an RFC 9068 access token".to_owned(),
+                    None,
+                    None,
+                    Vec::new(),
+                ),
+                TokenError::UnsupportedAlg(_) => (
+                    "unsupported_algorithm",
+                    "token algorithm is unsupported by the configured verifier".to_owned(),
+                    None,
+                    None,
+                    Hs256Verifier::SUPPORTED_ALGORITHMS.to_vec(),
+                ),
+                TokenError::BadSignature => (
+                    "bad_signature",
+                    "token signature verification failed".to_owned(),
+                    None,
+                    None,
+                    Vec::new(),
+                ),
+                TokenError::Expired { exp } => (
+                    "expired",
+                    format!("token expired at Unix time {exp}"),
+                    Some(*exp),
+                    None,
+                    Vec::new(),
+                ),
+                TokenError::NotYetValid => (
+                    "not_yet_valid",
+                    "token is not valid yet".to_owned(),
+                    None,
+                    None,
+                    Vec::new(),
+                ),
+                TokenError::UntrustedIssuer(_) => (
+                    "untrusted_issuer",
+                    "token issuer is not allowed by the configured resource server".to_owned(),
+                    None,
+                    None,
+                    Vec::new(),
+                ),
+                TokenError::AudienceMismatch => (
+                    "audience_mismatch",
+                    "token audience does not include the configured resource".to_owned(),
+                    None,
+                    None,
+                    Vec::new(),
+                ),
+                TokenError::InsufficientScope => (
+                    "insufficient_scope",
+                    "token does not include every configured required scope".to_owned(),
+                    None,
+                    None,
+                    Vec::new(),
+                ),
+                _ => (
+                    "validation_failed",
+                    "token validation failed".to_owned(),
+                    None,
+                    None,
+                    Vec::new(),
+                ),
+            };
+        Self {
+            status: "rejected",
+            token_error: Some(token_error),
+            detail,
+            expires_at_unix,
+            missing_claim,
+            supported_algorithms,
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "check": "oauth_token",
+            "status": self.status,
+            "token_error": self.token_error,
+            "detail": self.detail,
+            "expires_at_unix": self.expires_at_unix,
+            "missing_claim": self.missing_claim,
+            "supported_algorithms": self.supported_algorithms,
+        })
+    }
+
+    fn to_text(&self) -> String {
+        let mut output = format!(
+            "OAuth token diagnostic: {}\nDetail: {}",
+            self.status, self.detail
+        );
+        if let Some(error) = self.token_error {
+            output.push_str(&format!("\nToken error: {error}"));
+        }
+        if let Some(exp) = self.expires_at_unix {
+            output.push_str(&format!("\nExpires at (Unix): {exp}"));
+        }
+        if let Some(claim) = self.missing_claim {
+            output.push_str(&format!("\nMissing claim: {claim}"));
+        }
+        if !self.supported_algorithms.is_empty() {
+            output.push_str(&format!(
+                "\nSupported algorithms: {}",
+                self.supported_algorithms.join(", ")
+            ));
+        }
+        output.push('\n');
+        output
+    }
+}
+
+fn doctor_oauth_diagnostic(
+    config: &ResourceServerConfig,
+    verifier: &dyn SignatureVerifier,
+    token: &str,
+    now_unix: i64,
+) -> DoctorOauthDiagnostic {
+    match config.validate(token, verifier, now_unix) {
+        Ok(_) => DoctorOauthDiagnostic::accepted(),
+        Err(error) => DoctorOauthDiagnostic::rejected(&error),
+    }
+}
+
+fn run_doctor_oauth_cmd(robot_json: bool, token: &str) -> ExitCode {
+    // This command deliberately resolves only the local configured verifier and
+    // never starts an HTTP listener or routes a request through the MCP server.
+    let config = match OracleMcpConfig::load(None) {
+        Ok(config) => config,
+        Err(_) => {
+            return render_doctor_oauth_diagnostic(robot_json, DoctorOauthDiagnostic::unavailable());
+        }
+    };
+    let resolver = SystemSecretResolver;
+    let resolved = match resolve_http_transport_config(
+        &config,
+        &HttpServeArgs::default(),
+        &default_read_only_level(),
+        &resolver,
+    ) {
+        Ok(resolved) => resolved,
+        Err(_) => {
+            return render_doctor_oauth_diagnostic(robot_json, DoctorOauthDiagnostic::unavailable());
+        }
+    };
+    let Some(enforcement) = resolved.transport.oauth else {
+        return render_doctor_oauth_diagnostic(robot_json, DoctorOauthDiagnostic::unavailable());
+    };
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    let diagnostic = doctor_oauth_diagnostic(
+        &enforcement.config,
+        enforcement.verifier.as_ref(),
+        token,
+        now_unix,
+    );
+    render_doctor_oauth_diagnostic(robot_json, diagnostic)
+}
+
+fn render_doctor_oauth_diagnostic(robot_json: bool, diagnostic: DoctorOauthDiagnostic) -> ExitCode {
+    let exit_code = if diagnostic.status == "valid" { 0 } else { 2 };
+    if robot_json {
+        stdout_exit(
+            write_stdout_line(&diagnostic.to_json().to_string()),
+            ExitCode::from(exit_code),
+        )
+    } else {
+        stdout_exit(
+            write_stdout_text(&diagnostic.to_text()),
+            ExitCode::from(exit_code),
+        )
     }
 }
 

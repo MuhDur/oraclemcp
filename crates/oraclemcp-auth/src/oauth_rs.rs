@@ -59,8 +59,11 @@ pub enum TokenError {
     #[error("bad token signature")]
     BadSignature,
     /// `exp` has passed.
-    #[error("token expired")]
-    Expired,
+    #[error("token expired at Unix time {exp}")]
+    Expired {
+        /// The verified token's expiration epoch-second.
+        exp: i64,
+    },
     /// `nbf` is in the future.
     #[error("token not yet valid")]
     NotYetValid,
@@ -80,6 +83,16 @@ pub enum TokenError {
 /// is a fail-closed seam the embedding transport may supply; none ships, so
 /// asymmetric tokens are rejected until one is wired.
 pub trait SignatureVerifier {
+    /// Whether this verifier supports `alg`.
+    ///
+    /// Implementations that can verify more than one algorithm should override
+    /// this before [`Self::verify`]. The default preserves the former
+    /// fail-closed behavior for external verifiers: an unsupported algorithm is
+    /// still rejected when verification returns `false`.
+    fn supports_alg(&self, _alg: &str) -> bool {
+        true
+    }
+
     /// Whether `signature` is valid for `signing_input` under `alg`.
     fn verify(&self, alg: &str, signing_input: &[u8], signature: &[u8]) -> bool;
 }
@@ -91,6 +104,9 @@ pub struct Hs256Verifier {
 }
 
 impl Hs256Verifier {
+    /// Algorithms accepted by the built-in production verifier.
+    pub const SUPPORTED_ALGORITHMS: &'static [&'static str] = &["HS256"];
+
     /// Validate and install the HS256 shared secret.
     ///
     /// # Errors
@@ -105,9 +121,14 @@ impl Hs256Verifier {
 }
 
 impl SignatureVerifier for Hs256Verifier {
+    fn supports_alg(&self, alg: &str) -> bool {
+        Self::SUPPORTED_ALGORITHMS.contains(&alg)
+    }
+
     fn verify(&self, alg: &str, signing_input: &[u8], signature: &[u8]) -> bool {
         // Reject `none` and any non-HS256 alg outright (alg-confusion / alg=none).
-        alg == "HS256" && constant_time_eq(&self.secret.authenticate(signing_input), signature)
+        self.supports_alg(alg)
+            && constant_time_eq(&self.secret.authenticate(signing_input), signature)
     }
 }
 
@@ -141,6 +162,9 @@ impl ResourceServerConfig {
         }
         let alg = header.alg;
         if alg == "none" || alg.is_empty() {
+            return Err(TokenError::UnsupportedAlg(alg));
+        }
+        if !verifier.supports_alg(&alg) {
             return Err(TokenError::UnsupportedAlg(alg));
         }
         if !verifier.verify(&alg, &signing_input, &signature) {
@@ -192,7 +216,7 @@ impl ResourceServerConfig {
             }
         })?;
         if now_unix >= exp {
-            return Err(TokenError::Expired);
+            return Err(TokenError::Expired { exp });
         }
         if claims["nbf"].as_i64().is_some_and(|nbf| now_unix < nbf) {
             return Err(TokenError::NotYetValid);
@@ -647,7 +671,7 @@ mod tests {
         // now > exp.
         assert_eq!(
             cfg().validate(&token, &verifier(), 2_000_000_001),
-            Err(TokenError::Expired)
+            Err(TokenError::Expired { exp: 2_000_000_000 })
         );
     }
 
@@ -707,6 +731,15 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn configured_hs256_verifier_reports_other_algorithms_as_unsupported() {
+        let token = mint_with_header(json!({ "alg": "RS256", "typ": "at+jwt" }), good_claims());
+        assert_eq!(
+            cfg().validate(&token, &verifier(), 1_500_000_000),
+            Err(TokenError::UnsupportedAlg("RS256".to_owned()))
+        );
+    }
+
     /// Every `TokenError`, exhaustively (bead H13, plan §30.4 item 11).
     ///
     /// The audit the plan asked for: each reject reason above already has its
@@ -725,7 +758,7 @@ mod tests {
             TokenError::UnexpectedTokenType,
             TokenError::UnsupportedAlg(String::new()),
             TokenError::BadSignature,
-            TokenError::Expired,
+            TokenError::Expired { exp: 0 },
             TokenError::NotYetValid,
             TokenError::UntrustedIssuer(String::new()),
             TokenError::AudienceMismatch,
@@ -740,7 +773,7 @@ mod tests {
                 TokenError::UnexpectedTokenType => 3,
                 TokenError::UnsupportedAlg(_) => 4,
                 TokenError::BadSignature => 5,
-                TokenError::Expired => 6,
+                TokenError::Expired { .. } => 6,
                 TokenError::NotYetValid => 7,
                 TokenError::UntrustedIssuer(_) => 8,
                 TokenError::AudienceMismatch => 9,

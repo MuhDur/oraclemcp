@@ -544,7 +544,9 @@ fn token_error_audit_reason(e: &TokenError) -> &'static str {
         TokenError::UnexpectedTokenType => "oauth_unexpected_token_type",
         TokenError::UnsupportedAlg(_) => "oauth_unsupported_algorithm",
         TokenError::BadSignature => "oauth_bad_signature",
-        TokenError::Expired => "oauth_expired",
+        // Keep the verified expiry timestamp local to `doctor oauth`; the
+        // HTTP audit label and public challenge remain token-free and uniform.
+        TokenError::Expired { .. } => "oauth_expired",
         TokenError::NotYetValid => "oauth_not_yet_valid",
         TokenError::UntrustedIssuer(_) => "oauth_untrusted_issuer",
         TokenError::AudienceMismatch => "oauth_audience_mismatch",
