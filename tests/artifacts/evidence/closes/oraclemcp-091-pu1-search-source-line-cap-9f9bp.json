@@ -1,0 +1,53 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T22:59:45Z",
+  "bead_id": "oraclemcp-091-pu1-search-source-line-cap-9f9bp",
+  "scope": {
+    "summary": "Bound oracle_search_source response text per source line and make every truncation visible to the caller.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/args.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp/src/registry.rs"
+    ],
+    "out_of_scope": [
+      "Live Oracle dictionary search against a database fixture.",
+      "The repository-wide Required gate."
+    ]
+  },
+  "source": {
+    "sha": "39859487e0dbbab7cb36c35962fc150718045afd",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_search_source MCP tool",
+        "kind": "tool",
+        "trace": "cargo test -p oraclemcp source_search_ -- --nocapture passed the line-cap tests. A 501-character source line is bounded to the 500-character default, ends in the explicit truncation marker, retains TEXT_TRUNCATED=true and its original TEXT_CHAR_COUNT; custom caps retain the same line metadata."
+      },
+      {
+        "name": "oracle_search_source tool schema",
+        "kind": "api",
+        "trace": "target/sageraven-b2c/debug/deps/oraclemcp-aef73bd2b6fdd3e6 accepted_argument_spellings_stay_advertised --nocapture passed, including the advertised max_line_chars parameter and its documented 16..4000 bounds."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped tests only; the repository-wide Required gate was not run in this pane.",
+    "No live Oracle source-search fixture was exercised."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
