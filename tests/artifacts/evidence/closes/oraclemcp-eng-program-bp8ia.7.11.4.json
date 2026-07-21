@@ -1,0 +1,47 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T18:19:26Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.4",
+  "scope": {
+    "summary": "F-LOW DK1 was already implemented in driver commit 1912455: an explicit atomic handle count elects exactly one final PoolEngine drop, preventing the observational Arc strong-count race from losing eager close.",
+    "in_scope": [
+      "tests/artifacts/evidence/oraclemcp-eng-program-bp8ia.7.11.4-driver-handoff.json"
+    ],
+    "out_of_scope": [
+      "DK2's TIMEDWAIT-thread work, which happened to share the implementation commit but is tracked separately.",
+      "Live Oracle pool lifecycle testing; the landed regression test uses the driver's FakeBackend.",
+      "Any new driver source change: this close records verification of an already-landed commit."
+    ]
+  },
+  "source": {
+    "sha": "711818afe707462e98b9e42fe55c4262c6ae203a",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "PoolEngine Clone/Drop (rust-oracledb)",
+        "kind": "api",
+        "trace": "The checksum-bound driver commit 1912455 increments a shared AtomicUsize in Clone and uses fetch_sub(Ordering::AcqRel) in Drop, so only the 1-to-0 transition calls close_all_connections. racing_pool_handle_drops_close_exactly_once creates 16 clones, holds all drop calls at a Barrier, joins every thread, waits for worker exit, then asserts exactly one backend close."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The current-session rerun was bounded to 180 seconds and timed out compiling asupersync in a fresh dedicated target. This close does not claim that test passed in this session.",
+    "The acceptance test itself is not a happy-path single-thread test: it has a concrete 16-thread Barrier interleaving and an exact-one close assertion, verified by committed-source inspection.",
+    "Cross-repo close: this checkout records a checksum-bound rust-oracledb commit; no driver source was changed for this verification."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

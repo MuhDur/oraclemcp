@@ -1,0 +1,47 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T18:19:26Z",
+  "bead_id": "oraclemcp-verqx",
+  "scope": {
+    "summary": "B16a's driver prerequisite is complete: TokenSource can now carry the OCI IAM token's bound PKCS#8 proof-of-possession key without retaining a static access token.",
+    "in_scope": [
+      "tests/artifacts/evidence/oraclemcp-verqx-driver-handoff.json"
+    ],
+    "out_of_scope": [
+      "Server-side adoption: oraclemcp still pins a released driver and B16a remains open until a release carrying this driver API can be adopted.",
+      "Live OCI IAM token acceptance against an Oracle database.",
+      "Token persistence or rendering: neither is introduced; the source and key remain external, redacted inputs."
+    ]
+  },
+  "source": {
+    "sha": "711818afe707462e98b9e42fe55c4262c6ae203a",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "ConnectOptions::with_token_source_and_key (rust-oracledb)",
+        "kind": "api",
+        "trace": "The checksum-bound driver commit c3885783 adds the public builder, records the source and private key while leaving access_token unset, and feeds the existing connection token/PoP path. Its six offline token_source tests pass: plaintext is refused before fetch, refresh errors are typed and redacted before dial, and each physical attempt refreshes without static-token fallback."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The source-plus-key test uses an unopened TCPS loopback endpoint. PoP signing happens after an Oracle ACCEPT packet, so this test proves source/key wiring, transport refusal, refresh, and redaction but not a live on-wire signature.",
+    "No OCI token, private key, or Oracle server was used. The test values are deliberately non-secret sentinels and all rendered errors are checked for redaction.",
+    "Cross-repo close: this checkout records a checksum-bound rust-oracledb commit; the source tree for the server itself is unchanged by this prerequisite."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
