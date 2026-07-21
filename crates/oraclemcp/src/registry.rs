@@ -1575,7 +1575,9 @@ pub fn tool_registry() -> ToolRegistry {
                 "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
                 "table_name": { "type": "string", "description": "Table or view name. May be OWNER.TABLE." },
                 "table": { "type": "string", "description": "Alias for table_name." },
-                "name": { "type": "string", "description": "Alias for table_name." }
+                "name": { "type": "string", "description": "Alias for table_name." },
+                "max_rows": { "type": "integer", "minimum": 1, "description": "Maximum columns and constraints returned." },
+                "limit": { "type": "integer", "minimum": 1, "description": "Alias for max_rows." }
             }),
             &[],
         )),
@@ -1674,7 +1676,9 @@ pub fn tool_registry() -> ToolRegistry {
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
                 "object_name": { "type": "string", "description": "Optional object name. May be OWNER.NAME." },
-                "name": { "type": "string", "description": "Alias for object_name." }
+                "name": { "type": "string", "description": "Alias for object_name." },
+                "max_rows": { "type": "integer", "minimum": 1, "description": "Maximum compiler diagnostics returned." },
+                "limit": { "type": "integer", "minimum": 1, "description": "Alias for max_rows." }
             }),
             &[],
         )),

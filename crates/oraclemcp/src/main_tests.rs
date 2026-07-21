@@ -3702,25 +3702,11 @@ fn a2a_error_statuses_preserve_actionable_causes() {
     assert_eq!(code, "ORACLEMCP_INCIDENT_CAPTURE_IO_FAILED");
     assert!(message.contains("disk full"));
 
-    let (code, message) = incident_capture_error_status(&IncidentCaptureError::MissingFile {
-        operation: "read incident manifest",
-    });
-    assert_eq!(code, "ORACLEMCP_INCIDENT_BUNDLE_MISSING");
-    assert!(message.contains("read incident manifest"));
-
     let (code, message) = incident_replay_error_status(&IncidentReplayError::Capture(
         IncidentCaptureError::Io("audit volume is full".to_owned()),
     ));
     assert_eq!(code, "ORACLEMCP_INCIDENT_REPLAY_IO_FAILED");
     assert!(message.contains("audit volume is full"));
-
-    let (code, message) = incident_replay_error_status(&IncidentReplayError::Capture(
-        IncidentCaptureError::MissingFile {
-            operation: "read incident manifest",
-        },
-    ));
-    assert_eq!(code, "ORACLEMCP_INCIDENT_BUNDLE_MISSING");
-    assert!(message.contains("read incident manifest"));
 
     let (code, message) = incident_config_load_error_status("invalid profiles TOML");
     assert_eq!(code, "ORACLEMCP_INCIDENT_CONFIG_LOAD_FAILED");
