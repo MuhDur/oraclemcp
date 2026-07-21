@@ -1031,3 +1031,55 @@ fn oauth_scope_is_forwarded_to_operator_action_dispatch() {
 // ===================================================================
 // K10 — streaming query results over SSE (the streaming assembly)
 // ===================================================================
+
+// ===================================================================
+// CC1 — a framework panic must not strand the single-principal admission
+// (bead H14, plan §30.4 item 7)
+// ===================================================================
+
+/// A panic taken while the admission guard is held must leave the retry
+/// ADMITTED, not refused 409 — and must not loosen the guard for anyone else.
+///
+/// Both directions matter and they pull against each other. "Never strand"
+/// argued alone invites releasing the binding on unwind, which would let a
+/// caller who can provoke a panic take the slot from the principal holding it.
+/// "Never release" argued alone invites poisoning, which strands the rightful
+/// owner behind a permanent 409. The guard is built on `parking_lot::Mutex`
+/// (no poisoning) over a sticky binding, so recovery re-enforces rather than
+/// re-opens; swapping in a `std::sync::Mutex` with `.lock().unwrap()` would
+/// turn every post-panic request into a 500 and fail this test.
+#[test]
+fn a_panic_holding_the_admission_guard_admits_the_retry_and_still_refuses_others() {
+    let guard = SinglePrincipalGuard::new();
+    assert!(
+        guard.admit("principal-a").is_ok(),
+        "the first principal must be admitted"
+    );
+
+    let held = guard.clone();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _locked = held.active_principal_key.lock();
+        panic!("framework panic while the admission guard is held");
+    }));
+    assert!(panicked.is_err(), "the injected panic must have unwound");
+
+    assert!(
+        guard.admit("principal-a").is_ok(),
+        "the rightful principal's retry must be admitted after a panic, not stranded behind 409"
+    );
+    assert!(
+        guard.admit("principal-b").is_err(),
+        "a panic must not release the binding to another principal"
+    );
+}
+
+/// The refusal an unrelated principal receives is the 409 the retry must not
+/// get. Pinned alongside the recovery test so a change that turns the conflict
+/// into some other status cannot silently redefine what "admitted" means.
+#[test]
+fn a_second_principal_receives_the_single_principal_409_conflict() {
+    let response = single_principal_conflict_response();
+    assert_eq!(response.status, 409);
+    let body = response_json(&response);
+    assert_eq!(body["error"], serde_json::json!("single_principal_active"));
+}
