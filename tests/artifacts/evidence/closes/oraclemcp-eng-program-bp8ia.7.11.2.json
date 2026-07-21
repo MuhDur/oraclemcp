@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T20:18:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.2",
+  "scope": {
+    "summary": "F-LOW DC6 verified already satisfied: the driver's integer parse rejects every exponent form before prefix scanning, so Oracle's max-negative NUMBER sentinel -1e126 fails closed instead of collapsing to -1. This close records verification, not new work.",
+    "in_scope": [
+      "tests/artifacts/evidence/oraclemcp-eng-program-bp8ia.7.11.2-driver-handoff.json"
+    ],
+    "out_of_scope": [
+      "Any code change, in either repo. The strtoll-style collapse the finding describes is already gone.",
+      "Float64 coercion, which deliberately retains -1e126 and is asserted separately in the same test.",
+      "The documented decimal-fraction truncation for ordinary numerics, which the bead requires to stay unchanged and which is untouched."
+    ]
+  },
+  "source": {
+    "sha": "e7db479ad5757e9caba35b8d8208db3ec111e92e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "parse_number_i64 / parse_number_u64 (rust-oracledb crates/oracledb/src/arrow/builders.rs)",
+        "kind": "api",
+        "trace": "Both reject b'e'/b'E' before the prefix digit scan (builders.rs:107-109, 131-133). The guard sits in the shared parse function that all 5 call sites use, so the bead's 'both row and columnar Int64 paths' are covered by construction rather than by two separate patches. arrow::tests::number_sentinel_preserves_float_and_rejects_integer_collapse passes under --features arrow: it decodes the real single-byte [0x00] sentinel (a decoder-produced fixture, not hand-assembled), asserts Float64 keeps -1.0e126, asserts the Int64 target fails closed, and asserts -1 and 12 still map while 1e3 is refused. Bound to driver commit 5ed87b09ef39 by file digest in the in-scope handoff artifact."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verification of pre-existing state: I read the cited code and ran the test; I did not re-derive which commit replaced the strtoll-style scan.",
+    "Not mutation-checked. The fix is not mine and the existing test was written against it; I confirmed the guard is on the shared parse path rather than injecting a fault into another repo's committed code.",
+    "The 'row path' in the bead's wording is covered by the shared parse function rather than by a separate row-oriented assertion.",
+    "Scoped verification: cargo test -p oracledb --lib (347 passed) and --features arrow for the sentinel test."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
