@@ -3601,10 +3601,15 @@ mod tests {
             .find(|(sql, _)| sql.contains("FROM all_objects"))
             .expect("ALL_OBJECTS schema-map read");
         assert!(schema_call.0.contains("ROWNUM <= :2"));
+        assert!(schema_call.0.contains("page_row > :3"));
         assert_eq!(
             schema_call.1,
-            vec![OracleBind::String("HR".to_owned()), OracleBind::I64(25)],
-            "schema owner is upper-cased and bound positionally"
+            vec![
+                OracleBind::String("HR".to_owned()),
+                OracleBind::I64(25),
+                OracleBind::I64(0),
+            ],
+            "schema owner, cap, and zero offset are normalized positional binds"
         );
 
         let fk_call = calls
@@ -3614,6 +3619,7 @@ mod tests {
         assert!(fk_call.0.contains("JOIN all_constraints parent"));
         assert!(fk_call.0.contains("JOIN all_cons_columns child_columns"));
         assert!(fk_call.0.contains("JOIN all_cons_columns parent_columns"));
+        assert!(fk_call.0.contains("page_row > :3"));
         assert!(
             fk_call
                 .0
@@ -3623,8 +3629,12 @@ mod tests {
         assert!(fk_call.0.contains("ROWNUM <= :2"));
         assert_eq!(
             fk_call.1,
-            vec![OracleBind::String("HR".to_owned()), OracleBind::I64(1)],
-            "FK owner and cap are positional binds"
+            vec![
+                OracleBind::String("HR".to_owned()),
+                OracleBind::I64(1),
+                OracleBind::I64(0),
+            ],
+            "FK owner, cap, and zero offset are positional binds"
         );
     }
 
@@ -3664,6 +3674,7 @@ mod tests {
             .find(|(sql, _)| sql.contains("FROM all_tab_modifications"))
             .expect("ALL_TAB_MODIFICATIONS activity read");
         assert!(activity_call.0.contains("ROWNUM <= :2"));
+        assert!(activity_call.0.contains("page_row > :3"));
         assert!(activity_call.0.contains("partition_name IS NULL"));
         assert!(activity_call.0.contains("subpartition_name IS NULL"));
         assert!(
@@ -3674,8 +3685,12 @@ mod tests {
         );
         assert_eq!(
             activity_call.1,
-            vec![OracleBind::String("HR".to_owned()), OracleBind::I64(10)],
-            "owner and cap are normalized positional binds"
+            vec![
+                OracleBind::String("HR".to_owned()),
+                OracleBind::I64(10),
+                OracleBind::I64(0),
+            ],
+            "owner, cap, and zero offset are normalized positional binds"
         );
     }
 
@@ -3708,10 +3723,15 @@ mod tests {
         assert!(recent_ddl_call.0.contains("FROM all_objects"));
         assert!(recent_ddl_call.0.contains("o.last_ddl_time DESC"));
         assert!(recent_ddl_call.0.contains("ROWNUM <= :2"));
+        assert!(recent_ddl_call.0.contains("page_row > :3"));
         assert_eq!(
             recent_ddl_call.1,
-            vec![OracleBind::String("HR".to_owned()), OracleBind::I64(10)],
-            "owner and cap are normalized positional binds"
+            vec![
+                OracleBind::String("HR".to_owned()),
+                OracleBind::I64(10),
+                OracleBind::I64(0),
+            ],
+            "owner, cap, and zero offset are normalized positional binds"
         );
     }
 
