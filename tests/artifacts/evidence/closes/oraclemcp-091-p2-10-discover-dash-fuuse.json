@@ -1,0 +1,51 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T12:54:20Z",
+  "bead_id": "oraclemcp-091-p2-10-discover-dash-fuuse",
+  "scope": {
+    "summary": "Make the installer next-step discovery command truthful for non-interactive callers and reject non-Bash interpreters before Bash-only options are parsed.",
+    "in_scope": [
+      "install.sh",
+      "crates/oraclemcp/install.sh",
+      "scripts/installer_lint_and_offline_smoke.sh"
+    ],
+    "out_of_scope": [
+      "Changing discovery consent semantics or performing installer network, package, service, or filesystem mutations."
+    ]
+  },
+  "source": {
+    "sha": "cc119ba82c528aa1457c10db5d77c46aa15e68eb",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "non-interactive installer next steps",
+        "kind": "cli",
+        "trace": "print_next_steps now prints the existing setup --discover command together with the exact required non-interactive consent flags: --discover-tns or --yes."
+      },
+      {
+        "name": "dash install.sh",
+        "kind": "cli",
+        "trace": "The POSIX-compatible preflight exits 2 with 'run with bash' before set -o pipefail. The installer lint gate executes that diagnostic when dash is available."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped shell checks only: bash -n install.sh; bash -n crates/oraclemcp/install.sh; bash -n scripts/installer_lint_and_offline_smoke.sh; cmp -s install.sh crates/oraclemcp/install.sh; git diff --check; and env -u BASH_VERSION dash install.sh --dry-run (exit 2 with the clear Bash instruction).",
+    "The full installer lint/offline smoke suite and the full workspace gate were not run for this close because this swarm turn uses scoped checks and the installer suite performs broad temporary-file lifecycle work."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
