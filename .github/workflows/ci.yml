@@ -195,6 +195,19 @@ jobs:
           bash scripts/coverage_ratchet.sh run --base "$COVERAGE_BASE" 2>&1 \
             | tee target/test-attestation-evidence/coverage-ratchet.log
           echo "base=$COVERAGE_BASE" >> "$GITHUB_OUTPUT"
+      # The mutation-floor leg is advisory this train (ALLOW_STALE_MUTATION_SEAL,
+      # operator ruling 2026-07-21 §Z2), so it must never be attested PASS: the
+      # outcomes come from what the run recorded per leg, not from this file.
+      - name: Derive attestation outcomes from the legs the run enforced
+        id: legs
+        run: |
+          set -euo pipefail
+          {
+            echo 'tests<<ATTESTATION_OUTCOMES'
+            bash scripts/coverage_ratchet.sh attestation-outcomes
+            echo 'ATTESTATION_OUTCOMES'
+          } >> "$GITHUB_OUTPUT"
+          bash scripts/coverage_ratchet.sh attestation-outcomes
       - name: Record coverage-lane attestation status
         uses: ./.github/actions/test-attestation
         env:
@@ -205,9 +218,7 @@ jobs:
           trusted-context: ${{ github.event_name == 'push' }}
           lane: coverage-ratchet
           command: bash scripts/coverage_ratchet.sh run --base ${{ steps.coverage.outputs.base }}
-          tests: |
-            coverage-ratchet:changed-line-floor=PASS
-            coverage-ratchet:mutation-floor=PASS
+          tests: ${{ steps.legs.outputs.tests }}
           artifacts: target/test-attestation-evidence/coverage-ratchet.log
           output-name: coverage-ratchet.jsonl
       - uses: actions/upload-artifact@v7

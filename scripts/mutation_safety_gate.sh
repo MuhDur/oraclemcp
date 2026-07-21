@@ -428,6 +428,11 @@ cmd_check_floor_report() {
   # release path, so a day-scale campaign never stalls development or a release.
   if [ "${ALLOW_STALE_MUTATION_SEAL:-0}" = 1 ]; then
     echo "mutation-gate: WARNING D2 mutation-floor check deferred — ALLOW_STALE_MUTATION_SEAL set; the mutation floor is advisory this train (operator ruling 2026-07-21, plan v8 §Z2)." >&2
+    # Machine-readable leg status on stdout. Callers (coverage_ratchet.sh, and
+    # through it the CI attestation) must be able to tell a deferred leg from
+    # an enforced one: a return code of 0 alone would let a lane attest PASS
+    # for a check that never ran.
+    echo "mutation-gate: STATUS mutation-floor=deferred"
     return 0
   fi
   [ -f "$FLOOR_REPORT" ] || die "committed D2 mutation-floor report missing: $FLOOR_REPORT"
@@ -456,6 +461,7 @@ cmd_check_floor_report() {
     # (operator ruling 2026-07-21, plan v8 §Z2).
     if [ "${ALLOW_STALE_MUTATION_SEAL:-0}" = 1 ]; then
       echo "mutation-gate: WARNING E_STALE_SEAL (D2 floor) deferred (status=$status) — ALLOW_STALE_MUTATION_SEAL set; advisory this train (operator ruling 2026-07-21, plan v8 §Z2)." >&2
+      echo "mutation-gate: STATUS mutation-floor=deferred"
       return 0
     fi
     die "E_STALE_SEAL: D2 mutation-floor marker status=$status"
@@ -553,10 +559,11 @@ PY
   [ "$total_shards" -eq "${shards%/*}" ] ||
     die "D2 aggregate shard count mismatch: scopes=$total_shards marker=$shards"
   echo "mutation-gate: OK — current exact-SHA guard/audit/db floor seal is complete and OOM-free"
+  echo "mutation-gate: STATUS mutation-floor=enforced"
 }
 
 cmd_self_test() {
-  local work state files hash source good bad stale_output fixture output scope
+  local work state files hash source good bad stale_output fixture output scope valid_output
   work="$(mktemp -d /var/tmp/oraclemcp-mutation-gate-self-test.XXXXXX)"
   state="$(scope_state guard,audit,core,db,dispatch)"
   files="${state%% *}"
@@ -588,7 +595,15 @@ cmd_self_test() {
       "$fixture" >"$output"
     case "$(basename "$fixture")" in
       mutation-floor-valid.md.in)
-        "$ROOT/scripts/mutation_safety_gate.sh" check-floor-report --report "$output" >/dev/null
+        # The enforced path must SAY it enforced: coverage_ratchet.sh turns this
+        # token into the lane's attestation outcome, so a missing or wrong token
+        # would let a deferred leg be attested PASS.
+        valid_output="$("$ROOT/scripts/mutation_safety_gate.sh" check-floor-report --report "$output")"
+        [[ "$valid_output" == *"STATUS mutation-floor=enforced"* ]] ||
+          die "self-test: the enforced D2 floor emitted no enforced status token"
+        [[ "$(ALLOW_STALE_MUTATION_SEAL=1 "$ROOT/scripts/mutation_safety_gate.sh" \
+          check-floor-report --report "$output" 2>/dev/null)" == *"STATUS mutation-floor=deferred"* ]] ||
+          die "self-test: the deferred D2 floor emitted no deferred status token"
         ;;
       mutation-floor-low-guard.md.in) scope=guard ;;
       mutation-floor-low-audit.md.in) scope=audit ;;
