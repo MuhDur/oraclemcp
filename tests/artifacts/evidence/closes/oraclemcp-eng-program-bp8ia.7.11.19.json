@@ -6,13 +6,12 @@
   "scope": {
     "summary": "CF3 migrates legacy audit state through verified capability directory handles, no-follow operations, identity checks, and an atomic create-new hard-link install that refuses destination replacement.",
     "in_scope": [
-      "crates/oraclemcp-core/src/doctor.rs",
-      "crates/oraclemcp-core/Cargo.toml",
-      "Cargo.lock"
+      "crates/oraclemcp-core/src/doctor.rs"
     ],
     "out_of_scope": [
       "The migration's layout policy and legacy/current conflict handling are unchanged.",
-      "No general filesystem sandbox or unrelated doctor repair behavior is claimed."
+      "No general filesystem sandbox or unrelated doctor repair behavior is claimed.",
+      "The supporting cap_std and cap_fs_ext dependency entries landed with ee1b23ad, but the generated Cargo.lock is deliberately excluded from this source-behavior close scope because another pane currently owns a separate lockfile hunk."
     ]
   },
   "source": {
