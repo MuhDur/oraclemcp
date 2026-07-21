@@ -3368,8 +3368,11 @@ fn service_instance_pid_is_alive_platform(pid: u32) -> bool {
     use std::process::Command;
     Command::new("kill")
         .args(["-0", &pid.to_string()])
-        .status()
-        .map(|status| status.success())
+        // A stale pid makes `kill -0` write its diagnostic to stderr. Capture
+        // that expected probe failure so a successful stale-lock reclaim does
+        // not leak an unrelated shell diagnostic to the service operator.
+        .output()
+        .map(|output| output.status.success())
         .unwrap_or(false)
 }
 
