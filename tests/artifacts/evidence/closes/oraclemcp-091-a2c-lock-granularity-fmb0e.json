@@ -33,7 +33,7 @@
       },
       {
         "name": "running service operator config API",
-        "kind": "https control route",
+        "kind": "route",
         "trace": "The fallback accepts only an HTTPS origin and explicit CA/client certificate/key inputs, verifies the configured server identity, rejects a remote target path that differs from the requested config, and invokes /operator/v1/config/draft then /operator/v1/config/apply."
       },
       {
