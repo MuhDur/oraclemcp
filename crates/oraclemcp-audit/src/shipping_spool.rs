@@ -664,15 +664,6 @@ mod tests {
         }
     }
 
-    struct SleepForwarder(Duration);
-
-    impl ShippingForwarder for SleepForwarder {
-        fn forward(&self, _record: &AuditRecord) -> Result<(), ShippingError> {
-            thread::sleep(self.0);
-            Ok(())
-        }
-    }
-
     struct FlakyForwarder {
         attempts: Arc<AtomicUsize>,
     }
@@ -701,15 +692,36 @@ mod tests {
         }
     }
 
+    /// A durable local append must not wait for the destination.
+    ///
+    /// This used to prove that with a wall clock: a 300ms sleeping destination
+    /// and an assertion that the append returned in under 150ms. That budget is
+    /// a proxy, and it measures the wrong thing — the append itself performs a
+    /// real `sync_all()` under the spool mutex, and one fsync costs far more on
+    /// a virtualised Windows runner than on Linux, so the Windows lane failed
+    /// while the property under test held perfectly (bead oraclemcp-mqmo9).
+    ///
+    /// The gate proves the property instead of timing it: the destination
+    /// CANNOT have progressed, because it is blocked until this test opens the
+    /// gate. An append that returns while `delivered_records` is still 0 did
+    /// not wait for the destination, on any machine at any speed. Strictly
+    /// stronger than the old threshold, which a fast machine could satisfy by
+    /// luck.
     #[test]
     fn slow_destination_does_not_delay_durable_local_append() {
         let directory = tempfile::tempdir().expect("tempdir");
         let local = Arc::new(MemoryAuditSink::new());
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
         let delivery = DurableShippingForwarder::open(
             config(directory.path(), "slow"),
-            Box::new(SleepForwarder(Duration::from_millis(300))),
+            Box::new(GateForwarder {
+                gate: Arc::clone(&gate),
+            }),
         )
         .expect("open spool");
+        // Declared after `delivery` so it drops FIRST and releases the worker
+        // before the spool's stop() waits on the in-flight destination call.
+        let _release = release_gate_on_drop(&gate);
         let status = delivery.status_handle();
         let sink = crate::ShippingAuditSink::new(
             Box::new(SharedLocal(Arc::clone(&local))),
@@ -717,18 +729,29 @@ mod tests {
         );
         let auditor = Auditor::new(Box::new(sink), key());
 
+        // Liveness guard, NOT a latency budget: see the sibling test.
         let started = Instant::now();
         auditor
             .append(&draft(1), "t1".to_owned(), true)
             .expect("local durable append");
         assert!(
-            started.elapsed() < Duration::from_millis(150),
-            "the destination sleep leaked back onto the audit mutex: {:?}",
+            started.elapsed() < Duration::from_secs(30),
+            "the durable append blocked on the gated destination: {:?}",
             started.elapsed()
         );
+
+        // The destination is provably still blocked, so the append cannot have
+        // waited on it.
         assert_eq!(local.records().len(), 1);
-        assert_eq!(status.snapshot().pending_records, 1);
-        wait_until(Duration::from_secs(2), || {
+        let snapshot = status.snapshot();
+        assert_eq!(snapshot.pending_records, 1);
+        assert_eq!(
+            snapshot.delivered_records, 0,
+            "the destination is gated shut; nothing can have been delivered yet"
+        );
+
+        open_gate(&gate);
+        wait_until(Duration::from_secs(30), || {
             status.snapshot().delivered_records == 1
         });
     }
@@ -737,22 +760,34 @@ mod tests {
     fn concurrent_local_chain_stays_gap_free_while_shipping_is_stalled() {
         let directory = tempfile::tempdir().expect("tempdir");
         let local = Arc::new(MemoryAuditSink::new());
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        // A gate, not a sleep. The old version gave eight appends 1000ms while a
+        // 2000ms sleeping destination ran, but each append performs a real
+        // `sync_all()` under the spool mutex, so the budget measured serialised
+        // fsync latency as much as blocking — and on a virtualised Windows
+        // runner that alone exceeded it (bead oraclemcp-mqmo9). A gated
+        // destination cannot progress at all, so "the chain stayed gap-free
+        // while shipping was stalled" is proven rather than timed.
         let delivery = DurableShippingForwarder::open(
             config(directory.path(), "concurrent"),
-            // Ship delay deliberately large so the "appends don't block on
-            // shipping" check has a wide margin: a non-blocking run finishes far
-            // under the threshold below even on a slow/loaded CI runner, while a
-            // blocking run would wait at least one whole ship delay. (The spool
-            // is durable/async, so this delay only affects the background ship,
-            // not the test's own wall-clock.)
-            Box::new(SleepForwarder(Duration::from_millis(2000))),
+            Box::new(GateForwarder {
+                gate: Arc::clone(&gate),
+            }),
         )
         .expect("open spool");
+        // Declared after `delivery` so it drops FIRST and releases the worker
+        // before the spool's stop() waits on the in-flight destination call.
+        let _release = release_gate_on_drop(&gate);
+        let status = delivery.status_handle();
         let sink = crate::ShippingAuditSink::new(
             Box::new(SharedLocal(Arc::clone(&local))),
             Box::new(delivery),
         );
         let auditor = Arc::new(Auditor::new(Box::new(sink), key()));
+        // Liveness guard, NOT a latency budget. The gate proves the property;
+        // this only distinguishes "returned" from "blocked forever", so it is
+        // set far above any plausible fsync cost on any runner. The old 1000ms
+        // budget tried to measure speed and failed on Windows fsync latency.
         let started = Instant::now();
         let threads: Vec<_> = (0..8)
             .map(|i| {
@@ -767,15 +802,27 @@ mod tests {
         for worker in threads {
             worker.join().expect("append thread");
         }
-        assert!(
-            started.elapsed() < Duration::from_millis(1000),
-            "concurrent appends waited for the stalled destination"
+        // Every append returned while the destination was provably stalled.
+        assert_eq!(
+            status.snapshot().delivered_records,
+            0,
+            "the destination is gated shut; nothing can have been delivered yet"
         );
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "concurrent appends blocked on the stalled destination: {:?}",
+            started.elapsed()
+        );
+        // Release the worker BEFORE dropping the auditor: it owns the spool, and
+        // stop() waits for the in-flight destination call. `_release` cannot do
+        // it — locals drop in reverse declaration order, so `auditor` goes first.
+        open_gate(&gate);
         let records = local.records();
         assert_eq!(records.len(), 8);
         assert_eq!(
             records.iter().map(|record| record.seq).collect::<Vec<_>>(),
-            (1..=8).collect::<Vec<_>>()
+            (1..=8).collect::<Vec<_>>(),
+            "the local chain must stay gap-free under concurrent appends"
         );
         drop(auditor);
     }
