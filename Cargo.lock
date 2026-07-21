@@ -2230,6 +2230,8 @@ version = "0.9.0"
 dependencies = [
  "asupersync",
  "async-trait",
+ "cap-fs-ext",
+ "cap-std",
  "command-group",
  "getrandom 0.2.17",
  "libc",

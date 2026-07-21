@@ -31,6 +31,8 @@ oraclemcp-telemetry = { path = "../oraclemcp-telemetry", version = "0.9.0" }
 oracledb-protocol = { workspace = true }
 asupersync.workspace = true
 async-trait.workspace = true
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
 # `token_exec` and plugin subprocesses run in OS containment units: POSIX process
 # groups on Unix and Job Objects on Windows. Killing a unit closes
 # descendant-held pipes as well as reaping the direct child, so deadlines are

@@ -13,12 +13,16 @@
 //! In-MCP, the live-state subset is mirrored by `oracle_capabilities` (an agent
 //! can call it); `doctor` is the CLI mode.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::ffi::{OsStr, OsString};
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use asupersync::Cx;
+use cap_fs_ext::{DirExt as _, FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt as _};
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir as CapDir, DirBuilder as CapDirBuilder, OpenOptions as CapOpenOptions};
 use oraclemcp_db::{
     AuthAdapter, DRIVER_VERSION, DiagnosticsSource, OracleConnectOptions, OracleConnection,
     canonical_nls_statements, detect_oracle_driver, detect_standby, preflight, probe_privileges,
@@ -32,7 +36,9 @@ use serde_json::{Value, json};
 use crate::service_app::ServiceAppDoctorSnapshot;
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use cap_std::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 /// A single check's outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -902,15 +908,25 @@ pub fn apply_legacy_state_migration(
         LegacyStateLayoutObservation::Unsafe(reason) => return Err(reason),
     }
 
-    let bytes = fs::read(&layout.legacy_audit_path)
-        .map_err(|e| format!("failed to read legacy audit JSONL: {e}"))?;
-    ensure_private_dir(&layout.migration_backup_dir)?;
-    let backup_path = layout.migration_backup_dir.join(format!(
+    let bytes = read_regular_file_nofollow(&layout.legacy_audit_path)?;
+    let backup_dir = open_or_create_private_dir_nofollow(&layout.migration_backup_dir)?;
+    let backup_name = OsString::from(format!(
         "legacy-audit-jsonl.{}.backup",
         doctor_migration_timestamp_suffix()
     ));
-    write_new_private_file(&backup_path, &bytes)?;
-    write_new_atomic_file(&layout.current_audit_path, &bytes)?;
+    let backup_path = layout.migration_backup_dir.join(&backup_name);
+    write_new_private_file_at(&backup_dir, &backup_name, &backup_path, &bytes)?;
+
+    let current_parent_path = parent_path(&layout.current_audit_path)?;
+    let current_name = file_name(&layout.current_audit_path)?;
+    let current_parent = open_or_create_private_dir_nofollow(current_parent_path)?;
+    write_new_atomic_file_at(
+        &current_parent,
+        current_parent_path,
+        current_name,
+        &layout.current_audit_path,
+        &bytes,
+    )?;
     Ok(Some(DoctorFixMutation {
         id: "legacy_state_audit_jsonl_migration",
         target: "service_local_state",
@@ -931,83 +947,334 @@ fn doctor_migration_timestamp_suffix() -> String {
     format!("{}-{:09}", now.as_secs(), now.subsec_nanos())
 }
 
-fn ensure_private_dir(path: &Path) -> Result<(), String> {
-    if let Ok(metadata) = fs::symlink_metadata(path)
-        && (metadata.file_type().is_symlink() || !metadata.is_dir())
-    {
-        return Err(format!("{} is not a safe directory", path.display()));
+fn parent_path(path: &Path) -> Result<&Path, String> {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| format!("invalid migration target {}", path.display()))
+}
+
+fn file_name(path: &Path) -> Result<&OsStr, String> {
+    path.file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| format!("invalid migration target {}", path.display()))
+}
+
+/// Open the immutable root of `path`, then walk each directory component with
+/// `openat`-style capability operations. The held directory can be renamed,
+/// but no later create/link operation will follow its replacement pathname.
+fn capability_root(path: &Path) -> Result<CapDir, String> {
+    let root = if path.is_absolute() {
+        #[cfg(windows)]
+        {
+            let mut root = PathBuf::new();
+            for component in path.components() {
+                root.push(component.as_os_str());
+                if matches!(component, Component::RootDir) {
+                    break;
+                }
+            }
+            root
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/")
+        }
+    } else {
+        PathBuf::from(".")
+    };
+    CapDir::open_ambient_dir(&root, ambient_authority()).map_err(|e| {
+        format!(
+            "failed to open migration directory root {}: {e}",
+            root.display()
+        )
+    })
+}
+
+fn open_existing_dir_nofollow(path: &Path) -> Result<CapDir, String> {
+    let mut current = capability_root(path)?;
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => {
+                current = current
+                    .open_dir_nofollow(name)
+                    .map_err(|e| format!("{} is not a safe directory: {e}", path.display()))?;
+            }
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::ParentDir => {
+                return Err(format!(
+                    "{} is not a safe directory: parent traversal is refused",
+                    path.display()
+                ));
+            }
+        }
     }
-    fs::create_dir_all(path).map_err(|e| format!("failed to create {}: {e}", path.display()))?;
+    Ok(current)
+}
+
+fn open_or_create_private_dir_nofollow(path: &Path) -> Result<CapDir, String> {
+    let mut current = capability_root(path)?;
+    let mut has_normal_component = false;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            if matches!(component, Component::ParentDir) {
+                return Err(format!(
+                    "{} is not a safe directory: parent traversal is refused",
+                    path.display()
+                ));
+            }
+            continue;
+        };
+        has_normal_component = true;
+        match current.open_dir_nofollow(name) {
+            Ok(next) => current = next,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut builder = CapDirBuilder::new();
+                #[cfg(unix)]
+                builder.mode(0o700);
+                match current.create_dir_with(name, &builder) {
+                    Ok(()) => {}
+                    Err(race) if race.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        return Err(format!("failed to create {}: {error}", path.display()));
+                    }
+                }
+                current = current.open_dir_nofollow(name).map_err(|e| {
+                    format!(
+                        "{} is not a safe directory after creation: {e}",
+                        path.display()
+                    )
+                })?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "{} is not a safe directory: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    if has_normal_component {
+        set_private_dir_permissions(&current, path)?;
+    }
+    Ok(current)
+}
+
+fn set_private_dir_permissions(dir: &CapDir, display_path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|e| {
-            format!(
-                "failed to set private permissions on {}: {e}",
-                path.display()
-            )
-        })?;
+        dir.try_clone()
+            .and_then(|dir| {
+                dir.into_std_file()
+                    .set_permissions(fs::Permissions::from_mode(0o700))
+            })
+            .map_err(|e| {
+                format!(
+                    "failed to set private permissions on {}: {e}",
+                    display_path.display()
+                )
+            })?;
     }
+    #[cfg(not(unix))]
+    let _ = (dir, display_path);
     Ok(())
 }
 
-fn write_new_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        ensure_private_dir(parent)?;
+fn read_regular_file_nofollow(path: &Path) -> Result<Vec<u8>, String> {
+    let parent_path = parent_path(path)?;
+    let name = file_name(path)?;
+    let parent = open_existing_dir_nofollow(parent_path)?;
+    let metadata = parent.symlink_metadata(name).map_err(|e| {
+        format!(
+            "failed to inspect legacy audit JSONL {}: {e}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
     }
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let mut file = parent
+        .open_with(name, &options)
+        .map_err(|e| format!("failed to open legacy audit JSONL {}: {e}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|e| format!("failed to read legacy audit JSONL {}: {e}", path.display()))?;
+    Ok(bytes)
+}
+
+fn write_new_private_file_at(
+    parent: &CapDir,
+    name: &OsStr,
+    display_path: &Path,
+    bytes: &[u8],
+) -> Result<FileIdentity, String> {
+    let mut options = CapOpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
     #[cfg(unix)]
-    {
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|e| format!("failed to create {}: {e}", path.display()))?;
+    options.mode(0o600);
+    let mut file = parent
+        .open_with(name, &options)
+        .map_err(|e| format!("failed to create {}: {e}", display_path.display()))?;
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
-    if let Some(parent) = path.parent() {
-        sync_dir(parent)?;
-    }
-    Ok(())
+        .map_err(|e| format!("failed to write {}: {e}", display_path.display()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("failed to inspect {}: {e}", display_path.display()))?;
+    sync_cap_dir(parent, display_path)?;
+    Ok(FileIdentity::from_metadata(&metadata))
 }
 
-fn write_new_atomic_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    match regular_file_status(path) {
-        Ok(true) => return Err(format!("{} already exists", path.display())),
-        Ok(false) => {}
-        Err(reason) => return Err(reason),
+/// Install a fully-fsynced temp through an atomic create-new hard link. Unlike
+/// `rename`, the link fails if an attacker creates the destination after the
+/// first observation, while still making the completed file appear atomically.
+fn write_new_atomic_file_at(
+    parent: &CapDir,
+    parent_path: &Path,
+    name: &OsStr,
+    display_path: &Path,
+    bytes: &[u8],
+) -> Result<(), String> {
+    match regular_file_status_at(parent, name, display_path)? {
+        true => return Err(format!("{} already exists", display_path.display())),
+        false => {}
     }
-    if let Some(parent) = path.parent() {
-        ensure_private_dir(parent)?;
-    }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("invalid migration target {}", path.display()))?;
-    let tmp_path = parent.join(format!(
-        ".{file_name}.tmp.{}.{}",
+    let temp_name = OsString::from(format!(
+        ".{}.tmp.{}.{}",
+        name.to_string_lossy(),
         std::process::id(),
         doctor_migration_timestamp_suffix()
     ));
-    write_new_private_file(&tmp_path, bytes)?;
-    fs::rename(&tmp_path, path)
-        .map_err(|e| format!("failed to install {}: {e}", path.display()))?;
-    sync_dir(parent)
+    let temp_identity = write_new_private_file_at(parent, &temp_name, display_path, bytes)?;
+    run_doctor_atomic_install_hook();
+    verify_parent_identity(parent, parent_path, display_path)?;
+    verify_file_identity(parent, &temp_name, temp_identity, display_path)?;
+    parent
+        .hard_link(&temp_name, parent, name)
+        .map_err(|e| format!("failed to install {}: {e}", display_path.display()))?;
+    verify_file_identity(parent, name, temp_identity, display_path)?;
+    parent
+        .remove_file(&temp_name)
+        .map_err(|e| format!("failed to finalize {}: {e}", display_path.display()))?;
+    verify_parent_identity(parent, parent_path, display_path)?;
+    sync_cap_dir(parent, display_path)
 }
 
-#[cfg(unix)]
-fn sync_dir(path: &Path) -> Result<(), String> {
-    fs::File::open(path)
-        .and_then(|file| file.sync_all())
-        .map_err(|e| format!("failed to fsync {}: {e}", path.display()))
+fn regular_file_status_at(
+    parent: &CapDir,
+    name: &OsStr,
+    display_path: &Path,
+) -> Result<bool, String> {
+    match parent.symlink_metadata(name) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(format!("{} is a symlink", display_path.display()))
+        }
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(format!("{} is not a regular file", display_path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("{}: {error}", display_path.display())),
+    }
 }
 
-#[cfg(not(unix))]
-fn sync_dir(_path: &Path) -> Result<(), String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+impl FileIdentity {
+    fn from_metadata(metadata: &cap_std::fs::Metadata) -> Self {
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        }
+    }
+}
+
+fn verify_file_identity(
+    parent: &CapDir,
+    name: &OsStr,
+    expected: FileIdentity,
+    display_path: &Path,
+) -> Result<(), String> {
+    let metadata = parent
+        .symlink_metadata(name)
+        .map_err(|e| format!("failed to inspect {}: {e}", display_path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "{} was replaced during install",
+            display_path.display()
+        ));
+    }
+    let actual = FileIdentity::from_metadata(&metadata);
+    if actual != expected {
+        return Err(format!(
+            "{} was replaced during install",
+            display_path.display()
+        ));
+    }
     Ok(())
 }
+
+fn verify_parent_identity(
+    held_parent: &CapDir,
+    parent_path: &Path,
+    display_path: &Path,
+) -> Result<(), String> {
+    let current_parent = open_existing_dir_nofollow(parent_path)?;
+    let held = held_parent
+        .dir_metadata()
+        .map_err(|e| format!("failed to inspect held migration directory: {e}"))?;
+    let current = current_parent
+        .dir_metadata()
+        .map_err(|e| format!("failed to inspect current migration directory: {e}"))?;
+    if held.dev() != current.dev() || held.ino() != current.ino() {
+        return Err(format!(
+            "migration target parent for {} was replaced during install",
+            display_path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn sync_cap_dir(dir: &CapDir, display_path: &Path) -> Result<(), String> {
+    #[cfg(not(windows))]
+    {
+        dir.open(".")
+            .and_then(|dir| dir.sync_all())
+            .map_err(|e| format!("failed to fsync {}: {e}", display_path.display()))?;
+    }
+    #[cfg(windows)]
+    let _ = (dir, display_path);
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static DOCTOR_ATOMIC_INSTALL_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_doctor_atomic_install_hook(hook: impl FnOnce() + 'static) {
+    DOCTOR_ATOMIC_INSTALL_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_doctor_atomic_install_hook() {
+    DOCTOR_ATOMIC_INSTALL_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_doctor_atomic_install_hook() {}
 
 fn fix_refusal_for_check(check: &CheckResult) -> DoctorFixRefusal {
     let (target, scope, reason) = match check.id {
@@ -4668,6 +4935,103 @@ mod tests {
                 .expect("second migration is noop")
                 .is_none(),
             "migration must be idempotent after the byte-identical copy exists"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_migration_refuses_symlink_swaps_at_atomic_install() {
+        let audit_jsonl = br#"{"schema_version":1,"seq":1}
+"#;
+
+        let parent_swap_root = doctor_tmp_dir("legacy-state-parent-symlink-race");
+        let parent_swap_legacy = parent_swap_root.join("config").join("audit.jsonl");
+        let parent_swap_current = parent_swap_root
+            .join("state")
+            .join("audit")
+            .join("audit.jsonl");
+        let parent_swap_backups = parent_swap_root
+            .join("state")
+            .join("doctor-migrations")
+            .join("backups");
+        std::fs::create_dir_all(parent_swap_legacy.parent().expect("legacy parent"))
+            .expect("legacy parent exists");
+        std::fs::write(&parent_swap_legacy, audit_jsonl).expect("seed legacy audit");
+        let verified_parent = parent_swap_current
+            .parent()
+            .expect("current parent")
+            .to_owned();
+        let moved_parent = parent_swap_root.join("state").join("audit-verified");
+        let attacker_parent = parent_swap_root.join("attacker-parent");
+        std::fs::create_dir_all(&attacker_parent).expect("attacker parent exists");
+        let attacker_parent_for_hook = attacker_parent.clone();
+        set_doctor_atomic_install_hook(move || {
+            std::fs::rename(&verified_parent, &moved_parent).expect("move verified parent");
+            std::os::unix::fs::symlink(&attacker_parent_for_hook, &verified_parent)
+                .expect("replace visible parent with symlink");
+        });
+        let parent_swap = DoctorStateLayout {
+            legacy_audit_path: parent_swap_legacy.clone(),
+            current_audit_path: parent_swap_current.clone(),
+            migration_backup_dir: parent_swap_backups,
+            audit_path_configured: false,
+        };
+        let parent_error = apply_legacy_state_migration(Some(&parent_swap))
+            .expect_err("replaced destination parent must refuse");
+        assert!(
+            parent_error.contains("not a safe directory"),
+            "{parent_error}"
+        );
+        assert!(
+            !attacker_parent.join("audit.jsonl").exists(),
+            "the held parent must prevent writes through the replacement symlink"
+        );
+        assert_eq!(
+            std::fs::read(&parent_swap_legacy).expect("legacy source remains readable"),
+            audit_jsonl
+        );
+
+        let destination_swap_root = doctor_tmp_dir("legacy-state-destination-symlink-race");
+        let destination_swap_legacy = destination_swap_root.join("config").join("audit.jsonl");
+        let destination_swap_current = destination_swap_root
+            .join("state")
+            .join("audit")
+            .join("audit.jsonl");
+        let destination_swap_backups = destination_swap_root
+            .join("state")
+            .join("doctor-migrations")
+            .join("backups");
+        std::fs::create_dir_all(destination_swap_legacy.parent().expect("legacy parent"))
+            .expect("legacy parent exists");
+        std::fs::write(&destination_swap_legacy, audit_jsonl).expect("seed legacy audit");
+        let attacker_target = destination_swap_root.join("attacker-target");
+        set_doctor_atomic_install_hook({
+            let destination_swap_current = destination_swap_current.clone();
+            let attacker_target = attacker_target.clone();
+            move || {
+                std::os::unix::fs::symlink(&attacker_target, &destination_swap_current)
+                    .expect("replace destination with symlink");
+            }
+        });
+        let destination_swap = DoctorStateLayout {
+            legacy_audit_path: destination_swap_legacy.clone(),
+            current_audit_path: destination_swap_current,
+            migration_backup_dir: destination_swap_backups,
+            audit_path_configured: false,
+        };
+        let destination_error = apply_legacy_state_migration(Some(&destination_swap))
+            .expect_err("replacement destination must preserve create-new semantics");
+        assert!(
+            destination_error.contains("failed to install"),
+            "{destination_error}"
+        );
+        assert!(
+            !attacker_target.exists(),
+            "the destination symlink must never receive the migration write"
+        );
+        assert_eq!(
+            std::fs::read(&destination_swap_legacy).expect("legacy source remains readable"),
+            audit_jsonl
         );
     }
 
