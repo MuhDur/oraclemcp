@@ -1628,8 +1628,8 @@ pub enum DoctorWalletErrorKind {
     /// (B2.1).
     PasswordRequired,
     /// The wallet image exceeded the driver's fail-closed size limit before any
-    /// parser ran (`MAX_WALLET_FILE_BYTES`, 16 MiB in the pinned `=0.8.4`
-    /// driver). Distinct from `Pem`: the bytes were never parsed, so telling an
+    /// parser ran (`MAX_WALLET_FILE_BYTES`, 16 MiB in the pinned driver).
+    /// Distinct from `Pem`: the bytes were never parsed, so telling an
     /// operator their PEM is malformed sends them to debug a well-formed file.
     TooLarge,
 }
@@ -1705,7 +1705,7 @@ pub struct DoctorWalletPostureReport {
 
 /// Map a typed driver [`oracledb_protocol::tls::wallet::WalletError`] into the
 /// secret-free [`DoctorWalletErrorKind`]. The driver enum is `#[non_exhaustive]`,
-/// so a wildcard arm is required; every variant the pinned `=0.8.4` driver can
+/// so a wildcard arm is required; every variant the pinned driver can
 /// produce is mapped explicitly.
 fn wallet_error_kind(error: &oracledb_protocol::tls::wallet::WalletError) -> DoctorWalletErrorKind {
     use oracledb_protocol::tls::wallet::WalletError;
@@ -3033,7 +3033,7 @@ fn check_trio_stack(ctx: &DoctorContext<'_>) -> CheckResult {
     // `CARGO_PKG_VERSION` is also the `oraclemcp-db` / server version.
     let server_version = env!("CARGO_PKG_VERSION");
     // Read from the DRIVER crate (via the db seam re-export), never this one —
-    // the provenance guarantee that `reported == pinned` driver version (=0.8.4).
+    // the provenance guarantee that `reported == pinned` driver version.
     let driver_line = format!("thin oracledb {DRIVER_VERSION}");
 
     let plsql_status = if ctx.plsql_intelligence_detected {
@@ -3544,8 +3544,9 @@ mod tests {
             "trio-stack must report the pinned driver line: {}",
             trio.detail
         );
-        // reported == pinned driver (=0.8.4).
-        assert_eq!(DRIVER_VERSION, "0.8.4");
+        // The assertion above derives the expectation from the driver seam, so
+        // an intentional exact-pin bump cannot leave a second version literal
+        // behind in this doctor contract.
 
         // Server / db (workspace) version is present.
         assert!(

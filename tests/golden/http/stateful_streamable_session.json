@@ -170,8 +170,19 @@
                       "openWorldHint": false,
                       "readOnlyHint": true
                     },
-                    "description": "Zero-arg entry point: tools, operating level + gates, connection/standby status, feature tiers, version.",
+                    "description": "Compact discovery entry point: tools, operating level + gates, connection/standby status, feature tiers, version. Pass detail_level=full for the complete pre-0.9.1 descriptor report.",
                     "inputSchema": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "detail_level": {
+                          "description": "compact (default) omits tool summaries and schemas; full returns the complete descriptor report.",
+                          "enum": [
+                            "compact",
+                            "full"
+                          ],
+                          "type": "string"
+                        }
+                      },
                       "type": "object"
                     },
                     "name": "oracle_capabilities",

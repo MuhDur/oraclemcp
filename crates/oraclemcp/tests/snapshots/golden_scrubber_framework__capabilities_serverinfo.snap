@@ -1285,7 +1285,8 @@ expression: rendered
             "type": "array"
           },
           "max_rows": {
-            "description": "Row cap for each witness read (default: the profile page size).",
+            "description": "Row cap for each witness read (default: the profile page size, ceiling 5000). A larger request is clamped to the ceiling and the response says so; when the witness hits the cap the response also flags witness_truncated, because the rows shown are then not the whole set.",
+            "maximum": 5000,
             "minimum": 1,
             "type": "integer"
           },
@@ -1748,10 +1749,14 @@ expression: rendered
       "name": "oracle_orient",
       "title": "Oracle Orient",
       "tier": "foundation_live_db",
-      "summary": "Return bounded orientation evidence: by default one cacheable snapshot for the active profile; fleet=true maps every MCP-visible profile independently with schema, version, freshness, drift, and typed UNREACHABLE/FAIL_CLOSED lane status. Dictionary reads are parameterized and read-only; include selects schema, fks, hot, freshness, and/or ddl (all by default).",
+      "summary": "Return bounded orientation evidence: by default one cacheable snapshot for the active profile; fleet=true maps every MCP-visible profile independently with schema, version, freshness, drift, and typed UNREACHABLE/FAIL_CLOSED lane status. Dictionary reads are parameterized and read-only; include selects schema, fks, hot, freshness, and/or ddl (all by default). Every selected row list is capped and the response makes truncation explicit.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "cursor": {
+            "description": "Opaque continuation cursor returned by a truncated orient response. It is bound to this owner, include selection, fleet flag, and profile.",
+            "type": "string"
+          },
           "fleet": {
             "description": "When true, orient every MCP-visible configured profile independently. Each profile is returned with REACHABLE, UNREACHABLE, or FAIL_CLOSED status; one unavailable lane never omits or fails the other lanes.",
             "type": "boolean"
@@ -1769,6 +1774,18 @@ expression: rendered
               "type": "string"
             },
             "type": "array"
+          },
+          "limit": {
+            "description": "Alias for max_rows.",
+            "maximum": 250,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_rows": {
+            "description": "Maximum rows for each selected orientation list (default 100). The response sets truncated=true and returns next_cursor when another bounded page may exist.",
+            "maximum": 250,
+            "minimum": 1,
+            "type": "integer"
           },
           "owner": {
             "description": "Optional schema owner (case-insensitive). Omit or use * for all visible schemas.",
@@ -1794,6 +1811,18 @@ expression: rendered
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "limit": {
+            "description": "Alias for max_rows. Prefer max_rows.",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_rows": {
+            "description": "Maximum constraint rows to return (default 200, hard cap 5000).",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
           "name": {
             "description": "Alias for table. Prefer table.",
             "type": "string"
@@ -1922,7 +1951,7 @@ expression: rendered
       "name": "oracle_get_ddl",
       "title": "Oracle Get DDL",
       "tier": "foundation_live_db",
-      "summary": "Fetch an object's DDL via DBMS_METADATA.GET_DDL (allowlisted object types).",
+      "summary": "Fetch an object's DDL via DBMS_METADATA.GET_DDL (allowlisted object types). Responses include full and returned character counts plus an explicit truncated flag; a long DDL prefix is never presented as a complete document.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -1960,10 +1989,15 @@ expression: rendered
       "name": "oracle_get_source",
       "title": "Oracle Get Source",
       "tier": "foundation_live_db",
-      "summary": "Fetch an object's full source text from ALL_SOURCE with a character cap. Omit object_type to return every visible source variant for the object name.",
+      "summary": "Fetch an object's full source text or inclusive line range from ALL_SOURCE with a character cap. Omit object_type to return every visible source variant for the object name.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "from_line": {
+            "description": "Optional first ALL_SOURCE line to return, inclusive. Pair with oracle_search_source's LINE result.",
+            "minimum": 1,
+            "type": "integer"
+          },
           "max_chars": {
             "description": "Maximum source characters to return (default 1000000).",
             "minimum": 1,
@@ -1984,6 +2018,11 @@ expression: rendered
           "owner": {
             "description": "Optional schema owner (case-insensitive). Defaults to current schema when available.",
             "type": "string"
+          },
+          "to_line": {
+            "description": "Optional last ALL_SOURCE line to return, inclusive. Must not be lower than from_line.",
+            "minimum": 1,
+            "type": "integer"
           }
         },
         "required": [],
@@ -2110,6 +2149,18 @@ expression: rendered
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "limit": {
+            "description": "Alias for max_rows. Prefer max_rows.",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_rows": {
+            "description": "Maximum compile errors to return (default 200, hard cap 5000).",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
           "name": {
             "description": "Optional object name. May be OWNER.NAME. Omit to list all compile errors for the owner/current schema.",
             "type": "string"
@@ -2138,7 +2189,7 @@ expression: rendered
       "name": "oracle_search_source",
       "title": "Oracle Search Source",
       "tier": "foundation_live_db",
-      "summary": "Full-text search across ALL_SOURCE for a needle (row-capped).",
+      "summary": "Full-text search across ALL_SOURCE for a needle (row- and line-capped).",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -2146,6 +2197,12 @@ expression: rendered
             "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows.",
             "maximum": 5000,
             "minimum": 1,
+            "type": "integer"
+          },
+          "max_line_chars": {
+            "description": "Maximum characters retained from each matching source line (default 500). Longer lines end with an explicit truncation marker; use oracle_get_source with from_line/to_line for the exact source range.",
+            "maximum": 4000,
+            "minimum": 16,
             "type": "integer"
           },
           "max_rows": {
@@ -2192,6 +2249,18 @@ expression: rendered
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "limit": {
+            "description": "Alias for max_rows. Prefer max_rows.",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_rows": {
+            "description": "Maximum identifiers and SQL statements per array (default 200, hard cap 5000).",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
           "name": {
             "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied.",
             "type": "string"
@@ -3547,19 +3616,23 @@ expression: rendered
       "name": "get_schema",
       "title": "Get Schema",
       "tier": "foundation_live_db",
-      "summary": "Compatibility alias for oracle_schema_inspect; omit arguments to inspect the current schema.",
+      "summary": "Compact schema orientation alias. With no object_type it lists TABLE, VIEW, and PACKAGE objects only; a bounded truncated page carries an opaque cursor.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "cursor": {
+            "description": "Opaque continuation cursor returned by a truncated get_schema page.",
+            "type": "string"
+          },
           "limit": {
-            "description": "Maximum objects to return.",
-            "maximum": 5000,
+            "description": "Maximum objects to return (default 100, hard cap 250).",
+            "maximum": 250,
             "minimum": 1,
             "type": "integer"
           },
           "max_rows": {
             "description": "Alias for limit.",
-            "maximum": 5000,
+            "maximum": 250,
             "minimum": 1,
             "type": "integer"
           },
@@ -3568,7 +3641,7 @@ expression: rendered
             "type": "string"
           },
           "object_type": {
-            "description": "Optional object type filter.",
+            "description": "Optional object type filter. Supplying it overrides the compact TABLE/VIEW/PACKAGE default projection.",
             "type": "string"
           },
           "owner": {
@@ -3595,6 +3668,16 @@ expression: rendered
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "limit": {
+            "description": "Alias for max_rows.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_rows": {
+            "description": "Maximum columns and constraints returned.",
+            "minimum": 1,
+            "type": "integer"
+          },
           "name": {
             "description": "Alias for table_name.",
             "type": "string"
@@ -3723,7 +3806,7 @@ expression: rendered
       "name": "get_ddl",
       "title": "Get DDL",
       "tier": "foundation_live_db",
-      "summary": "Compatibility alias for oracle_get_ddl.",
+      "summary": "Compatibility alias for oracle_get_ddl; long DDL is explicitly marked partial rather than silently truncated.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -3806,6 +3889,16 @@ expression: rendered
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "limit": {
+            "description": "Alias for max_rows.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_rows": {
+            "description": "Maximum compiler diagnostics returned.",
+            "minimum": 1,
+            "type": "integer"
+          },
           "name": {
             "description": "Alias for object_name.",
             "type": "string"
@@ -3907,12 +4000,13 @@ expression: rendered
     "read_only_standby": false
   },
   "features": {
-    "live_db": true,
+    "built_with_live_db": true,
     "engine": false,
     "http_transport": true
   },
   "tool_features": {
     "incremental_fetch": true,
     "streaming": true
-  }
+  },
+  "skipped_custom_tools": []
 }

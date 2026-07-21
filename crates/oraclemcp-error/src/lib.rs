@@ -465,8 +465,8 @@ pub enum OracleRetryAction {
 
 /// The pinned driver's connection-lost Oracle-code set.
 ///
-/// This is the `oracledb 0.8.4` `Error::is_connection_lost()` set for server
-/// errors. Raw I/O and driver `ConnectionClosed` errors are classified by the
+/// This mirrors the pinned driver's `Error::is_connection_lost()` set for
+/// server errors. Raw I/O and driver `ConnectionClosed` errors are classified by the
 /// DB adapter directly, because they have no Oracle code.
 pub const CONNECTION_LOST_ORA_CODES: &[i32] = &[
     28, 1012, 1041, 1089, 2396, 3113, 3114, 3135, 12537, 12547, 12570, 28511,
