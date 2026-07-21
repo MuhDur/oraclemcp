@@ -1,0 +1,57 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T15:15:00Z",
+  "bead_id": "oraclemcp-091-c6-cli-vs-server-collision-6o0m9",
+  "scope": {
+    "summary": "Commits the C6 fixture: the state-store flock is held exactly as a running server holds it, then setup --write and clients revoke run as child processes against the same store. A green half pins that both verbs fail rather than silently succeeding; a committed-red half asserts the failure names the lock instead of emitting the generic write-failure catch-all.",
+    "in_scope": [
+      "crates/oraclemcp/tests/c6_cli_vs_running_server.rs",
+      "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c6-cli-vs-server-collision-6o0m9.json"
+    ],
+    "out_of_scope": [
+      "Mapping FileStoreError::Locked to an actionable code — A2a owns the fix; this bead owns only the fixture.",
+      "Naming the specific holder (pid, listen address) in the message. The fixture asserts the class is identifiable and the remedy implied; how much holder detail is safe to surface is A2a's call.",
+      "Every other state-mutating CLI verb. Two representative verbs are covered, not an exhaustive sweep."
+    ]
+  },
+  "source": {
+    "sha": "9f30ed1032a7a1b11107bf921cd4cd83caabd7c5",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oraclemcp setup --write against a server-owned state store",
+        "kind": "cli",
+        "trace": "c6_state_mutating_cli_verbs_fail_while_the_store_is_owned spawns the real binary with XDG_STATE_HOME pointed at a store this process holds the service-owner flock on, and asserts a non-zero exit"
+      },
+      {
+        "name": "oraclemcp clients revoke against a server-owned state store",
+        "kind": "cli",
+        "trace": "same test, second collision case; both verbs are driven as separate child processes so the contention is real rather than simulated in-process"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped test only: cargo test -p oraclemcp --test c6_cli_vs_running_server (1 passed, 1 expected-failure) plus the deliberate red run. The full workspace gate was not run for this commit.",
+    "The diagnostic assertion is committed red by design and does not execute in the default run; it is not cited as proof of anything here.",
+    "The lock is held by the test process rather than by a spawned `serve`. flock is per open file description so the contention a child sees is identical, but this fixture does not prove a real server's full startup path takes that lock — file_store's own tests cover that.",
+    "Two CLI verbs are covered. Other state-mutating verbs likely share the same catch-all and are not asserted here."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "A2a must delete the #[ignore] on c6_a_store_collision_names_the_lock_holder_and_the_remedy, leaving the assertions unchanged, and must keep c6_state_mutating_cli_verbs_fail_while_the_store_is_owned green — a diagnostic fix must not turn the collision into a success path.",
+    "Consider whether other state-mutating CLI verbs reach the same ConfigOpsError catch-all; if so they inherit the same indistinguishable failure."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
