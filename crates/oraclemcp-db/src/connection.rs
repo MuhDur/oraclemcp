@@ -2422,7 +2422,11 @@ mod driver {
             let mut rows: VecDeque<_> = std::mem::take(&mut result.rows).into();
             let mut previous_row = rows.back().cloned();
             let has_parent_result = !columns.is_empty();
-            let mut builder = QueryPageBuilder::new(caps, offset);
+            let column_names = columns
+                .iter()
+                .map(|column| column.name().to_owned())
+                .collect();
+            let mut builder = QueryPageBuilder::new(caps, offset, column_names);
 
             if has_parent_result
                 && rows.is_empty()

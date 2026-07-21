@@ -49,7 +49,8 @@ impl Default for QueryCaps {
 /// A page of query results (dual-output friendly: `rows` is structured JSON).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryResponse {
-    /// Column names in select-list order (from the first row).
+    /// Column names in select-list order (from statement describe metadata when
+    /// available, otherwise from the first materialized row).
     pub columns: Vec<String>,
     /// Serialized rows (each a JSON object per the §5.2 type table).
     pub rows: Vec<Value>,
@@ -485,11 +486,11 @@ pub(crate) enum QueryPagePush {
 }
 
 impl QueryPageBuilder {
-    pub(crate) fn new(caps: QueryCaps, offset: usize) -> Self {
+    pub(crate) fn new(caps: QueryCaps, offset: usize, columns: Vec<String>) -> Self {
         Self {
             caps,
             offset,
-            columns: Vec::new(),
+            columns,
             column_cache: None,
             mask_certificate: None,
             rows: Vec::with_capacity(caps.max_rows),
@@ -578,7 +579,11 @@ pub(crate) fn query_response_from_rows_checked<Caps>(
 ) -> Result<QueryResponse, DbError> {
     db_checkpoint(cx, "oracle_query.serialize.before")?;
     let more_by_rows = rows.len() > caps.max_rows;
-    let mut builder = QueryPageBuilder::new(caps, offset);
+    let columns = rows
+        .first()
+        .map(|row| row.columns.iter().map(|(name, _)| name.clone()).collect())
+        .unwrap_or_default();
+    let mut builder = QueryPageBuilder::new(caps, offset, columns);
     let mut byte_truncated = false;
     for row in rows.iter().take(caps.max_rows) {
         if builder.push_with_options(cx, row, serialize_opts)? == QueryPagePush::ByteLimit {
@@ -716,7 +721,12 @@ mod tests {
             offset: usize,
             serialize_opts: &SerializeOptions,
         ) -> Result<QueryResponse, DbError> {
-            let mut builder = QueryPageBuilder::new(caps, offset);
+            let columns = self
+                .rows
+                .first()
+                .map(|row| row.columns.iter().map(|(name, _)| name.clone()).collect())
+                .unwrap_or_default();
+            let mut builder = QueryPageBuilder::new(caps, offset, columns);
             let mut truncated = false;
             let available = self.rows.len().saturating_sub(offset);
             for row in self.rows.iter().skip(offset) {
@@ -2203,8 +2213,8 @@ mod tests {
     /// The observable contrast, and the reason the next test matters: the same
     /// query shape reports its schema when a row survives and forgets it when
     /// none does. Column names reach the page only through
-    /// `push_with_options` (gated on the first row), never from statement
-    /// describe metadata — so an emptied result loses its schema.
+    /// `push_with_options` (gated on the first row). The real driver path must
+    /// instead seed the page from statement describe metadata before fetching.
     ///
     /// This passes today and pins the working half.
     #[test]
@@ -2242,32 +2252,25 @@ mod tests {
     /// zero columns. An agent cannot tell "this object exists, you may read it,
     /// and nothing matched" from "wrong object" or "no access" — three
     /// situations with three different next actions, collapsed into one
-    /// response. Statement describe metadata is available at the call site that
-    /// builds this page (`connection.rs` clones `result.columns` immediately
-    /// before `QueryPageBuilder::new`), it is simply not handed over.
-    ///
-    /// Bead `oraclemcp-091-a1c-*` (A1c) populates the columns from that
-    /// describe metadata at construction. Flipping this green means removing
-    /// the `#[ignore]` and passing the metadata into the constructor; the
-    /// assertion below must not change.
+    /// response. The builder must receive statement describe metadata at
+    /// construction, before any row is fetched.
     #[test]
-    #[ignore = "expected failure until A1c populates QueryPageBuilder columns from describe metadata (bead oraclemcp-091-c7-zero-rows-columns-v6zdw)"]
     fn c7_a_zero_row_page_still_reports_its_columns() {
         let caps = QueryCaps {
             max_rows: 10,
             max_result_bytes: 64 * 1024,
         };
         let response = run_with_cx(|cx| async move {
-            QueryPageBuilder::new(caps, 0)
+            QueryPageBuilder::new(caps, 0, vec!["CUSTOMER_ID".to_owned(), "REGION".to_owned()])
                 .finish(&cx, false)
                 .expect("an empty page finishes")
         });
 
         assert_eq!(response.row_count, 0, "the fixture is about an empty page");
-        assert!(
-            !response.columns.is_empty(),
-            "a zero-row page must still carry its select-list columns; without them an agent \
-             cannot distinguish 'nothing matched' from 'wrong object' or 'no access'"
+        assert_eq!(
+            response.columns,
+            vec!["CUSTOMER_ID".to_owned(), "REGION".to_owned()],
+            "a zero-row page must preserve statement describe metadata"
         );
     }
 }
