@@ -1,0 +1,60 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T23:05:44Z",
+  "bead_id": "oraclemcp-091-p2-8-session-footprint-m7nmi",
+  "scope": {
+    "summary": "Makes the connection footprint honest by reporting the dedicated pinned connection and the independently observed stateless pool separately, with documentation of their distinct lifecycle and sizing semantics.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/pool.rs",
+      "crates/oraclemcp-db/src/types.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs",
+      "README.md",
+      "docs/configuration.md",
+      "docs/operations.md"
+    ],
+    "out_of_scope": [
+      "Credentialed D-lane corroboration against V$SESSION is owned by oraclemcp-20cw3.",
+      "Physical-session release and SIGTERM leak remediation are owned by B7c/B7b."
+    ]
+  },
+  "source": {
+    "sha": "2106de73bd2dfe581dde6005de2e49eb0dc0a11b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_connection_info",
+        "kind": "tool",
+        "trace": "The dispatcher returns the pinned primary as connection and the separately observed stateless pool as stateless_read_connection; a successful pool reports its locked open_count, never a blended estimate. Scoped check: CARGO_TARGET_DIR=/var/tmp/oraclemcp-p2-8-session-footprint-20260721/target scripts/swarm_discipline.sh bounded-run --timeout 120 -- cargo test -p oraclemcp --lib connection_info_reports_stateless_read_strategy_when_configured -- --nocapture (1 passed)."
+      },
+      {
+        "name": "[profiles.pool] configuration",
+        "kind": "config-gate",
+        "trace": "README.md and docs/configuration.md state that user work remains on one pinned main session, the stateless pool is separate, and max_size caps only additional stateless connections. Scoped check: CARGO_TARGET_DIR=/var/tmp/oraclemcp-p2-8-session-footprint-20260721/target scripts/swarm_discipline.sh bounded-run --timeout 120 -- cargo test -p oraclemcp --bin oraclemcp healthy_optional_pool_is_installed_and_reported -- --nocapture (1 passed)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No credentialed D-lane V$SESSION capture was run; the separate follow-up oraclemcp-20cw3 owns that server-side corroboration.",
+    "pool_open_connections is the exact local pool open_count at observation time, not an estimate of unrelated database sessions."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-20cw3 verifies the reported pinned-plus-stateless footprint against a scrubbed live D-lane V$SESSION observation."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
