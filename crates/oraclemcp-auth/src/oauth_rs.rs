@@ -223,20 +223,17 @@ impl ResourceServerConfig {
 
     /// The `WWW-Authenticate: Bearer …` header value for a 401 (RFC 9728 §5.1):
     /// points the client at the resource-metadata URL and, optionally, a
-    /// token-free error code and diagnostic.
+    /// coarse RFC 6750 error code.
+    ///
+    /// Detailed token-validation categories are deliberately not rendered here:
+    /// an unauthenticated client must not be able to distinguish a bad signature
+    /// from an expired token, a missing claim, or an unsupported algorithm.
+    /// The transport records its fixed category in the operator audit trail.
     #[must_use]
-    pub fn www_authenticate(
-        &self,
-        metadata_url: &str,
-        error: Option<&str>,
-        error_description: Option<&str>,
-    ) -> String {
+    pub fn www_authenticate(&self, metadata_url: &str, error: Option<&str>) -> String {
         let mut s = format!("Bearer resource_metadata=\"{metadata_url}\"");
         if let Some(e) = error {
             s.push_str(&format!(", error=\"{e}\""));
-        }
-        if let Some(description) = error_description {
-            s.push_str(&format!(", error_description=\"{description}\""));
         }
         s
     }
@@ -876,11 +873,10 @@ mod tests {
         let chal = c.www_authenticate(
             "https://oraclemcp.example/.well-known/oauth-protected-resource",
             Some("invalid_token"),
-            Some("Token signature did not verify"),
         );
         assert!(chal.starts_with("Bearer resource_metadata="));
         assert!(chal.contains("error=\"invalid_token\""));
-        assert!(chal.contains("error_description=\"Token signature did not verify\""));
+        assert!(!chal.contains("error_description="));
     }
 
     #[test]

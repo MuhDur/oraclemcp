@@ -555,11 +555,13 @@ match `http.oauth.allowed_issuers`. A token supplies scopes as either a
 space-delimited `scope` string or an `scp` array, and must satisfy every
 non-empty `http.oauth.required_scopes` entry.
 
-Rejected requests keep the response body generic, but their
-`WWW-Authenticate` header includes an RFC 6750 error and a token-free
-`error_description` (for example, missing `client_id`, bad signature, expired
-token, or audience mismatch). Use that header to correct client configuration;
-the server never echoes a bearer token, signature, or untrusted issuer value.
+Rejected requests keep the response body and `WWW-Authenticate` challenge
+generic: a presented but rejected bearer always receives `error="invalid_token"`
+with no `error_description`. This prevents an unauthenticated caller learning
+whether a token was malformed, signed correctly but expired, or missing a
+particular claim. The server records the fixed rejection category in its
+operator audit/security trail; it never records or echoes a bearer token,
+signature, or untrusted issuer value.
 
 Native TLS uses rustls when `[http.tls]` or `--tls-cert` / `--tls-key` are
 configured. Adding `[http.tls.client_ca_path]` or `--mtls-client-ca` requires

@@ -34,11 +34,11 @@
 //! with `PLAIN` instead of `SECRET`. All values are synthetic: `SECRET` is a
 //! published test constant with no production meaning.
 //!
-//! **Two-sided proof.** `c1_negative_tokens_are_pairwise_distinguishable_on_the_wire`
-//! confirms that every rejected token reports a token-free, operator-actionable
-//! `WWW-Authenticate` diagnostic. Bead `oraclemcp-091-b2-oauth-contract-g5xmr`
-//! (B2a+B2b) owns that guarantee. Everything else in this file passes today and
-//! guards the acceptance path against regression.
+//! **Two-sided proof.** `c1_negative_tokens_share_one_opaque_challenge` confirms
+//! that every rejected bearer has the same public `WWW-Authenticate` challenge.
+//! Detailed fixed failure categories belong in the operator audit trail, not in
+//! an unauthenticated response. Everything else in this file guards the
+//! acceptance path against regression.
 
 use std::sync::Arc;
 
@@ -304,13 +304,10 @@ fn c1_negatives_are_refused_with_an_rfc6750_challenge() {
     }
 }
 
-/// The failing half of C1's two-sided proof.
-///
-/// Each hand-built negative must surface its distinct, token-free failure
-/// category. In particular, missing `client_id` and missing `jti` use the
-/// typed `MissingRequiredClaim` error rather than collapsing into `Malformed`.
+/// The negative half of C1's two-sided proof: public authentication failures
+/// must not disclose their distinct validation categories.
 #[test]
-fn c1_negative_tokens_are_pairwise_distinguishable_on_the_wire() {
+fn c1_negative_tokens_share_one_opaque_challenge() {
     let challenges: Vec<(&str, String)> = NEGATIVES
         .iter()
         .map(|(label, token)| {
@@ -319,28 +316,29 @@ fn c1_negative_tokens_are_pairwise_distinguishable_on_the_wire() {
                 .header("www-authenticate")
                 .unwrap_or_else(|| panic!("negative ({label}) must carry a challenge"))
                 .to_owned();
+            assert_eq!(
+                challenge,
+                format!("Bearer resource_metadata=\"{METADATA_URL}\", error=\"invalid_token\""),
+                "negative ({label}) must use the shared opaque invalid_token challenge"
+            );
             assert!(
-                challenge.contains("error_description=\""),
-                "negative ({label}) must name a token-free failure category: {challenge}"
+                !challenge.contains("error_description="),
+                "negative ({label}) must not disclose its validation category"
             );
             (*label, challenge)
         })
         .collect();
 
-    for i in 0..challenges.len() {
-        for j in (i + 1)..challenges.len() {
-            let (left_label, left) = &challenges[i];
-            let (right_label, right) = &challenges[j];
-            assert_ne!(
-                left, right,
-                "'{left_label}' and '{right_label}' are different failures and must produce \
-                 different diagnostics; both said: {left}"
-            );
-        }
+    for (label, challenge) in &challenges {
+        assert_eq!(
+            challenge, &challenges[0].1,
+            "'{label}' must not be distinguishable from another rejected bearer"
+        );
     }
 
-    // A missing bearer is a fifth, distinct case: it must stay distinguishable
-    // from a bearer that was presented and rejected.
+    // A missing bearer is the one protocol-level exception: no bearer was
+    // presented, so the challenge contains metadata only and reveals no
+    // credential-validation fact.
     let missing = initialize_with_bearer(None);
     let missing_challenge = missing
         .header("www-authenticate")

@@ -523,31 +523,69 @@ fn token_error_code(e: &TokenError) -> &'static str {
     }
 }
 
-/// Operator-facing OAuth failure text. Every value is a fixed protocol category
-/// or a fixed RFC 9068 claim name: tokens, signatures, issuer strings, and other
-/// client-controlled values must never enter a response header.
-fn token_error_description(e: &TokenError) -> &'static str {
+/// Fixed, token-free OAuth rejection category for the operator audit trail.
+///
+/// These labels intentionally retain the typed validation outcome without
+/// recording a bearer token, signature bytes, untrusted issuer, or algorithm.
+/// They must never reach an unauthenticated HTTP response.
+fn token_error_audit_reason(e: &TokenError) -> &'static str {
     match e {
-        TokenError::Missing => "Bearer access token is required",
-        TokenError::Malformed => "Token is malformed",
+        TokenError::Missing => "oauth_missing_bearer",
+        TokenError::Malformed => "oauth_malformed",
         TokenError::MissingRequiredClaim(claim) => match *claim {
-            "iss" => "Required RFC 9068 claim iss is missing",
-            "sub" => "Required RFC 9068 claim sub is missing",
-            "client_id" => "Required RFC 9068 claim client_id is missing",
-            "jti" => "Required RFC 9068 claim jti is missing",
-            "iat" => "Required RFC 9068 claim iat is missing",
-            "exp" => "Required RFC 9068 claim exp is missing",
-            _ => "A required RFC 9068 claim is missing",
+            "iss" => "oauth_missing_required_claim_iss",
+            "sub" => "oauth_missing_required_claim_sub",
+            "client_id" => "oauth_missing_required_claim_client_id",
+            "jti" => "oauth_missing_required_claim_jti",
+            "iat" => "oauth_missing_required_claim_iat",
+            "exp" => "oauth_missing_required_claim_exp",
+            _ => "oauth_missing_required_claim",
         },
-        TokenError::UnexpectedTokenType => "JWT typ must identify an RFC 9068 access token",
-        TokenError::UnsupportedAlg(_) => "JWT alg is not supported by this resource server",
-        TokenError::BadSignature => "Token signature did not verify",
-        TokenError::Expired => "Token has expired",
-        TokenError::NotYetValid => "Token is not valid yet",
-        TokenError::UntrustedIssuer(_) => "Token issuer is not trusted",
-        TokenError::AudienceMismatch => "Token audience does not include this resource",
-        TokenError::InsufficientScope => "Token lacks a required scope",
-        _ => "Token validation failed",
+        TokenError::UnexpectedTokenType => "oauth_unexpected_token_type",
+        TokenError::UnsupportedAlg(_) => "oauth_unsupported_algorithm",
+        TokenError::BadSignature => "oauth_bad_signature",
+        TokenError::Expired => "oauth_expired",
+        TokenError::NotYetValid => "oauth_not_yet_valid",
+        TokenError::UntrustedIssuer(_) => "oauth_untrusted_issuer",
+        TokenError::AudienceMismatch => "oauth_audience_mismatch",
+        TokenError::InsufficientScope => "oauth_insufficient_scope",
+        _ => "oauth_validation_failed",
+    }
+}
+
+/// Persist a token-free authentication failure for the operator.
+///
+/// OAuth has already failed closed before this observer runs. An unavailable
+/// auditor must therefore never turn a rejection into an allow or change its
+/// public response; the fixed reason remains visible in the security log until
+/// the signed audit sink is restored.
+fn record_oauth_rejection(auditor: Option<&Arc<Auditor>>, error: &TokenError) {
+    let reason = token_error_audit_reason(error);
+    let Some(auditor) = auditor else {
+        tracing::warn!(
+            oauth_rejection_reason = reason,
+            "OAuth bearer token rejected without a signed audit sink"
+        );
+        return;
+    };
+    let draft = AuditEntryDraft {
+        subject: AuditSubject::new("anonymous-http", "oauth-token-rejected")
+            .with_authn_method("oauth"),
+        db_evidence: None,
+        cancel: Some(AuditCancel::new("Authentication", reason)),
+        result_masking: None,
+        tool: "oauth_bearer_authentication".to_owned(),
+        sql: "oauth_token_rejected".to_owned(),
+        danger_level: "AUTHENTICATION".to_owned(),
+        decision: AuditDecision::Blocked,
+        rows_affected: None,
+        outcome: AuditOutcome::Failed,
+    };
+    if auditor.append(&draft, audit_timestamp(), true).is_err() {
+        tracing::error!(
+            oauth_rejection_reason = reason,
+            "failed to append OAuth rejection audit record"
+        );
     }
 }
 
@@ -561,6 +599,7 @@ fn token_error_status(e: Option<&TokenError>) -> u16 {
 fn validate_oauth_request(
     request: &HttpRequest,
     enforcement: &OAuthEnforcement,
+    auditor: Option<&Arc<Auditor>>,
 ) -> Result<ValidatedOAuthRequest, HttpResponse> {
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -568,7 +607,10 @@ fn validate_oauth_request(
         .unwrap_or(0);
     let token = match extract_bearer(request.header("authorization")) {
         Ok(token) => token,
-        Err(_) => return Err(oauth_error_response(enforcement, None)),
+        Err(error) => {
+            record_oauth_rejection(auditor, &error);
+            return Err(oauth_error_response(enforcement, None));
+        }
     };
     enforcement
         .config
@@ -577,7 +619,10 @@ fn validate_oauth_request(
             scope_grant: ScopeGrant(scopes),
             principal_key: oauth_principal_key_from_validated_token(token),
         })
-        .map_err(|err| oauth_error_response(enforcement, Some(err)))
+        .map_err(|error| {
+            record_oauth_rejection(auditor, &error);
+            oauth_error_response(enforcement, Some(&error))
+        })
 }
 
 fn authenticate_http_request(
@@ -594,7 +639,8 @@ fn authenticate_http_request(
     if let Some(enforcement) = &config.oauth
         && request.header("authorization").is_some()
     {
-        let validated = validate_oauth_request(request, enforcement)?;
+        let validated =
+            validate_oauth_request(request, enforcement, config.operator_auditor.as_ref())?;
         return Ok(Some(AuthenticatedHttpRequest {
             scope_grant: Some(validated.scope_grant),
             principal_key: validated.principal_key,
@@ -621,6 +667,7 @@ fn authenticate_http_request(
     }
 
     if let Some(enforcement) = &config.oauth {
+        record_oauth_rejection(config.operator_auditor.as_ref(), &TokenError::Missing);
         return Err(oauth_error_response(enforcement, None));
     }
 
@@ -653,13 +700,11 @@ fn client_credential_unavailable_response() -> HttpResponse {
     .with_header("cache-control", "no-store")
 }
 
-fn oauth_error_response(enforcement: &OAuthEnforcement, err: Option<TokenError>) -> HttpResponse {
-    let challenge = enforcement.config.www_authenticate(
-        &enforcement.metadata_url,
-        err.as_ref().map(token_error_code),
-        err.as_ref().map(token_error_description),
-    );
-    let status = token_error_status(err.as_ref());
+fn oauth_error_response(enforcement: &OAuthEnforcement, err: Option<&TokenError>) -> HttpResponse {
+    let challenge = enforcement
+        .config
+        .www_authenticate(&enforcement.metadata_url, err.map(token_error_code));
+    let status = token_error_status(err);
     HttpResponse {
         status,
         headers: vec![

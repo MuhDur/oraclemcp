@@ -345,8 +345,10 @@ pub struct HttpTransportConfig {
     /// same-origin dashboard session in addition to per-request operator
     /// authority.
     pub dashboard_auth: Option<Arc<DashboardAuth>>,
-    /// Audit sink for authorized operator API actions. If unset, operator API
-    /// actions fail closed rather than running unaudited.
+    /// Signed audit sink for OAuth rejection security events and authorized
+    /// operator API actions. OAuth failures remain denied if it is unavailable;
+    /// operator API actions additionally fail closed rather than running
+    /// unaudited.
     pub operator_auditor: Option<Arc<Auditor>>,
     /// Optional audit JSONL path used by `/operator/v1/audit-tail`. The route
     /// summarizes records and never exposes bind values or raw identities.

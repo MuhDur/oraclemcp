@@ -566,10 +566,12 @@ the configured resource string or an array containing it. `iss`, `sub`,
 `client_id`, and `jti` are non-empty strings; `iat` and `exp` are numeric; and
 `exp` must be in the future. Tokens provide scopes as either a space-delimited
 `scope` string or an `scp` array, and must satisfy every non-empty
-`required_scopes` item. OAuth rejection bodies remain generic, but the
-`WWW-Authenticate` header carries a token-free `error_description` naming the
-failure category or a missing fixed claim name; it never echoes a bearer token,
-signature, or issuer value.
+`required_scopes` item. OAuth rejection bodies and challenges remain generic:
+a presented but rejected bearer receives `error="invalid_token"` with no
+`error_description`, so an unauthenticated caller cannot distinguish a bad
+signature from expiry, a missing claim, or an unsupported algorithm. The fixed
+rejection category is recorded in the operator audit/security trail; neither
+that trail nor the response records a bearer token, signature, or issuer value.
 Adding `[http.tls.client_ca_path]` requires mTLS client certs, but only leaf DER
 SHA-256 fingerprints listed in `[http.mtls].client_fingerprints` become
 `mtls:sha256:<hex>` principals.

@@ -179,7 +179,7 @@ fn oauth_scope_is_captured_for_dispatch_enforcement() {
         ],
         Vec::new(),
     );
-    let grant = validate_oauth_request(&request, &enforcement)
+    let grant = validate_oauth_request(&request, &enforcement, None)
         .expect("valid narrowly-scoped bearer is admitted");
     assert_eq!(
         grant.scope_grant,
@@ -211,7 +211,7 @@ fn oauth_insufficient_scope_is_forbidden() {
         ],
         Vec::new(),
     );
-    let response = validate_oauth_request(&request, &enforcement)
+    let response = validate_oauth_request(&request, &enforcement, None)
         .expect_err("valid token without required scope is forbidden");
     assert_eq!(response.status, 403);
     assert_eq!(String::from_utf8_lossy(&response.body), "forbidden");

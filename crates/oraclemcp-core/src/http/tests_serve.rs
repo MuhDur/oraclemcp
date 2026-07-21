@@ -788,6 +788,96 @@ fn oauth_enabled_rejects_bad_token_but_keeps_metadata_open() {
 }
 
 #[test]
+fn oauth_rejections_keep_one_challenge_and_audit_the_fixed_reason() {
+    let (auditor, sink) = operator_auditor();
+    let bad_signature_cfg = HttpTransportConfig {
+        json_response: true,
+        stateful: false,
+        oauth: Some(oauth_enforcement()),
+        operator_auditor: Some(Arc::clone(&auditor)),
+        ..Default::default()
+    };
+    let bad_signature = jwt_with_scope("oracle:read");
+    let bad_signature_response = handle_http_request(
+        &test_server(),
+        &bad_signature_cfg,
+        HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("content-type", "application/json"),
+                ("accept", "application/json, text/event-stream"),
+                ("authorization", &format!("Bearer {bad_signature}")),
+            ],
+            init_body().to_string().into_bytes(),
+        ),
+    );
+
+    let mut expired_claims = oauth_claims("oracle:read");
+    expired_claims["exp"] = serde_json::json!(0);
+    let expired = jwt_with_type_and_claims(Some("at+jwt"), expired_claims);
+    let expired_cfg = HttpTransportConfig {
+        json_response: true,
+        stateful: false,
+        oauth: Some(accepting_oauth_enforcement(Vec::new())),
+        operator_auditor: Some(auditor),
+        ..Default::default()
+    };
+    let expired_response = handle_http_request(
+        &test_server(),
+        &expired_cfg,
+        HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("content-type", "application/json"),
+                ("accept", "application/json, text/event-stream"),
+                ("authorization", &format!("Bearer {expired}")),
+            ],
+            init_body().to_string().into_bytes(),
+        ),
+    );
+
+    let challenge = bad_signature_response
+        .header("www-authenticate")
+        .expect("bad signature has a challenge");
+    assert_eq!(bad_signature_response.status, 401);
+    assert_eq!(expired_response.status, 401);
+    assert_eq!(expired_response.header("www-authenticate"), Some(challenge));
+    assert_eq!(
+        challenge,
+        "Bearer resource_metadata=\"https://oraclemcp.example/.well-known/oauth-protected-resource\", error=\"invalid_token\""
+    );
+    assert!(
+        !challenge.contains("error_description="),
+        "anonymous callers must not receive a token-validation oracle"
+    );
+
+    let records = sink.records();
+    assert_eq!(records.len(), 2, "each rejected bearer is an audit event");
+    let reasons: Vec<_> = records
+        .iter()
+        .map(|record| {
+            assert_eq!(record.tool, "oauth_bearer_authentication");
+            assert_eq!(record.decision, AuditDecision::Blocked);
+            assert_eq!(record.outcome, AuditOutcome::Failed);
+            assert_eq!(
+                record.cancel.as_ref().map(|cancel| cancel.kind.as_str()),
+                Some("Authentication")
+            );
+            record
+                .cancel
+                .as_ref()
+                .map(|cancel| cancel.reason.as_str())
+                .expect("OAuth rejection keeps its fixed reason in the audit trail")
+        })
+        .collect();
+    assert_eq!(reasons, ["oauth_bad_signature", "oauth_expired"]);
+}
+
+#[test]
 fn oversized_request_is_rejected_before_oauth() {
     let cfg = HttpTransportConfig {
         json_response: true,
