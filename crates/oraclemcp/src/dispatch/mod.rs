@@ -52,7 +52,6 @@ use oraclemcp_core::{
     WriteIntent, WriteIntentDetails, WriteIntentError, WriteIntentLog, WriteIntentOutcome,
     execute_custom_tool, narrow_to_read_path, sign_token, verify_token,
 };
-use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
     AsOf, CatalogInvalidation, DbError, DbRequestQuota, DbmsOutput, DependentObject,
     DependentsProbe, FlashbackRefusalKind, IncomparableMaskedColumn, MaskComparabilityBreak,
@@ -73,6 +72,7 @@ use oraclemcp_db::{
     search_objects, search_source, semantic_search_query, semantic_search_query_with_filter,
     semantic_search_text_query, semantic_search_text_query_with_filter, serialize_row,
 };
+use oraclemcp_db::{SearchDetailLevel, SourceText};
 use oraclemcp_error::{
     ErrorClass, ErrorEnvelope, OptimizerPlanRow, QueryCostRefusal, ReasonCategory, StructuredReason,
 };
@@ -5119,6 +5119,54 @@ fn source_line_range(
     Ok((from_line, to_line))
 }
 
+/// Describe both the requested and actual `ALL_SOURCE.LINE` bounds for a
+/// bounded source read. `ALL_SOURCE` line numbering starts at one and is
+/// contiguous for one stored source unit, so the query's first row is the
+/// requested lower bound (or one) and `line_count` determines the last row.
+///
+/// An empty bounded result is never represented as a successful empty source:
+/// the caller needs to distinguish a source range outside the visible object
+/// from a successful fetch whose text happens to be empty.
+fn source_range_metadata(
+    source: &SourceText,
+    from_line: Option<usize>,
+    to_line: Option<usize>,
+) -> Result<Value, ErrorEnvelope> {
+    let requested = json!({
+        "from_line": from_line,
+        "to_line": to_line,
+    });
+    if source.line_count == 0 {
+        if from_line.is_some() || to_line.is_some() {
+            return Err(invalid_args(format!(
+                "invalid arguments for oracle_get_source: requested source range {requested} is outside the visible source"
+            ))
+            .with_suggested_tool("oracle_search_source")
+            .with_next_step(
+                "search the object's source to find a visible LINE value, then request an inclusive range containing it",
+            ));
+        }
+        return Ok(json!({
+            "requested": requested,
+            "returned": Value::Null,
+        }));
+    }
+
+    let returned_from_line = from_line.unwrap_or(1);
+    let returned_to_line = returned_from_line
+        .checked_add(source.line_count - 1)
+        .ok_or_else(|| {
+            invalid_args("invalid arguments for oracle_get_source: returned source range exceeds supported line numbers")
+        })?;
+    Ok(json!({
+        "requested": requested,
+        "returned": {
+            "from_line": returned_from_line,
+            "to_line": returned_to_line,
+        },
+    }))
+}
+
 /// Deserialize a tool's args struct, mapping a serde error to a structured
 /// `InvalidArguments` envelope (never a panic).
 fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, args: Value) -> Result<T, ErrorEnvelope> {
@@ -8069,6 +8117,10 @@ impl OracleConnection for ReadUncertaintyConn<'_> {
         self.inner.backend()
     }
 
+    async fn close(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.close(cx).await
+    }
+
     async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
         self.observe("database ping", self.inner.ping(cx).await)
     }
@@ -8242,6 +8294,10 @@ impl GuardedGeneratedReadConn<'_> {
 impl OracleConnection for GuardedGeneratedReadConn<'_> {
     fn backend(&self) -> OracleBackend {
         self.inner.backend()
+    }
+
+    async fn close(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.close(cx).await
     }
 
     async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
@@ -14120,12 +14176,10 @@ impl OracleDispatcher {
                         .await
                         .map_err(DbError::into_envelope)?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.get_source.after")?;
+                        let range = source_range_metadata(&source, from_line, to_line)?;
                         Ok(json!({
                             "source": source,
-                            "range": {
-                                "from_line": from_line,
-                                "to_line": to_line,
-                            },
+                            "range": range,
                         }))
                     }
                     None => {
@@ -14142,6 +14196,17 @@ impl OracleDispatcher {
                         .await
                         .map_err(DbError::into_envelope)?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.get_sources_by_name.after")?;
+                        let returned_ranges = sources
+                            .iter()
+                            .map(|source| {
+                                source_range_metadata(source, from_line, to_line).map(|range| {
+                                    json!({
+                                        "object_type": source.object_type,
+                                        "range": range,
+                                    })
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
                         Ok(json!({
                             "owner": owner,
                             "name": object_name,
@@ -14150,6 +14215,7 @@ impl OracleDispatcher {
                                 "from_line": from_line,
                                 "to_line": to_line,
                             },
+                            "returned_ranges": returned_ranges,
                             "sources": sources,
                         }))
                     }

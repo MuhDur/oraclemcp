@@ -186,6 +186,10 @@ impl OracleConnection for SemanticGuardMock {
         OracleBackend::RustOracle
     }
 
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -775,6 +779,9 @@ impl OracleConnection for OneRowMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -974,6 +981,10 @@ impl OracleConnection for DescribeCatalogMock {
         OracleBackend::RustOracle
     }
 
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -1129,6 +1140,9 @@ impl OracleConnection for SourceLookupMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -1204,6 +1218,85 @@ impl OracleConnection for SourceLookupMock {
     }
 }
 
+struct RangeSourceMock;
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for RangeSourceMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        if sql.contains("SELECT type") {
+            return Ok(vec![OracleRow {
+                columns: vec![(
+                    "TYPE".to_owned(),
+                    OracleCell::new("VARCHAR2", Some("PACKAGE".to_owned())),
+                )],
+            }]);
+        }
+
+        let from_line = match binds.get(3) {
+            Some(OracleBind::I64(line)) => *line as usize,
+            _ => 1,
+        };
+        let to_line = match binds.get(4) {
+            Some(OracleBind::I64(line)) => *line as usize,
+            _ => usize::MAX,
+        };
+        // Lines 40-42 so a request for 40..=48 is a PARTIAL hit: the fixture must
+        // exercise the case where fewer lines come back than were asked for,
+        // which is exactly what `range.returned` has to disclose. A fixture whose
+        // lines sat outside every requested range made the valid-range case
+        // refuse and the test could never have passed.
+        Ok(
+            [(40_usize, "first\\n"), (41, "second\\n"), (42, "third\\n")]
+                .into_iter()
+                .filter(|(line, _)| *line >= from_line && *line <= to_line)
+                .map(|(line, text)| OracleRow {
+                    columns: vec![
+                        (
+                            "LINE".to_owned(),
+                            OracleCell::new("NUMBER", Some(line.to_string())),
+                        ),
+                        (
+                            "TEXT".to_owned(),
+                            OracleCell::new("VARCHAR2", Some(text.to_owned())),
+                        ),
+                    ],
+                })
+                .collect(),
+        )
+    }
+
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        Ok(0)
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
 /// A mock whose every query fails with a classifiable ORA- error, so we can
 /// assert DbError -> ErrorEnvelope mapping end to end.
 struct FailingMock;
@@ -1211,6 +1304,9 @@ struct FailingMock;
 impl OracleConnection for FailingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
     }
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
@@ -1256,6 +1352,9 @@ impl OracleConnection for FlashbackFailingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -1292,6 +1391,9 @@ struct DescribeFailingMock;
 impl OracleConnection for DescribeFailingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
     }
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Err(DbError::BackendNotCompiled {
@@ -1339,6 +1441,10 @@ struct PingFailingMock {
 impl OracleConnection for PingFailingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
     }
 
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -1439,6 +1545,10 @@ impl OracleConnection for CancelAfterExecuteMock {
         OracleBackend::RustOracle
     }
 
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -1509,6 +1619,10 @@ impl ExecRecordingMock {
 impl OracleConnection for EditionLifecycleMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
     }
 
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -1588,6 +1702,10 @@ impl OracleConnection for IntentObservingExecMock {
         OracleBackend::RustOracle
     }
 
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -1645,6 +1763,10 @@ impl OracleConnection for CommitInDoubtMock {
         OracleBackend::RustOracle
     }
 
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -1692,6 +1814,10 @@ impl OracleConnection for CommitInDoubtMock {
 impl OracleConnection for ExecRecordingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
     }
 
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -3273,6 +3399,9 @@ impl OracleConnection for SearchObjectsDispatchMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -3471,6 +3600,10 @@ impl OrientDispatchMock {
 impl OracleConnection for OrientDispatchMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
     }
 
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -3912,8 +4045,8 @@ fn get_source_without_object_type_returns_all_visible_sources() {
 }
 
 #[test]
-fn get_source_returns_requested_line_range_metadata() {
-    let dispatcher = OracleDispatcher::new(Box::new(SourceLookupMock));
+fn get_source_reports_returned_line_range_and_refuses_outside_it() {
+    let dispatcher = OracleDispatcher::new(Box::new(RangeSourceMock));
     let out = dispatcher
         .dispatch(
             "oracle_get_source",
@@ -3925,8 +4058,10 @@ fn get_source_returns_requested_line_range_metadata() {
             }),
         )
         .expect("source range fetch is accepted");
-    assert_eq!(out["range"]["from_line"], json!(40));
-    assert_eq!(out["range"]["to_line"], json!(48));
+    assert_eq!(out["range"]["requested"]["from_line"], json!(40));
+    assert_eq!(out["range"]["requested"]["to_line"], json!(48));
+    assert_eq!(out["range"]["returned"]["from_line"], json!(40));
+    assert_eq!(out["range"]["returned"]["to_line"], json!(42));
 
     let err = dispatcher
         .dispatch(
@@ -3941,6 +4076,21 @@ fn get_source_returns_requested_line_range_metadata() {
         .expect_err("backwards source range is refused");
     assert_eq!(err.error_class, ErrorClass::InvalidArguments);
     assert!(err.message.contains("from_line must not exceed to_line"));
+
+    let err = dispatcher
+        .dispatch(
+            "oracle_get_source",
+            json!({
+                "name": "EMP_API",
+                "object_type": "PACKAGE",
+                "from_line": 150,
+                "to_line": 200,
+            }),
+        )
+        .expect_err("an out-of-range source request is refused, not an empty success");
+    assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+    assert!(err.message.contains("requested source range"), "{err:?}");
+    assert_eq!(err.suggested_tool.as_deref(), Some("oracle_search_source"));
 }
 
 #[test]
@@ -4980,6 +5130,9 @@ impl OracleConnection for NoExecMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -5036,6 +5189,11 @@ struct TouchCountingMock {
 impl OracleConnection for TouchCountingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.counts.close.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -5439,6 +5597,10 @@ fn finalization_timeout_audits_unknown_before_best_effort_cleanup() {
             OracleBackend::RustOracle
         }
 
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
@@ -5546,6 +5708,10 @@ fn partial_request_limit_install_failure_quarantines_failed_rollback() {
     impl OracleConnection for LimitInstallFailureMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
 
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -7759,6 +7925,10 @@ impl OracleConnection for QueryCostQuotaMock {
         OracleBackend::RustOracle
     }
 
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -7978,6 +8148,10 @@ struct QueryCostGateMock {
 impl OracleConnection for QueryCostGateMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
     }
 
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -10529,6 +10703,9 @@ mod audit_wiring {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
         }
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
@@ -11143,6 +11320,10 @@ mod top_queries {
             OracleBackend::RustOracle
         }
 
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
@@ -11270,6 +11451,10 @@ mod plan_timeline {
             OracleBackend::RustOracle
         }
 
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
@@ -11390,6 +11575,9 @@ mod db_health {
     impl OracleConnection for NoPrivilegeMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
@@ -11558,6 +11746,9 @@ mod read_only_backstop_wiring {
     impl OracleConnection for BackstopRecordingMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
@@ -12188,6 +12379,9 @@ impl OracleConnection for RowStreamMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -12240,6 +12434,9 @@ impl OracleConnection for RowStreamMock {
 impl OracleConnection for StreamOffsetMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
     }
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
@@ -13165,6 +13362,10 @@ mod qa85_shared_health_budget {
             OracleBackend::RustOracle
         }
 
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
@@ -13380,6 +13581,10 @@ mod qa97_health_failure_boundaries {
             OracleBackend::RustOracle
         }
 
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
@@ -13517,6 +13722,10 @@ mod qa106_uncertain_read_ownership {
     impl OracleConnection for FailFirstReadMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
 
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -13726,6 +13935,10 @@ mod qa107_describe_uncertainty {
     impl OracleConnection for UncertainDescribeMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
 
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -14392,6 +14605,10 @@ impl FleetMock {
 impl OracleConnection for FleetMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
     }
 
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
