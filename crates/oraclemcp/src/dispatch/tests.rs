@@ -1116,6 +1116,11 @@ impl OracleConnection for LabeledMock {
         self.counts.rollback.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.counts.close.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 struct SourceLookupMock;
@@ -2201,8 +2206,18 @@ fn profile_switch_opens_one_connection_bundle() {
     let state = ProfileDrainState::from_config(config);
     let bundle_calls = Arc::new(AtomicUsize::new(0));
     let calls = Arc::clone(&bundle_calls);
+    let retired_session_counts = Arc::new(TouchCounts::default());
+    let retired_pool_counts = Arc::new(TouchCounts::default());
+    let next_session_counts = Arc::new(TouchCounts::default());
+    let next_pool_counts = Arc::new(TouchCounts::default());
+    let connector_session_counts = Arc::clone(&next_session_counts);
+    let connector_pool_counts = Arc::clone(&next_pool_counts);
     let dispatcher = OracleDispatcher::new_switchable_with_custom_tools_and_stateless(
-        Box::new(OneRowMock),
+        Box::new(LabeledMock::new(
+            "dev-session",
+            "single_session",
+            Arc::clone(&retired_session_counts),
+        )),
         Some("dev".to_owned()),
         default_read_only_level(),
         Arc::new(move |_cx, generation| {
@@ -2215,22 +2230,28 @@ fn profile_switch_opens_one_connection_bundle() {
                 Some("env:ROTATING_PASSWORD")
             );
             calls.fetch_add(1, Ordering::SeqCst);
+            let session_counts = Arc::clone(&connector_session_counts);
+            let pool_counts = Arc::clone(&connector_pool_counts);
             Box::pin(async move {
                 Ok(ProfileConnectionBundle::new(
                     Box::new(LabeledMock::new(
                         "bundle-session",
                         "single_session",
-                        Arc::new(TouchCounts::default()),
+                        session_counts,
                     )),
                     Some(Box::new(LabeledMock::new(
                         "bundle-pool",
                         "stateless_metadata_pool",
-                        Arc::new(TouchCounts::default()),
+                        pool_counts,
                     ))),
                 ))
             })
         }),
-        StatelessReadStrategy::none(),
+        StatelessReadStrategy::new(Some(Box::new(LabeledMock::new(
+            "dev-pool",
+            "stateless_metadata_pool",
+            Arc::clone(&retired_pool_counts),
+        )))),
         CustomToolCatalog::default(),
         None,
     )
@@ -2242,6 +2263,16 @@ fn profile_switch_opens_one_connection_bundle() {
         .expect("bundle switch succeeds");
     assert_eq!(catalog_generation(&dispatcher), before_generation + 1);
     assert_eq!(bundle_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        retired_session_counts.close.load(Ordering::SeqCst),
+        1,
+        "profile replacement logically closes the retired pinned session"
+    );
+    assert_eq!(
+        retired_pool_counts.close.load(Ordering::SeqCst),
+        1,
+        "profile replacement logically closes the retired stateless pool"
+    );
     let query = dispatcher
         .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
         .expect("primary bundle connection is active");
@@ -4794,6 +4825,7 @@ struct TouchCounts {
     execute: AtomicUsize,
     commit: AtomicUsize,
     rollback: AtomicUsize,
+    close: AtomicUsize,
 }
 
 impl TouchCounts {
@@ -4804,6 +4836,7 @@ impl TouchCounts {
             + self.execute.load(Ordering::SeqCst)
             + self.commit.load(Ordering::SeqCst)
             + self.rollback.load(Ordering::SeqCst)
+            + self.close.load(Ordering::SeqCst)
     }
 }
 
@@ -4856,6 +4889,7 @@ impl OracleConnection for TouchCountingMock {
 struct LifecycleCleanupMock {
     rollbacks: Arc<AtomicUsize>,
     executes: Arc<AtomicUsize>,
+    closes: Arc<AtomicUsize>,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -4924,6 +4958,11 @@ impl OracleConnection for LifecycleCleanupMock {
         self.rollbacks.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.closes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 fn close_dispatcher_for_test(
@@ -4956,6 +4995,7 @@ fn lifecycle_close_rolls_back_and_revokes_execution_grants() {
 
     let rollbacks = Arc::new(AtomicUsize::new(0));
     let executes = Arc::new(AtomicUsize::new(0));
+    let closes = Arc::new(AtomicUsize::new(0));
     let sink = Arc::new(MemoryAuditSink::new());
     let auditor = Arc::new(oraclemcp_audit::Auditor::new(
         Box::new(SharedSink(sink.clone())),
@@ -4966,6 +5006,7 @@ fn lifecycle_close_rolls_back_and_revokes_execution_grants() {
         Box::new(LifecycleCleanupMock {
             rollbacks: Arc::clone(&rollbacks),
             executes: Arc::clone(&executes),
+            closes: Arc::clone(&closes),
         }),
         Some("dev".to_owned()),
         read_write_level(),
@@ -4978,6 +5019,7 @@ fn lifecycle_close_rolls_back_and_revokes_execution_grants() {
         .expect("lifecycle cleanup succeeds");
 
     assert_eq!(rollbacks.load(Ordering::SeqCst), 1);
+    assert_eq!(closes.load(Ordering::SeqCst), 1);
     let records = sink.records();
     assert_eq!(records.len(), 1);
     let record = &records[0];
@@ -5138,6 +5180,7 @@ fn lifecycle_timeout_close_audits_timeout_reason() {
 
     let rollbacks = Arc::new(AtomicUsize::new(0));
     let executes = Arc::new(AtomicUsize::new(0));
+    let closes = Arc::new(AtomicUsize::new(0));
     let sink = Arc::new(MemoryAuditSink::new());
     let auditor = Arc::new(oraclemcp_audit::Auditor::new(
         Box::new(SharedSink(sink.clone())),
@@ -5148,6 +5191,7 @@ fn lifecycle_timeout_close_audits_timeout_reason() {
         Box::new(LifecycleCleanupMock {
             rollbacks: Arc::clone(&rollbacks),
             executes,
+            closes: Arc::clone(&closes),
         }),
         Some("dev".to_owned()),
         read_write_level(),
@@ -5158,6 +5202,7 @@ fn lifecycle_timeout_close_audits_timeout_reason() {
         .expect("timeout lifecycle cleanup succeeds");
 
     assert_eq!(rollbacks.load(Ordering::SeqCst), 1);
+    assert_eq!(closes.load(Ordering::SeqCst), 1);
     let records = sink.records();
     assert_eq!(records.len(), 1);
     let record = &records[0];

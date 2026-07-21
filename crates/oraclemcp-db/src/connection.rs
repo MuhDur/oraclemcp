@@ -1200,6 +1200,17 @@ pub trait OracleConnection: Send + Sync {
     /// Roll back the current transaction on this session.
     async fn rollback(&self, cx: &Cx) -> Result<(), DbError>;
 
+    /// Log off and close this physical Oracle session.
+    ///
+    /// Lifecycle owners call this after their rollback/finalization work rather
+    /// than relying on Rust drop. The thin implementation delegates to the
+    /// driver's consuming logical-logoff path; lightweight test backends may
+    /// retain this no-op default when they do not own a physical session.
+    async fn close(&self, cx: &Cx) -> Result<(), DbError> {
+        let _ = cx;
+        Ok(())
+    }
+
     /// Tear down any `DBMS_FLASHBACK` session read-snapshot window (K9).
     ///
     /// This is **cleanup**: like [`OracleConnection::rollback`], the primary
@@ -5240,6 +5251,54 @@ mod driver {
     impl super::OracleConnection for RustOracleConnection {
         fn backend(&self) -> crate::types::OracleBackend {
             crate::types::OracleBackend::RustOracle
+        }
+
+        async fn close(&self, cx: &Cx) -> Result<(), DbError> {
+            // Logical logoff is terminal cleanup. Mask a cancelled request so
+            // the driver's consuming close path still gets its bounded chance
+            // to roll back, send LOGOFF, and emit TLS close_notify.
+            try_commit_section(cx, super::CLEANUP_MASKED_POLLS, async {
+                let connection = {
+                    let mut slot = self.inner.lock(cx).await.map_err(|err| {
+                        DbError::Internal(format!("thin connection lock failed: {err}"))
+                    })?;
+                    if let Some(reason) = slot.quarantine_reason.as_deref() {
+                        return Err(DbError::Quarantined {
+                            outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                            message: reason.to_owned(),
+                        });
+                    }
+                    slot.connection.take().ok_or_else(|| {
+                        DbError::Internal(
+                            "thin connection is unavailable for logical close".to_owned(),
+                        )
+                    })?
+                };
+
+                let result = connection
+                    .close(cx)
+                    .await
+                    .map_err(|err| driver_query_error(err, &self.opts, None));
+
+                let mut slot = self.inner.lock(cx).await.map_err(|err| {
+                    DbError::Internal(format!("thin connection lock failed: {err}"))
+                })?;
+                match result {
+                    Ok(()) => {
+                        slot.quarantine_reason = Some(
+                            "thin connection was closed by explicit logical logoff".to_owned(),
+                        );
+                        Ok(())
+                    }
+                    Err(error) => {
+                        slot.quarantine_reason = Some(format!(
+                            "logical close consumed the thin connection after an error: {error}"
+                        ));
+                        Err(error)
+                    }
+                }
+            })
+            .await
         }
 
         async fn ping(&self, cx: &Cx) -> Result<(), DbError> {

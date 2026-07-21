@@ -4739,6 +4739,31 @@ async fn rollback_conn_cleanup(cx: &Cx, conn: &dyn OracleConnection) -> Result<(
     run_cleanup_with_budget(cx, &cleanup_budget, conn.rollback(cx)).await
 }
 
+/// Finish a retired physical session after its lifecycle rollback. This must
+/// use a fresh bounded cleanup allowance: a profile switch or lane shutdown is
+/// already committed by the time it retires the old connection, so a request's
+/// expired budget must not turn the remaining logical logoff into a bare drop.
+async fn close_conn_cleanup(cx: &Cx, conn: &dyn OracleConnection) -> Result<(), DbError> {
+    let cleanup_budget = RequestBudget::fresh_cleanup(cx.now());
+    run_cleanup_with_budget(cx, &cleanup_budget, conn.close(cx)).await
+}
+
+async fn close_retired_connections(
+    cx: &Cx,
+    primary: &dyn OracleConnection,
+    stateless: Option<&dyn OracleConnection>,
+    lifecycle: &'static str,
+) {
+    if let Err(error) = close_conn_cleanup(cx, primary).await {
+        tracing::warn!(error = %error, lifecycle, "primary Oracle logical close failed after retirement");
+    }
+    if let Some(stateless) = stateless
+        && let Err(error) = close_conn_cleanup(cx, stateless).await
+    {
+        tracing::warn!(error = %error, lifecycle, "stateless Oracle logical close failed after retirement");
+    }
+}
+
 async fn recover_row_stream_cleanup(cx: &Cx, stream: QueryRowStream) -> Result<(), DbError> {
     let cleanup_budget = RequestBudget::fresh_cleanup(cx.now());
     run_cleanup_with_budget(cx, &cleanup_budget, stream.recover(cx)).await
@@ -11718,6 +11743,13 @@ impl OracleDispatcher {
                 }
             }
             audit_result?;
+            close_retired_connections(
+                cx,
+                state.conn.as_ref(),
+                state.stateless_conn.as_deref(),
+                "request_finalization_timeout",
+            )
+            .await;
             return Ok(());
         }
 
@@ -11749,6 +11781,14 @@ impl OracleDispatcher {
             reason,
             outcome,
         )?;
+
+        close_retired_connections(
+            cx,
+            state.conn.as_ref(),
+            state.stateless_conn.as_deref(),
+            reason.as_str(),
+        )
+        .await;
 
         tracing::info!(
             close_reason = reason.as_str(),
@@ -11982,6 +12022,7 @@ impl OracleDispatcher {
             // generation reference.
             let mut pending_profile_generation = Some(profile_generation);
             let mut retired_generation = None;
+            let mut retired_connections = None;
             let mut response = self
                 .profile_drain
                 .commit_generation(&profile, generation, || {
@@ -12033,8 +12074,10 @@ impl OracleDispatcher {
                                 "prepared profile generation was already consumed",
                             )
                         })?;
-                    state.conn = conn;
-                    state.stateless_conn = stateless_conn;
+                    let previous_conn = std::mem::replace(&mut state.conn, conn);
+                    let previous_stateless =
+                        std::mem::replace(&mut state.stateless_conn, stateless_conn);
+                    retired_connections = Some((previous_conn, previous_stateless));
                     state.active_profile = Some(profile.clone());
                     // The new physical session has its own CURRENT_SCHEMA; the old
                     // one must never qualify a policy target on it.
@@ -12072,6 +12115,15 @@ impl OracleDispatcher {
                 .map_err(|()| profile_draining_error(&profile))??;
             drop(retired_generation);
             drop(state);
+            if let Some((previous_conn, previous_stateless)) = retired_connections {
+                close_retired_connections(
+                    cx,
+                    previous_conn.as_ref(),
+                    previous_stateless.as_deref(),
+                    "profile_switch",
+                )
+                .await;
+            }
             if let Err(error) = request_budget.enforce(cx) {
                 response.annotate_deadline_after_effect();
                 tracing::warn!(
