@@ -24,7 +24,7 @@
     "entry_points": [
       {
         "name": "dedicated control authorization drop",
-        "kind": "unit",
+        "kind": "route",
         "trace": "The authorization rejection helper emits warn-level tracing with computed_principal_key and reason before returning PermissionDenied."
       }
     ]
@@ -41,7 +41,7 @@
   "known_defects": [],
   "follow_ups": [],
   "readiness": {
-    "claim": "scoped-test",
-    "basis": "unit-test"
+    "claim": "not-ready",
+    "basis": "scoped-test"
   }
 }
