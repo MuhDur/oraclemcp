@@ -54,6 +54,16 @@ the live-gate control vars `ORACLEMCP_LIVE_XE`,
 `ORACLEMCP_MULTI_DB_LIVE_XE`, `ORACLEMCP_LIVE_XE_CONTENTION`, and
 `ORACLEMCP_PHASE0_*`.
 
+### Stdio init-token protocol
+
+`ORACLEMCP_STDIO_TOKEN` configures a token that a custom MCP client presents
+on its raw `initialize` request. The client sends the value as a JSON string at
+`params._meta["oraclemcp/initToken"]`; omitting that key or sending another JSON
+type is treated as missing. Ordinary MCP client configuration files do not
+normally expose `initialize` metadata, so this is not a generic client snippet.
+For a client that cannot control that frame, keep stdio local and choose
+`--allow-no-auth` deliberately, or use an authenticated HTTP transport.
+
 ### Strictness
 
 Parsing is **strict and fail-fast**:
@@ -202,7 +212,7 @@ field is unset after inheritance.
 
 | Field | Type | Default | Effect |
 |---|---|---|---|
-| `wallet_location` | path | none | TCPS wallet directory. The default build loads `ewallet.pem`; other recognized wallet artifacts are diagnostic-only unless driver support is enabled later. |
+| `wallet_location` | path | none | TCPS wallet directory. The default build loads `ewallet.pem` and standalone `ewallet.p12` with their wallet password, plus auto-login `cwallet.sso`, through the thin driver's wallet loaders. |
 | `wallet_password_ref` | string | none | Secret reference for an encrypted-wallet password. Use `env:`, `file:`, `keyring:`, or future `vault:` for production; `literal:` is dev-only and rejected when `protected = true`. |
 | `ssl_server_dn_match` | bool | none (driver default) | Override server-certificate DN matching. |
 | `ssl_server_cert_dn` | string | none | Exact expected server-certificate DN. |
@@ -229,7 +239,10 @@ savepoints, package globals, login setup, session identity, and `DBMS_OUTPUT`
 stay on the pinned main session. Served stateless HTTP uses bounded
 per-subject/profile read-worker lanes for generated metadata reads instead of
 sharing one pool across lane runtimes. This is **separate** from DRCP server
-routing.
+routing. When the stateless surface is live, expect the pinned main session plus
+stateless pool session(s): `oracle_connection_info` reports
+`connection_strategy = "pinned_plus_stateless"` and the separate stateless
+connection details. `max_size` caps the additional stateless connections.
 
 | Field | Type | Default | Effect |
 |---|---|---|---|
@@ -418,7 +431,7 @@ fail closed during startup, verification, or `sign-tool` before use.
 | Mode | How to configure | Status |
 |---|---|---|
 | **Password** | `username` + `credential_ref` (for example `env:`, `file:`, `keyring:`; `literal:` dev-only). | Supported. |
-| **Wallet / TCPS (TLS/mTLS)** | `[profiles.oci]` `wallet_location`, `ssl_server_dn_match`, `ssl_server_cert_dn`, `use_sni`; or a `tcps://…` / TLS-descriptor `connect_string`. The default build loads `ewallet.pem`; `cwallet.sso` and standalone `ewallet.p12` are recognized and reported with structured wallet diagnostics instead of a silent fallback. | `ewallet.pem` supported; other recognized wallet formats are diagnostic-only in the default build. |
+| **Wallet / TCPS (TLS/mTLS)** | `[profiles.oci]` `wallet_location`, `ssl_server_dn_match`, `ssl_server_cert_dn`, `use_sni`; or a `tcps://…` / TLS-descriptor `connect_string`. The default build loads `ewallet.pem` and standalone `ewallet.p12` with their wallet password, plus auto-login `cwallet.sso`, through the thin driver's wallet loaders. | Supported in the default build. `cwallet.sso` is the auto-login mode; `ewallet.pem` and `ewallet.p12` require their wallet password. |
 | **OCI IAM database token** | `[profiles.oci]` `use_iam_token = true` + a token source (`token_env` / `token_file` / `token_exec`, or the built-in `ORACLEMCP_IAM_TOKEN`). | Simple env/file/exec token sources supported over TCPS (beta); an autonomous OCI-SDK token source is not yet wired — see below. |
 | **Proxy** | `[profiles.proxy_auth]` `proxy_user` + `target_schema`; `credential_ref` belongs to `proxy_user`. Needs `ALTER USER <target_schema> GRANT CONNECT THROUGH <proxy_user>`. | Supported. |
 | **DRCP routing** | `[profiles.drcp]` `pooled` / `connection_class` / `purity`. | Supported (server routing; orthogonal to auth). |

@@ -374,11 +374,15 @@ surface. Everything below concerns the HTTP transport (`serve --listen`).
   `127.0.0.1`/`::1`) is refused unless `ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set.
   This is a deliberate guard against accidentally exposing the server; set it
   consciously, behind a network boundary.
-- **Single service instance.** After binding but before accepting work, the HTTP
-  service creates a private runtime `service-instance.json` lock containing
-  pid/listen/start metadata. A second `serve --listen` process fails closed with
+- **Single service instance per state root.** After binding but before accepting
+  work, the HTTP service creates a private `service-instance.json` lock under
+  `$XDG_STATE_HOME/oraclemcp` (or `$HOME/.local/state/oraclemcp` when XDG is
+  unset), containing pid/listen/start metadata. A second `serve --listen`
+  process using that same state root fails closed with
   `ORACLEMCP_SERVICE_ALREADY_RUNNING` and reports that metadata instead of
-  silently taking over another port or socket.
+  silently taking over another port or socket. Intentionally independent
+  instances need distinct state roots and listener ports; the roots also
+  separate service-owned credentials, audit records, and durable state.
 - **Host / Origin allowlists.** `--http-allowed-host` and
   `--http-allowed-origin` (or `[http] allowed_hosts`/`allowed_origins`) gate the
   `Host` authority and browser `Origin`. Loopback authorities are allowed
@@ -412,7 +416,10 @@ surface. Everything below concerns the HTTP transport (`serve --listen`).
   encrypts the transport but is **not** application authentication — `/mcp`
   still needs per-client credentials, OAuth, or an explicit `--allow-no-auth`
   dev opt-in, and a non-loopback bind still needs `ORACLEMCP_HTTP_ALLOW_REMOTE=1`
-  even with TLS.
+  even with TLS. Native TLS on a non-loopback listener also emits
+  `Strict-Transport-Security: max-age=31536000; includeSubDomains`; loopback
+  HTTPS deliberately omits HSTS so local HTTP development is never pinned by a
+  browser.
 - **Dedicated control ingress.** Configure `[http.control]` (or
   `serve --control-listen <ADDR>`) only with native mTLS, a registered client
   fingerprint, and that `mtls:<fingerprint>` in
@@ -473,10 +480,19 @@ Logs go to **stderr** (stdout stays pure JSON-RPC over stdio). Startup keeps the
 tool surface and discovery available even when the live connection cannot open;
 live tool calls then return structured error envelopes instead of crashing the
 server.
-Only one HTTP service instance is allowed per runtime directory. If a second
-`serve --listen` process finds `service-instance.json`, it exits with
-`ORACLEMCP_SERVICE_ALREADY_RUNNING`; `oraclemcp --json service status` includes
-the same runtime instance discovery block for operator inspection.
+Only one HTTP service instance is allowed per state root. If a second
+`serve --listen` process finds the state-root `service-instance.json`, it exits
+with `ORACLEMCP_SERVICE_ALREADY_RUNNING`; `oraclemcp --json service status`
+includes the same instance discovery block for operator inspection. For two
+intentionally independent local instances, give each an isolated state root and
+a different port (with authentication configured separately for each root):
+
+```bash
+XDG_STATE_HOME=/srv/oraclemcp-state-a \
+  oraclemcp serve --profile db_ro --listen 127.0.0.1:7070 --client-credentials
+XDG_STATE_HOME=/srv/oraclemcp-state-b \
+  oraclemcp serve --profile db_ro --listen 127.0.0.1:7071 --client-credentials
+```
 
 ### 5.3 Drain and stop (SIGTERM)
 

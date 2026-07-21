@@ -375,6 +375,18 @@ oraclemcp dashboard                   # open the local dashboard through a one-t
 `--json` is a visible alias for `--robot-json` and keeps stdout as a single
 machine-readable JSON object.
 
+### Stdio init-token clients
+
+`ORACLEMCP_STDIO_TOKEN` (or `serve --stdio-token`) enables a handshake token
+for a **custom MCP client** that controls the raw `initialize` request. The
+client must send the shared token as a JSON string at exactly
+`params._meta["oraclemcp/initToken"]`; a missing key or a non-string value is
+reported as missing. This is not a generic Claude/Codex-style configuration
+snippet: mainstream MCP client configuration surfaces do not provide a way to
+inject `initialize` metadata. If the client cannot control that frame, keep
+stdio local and use `--allow-no-auth` deliberately, or use authenticated HTTP
+instead.
+
 Release archives also include `om` (`om.exe` on Windows) as an argv0-aware
 short alias. `om dashboard` is equivalent to `oraclemcp dashboard` and uses the
 short name in CLI help and dashboard diagnostics when invoked through that
@@ -398,9 +410,13 @@ files, and starting it again.
 Streamable HTTP auth rules are unchanged for service mode: configure
 service-owned per-client credentials, OAuth, or mTLS with registered client leaf
 fingerprints, or pass `--allow-no-auth` only for intentional local development.
-The HTTP service also owns a private runtime instance lock; a second
-`serve --listen` process refuses to start and reports the existing pid/listen
-metadata instead of silently taking over another port or socket.
+The HTTP service also owns a private `service-instance.json` lock in its state
+root (`$XDG_STATE_HOME/oraclemcp`, or `$HOME/.local/state/oraclemcp` when XDG
+is unset). A second `serve --listen` process using that same state root refuses
+to start and reports the existing pid/listen metadata instead of silently
+taking over another port or socket. For intentionally independent instances,
+give each process a distinct `XDG_STATE_HOME` and listener port; that also
+separates their service-owned credentials, audit records, and durable state.
 
 The browser dashboard is paired separately even on loopback. `oraclemcp
 dashboard` creates a 0600 one-time ticket under the user runtime directory and
@@ -510,7 +526,10 @@ The resulting principal key is `mtls:sha256:<hex>`. Server-only TLS encrypts the
 transport but is not application authentication, so `/mcp` still needs
 per-client credentials, OAuth, or an explicit `--allow-no-auth` development
 opt-in. Non-loopback binds require `ORACLEMCP_HTTP_ALLOW_REMOTE=1` even with
-TLS.
+TLS. Native TLS on a non-loopback listener emits
+`Strict-Transport-Security: max-age=31536000; includeSubDomains`; loopback
+HTTPS deliberately omits HSTS so browser pinning cannot disrupt local HTTP
+development.
 
 When Claude Code connects over HTTPS to a self-signed or private-CA listener,
 start it with that CA PEM in Node's trust store: `NODE_EXTRA_CA_CERTS=/path/to/private-ca.pem claude`.
@@ -740,7 +759,11 @@ A few further profile keys are optional:
   transactions, savepoints, temp tables, package globals, login setup, session
   identity, and `DBMS_OUTPUT` stay on the pinned main session. Served stateless
   HTTP routes generated metadata reads through bounded read-worker lanes instead
-  of sharing one pool across lane runtimes. `statement_cache_size` is passed to
+  of sharing one pool across lane runtimes. When the stateless surface is live,
+  expect at least a pinned main Oracle session plus stateless pool session(s);
+  `oracle_connection_info` reports `connection_strategy = "pinned_plus_stateless"`
+  and the stateless pool details separately. `max_size` is the knob that caps
+  those additional stateless connections. `statement_cache_size` is passed to
   the thin driver's bounded per-connection statement cache where pool-backed
   reads are used; omit it to keep the driver default. This is separate from DRCP
   server routing.
@@ -1059,11 +1082,11 @@ Connection modes are configured per profile in `profiles.toml`; see
 | `oracle_describe_trigger` | Trigger timing, target table, status, and body |
 | `oracle_describe_view` | View definition metadata and columns |
 | `oracle_get_ddl` | `DBMS_METADATA` DDL for an object |
-| `oracle_get_source` | Full source text for a package, procedure, function, trigger, or type; omit `object_type` to return every visible source variant for the object name |
+| `oracle_get_source` | Full source text or an inclusive `from_line`/`to_line` range for a package, procedure, function, trigger, or type; pair the range with a line returned by `oracle_search_source`; omit `object_type` to return every visible source variant for the object name |
 | `oracle_sample_rows` | Safely sample the first rows of a table or view |
 | `oracle_read_clob` | Read one capped CLOB/NCLOB/text value by key |
 | `oracle_compile_errors` | Compile errors for the current schema, an owner, or one PL/SQL object |
-| `oracle_search_source` | Search `ALL_SOURCE` for a needle; optionally use `owner="*"`, `object_type`, and `name_like` to widen or narrow scope |
+| `oracle_search_source` | Search `ALL_SOURCE` for a needle; optionally use `owner="*"`, `object_type`, and `name_like` to widen or narrow scope; matching lines are capped by `max_line_chars`, and their `LINE` values can be passed to `oracle_get_source`'s `from_line`/`to_line` range |
 | `oracle_plscope_inspect` | Read PL/Scope identifiers/statements for one object and report unused declarations plus dynamic-SQL lines when metadata is populated |
 | `oracle_explain_plan` | Diagnostic `EXPLAIN PLAN` for a vetted read-only statement; writes `PLAN_TABLE` and requires `READ_WRITE` plus `allow_plan_table_write=true` |
 | `oracle_capabilities` | Zero-arg discovery: tools, operating level, feature tiers |
@@ -1255,9 +1278,9 @@ keep the profile `max_level` no higher than that work requires.
 (11): with a live connection it reads the session's own `SESSION_PRIVS` and
 reports a read-only posture when the principal holds no write-implying system
 privilege, or **warns** (naming the offending privileges) when it can write. The
-same check reports the wallet mode truth table: `ewallet.pem` is supported in
-the default build, while `cwallet.sso` and standalone `ewallet.p12` produce
-structured wallet diagnostics. `doctor --fix`
+same check reports the wallet mode truth table: the default build supports
+`ewallet.pem` and standalone `ewallet.p12` with their wallet password, plus
+auto-login `cwallet.sso`. `doctor --fix`
 may copy the legacy `~/.config/oraclemcp/audit.jsonl` default audit log into
 the XDG state audit path when the current target is absent, leaving the legacy
 file untouched and recording a backup artifact. It never changes Oracle, rewrites
