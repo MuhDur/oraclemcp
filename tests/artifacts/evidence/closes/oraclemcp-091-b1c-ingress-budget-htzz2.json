@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T17:40:00Z",
+  "bead_id": "oraclemcp-091-b1c-ingress-budget-htzz2",
+  "scope": {
+    "summary": "The one-second authenticated control-probe ingress budget remains bounded and slow requests now emit a distinguishable warning.",
+    "in_scope": [
+      "README.md",
+      "crates/oraclemcp-core/src/http/serve.rs",
+      "crates/oraclemcp-core/src/http/tests_serve_tls.rs"
+    ],
+    "out_of_scope": [
+      "Changing the TLS handshake deadline or authentication policy.",
+      "Claiming a live openssl or R1 lane run."
+    ]
+  },
+  "source": {
+    "sha": "15596ba2dd4a76c517b03f1fabdd971dd97cf725",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "control probe request budget",
+        "kind": "route",
+        "trace": "Control-probe header and body parsing retain the one-second deadline; timed-out requests call the dedicated timeout logger before closing."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "cargo fmt -p oraclemcp-core -- --check passed.",
+    "cargo test -p oraclemcp-core dedicated_control_ingress_timeout_warn_is_distinguishable -- --nocapture passed (1 test).",
+    "No live openssl probe or deliberately slow external client was run in this scoped verification."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
