@@ -1,0 +1,57 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T21:45:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.9",
+  "scope": {
+    "summary": "Cluster H closed on the coverage-that-can-fail lens rather than a test count: all 14 children are closed, and a sweep for tests that would pass with their subject broken found 17 CI/e2e gates that silently pass when their name filter matches zero tests. All 17 now fail closed.",
+    "in_scope": [
+      "scripts/e2e/lib.sh",
+      "scripts/oraclemcp_ergonomics_lint.sh",
+      "scripts/e2e/hardening_acceptance.sh",
+      "scripts/e2e/doctor_fixtures.sh",
+      "scripts/e2e/mcp_and_operator_v1_conformance_matrix.sh"
+    ],
+    "out_of_scope": [
+      "Plan \u00a730.4 items 2 (DI1 held-execute) and 3 (MET cardinality). Those regressions are owned by Cluster F beads, not Cluster H; oraclemcp-f-server-met-bounded-tool-labels-na6y is still open. Cluster H's own 14 children are all closed.",
+      "The `--test <binary>` and `--lib` selectors in the conformance matrix: cargo errors when a target is missing, so they cannot silently match zero and were deliberately left alone.",
+      "Vacuous-coverage classes other than the zero-match filter (for example assertion-free tests, or goldens that regenerate themselves). \u00a730.5's self-fulfilling-fixture rule and scripts/oraclemcp_fixture_lint.sh cover part of that ground; this close does not claim to have swept it."
+    ]
+  },
+  "source": {
+    "sha": "d9aadaa956703f24674e500d468d19722b538375",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "the finding: `cargo test <filter>` exits 0 on zero matches",
+        "kind": "cli",
+        "trace": "Demonstrated, not assumed: `cargo test -p oraclemcp-audit --lib a_name_that_matches_no_test_whatsoever` prints 'test result: ok. 0 passed; 0 failed; 244 filtered out' and exits 0. 17 invocations across 4 scripts trusted that exit status with a hard-coded filter and none checked that a test ran, so each would keep passing while asserting nothing after a rename. The CI-wired one (oraclemcp_ergonomics_lint.sh) gates the agent-facing CLI contract."
+      },
+      {
+        "name": "e2e_cargo_test_filter (scripts/e2e/lib.sh)",
+        "kind": "cli",
+        "trace": "Sums 'N passed' across every binary an invocation ran and fails below a caller-declared minimum. Proven in both directions by a standalone probe: a zero-match filter is refused with 'filter matched 0 test(s), expected at least 1', and a real filter (no_variant_name_prefixes_another) exits 0. Wired into 16 gates; the 17th (the ergonomics lint) carries the same check inlined because it has its own documented exit codes and no e2e-harness dependency, and that inlined logic was exercised through an identical code path in both directions."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The e2e scripts could not be run to green in this working tree: oraclemcp-db does not compile because another pane's in-flight logoff work references EXPLICIT_LOGOFF_CLOSED_REASON at connection.rs:5486 with no definition in scope. That is uncommitted work, not HEAD. The guard's behaviour is therefore evidenced by the standalone both-directions probe plus a dry run in which it fires with its own message, not by a full green e2e pass.",
+    "The ergonomics lint's real invocation could not be executed either: -p oraclemcp does not build while another pane holds ~1081 uncommitted lines in dispatch/, main.rs and registry.rs.",
+    "A fixed minimum of 1 (2 for the ergonomics drift guards) is a floor, not an exact count: it catches deletion and rename, not a test that was silently narrowed from many cases to one.",
+    "Cluster H is closed on its own 14 children plus this sweep. It does not assert anything about the Cluster F regressions listed in out_of_scope."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
