@@ -4033,6 +4033,58 @@ mod tests {
         ));
     }
 
+    /// Every `AuditDecision`, exhaustively. The `match` is the point: it is in
+    /// the defining crate, so `#[non_exhaustive]` does not apply and adding a
+    /// variant fails to compile here until it is listed. A hand-written list
+    /// silently skips new variants — which is exactly what happened to
+    /// `HeldUncommitted` below (bead H12, plan §30.4 item 8).
+    const fn all_decisions() -> [AuditDecision; 3] {
+        let all = [
+            AuditDecision::Allowed,
+            AuditDecision::StepUpRequired,
+            AuditDecision::Blocked,
+        ];
+        // Exhaustiveness guard: extend `all` when this stops compiling.
+        const fn assert_exhaustive(decision: AuditDecision) -> u8 {
+            match decision {
+                AuditDecision::Allowed => 0,
+                AuditDecision::StepUpRequired => 1,
+                AuditDecision::Blocked => 2,
+            }
+        }
+        let _ = assert_exhaustive(AuditDecision::Allowed);
+        all
+    }
+
+    /// Every `AuditOutcome`, exhaustively. Same contract as `all_decisions`.
+    const fn all_outcomes() -> [AuditOutcome; 8] {
+        let all = [
+            AuditOutcome::Pending,
+            AuditOutcome::Succeeded,
+            AuditOutcome::Failed,
+            AuditOutcome::RolledBack,
+            AuditOutcome::DiscardedUncommitted,
+            AuditOutcome::CommitInDoubt,
+            AuditOutcome::UnknownDiscarded,
+            AuditOutcome::HeldUncommitted,
+        ];
+        // Exhaustiveness guard: extend `all` when this stops compiling.
+        const fn assert_exhaustive(outcome: AuditOutcome) -> u8 {
+            match outcome {
+                AuditOutcome::Pending => 0,
+                AuditOutcome::Succeeded => 1,
+                AuditOutcome::Failed => 2,
+                AuditOutcome::RolledBack => 3,
+                AuditOutcome::DiscardedUncommitted => 4,
+                AuditOutcome::CommitInDoubt => 5,
+                AuditOutcome::UnknownDiscarded => 6,
+                AuditOutcome::HeldUncommitted => 7,
+            }
+        }
+        let _ = assert_exhaustive(AuditOutcome::Pending);
+        all
+    }
+
     #[test]
     fn v5_enum_tags_are_stable_and_unique() {
         assert_eq!(
@@ -4043,6 +4095,8 @@ mod tests {
             ],
             [0, 1, 2]
         );
+        // Arc I added HeldUncommitted = 7 additively; the pinned list must name
+        // it, or a tag change to the newest variant would go unnoticed.
         assert_eq!(
             [
                 canonical_outcome_tag(AuditOutcome::Pending),
@@ -4052,9 +4106,93 @@ mod tests {
                 canonical_outcome_tag(AuditOutcome::DiscardedUncommitted),
                 canonical_outcome_tag(AuditOutcome::CommitInDoubt),
                 canonical_outcome_tag(AuditOutcome::UnknownDiscarded),
+                canonical_outcome_tag(AuditOutcome::HeldUncommitted),
             ],
-            [0, 1, 2, 3, 4, 5, 6]
+            [0, 1, 2, 3, 4, 5, 6, 7]
         );
+    }
+
+    /// Tags are what the canonical preimage actually hashes, so two variants
+    /// sharing a tag would make two materially different audit records hash
+    /// identically — a collision inside the tamper-evident chain.
+    #[test]
+    fn canonical_tags_are_injective_across_every_variant() {
+        let decision_tags: Vec<u8> = all_decisions()
+            .iter()
+            .copied()
+            .map(canonical_decision_tag)
+            .collect();
+        let mut unique = decision_tags.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            decision_tags.len(),
+            "two AuditDecision variants share a canonical tag: {decision_tags:?}"
+        );
+
+        let outcome_tags: Vec<u8> = all_outcomes()
+            .iter()
+            .copied()
+            .map(canonical_outcome_tag)
+            .collect();
+        let mut unique = outcome_tags.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            outcome_tags.len(),
+            "two AuditOutcome variants share a canonical tag: {outcome_tags:?}"
+        );
+    }
+
+    /// Plan §30.4 item 8, second half. The v5+ preimage frames every
+    /// variable-length field and hashes these enums as numeric tags, so a
+    /// prefix relation cannot corrupt it — but the same variant names are
+    /// rendered as text on unframed surfaces (serde output, structured logs,
+    /// the refusal corpus, CEF export). A name that prefixes another is
+    /// ambiguous the moment one of those surfaces concatenates without a
+    /// delimiter, so keep the names mutually non-prefixing.
+    #[test]
+    fn no_variant_name_prefixes_another() {
+        fn assert_no_prefix(names: &[String], enum_name: &str) {
+            for (i, left) in names.iter().enumerate() {
+                for (j, right) in names.iter().enumerate() {
+                    if i == j {
+                        continue;
+                    }
+                    assert!(
+                        !right.starts_with(left.as_str()),
+                        "{enum_name}: {left:?} is a prefix of {right:?}; \
+                         these names are ambiguous on any unframed surface"
+                    );
+                }
+            }
+        }
+
+        let debug_decisions: Vec<String> = all_decisions()
+            .iter()
+            .map(|value| format!("{value:?}"))
+            .collect();
+        assert_no_prefix(&debug_decisions, "AuditDecision Debug");
+        let debug_outcomes: Vec<String> = all_outcomes()
+            .iter()
+            .map(|value| format!("{value:?}"))
+            .collect();
+        assert_no_prefix(&debug_outcomes, "AuditOutcome Debug");
+
+        // The serialized (SCREAMING_SNAKE_CASE) names are the ones that reach
+        // operators and SIEM pipelines; check them too, not just Debug.
+        let serde_decisions: Vec<String> = all_decisions()
+            .iter()
+            .map(|value| serde_json::to_string(value).expect("decision serializes"))
+            .collect();
+        assert_no_prefix(&serde_decisions, "AuditDecision serde");
+        let serde_outcomes: Vec<String> = all_outcomes()
+            .iter()
+            .map(|value| serde_json::to_string(value).expect("outcome serializes"))
+            .collect();
+        assert_no_prefix(&serde_outcomes, "AuditOutcome serde");
     }
 
     #[test]
