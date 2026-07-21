@@ -224,66 +224,6 @@ impl ProxyAuthConfig {
     }
 }
 
-/// Parse Oracle's `proxy_user[target_schema]` username shorthand without
-/// treating brackets inside a quoted Oracle identifier as proxy syntax.
-///
-/// The values are configuration material, so callers must report only the
-/// profile name on an error rather than echoing either component.
-fn proxy_bracket_username(username: &str) -> Result<Option<(String, String)>, ()> {
-    let username = username.trim();
-    let mut quoted = false;
-    let mut saw_bracket = false;
-    let mut opening = None;
-    let mut closing = None;
-    let mut chars = username.char_indices().peekable();
-
-    while let Some((index, character)) = chars.next() {
-        if character == '"' {
-            if quoted && chars.peek().is_some_and(|(_, next)| *next == '"') {
-                // Oracle escapes a quote in a quoted identifier as `""`.
-                let _ = chars.next();
-            } else {
-                quoted = !quoted;
-            }
-            continue;
-        }
-        if quoted {
-            continue;
-        }
-        match character {
-            '[' => {
-                saw_bracket = true;
-                if opening.replace(index).is_some() || closing.is_some() {
-                    return Err(());
-                }
-            }
-            ']' => {
-                saw_bracket = true;
-                if opening.is_none() || closing.replace(index).is_some() {
-                    return Err(());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if !saw_bracket {
-        return Ok(None);
-    }
-    let (Some(opening), Some(closing)) = (opening, closing) else {
-        return Err(());
-    };
-    if quoted || closing + 1 != username.len() {
-        return Err(());
-    }
-    let proxy_user = username[..opening].trim();
-    let target_schema = username[opening + 1..closing].trim();
-    if proxy_user.is_empty() || target_schema.is_empty() {
-        return Err(());
-    }
-    Ok(Some((proxy_user.to_owned(), target_schema.to_owned())))
-}
-
 impl std::fmt::Debug for ProxyAuthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let proxy_user = self.proxy_user.as_ref().map(|_| "<redacted>");
@@ -959,29 +899,6 @@ impl std::fmt::Debug for ConnectionProfile {
 }
 
 impl ConnectionProfile {
-    /// Normalize Oracle's bracket proxy shorthand into the typed proxy-auth
-    /// fields before validation or connection setup can send it as a literal
-    /// username (which would otherwise surface as an unhelpful ORA-01017).
-    pub(crate) fn desugar_proxy_bracket_username(&mut self) -> Result<(), ConfigError> {
-        let Some(username) = self.username.as_deref() else {
-            return Ok(());
-        };
-        let Some((proxy_user, target_schema)) = proxy_bracket_username(username)
-            .map_err(|()| ConfigError::MalformedProxyBracketUsername(self.name.clone()))?
-        else {
-            return Ok(());
-        };
-        if self.proxy_auth.is_some() {
-            return Err(ConfigError::DuplicateProxyAuthSyntax(self.name.clone()));
-        }
-        self.username = Some(proxy_user.clone());
-        self.proxy_auth = Some(ProxyAuthConfig {
-            proxy_user: Some(proxy_user),
-            target_schema: Some(target_schema),
-        });
-        Ok(())
-    }
-
     /// The effective operating-level ceiling (defaults to `READ_ONLY`).
     #[must_use]
     pub fn max_level(&self) -> OperatingLevel {
@@ -1713,95 +1630,6 @@ mod tests {
         assert!(matches!(err, ConfigError::ProxyUsernameMismatch(_)));
         assert!(!err.to_string().contains("OTHER_USER"));
         assert!(!err.to_string().contains("MCP_PROXY"));
-    }
-
-    #[test]
-    fn proxy_bracket_username_desugars_before_validation() {
-        let cfg = crate::OracleMcpConfig::from_toml_str(
-            r#"
-            [[profiles]]
-            name = "proxy"
-            connect_string = "localhost:1521/FREEPDB1"
-            username = "MCP_PROXY[APP_OWNER]"
-            "#,
-        )
-        .expect("bracket proxy syntax desugars");
-
-        let profile = &cfg.profiles[0];
-        assert_eq!(profile.username.as_deref(), Some("MCP_PROXY"));
-        let proxy = profile.proxy_auth.as_ref().expect("typed proxy auth");
-        assert_eq!(proxy.proxy_user(), Some("MCP_PROXY"));
-        assert_eq!(proxy.target_schema(), Some("APP_OWNER"));
-    }
-
-    #[test]
-    fn proxy_bracket_username_preserves_quoted_identifier_components() {
-        let cfg = crate::OracleMcpConfig::from_toml_str(
-            r#"
-            [[profiles]]
-            name = "proxy"
-            connect_string = "localhost:1521/FREEPDB1"
-            username = '"MCP_PROXY"["APP_OWNER"]'
-            "#,
-        )
-        .expect("quoted proxy syntax desugars");
-
-        let profile = &cfg.profiles[0];
-        assert_eq!(profile.username.as_deref(), Some("\"MCP_PROXY\""));
-        let proxy = profile.proxy_auth.as_ref().expect("typed proxy auth");
-        assert_eq!(proxy.target_schema(), Some("\"APP_OWNER\""));
-
-        let cfg = crate::OracleMcpConfig::from_toml_str(
-            r#"
-            [[profiles]]
-            name = "ordinary"
-            connect_string = "localhost:1521/FREEPDB1"
-            username = '"APP[REPORTS]"'
-            "#,
-        )
-        .expect("brackets inside a quoted identifier are not proxy syntax");
-        assert!(cfg.profiles[0].proxy_auth.is_none());
-        assert_eq!(
-            cfg.profiles[0].username.as_deref(),
-            Some("\"APP[REPORTS]\"")
-        );
-    }
-
-    #[test]
-    fn malformed_or_duplicate_proxy_bracket_syntax_fails_at_config_load() {
-        let malformed = crate::OracleMcpConfig::from_toml_str(
-            r#"
-            [[profiles]]
-            name = "proxy"
-            connect_string = "localhost:1521/FREEPDB1"
-            username = "MCP_PROXY[]"
-            "#,
-        )
-        .expect_err("empty bracket target must not reach Oracle");
-        assert!(matches!(
-            &malformed,
-            ConfigError::MalformedProxyBracketUsername(_)
-        ));
-        assert!(malformed.to_string().contains("proxy_user[target_schema]"));
-
-        let duplicate = crate::OracleMcpConfig::from_toml_str(
-            r#"
-            [[profiles]]
-            name = "proxy"
-            connect_string = "localhost:1521/FREEPDB1"
-            username = "MCP_PROXY[APP_OWNER]"
-
-            [profiles.proxy_auth]
-            proxy_user = "MCP_PROXY"
-            target_schema = "APP_OWNER"
-            "#,
-        )
-        .expect_err("two proxy syntax forms are ambiguous");
-        assert!(matches!(
-            &duplicate,
-            ConfigError::DuplicateProxyAuthSyntax(_)
-        ));
-        assert!(duplicate.to_string().contains("choose one form"));
     }
 
     #[test]

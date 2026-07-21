@@ -588,8 +588,7 @@ fn setup_write_round_trips_profiles_through_config_ops() {
     assert!(!written.contains("[profiles.oci]"));
     assert!(!written.contains("[profiles.drcp]"));
     assert!(!written.contains("[profiles.pool]"));
-    assert!(written.contains("[profiles.proxy_auth]"));
-    assert!(written.contains("MCP_PROXY[APP_OWNER]"));
+    assert!(!written.contains("[profiles.proxy_auth]"));
     assert!(!written.contains("[profiles.session_identity]"));
     assert!(!written.contains("[[profiles.app_context]]"));
     assert!(!written.contains("db_ddl"));

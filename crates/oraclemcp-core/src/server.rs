@@ -39,34 +39,6 @@ pub const INIT_TOKEN_META_KEY: &str = "oraclemcp/initToken";
 /// The zero-arg discovery tool name (§8.1).
 pub const CAPABILITIES_TOOL: &str = "oracle_capabilities";
 
-fn capabilities_detail_level(args: &Value) -> Result<&'static str, ErrorEnvelope> {
-    let Some(args) = args.as_object() else {
-        return if args.is_null() {
-            Ok("compact")
-        } else {
-            Err(ErrorEnvelope::new(
-                ErrorClass::InvalidArguments,
-                "oracle_capabilities arguments must be an object",
-            ))
-        };
-    };
-    if args.keys().any(|key| key != "detail_level") {
-        return Err(ErrorEnvelope::new(
-            ErrorClass::InvalidArguments,
-            "oracle_capabilities accepts only detail_level",
-        ));
-    }
-    match args.get("detail_level") {
-        None => Ok("compact"),
-        Some(Value::String(level)) if level == "compact" => Ok("compact"),
-        Some(Value::String(level)) if level == "full" => Ok("full"),
-        _ => Err(ErrorEnvelope::new(
-            ErrorClass::InvalidArguments,
-            "oracle_capabilities detail_level must be compact or full",
-        )),
-    }
-}
-
 const STDIO_MAX_FRAME_BYTES: usize = 1024 * 1024;
 const JSONRPC_PARSE_ERROR: i64 = -32700;
 const JSONRPC_INVALID_REQUEST: i64 = -32600;
@@ -1136,26 +1108,21 @@ impl OracleMcpServer {
 
     #[cfg(test)]
     fn capabilities_result_json(&self) -> Value {
-        tool_result_ok_json(self.capabilities_report_json(None, false))
+        tool_result_ok_json(self.capabilities_report_json(None))
     }
 
     async fn capabilities_result_json_with_context(
         &self,
         cx: &Cx,
         context: DispatchContext<'_>,
-        args: &Value,
     ) -> DispatchOutcome {
-        let detail_level = match capabilities_detail_level(args) {
-            Ok(detail_level) => detail_level,
-            Err(envelope) => return Outcome::Err(envelope),
-        };
         match self
             .dispatcher
             .mcp_surface_state(cx, context, McpSurfaceDetail::Connection)
             .await
         {
             Outcome::Ok(surface) => Outcome::Ok(tool_result_ok_json(
-                self.capabilities_report_json(surface.as_ref(), detail_level == "compact"),
+                self.capabilities_report_json(surface.as_ref()),
             )),
             Outcome::Err(envelope) => Outcome::Err(envelope),
             Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
@@ -1163,7 +1130,7 @@ impl OracleMcpServer {
         }
     }
 
-    fn capabilities_report_json(&self, surface: Option<&McpSurfaceState>, compact: bool) -> Value {
+    fn capabilities_report_json(&self, surface: Option<&McpSurfaceState>) -> Value {
         let mut report = (*self.capabilities).clone();
         if let Some(surface) = surface {
             report.tools = self.visible_tool_descriptors(surface);
@@ -1179,33 +1146,7 @@ impl OracleMcpServer {
                 report.connection.profile = surface.active_profile.clone();
             }
         }
-        let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
-        if compact && let Some(tools) = value.get_mut("tools").and_then(Value::as_array_mut) {
-            for tool in tools {
-                if let Some(tool) = tool.as_object_mut() {
-                    tool.retain(|key, _| {
-                        matches!(
-                            key.as_str(),
-                            "name" | "title" | "tier" | "destructive" | "annotations"
-                        )
-                    });
-                }
-            }
-            if let Some(report) = value.as_object_mut() {
-                report.insert(
-                    "detail_level".to_owned(),
-                    Value::String("compact".to_owned()),
-                );
-                report.insert(
-                    "next_step".to_owned(),
-                    Value::String(
-                        "call oracle_capabilities with detail_level=full for summaries and argument schemas"
-                            .to_owned(),
-                    ),
-                );
-            }
-        }
-        value
+        serde_json::to_value(report).unwrap_or(Value::Null)
     }
 
     fn surface_state_blocking(
@@ -1318,7 +1259,7 @@ impl OracleMcpServer {
     ) -> DispatchOutcome {
         if name == CAPABILITIES_TOOL {
             return self
-                .capabilities_result_json_with_context(cx, context, &args)
+                .capabilities_result_json_with_context(cx, context)
                 .await;
         }
         self.dispatcher
@@ -1904,7 +1845,7 @@ impl OracleMcpServer {
                 uri: ResourceUri::Capabilities.to_uri(),
                 mime_type: "application/json".to_owned(),
                 text: match self.surface_state_blocking(context, McpSurfaceDetail::Connection) {
-                    Outcome::Ok(surface) => self.capabilities_report_json(surface.as_ref(), false),
+                    Outcome::Ok(surface) => self.capabilities_report_json(surface.as_ref()),
                     Outcome::Err(envelope) => return Err(envelope),
                     Outcome::Cancelled(reason) => return Err(cancelled_dispatch_envelope(&reason)),
                     Outcome::Panicked(payload) => return Err(panicked_dispatch_envelope(&payload)),
@@ -2634,18 +2575,8 @@ fn tools_json_for_descriptors(descriptors: &[ToolDescriptor]) -> Vec<Value> {
     tools.push(json!({
         "name": CAPABILITIES_TOOL,
         "title": "Oracle Capabilities",
-        "description": "Compact discovery entry point: tools, operating level + gates, connection/standby status, feature tiers, version. Pass detail_level=full for the complete pre-0.9.1 descriptor report.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "detail_level": {
-                    "type": "string",
-                    "enum": ["compact", "full"],
-                    "description": "compact (default) omits tool summaries and schemas; full returns the complete descriptor report."
-                }
-            },
-            "additionalProperties": false
-        },
+        "description": "Zero-arg entry point: tools, operating level + gates, connection/standby status, feature tiers, version.",
+        "inputSchema": empty_object_schema(),
         "annotations": ToolAnnotations::read_only(),
     }));
     for d in descriptors {
@@ -3482,30 +3413,6 @@ mod tests {
         assert_eq!(
             result["structuredContent"]["protocol_version"],
             serde_json::json!("2025-11-25")
-        );
-        assert_eq!(
-            result["structuredContent"]["detail_level"],
-            serde_json::json!("compact")
-        );
-        assert!(
-            result["structuredContent"]["tools"][0]
-                .get("summary")
-                .is_none(),
-            "the default discovery response keeps only stable tool identity and safety facts"
-        );
-
-        let full = run_tool_json(
-            &s,
-            CAPABILITIES_TOOL,
-            serde_json::json!({ "detail_level": "full" }),
-        );
-        assert_eq!(full["isError"], serde_json::json!(false));
-        assert!(full["structuredContent"].get("detail_level").is_none());
-        assert!(
-            full["structuredContent"]["tools"][0]
-                .get("summary")
-                .is_some(),
-            "detail_level=full is the pinned-client escape hatch"
         );
     }
 

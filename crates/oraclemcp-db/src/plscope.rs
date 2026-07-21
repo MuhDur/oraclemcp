@@ -131,20 +131,13 @@ pub async fn plscope_identifiers(
     conn: &dyn OracleConnection,
     owner: &str,
     name: &str,
-    max_rows: usize,
 ) -> Result<Vec<PlscopeIdentifier>, DbError> {
     let rows = conn
         .query_rows(
             cx,
-            "SELECT * FROM ( \
-                 SELECT name, type, usage, line, col, signature FROM all_identifiers \
-                 WHERE owner = :1 AND object_name = :2 ORDER BY line, col \
-             ) WHERE ROWNUM <= :3",
-            &[
-                OracleBind::from(owner),
-                OracleBind::from(name),
-                OracleBind::from(max_rows.max(1) as i64),
-            ],
+            "SELECT name, type, usage, line, col, signature FROM all_identifiers \
+         WHERE owner = :1 AND object_name = :2 ORDER BY line, col",
+            &[OracleBind::from(owner), OracleBind::from(name)],
         )
         .await?;
     Ok(rows
@@ -167,20 +160,13 @@ pub async fn plscope_statements(
     conn: &dyn OracleConnection,
     owner: &str,
     name: &str,
-    max_rows: usize,
 ) -> Result<Vec<PlscopeStatement>, DbError> {
     let rows = conn
         .query_rows(
             cx,
-            "SELECT * FROM ( \
-                 SELECT type, line, sql_id FROM all_statements \
-                 WHERE owner = :1 AND object_name = :2 ORDER BY line \
-             ) WHERE ROWNUM <= :3",
-            &[
-                OracleBind::from(owner),
-                OracleBind::from(name),
-                OracleBind::from(max_rows.max(1) as i64),
-            ],
+            "SELECT type, line, sql_id FROM all_statements \
+         WHERE owner = :1 AND object_name = :2 ORDER BY line",
+            &[OracleBind::from(owner), OracleBind::from(name)],
         )
         .await?;
     Ok(rows
@@ -423,7 +409,7 @@ mod tests {
     #[test]
     fn plscope_identifiers_parses_rows() {
         let ids = run_with_cx(|cx| async move {
-            plscope_identifiers(&cx, &IdentMock, "HR", "EMP_API", 25)
+            plscope_identifiers(&cx, &IdentMock, "HR", "EMP_API")
                 .await
                 .expect("query")
         });

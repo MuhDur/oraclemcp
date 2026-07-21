@@ -126,27 +126,6 @@ fn target_tmp_file(name: &str) -> PathBuf {
 }
 
 #[test]
-fn online_setup_control_origin_is_https_and_pathless() {
-    let endpoint = OperatorControlEndpoint::parse("https://control.example.test:9443")
-        .expect("HTTPS control origin parses");
-    assert_eq!(endpoint.authority, "control.example.test:9443");
-    assert_eq!(endpoint.host, "control.example.test");
-    assert_eq!(endpoint.port, 9443);
-
-    for invalid in [
-        "http://control.example.test:9443",
-        "https://control.example.test:9443/operator/v1/config",
-        "https://operator@control.example.test:9443",
-        "https://control.example.test:invalid",
-    ] {
-        assert!(
-            OperatorControlEndpoint::parse(invalid).is_err(),
-            "unsafe control URL was accepted: {invalid}"
-        );
-    }
-}
-
-#[test]
 fn ci_lane_snapshot_default_never_overwrites_an_explicit_transport_path() {
     let explicit = PathBuf::from("/operator/configured/ci-lanes.json");
     let mut transport = HttpTransportConfig {
@@ -291,7 +270,7 @@ fn optional_pool_failure_retains_the_authoritative_primary_session() {
     assert!(connections.stateless.is_none());
     assert_eq!(
         runtime_connection_strategy(true, &connections),
-        "pinned_plus_stateless_degraded"
+        "hybrid_pool_degraded"
     );
     let error = block_on_connect(|cx| async move {
         connections
@@ -326,7 +305,7 @@ fn healthy_optional_pool_is_installed_and_reported() {
     assert!(connections.stateless.is_some());
     assert_eq!(
         runtime_connection_strategy(true, &connections),
-        "pinned_plus_stateless"
+        "hybrid_pool"
     );
 }
 
@@ -439,7 +418,6 @@ fn fresh_stateful_lane_uses_reloaded_profile_ceiling_and_timeout() {
         auditor: None,
         write_intents: None,
         exports: Arc::new(ExportRegistry::new()),
-        unsigned_refusal_log: true,
     };
 
     apply_selected_profile_to_wiring(&mut wiring, selected);
@@ -646,25 +624,10 @@ fn doctor_audit_posture_matches_startup_audit_policy_without_opening_a_log() {
     )
     .expect("read-only config parses");
     let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
-    assert!(unsigned_refusal_trail_enabled(false, true));
-    assert!(!unsigned_refusal_trail_enabled(false, false));
-    assert!(!unsigned_refusal_trail_enabled(true, true));
     assert_eq!(
         doctor_audit_posture_from_config(&read_only, &active, false),
-        DoctorAuditPosture::DisabledReadOnly {
-            unsigned_refusal_trail_path: Some(default_unsigned_refusal_trail_path()),
-        },
+        DoctorAuditPosture::DisabledReadOnly,
         "a keyless read-only server intentionally has no auditor"
-    );
-
-    let mut opted_out = read_only.clone();
-    opted_out.audit.unsigned_refusal_log = false;
-    assert_eq!(
-        doctor_audit_posture_from_config(&opted_out, &active, false),
-        DoctorAuditPosture::DisabledReadOnly {
-            unsigned_refusal_trail_path: None,
-        },
-        "an explicit opt-out disables only the unsigned refusal trail"
     );
 
     let writable = OracleMcpConfig::from_toml_str(
@@ -2803,8 +2766,7 @@ fn setup_payload_is_generic_and_client_ready() {
     assert!(!profiles_toml.contains("wallet_password_ref"));
     assert!(!profiles_toml.contains("[profiles.oci]"));
     assert!(!profiles_toml.contains("[profiles.drcp]"));
-    assert!(profiles_toml.contains("[profiles.proxy_auth]"));
-    assert!(profiles_toml.contains("MCP_PROXY[APP_OWNER]"));
+    assert!(!profiles_toml.contains("[profiles.proxy_auth]"));
     assert!(!profiles_toml.contains("[[profiles.app_context]]"));
     assert!(!profiles_toml.contains("[profiles.session_identity]"));
     assert_eq!(
@@ -3516,21 +3478,6 @@ fn agent_ergonomics_drift_guard_pins_help_footer() {
 }
 
 #[test]
-fn allow_no_auth_help_names_stdio_and_http_behavior() {
-    let mut command = cli_command("oraclemcp");
-    let serve = command
-        .find_subcommand_mut("serve")
-        .expect("serve subcommand exists");
-    let mut help = Vec::new();
-    serve.write_long_help(&mut help).expect("render serve help");
-    let help = String::from_utf8(help).expect("help utf8");
-
-    assert!(help.contains("stdio's init-token"));
-    assert!(help.contains("HTTP to start without configured auth"));
-    assert!(help.contains("non-loopback HTTP bind still needs"));
-}
-
-#[test]
 fn robot_docs_guide_outputs_agent_workflows() {
     let text = robot_docs::robot_docs_guide_text();
     assert!(text.contains("oraclemcp robot-docs guide"));
@@ -3664,80 +3611,6 @@ fn robot_docs_guide_outputs_agent_workflows() {
             .expect("json")
             .contains("oracle_preview_sql")
     );
-}
-
-#[test]
-fn a2a_error_statuses_preserve_actionable_causes() {
-    let (code, message) = setup_config_error_status(&ConfigOpsError::FileStore(
-        oraclemcp_core::file_store::FileStoreError::Locked,
-    ));
-    assert_eq!(code, "ORACLEMCP_STATE_STORE_LOCKED");
-    assert!(message.contains("exclusively locked"));
-    assert!(message.contains("stop that service"));
-
-    let credential_store_locked =
-        ClientCredentialError::Store(oraclemcp_core::file_store::FileStoreError::Locked);
-    assert_eq!(
-        client_credential_error_code(&credential_store_locked),
-        "ORACLEMCP_STATE_STORE_LOCKED"
-    );
-    assert!(client_credential_error_message(&credential_store_locked).contains("stop the service"));
-
-    for (error, expected_code) in [
-        (
-            ConfigOpsError::PreviewRequired,
-            "ORACLEMCP_SETUP_PREVIEW_REQUIRED",
-        ),
-        (
-            ConfigOpsError::InvalidPreviewToken,
-            "ORACLEMCP_SETUP_PREVIEW_TOKEN_INVALID",
-        ),
-        (
-            ConfigOpsError::PreviewExpired,
-            "ORACLEMCP_SETUP_PREVIEW_EXPIRED",
-        ),
-        (
-            ConfigOpsError::PreviewDraftChanged,
-            "ORACLEMCP_SETUP_PREVIEW_DRAFT_CHANGED",
-        ),
-        (
-            ConfigOpsError::PreviewConfirmationRequired,
-            "ORACLEMCP_SETUP_PREVIEW_CONFIRMATION_REQUIRED",
-        ),
-    ] {
-        let (code, message) = setup_config_error_status(&error);
-        assert_eq!(code, expected_code);
-        assert!(!message.is_empty());
-    }
-
-    let (code, message) =
-        incident_capture_error_status(&IncidentCaptureError::Io("disk full".to_owned()));
-    assert_eq!(code, "ORACLEMCP_INCIDENT_CAPTURE_IO_FAILED");
-    assert!(message.contains("disk full"));
-
-    let (code, message) = incident_capture_error_status(&IncidentCaptureError::MissingFile {
-        operation: "read incident manifest",
-    });
-    assert_eq!(code, "ORACLEMCP_INCIDENT_BUNDLE_MISSING");
-    assert!(message.contains("read incident manifest"));
-
-    let (code, message) = incident_replay_error_status(&IncidentReplayError::Capture(
-        IncidentCaptureError::Io("audit volume is full".to_owned()),
-    ));
-    assert_eq!(code, "ORACLEMCP_INCIDENT_REPLAY_IO_FAILED");
-    assert!(message.contains("audit volume is full"));
-
-    let (code, message) = incident_replay_error_status(&IncidentReplayError::Capture(
-        IncidentCaptureError::MissingFile {
-            operation: "read incident manifest",
-        },
-    ));
-    assert_eq!(code, "ORACLEMCP_INCIDENT_BUNDLE_MISSING");
-    assert!(message.contains("read incident manifest"));
-
-    let (code, message) = incident_config_load_error_status("invalid profiles TOML");
-    assert_eq!(code, "ORACLEMCP_INCIDENT_CONFIG_LOAD_FAILED");
-    assert!(message.contains("invalid profiles TOML"));
 }
 
 fn custom_def(name: &str) -> CustomToolDef {
@@ -4010,11 +3883,10 @@ fn build_server_advertises_the_active_custom_catalog_plus_capabilities() {
             sql_policy: None,
             metrics: None,
             profile_drain: ProfileDrainState::default(),
-            unsigned_refusal_log: true,
         },
     );
     // The capabilities report carries the registry's tools.
-    let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), BUILT_WITH_LIVE_DB, false);
+    let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), LIVE_DB, false);
     assert_eq!(caps.tools.len(), registry::tool_names().len());
     let listed = server
         .handle_jsonrpc_request(
@@ -4039,82 +3911,6 @@ fn build_server_advertises_the_active_custom_catalog_plus_capabilities() {
     );
     // Smoke: the server clones (it is Clone) — proves it is fully built.
     let _ = server.clone();
-}
-
-#[test]
-fn build_capability_payloads_do_not_claim_live_connectivity() {
-    let status = serve_status_payload("stdio", None, &[]);
-    assert_eq!(status["built_with_live_db"], serde_json::json!(true));
-    assert!(status.get("live_db").is_none());
-
-    let info = info_payload();
-    assert_eq!(info["built_with_live_db"], serde_json::json!(true));
-    assert!(info.get("live_db").is_none());
-
-    let capabilities = capabilities_payload();
-    assert_eq!(
-        capabilities["features"]["built_with_live_db"],
-        serde_json::json!(true)
-    );
-    assert!(capabilities["features"].get("live_db").is_none());
-}
-
-#[test]
-fn client_credential_commands_distinguish_offline_and_live_revocation() {
-    let client_id = "client-0123456789abcdef0123456789abcdef";
-    let client_command = client_credential_client_command("ocmcp_fixture_bearer");
-    assert_eq!(
-        client_command,
-        serde_json::json!([
-            "claude",
-            "mcp",
-            "add",
-            "oracle",
-            "--transport",
-            "http",
-            "--header",
-            "Authorization: Bearer ocmcp_fixture_bearer",
-            "http://127.0.0.1:7070/mcp",
-        ])
-    );
-
-    let online = online_client_credential_revoke_command(client_id);
-    assert_eq!(online["program"], serde_json::json!("curl"));
-    assert_eq!(online["method"], serde_json::json!("POST"));
-    assert_eq!(
-        online["path"],
-        serde_json::json!("/operator/v1/client-credentials/revoke")
-    );
-    assert_eq!(
-        online["argv"][4],
-        serde_json::json!("${ORACLEMCP_CONTROL_URL}/operator/v1/client-credentials/revoke")
-    );
-    assert_eq!(
-        online["argv"][14],
-        serde_json::json!(format!("{{\"client_id\":\"{client_id}\"}}"))
-    );
-    assert!(
-        online["requires"]
-            .as_array()
-            .expect("online command requirements")
-            .iter()
-            .any(|requirement| requirement
-                .as_str()
-                .is_some_and(|requirement| requirement.contains("mTLS")))
-    );
-
-    let revoke = ClientCredentialCliCommand::Revoke(ClientCredentialIdCliArgs {
-        client_id: client_id.to_owned(),
-    });
-    assert_eq!(
-        online_revocation_for_command(&revoke),
-        Some(online_client_credential_revoke_command(client_id))
-    );
-    let issue = ClientCredentialCliCommand::Issue(ClientCredentialIssueCliArgs {
-        label: "fixture".to_owned(),
-        scopes: vec!["oracle:read".to_owned()],
-    });
-    assert!(online_revocation_for_command(&issue).is_none());
 }
 
 // ---- K4: bounded reason_class + operating_level labels on the blocked counter ----

@@ -142,18 +142,6 @@ pub enum CorpusRedactionError {
     IdMismatch,
 }
 
-/// Authenticity boundary carried by every refusal-trail record.
-///
-/// The trail is durable and redacted, but it has no signing key, hash chain, or
-/// anchor. Callers must never mistake the record identifier for integrity proof.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CorpusAuthenticity {
-    /// The record is unsigned and not tamper-evident.
-    #[default]
-    UnsignedNotTamperEvident,
-}
-
 /// One redacted refusal-to-rewrite pair, as written to the corpus JSONL.
 ///
 /// Every text field here has already passed the redaction seam. The struct is
@@ -173,10 +161,6 @@ pub struct CorpusRecord {
     pub suggested_rewrite_redacted: Option<String>,
     /// Short, non-secret prose explaining the refusal.
     pub why: String,
-    /// Explicit per-entry authenticity boundary. The fixed default lets older
-    /// unsigned records retain their truthful interpretation when read.
-    #[serde(default)]
-    pub authenticity: CorpusAuthenticity,
 }
 
 impl CorpusRecord {
@@ -207,7 +191,6 @@ impl CorpusRecord {
             refusal_class,
             suggested_rewrite_redacted,
             why,
-            authenticity: CorpusAuthenticity::UnsignedNotTamperEvident,
         })
     }
 
@@ -585,27 +568,6 @@ mod tests {
         assert_eq!(
             validate_redacted_sql("SELECT id_1 FROM id_2 /* blocked */ WHERE id_1 = id_2"),
             Err(CorpusRedactionError::ResidualComment)
-        );
-    }
-
-    #[test]
-    fn every_record_labels_its_unsigned_authenticity_boundary() {
-        let record = CorpusRecord::new(
-            "UPDATE app.orders SET state = 'closed'",
-            ReasonCategory::RequiresHigherLevel,
-            None,
-            "the statement needs a higher operating level",
-        )
-        .expect("refusal record");
-
-        assert_eq!(
-            record.authenticity,
-            CorpusAuthenticity::UnsignedNotTamperEvident
-        );
-        assert!(
-            record
-                .to_jsonl_line()
-                .contains(r#""authenticity":"unsigned_not_tamper_evident""#)
         );
     }
 }

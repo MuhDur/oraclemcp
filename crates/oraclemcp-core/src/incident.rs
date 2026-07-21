@@ -93,13 +93,6 @@ pub enum IncidentCaptureError {
     /// manifest.
     #[error("incident bundle io failed: {0}")]
     Io(String),
-    /// A required incident-bundle file was absent. The operation is a fixed
-    /// implementation label, never an operator-controlled path.
-    #[error("incident bundle file is missing while attempting to {operation}")]
-    MissingFile {
-        /// Fixed operation label for the missing file.
-        operation: &'static str,
-    },
 }
 
 /// Why a captured incident could not be replayed safely.
@@ -300,11 +293,11 @@ pub fn capture_bundle(
 pub fn verify_bundle(dir: &Path) -> Result<IncidentManifest, IncidentCaptureError> {
     let manifest_path = dir.join(MANIFEST_FILE_NAME);
     let json = fs::read_to_string(&manifest_path)
-        .map_err(|e| incident_io_error("read incident manifest", e))?;
+        .map_err(|e| IncidentCaptureError::Io(format!("read manifest: {e}")))?;
     let manifest = IncidentManifest::from_json(&json)?;
     for entry in &manifest.entries {
         let bytes = fs::read(dir.join(&entry.path))
-            .map_err(|e| incident_io_error("read incident bundle entry", e))?;
+            .map_err(|e| IncidentCaptureError::Io(format!("read bundle entry: {e}")))?;
         let digest = oraclemcp_audit::sha256_hex(&bytes);
         if digest != entry.sha256 || bytes.len() as u64 != entry.bytes {
             return Err(IncidentCaptureError::Io(
@@ -388,7 +381,7 @@ fn replay_verified_bundle(
     }
 
     let audit_tail = fs::read(dir.join(REDACTED_AUDIT_TAIL_FILE_NAME))
-        .map_err(|e| incident_io_error("read incident audit tail", e))?;
+        .map_err(|_| IncidentReplayError::UnsafeArtifact)?;
     Ok(IncidentReplayReport {
         manifest_id: manifest.id,
         seed: manifest.seed,
@@ -437,11 +430,11 @@ fn gate(
 
 fn write_bundle(dir: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), IncidentCaptureError> {
     fs::create_dir_all(dir.join(CASSETTE_DIR_NAME))
-        .map_err(|e| incident_io_error("create incident bundle directory", e))?;
+        .map_err(|e| IncidentCaptureError::Io(format!("create bundle dir: {e}")))?;
     for (path, bytes) in files {
         let target: PathBuf = dir.join(path);
         fs::write(&target, bytes)
-            .map_err(|e| incident_io_error("write incident bundle entry", e))?;
+            .map_err(|e| IncidentCaptureError::Io(format!("write bundle entry: {e}")))?;
     }
     Ok(())
 }
@@ -557,8 +550,8 @@ pub fn read_cassette(
     lane_id: &str,
 ) -> Result<Vec<RedactedCassetteFrame>, IncidentCaptureError> {
     let path = dir.join(CASSETTE_DIR_NAME).join(format!("{lane_id}.jsonl"));
-    let text =
-        fs::read_to_string(&path).map_err(|e| incident_io_error("read incident cassette", e))?;
+    let text = fs::read_to_string(&path)
+        .map_err(|e| IncidentCaptureError::Io(format!("read cassette: {e}")))?;
     text.lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
@@ -572,7 +565,7 @@ pub fn read_cassette(
 /// hash-equality check).
 pub fn read_redacted_audit_tail(dir: &Path) -> Result<Vec<Value>, IncidentCaptureError> {
     let text = fs::read_to_string(dir.join(REDACTED_AUDIT_TAIL_FILE_NAME))
-        .map_err(|e| incident_io_error("read incident audit tail", e))?;
+        .map_err(|e| IncidentCaptureError::Io(format!("read audit tail: {e}")))?;
     text.lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
@@ -580,12 +573,4 @@ pub fn read_redacted_audit_tail(dir: &Path) -> Result<Vec<Value>, IncidentCaptur
                 .map_err(|e| IncidentCaptureError::Io(format!("parse audit record: {e}")))
         })
         .collect()
-}
-
-fn incident_io_error(operation: &'static str, error: std::io::Error) -> IncidentCaptureError {
-    if error.kind() == std::io::ErrorKind::NotFound {
-        IncidentCaptureError::MissingFile { operation }
-    } else {
-        IncidentCaptureError::Io(format!("{operation}: {error}"))
-    }
 }

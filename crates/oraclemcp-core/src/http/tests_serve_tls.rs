@@ -38,6 +38,59 @@ fn pem_key(pem: &[u8]) -> PrivateKeyDer<'static> {
     PrivateKeyDer::from_pem_slice(pem).expect("private-key PEM parses")
 }
 
+/// Captures one tracing event without changing the process-wide test
+/// subscriber, so the log contract can be asserted without a new dependency.
+#[derive(Clone, Default)]
+struct CapturingControlDropSubscriber(
+    std::sync::Arc<std::sync::Mutex<Vec<CapturedControlDropEvent>>>,
+);
+
+#[derive(Debug)]
+struct CapturedControlDropEvent {
+    level: tracing::Level,
+    fields: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Default)]
+struct CapturedControlDropFields(std::collections::BTreeMap<String, String>);
+
+impl tracing::field::Visit for CapturedControlDropFields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0
+            .insert(field.name().to_owned(), format!("{value:?}"));
+    }
+}
+
+impl tracing::Subscriber for CapturingControlDropSubscriber {
+    fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut fields = CapturedControlDropFields::default();
+        event.record(&mut fields);
+        self.0
+            .lock()
+            .expect("control-drop event lock is not poisoned")
+            .push(CapturedControlDropEvent {
+                level: *event.metadata().level(),
+                fields: fields.0,
+            });
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
 fn tls_client_config(
     server_cert_pem: &[u8],
     client_cert_and_key: Option<(&[u8], &[u8])>,
@@ -210,6 +263,51 @@ fn http_body(response: &str) -> &str {
         .split_once("\r\n\r\n")
         .map(|(_, body)| body)
         .expect("HTTP response has body separator")
+}
+
+#[test]
+fn dedicated_control_authorization_drop_warns_with_computed_principal_and_reason() {
+    let computed_principal_key =
+        "mtls:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let subscriber = CapturingControlDropSubscriber::default();
+
+    tracing::subscriber::with_default(subscriber.clone(), || {
+        let error = super::serve::control_auth_drop(
+            computed_principal_key,
+            "not in http.operator.allowed_subjects",
+            "dedicated control ingress certificate is not operator-authorized",
+        );
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    });
+
+    let events = subscriber
+        .0
+        .lock()
+        .expect("control-drop event lock is not poisoned");
+    assert_eq!(events.len(), 1, "expected one control-drop warning");
+    let event = &events[0];
+    assert_eq!(event.level, tracing::Level::WARN);
+    assert!(
+        event
+            .fields
+            .get("message")
+            .is_some_and(|message| message.contains("dedicated control ingress dropped mTLS client")),
+        "control drop must identify the listener decision: {event:?}"
+    );
+    assert!(
+        event
+            .fields
+            .get("computed_principal_key")
+            .is_some_and(|principal| principal.contains(computed_principal_key)),
+        "control drop must include the measured mTLS principal: {event:?}"
+    );
+    assert!(
+        event
+            .fields
+            .get("reason")
+            .is_some_and(|reason| reason.contains("not in http.operator.allowed_subjects")),
+        "control drop must include the operator-actionable reason: {event:?}"
+    );
 }
 
 #[test]

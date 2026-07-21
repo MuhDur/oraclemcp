@@ -118,7 +118,7 @@ pub use health::{
     tablespace_usage_sql, unusable_indexes_sql,
 };
 pub use intelligence::{
-    DdlText, DependentObject, DependentsProbe, IndexDescription, LobText, OrientForeignKey,
+    DependentObject, DependentsProbe, IndexDescription, LobText, OrientForeignKey,
     OrientForeignKeyColumn, OrientHotObject, OrientRecentDdlObject, OrientSchemaObject,
     PLAN_COST_ESTIMATE_NOTE, PlanCostEstimate, PlanCostRow, PlanCostSummary, QueryDiff,
     QueryDiffChange, QueryDiffError, QueryDiffSource, SearchColumn, SearchDetailLevel, SearchIndex,
@@ -126,13 +126,11 @@ pub use intelligence::{
     assemble_cost_estimate, compile_errors, dependent_from_row, describe_columns,
     describe_constraints, describe_index, describe_trigger, describe_view, diff_query_responses,
     explain_plan, get_ddl, get_source, get_sources_by_name, is_ddl_object_type,
-    is_simple_identifier, list_objects, list_objects_page, list_schema_projection_page,
-    list_schemas, list_source_types, normalize_source_object_type, orient_fks, orient_fks_page,
-    orient_hot_objects, orient_hot_objects_page, orient_recent_ddl, orient_recent_ddl_page,
-    orient_schema, orient_schema_page, plan_cost_estimate, primary_key_columns, probe_dependents,
-    read_lob, sample_rows, search_objects, search_source, semantic_search_query,
-    semantic_search_query_with_filter, semantic_search_text_query,
-    semantic_search_text_query_with_filter,
+    is_simple_identifier, list_objects, list_schemas, list_source_types,
+    normalize_source_object_type, orient_fks, orient_hot_objects, orient_recent_ddl, orient_schema,
+    plan_cost_estimate, primary_key_columns, probe_dependents, read_lob, sample_rows,
+    search_objects, search_source, semantic_search_query, semantic_search_query_with_filter,
+    semantic_search_text_query, semantic_search_text_query_with_filter,
 };
 pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_id};
 pub use masking::{

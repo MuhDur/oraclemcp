@@ -15,7 +15,7 @@ use oraclemcp_config::CumulativeQueryCostBudgetConfig;
 use oraclemcp_core::{DispatchCloseReason, DispatchContext, FileStore, ScopeGrant};
 use oraclemcp_db::{OracleBackend, OracleCell, OracleRow, QueryRowStream, QueryRowStreamStart};
 use oraclemcp_guard::SET_TRANSACTION_READ_ONLY;
-use oraclemcp_guard::corpus::{CorpusAuthenticity, CorpusRecord, ReasonCategory};
+use oraclemcp_guard::corpus::{CorpusRecord, ReasonCategory};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -598,10 +598,6 @@ fn guard_refusal_appends_only_a_redacted_classifier_proven_corpus_record() {
     let line = fs::read_to_string(corpus_path).expect("the refusal corpus was appended");
     let record = CorpusRecord::from_jsonl_line(line.trim()).expect("stored corpus record is valid");
     assert_eq!(record.refusal_class, ReasonCategory::RequiresHigherLevel);
-    assert_eq!(
-        record.authenticity,
-        CorpusAuthenticity::UnsignedNotTamperEvident
-    );
     assert!(
         record.suggested_rewrite_redacted.is_some(),
         "only the independently classifier-proven rewrite is retained"
@@ -612,30 +608,6 @@ fn guard_refusal_appends_only_a_redacted_classifier_proven_corpus_record() {
             "the public corpus must not persist raw secret, bind, or identifier {secret:?}: {line}"
         );
     }
-}
-
-#[test]
-fn explicit_refusal_trail_opt_out_keeps_the_guard_refusal_without_a_record() {
-    let temp = tempfile::tempdir().expect("temporary corpus directory");
-    let corpus_path = temp.path().join("corpus/refusals.jsonl");
-    let (dispatcher, state) = semantic_dispatcher();
-    let dispatcher = dispatcher
-        .with_refusal_corpus_path(corpus_path.clone())
-        .without_refusal_corpus();
-
-    let error = dispatcher
-        .dispatch(
-            "oracle_query",
-            json!({"sql": "UPDATE app.orders SET state = 'closed'"}),
-        )
-        .expect_err("the guard refusal remains fail-closed when the observer is disabled");
-
-    assert_eq!(error.error_class, ErrorClass::OperatingLevelTooLow);
-    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0);
-    assert!(
-        !corpus_path.exists(),
-        "operator opt-out must prevent unsigned refusal-trail writes"
-    );
 }
 
 #[test]
@@ -1116,11 +1088,6 @@ impl OracleConnection for LabeledMock {
         self.counts.rollback.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-
-    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
-        self.counts.close.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
 }
 
 struct SourceLookupMock;
@@ -1327,51 +1294,6 @@ impl OracleConnection for DescribeFailingMock {
         Err(DbError::BackendNotCompiled {
             backend: OracleBackend::RustOracle,
         })
-    }
-}
-
-struct PingFailingMock {
-    pings: Arc<AtomicUsize>,
-    describes: Arc<AtomicUsize>,
-}
-
-#[async_trait::async_trait(?Send)]
-impl OracleConnection for PingFailingMock {
-    fn backend(&self) -> OracleBackend {
-        OracleBackend::RustOracle
-    }
-
-    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
-        self.pings.fetch_add(1, Ordering::SeqCst);
-        Err(DbError::ConnectionLost(
-            "ORA-03135: connection lost contact".to_owned(),
-        ))
-    }
-
-    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
-        self.describes.fetch_add(1, Ordering::SeqCst);
-        panic!("connection_info must not describe after its liveness round trip failed")
-    }
-
-    async fn query_rows(
-        &self,
-        _cx: &Cx,
-        _sql: &str,
-        _binds: &[OracleBind],
-    ) -> Result<Vec<OracleRow>, DbError> {
-        Ok(Vec::new())
-    }
-
-    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
-        Ok(0)
-    }
-
-    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
-        Ok(())
-    }
-
-    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
-        Ok(())
     }
 }
 
@@ -2219,7 +2141,7 @@ fn connection_info_reports_stateless_read_strategy_when_configured() {
 
     assert_eq!(
         out["connection"]["connection_strategy"],
-        json!("pinned_plus_stateless")
+        json!("single_session")
     );
     assert_eq!(
         out["stateless_read_connection"]["strategy"],
@@ -2231,16 +2153,6 @@ fn connection_info_reports_stateless_read_strategy_when_configured() {
     );
     assert_eq!(session_counts.describe.load(Ordering::SeqCst), 1);
     assert_eq!(stateless_counts.describe.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        session_counts.ping.load(Ordering::SeqCst),
-        1,
-        "the primary connection status must come from a current round trip"
-    );
-    assert_eq!(
-        stateless_counts.ping.load(Ordering::SeqCst),
-        1,
-        "the stateless connection status must come from a current round trip"
-    );
 }
 
 #[test]
@@ -2261,18 +2173,8 @@ fn profile_switch_opens_one_connection_bundle() {
     let state = ProfileDrainState::from_config(config);
     let bundle_calls = Arc::new(AtomicUsize::new(0));
     let calls = Arc::clone(&bundle_calls);
-    let retired_session_counts = Arc::new(TouchCounts::default());
-    let retired_pool_counts = Arc::new(TouchCounts::default());
-    let next_session_counts = Arc::new(TouchCounts::default());
-    let next_pool_counts = Arc::new(TouchCounts::default());
-    let connector_session_counts = Arc::clone(&next_session_counts);
-    let connector_pool_counts = Arc::clone(&next_pool_counts);
     let dispatcher = OracleDispatcher::new_switchable_with_custom_tools_and_stateless(
-        Box::new(LabeledMock::new(
-            "dev-session",
-            "single_session",
-            Arc::clone(&retired_session_counts),
-        )),
+        Box::new(OneRowMock),
         Some("dev".to_owned()),
         default_read_only_level(),
         Arc::new(move |_cx, generation| {
@@ -2285,28 +2187,22 @@ fn profile_switch_opens_one_connection_bundle() {
                 Some("env:ROTATING_PASSWORD")
             );
             calls.fetch_add(1, Ordering::SeqCst);
-            let session_counts = Arc::clone(&connector_session_counts);
-            let pool_counts = Arc::clone(&connector_pool_counts);
             Box::pin(async move {
                 Ok(ProfileConnectionBundle::new(
                     Box::new(LabeledMock::new(
                         "bundle-session",
                         "single_session",
-                        session_counts,
+                        Arc::new(TouchCounts::default()),
                     )),
                     Some(Box::new(LabeledMock::new(
                         "bundle-pool",
                         "stateless_metadata_pool",
-                        pool_counts,
+                        Arc::new(TouchCounts::default()),
                     ))),
                 ))
             })
         }),
-        StatelessReadStrategy::new(Some(Box::new(LabeledMock::new(
-            "dev-pool",
-            "stateless_metadata_pool",
-            Arc::clone(&retired_pool_counts),
-        )))),
+        StatelessReadStrategy::none(),
         CustomToolCatalog::default(),
         None,
     )
@@ -2318,16 +2214,6 @@ fn profile_switch_opens_one_connection_bundle() {
         .expect("bundle switch succeeds");
     assert_eq!(catalog_generation(&dispatcher), before_generation + 1);
     assert_eq!(bundle_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        retired_session_counts.close.load(Ordering::SeqCst),
-        1,
-        "profile replacement logically closes the retired pinned session"
-    );
-    assert_eq!(
-        retired_pool_counts.close.load(Ordering::SeqCst),
-        1,
-        "profile replacement logically closes the retired stateless pool"
-    );
     let query = dispatcher
         .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
         .expect("primary bundle connection is active");
@@ -2539,77 +2425,6 @@ fn connection_info_degrades_when_describe_fails() {
             json!(["--json", "doctor", "--online", "--profile", "dev"])
         );
     }
-}
-
-#[test]
-fn connection_info_reports_disconnected_when_the_liveness_round_trip_fails() {
-    let pings = Arc::new(AtomicUsize::new(0));
-    let describes = Arc::new(AtomicUsize::new(0));
-    let dispatcher = OracleDispatcher::new_with_profile(
-        Box::new(PingFailingMock {
-            pings: Arc::clone(&pings),
-            describes: Arc::clone(&describes),
-        }),
-        Some("dev".to_owned()),
-    );
-
-    let out = dispatcher
-        .dispatch("oracle_connection_info", json!({}))
-        .expect("connection diagnostics report an in-band liveness failure");
-
-    assert_eq!(out["active_profile"], json!("dev"));
-    assert_eq!(out["connected"], json!(false));
-    assert_eq!(out["connection"], Value::Null);
-    assert_eq!(out["connection_error"]["error_class"], json!("TRANSIENT"));
-    assert!(
-        out["connection_error"]["next_steps"]
-            .as_array()
-            .is_some_and(|steps| !steps.is_empty()),
-        "a failed connection probe must retain actionable envelope guidance: {out}"
-    );
-    assert_eq!(pings.load(Ordering::SeqCst), 1);
-    assert_eq!(describes.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-fn capability_surface_liveness_ping_quarantines_an_uncertain_retained_session() {
-    let pings = Arc::new(AtomicUsize::new(0));
-    let describes = Arc::new(AtomicUsize::new(0));
-    let dispatcher = OracleDispatcher::new_with_profile(
-        Box::new(PingFailingMock {
-            pings: Arc::clone(&pings),
-            describes: Arc::clone(&describes),
-        }),
-        Some("dev".to_owned()),
-    );
-    let runtime = RuntimeBuilder::current_thread()
-        .build()
-        .expect("asupersync test runtime builds");
-    let outcome = runtime.block_on(async {
-        let cx = Cx::current().expect("block_on installs a current Cx");
-        dispatcher
-            .mcp_surface_state(
-                &cx,
-                DispatchContext::default(),
-                McpSurfaceDetail::Connection,
-            )
-            .await
-    });
-
-    match outcome {
-        Outcome::Err(error) => assert_eq!(error.error_class, ErrorClass::Transient),
-        other => panic!("uncertain liveness failure must not produce a healthy surface: {other:?}"),
-    }
-    assert_eq!(pings.load(Ordering::SeqCst), 1);
-    assert_eq!(describes.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        dispatcher
-            .connection_quarantine()
-            .expect("quarantine lock")
-            .expect("uncertain liveness ping quarantines retained session")
-            .outcome,
-        AuditOutcome::UnknownDiscarded
-    );
 }
 
 #[test]
@@ -3249,20 +3064,6 @@ fn schema_inspect_can_default_to_current_schema() {
     assert!(out["objects"].is_array());
 }
 
-#[test]
-fn get_schema_uses_compact_projection_and_a_server_owned_ceiling() {
-    let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
-    let out = dispatcher
-        .dispatch("get_schema", json!({ "max_rows": usize::MAX }))
-        .expect("compact get_schema alias succeeds");
-
-    assert_eq!(out["owner"], json!("APP"));
-    assert_eq!(out["max_rows"], json!(MAX_GET_SCHEMA_MAX_ROWS));
-    assert_eq!(out["projection"], json!(["TABLE", "VIEW", "PACKAGE"]));
-    assert_eq!(out["truncated"], json!(false));
-    assert!(out["next_cursor"].is_null());
-}
-
 /// E4: a scripted mock that drives `oracle_search_objects` through dispatch,
 /// returning SQL-shape-dependent rows so the detail levels and the
 /// ALL_TABLES.NUM_ROWS path are exercised end-to-end.
@@ -3603,25 +3404,6 @@ fn orient_assembles_selector_stable_snapshot_and_reloads_on_catalog_revision() {
         "one cache miss invokes each bounded dictionary reader once"
     );
 
-    let capped = dispatcher
-        .dispatch("oracle_orient", json!({ "owner": "APP", "max_rows": 1 }))
-        .expect("explicit orient cap is accepted");
-    assert_eq!(capped["max_rows"], json!(1));
-    assert_eq!(
-        capped["truncated"],
-        json!(false),
-        "one returned row does not prove an omitted row exists"
-    );
-    assert!(capped["next_cursor"].is_null());
-
-    let client_max = dispatcher
-        .dispatch(
-            "oracle_orient",
-            json!({ "owner": "APP", "max_rows": usize::MAX }),
-        )
-        .expect("a client maximum is clamped to the server ceiling");
-    assert_eq!(client_max["max_rows"], json!(MAX_ORIENT_MAX_ROWS));
-
     let selected = dispatcher
         .dispatch(
             "oracle_orient",
@@ -3635,7 +3417,7 @@ fn orient_assembles_selector_stable_snapshot_and_reloads_on_catalog_revision() {
     assert!(selected["freshness"].is_object());
     assert_eq!(
         state.dictionary_reads.load(Ordering::SeqCst),
-        8,
+        4,
         "include selectors must not create stale independent cache fragments"
     );
 
@@ -3643,7 +3425,7 @@ fn orient_assembles_selector_stable_snapshot_and_reloads_on_catalog_revision() {
         .dispatch("oracle_orient", json!({ "include": ["unknown"] }))
         .expect_err("unknown orient section is refused before dictionary I/O");
     assert_eq!(invalid.error_class, ErrorClass::InvalidArguments);
-    assert_eq!(state.dictionary_reads.load(Ordering::SeqCst), 8);
+    assert_eq!(state.dictionary_reads.load(Ordering::SeqCst), 4);
 
     invalidate_orient_catalog(&dispatcher);
     let refreshed = dispatcher
@@ -3655,7 +3437,7 @@ fn orient_assembles_selector_stable_snapshot_and_reloads_on_catalog_revision() {
     assert_eq!(refreshed["catalog_revision"], json!(2));
     assert_eq!(
         state.dictionary_reads.load(Ordering::SeqCst),
-        12,
+        8,
         "the new catalog generation never reuses prior snapshot evidence"
     );
 }
@@ -3909,61 +3691,6 @@ fn get_source_without_object_type_returns_all_visible_sources() {
     assert_eq!(out["source_count"], json!(2));
     assert_eq!(out["sources"][0]["object_type"], json!("PACKAGE"));
     assert_eq!(out["sources"][1]["object_type"], json!("PACKAGE BODY"));
-}
-
-#[test]
-fn get_source_returns_requested_line_range_metadata() {
-    let dispatcher = OracleDispatcher::new(Box::new(SourceLookupMock));
-    let out = dispatcher
-        .dispatch(
-            "oracle_get_source",
-            json!({
-                "name": "EMP_API",
-                "object_type": "PACKAGE",
-                "from_line": 40,
-                "to_line": 48,
-            }),
-        )
-        .expect("source range fetch is accepted");
-    assert_eq!(out["range"]["from_line"], json!(40));
-    assert_eq!(out["range"]["to_line"], json!(48));
-
-    let err = dispatcher
-        .dispatch(
-            "oracle_get_source",
-            json!({
-                "name": "EMP_API",
-                "object_type": "PACKAGE",
-                "from_line": 48,
-                "to_line": 40,
-            }),
-        )
-        .expect_err("backwards source range is refused");
-    assert_eq!(err.error_class, ErrorClass::InvalidArguments);
-    assert!(err.message.contains("from_line must not exceed to_line"));
-}
-
-#[test]
-fn source_search_line_cap_keeps_line_metadata_and_marks_truncation() {
-    let rows = [OracleRow {
-        columns: vec![
-            (
-                "LINE".to_owned(),
-                OracleCell::new("NUMBER", Some("42".to_owned())),
-            ),
-            (
-                "TEXT".to_owned(),
-                OracleCell::new("VARCHAR2", Some("abcdefghij0123456789".to_owned())),
-            ),
-        ],
-    }];
-
-    let (matches, truncated_lines) = source_search_rows_to_json(&rows, 16);
-    assert_eq!(truncated_lines, 1);
-    assert_eq!(matches[0]["LINE"], json!("42"));
-    assert_eq!(matches[0]["TEXT"], json!("abc… [truncated]"));
-    assert_eq!(matches[0]["TEXT_TRUNCATED"], json!(true));
-    assert_eq!(matches[0]["TEXT_CHAR_COUNT"], json!(20));
 }
 
 #[test]
@@ -4984,7 +4711,6 @@ struct TouchCounts {
     execute: AtomicUsize,
     commit: AtomicUsize,
     rollback: AtomicUsize,
-    close: AtomicUsize,
 }
 
 impl TouchCounts {
@@ -4995,7 +4721,6 @@ impl TouchCounts {
             + self.execute.load(Ordering::SeqCst)
             + self.commit.load(Ordering::SeqCst)
             + self.rollback.load(Ordering::SeqCst)
-            + self.close.load(Ordering::SeqCst)
     }
 }
 
@@ -5048,7 +4773,6 @@ impl OracleConnection for TouchCountingMock {
 struct LifecycleCleanupMock {
     rollbacks: Arc<AtomicUsize>,
     executes: Arc<AtomicUsize>,
-    closes: Arc<AtomicUsize>,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -5117,11 +4841,6 @@ impl OracleConnection for LifecycleCleanupMock {
         self.rollbacks.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-
-    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
-        self.closes.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
 }
 
 fn close_dispatcher_for_test(
@@ -5154,7 +4873,6 @@ fn lifecycle_close_rolls_back_and_revokes_execution_grants() {
 
     let rollbacks = Arc::new(AtomicUsize::new(0));
     let executes = Arc::new(AtomicUsize::new(0));
-    let closes = Arc::new(AtomicUsize::new(0));
     let sink = Arc::new(MemoryAuditSink::new());
     let auditor = Arc::new(oraclemcp_audit::Auditor::new(
         Box::new(SharedSink(sink.clone())),
@@ -5165,7 +4883,6 @@ fn lifecycle_close_rolls_back_and_revokes_execution_grants() {
         Box::new(LifecycleCleanupMock {
             rollbacks: Arc::clone(&rollbacks),
             executes: Arc::clone(&executes),
-            closes: Arc::clone(&closes),
         }),
         Some("dev".to_owned()),
         read_write_level(),
@@ -5178,7 +4895,6 @@ fn lifecycle_close_rolls_back_and_revokes_execution_grants() {
         .expect("lifecycle cleanup succeeds");
 
     assert_eq!(rollbacks.load(Ordering::SeqCst), 1);
-    assert_eq!(closes.load(Ordering::SeqCst), 1);
     let records = sink.records();
     assert_eq!(records.len(), 1);
     let record = &records[0];
@@ -5339,7 +5055,6 @@ fn lifecycle_timeout_close_audits_timeout_reason() {
 
     let rollbacks = Arc::new(AtomicUsize::new(0));
     let executes = Arc::new(AtomicUsize::new(0));
-    let closes = Arc::new(AtomicUsize::new(0));
     let sink = Arc::new(MemoryAuditSink::new());
     let auditor = Arc::new(oraclemcp_audit::Auditor::new(
         Box::new(SharedSink(sink.clone())),
@@ -5350,7 +5065,6 @@ fn lifecycle_timeout_close_audits_timeout_reason() {
         Box::new(LifecycleCleanupMock {
             rollbacks: Arc::clone(&rollbacks),
             executes,
-            closes: Arc::clone(&closes),
         }),
         Some("dev".to_owned()),
         read_write_level(),
@@ -5361,7 +5075,6 @@ fn lifecycle_timeout_close_audits_timeout_reason() {
         .expect("timeout lifecycle cleanup succeeds");
 
     assert_eq!(rollbacks.load(Ordering::SeqCst), 1);
-    assert_eq!(closes.load(Ordering::SeqCst), 1);
     let records = sink.records();
     assert_eq!(records.len(), 1);
     let record = &records[0];
@@ -13595,9 +13308,7 @@ mod qa106_uncertain_read_ownership {
 
 /// QA107: best-effort connection metadata may degrade ordinary adapter or
 /// privilege failures, but it must never hide cancellation/connection loss on
-/// a retained session. Connection diagnostics report that uncertainty in-band
-/// and quarantine the retained session; uncertain switch candidates are never
-/// installed.
+/// a retained session or install an uncertain switch candidate.
 mod qa107_describe_uncertainty {
     use super::*;
     use std::sync::Arc;
@@ -13658,7 +13369,7 @@ mod qa107_describe_uncertainty {
     }
 
     #[test]
-    fn uncertain_connection_info_reports_disconnected_and_quarantines_before_reuse() {
+    fn uncertain_connection_info_quarantines_retained_primary_before_reuse() {
         let describe_calls = Arc::new(AtomicUsize::new(0));
         let query_calls = Arc::new(AtomicUsize::new(0));
         let dispatcher = OracleDispatcher::new_with_profile(
@@ -13671,16 +13382,8 @@ mod qa107_describe_uncertainty {
 
         let first = dispatcher
             .dispatch("oracle_connection_info", json!({}))
-            .expect("connection diagnostics render uncertain metadata as an in-band report");
-        assert_eq!(first["connected"], json!(false));
-        assert_eq!(first["connection"], Value::Null);
-        assert_eq!(first["connection_error"]["error_class"], json!("TIMEOUT"));
-        assert!(
-            first["connection_error"]["next_steps"]
-                .as_array()
-                .is_some_and(|steps| !steps.is_empty()),
-            "uncertain metadata must retain structured recovery guidance: {first}"
-        );
+            .expect_err("uncertain describe must not become disconnected metadata");
+        assert_eq!(first.error_class, ErrorClass::Timeout);
         assert_eq!(describe_calls.load(Ordering::SeqCst), 1);
         let quarantine = dispatcher
             .connection_quarantine()

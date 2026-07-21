@@ -252,8 +252,8 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
                     "ORACLEMCP_STDIO_TOKEN": "<shared-init-token>"
                 },
                 "notes": [
-                    "Use this when the MCP client can send the init token in initialize _meta.",
-                    "If the client cannot send an init token, keep the server local and use --allow-no-auth intentionally."
+                    "This is a custom-client protocol, not a generic MCP-client configuration snippet: the client must send the shared token as the JSON string at params._meta[\"oraclemcp/initToken\"] in its initialize request.",
+                    "Most MCP client configuration surfaces cannot inject initialize _meta. If the client cannot control that raw frame, keep local stdio and use --allow-no-auth intentionally, or use authenticated HTTP instead."
                 ]
             },
             "service": {
@@ -417,7 +417,7 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
             "http_transport": "use --client-credentials for service-owned per-client bearers, or top-level http config / serve --oauth-* / --http-* / --tls-* flags for Streamable HTTP; native rustls TLS and optional mTLS are served directly, mTLS identities require registered leaf fingerprints, and server-only TLS still needs per-client credentials, OAuth, or explicit --allow-no-auth",
             "proxy_auth": "use profiles.proxy_auth for thin proxy auth; credential_ref belongs to proxy_user and target_schema is the CONNECT THROUGH client",
             "network_routing": "use top-level sdu and profiles.drcp for validated thin SDU and DRCP server routing instead of raw connect_string query parameters",
-            "local_pool": "profiles.pool enables pinned_plus_stateless where pool-backed reads are live: stateless catalog/metadata reads can use bounded local read connections while user SQL, LOB/sample reads, transactions, and DBMS_OUTPUT stay on the pinned main session. Login setup and session identity are applied to every newly opened connection, including pool connections; a setup failure fails that connection rather than being ignored. Expect at least that pinned session plus stateless pool session(s); oracle_connection_info reports the strategy and separate stateless details. Served stateless HTTP uses bounded per-subject/profile read-worker lanes instead of sharing one pool across lane runtimes; statement_cache_size reaches the thin driver for pool-backed reads",
+            "local_pool": "profiles.pool enables hybrid_pool where pool-backed reads are used: stateless catalog/metadata reads can use bounded local read connections, while user SQL, LOB/sample reads, transactions, and DBMS_OUTPUT remain on the pinned main session. Login setup and session identity are applied to every newly opened connection, including pool connections; a setup failure fails that connection rather than being ignored. Served stateless HTTP uses bounded per-subject/profile read-worker lanes instead of sharing one pool across lane runtimes; statement_cache_size reaches the thin driver for pool-backed reads",
             "app_context": "use repeated profiles.app_context entries for typed thin logon application-context triples; values are sensitive and redacted from profile output",
             "environment_specifics": "database aliases, session identity, client module/program labels, and custom workflow tools belong in profiles or tools.d config, not in the general core"
         },
@@ -498,7 +498,7 @@ Client setup
 - Install or build one oraclemcp binary, then configure every MCP client to call the same command, args, config file, and environment.
 - Generate generic setup templates with: oraclemcp --json setup --profile <profile>
 - Local stdio command: oraclemcp serve --profile <profile> --allow-no-auth
-- Secure stdio command: ORACLEMCP_STDIO_TOKEN=<token> oraclemcp serve --profile <profile>
+- Secure stdio is a custom-client protocol, not a generic config snippet: the client must send the shared token as the JSON string at params._meta["oraclemcp/initToken"] in its initialize request. Most MCP client config surfaces cannot inject initialize _meta; otherwise keep local stdio and use --allow-no-auth intentionally, or use authenticated HTTP.
 - Streamable HTTP starts only with per-client credentials, configured OAuth, mTLS client-certificate verification, or explicit --allow-no-auth; issue per-client bearers with oraclemcp clients issue and enable them with --client-credentials. mTLS identities require registered leaf fingerprints via --mtls-client-fingerprint or [http.mtls].client_fingerprints; use --oauth-* / --http-* / --tls-* flags or top-level [http] config, and keep non-loopback binds behind ORACLEMCP_HTTP_ALLOW_REMOTE=1.
 - The thin driver does not need Oracle Instant Client, ODPI-C, libclntsh, or a C toolchain.
 - If Oracle Net files need TNS_ADMIN, point every MCP client at the same small wrapper script.
@@ -579,7 +579,7 @@ Configuration
 - Prefer credential_ref and wallet_password_ref over literal passwords.
 - Use profiles.proxy_auth for thin proxy authentication: credential_ref belongs to proxy_user and target_schema is the CONNECT THROUGH client.
 - Use top-level sdu and profiles.drcp for validated thin SDU and DRCP server routing instead of raw connect_string query parameters.
-- Use profiles.pool for pinned_plus_stateless where pool-backed reads are live: stateless catalog/metadata reads can use bounded local read connections while user SQL, LOB/sample reads, transactions, and DBMS_OUTPUT stay on the pinned main session. Login setup and session identity are applied to every newly opened connection, including pool connections; a setup failure fails that connection rather than being ignored. Expect at least that pinned session plus stateless pool session(s); oracle_connection_info reports the strategy and separate stateless details. Served stateless HTTP uses bounded per-subject/profile read-worker lanes instead of sharing one pool across lane runtimes.
+- Use profiles.pool for hybrid_pool where pool-backed reads are used: stateless catalog/metadata reads can use bounded local read connections, while user SQL, LOB/sample reads, transactions, and DBMS_OUTPUT remain on the pinned main session. Login setup and session identity are applied to every newly opened connection, including pool connections; a setup failure fails that connection rather than being ignored. Served stateless HTTP uses bounded per-subject/profile read-worker lanes instead of sharing one pool across lane runtimes.
 - Use repeated profiles.app_context entries for thin logon application-context triples; values are redacted from profile output.
 - Database aliases, session identity, client module/program labels, and custom workflow tools belong in profiles or tools.d config, not in the general core.
 

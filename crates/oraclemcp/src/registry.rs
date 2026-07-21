@@ -904,16 +904,13 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_orient",
             ToolTier::FoundationLiveDb,
-            "Return bounded orientation evidence: by default one cacheable snapshot for the active profile; fleet=true maps every MCP-visible profile independently with schema, version, freshness, drift, and typed UNREACHABLE/FAIL_CLOSED lane status. Dictionary reads are parameterized and read-only; include selects schema, fks, hot, freshness, and/or ddl (all by default). Every selected row list is capped and the response makes truncation explicit.",
+            "Return bounded orientation evidence: by default one cacheable snapshot for the active profile; fleet=true maps every MCP-visible profile independently with schema, version, freshness, drift, and typed UNREACHABLE/FAIL_CLOSED lane status. Dictionary reads are parameterized and read-only; include selects schema, fks, hot, freshness, and/or ddl (all by default).",
         )
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Omit or use * for all visible schemas." },
                 "include": { "type": "array", "items": { "type": "string", "enum": ["schema", "fks", "hot", "freshness", "ddl"] }, "description": "Optional sections to return. Defaults to every section; ddl selects the recent_ddl field." },
-                "fleet": { "type": "boolean", "description": "When true, orient every MCP-visible configured profile independently. Each profile is returned with REACHABLE, UNREACHABLE, or FAIL_CLOSED status; one unavailable lane never omits or fails the other lanes." },
-                "max_rows": { "type": "integer", "minimum": 1, "maximum": 250, "description": "Maximum rows for each selected orientation list (default 100). The response sets truncated=true and returns next_cursor when another bounded page may exist." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 250, "description": "Alias for max_rows." },
-                "cursor": { "type": "string", "description": "Opaque continuation cursor returned by a truncated orient response. It is bound to this owner, include selection, fleet flag, and profile." }
+                "fleet": { "type": "boolean", "description": "When true, orient every MCP-visible configured profile independently. Each profile is returned with REACHABLE, UNREACHABLE, or FAIL_CLOSED status; one unavailable lane never omits or fails the other lanes." }
             }),
             &[],
         )),
@@ -930,9 +927,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
                 "table": { "type": "string", "description": "Table or view name. May be OWNER.TABLE. Required unless table_name or name is supplied." },
                 "table_name": { "type": "string", "description": "Alias for table for compatibility with older clients. Prefer table." },
-                "name": { "type": "string", "description": "Alias for table. Prefer table." },
-                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum constraint rows to return (default 200, hard cap 5000)." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows. Prefer max_rows." }
+                "name": { "type": "string", "description": "Alias for table. Prefer table." }
             }),
             &[],
         )),
@@ -990,7 +985,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_get_ddl",
             ToolTier::FoundationLiveDb,
-            "Fetch an object's DDL via DBMS_METADATA.GET_DDL (allowlisted object types). Responses include full and returned character counts plus an explicit truncated flag; a long DDL prefix is never presented as a complete document.",
+            "Fetch an object's DDL via DBMS_METADATA.GET_DDL (allowlisted object types).",
         )
         .with_input_schema(object_schema(
             json!({
@@ -1007,7 +1002,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_get_source",
             ToolTier::FoundationLiveDb,
-            "Fetch an object's full source text or inclusive line range from ALL_SOURCE with a character cap. Omit object_type to return every visible source variant for the object name.",
+            "Fetch an object's full source text from ALL_SOURCE with a character cap. Omit object_type to return every visible source variant for the object name.",
         )
         .with_input_schema(object_schema(
             json!({
@@ -1015,9 +1010,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
                 "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." },
                 "object_type": { "type": "string", "description": "Optional supported source type: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY. When omitted, all visible source types for this name are returned." },
-                "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum source characters to return (default 1000000)." },
-                "from_line": { "type": "integer", "minimum": 1, "description": "Optional first ALL_SOURCE line to return, inclusive. Pair with oracle_search_source's LINE result." },
-                "to_line": { "type": "integer", "minimum": 1, "description": "Optional last ALL_SOURCE line to return, inclusive. Must not be lower than from_line." }
+                "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum source characters to return (default 1000000)." }
             }),
             &[],
         )),
@@ -1074,9 +1067,7 @@ pub fn tool_registry() -> ToolRegistry {
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
                 "name": { "type": "string", "description": "Optional object name. May be OWNER.NAME. Omit to list all compile errors for the owner/current schema." },
-                "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." },
-                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum compile errors to return (default 200, hard cap 5000)." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows. Prefer max_rows." }
+                "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." }
             }),
             &[],
         )),
@@ -1086,7 +1077,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_search_source",
             ToolTier::FoundationLiveDb,
-            "Full-text search across ALL_SOURCE for a needle (row- and line-capped).",
+            "Full-text search across ALL_SOURCE for a needle (row-capped).",
         )
         .with_input_schema(object_schema(
             json!({
@@ -1095,8 +1086,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "object_type": { "type": "string", "description": "Optional source type filter: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY." },
                 "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for source object names, e.g. EMP%." },
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum matching source lines to return (default 200, hard cap 5000)." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
-                "max_line_chars": { "type": "integer", "minimum": 16, "maximum": 4000, "description": "Maximum characters retained from each matching source line (default 500). Longer lines end with an explicit truncation marker; use oracle_get_source with from_line/to_line for the exact source range." }
+                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." }
             }),
             &["needle"],
         )),
@@ -1112,9 +1102,7 @@ pub fn tool_registry() -> ToolRegistry {
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
                 "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
-                "object_name": { "type": "string", "description": "Alias for name for compatibility. Prefer name." },
-                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum identifiers and SQL statements per array (default 200, hard cap 5000)." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows. Prefer max_rows." }
+                "object_name": { "type": "string", "description": "Alias for name for compatibility. Prefer name." }
             }),
             &[],
         )),
@@ -1549,16 +1537,15 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "get_schema",
             ToolTier::FoundationLiveDb,
-            "Compact schema orientation alias. With no object_type it lists TABLE, VIEW, and PACKAGE objects only; a bounded truncated page carries an opaque cursor.",
+            "Compatibility alias for oracle_schema_inspect; omit arguments to inspect the current schema.",
         )
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner; omit for current schema, or use * for all accessible schemas." },
-                "object_type": { "type": "string", "description": "Optional object type filter. Supplying it overrides the compact TABLE/VIEW/PACKAGE default projection." },
+                "object_type": { "type": "string", "description": "Optional object type filter." },
                 "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for object_name." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 250, "description": "Maximum objects to return (default 100, hard cap 250)." },
-                "max_rows": { "type": "integer", "minimum": 1, "maximum": 250, "description": "Alias for limit." },
-                "cursor": { "type": "string", "description": "Opaque continuation cursor returned by a truncated get_schema page." }
+                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum objects to return." },
+                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for limit." }
             }),
             &[],
         )),
@@ -1633,7 +1620,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "get_ddl",
             ToolTier::FoundationLiveDb,
-            "Compatibility alias for oracle_get_ddl; long DDL is explicitly marked partial rather than silently truncated.",
+            "Compatibility alias for oracle_get_ddl.",
         )
         .with_input_schema(object_schema(
             json!({
@@ -1709,23 +1696,18 @@ pub fn tool_registry() -> ToolRegistry {
     registry
 }
 
-/// Assemble the `oracle_capabilities` report for this build. `built_with_live_db`
-/// reflects whether the Oracle driver is compiled in, not whether a database is
-/// currently reachable; `http` reflects whether the
+/// Assemble the `oracle_capabilities` report for this build. `live_db` reflects
+/// whether the Oracle driver is compiled in; `http` reflects whether the
 /// Streamable HTTP transport is exposed by `serve`. The engine tier reflects the
 /// optional `plsql-intelligence` feature; default builds stay engine-free.
-pub fn capabilities(
-    version: impl Into<String>,
-    built_with_live_db: bool,
-    http: bool,
-) -> CapabilitiesReport {
+pub fn capabilities(version: impl Into<String>, live_db: bool, http: bool) -> CapabilitiesReport {
     let registry = tool_registry();
     CapabilitiesReport::new(
         version,
         registry.tools,
         OperatingLevel::ReadOnly,
         FeatureTiers {
-            live_db: built_with_live_db,
+            live_db,
             engine: cfg!(feature = "plsql-intelligence"),
             http_transport: http,
         },
@@ -2313,19 +2295,10 @@ mod tests {
                     "fleet",
                 ],
             ),
-            (
-                "oracle_orient",
-                &["owner", "include", "fleet", "max_rows", "limit", "cursor"],
-            ),
+            ("oracle_orient", &["owner", "include", "fleet"]),
             ("oracle_list_schemas", &["name_like", "max_rows", "limit"]),
-            (
-                "oracle_describe",
-                &["owner", "table", "table_name", "name", "max_rows", "limit"],
-            ),
-            (
-                "describe_table",
-                &["owner", "table", "table_name", "name", "max_rows", "limit"],
-            ),
+            ("oracle_describe", &["owner", "table", "table_name", "name"]),
+            ("describe_table", &["owner", "table", "table_name", "name"]),
             ("oracle_describe_index", &["owner", "name", "index_name"]),
             ("describe_index", &["owner", "name", "index_name"]),
             (
@@ -2342,15 +2315,7 @@ mod tests {
             ("get_ddl", &["object_type", "owner", "name", "object_name"]),
             (
                 "oracle_get_source",
-                &[
-                    "owner",
-                    "name",
-                    "object_name",
-                    "object_type",
-                    "max_chars",
-                    "from_line",
-                    "to_line",
-                ],
+                &["owner", "name", "object_name", "object_type", "max_chars"],
             ),
             (
                 "get_object_source",
@@ -2390,14 +2355,8 @@ mod tests {
                     "max_chars",
                 ],
             ),
-            (
-                "oracle_compile_errors",
-                &["owner", "name", "object_name", "max_rows", "limit"],
-            ),
-            (
-                "get_errors",
-                &["owner", "name", "object_name", "max_rows", "limit"],
-            ),
+            ("oracle_compile_errors", &["owner", "name", "object_name"]),
+            ("get_errors", &["owner", "name", "object_name"]),
             (
                 "oracle_search_source",
                 &[
@@ -2407,13 +2366,9 @@ mod tests {
                     "name_like",
                     "max_rows",
                     "limit",
-                    "max_line_chars",
                 ],
             ),
-            (
-                "oracle_plscope_inspect",
-                &["owner", "name", "object_name", "max_rows", "limit"],
-            ),
+            ("oracle_plscope_inspect", &["owner", "name", "object_name"]),
             (
                 "oracle_explain_plan",
                 &["sql", "read_only_standby", "allow_plan_table_write"],

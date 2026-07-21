@@ -260,21 +260,6 @@ pub struct SourceText {
     pub truncated: bool,
 }
 
-/// DDL text returned by `DBMS_METADATA.GET_DDL`, with the full CLOB length.
-///
-/// The thin driver path reads a bounded prefix rather than materializing an
-/// unbounded CLOB. Callers must inspect [`Self::truncated`] before treating
-/// [`Self::text`] as a complete DDL document.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DdlText {
-    /// Bounded DDL prefix returned from Oracle.
-    pub text: String,
-    /// Character length of the full Oracle CLOB.
-    pub char_count: usize,
-    /// Whether `text` is only a prefix of the full DDL CLOB.
-    pub truncated: bool,
-}
-
 /// A single CLOB/NCLOB/text value read by key, with truncation metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LobText {
@@ -767,102 +752,6 @@ pub async fn list_objects(
     .await
 }
 
-/// One deterministic, bounded page from the `schema_inspect` object listing.
-///
-/// This is deliberately separate from [`list_objects`] so existing focused
-/// inspection callers retain their established SQL shape. Compact aliases use
-/// the extra sentinel row to say truthfully whether another page exists.
-pub async fn list_objects_page(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    owner: Option<&str>,
-    object_type: Option<&str>,
-    name_like: Option<&str>,
-    offset: usize,
-    max_rows: usize,
-) -> Result<Vec<OracleRow>, DbError> {
-    let sql = "SELECT owner, object_name, object_type, status, last_ddl_time FROM ( \
-                   SELECT selected.*, ROWNUM AS page_row FROM ( \
-                       WITH args AS ( \
-                           SELECT :1 owner_filter, :2 type_filter, :3 name_filter FROM dual \
-                       ) \
-                       SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
-                       FROM all_objects o CROSS JOIN args \
-                       WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
-                         AND (args.type_filter IS NULL OR o.object_type = args.type_filter) \
-                         AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
-                       ORDER BY o.owner, o.object_type, o.object_name \
-                   ) selected WHERE ROWNUM <= :4 \
-               ) WHERE page_row > :5";
-    let owner_bind = owner.map_or(OracleBind::Null, |value| {
-        OracleBind::from(value.to_ascii_uppercase())
-    });
-    let type_bind = object_type.map_or(OracleBind::Null, |value| {
-        OracleBind::from(value.to_ascii_uppercase())
-    });
-    let name_like_bind = name_like.map_or(OracleBind::Null, |value| {
-        OracleBind::from(value.to_ascii_uppercase())
-    });
-    let upper_bound = page_upper_bound(offset, max_rows)?;
-    conn.query_rows(
-        cx,
-        sql,
-        &[
-            owner_bind,
-            type_bind,
-            name_like_bind,
-            OracleBind::from(upper_bound),
-            OracleBind::from(offset as i64),
-        ],
-    )
-    .await
-}
-
-/// Compact `get_schema` projection. Its object-kind predicate is fixed in the
-/// server SQL rather than supplied by the caller, so an empty alias call never
-/// expands back into every accessible index, synonym, trigger, and generated
-/// object. Pagination stays positional-bind-only and deterministic.
-pub async fn list_schema_projection_page(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    owner: Option<&str>,
-    name_like: Option<&str>,
-    offset: usize,
-    max_rows: usize,
-) -> Result<Vec<OracleRow>, DbError> {
-    let sql = "SELECT owner, object_name, object_type, status, last_ddl_time FROM ( \
-                   SELECT selected.*, ROWNUM AS page_row FROM ( \
-                       WITH args AS ( \
-                           SELECT :1 owner_filter, :2 name_filter FROM dual \
-                       ) \
-                       SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
-                       FROM all_objects o CROSS JOIN args \
-                       WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
-                         AND o.object_type IN ('TABLE', 'VIEW', 'PACKAGE') \
-                         AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
-                       ORDER BY o.owner, o.object_type, o.object_name \
-                   ) selected WHERE ROWNUM <= :3 \
-               ) WHERE page_row > :4";
-    let owner_bind = owner.map_or(OracleBind::Null, |value| {
-        OracleBind::from(value.to_ascii_uppercase())
-    });
-    let name_like_bind = name_like.map_or(OracleBind::Null, |value| {
-        OracleBind::from(value.to_ascii_uppercase())
-    });
-    let upper_bound = page_upper_bound(offset, max_rows)?;
-    conn.query_rows(
-        cx,
-        sql,
-        &[
-            owner_bind,
-            name_like_bind,
-            OracleBind::from(upper_bound),
-            OracleBind::from(offset as i64),
-        ],
-    )
-    .await
-}
-
 /// One object in the bounded `oracle_orient` schema map.
 ///
 /// This intentionally carries only the stable identity triplet from
@@ -919,42 +808,20 @@ pub async fn orient_schema(
     owner: Option<&str>,
     max_rows: usize,
 ) -> Result<Vec<OrientSchemaObject>, DbError> {
-    orient_schema_page(cx, conn, owner, 0, max_rows).await
-}
-
-/// Read one stable, offset-based schema-map page for `oracle_orient`.
-pub async fn orient_schema_page(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    owner: Option<&str>,
-    offset: usize,
-    max_rows: usize,
-) -> Result<Vec<OrientSchemaObject>, DbError> {
-    let sql = "SELECT owner, object_name, object_type FROM ( \
-                   SELECT selected.*, ROWNUM AS page_row FROM ( \
-                       WITH args AS ( \
-                           SELECT :1 owner_filter FROM dual \
-                       ) \
-                       SELECT o.owner, o.object_name, o.object_type \
-                       FROM all_objects o CROSS JOIN args \
-                       WHERE args.owner_filter IS NULL OR o.owner = args.owner_filter \
-                       ORDER BY o.owner, o.object_type, o.object_name \
-                   ) selected WHERE ROWNUM <= :2 \
-               ) WHERE page_row > :3";
+    let sql = "SELECT * FROM ( \
+                   WITH args AS ( \
+                       SELECT :1 owner_filter FROM dual \
+                   ) \
+                   SELECT o.owner, o.object_name, o.object_type \
+                   FROM all_objects o CROSS JOIN args \
+                   WHERE args.owner_filter IS NULL OR o.owner = args.owner_filter \
+                   ORDER BY o.owner, o.object_type, o.object_name \
+               ) WHERE ROWNUM <= :2";
     let owner_bind = owner.map_or(OracleBind::Null, |value| {
         OracleBind::from(value.to_ascii_uppercase())
     });
-    let upper_bound = page_upper_bound(offset, max_rows)?;
     let rows = conn
-        .query_rows(
-            cx,
-            sql,
-            &[
-                owner_bind,
-                OracleBind::from(upper_bound),
-                OracleBind::from(offset as i64),
-            ],
-        )
+        .query_rows(cx, sql, &[owner_bind, OracleBind::from(max_rows as i64)])
         .await?;
 
     Ok(rows
@@ -965,14 +832,6 @@ pub async fn orient_schema_page(
             object_type: row.text("OBJECT_TYPE").unwrap_or_default().to_owned(),
         })
         .collect())
-}
-
-fn page_upper_bound(offset: usize, max_rows: usize) -> Result<i64, DbError> {
-    let upper_bound = offset
-        .checked_add(max_rows.max(1))
-        .ok_or_else(|| DbError::Query("bounded metadata page offset overflowed".to_owned()))?;
-    i64::try_from(upper_bound)
-        .map_err(|_| DbError::Query("bounded metadata page exceeds Oracle limit".to_owned()))
 }
 
 /// Read bounded child-to-parent foreign-key topology for `oracle_orient`.
@@ -989,17 +848,6 @@ pub async fn orient_fks(
     owner: Option<&str>,
     max_rows: usize,
 ) -> Result<Vec<OrientForeignKey>, DbError> {
-    orient_fks_page(cx, conn, owner, 0, max_rows).await
-}
-
-/// Read one stable, offset-based foreign-key page for `oracle_orient`.
-pub async fn orient_fks_page(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    owner: Option<&str>,
-    offset: usize,
-    max_rows: usize,
-) -> Result<Vec<OrientForeignKey>, DbError> {
     // Keep the outermost statement a SELECT. Besides matching the generated
     // read-path contract, the thin driver recognizes this shape consistently
     // when the dictionary query contains a CTE.
@@ -1007,20 +855,17 @@ pub async fn orient_fks_page(
                WITH args AS ( \
                    SELECT :1 owner_filter FROM dual \
                ), selected_foreign_keys AS ( \
-                   SELECT child_owner, child_table, constraint_name, parent_owner, parent_constraint_name \
-                   FROM ( \
-                       SELECT ordered_foreign_keys.*, ROWNUM AS page_row FROM ( \
-                           SELECT child.owner AS child_owner, \
-                                  child.table_name AS child_table, \
-                                  child.constraint_name, \
-                                  child.r_owner AS parent_owner, \
-                                  child.r_constraint_name AS parent_constraint_name \
-                           FROM all_constraints child CROSS JOIN args \
-                           WHERE child.constraint_type = 'R' \
-                             AND (args.owner_filter IS NULL OR child.owner = args.owner_filter) \
-                           ORDER BY child.owner, child.table_name, child.constraint_name \
-                       ) ordered_foreign_keys WHERE ROWNUM <= :2 \
-                   ) WHERE page_row > :3 \
+                   SELECT * FROM ( \
+                       SELECT child.owner AS child_owner, \
+                              child.table_name AS child_table, \
+                              child.constraint_name, \
+                              child.r_owner AS parent_owner, \
+                              child.r_constraint_name AS parent_constraint_name \
+                       FROM all_constraints child CROSS JOIN args \
+                       WHERE child.constraint_type = 'R' \
+                         AND (args.owner_filter IS NULL OR child.owner = args.owner_filter) \
+                       ORDER BY child.owner, child.table_name, child.constraint_name \
+                   ) WHERE ROWNUM <= :2 \
                ) \
                SELECT foreign_key.child_owner, foreign_key.child_table, \
                       foreign_key.constraint_name, foreign_key.parent_owner, \
@@ -1045,17 +890,8 @@ pub async fn orient_fks_page(
     let owner_bind = owner.map_or(OracleBind::Null, |value| {
         OracleBind::from(value.to_ascii_uppercase())
     });
-    let upper_bound = page_upper_bound(offset, max_rows)?;
     let rows = conn
-        .query_rows(
-            cx,
-            sql,
-            &[
-                owner_bind,
-                OracleBind::from(upper_bound),
-                OracleBind::from(offset as i64),
-            ],
-        )
+        .query_rows(cx, sql, &[owner_bind, OracleBind::from(max_rows as i64)])
         .await?;
 
     let mut foreign_keys: Vec<OrientForeignKey> = Vec::new();
@@ -1137,56 +973,34 @@ pub async fn orient_hot_objects(
     owner: Option<&str>,
     max_rows: usize,
 ) -> Result<Vec<OrientHotObject>, DbError> {
-    orient_hot_objects_page(cx, conn, owner, 0, max_rows).await
-}
-
-/// Read one stable, offset-based hot-object page for `oracle_orient`.
-pub async fn orient_hot_objects_page(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    owner: Option<&str>,
-    offset: usize,
-    max_rows: usize,
-) -> Result<Vec<OrientHotObject>, DbError> {
-    let sql = "SELECT owner, object_name, inserts, updates, deletes, last_modified, truncated, drop_segments FROM ( \
-                   SELECT selected.*, ROWNUM AS page_row FROM ( \
-                       WITH args AS ( \
-                           SELECT :1 owner_filter FROM dual \
-                       ) \
-                       SELECT modifications.table_owner AS owner, \
-                              modifications.table_name AS object_name, \
-                              NVL(modifications.inserts, 0) AS inserts, \
-                              NVL(modifications.updates, 0) AS updates, \
-                              NVL(modifications.deletes, 0) AS deletes, \
-                              modifications.timestamp AS last_modified, \
-                              NVL(modifications.truncated, 'NO') AS truncated, \
-                              NVL(modifications.drop_segments, 0) AS drop_segments \
-                       FROM all_tab_modifications modifications CROSS JOIN args \
-                       WHERE (args.owner_filter IS NULL \
-                              OR modifications.table_owner = args.owner_filter) \
-                         AND modifications.partition_name IS NULL \
-                         AND modifications.subpartition_name IS NULL \
-                       ORDER BY (NVL(modifications.inserts, 0) \
-                                 + NVL(modifications.updates, 0) \
-                                 + NVL(modifications.deletes, 0)) DESC, \
-                                modifications.timestamp DESC NULLS LAST, \
-                                modifications.table_owner, modifications.table_name \
-                   ) selected WHERE ROWNUM <= :2 \
-               ) WHERE page_row > :3";
+    let sql = "SELECT * FROM ( \
+                   WITH args AS ( \
+                       SELECT :1 owner_filter FROM dual \
+                   ) \
+                   SELECT modifications.table_owner AS owner, \
+                          modifications.table_name AS object_name, \
+                          NVL(modifications.inserts, 0) AS inserts, \
+                          NVL(modifications.updates, 0) AS updates, \
+                          NVL(modifications.deletes, 0) AS deletes, \
+                          modifications.timestamp AS last_modified, \
+                          NVL(modifications.truncated, 'NO') AS truncated, \
+                          NVL(modifications.drop_segments, 0) AS drop_segments \
+                   FROM all_tab_modifications modifications CROSS JOIN args \
+                   WHERE (args.owner_filter IS NULL \
+                          OR modifications.table_owner = args.owner_filter) \
+                     AND modifications.partition_name IS NULL \
+                     AND modifications.subpartition_name IS NULL \
+                   ORDER BY (NVL(modifications.inserts, 0) \
+                             + NVL(modifications.updates, 0) \
+                             + NVL(modifications.deletes, 0)) DESC, \
+                            modifications.timestamp DESC NULLS LAST, \
+                            modifications.table_owner, modifications.table_name \
+               ) WHERE ROWNUM <= :2";
     let owner_bind = owner.map_or(OracleBind::Null, |value| {
         OracleBind::from(value.to_ascii_uppercase())
     });
-    let upper_bound = page_upper_bound(offset, max_rows)?;
     let rows = conn
-        .query_rows(
-            cx,
-            sql,
-            &[
-                owner_bind,
-                OracleBind::from(upper_bound),
-                OracleBind::from(offset as i64),
-            ],
-        )
+        .query_rows(cx, sql, &[owner_bind, OracleBind::from(max_rows as i64)])
         .await?;
 
     Ok(rows
@@ -1242,43 +1056,21 @@ pub async fn orient_recent_ddl(
     owner: Option<&str>,
     max_rows: usize,
 ) -> Result<Vec<OrientRecentDdlObject>, DbError> {
-    orient_recent_ddl_page(cx, conn, owner, 0, max_rows).await
-}
-
-/// Read one stable, offset-based recent-DDL page for `oracle_orient`.
-pub async fn orient_recent_ddl_page(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    owner: Option<&str>,
-    offset: usize,
-    max_rows: usize,
-) -> Result<Vec<OrientRecentDdlObject>, DbError> {
-    let sql = r"SELECT owner, object_name, object_type, last_ddl_time FROM (
-                   SELECT selected.*, ROWNUM AS page_row FROM (
-                       WITH args AS (
-                           SELECT :1 owner_filter FROM dual
-                       )
-                       SELECT o.owner, o.object_name, o.object_type, o.last_ddl_time
-                       FROM all_objects o CROSS JOIN args
-                       WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter)
-                         AND o.last_ddl_time IS NOT NULL
-                       ORDER BY o.last_ddl_time DESC, o.owner, o.object_type, o.object_name
-                   ) selected WHERE ROWNUM <= :2
-               ) WHERE page_row > :3";
+    let sql = r"SELECT * FROM (
+                   WITH args AS (
+                       SELECT :1 owner_filter FROM dual
+                   )
+                   SELECT o.owner, o.object_name, o.object_type, o.last_ddl_time
+                   FROM all_objects o CROSS JOIN args
+                   WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter)
+                     AND o.last_ddl_time IS NOT NULL
+                   ORDER BY o.last_ddl_time DESC, o.owner, o.object_type, o.object_name
+               ) WHERE ROWNUM <= :2";
     let owner_bind = owner.map_or(OracleBind::Null, |value| {
         OracleBind::from(value.to_ascii_uppercase())
     });
-    let upper_bound = page_upper_bound(offset, max_rows)?;
     let rows = conn
-        .query_rows(
-            cx,
-            sql,
-            &[
-                owner_bind,
-                OracleBind::from(upper_bound),
-                OracleBind::from(offset as i64),
-            ],
-        )
+        .query_rows(cx, sql, &[owner_bind, OracleBind::from(max_rows as i64)])
         .await?;
 
     Ok(rows
@@ -1575,30 +1367,19 @@ pub async fn describe_constraints(
     conn: &dyn OracleConnection,
     owner: &str,
     table: &str,
-    max_rows: usize,
 ) -> Result<Vec<OracleRow>, DbError> {
-    let sql = "SELECT * FROM ( \
-                   SELECT c.constraint_name, c.constraint_type, c.status, \
-                          c.deferrable, c.deferred, c.validated, c.generated, \
-                          c.r_owner, c.r_constraint_name, cc.column_name, cc.position \
-                   FROM all_constraints c \
-                   LEFT JOIN all_cons_columns cc \
-                     ON cc.owner = c.owner \
-                    AND cc.constraint_name = c.constraint_name \
-                    AND cc.table_name = c.table_name \
-                   WHERE c.owner = :1 AND c.table_name = :2 \
-                   ORDER BY c.constraint_name, cc.position \
-               ) WHERE ROWNUM <= :3";
-    conn.query_rows(
-        cx,
-        sql,
-        &[
-            OracleBind::from(owner),
-            OracleBind::from(table),
-            OracleBind::from(max_rows.max(1) as i64),
-        ],
-    )
-    .await
+    let sql = "SELECT c.constraint_name, c.constraint_type, c.status, \
+                      c.deferrable, c.deferred, c.validated, c.generated, \
+                      c.r_owner, c.r_constraint_name, cc.column_name, cc.position \
+               FROM all_constraints c \
+               LEFT JOIN all_cons_columns cc \
+                 ON cc.owner = c.owner \
+                AND cc.constraint_name = c.constraint_name \
+                AND cc.table_name = c.table_name \
+               WHERE c.owner = :1 AND c.table_name = :2 \
+               ORDER BY c.constraint_name, cc.position";
+    conn.query_rows(cx, sql, &[OracleBind::from(owner), OracleBind::from(table)])
+        .await
 }
 
 /// `get_ddl`: `DBMS_METADATA.GET_DDL` for an object. `object_type` is validated
@@ -1609,18 +1390,16 @@ pub async fn get_ddl(
     object_type: &str,
     owner: &str,
     name: &str,
-) -> Result<Option<DdlText>, DbError> {
+) -> Result<Option<String>, DbError> {
     if !is_ddl_object_type(object_type) {
         return Err(DbError::Query(format!(
             "unsupported DDL object type: {object_type:?}"
         )));
     }
-    // DBMS_METADATA returns a CLOB. The thin-driver path intentionally reads a
-    // bounded VARCHAR2 prefix, and carries GETLENGTH alongside it so the MCP
-    // surface can never silently present a partial document as complete.
+    // DBMS_METADATA returns a CLOB. Request a VARCHAR2 slice until the thin
+    // driver exposes the LOB APIs needed for streaming full metadata text.
     let sql = format!(
-        "SELECT DBMS_LOB.SUBSTR(ddl, 4000, 1) AS ddl, DBMS_LOB.GETLENGTH(ddl) AS ddl_length \
-         FROM (SELECT DBMS_METADATA.GET_DDL('{}', :1, :2) AS ddl FROM dual)",
+        "SELECT DBMS_LOB.SUBSTR(DBMS_METADATA.GET_DDL('{}', :1, :2), 4000, 1) AS ddl FROM dual",
         object_type.to_ascii_uppercase()
     );
     let rows = conn
@@ -1633,21 +1412,7 @@ pub async fn get_ddl(
             ],
         )
         .await?;
-    Ok(rows.first().and_then(ddl_text_from_row))
-}
-
-fn ddl_text_from_row(row: &OracleRow) -> Option<DdlText> {
-    let text = row.text("DDL")?.to_owned();
-    let returned_chars = text.chars().count();
-    let char_count = row
-        .parse_i64("DDL_LENGTH")
-        .and_then(|length| usize::try_from(length).ok())
-        .unwrap_or(returned_chars);
-    Some(DdlText {
-        truncated: char_count > returned_chars,
-        text,
-        char_count,
-    })
+    Ok(rows.first().and_then(|r| r.text("DDL").map(str::to_owned)))
 }
 
 /// Compile errors for an owner, optionally narrowed to one object (`ALL_ERRORS`;
@@ -1657,25 +1422,18 @@ pub async fn compile_errors(
     conn: &dyn OracleConnection,
     owner: &str,
     name: Option<&str>,
-    max_rows: usize,
 ) -> Result<Vec<OracleRow>, DbError> {
-    let sql = "SELECT * FROM ( \
-                   SELECT name, type, line, position, text, attribute \
-                   FROM all_errors \
-                   WHERE owner = :1 AND (:2 IS NULL OR name = :2) \
-                   ORDER BY name, type, sequence \
-               ) WHERE ROWNUM <= :3";
+    let sql = "SELECT name, type, line, position, text, attribute \
+               FROM all_errors \
+               WHERE owner = :1 AND (:2 IS NULL OR name = :2) \
+               ORDER BY name, type, sequence";
     let name_bind = name.map_or(OracleBind::Null, |n| {
         OracleBind::from(n.to_ascii_uppercase())
     });
     conn.query_rows(
         cx,
         sql,
-        &[
-            OracleBind::from(owner.to_ascii_uppercase()),
-            name_bind,
-            OracleBind::from(max_rows.max(1) as i64),
-        ],
+        &[OracleBind::from(owner.to_ascii_uppercase()), name_bind],
     )
     .await
 }
@@ -1738,8 +1496,6 @@ pub async fn get_source(
     owner: &str,
     name: &str,
     object_type: &str,
-    from_line: Option<usize>,
-    to_line: Option<usize>,
     max_chars: usize,
 ) -> Result<SourceText, DbError> {
     let Some(source_type) = normalize_source_object_type(object_type) else {
@@ -1749,8 +1505,6 @@ pub async fn get_source(
     };
     let sql = "SELECT line, text FROM all_source \
                WHERE owner = :1 AND name = :2 AND type = :3 \
-                 AND (:4 IS NULL OR line >= :4) \
-                 AND (:5 IS NULL OR line <= :5) \
                ORDER BY line";
     let rows = conn
         .query_rows(
@@ -1760,8 +1514,6 @@ pub async fn get_source(
                 OracleBind::from(owner.to_ascii_uppercase()),
                 OracleBind::from(name.to_ascii_uppercase()),
                 OracleBind::from(source_type),
-                from_line.map_or(OracleBind::Null, |line| OracleBind::from(line as i64)),
-                to_line.map_or(OracleBind::Null, |line| OracleBind::from(line as i64)),
             ],
         )
         .await?;
@@ -1845,25 +1597,11 @@ pub async fn get_sources_by_name(
     conn: &dyn OracleConnection,
     owner: &str,
     name: &str,
-    from_line: Option<usize>,
-    to_line: Option<usize>,
     max_chars: usize,
 ) -> Result<Vec<SourceText>, DbError> {
     let mut out = Vec::new();
     for source_type in list_source_types(cx, conn, owner, name).await? {
-        out.push(
-            get_source(
-                cx,
-                conn,
-                owner,
-                name,
-                &source_type,
-                from_line,
-                to_line,
-                max_chars,
-            )
-            .await?,
-        );
+        out.push(get_source(cx, conn, owner, name, &source_type, max_chars).await?);
     }
     Ok(out)
 }
@@ -2980,62 +2718,6 @@ mod tests {
     }
 
     #[test]
-    fn list_objects_page_binds_a_bounded_offset_window() {
-        let mock = CaptureMock::default();
-        let m = &mock;
-        run_with_cx(|cx| async move {
-            list_objects_page(&cx, m, Some("hr"), Some("package"), Some("emp%"), 250, 101)
-                .await
-                .unwrap();
-        });
-
-        let calls = mock.calls.lock().expect("capture lock");
-        assert_eq!(calls.len(), 1);
-        assert!(calls[0].0.contains("ROWNUM <= :4"));
-        assert!(calls[0].0.contains("page_row > :5"));
-        assert_eq!(
-            calls[0].1,
-            vec![
-                OracleBind::String("HR".to_owned()),
-                OracleBind::String("PACKAGE".to_owned()),
-                OracleBind::String("EMP%".to_owned()),
-                OracleBind::I64(351),
-                OracleBind::I64(250),
-            ]
-        );
-    }
-
-    #[test]
-    fn compact_schema_projection_is_static_and_offset_bounded() {
-        let mock = CaptureMock::default();
-        let m = &mock;
-        run_with_cx(|cx| async move {
-            list_schema_projection_page(&cx, m, Some("hr"), Some("emp%"), 100, 101)
-                .await
-                .unwrap();
-        });
-
-        let calls = mock.calls.lock().expect("capture lock");
-        assert_eq!(calls.len(), 1);
-        assert!(
-            calls[0]
-                .0
-                .contains("o.object_type IN ('TABLE', 'VIEW', 'PACKAGE')")
-        );
-        assert!(calls[0].0.contains("ROWNUM <= :3"));
-        assert!(calls[0].0.contains("page_row > :4"));
-        assert_eq!(
-            calls[0].1,
-            vec![
-                OracleBind::String("HR".to_owned()),
-                OracleBind::String("EMP%".to_owned()),
-                OracleBind::I64(201),
-                OracleBind::I64(100),
-            ]
-        );
-    }
-
-    #[test]
     fn list_schemas_binds_filter_and_limit() {
         let mock = CaptureMock::default();
         let m = &mock;
@@ -3112,38 +2794,13 @@ mod tests {
 
         let calls = mock.calls.lock().expect("capture lock");
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].0.contains("DBMS_LOB.SUBSTR(ddl, 4000, 1)"));
-        assert!(calls[0].0.contains("DBMS_LOB.GETLENGTH(ddl)"));
+        assert!(calls[0].0.contains("DBMS_LOB.SUBSTR(DBMS_METADATA.GET_DDL"));
         assert_eq!(
             calls[0].1,
             vec![
                 OracleBind::String("PKG_DEMO".to_owned()),
                 OracleBind::String("HR".to_owned()),
             ]
-        );
-    }
-
-    #[test]
-    fn ddl_prefix_carries_the_full_length_and_never_looks_complete() {
-        let row = OracleRow {
-            columns: vec![
-                (
-                    "DDL".to_owned(),
-                    OracleCell::new("VARCHAR2", Some("CREATE TABLE T".to_owned())),
-                ),
-                (
-                    "DDL_LENGTH".to_owned(),
-                    OracleCell::new("NUMBER", Some("4001".to_owned())),
-                ),
-            ],
-        };
-
-        let ddl = ddl_text_from_row(&row).expect("DDL row converts");
-        assert_eq!(ddl.text, "CREATE TABLE T");
-        assert_eq!(ddl.char_count, 4_001);
-        assert!(
-            ddl.truncated,
-            "a bounded prefix must carry explicit loss metadata"
         );
     }
 
@@ -3213,7 +2870,7 @@ mod tests {
         let mock = CaptureMock::default();
         let m = &mock;
         let constraints = run_with_cx(|cx| async move {
-            describe_constraints(&cx, m, "hr", "employees", 25)
+            describe_constraints(&cx, m, "hr", "employees")
                 .await
                 .unwrap()
         });
@@ -3222,13 +2879,11 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert!(calls[0].0.contains("FROM all_constraints"));
         assert!(calls[0].0.contains("LEFT JOIN all_cons_columns"));
-        assert!(calls[0].0.contains("ROWNUM <= :3"));
         assert_eq!(
             calls[0].1,
             vec![
                 OracleBind::String("hr".to_owned()),
                 OracleBind::String("employees".to_owned()),
-                OracleBind::I64(25),
             ]
         );
     }
@@ -3236,18 +2891,9 @@ mod tests {
     #[test]
     fn get_source_caps_text_and_reports_metadata() {
         let source = run_with_cx(|cx| async move {
-            get_source(
-                &cx,
-                &SourceMock,
-                "hr",
-                "emp_api",
-                "package_body",
-                None,
-                None,
-                8,
-            )
-            .await
-            .unwrap()
+            get_source(&cx, &SourceMock, "hr", "emp_api", "package_body", 8)
+                .await
+                .unwrap()
         });
         assert_eq!(source.owner, "HR");
         assert_eq!(source.name, "EMP_API");
@@ -3259,48 +2905,9 @@ mod tests {
     }
 
     #[test]
-    fn get_source_range_binds_inclusive_line_bounds() {
-        let conn = CaptureMock::default();
-        let conn_ref = &conn;
-        run_with_cx(|cx| async move {
-            get_source(
-                &cx,
-                conn_ref,
-                "hr",
-                "emp_api",
-                "package_body",
-                Some(37),
-                Some(42),
-                1_000,
-            )
-            .await
-            .expect("range lookup succeeds")
-        });
-        let (sql, binds) = conn
-            .calls
-            .lock()
-            .expect("calls")
-            .first()
-            .cloned()
-            .expect("one source query");
-        assert!(sql.contains("line >= :4"));
-        assert!(sql.contains("line <= :5"));
-        assert_eq!(
-            binds,
-            vec![
-                OracleBind::String("HR".to_owned()),
-                OracleBind::String("EMP_API".to_owned()),
-                OracleBind::String("PACKAGE BODY".to_owned()),
-                OracleBind::I64(37),
-                OracleBind::I64(42),
-            ]
-        );
-    }
-
-    #[test]
     fn get_sources_by_name_lists_source_types_and_fetches_each() {
         let sources = run_with_cx(|cx| async move {
-            get_sources_by_name(&cx, &MultiSourceMock, "hr", "emp_api", None, None, 64)
+            get_sources_by_name(&cx, &MultiSourceMock, "hr", "emp_api", 64)
                 .await
                 .unwrap()
         });

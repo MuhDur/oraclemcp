@@ -49,6 +49,22 @@ const CONTROL_PROBE_INGRESS_TIMEOUT: Duration = Duration::from_secs(1);
 const CONTROL_INGRESS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_CONTROL_PREAUTH_CAPACITY_SUBJECT: &str = "control-mtls-handshake";
 
+/// Records a measured control-listener authorization drop before the raw
+/// socket is closed. The principal key contains only the public certificate
+/// fingerprint; it never includes certificate bytes or request contents.
+pub(super) fn control_auth_drop(
+    computed_principal_key: &str,
+    reason: &'static str,
+    error_message: &'static str,
+) -> std::io::Error {
+    tracing::warn!(
+        computed_principal_key = %computed_principal_key,
+        reason = %reason,
+        "dedicated control ingress dropped mTLS client"
+    );
+    std::io::Error::new(std::io::ErrorKind::PermissionDenied, error_message)
+}
+
 /// Serve the MCP server over plaintext Streamable HTTP on `listener`.
 ///
 /// # Errors
@@ -524,12 +540,14 @@ fn handle_control_tls_connection(
                 "dedicated control ingress requires a verified client certificate",
             )
         })?;
+    let computed_principal_key = format!("mtls:{fingerprint}");
     let principal_key = config
         .mtls_clients
         .principal_key_for_fingerprint(&fingerprint)
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
+            control_auth_drop(
+                &computed_principal_key,
+                "not in http.mtls.client_fingerprints",
                 "dedicated control ingress client certificate is not registered",
             )
         })?;
@@ -537,8 +555,9 @@ fn handle_control_tls_connection(
         .operator_authority
         .authorize(Some(&principal_key), false)
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
+            control_auth_drop(
+                &computed_principal_key,
+                "not in http.operator.allowed_subjects",
                 "dedicated control ingress certificate is not operator-authorized",
             )
         })?;
