@@ -1,0 +1,54 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T15:08:06Z",
+  "bead_id": "oraclemcp-091-b9a-proxy-bracket-rhhb9",
+  "scope": {
+    "summary": "Desugar Oracle proxy username shorthand at config load into typed proxy authentication and show the explicit proxy shape in setup output.",
+    "in_scope": [
+      "crates/oraclemcp-config/src/lib.rs",
+      "crates/oraclemcp-config/src/profile.rs",
+      "crates/oraclemcp-core/src/connect.rs",
+      "crates/oraclemcp/src/main_tests.rs",
+      "crates/oraclemcp/src/robot_docs.rs",
+      "crates/oraclemcp/tests/cli.rs"
+    ],
+    "out_of_scope": [
+      "Driver-side bracket-syntax parity in rust-oracledb.",
+      "Live Oracle authentication with a field profile."
+    ]
+  },
+  "source": {
+    "sha": "13a7e6fe4848b84efd9c6ab38eb25a52ba798f20",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "configuration loader and typed connection options",
+        "kind": "config-gate",
+        "trace": "scripts/swarm_discipline.sh bounded-run --timeout 120 -- env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp-target/ws-b-b8c-evidence cargo test -p oraclemcp-config proxy_bracket and cargo test -p oraclemcp-core proxy_bracket_username_reaches_typed_connect_options: 3 config tests and 1 core test passed in the dedicated clean worktree at 13a7e6fe4848b84efd9c6ab38eb25a52ba798f20. They prove desugaring, quoted-identifier preservation, malformed/dual-form refusal, and typed proxy connection options."
+      },
+      {
+        "name": "setup templates and config-ops write path",
+        "kind": "cli",
+        "trace": "scripts/swarm_discipline.sh bounded-run --timeout 120 -- env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp-target/ws-b-b8c-evidence cargo test -p oraclemcp setup_payload_is_generic_and_client_ready and cargo test -p oraclemcp --test cli setup_write_round_trips_profiles_through_config_ops: 1 passed each in the clean worktree at 13a7e6fe4848b84efd9c6ab38eb25a52ba798f20. The generated setup shape exposes [profiles.proxy_auth] without leaking credentials."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No live Oracle proxy authentication was run; this evidence covers config and typed-connect construction only."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
