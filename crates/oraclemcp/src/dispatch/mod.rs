@@ -79,8 +79,9 @@ use oraclemcp_guard::{
     EditionIdentifier, EditionLifecycleParse, EditionLifecycleSql, EscalationError,
     ExecGrantBinding, ExecGrantError, ExecGrantStore, GuardDecision, LevelDecision, ObjectRef,
     OperatingLevel, PolicyGate, PolicyGateAdmission, PolicyGateDenial, PolicyGateRequest, Purity,
-    Resolution, ResolvedObject, SessionLevelState, SideEffectOracle, SqlPolicyConfig,
-    VerdictCertificate, enforce_sql_policy, parse_edition_lifecycle_sql, semantic_read_plan,
+    QuoteSemantics, RawName, Resolution, ResolvedObject, SessionLevelState, SideEffectOracle,
+    SqlPolicyConfig, VerdictCertificate, enforce_sql_policy, parse_edition_lifecycle_sql,
+    semantic_read_plan,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -5018,6 +5019,54 @@ fn unresolved_semantic_read(reason: &'static str) -> ErrorEnvelope {
     .with_next_step(
         "query an ordinary table using explicit table aliases and real columns; views, VPD-protected tables, virtual columns, remote objects, ambiguous names, and unrepresented query scopes are refused",
     )
+    .with_next_step(
+        "inspect allowed objects with oracle_schema_inspect, discover visible schemas with oracle_list_schemas, check database posture with oracle_db_health, or review the enabled surface with oracle_capabilities",
+    )
+}
+
+/// Render a parser-observed identifier for an error without changing the
+/// identifier that the resolver uses as its proof input. Unquoted Oracle names
+/// are shown in their database-normalized form; quoted parts retain their
+/// exact spelling and escape embedded quotes for an unambiguous message.
+fn semantic_name_for_error(name: &RawName) -> String {
+    name.parts
+        .iter()
+        .map(|part| match part.quoting {
+            QuoteSemantics::Unquoted => part.text.to_ascii_uppercase(),
+            QuoteSemantics::Quoted => format!("\"{}\"", part.text.escape_default()),
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// A catalog miss is not a policy refusal. The semantic read gate still refuses
+/// every unknown dependency before caller SQL reaches Oracle, but an operator
+/// needs to distinguish a spelling/visibility problem from a request to
+/// escalate privileges.
+fn missing_semantic_relation(name: &RawName) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::ObjectNotFound,
+        format!(
+            "relation {} does not exist or is not visible to this principal",
+            semantic_name_for_error(name)
+        ),
+    )
+    .with_next_step(
+        "use oracle_schema_inspect to inspect the expected owner, or oracle_list_schemas to discover schemas visible to this principal",
+    )
+}
+
+fn missing_semantic_column(name: &RawName) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::ObjectNotFound,
+        format!(
+            "column {} does not exist or is not visible to this principal",
+            semantic_name_for_error(name)
+        ),
+    )
+    .with_next_step(
+        "use oracle_schema_inspect to inspect the relation columns visible to this principal",
+    )
 }
 
 /// Resolve every caller-controlled read dependency against the exact live
@@ -5092,18 +5141,26 @@ async fn resolve_read_only_relations_inner(
 
     let mut relations = Vec::with_capacity(plan.relations.len());
     for name in &plan.relations {
-        let Resolution::Resolved(object) = cache.resolve(name, &context) else {
-            return Err(unresolved_semantic_read(
-                "a relation has no unique local catalog identity",
-            ));
+        let object = match cache.resolve(name, &context) {
+            Resolution::Resolved(object) => object,
+            Resolution::Unresolved => return Err(missing_semantic_relation(name)),
+            Resolution::Ambiguous { .. } | Resolution::Remote { .. } => {
+                return Err(unresolved_semantic_read(
+                    "a relation has no unique local catalog identity",
+                ));
+            }
         };
         relations.push(*object);
     }
     for name in &plan.values {
-        let Resolution::Resolved(object) = cache.resolve(name, &context) else {
-            return Err(unresolved_semantic_read(
-                "a value identifier is not a unique column",
-            ));
+        let object = match cache.resolve(name, &context) {
+            Resolution::Resolved(object) => object,
+            Resolution::Unresolved => return Err(missing_semantic_column(name)),
+            Resolution::Ambiguous { .. } | Resolution::Remote { .. } => {
+                return Err(unresolved_semantic_read(
+                    "a value identifier is not a unique column",
+                ));
+            }
         };
         if object.kind != CatalogObjectKind::Column {
             return Err(unresolved_semantic_read(
@@ -11159,14 +11216,18 @@ fn connection_info_json(
                 "args": doctor_args,
             }));
 
+            let connection_error = err
+                .into_envelope()
+                .with_suggested_tool("oracle_list_profiles")
+                .with_next_step(
+                    "inspect configured profiles with oracle_list_profiles, then run the listed doctor command for connection diagnostics",
+                );
+
             json!({
                 "active_profile": active_profile,
                 "connected": false,
                 "connection": Value::Null,
-                "connection_error": err
-                    .into_envelope()
-                    .with_suggested_tool("oracle_list_profiles")
-                    .to_json(),
+                "connection_error": connection_error.to_json(),
                 "next_actions": next_actions,
             })
         }

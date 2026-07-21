@@ -663,6 +663,18 @@ mod tests {
     }
 
     #[test]
+    fn dbms_metadata_missing_object_does_not_fall_back_to_connection_failed() {
+        let env = DbError::Query(
+            "ORA-31603: object \"MISSING_TABLE\" of type TABLE not found in schema \"APP\""
+                .to_owned(),
+        )
+        .into_envelope();
+        assert_eq!(env.error_class, ErrorClass::ObjectNotFound);
+        assert_eq!(env.ora_code, Some(31603));
+        assert_eq!(env.suggested_tool.as_deref(), Some("oracle_schema_inspect"));
+    }
+
+    #[test]
     fn unclassified_oracle_error_keeps_code_in_connection_fallback() {
         let env =
             DbError::Execute("ORA-20000: server detail suppressed".to_owned()).into_envelope();

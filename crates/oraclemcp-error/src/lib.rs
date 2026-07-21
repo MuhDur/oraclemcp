@@ -451,7 +451,7 @@ pub fn classify_ora_code(code: i32) -> ErrorClass {
     match code {
         // Object resolution (handled before the 900..=999 syntax range so
         // ORA-00942 classifies as a missing object, not a syntax error).
-        942 | 4043 => ErrorClass::ObjectNotFound,
+        942 | 4043 | 31603 => ErrorClass::ObjectNotFound,
         // Privilege / authentication — all TERMINAL (never auto-retried; not in
         // resilience.rs TRANSIENT_ORA_CODES), so a wrong password or a locked
         // account can never drive a reconnect loop that locks the account harder.
@@ -623,6 +623,7 @@ mod tests {
     fn classify_known_codes() {
         assert_eq!(classify_ora_code(942), ErrorClass::ObjectNotFound);
         assert_eq!(classify_ora_code(4043), ErrorClass::ObjectNotFound);
+        assert_eq!(classify_ora_code(31603), ErrorClass::ObjectNotFound);
         assert_eq!(classify_ora_code(1031), ErrorClass::InsufficientPrivilege);
         assert_eq!(classify_ora_code(1456), ErrorClass::ForbiddenStatement);
         assert_eq!(classify_ora_code(3113), ErrorClass::Transient);
@@ -796,6 +797,16 @@ mod tests {
             .into_envelope();
         assert_eq!(env.error_class, ErrorClass::ObjectNotFound);
         assert_eq!(env.ora_code, Some(942));
+        assert_eq!(env.suggested_tool.as_deref(), Some("oracle_schema_inspect"));
+    }
+
+    #[test]
+    fn dbms_metadata_missing_object_is_not_a_connection_failure() {
+        let env = envelope_from_oracle_message(
+            "ORA-31603: object \"MISSING_TABLE\" of type TABLE not found in schema \"APP\"",
+        );
+        assert_eq!(env.error_class, ErrorClass::ObjectNotFound);
+        assert_eq!(env.ora_code, Some(31603));
         assert_eq!(env.suggested_tool.as_deref(), Some("oracle_schema_inspect"));
     }
 

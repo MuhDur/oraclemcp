@@ -530,6 +530,53 @@ fn served_read_gate_refuses_view_policy_and_zero_arg_function_before_evaluation(
             .dispatch("oracle_query", json!({"sql": sql}))
             .expect_err("hidden or executable dependency must fail closed");
         assert_eq!(error.error_class, ErrorClass::ForbiddenStatement, "{sql}");
+        assert!(
+            error.next_steps.iter().any(|step| {
+                [
+                    "oracle_schema_inspect",
+                    "oracle_list_schemas",
+                    "oracle_db_health",
+                    "oracle_capabilities",
+                ]
+                .iter()
+                .all(|tool| step.contains(tool))
+            }),
+            "view/policy refusal must redirect to sanctioned discovery tools: {error:?}"
+        );
+        assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0, "{sql}");
+    }
+}
+
+#[test]
+fn served_read_gate_reports_missing_relations_and_columns_without_suggesting_escalation() {
+    for (sql, expected_message) in [
+        (
+            "SELECT * FROM app.missing_table",
+            "relation APP.MISSING_TABLE does not exist or is not visible to this principal",
+        ),
+        (
+            "SELECT missing_column FROM app.orders",
+            "column MISSING_COLUMN does not exist or is not visible to this principal",
+        ),
+    ] {
+        let (dispatcher, state) = semantic_dispatcher();
+        let error = dispatcher
+            .dispatch("oracle_query", json!({"sql": sql}))
+            .expect_err("a missing catalog name must refuse before caller SQL executes");
+
+        assert_eq!(error.error_class, ErrorClass::ObjectNotFound, "{sql}");
+        assert_eq!(error.message, expected_message, "{sql}");
+        assert_eq!(
+            error.suggested_tool.as_deref(),
+            Some("oracle_schema_inspect")
+        );
+        assert!(
+            error
+                .next_steps
+                .iter()
+                .any(|step| step.contains("oracle_schema_inspect")),
+            "missing object guidance should direct catalog discovery: {error:?}"
+        );
         assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0, "{sql}");
     }
 }

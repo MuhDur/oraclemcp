@@ -1,0 +1,54 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T12:31:18Z",
+  "bead_id": "oraclemcp-091-p2-3-current-db-redaction-t0ufb",
+  "scope": {
+    "summary": "Expose current_schema and service_name only to stdio and server-observed loopback HTTP connection-info calls, retaining the full remote HTTP redaction set.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/server.rs",
+      "crates/oraclemcp-core/src/http/mod.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp/tests/e2e_http_oauth.rs"
+    ],
+    "out_of_scope": [
+      "Changing the remote HTTP redaction policy for any other connection identity or topology field.",
+      "Trusting caller-supplied forwarding headers to classify a remote peer as local."
+    ]
+  },
+  "source": {
+    "sha": "cf54f10a277acf11f1027b9b09189a177a37376a",
+    "tree_clean": false,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_connection_info and current_database over stdio or loopback HTTP",
+        "kind": "tool",
+        "trace": "connection_info_reports_the_active_profile asserts the local response exposes current_schema and service_name; stateful_http_lanes_keep_profile_switches_and_connections_isolated exercises the real loopback HTTP route and asserts its current schema is present while session_user, module, and action remain redacted."
+      },
+      {
+        "name": "oracle_connection_info over remote HTTP",
+        "kind": "tool",
+        "trace": "connection_info_keeps_schema_and_service_redacted_for_remote_transport sets the server-observed transport flag false and asserts both fields are omitted and still listed in redacted_fields."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped checks only: cargo test -p oraclemcp connection_info_ (5 passed), cargo test -p oraclemcp --test e2e_http_oauth stateful_http_lanes_keep_profile_switches_and_connections_isolated (1 passed), and cargo test -p oraclemcp-core owned_dispatch_context_preserves_lane_time_and_caller_budget (1 passed). The full workspace gate was not run for this close.",
+    "The remote-policy test exercises the trusted DispatchContext boundary directly; no non-loopback listener was started for this close."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
