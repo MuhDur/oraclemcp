@@ -1,0 +1,54 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T17:31:23Z",
+  "bead_id": "oraclemcp-091-b2-oauth-contract-g5xmr",
+  "scope": {
+    "summary": "Document the exact OAuth HS256/RFC 9068 contract and return token-free, distinguishable RFC 6750 diagnostics for rejected bearer tokens.",
+    "in_scope": [
+      "README.md",
+      "docs/configuration.md",
+      "crates/oraclemcp-auth/src/oauth_rs.rs",
+      "crates/oraclemcp-core/src/http/mod.rs",
+      "crates/oraclemcp-core/tests/c1_oauth_literal_jwt.rs"
+    ],
+    "out_of_scope": [
+      "Adding an OAuth token acquisition, refresh, or asymmetric/JWKS verifier.",
+      "Live external-issuer or Oracle validation."
+    ]
+  },
+  "source": {
+    "sha": "15596ba2dd4a76c517b03f1fabdd971dd97cf725",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "POST /mcp with externally minted bearer-token negatives",
+        "kind": "route",
+        "trace": "scripts/resource_budget.sh --profile test --run-id b2-oauth-core-lavendertern -- cargo test -p oraclemcp-core --test c1_oauth_literal_jwt c1_negative_tokens_are_pairwise_distinguishable_on_the_wire: 1 passed. The real HTTP OAuth path emits distinct, token-free WWW-Authenticate diagnostics for wrong typ, missing client_id, missing jti, and bad signature."
+      },
+      {
+        "name": "ResourceServerConfig required-claim validation and reject matrix",
+        "kind": "api",
+        "trace": "scripts/resource_budget.sh --profile test --run-id b2-oauth-auth-lavendertern -- cargo test -p oraclemcp-auth required_rfc9068_claims_must_have_valid_shapes: 1 passed; scripts/resource_budget.sh --profile test --run-id b2-oauth-auth-lavendertern -- cargo test -p oraclemcp-auth oauth_reject_matrix_covers_every_reason_and_the_accept: 1 passed. Missing fixed RFC 9068 claim names are typed while malformed token syntax remains fail-closed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped tests only; no full-workspace gate was run for this commit.",
+    "No live OAuth issuer, Oracle instance, or external network interaction was exercised."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
