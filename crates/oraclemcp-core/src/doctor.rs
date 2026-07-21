@@ -489,6 +489,12 @@ impl DoctorFixReport {
 pub struct DoctorContext<'a> {
     /// A live connection, if one could be opened (enables the live checks).
     pub conn: Option<&'a dyn OracleConnection>,
+    /// Configuration-load error observed before a profile could be resolved.
+    ///
+    /// Kept distinct from [`Self::connection_error`] so a malformed
+    /// `profiles.toml` is reported as a configuration failure, not as a
+    /// firewall, listener, or database-connectivity problem.
+    pub configuration_error: Option<String>,
     /// Connection/setup error observed before a live connection was available.
     pub connection_error: Option<String>,
     /// `TNS_ADMIN` (tnsnames/wallet directory), if set.
@@ -1063,6 +1069,7 @@ pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
         check_state_layout(ctx),
         check_iam_token(ctx),
         check_trio_stack(ctx),
+        check_configuration(ctx),
     ];
     DoctorReport {
         checks,
@@ -1877,6 +1884,14 @@ fn connectivity_failure_class(error: &str) -> ErrorClass {
 }
 
 async fn check_connectivity(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
+    if ctx.configuration_error.is_some() {
+        return CheckResult::new(
+            3,
+            "Connectivity",
+            CheckStatus::Skip,
+            "skipped because configuration could not be loaded",
+        );
+    }
     if let Some(error) = &ctx.connection_error {
         let detail = sanitized_detail(ctx, format!("connect failed: {error}"));
         let fix = connectivity_fix(&detail);
@@ -1936,6 +1951,25 @@ async fn check_connectivity(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
                 .with_oracle_error(&sanitized_detail(ctx, &raw))
             }
         },
+    }
+}
+
+/// Configuration-load check. It is deliberately separate from connectivity:
+/// retrying a malformed `profiles.toml` against the same listener cannot help.
+fn check_configuration(ctx: &DoctorContext<'_>) -> CheckResult {
+    const ID: u8 = 16;
+    const NAME: &str = "Configuration";
+
+    match &ctx.configuration_error {
+        Some(error) => {
+            let detail = sanitized_detail(ctx, format!("configuration load failed: {error}"));
+            CheckResult::new(ID, NAME, CheckStatus::Fail, detail)
+                .with_fix(
+                    "fix the named profiles.toml or ORACLEMCP_CONFIG error, then rerun doctor",
+                )
+                .with_failure_class(ErrorClass::InvalidArguments)
+        }
+        None => CheckResult::new(ID, NAME, CheckStatus::Pass, "configuration load succeeded"),
     }
 }
 

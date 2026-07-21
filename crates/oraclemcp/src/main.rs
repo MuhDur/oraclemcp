@@ -6207,6 +6207,7 @@ fn doctor_process_exit_code(report: &oraclemcp_core::DoctorReport) -> u8 {
 
 struct DoctorProfileContext {
     conn: Option<Box<dyn OracleConnection>>,
+    configuration_error: Option<String>,
     connection_error: Option<String>,
     wallet_location: Option<String>,
     protected_profile_writable: bool,
@@ -6233,6 +6234,7 @@ impl DoctorProfileContext {
     fn offline() -> Self {
         DoctorProfileContext {
             conn: None,
+            configuration_error: None,
             connection_error: None,
             wallet_location: None,
             protected_profile_writable: false,
@@ -6279,6 +6281,28 @@ fn doctor_sensitive_values(opts: &OracleConnectOptions) -> Vec<String> {
 
 fn doctor_connection_error(error: DbError) -> String {
     error.into_envelope().message
+}
+
+/// Render a configuration failure with both the configuration file contract and
+/// the underlying parser/validation error. `default_config_path` names an
+/// existing discovered file; malformed explicit pointers are already named by
+/// the underlying `ORACLEMCP_CONFIG` error.
+fn doctor_configuration_error(error: impl std::fmt::Display) -> String {
+    let source = OracleMcpConfig::default_config_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "profiles.toml or ORACLEMCP_CONFIG".to_owned());
+    format!("{source}: {error}")
+}
+
+fn doctor_resolution_error_context(error: DbError) -> DoctorProfileContext {
+    let error = doctor_connection_error(error);
+    let mut context = DoctorProfileContext::offline();
+    if error.starts_with("config load failed:") {
+        context.configuration_error = Some(doctor_configuration_error(error));
+    } else {
+        context.connection_error = Some(error);
+    }
+    context
 }
 
 fn doctor_call_timeout(call_timeout_seconds: Option<u64>) -> Option<std::time::Duration> {
@@ -6333,7 +6357,7 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
         Ok(cfg) => cfg,
         Err(e) => {
             return DoctorProfileContext {
-                connection_error: Some(format!("config load failed: {e}")),
+                configuration_error: Some(doctor_configuration_error(e)),
                 ..DoctorProfileContext::offline()
             };
         }
@@ -6347,6 +6371,7 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
     let level = oraclemcp_core::session_level_state(chosen, false);
     DoctorProfileContext {
         conn: None,
+        configuration_error: None,
         connection_error: None,
         wallet_location: chosen
             .oci
@@ -6411,7 +6436,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
                     },
                 },
                 Err(e) => DoctorProfileContext {
-                    connection_error: Some(format!("config load failed: {e}")),
+                    configuration_error: Some(doctor_configuration_error(e)),
                     ..DoctorProfileContext::offline()
                 },
             },
@@ -6427,10 +6452,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
                 ),
                 ..DoctorProfileContext::offline()
             },
-            Err(e) => DoctorProfileContext {
-                connection_error: Some(doctor_connection_error(e)),
-                ..DoctorProfileContext::offline()
-            },
+            Err(e) => doctor_resolution_error_context(e),
         };
     };
 
@@ -6438,6 +6460,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
         Ok(Some(resolved)) => doctor_open_resolved_profile(resolved),
         Ok(None) => DoctorProfileContext {
             conn: None,
+            configuration_error: None,
             connection_error: Some(format!("connection profile `{profile}` not found")),
             wallet_location: None,
             protected_profile_writable: false,
@@ -6455,25 +6478,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             iam_token: None,
             wallet_password: None,
         },
-        Err(e) => DoctorProfileContext {
-            conn: None,
-            connection_error: Some(doctor_connection_error(e)),
-            wallet_location: None,
-            protected_profile_writable: false,
-            connection_strategy: None,
-            call_timeout_resolved: false,
-            call_timeout: None,
-            connect_timeout_seconds: None,
-            inactivity_timeout_seconds: None,
-            keepalive_minutes: None,
-            proxy_user: false,
-            profile_caps: None,
-            auth_capabilities: None,
-            sensitive_values: Vec::new(),
-            credential_env_hint: None,
-            iam_token: None,
-            wallet_password: None,
-        },
+        Err(e) => doctor_resolution_error_context(e),
     }
 }
 
@@ -6562,6 +6567,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
                 Some(runtime_connection_strategy(pool_configured, &connections).to_owned());
             DoctorProfileContext {
                 conn: Some(connections.session),
+                configuration_error: None,
                 connection_error: None,
                 wallet_location,
                 protected_profile_writable,
@@ -6584,6 +6590,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
         }
         Err(e) => DoctorProfileContext {
             conn: None,
+            configuration_error: None,
             connection_error: Some(doctor_connection_error(e)),
             wallet_location,
             protected_profile_writable,
@@ -6620,6 +6627,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
     }
     let ctx = DoctorContext {
         conn: profile_ctx.conn.as_deref(),
+        configuration_error: profile_ctx.configuration_error,
         connection_error: profile_ctx.connection_error,
         tns_admin: std::env::var("TNS_ADMIN").ok(),
         wallet_location: profile_ctx.wallet_location,
