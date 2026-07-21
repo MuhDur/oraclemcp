@@ -999,7 +999,7 @@ documented in [`docs/configuration.md`](docs/configuration.md).
 |---|---|
 | **Database version** | Tested against **Oracle Database 23ai**, including the free **Oracle FREE 23ai** image (`gvenzl/oracle-free:23-slim`, `FREEPDB1`). The pure-Rust thin `oracledb` driver speaks the Oracle Net protocol directly — no Instant Client or ODPI-C. |
 | **EZConnect** | Supported (`host:port/service`, plus EZConnect-Plus `tcps://…?wallet_location=…`) and `tnsnames.ora` aliases. |
-| **TCPS / wallet (TLS, mTLS)** | Supported with unencrypted `ewallet.pem`, plus `ssl_server_dn_match` / `ssl_server_cert_dn` / `use_sni` controls. `cwallet.sso` and standalone `ewallet.p12` are recognized and reported with structured wallet diagnostics in the default build rather than silently falling back. |
+| **TCPS / wallet (TLS, mTLS)** | Supported with `ewallet.pem` (with its wallet password), auto-login `cwallet.sso`, or standalone `ewallet.p12` (with its wallet password), plus `ssl_server_dn_match` / `ssl_server_cert_dn` / `use_sni` controls. All three wallet modes load through the default build's thin driver. |
 | **OCI IAM database token** | Supported for pre-fetched JWT sources over TCPS (`token_env`, `token_file`, `token_exec`, or `ORACLEMCP_IAM_TOKEN`). Non-TCPS is refused before token use. Autonomous OCI SDK/resource-principal minting and real-ADB acceptance remain separate gated work — see the [OCI section](#oci-iam-database-token-auth) and [`docs/configuration.md`](docs/configuration.md). |
 | **Proxy auth** | Supported (`proxy_user` + `target_schema` with `CONNECT THROUGH`). |
 | **DRCP** | Supported (server routing: `pooled` / `connection_class` / `purity`). |
