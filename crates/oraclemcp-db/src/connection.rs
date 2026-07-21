@@ -1341,6 +1341,23 @@ impl RustOracleConnectionGuard<'_> {
     }
 }
 
+async fn quarantine_connection_slot(
+    inner: &Arc<AsyncMutex<RustOracleConnectionSlot>>,
+    cx: &Cx,
+    reason: String,
+) -> DbError {
+    let mut guard = match inner.lock(cx).await {
+        Ok(guard) => guard,
+        Err(err) => return DbError::Internal(format!("thin connection lock failed: {err}")),
+    };
+    let reason = guard.quarantine_reason.get_or_insert(reason).clone();
+    drop(guard.connection.take());
+    DbError::Quarantined {
+        outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+        message: reason,
+    }
+}
+
 impl std::ops::Deref for RustOracleConnectionGuard<'_> {
     type Target = oracledb::Connection;
 
@@ -1434,12 +1451,18 @@ impl RustOracleConnection {
                 message: reason.to_owned(),
             });
         }
-        if guard.connection.replace(connection).is_some() {
-            return Err(DbError::Internal(
+        if guard.connection.is_some() {
+            let reason =
                 "thin connection slot was unexpectedly occupied during row-stream recovery"
-                    .to_owned(),
-            ));
+                    .to_owned();
+            guard.quarantine_reason = Some(reason.clone());
+            drop(guard.connection.take());
+            return Err(DbError::Quarantined {
+                outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                message: reason,
+            });
         }
+        guard.connection = Some(connection);
         Ok(())
     }
 
@@ -2714,12 +2737,18 @@ mod driver {
                 message: reason.to_owned(),
             });
         }
-        if guard.connection.replace(connection).is_some() {
-            return Err(DbError::Internal(
+        if guard.connection.is_some() {
+            let reason =
                 "thin connection slot was unexpectedly occupied during row-stream recovery"
-                    .to_owned(),
-            ));
+                    .to_owned();
+            guard.quarantine_reason = Some(reason.clone());
+            drop(guard.connection.take());
+            return Err(DbError::Quarantined {
+                outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                message: reason,
+            });
         }
+        guard.connection = Some(connection);
         Ok(())
     }
 
@@ -2777,17 +2806,20 @@ mod driver {
                 let stream = self.stream.take().ok_or_else(|| {
                     DbError::Internal("owned row stream has already been recovered".to_owned())
                 })?;
-                let connection =
-                    stream
-                        .into_connection()
-                        .await
-                        .map_err(|err| DbError::Quarantined {
-                            outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
-                            message: format!(
+                let connection = match stream.into_connection().await {
+                    Ok(connection) => connection,
+                    Err(err) => {
+                        return Err(super::quarantine_connection_slot(
+                            &self.inner,
+                            cx,
+                            format!(
                                 "owned row stream could not recover its connection: {}",
                                 sanitize_driver_error(err, &self.opts)
                             ),
-                        })?;
+                        )
+                        .await);
+                    }
+                };
                 replace_connection_slot(&self.inner, cx, connection).await?;
                 super::db_checkpoint(cx, "oracle_db.query_row_stream.recovered")?;
                 Ok(())
@@ -5651,28 +5683,36 @@ mod driver {
             if let Some(timeout_ms) = timeout_ms {
                 query = query.timeout(Duration::from_millis(u64::from(timeout_ms)));
             }
-            let stream = connection.into_row_stream(cx, query).await.map_err(|err| {
-                DbError::Quarantined {
-                    outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
-                    message: format!(
-                        "owned row stream failed before the connection could be recovered: {}",
-                        sanitize_driver_error(err, &self.opts)
-                    ),
+            let stream = match connection.into_row_stream(cx, query).await {
+                Ok(stream) => stream,
+                Err(err) => {
+                    return Err(super::quarantine_connection_slot(
+                        &self.inner,
+                        cx,
+                        format!(
+                            "owned row stream failed before the connection could be recovered: {}",
+                            sanitize_driver_error(err, &self.opts)
+                        ),
+                    )
+                    .await);
                 }
-            })?;
+            };
             let metadata = stream.columns().to_vec();
             if let Some(reason) = row_stream_chunked_fallback_reason(&metadata) {
-                let connection =
-                    stream
-                        .into_connection()
-                        .await
-                        .map_err(|err| DbError::Quarantined {
-                            outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
-                            message: format!(
+                let connection = match stream.into_connection().await {
+                    Ok(connection) => connection,
+                    Err(err) => {
+                        return Err(super::quarantine_connection_slot(
+                            &self.inner,
+                            cx,
+                            format!(
                                 "owned row stream could not recover for chunked fallback: {}",
                                 sanitize_driver_error(err, &self.opts)
                             ),
-                        })?;
+                        )
+                        .await);
+                    }
+                };
                 self.replace_connection(cx, connection).await?;
                 super::db_checkpoint(cx, "oracle_db.query_row_stream.fallback")?;
                 return Ok(QueryRowStreamStart::Fallback { reason });
@@ -6377,6 +6417,52 @@ mod tests {
             ),
             "subsequent use remains structurally quarantined: {error:?}"
         );
+    }
+
+    #[test]
+    fn owned_stream_recovery_failure_persists_quarantine_for_later_calls() {
+        use asupersync::runtime::RuntimeBuilder;
+
+        let inner = Arc::new(AsyncMutex::new(RustOracleConnectionSlot {
+            connection: None,
+            quarantine_reason: None,
+        }));
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let (first, repeated) = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            let first = quarantine_connection_slot(
+                &inner,
+                &cx,
+                "owned row stream could not recover its connection: injected failure".to_owned(),
+            )
+            .await;
+            let conn = RustOracleConnection {
+                opts: OracleConnectOptions::default(),
+                inner: Arc::clone(&inner),
+                wire_limits: Mutex::new(WireLimits::default()),
+                cqn_client_ids: Mutex::new(HashMap::new()),
+            };
+            let repeated = match conn.lock_inner(&cx).await {
+                Ok(_) => panic!("a recovery failure must not restore the connection slot"),
+                Err(error) => error,
+            };
+            (first, repeated)
+        });
+
+        for error in [first, repeated] {
+            assert!(
+                matches!(
+                    error,
+                    DbError::Quarantined {
+                        outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                        ref message,
+                    } if message == "owned row stream could not recover its connection: injected failure"
+                ),
+                "recovery failure must remain typed quarantine, never temporary unavailability: {error:?}"
+            );
+        }
     }
 
     #[test]
