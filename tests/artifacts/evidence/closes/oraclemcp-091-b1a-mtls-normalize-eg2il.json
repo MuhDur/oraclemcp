@@ -1,0 +1,51 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T18:07:59Z",
+  "bead_id": "oraclemcp-091-b1a-mtls-normalize-eg2il",
+  "scope": {
+    "summary": "Normalizes only exact mtls: SHA-256 operator subjects at config load so accepted uppercase and bare-hex spellings become the runtime principal key, with C3 proving every accepted spelling authorizes.",
+    "in_scope": [
+      "crates/oraclemcp-config/src/lib.rs",
+      "crates/oraclemcp-core/tests/c3_mtls_literal_fingerprints.rs"
+    ],
+    "out_of_scope": [
+      "Remote control-listener or live Oracle R1 execution.",
+      "Normalization of non-mTLS operator identity kinds or malformed mTLS entries; those remain trim-only."
+    ]
+  },
+  "source": {
+    "sha": "1beb302db264093d4ee705e320b1a8f33e21efa2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "control-listener operator authority policy",
+        "kind": "api",
+        "trace": "scripts/resource_budget.sh --profile test --run-id b1a-c3-adoption-lavendertern -- cargo test -p oraclemcp-core c3_operator_allowed_subjects_authorize_in_every_accepted_spelling: 1 passed; C3 loads each accepted spelling through OracleMcpConfig and verifies it authorizes the runtime mtls:sha256 lowercase principal key."
+      },
+      {
+        "name": "HTTP config loading and validation",
+        "kind": "api",
+        "trace": "scripts/resource_budget.sh --profile test --run-id b15-config-adoption-lavendertern -- cargo test -p oraclemcp-config: 132 unit, 5 discovery-parity, 1 example-config, and 5 property tests passed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No R1 remote control-listener or live Oracle execution is claimed; the closure is backed by deterministic config and C3 authority-policy tests.",
+    "The full workspace quality gate was not run for this source commit."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
