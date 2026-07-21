@@ -1,0 +1,39 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T12:16:18Z",
+  "bead_id": "oraclemcp-091-p2-1-node-extra-ca-doc-9enoe",
+  "scope": {
+    "summary": "Document the Node CA-bundle environment needed for Claude Code to connect to a self-signed or private-CA HTTPS listener.",
+    "in_scope": [
+      "README.md"
+    ],
+    "out_of_scope": [
+      "Changing the listener TLS trust model or Claude Code runtime behavior."
+    ]
+  },
+  "source": {
+    "sha": "62dd4879ef47c42c20aa780a0406991e782aa127",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is a documentation-only change; no live Claude Code or private-CA listener session was run.",
+    "No required-proof/v1 artifact exists for this close, so readiness remains not-ready on manual review."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
