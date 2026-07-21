@@ -15,7 +15,7 @@
   },
   "source": {
     "sha": "c5a22eaa54d6f105b5c97ca0d2ea23bf00c9fdba",
-    "tree_clean": false,
+    "tree_clean": true,
     "branch": "main"
   },
   "proofs": [],
@@ -37,5 +37,5 @@
   "limitations": ["Live fixture seeding and DRCP execution require the operator's existing Oracle containers and credentials."] ,
   "known_defects": [],
   "follow_ups": [],
-  "readiness": {"claim": "ready", "basis": "scoped-test"}
+  "readiness": {"claim": "ready", "basis": "manual-review"}
 }
