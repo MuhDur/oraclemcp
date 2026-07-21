@@ -684,6 +684,138 @@ mod tests {
         ));
     }
 
+    /// Every `TokenError`, exhaustively (bead H13, plan §30.4 item 11).
+    ///
+    /// The audit the plan asked for: each reject reason above already has its
+    /// own test, so this is not new coverage — it is the guarantee those tests
+    /// cannot give. `TokenError` is `#[non_exhaustive]`, and nothing linked the
+    /// enum to the test list, so a new variant could ship with no test and
+    /// nothing would notice. This `match` is in the defining crate, so adding a
+    /// variant stops the crate compiling until it is named here, and
+    /// `oauth_reject_matrix_covers_every_reason_and_the_accept` then requires a
+    /// row that actually provokes it.
+    fn all_token_errors() -> Vec<TokenError> {
+        let all = vec![
+            TokenError::Missing,
+            TokenError::Malformed,
+            TokenError::UnexpectedTokenType,
+            TokenError::UnsupportedAlg(String::new()),
+            TokenError::BadSignature,
+            TokenError::Expired,
+            TokenError::NotYetValid,
+            TokenError::UntrustedIssuer(String::new()),
+            TokenError::AudienceMismatch,
+            TokenError::InsufficientScope,
+        ];
+        // Exhaustiveness guard: extend `all` when this stops compiling.
+        fn assert_exhaustive(error: &TokenError) -> u8 {
+            match error {
+                TokenError::Missing => 0,
+                TokenError::Malformed => 1,
+                TokenError::UnexpectedTokenType => 2,
+                TokenError::UnsupportedAlg(_) => 3,
+                TokenError::BadSignature => 4,
+                TokenError::Expired => 5,
+                TokenError::NotYetValid => 6,
+                TokenError::UntrustedIssuer(_) => 7,
+                TokenError::AudienceMismatch => 8,
+                TokenError::InsufficientScope => 9,
+            }
+        }
+        let _ = assert_exhaustive(&TokenError::Missing);
+        all
+    }
+
+    /// The single reject table plan §30.4 item 11 asks for: every reject reason
+    /// provoked by a purpose-built input, plus the one accept. Coverage is
+    /// checked by discriminant, so a payload-carrying variant counts only when
+    /// the validator really produced it.
+    #[test]
+    fn oauth_reject_matrix_covers_every_reason_and_the_accept() {
+        let config = cfg();
+        let now = 1_000_000_000i64;
+
+        // (label, actual outcome) — every row runs the real validator.
+        let rows: Vec<(&str, Result<Vec<String>, TokenError>)> = vec![
+            (
+                "no Authorization header",
+                extract_bearer(None).map(|token| vec![token.to_owned()]),
+            ),
+            ("not a JWT", config.validate("not-a-jwt", &verifier(), now)),
+            (
+                "typ is a generic JWT, not at+jwt",
+                config.validate(
+                    &mint_with_header(json!({ "alg": "HS256", "typ": "JWT" }), good_claims()),
+                    &verifier(),
+                    now,
+                ),
+            ),
+            (
+                "alg none",
+                config.validate(
+                    &mint_with_header(json!({ "alg": "none", "typ": "at+jwt" }), good_claims()),
+                    &verifier(),
+                    now,
+                ),
+            ),
+            ("tampered signature", {
+                let token = mint(good_claims());
+                let tampered = format!("{}x", &token[..token.len() - 1]);
+                config.validate(&tampered, &verifier(), now)
+            }),
+            ("exp in the past", {
+                let mut claims = good_claims();
+                claims["exp"] = json!(now - 1);
+                config.validate(&mint(claims), &verifier(), now)
+            }),
+            ("nbf in the future", {
+                let mut claims = good_claims();
+                claims["nbf"] = json!(now + 60);
+                config.validate(&mint(claims), &verifier(), now)
+            }),
+            ("iss off the allowlist", {
+                let mut claims = good_claims();
+                claims["iss"] = json!("https://attacker.example");
+                config.validate(&mint(claims), &verifier(), now)
+            }),
+            ("aud omits this resource", {
+                let mut claims = good_claims();
+                claims["aud"] = json!(["https://other.example/mcp"]);
+                config.validate(&mint(claims), &verifier(), now)
+            }),
+            ("required scope absent", {
+                let mut required = cfg();
+                required.required_scopes = vec!["oracle:admin".to_owned()];
+                required.validate(&mint(good_claims()), &verifier(), now)
+            }),
+        ];
+
+        let mut produced = Vec::new();
+        for (label, outcome) in &rows {
+            let error = outcome
+                .as_ref()
+                .expect_err(&format!("row {label:?} must be rejected"));
+            produced.push(std::mem::discriminant(error));
+        }
+
+        for expected in all_token_errors() {
+            assert!(
+                produced.contains(&std::mem::discriminant(&expected)),
+                "no row in the reject matrix provokes {expected:?}; \
+                 a reject reason with no row is a reason nothing tests"
+            );
+        }
+
+        // ...and the one accept, so the matrix cannot pass by rejecting all.
+        let scopes = config
+            .validate(&mint(good_claims()), &verifier(), now)
+            .expect("an authentic in-window token with satisfied scopes must be accepted");
+        assert!(
+            scopes.iter().any(|scope| scope == "oracle:read"),
+            "the accept row must return the token's scopes, got {scopes:?}"
+        );
+    }
+
     #[test]
     fn extract_bearer_parses_header() {
         assert_eq!(

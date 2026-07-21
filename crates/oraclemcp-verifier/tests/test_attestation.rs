@@ -371,3 +371,121 @@ fn golden_document_is_byte_stable_and_verifies() {
     );
     verify_test_attestation(&golden, &[signing_key()]).expect("golden verifies");
 }
+
+/// Tamper matrix with a depth check (bead H13, plan §30.4 item 11, second half).
+///
+/// `payload_tamper_is_rejected_via_digest_mismatch` flips one field at depth 3.
+/// That proves the digest covers *that* field. This walks the whole payload and
+/// tampers every scalar leaf at every depth, so a field accidentally left out of
+/// the signed preimage — the classic way a "signed" document is not actually
+/// signed end to end — cannot hide behind the one field that is checked.
+///
+/// The control assertion is the point of the design: an untampered
+/// re-serialization must still verify. Without it, a matrix that merely
+/// re-encodes the JSON would "reject" every row for the wrong reason and prove
+/// nothing (plan §30.5, self-fulfilling fixtures).
+#[test]
+fn every_payload_leaf_at_every_depth_is_covered_by_the_signature() {
+    fn leaves(value: &serde_json::Value, path: String, out: &mut Vec<(String, usize)>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    leaves(child, format!("{path}/{key}"), out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, child) in items.iter().enumerate() {
+                    leaves(child, format!("{path}/{index}"), out);
+                }
+            }
+            _ => {
+                let depth = path.matches('/').count();
+                out.push((path, depth));
+            }
+        }
+    }
+
+    fn tamper(value: &mut serde_json::Value, pointer: &str) {
+        let target = value
+            .pointer_mut(pointer)
+            .unwrap_or_else(|| panic!("pointer {pointer} must resolve"));
+        *target = match target {
+            serde_json::Value::String(text) => serde_json::Value::String(format!("{text}x")),
+            serde_json::Value::Bool(flag) => serde_json::Value::Bool(!*flag),
+            serde_json::Value::Number(number) => serde_json::Value::Number(
+                serde_json::Number::from(number.as_i64().unwrap_or_default() + 1),
+            ),
+            other => panic!("unexpected non-scalar leaf at {pointer}: {other}"),
+        };
+    }
+
+    let document = signed_document();
+    let (payload_line, signature_line) = document
+        .trim_end_matches('\n')
+        .split_once('\n')
+        .expect("a signed document is payload + signature");
+    let payload: serde_json::Value = serde_json::from_str(payload_line).expect("payload JSON");
+    let rebuild = |payload: &serde_json::Value| {
+        format!(
+            "{}\n{signature_line}\n",
+            serde_json::to_string(payload).expect("payload re-serializes")
+        )
+    };
+
+    // Control: re-serializing without tampering must still verify, otherwise
+    // every row below would be rejected by encoding drift rather than by tamper
+    // detection and this test would be worthless.
+    verify_test_attestation(&rebuild(&payload), &[signing_key()])
+        .expect("an untampered re-serialization must still verify");
+
+    let mut targets = Vec::new();
+    leaves(&payload, String::new(), &mut targets);
+    assert!(
+        targets.len() >= 12,
+        "the payload should expose many leaves; found {}",
+        targets.len()
+    );
+    assert!(
+        targets.iter().any(|(_, depth)| *depth >= 3),
+        "no leaf deeper than two levels; the depth check would be vacuous"
+    );
+
+    // Totality: every leaf, at every depth, must be rejected somehow. A leaf
+    // that verifies is a field outside the signed bytes.
+    for (pointer, depth) in &targets {
+        let mut tampered = payload.clone();
+        tamper(&mut tampered, pointer);
+        let outcome = verify_test_attestation(&rebuild(&tampered), &[signing_key()]);
+        assert!(
+            outcome.is_err(),
+            "tampering {pointer} (depth {depth}) verified successfully; \
+             that field is not covered by the signature"
+        );
+    }
+
+    // Specificity: a tamper that stays schema-valid must be caught by the
+    // DIGEST, not by an earlier format check. Without this, a document whose
+    // digest covered nothing would still pass the loop above purely on schema
+    // validation — the fields below are the deepest ones, at depth 3.
+    for (pointer, replacement) in [
+        ("/tests/0/outcome", serde_json::json!("FAIL")),
+        (
+            "/artifacts/0/sha256",
+            serde_json::json!(format!("sha256:{}{}", "a".repeat(63), "b")),
+        ),
+        (
+            "/tests/0/detail",
+            serde_json::json!("kill=00.0% threshold=90"),
+        ),
+    ] {
+        let mut tampered = payload.clone();
+        *tampered
+            .pointer_mut(pointer)
+            .unwrap_or_else(|| panic!("pointer {pointer} must resolve")) = replacement;
+        assert_eq!(
+            verify_test_attestation(&rebuild(&tampered), &[signing_key()]),
+            Err(TestAttestationVerificationError::PayloadDigestMismatch),
+            "a schema-valid tamper of {pointer} must be caught by the payload digest"
+        );
+    }
+}
