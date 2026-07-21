@@ -528,6 +528,8 @@ Connection profiles are resolved from layered configuration (`oraclemcp-config`)
 > before you add wallet, proxy, DRCP, pool, app-context, or writable-profile
 > settings.
 
+### Signed audit and unsigned refusal trail
+
 For live database access, create `~/.config/oraclemcp/profiles.toml`:
 
 ```toml
@@ -547,8 +549,6 @@ dashboard_workbench = false
 resource = "http://127.0.0.1:7070/mcp"
 allowed_issuers = ["https://issuer.example.com"]
 authorization_servers = ["https://issuer.example.com"]
-### Signed audit and unsigned refusal trail
-
 required_scopes = ["oracle:read"]
 hs256_secret_ref = "env:ORACLEMCP_OAUTH_HS256_SECRET"
 
@@ -574,25 +574,6 @@ hs256_secret_ref = "env:ORACLEMCP_OAUTH_HS256_SECRET"
 # allow_loopback_owner = true
 # allowed_subjects = ["mtls:sha256:<client-leaf-der-sha256>"]
 
-[[profiles]]
-name = "dev_ro"
-description = "Read-only development database"
-connect_string = "localhost:1521/FREEPDB1"
-username = "APP_READONLY"
-credential_ref = "env:ORACLE_APP_PASSWORD"
-max_level = "READ_ONLY"
-default_level = "READ_ONLY"
-require_signed_tools = true
-dashboard_ddl_workbench = false
-# Optional Oracle call timeout and request-budget ceiling. Omit for the 30s
-# default; set 0 only to opt out deliberately. Tool calls can tighten it with
-# timeout_seconds where advertised.
-call_timeout_seconds = 30
-# Optional thin Session Data Unit request. Validated as 512..=65535 bytes.
-sdu = 32768
-login_statements = [
-  "ALTER SESSION SET NLS_LANGUAGE = english",
-  "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'",
 # Signed audit chain. It records every privileged action in an append-only,
 # hash-chained, HMAC-SHA256-signed JSONL stream. Omit `path` to use
 # $XDG_STATE_HOME/oraclemcp/audit/audit.jsonl (or
@@ -614,6 +595,25 @@ key_id = "2026-q3"
 # tamper-evident; it never replaces the signed chain. Set false only to opt out.
 unsigned_refusal_log = true
 
+[[profiles]]
+name = "dev_ro"
+description = "Read-only development database"
+connect_string = "localhost:1521/FREEPDB1"
+username = "APP_READONLY"
+credential_ref = "env:ORACLE_APP_PASSWORD"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
+require_signed_tools = true
+dashboard_ddl_workbench = false
+# Optional Oracle call timeout and request-budget ceiling. Omit for the 30s
+# default; set 0 only to opt out deliberately. Tool calls can tighten it with
+# timeout_seconds where advertised.
+call_timeout_seconds = 30
+# Optional thin Session Data Unit request. Validated as 512..=65535 bytes.
+sdu = 32768
+login_statements = [
+  "ALTER SESSION SET NLS_LANGUAGE = english",
+  "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'",
 ]
 # Optional trusted local setup, authored by the profile owner and never by the
 # agent. Use for session-local initialization that is not an ALTER SESSION.
@@ -687,6 +687,13 @@ client_identifier = "agent"
 client_info = "local-workstation"
 ```
 
+Keep the signed JSONL and its `<audit path>.anchor` sidecar together. Run
+`oraclemcp audit verify /var/lib/oraclemcp/audit/audit.jsonl` with the same
+secret reference to re-walk the hashes, verify the MAC, and detect a truncated
+tail against that anchor. The unsigned refusal trail is deliberately outside
+this command and cannot provide those tamper-evidence guarantees; it is the
+diagnostic floor only while the signed tier is unavailable.
+
 `max_level` is the profile ceiling; `default_level` is the starting session
 level and must not exceed that ceiling. `call_timeout_seconds` defaults to 30
 seconds when omitted. It sets the Oracle driver call timeout for the physical
@@ -706,13 +713,6 @@ The `oracle_connection_info` tool reports allow-listed connection posture
 status). Session identity and client topology fields such as `os_user`,
 `program`, `machine`, `terminal`, `client_driver`, `module`, `action`,
 `client_identifier`, and `client_info` are redacted by default and appear only
-Keep the signed JSONL and its `<audit path>.anchor` sidecar together. Run
-`oraclemcp audit verify /var/lib/oraclemcp/audit/audit.jsonl` with the same
-secret reference to re-walk the hashes, verify the MAC, and detect a truncated
-tail against that anchor. The unsigned refusal trail is deliberately outside
-this command and cannot provide those tamper-evidence guarantees; it is the
-diagnostic floor only while the signed tier is unavailable.
-
 as names in `redacted_fields` when present. The Rust thin backend can still set
 the connect-time client identity fields (`program`, `machine`, `os_user`,
 `terminal`, and `driver_name`) from profile config, and it applies `module`,
