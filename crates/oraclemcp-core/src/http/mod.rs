@@ -516,9 +516,38 @@ impl HttpResponse {
 
 fn token_error_code(e: &TokenError) -> &'static str {
     match e {
+        TokenError::Missing => "invalid_request",
         TokenError::InsufficientScope => "insufficient_scope",
         // RFC 6750: every other validation failure is `invalid_token`.
         _ => "invalid_token",
+    }
+}
+
+/// Operator-facing OAuth failure text. Every value is a fixed protocol category
+/// or a fixed RFC 9068 claim name: tokens, signatures, issuer strings, and other
+/// client-controlled values must never enter a response header.
+fn token_error_description(e: &TokenError) -> &'static str {
+    match e {
+        TokenError::Missing => "Bearer access token is required",
+        TokenError::Malformed => "Token is malformed",
+        TokenError::MissingRequiredClaim(claim) => match *claim {
+            "iss" => "Required RFC 9068 claim iss is missing",
+            "sub" => "Required RFC 9068 claim sub is missing",
+            "client_id" => "Required RFC 9068 claim client_id is missing",
+            "jti" => "Required RFC 9068 claim jti is missing",
+            "iat" => "Required RFC 9068 claim iat is missing",
+            "exp" => "Required RFC 9068 claim exp is missing",
+            _ => "A required RFC 9068 claim is missing",
+        },
+        TokenError::UnexpectedTokenType => "JWT typ must identify an RFC 9068 access token",
+        TokenError::UnsupportedAlg(_) => "JWT alg is not supported by this resource server",
+        TokenError::BadSignature => "Token signature did not verify",
+        TokenError::Expired => "Token has expired",
+        TokenError::NotYetValid => "Token is not valid yet",
+        TokenError::UntrustedIssuer(_) => "Token issuer is not trusted",
+        TokenError::AudienceMismatch => "Token audience does not include this resource",
+        TokenError::InsufficientScope => "Token lacks a required scope",
+        _ => "Token validation failed",
     }
 }
 
@@ -628,6 +657,7 @@ fn oauth_error_response(enforcement: &OAuthEnforcement, err: Option<TokenError>)
     let challenge = enforcement.config.www_authenticate(
         &enforcement.metadata_url,
         err.as_ref().map(token_error_code),
+        err.as_ref().map(token_error_description),
     );
     let status = token_error_status(err.as_ref());
     HttpResponse {

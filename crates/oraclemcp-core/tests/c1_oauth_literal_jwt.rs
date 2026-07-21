@@ -35,12 +35,9 @@
 //! published test constant with no production meaning.
 //!
 //! **Two-sided proof.** `c1_negative_tokens_are_pairwise_distinguishable_on_the_wire`
-//! is the failing half and is `#[ignore]`d against today's `main`
-//! (`token_error_code`, `http/mod.rs:517-523`, collapses Malformed /
-//! BadSignature / AudienceMismatch / UntrustedIssuer / Expired into one
-//! `invalid_token` code with no `error_description`). Bead
-//! `oraclemcp-091-b2-oauth-contract-g5xmr` (B2a+B2b) flips it to enforced-green
-//! by removing the `#[ignore]`. Everything else in this file passes today and
+//! confirms that every rejected token reports a token-free, operator-actionable
+//! `WWW-Authenticate` diagnostic. Bead `oraclemcp-091-b2-oauth-contract-g5xmr`
+//! (B2a+B2b) owns that guarantee. Everything else in this file passes today and
 //! guards the acceptance path against regression.
 
 use std::sync::Arc;
@@ -309,17 +306,10 @@ fn c1_negatives_are_refused_with_an_rfc6750_challenge() {
 
 /// The failing half of C1's two-sided proof.
 ///
-/// A hand-built token that is missing `client_id` and one that is missing `jti`
-/// both collapse to `TokenError::Malformed`, and every rejection class collapses
-/// to a bare `error="invalid_token"` with no `error_description`
-/// (`http/mod.rs:517-523`). An operator debugging a rejected token therefore
-/// gets the same six words no matter what is actually wrong — which is precisely
-/// how P1-11 was misdiagnosed as a broken HS256 implementation.
-///
-/// Ignored against pre-fix `main`; bead `oraclemcp-091-b2-oauth-contract-g5xmr`
-/// (B2a+B2b) removes the `#[ignore]` as its acceptance.
+/// Each hand-built negative must surface its distinct, token-free failure
+/// category. In particular, missing `client_id` and missing `jti` use the
+/// typed `MissingRequiredClaim` error rather than collapsing into `Malformed`.
 #[test]
-#[ignore = "expected failure until oraclemcp-091-b2-oauth-contract-g5xmr (B2b) widens error_description"]
 fn c1_negative_tokens_are_pairwise_distinguishable_on_the_wire() {
     let challenges: Vec<(&str, String)> = NEGATIVES
         .iter()
@@ -329,6 +319,10 @@ fn c1_negative_tokens_are_pairwise_distinguishable_on_the_wire() {
                 .header("www-authenticate")
                 .unwrap_or_else(|| panic!("negative ({label}) must carry a challenge"))
                 .to_owned();
+            assert!(
+                challenge.contains("error_description=\""),
+                "negative ({label}) must name a token-free failure category: {challenge}"
+            );
             (*label, challenge)
         })
         .collect();

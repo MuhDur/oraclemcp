@@ -560,6 +560,16 @@ It accepts RFC 9068 JWT access tokens only: `typ` must be `at+jwt` or
 `application/at+jwt` (case-insensitive), and the required `iss`, `sub`, `aud`,
 `exp`, `client_id`, `iat`, and `jti` claims must have valid shapes. A generic
 `typ=JWT`, a missing token type, or an ID token fails as `invalid_token`.
+The HS256 key is the raw UTF-8 bytes of the value resolved from
+`[http.oauth].hs256_secret_ref`; it is not base64- or hex-decoded. `aud` may be
+the configured resource string or an array containing it. `iss`, `sub`,
+`client_id`, and `jti` are non-empty strings; `iat` and `exp` are numeric; and
+`exp` must be in the future. Tokens provide scopes as either a space-delimited
+`scope` string or an `scp` array, and must satisfy every non-empty
+`required_scopes` item. OAuth rejection bodies remain generic, but the
+`WWW-Authenticate` header carries a token-free `error_description` naming the
+failure category or a missing fixed claim name; it never echoes a bearer token,
+signature, or issuer value.
 Adding `[http.tls.client_ca_path]` requires mTLS client certs, but only leaf DER
 SHA-256 fingerprints listed in `[http.mtls].client_fingerprints` become
 `mtls:sha256:<hex>` principals.

@@ -44,6 +44,11 @@ pub enum TokenError {
     /// The token is not a well-formed JWT.
     #[error("malformed token")]
     Malformed,
+    /// A required RFC 9068 claim is absent. The claim name is a fixed protocol
+    /// field, never token-provided material, so transports may safely surface
+    /// it as an operator diagnostic.
+    #[error("missing required token claim: {0}")]
+    MissingRequiredClaim(&'static str),
     /// The JWT does not explicitly identify itself as an RFC 9068 access token.
     #[error("unexpected JWT token type")]
     UnexpectedTokenType,
@@ -153,12 +158,18 @@ impl ResourceServerConfig {
         // RFC 9068 required access-token claims. Validate their shapes even
         // when a caller supplies an already signature-verified claim set.
         for claim in ["iss", "sub", "client_id", "jti"] {
+            if claims.get(claim).is_none() {
+                return Err(TokenError::MissingRequiredClaim(claim));
+            }
             if !claims[claim]
                 .as_str()
                 .is_some_and(|value| !value.trim().is_empty())
             {
                 return Err(TokenError::Malformed);
             }
+        }
+        if claims.get("iat").is_none() {
+            return Err(TokenError::MissingRequiredClaim("iat"));
         }
         if !claims["iat"].is_number() {
             return Err(TokenError::Malformed);
@@ -173,7 +184,13 @@ impl ResourceServerConfig {
             return Err(TokenError::AudienceMismatch);
         }
         // Expiry / not-before (exp is required per RFC 9068).
-        let exp = claims["exp"].as_i64().ok_or(TokenError::Malformed)?;
+        let exp = claims["exp"].as_i64().ok_or_else(|| {
+            if claims.get("exp").is_none() {
+                TokenError::MissingRequiredClaim("exp")
+            } else {
+                TokenError::Malformed
+            }
+        })?;
         if now_unix >= exp {
             return Err(TokenError::Expired);
         }
@@ -205,12 +222,21 @@ impl ResourceServerConfig {
     }
 
     /// The `WWW-Authenticate: Bearer …` header value for a 401 (RFC 9728 §5.1):
-    /// points the client at the resource-metadata URL and, optionally, the error.
+    /// points the client at the resource-metadata URL and, optionally, a
+    /// token-free error code and diagnostic.
     #[must_use]
-    pub fn www_authenticate(&self, metadata_url: &str, error: Option<&str>) -> String {
+    pub fn www_authenticate(
+        &self,
+        metadata_url: &str,
+        error: Option<&str>,
+        error_description: Option<&str>,
+    ) -> String {
         let mut s = format!("Bearer resource_metadata=\"{metadata_url}\"");
         if let Some(e) = error {
             s.push_str(&format!(", error=\"{e}\""));
+        }
+        if let Some(description) = error_description {
+            s.push_str(&format!(", error_description=\"{description}\""));
         }
         s
     }
@@ -559,7 +585,7 @@ mod tests {
             missing.as_object_mut().unwrap().remove(claim);
             assert_eq!(
                 cfg().validate(&mint(missing), &verifier(), 1_500_000_000),
-                Err(TokenError::Malformed),
+                Err(TokenError::MissingRequiredClaim(claim)),
                 "missing {claim}"
             );
         }
@@ -584,7 +610,7 @@ mod tests {
         missing_exp.as_object_mut().unwrap().remove("exp");
         assert_eq!(
             cfg().validate(&mint(missing_exp), &verifier(), 1_500_000_000),
-            Err(TokenError::Malformed)
+            Err(TokenError::MissingRequiredClaim("exp"))
         );
 
         let mut missing_aud = good_claims();
@@ -698,6 +724,7 @@ mod tests {
         let all = vec![
             TokenError::Missing,
             TokenError::Malformed,
+            TokenError::MissingRequiredClaim("client_id"),
             TokenError::UnexpectedTokenType,
             TokenError::UnsupportedAlg(String::new()),
             TokenError::BadSignature,
@@ -712,14 +739,15 @@ mod tests {
             match error {
                 TokenError::Missing => 0,
                 TokenError::Malformed => 1,
-                TokenError::UnexpectedTokenType => 2,
-                TokenError::UnsupportedAlg(_) => 3,
-                TokenError::BadSignature => 4,
-                TokenError::Expired => 5,
-                TokenError::NotYetValid => 6,
-                TokenError::UntrustedIssuer(_) => 7,
-                TokenError::AudienceMismatch => 8,
-                TokenError::InsufficientScope => 9,
+                TokenError::MissingRequiredClaim(_) => 2,
+                TokenError::UnexpectedTokenType => 3,
+                TokenError::UnsupportedAlg(_) => 4,
+                TokenError::BadSignature => 5,
+                TokenError::Expired => 6,
+                TokenError::NotYetValid => 7,
+                TokenError::UntrustedIssuer(_) => 8,
+                TokenError::AudienceMismatch => 9,
+                TokenError::InsufficientScope => 10,
             }
         }
         let _ = assert_exhaustive(&TokenError::Missing);
@@ -742,6 +770,14 @@ mod tests {
                 extract_bearer(None).map(|token| vec![token.to_owned()]),
             ),
             ("not a JWT", config.validate("not-a-jwt", &verifier(), now)),
+            ("missing client_id", {
+                let mut claims = good_claims();
+                claims
+                    .as_object_mut()
+                    .expect("claims object")
+                    .remove("client_id");
+                config.validate(&mint(claims), &verifier(), now)
+            }),
             (
                 "typ is a generic JWT, not at+jwt",
                 config.validate(
@@ -840,9 +876,11 @@ mod tests {
         let chal = c.www_authenticate(
             "https://oraclemcp.example/.well-known/oauth-protected-resource",
             Some("invalid_token"),
+            Some("Token signature did not verify"),
         );
         assert!(chal.starts_with("Bearer resource_metadata="));
         assert!(chal.contains("error=\"invalid_token\""));
+        assert!(chal.contains("error_description=\"Token signature did not verify\""));
     }
 
     #[test]

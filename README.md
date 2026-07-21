@@ -517,6 +517,29 @@ JWT bearer tokens must use the RFC 9068 access-token profile: the protected
 Generic JWTs and OpenID Connect ID tokens are rejected; there is no implicit
 generic-JWT compatibility mode.
 
+### OAuth bearer-token contract
+
+`--oauth-hs256-secret-ref` is a **secret reference**, not an encoded-key
+setting. The server resolves the reference and uses the resolved value's raw
+UTF-8 bytes as the HS256 key; it does not base64- or hex-decode them. For
+example, `env:ORACLEMCP_OAUTH_HS256_SECRET` reads that environment variable,
+while putting a raw key in the field makes the literal `env:...` text the key.
+The resolved key must contain at least 32 bytes.
+
+An accepted access token has `typ: at+jwt` (or `application/at+jwt`), a
+supported `alg`, and non-empty string `iss`, `sub`, `client_id`, and `jti`
+claims; numeric `iat`; a future numeric `exp`; and an `aud` that is either the
+configured resource string or an array containing it. The issuer must exactly
+match `http.oauth.allowed_issuers`. A token supplies scopes as either a
+space-delimited `scope` string or an `scp` array, and must satisfy every
+non-empty `http.oauth.required_scopes` entry.
+
+Rejected requests keep the response body generic, but their
+`WWW-Authenticate` header includes an RFC 6750 error and a token-free
+`error_description` (for example, missing `client_id`, bad signature, expired
+token, or audience mismatch). Use that header to correct client configuration;
+the server never echoes a bearer token, signature, or untrusted issuer value.
+
 Native TLS uses rustls when `[http.tls]` or `--tls-cert` / `--tls-key` are
 configured. Adding `[http.tls.client_ca_path]` or `--mtls-client-ca` requires
 client certificates (mTLS) verified against that CA, but a CA-verified cert is
