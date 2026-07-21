@@ -1,0 +1,41 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T19:52:13Z",
+  "bead_id": "oraclemcp-091-d2-capability-fixtures-k2udd",
+  "scope": {
+    "summary": "Seeded L1 capability fixtures cover supported typed, LOB, REF CURSOR, output, cache, TPC, SODA and VECTOR paths, with an explicit pre-23 VECTOR rejection and DRCP identity-bleed fixture.",
+    "in_scope": [
+      "scripts/rig/oracle_l1.sh",
+      "scripts/rig/oracle_l1_capabilities.sql",
+      "crates/oraclemcp/tests/e2e_harness.rs",
+      "docs/operations.md"
+    ],
+    "out_of_scope": ["Live Oracle containers were not available in this scoped run."]
+  },
+  "source": {
+    "sha": "c5a22eaa54d6f105b5c97ca0d2ea23bf00c9fdba",
+    "tree_clean": false,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Rig L1 fixture-plan regression",
+        "kind": "test",
+        "trace": "CARGO_TARGET_DIR=target cargo test -p oraclemcp --test e2e_harness rig_l1_dry_run_is_a_single_command_with_complete_lane_plan -- --exact passed."
+      },
+      {
+        "name": "Rig L1 shell syntax",
+        "kind": "cli",
+        "trace": "bash -n scripts/rig/oracle_l1.sh passed."
+      }
+    ]
+  },
+  "live_evidence": {"claimed": false, "artifacts": []},
+  "limitations": ["Live fixture seeding and DRCP execution require the operator's existing Oracle containers and credentials."] ,
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {"claim": "ready", "basis": "scoped-test-and-syntax-proof"}
+}
