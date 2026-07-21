@@ -582,6 +582,36 @@ cmd_self_test() {
   [[ "$stale_output" == *E_SEAL_SOURCE_MISMATCH* ]] ||
     die "self-test stale marker failed for the wrong reason: $stale_output"
 
+  # ALLOW_STALE_MUTATION_SEAL DEFERS STALENESS ONLY. It is set on per-push CI
+  # and on the release path, so if it ever widened into a global kill switch the
+  # seal would still report green while checking nothing — the precise profile of
+  # an advisory background check that quietly stops meaning anything. These two
+  # cases pin its SCOPE: under the flag, a marker that CLAIMS to be enforcing is
+  # still held to its structure, and an absent report is still fatal.
+  local flagged_output
+  if flagged_output="$(ALLOW_STALE_MUTATION_SEAL=1 "$ROOT/scripts/mutation_safety_gate.sh" \
+      check-report --report "$bad" 2>&1)"; then
+    die "self-test: ALLOW_STALE_MUTATION_SEAL=1 accepted a malformed ENFORCING marker; the flag is a kill switch, not a staleness deferral"
+  fi
+  [[ "$flagged_output" == *E_SEAL_SOURCE_MISMATCH* ]] ||
+    die "self-test: flagged malformed marker failed for the wrong reason: $flagged_output"
+  if ALLOW_STALE_MUTATION_SEAL=1 "$ROOT/scripts/mutation_safety_gate.sh" \
+      check-report --report "$work/does-not-exist.md" >/dev/null 2>&1; then
+    die "self-test: ALLOW_STALE_MUTATION_SEAL=1 accepted a MISSING report"
+  fi
+
+  # And the deferral itself must still happen for a genuinely stale marker,
+  # or the flag would not be doing the job the operator ruling gave it.
+  local deferred="$work/genuinely-stale.md"
+  # Valid in every respect EXCEPT status: a bogus hash here would be rejected by
+  # the integrity check before the staleness branch is ever reached, and the
+  # case would pass for the wrong reason.
+  printf '<!-- MUTATION-GATE v=2 source=%s scopes=guard,audit,core,db,dispatch scope_sha256=%s covered_files=%s mutants=1 shards=1/1 oom=0 guard=95 audit=95 core=95 db=95 dispatch=95 threshold=90 status=stale -->\n' \
+    "$source" "$hash" "$files" >"$deferred"
+  ALLOW_STALE_MUTATION_SEAL=1 "$ROOT/scripts/mutation_safety_gate.sh" \
+    check-report --report "$deferred" >/dev/null 2>&1 ||
+    die "self-test: a genuinely stale marker was NOT deferred under ALLOW_STALE_MUTATION_SEAL=1"
+
   local guard_state audit_state db_state guard_files guard_hash audit_files audit_hash db_files db_hash
   guard_state="$(scope_state guard)"; guard_files="${guard_state%% *}"; guard_hash="${guard_state##* }"
   audit_state="$(scope_state audit)"; audit_files="${audit_state%% *}"; audit_hash="${audit_state##* }"
