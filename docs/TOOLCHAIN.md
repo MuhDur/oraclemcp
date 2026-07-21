@@ -46,7 +46,7 @@ cargo tree -i asupersync -e features   # asupersync feature "default" <- oracled
 
 Neither the driver's nor the server's own source uses the nightly syntax: the
 feature arrives transitively and unrequested.
-The pinned `oracledb` 0.8.4 driver's own source is stable-clean — but its
+The pinned `oracledb` 0.9.0 driver's own source is stable-clean — but its
 **dependency declaration** is the proximate cause, so "oracledb is not the
 reason for the pin" is misleading.
 

@@ -241,7 +241,7 @@ pin is required, for two independent reasons: this checkout resolves
 `try_trait_v2_residual` inside asupersync (it is opt-in, but in asupersync's
 default feature set, and reaches us through the `oracledb` dependency), and on
 **Windows** `oraclemcp-core` additionally needs `windows_by_handle`. The pinned
-`oracledb` 0.8.4 driver's own source is stable-clean — it is its asupersync
+`oracledb` 0.9.0 driver's own source is stable-clean — it is its asupersync
 dependency declaration that pulls the nightly feature in.
 [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) has the exact mechanism. The
 repository's `rust-toolchain.toml` selects the pin for local builds. Use the release installer above when you want
@@ -1041,7 +1041,7 @@ legacy `signature` value before restarting a protected profile.
 `oraclemcp` builds on a single **pinned Rust nightly** (`nightly-2026-05-11`,
 recorded in `rust-toolchain.toml`). Two independent things need it: asupersync 0.3.9's
 `nightly-outcome-try` feature (`try_trait_v2` + `try_trait_v2_residual`), which
-is opt-in but on by default and reaches us via the `oracledb` 0.8.4 dependency; and,
+is opt-in but on by default and reaches us via the `oracledb` 0.9.0 dependency; and,
 on Windows only, `windows_by_handle`. The pin is **build-time only**: the
 shipped binary has no runtime dependency on nightly. See
 [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) for the full rationale and the
