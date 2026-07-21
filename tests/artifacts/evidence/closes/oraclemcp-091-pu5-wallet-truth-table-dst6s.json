@@ -1,0 +1,45 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T15:10:00Z",
+  "bead_id": "oraclemcp-091-pu5-wallet-truth-table-dst6s",
+  "scope": {
+    "summary": "Correct the wallet support truth table so it matches the default thin-driver modes actually reported by the server.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/oci.rs",
+      "README.md",
+      "docs/configuration.md"
+    ],
+    "out_of_scope": [
+      "Adding an OCI SDK token source or changing wallet loader behavior."
+    ]
+  },
+  "source": {
+    "sha": "5259fba508886109837c2094c25d6f6b2183596c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "doctor wallet mode truth table",
+        "kind": "cli",
+        "trace": "supported_wallet_modes reports ewallet.pem, cwallet.sso, and ewallet.p12 as supported; doctor consumes that production mode list, while README and configuration describe the same password-bearing versus auto-login distinctions."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo check -p oraclemcp-db passed in the shared working tree. This close claims no live wallet connection or source-exact clean-worktree test run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
