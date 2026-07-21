@@ -11,6 +11,7 @@
 #   bounded-run        rule 16  how long may this turn block?
 #   unbounded-wait-lint rule 16 do committed scripts contain a wait that cannot end?
 #   struct-atomicity   rule 17  does this change add a field without its initializers?
+#   stale-delete-check rule 18  is this commit deleting files that still exist?
 #
 # Exit codes: 0 satisfied · 64 usage/environment · 65 refused (rule violated)
 # · 124 bounded-run deadline reached.
@@ -31,6 +32,7 @@ Usage:
   scripts/swarm_discipline.sh bounded-run [--timeout SECONDS] -- CMD...
   scripts/swarm_discipline.sh unbounded-wait-lint [PATH...]
   scripts/swarm_discipline.sh struct-atomicity [--staged | --commit REF]
+  scripts/swarm_discipline.sh stale-delete-check [--staged | --commit REF]
   scripts/swarm_discipline.sh --selftest
 
 foreign-edit (rule 13)
@@ -58,6 +60,11 @@ struct-atomicity (rule 17)
   For each struct field a change adds, lists struct-literal and struct-pattern
   sites the same change does not touch and that do not use `..`. Those sites
   stop compiling the moment the field lands, so they belong in this commit.
+
+stale-delete-check (rule 18)
+  Refuses a change that deletes a path still present in the worktree. Such a
+  deletion is a stale index snapshot committed over another agent's landed
+  work, not a delete anyone asked for.
 EOF
 }
 
@@ -554,6 +561,54 @@ PY
 }
 
 # --------------------------------------------------------------------------
+# rule 18 — commit explicit paths; a delete of a live file is a stale index
+# --------------------------------------------------------------------------
+
+stale_delete_check() {
+  local repo mode=staged ref="" path violations=0
+  while (( $# )); do
+    case "$1" in
+      --staged)
+        mode=staged
+        shift
+        ;;
+      --commit)
+        (( $# >= 2 )) || die "--commit requires a ref"
+        mode=commit
+        ref="$2"
+        shift 2
+        ;;
+      *) die "unknown argument: $1" ;;
+    esac
+  done
+  repo="$(repo_root)"
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    if [[ -e "$repo/$path" ]]; then
+      printf 'STALE-DELETE   %s — deleted by this change, still present in the worktree\n' "$path"
+      violations=$((violations + 1))
+    fi
+  done < <(
+    if [[ "$mode" == staged ]]; then
+      git -C "$repo" diff --cached --name-only --diff-filter=D
+    else
+      git -C "$repo" show --name-only --diff-filter=D --format= "$ref"
+    fi
+  )
+  if (( violations )); then
+    cat >&2 <<'EOF'
+swarm-discipline: REFUSED: this change deletes paths that still exist on disk.
+That is a stale index snapshot committed over someone's landed work, not a
+delete. Commit explicit paths and check what actually landed:
+  git commit -m '...' -- <path>...
+  git show --stat HEAD
+EOF
+    exit 65
+  fi
+  printf 'swarm-discipline: no deletion of a path that still exists\n'
+}
+
+# --------------------------------------------------------------------------
 # selftest
 # --------------------------------------------------------------------------
 
@@ -674,6 +729,22 @@ PY
     || status=$?
   (( status == 0 )) || die "selftest: one complete logical change was refused (exit $status)"
   printf 'PASS selftest: field plus every initializer in one change is accepted\n'
+
+  git -C "$work" commit -qm "field and initializer together"
+  status=0
+  ( cd "$work" && bash "$ROOT/scripts/swarm_discipline.sh" stale-delete-check --commit HEAD ) \
+    >/dev/null 2>&1 || status=$?
+  (( status == 0 )) || die "selftest: an ordinary commit was called a stale delete (exit $status)"
+  printf 'PASS selftest: a change that deletes nothing passes the stale-delete check\n'
+
+  # A stale index: the path is staged as deleted while it still exists on disk,
+  # which is how one pane committed another pane's landed evidence away.
+  git -C "$work" rm -q --cached crates/demo/src/other.rs
+  status=0
+  ( cd "$work" && bash "$ROOT/scripts/swarm_discipline.sh" stale-delete-check --staged ) \
+    >/dev/null 2>&1 || status=$?
+  (( status == 65 )) || die "selftest: a delete of a live file was accepted (exit $status)"
+  printf 'PASS selftest: deleting a path that still exists is refused\n'
 }
 
 command_name="${1:-}"
@@ -697,6 +768,7 @@ case "$command_name" in
     require_command "$PYTHON_BIN"
     struct_atomicity "${@:2}"
     ;;
+  stale-delete-check) stale_delete_check "${@:2}" ;;
   --selftest) selftest ;;
   -h|--help) usage ;;
   *)

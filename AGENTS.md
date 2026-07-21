@@ -26,10 +26,11 @@ deliberate step.
 
 ## Swarm operating constitution
 
-Seventeen rules. Rules 1-12 were mined from the 2026-07 multi-repo swarm
+Eighteen rules. Rules 1-12 were mined from the 2026-07 multi-repo swarm
 retrospective (`docs/plan/RETRO_SWARM_CAMPAIGN_2026-07.md` §3G,
 `docs/plan/PLAN_ENGINEERING_PROGRAM.md` §27.3); rules 13-17 were mined from the
-2026-07-21 five-agent session, one per incident it produced. Binding on every
+2026-07-21 five-agent session, one per incident it produced (rule 18 from an
+incident during the session that encoded the others). Binding on every
 agent in this repo, solo or swarmed — most are new; a few name-and-link existing
 rules above so the constitution stays the one place to check:
 
@@ -80,8 +81,12 @@ rules above so the constitution stays the one place to check:
     compile apart: a `git mv` and its references, a trait method and its impls,
     an enum variant and its exhaustive matches. Split it across panes and you
     break the build for everyone in the shared checkout.
+18. **Commit explicit paths, then verify what landed.** `git commit -- <path>...`
+    and `git show --stat HEAD`; never `-a`/`git add -A` in a shared checkout.
+    A deletion of a path that still exists in the worktree is a stale index
+    snapshot committed over someone else's landed work, not a delete.
 
-Rules 13-17 are mechanized, one subcommand per rule, so the question each one
+Rules 13-18 are mechanized, one subcommand per rule, so the question each one
 answers is settled by git or an exit status rather than by a buffer or a hope:
 
 ```bash
@@ -93,6 +98,7 @@ scripts/swarm_discipline.sh verified-push \
 scripts/swarm_discipline.sh bounded-run --timeout 120 -- <cmd>                   # 16
 scripts/swarm_discipline.sh unbounded-wait-lint                                  # 16
 scripts/swarm_discipline.sh struct-atomicity --staged                            # 17
+scripts/swarm_discipline.sh stale-delete-check --staged                           # 18
 ```
 
 Exit 65 from any of them is a refusal, not advice. `--selftest` proves each
