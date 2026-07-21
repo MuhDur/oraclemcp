@@ -2782,7 +2782,8 @@ fn setup_payload_is_generic_and_client_ready() {
     assert!(!profiles_toml.contains("wallet_password_ref"));
     assert!(!profiles_toml.contains("[profiles.oci]"));
     assert!(!profiles_toml.contains("[profiles.drcp]"));
-    assert!(!profiles_toml.contains("[profiles.proxy_auth]"));
+    assert!(profiles_toml.contains("[profiles.proxy_auth]"));
+    assert!(profiles_toml.contains("MCP_PROXY[APP_OWNER]"));
     assert!(!profiles_toml.contains("[[profiles.app_context]]"));
     assert!(!profiles_toml.contains("[profiles.session_identity]"));
     assert_eq!(

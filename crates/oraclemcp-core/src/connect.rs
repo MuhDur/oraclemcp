@@ -691,6 +691,30 @@ mod tests {
     }
 
     #[test]
+    fn proxy_bracket_username_reaches_typed_connect_options() {
+        let profile = profile(
+            r#"
+            [[profiles]]
+            name = "proxy"
+            connect_string = "localhost:1521/FREEPDB1"
+            username = "MCP_PROXY[APP_OWNER]"
+            credential_ref = "env:PROXY_PASSWORD"
+            "#,
+        );
+        let ctx = build_session_context(&profile, Some("proxy-password".to_owned()), None, false)
+            .expect("bracket proxy config builds a typed session");
+
+        assert_eq!(ctx.options.username.as_deref(), Some("MCP_PROXY"));
+        assert!(matches!(
+            ctx.options.auth_adapter,
+            AuthAdapter::Proxy {
+                ref proxy_user,
+                ref target_schema
+            } if proxy_user == "MCP_PROXY" && target_schema == "APP_OWNER"
+        ));
+    }
+
+    #[test]
     fn session_identity_is_carried_to_connect_options() {
         let p = profile(
             r#"

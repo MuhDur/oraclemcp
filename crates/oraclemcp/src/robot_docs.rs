@@ -17,6 +17,14 @@ username = "APP_READONLY"
 credential_ref = "env:{credential_env}"
 max_level = "READ_ONLY"
 default_level = "READ_ONLY"
+
+# Optional thin proxy authentication. Keep username = "MCP_PROXY" and
+# uncomment this block; credential_ref then belongs to the proxy account.
+# Oracle also accepts username = "MCP_PROXY[APP_OWNER]", which oraclemcp
+# desugars into the same typed proxy settings at config load.
+# [profiles.proxy_auth]
+# proxy_user = "MCP_PROXY"
+# target_schema = "APP_OWNER"
 "#
     )
 }

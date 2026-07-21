@@ -1083,6 +1083,9 @@ impl OracleMcpConfig {
             shipping.validate()?;
         }
         resolve_inheritance(&mut self.profiles)?;
+        for profile in &mut self.profiles {
+            profile.desugar_proxy_bracket_username()?;
+        }
         if let Some(default_profile) = self.default_profile.as_deref()
             && !self.profiles.iter().any(|p| p.name == default_profile)
         {
@@ -1502,6 +1505,16 @@ pub enum ConfigError {
     /// Top-level username conflicts with `proxy_auth.proxy_user`.
     #[error("connection profile `{0}` proxy_auth.proxy_user must match username when both are set")]
     ProxyUsernameMismatch(String),
+    /// Bracket proxy syntax was incomplete or mixed with ordinary username text.
+    #[error(
+        "connection profile `{0}` has malformed proxy username syntax; use username = \"proxy_user[target_schema]\" or an explicit [profiles.proxy_auth] block"
+    )]
+    MalformedProxyBracketUsername(String),
+    /// Both supported proxy-auth configuration shapes were specified together.
+    #[error(
+        "connection profile `{0}` configures both username = \"proxy_user[target_schema]\" and [profiles.proxy_auth]; choose one form"
+    )]
+    DuplicateProxyAuthSyntax(String),
     /// A profile declared an SDU outside the thin driver's supported range.
     #[error("connection profile `{profile}` has invalid sdu {sdu}; expected {min}..={max}")]
     InvalidSdu {
