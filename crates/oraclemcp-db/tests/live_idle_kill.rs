@@ -1,0 +1,317 @@
+//! D5 — the idle-kill lane: prove the server survives a session killed out from
+//! under it, on BOTH surfaces, asserted separately.
+//!
+//! The two surfaces are not the same code path and must not be proven by the
+//! same test (plan §A.6.9 settles the architecture: **the pinned session is NOT
+//! pooled** — it is a single long-lived connection whose only recovery today is
+//! an explicit profile switch, and the field's P0-5 symptom ran on that path):
+//!
+//! - **pooled** (A4a, validate-on-checkout): a dead session must be replaced
+//!   transparently. The caller holds no session state, so silence is correct.
+//! - **pinned** (A4e, audited recycle): a dead session must NOT be swapped
+//!   underneath a caller that is mid-transaction. Silently rebinding a lease to
+//!   a fresh session is how a caller ends up issuing statements — and then a
+//!   COMMIT — in a transaction it did not start and cannot see.
+//!
+//! Run against the rig: `bash scripts/rig/oracle_l1.sh up` then
+//! `cargo test -p oraclemcp-db --features live-xe --test live_idle_kill`,
+//! with ORACLEMCP_TEST_DSN / _USER / _PASSWORD pointed at the lane.
+//!
+//! Killing requires ALTER SYSTEM, which the rig's admin principal holds.
+//!
+//! # The lane can fail on purpose
+//!
+//! `ORACLEMCP_D5_SKIP_KILL=1` runs everything EXCEPT the kill. Both halves must
+//! then FAIL — the pooled one because the same `(sid, serial#)` comes back, the
+//! pinned one because COMMIT succeeds. A lane whose kill silently stopped
+//! landing would otherwise go green forever while proving nothing.
+//!
+//! # What this lane found on first run (XE21, 2026-07-21)
+//!
+//! The predicted pre-fix failure DID NOT REPRODUCE. Both surfaces already
+//! behave correctly, for reasons that are deliberate rather than lucky:
+//!
+//! - pooled: `OraclePool::with_conn` already carries
+//!   `RetryPolicy::one_immediate_retry` with `ReconnectThenRetry`, and discards
+//!   a session whose error `is_uncertain_session_state`. The caller saw
+//!   sid 313 serial 7915 replaced by sid 313 serial 42101 and no error. Note
+//!   this is reconnect-THEN-REPLAY, not validate-on-checkout: the recovery runs
+//!   after the caller's statement has already failed once, which is only safe
+//!   for a replayable statement. A4a moves the check earlier; it does not
+//!   introduce recovery that was missing.
+//! - pinned: COMMIT was refused with
+//!   `Quarantined { outcome: CommitInDoubt, message: "commit failed; lease
+//!   discarded: Oracle connection lost: ..." }` — already a typed envelope, not
+//!   a raw driver leak, and the lease was discarded rather than rebound. The
+//!   same `is_uncertain_session_state` quarantine guards savepoint, preview_dml,
+//!   enable_dbms_output and apply_session_statement, so this is the pinned
+//!   path's general behaviour and not a commit special case.
+//!
+//! So the pinned half's value is forward-looking: it is the regression guard on
+//! A4e. The moment A4e adds a transparent reopen, this test fails unless the
+//! reopen refuses a caller that was mid-transaction.
+
+#![cfg(feature = "live-xe")]
+#![forbid(unsafe_code)]
+
+use asupersync::Cx;
+use asupersync::runtime::RuntimeBuilder;
+use oraclemcp_db::{
+    DbError, LeaseManager, OracleBind, OracleConnectOptions, OracleConnection, OraclePool,
+    PoolSettings, RustOracleConnection,
+};
+use std::time::Duration;
+
+/// Run an async body on a fresh current-thread runtime with a reactor, handing
+/// it the installed request `Cx`. The only `block_on` in this file.
+fn run_with_cx<F, Fut, T>(body: F) -> T
+where
+    F: FnOnce(Cx) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let reactor = asupersync::runtime::reactor::create_reactor().expect("native reactor");
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("rt");
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("block_on installs a current Cx");
+        body(cx).await
+    })
+}
+
+fn test_opts() -> OracleConnectOptions {
+    OracleConnectOptions {
+        connect_string: std::env::var("ORACLEMCP_TEST_DSN")
+            .unwrap_or_else(|_| "//localhost:1521/FREEPDB1".to_owned()),
+        username: Some(
+            std::env::var("ORACLEMCP_TEST_USER").unwrap_or_else(|_| "system".to_owned()),
+        ),
+        password: Some(
+            std::env::var("ORACLEMCP_TEST_PASSWORD").unwrap_or_else(|_| "test_password".to_owned()),
+        ),
+        ..Default::default()
+    }
+}
+
+/// A session's `(sid, serial#)`, the pair `ALTER SYSTEM KILL SESSION` needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SessionKey {
+    sid: String,
+    serial: String,
+}
+
+impl SessionKey {
+    /// Both halves come back from `v$session` as NUMBER-as-string (the
+    /// NUMBER->string invariant). Refuse anything else rather than interpolate
+    /// unvalidated text into an ALTER SYSTEM statement, which takes no binds.
+    fn checked(sid: String, serial: String) -> Self {
+        assert!(
+            sid.chars().all(|c| c.is_ascii_digit()) && !sid.is_empty(),
+            "v$session.sid must be numeric, got {sid:?}"
+        );
+        assert!(
+            serial.chars().all(|c| c.is_ascii_digit()) && !serial.is_empty(),
+            "v$session.serial# must be numeric, got {serial:?}"
+        );
+        SessionKey { sid, serial }
+    }
+}
+
+const SESSION_BY_IDENTIFIER: &str = "SELECT sid AS s_id, serial# AS s_serial FROM v$session \
+     WHERE client_identifier = :1 AND status != 'KILLED'";
+
+const OWN_SESSION: &str = "SELECT sid AS s_id, serial# AS s_serial FROM v$session \
+     WHERE sid = SYS_CONTEXT('USERENV', 'SID')";
+
+/// Locate a session by the CLIENT_IDENTIFIER the lease stamps on it
+/// (`session_tag_statements` sets it to the agent identity on every checkout).
+async fn session_by_identifier(
+    cx: &Cx,
+    admin: &RustOracleConnection,
+    identifier: &str,
+) -> Option<SessionKey> {
+    let rows = admin
+        .query_rows(cx, SESSION_BY_IDENTIFIER, &[OracleBind::from(identifier)])
+        .await
+        .expect("v$session lookup by client_identifier");
+    let row = rows.first()?;
+    Some(SessionKey::checked(
+        row.text("S_ID")?.to_owned(),
+        row.text("S_SERIAL")?.to_owned(),
+    ))
+}
+
+/// Kill a session from a SECOND connection, the way an DBA or a resource
+/// manager policy would. IMMEDIATE so the victim learns on its next use rather
+/// than at PMON's convenience.
+async fn kill_session(cx: &Cx, admin: &RustOracleConnection, key: &SessionKey) {
+    let sql = format!(
+        "ALTER SYSTEM KILL SESSION '{},{}' IMMEDIATE",
+        key.sid, key.serial
+    );
+    admin
+        .execute(cx, &sql, &[])
+        .await
+        .expect("ALTER SYSTEM KILL SESSION requires the rig admin principal");
+}
+
+/// POOLED SURFACE (A4a). A caller that checks a connection out of the pool holds
+/// no session state, so a dead session must be replaced without the caller ever
+/// seeing it.
+///
+/// ANTI-VACUITY: the pool is pinned to exactly one connection. With the default
+/// sizing the next checkout could hand back a DIFFERENT, still-live connection
+/// and the test would pass while validate-on-checkout did nothing at all.
+#[test]
+fn a_killed_pooled_session_is_replaced_without_the_caller_seeing_it() {
+    run_with_cx(|cx| async move {
+        let admin = RustOracleConnection::connect(&cx, test_opts())
+            .await
+            .expect("admin connection for the kill");
+        let pool = OraclePool::connect(
+            &cx,
+            test_opts(),
+            PoolSettings {
+                max_size: 1,
+                min_idle: 1,
+                ..PoolSettings::default()
+            },
+        )
+        .await
+        .expect("pool connect");
+
+        let rows = pool
+            .query_rows(&cx, OWN_SESSION, Vec::new())
+            .await
+            .expect("the pooled session can identify itself before the kill");
+        let victim = SessionKey::checked(
+            rows[0].text("S_ID").expect("sid").to_owned(),
+            rows[0].text("S_SERIAL").expect("serial#").to_owned(),
+        );
+
+        if std::env::var("ORACLEMCP_D5_SKIP_KILL").is_err() {
+            kill_session(&cx, &admin, &victim).await;
+        }
+
+        // The caller's next use. Post-fix this succeeds on a replacement
+        // session; pre-fix it surfaces the raw transport error (the recorded
+        // failing half of the two-sided proof).
+        let after = pool.query_rows(&cx, OWN_SESSION, Vec::new()).await;
+        let after = match after {
+            Ok(rows) => rows,
+            Err(err) => panic!(
+                "pooled: validate-on-checkout must replace a session killed while idle, \
+                 but the caller saw the death directly: {err:?}"
+            ),
+        };
+        let replacement = SessionKey::checked(
+            after[0].text("S_ID").expect("sid").to_owned(),
+            after[0].text("S_SERIAL").expect("serial#").to_owned(),
+        );
+        eprintln!("D5 pooled: victim={victim:?} replacement={replacement:?}");
+
+        // The detector: a pool that handed back the SAME (sid, serial#) did not
+        // replace anything, so the kill did not land and this test proves
+        // nothing. Assert the precondition rather than trusting it.
+        assert_ne!(
+            replacement, victim,
+            "pooled: the post-kill session is the pre-kill session, so the kill never took \
+             effect and this lane is not exercising recovery at all"
+        );
+    });
+}
+
+/// PINNED SURFACE (A4e). The lease owns ONE physical session for its lifetime.
+/// A caller mid-transaction must never be moved to a different session without
+/// being told: its uncommitted work is gone, and a later COMMIT would commit
+/// something it never wrote.
+///
+/// This is the half a pooled-only test cannot reach: the pool passes by
+/// replacing the connection, which is exactly what must NOT happen here.
+#[test]
+fn a_killed_pinned_session_never_silently_rebinds_a_caller_mid_transaction() {
+    run_with_cx(|cx| async move {
+        let admin = RustOracleConnection::connect(&cx, test_opts())
+            .await
+            .expect("admin connection for the kill");
+        let conn = RustOracleConnection::connect(&cx, test_opts())
+            .await
+            .expect("pinned connection");
+
+        // A per-run identity so the lookup cannot collide with another lane's
+        // session (or a leftover from a previous run).
+        let agent_identity = format!("d5-pinned-{}", std::process::id());
+        let leases = LeaseManager::new();
+        let lease_id = leases
+            .acquire(
+                &cx,
+                "d5-idle-kill",
+                agent_identity.clone(),
+                Duration::from_secs(120),
+                &[],
+                Box::new(conn),
+            )
+            .await
+            .expect("acquire the pinned lease");
+
+        let before = leases
+            .info(&cx, &agent_identity, &lease_id)
+            .await
+            .expect("lease info before the kill");
+
+        let victim = session_by_identifier(&cx, &admin, &agent_identity)
+            .await
+            .expect(
+                "the lease must stamp CLIENT_IDENTIFIER on its pinned session; without that \
+                 stamp this lane cannot find the session to kill and proves nothing",
+            );
+
+        // Put real state on the session: this is what a silent rebind destroys.
+        leases
+            .begin_transaction(&cx, &agent_identity, &lease_id)
+            .await
+            .expect("begin transaction on the pinned lease");
+
+        eprintln!("D5 pinned: victim={victim:?}");
+        if std::env::var("ORACLEMCP_D5_SKIP_KILL").is_err() {
+            kill_session(&cx, &admin, &victim).await;
+        }
+
+        let outcome = leases.commit(&cx, &agent_identity, &lease_id).await;
+
+        match outcome {
+            Err(err) => {
+                eprintln!("D5 pinned: commit refused with {err:?}");
+                // Required behaviour. Post-fix this is a typed envelope (A4d);
+                // pre-fix it is the raw driver error, which is the failing half
+                // this lane exists to record.
+                let typed = matches!(
+                    err,
+                    DbError::Quarantined { .. } | DbError::ConnectionLost(_)
+                );
+                assert!(
+                    typed,
+                    "pinned: the caller is correctly refused, but with a raw driver error \
+                     rather than a typed envelope (A4d): {err:?}"
+                );
+            }
+            Ok(()) => {
+                // The commit reported success on a session that was killed. The
+                // ONLY way that happens is a reconnect underneath the caller.
+                let after = leases
+                    .info(&cx, &agent_identity, &lease_id)
+                    .await
+                    .expect("lease info after the commit");
+                let now = session_by_identifier(&cx, &admin, &agent_identity).await;
+                panic!(
+                    "pinned: COMMIT reported success after the session was killed \
+                     mid-transaction. generation {} -> {} (unchanged generation means the \
+                     rebind was silent), session {:?} -> {:?}. A lease that reconnects here \
+                     commits nothing the caller wrote and reports success for it.",
+                    before.generation, after.generation, victim, now
+                );
+            }
+        }
+    });
+}
