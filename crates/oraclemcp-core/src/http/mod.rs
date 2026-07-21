@@ -1922,6 +1922,7 @@ fn handle_mcp_post_exchange(
     let mut context = scope_grant
         .map(DispatchContext::with_scope_grant)
         .unwrap_or_default();
+    context = context.with_local_transport(request.peer_is_loopback);
     if let Some(session_id) = http_session_id.as_deref() {
         context = context.with_http_session_id(session_id);
     }

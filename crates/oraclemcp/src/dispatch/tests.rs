@@ -3521,6 +3521,96 @@ fn dictionary_tools_accept_default_owner_qualified_names_and_aliases() {
 }
 
 #[test]
+fn oracle_describe_not_visible_returns_structured_not_found_with_next_actions() {
+    let state = Arc::new(DescribeCatalogState::default());
+    let dispatcher = OracleDispatcher::new(Box::new(DescribeCatalogMock {
+        state: Arc::clone(&state),
+        columns: Vec::new(),
+    }));
+
+    let error = dispatcher
+        .dispatch(
+            "oracle_describe",
+            json!({ "owner": "APP", "table": "MISSING_TABLE" }),
+        )
+        .expect_err("an empty ALL_TAB_COLUMNS result is not a successful description");
+
+    assert_eq!(error.error_class, ErrorClass::ObjectNotFound);
+    assert_eq!(
+        error.suggested_tool.as_deref(),
+        Some("oracle_schema_inspect")
+    );
+    assert!(
+        error
+            .next_steps
+            .iter()
+            .any(|step| step.contains("oracle_schema_inspect")),
+        "not-found describe response must tell the caller how to recover: {error:?}"
+    );
+    assert!(
+        error.message.contains("not found or is not visible"),
+        "the response must not disguise catalog invisibility as an empty description: {error:?}"
+    );
+    assert_eq!(
+        state
+            .calls
+            .lock()
+            .expect("describe catalog call mutex")
+            .len(),
+        1,
+        "constraints are not queried after the object is known absent"
+    );
+}
+
+#[test]
+fn oracle_describe_unresolved_synonym_returns_structured_not_found() {
+    let dispatcher = OracleDispatcher::new(Box::new(DescribeCatalogMock {
+        state: Arc::new(DescribeCatalogState::default()),
+        columns: Vec::new(),
+    }));
+
+    let error = dispatcher
+        .dispatch("oracle_describe", json!({ "table": "MISSING_SYNONYM" }))
+        .expect_err("an unresolved synonym cannot be represented as empty metadata");
+
+    assert_eq!(error.error_class, ErrorClass::ObjectNotFound);
+    assert!(error.message.contains("APP.MISSING_SYNONYM"));
+}
+
+#[test]
+fn oracle_describe_preserves_double_quoted_identifier_case() {
+    let state = Arc::new(DescribeCatalogState::default());
+    let dispatcher = OracleDispatcher::new(Box::new(DescribeCatalogMock {
+        state: Arc::clone(&state),
+        columns: vec![OracleRow {
+            columns: vec![(
+                "COLUMN_NAME".to_owned(),
+                OracleCell::new("VARCHAR2", Some("id".to_owned())),
+            )],
+        }],
+    }));
+
+    let description = dispatcher
+        .dispatch(
+            "oracle_describe",
+            json!({ "owner": "\"AppOwner\"", "table": "\"camelCase\"" }),
+        )
+        .expect("quoted lower-case identifiers retain their dictionary case");
+
+    assert_eq!(description["owner"], json!("AppOwner"));
+    assert_eq!(description["table"], json!("camelCase"));
+    let calls = state.calls.lock().expect("describe catalog call mutex");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0].1,
+        vec![
+            OracleBind::String("AppOwner".to_owned()),
+            OracleBind::String("camelCase".to_owned()),
+        ]
+    );
+}
+
+#[test]
 fn get_source_without_object_type_returns_all_visible_sources() {
     let dispatcher = OracleDispatcher::new(Box::new(SourceLookupMock));
     let out = dispatcher

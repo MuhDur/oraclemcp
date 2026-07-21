@@ -911,9 +911,6 @@ fn stateful_http_lanes_keep_profile_switches_and_connections_isolated() {
     for output in [&switched_a, &switched_b, &info_a, &info_b] {
         let serialized = output.to_string();
         for forbidden in [
-            "SCHEMA_PROFILE_X",
-            "SCHEMA_PROFILE_Y",
-            "SCHEMA_PROFILE_Z",
             "USER_PROFILE_X",
             "USER_PROFILE_Y",
             "USER_PROFILE_Z",
@@ -928,7 +925,13 @@ fn stateful_http_lanes_keep_profile_switches_and_connections_isolated() {
             output["result"]["structuredContent"]["connection"]["redacted_fields"]
                 .as_array()
                 .expect("redacted fields array");
-        for field in ["current_schema", "session_user", "module", "action"] {
+        assert!(
+            output["result"]["structuredContent"]["connection"]["current_schema"]
+                .as_str()
+                .is_some_and(|schema| schema.starts_with("SCHEMA_PROFILE_")),
+            "loopback HTTP must expose the current schema: {output}"
+        );
+        for field in ["session_user", "module", "action"] {
             assert!(
                 redacted_fields.contains(&json!(field)),
                 "{field} should be marked redacted in {output}"

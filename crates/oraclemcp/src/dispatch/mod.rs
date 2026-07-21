@@ -11134,13 +11134,14 @@ fn preview_sql(
 fn connection_info_json(
     active_profile: Option<String>,
     info: Result<OracleConnectionInfo, DbError>,
+    local_transport: bool,
 ) -> Value {
     match info {
         Ok(info) => json!({
             "metadata_cache_key": metadata_cache_key_json(active_profile.as_deref(), &info),
             "active_profile": active_profile,
             "connected": true,
-            "connection": info.redacted(),
+            "connection": connection_info_for_transport(&info, local_transport),
         }),
         Err(err) => {
             let mut next_actions = vec![json!({
@@ -11170,6 +11171,28 @@ fn connection_info_json(
             })
         }
     }
+}
+
+fn connection_info_for_transport(info: &OracleConnectionInfo, local_transport: bool) -> Value {
+    let mut connection =
+        serde_json::to_value(info.redacted()).expect("redacted connection info serializes");
+    if !local_transport {
+        return connection;
+    }
+
+    let Some(fields) = connection.as_object_mut() else {
+        return connection;
+    };
+    fields.insert("current_schema".to_owned(), json!(info.current_schema));
+    fields.insert("service_name".to_owned(), json!(info.service_name));
+    if let Some(redacted_fields) = fields
+        .get_mut("redacted_fields")
+        .and_then(Value::as_array_mut)
+    {
+        redacted_fields
+            .retain(|field| !matches!(field.as_str(), Some("current_schema" | "service_name")));
+    }
+    connection
 }
 
 async fn connection_strategy_json(cx: &Cx, conn: &dyn OracleConnection) -> Value {
@@ -11740,7 +11763,11 @@ impl OracleDispatcher {
             // the still-active dispatcher session.
             let mut response = match describe_conn(cx, conn.as_ref()).await {
                 Err(err) if err.is_uncertain_session_state() => Err(err),
-                result => Ok(connection_info_json(Some(profile.clone()), result)),
+                result => Ok(connection_info_json(
+                    Some(profile.clone()),
+                    result,
+                    context.is_local_transport(),
+                )),
             };
             if let Ok(Value::Object(map)) = &mut response
                 && let Some(stateless_conn) = stateless_conn.as_ref()
@@ -12716,7 +12743,11 @@ impl OracleDispatcher {
                     Err(err) if err.is_uncertain_session_state() => {
                         return Err(DbError::into_envelope(err));
                     }
-                    result => connection_info_json(state.active_profile.clone(), result),
+                    result => connection_info_json(
+                        state.active_profile.clone(),
+                        result,
+                        context.is_local_transport(),
+                    ),
                 };
                 if let Value::Object(map) = &mut value {
                     if let Some(generation) = state.profile_generation.as_ref() {

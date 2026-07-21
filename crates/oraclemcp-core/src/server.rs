@@ -385,6 +385,7 @@ pub struct DispatchContext<'a> {
     admitted_at: Option<Time>,
     caller_budget: Option<Budget>,
     request_budget: Option<&'a RequestBudget>,
+    local_transport: bool,
     notification_session_owner: Option<&'a str>,
     notification_request_owner: Option<&'a str>,
 }
@@ -402,6 +403,9 @@ impl Default for DispatchContext<'_> {
             admitted_at: None,
             caller_budget: None,
             request_budget: None,
+            // Stdio is local by construction. HTTP overwrites this with its
+            // server-observed peer locality before dispatch.
+            local_transport: true,
             notification_session_owner: Some(crate::notifications::STDIO_NOTIFICATION_OWNER),
             notification_request_owner: Some(crate::notifications::STDIO_NOTIFICATION_OWNER),
         }
@@ -520,6 +524,16 @@ impl<'a> DispatchContext<'a> {
         self
     }
 
+    /// Mark whether this request arrived through a local transport.
+    ///
+    /// Stdio is local by construction. HTTP callers must supply the
+    /// server-observed peer-loopback result rather than trusting a header.
+    #[must_use]
+    pub fn with_local_transport(mut self, local_transport: bool) -> Self {
+        self.local_transport = local_transport;
+        self
+    }
+
     /// The validated OAuth scopes for this request, if any.
     #[must_use]
     pub fn scope_grant(self) -> Option<&'a crate::http::ScopeGrant> {
@@ -582,6 +596,12 @@ impl<'a> DispatchContext<'a> {
         self.request_budget
     }
 
+    /// Whether this request arrived through stdio or server-observed loopback HTTP.
+    #[must_use]
+    pub const fn is_local_transport(self) -> bool {
+        self.local_transport
+    }
+
     /// Persistent MCP session owner used to detect catalog transitions.
     #[must_use]
     pub fn notification_session_owner(self) -> Option<&'a str> {
@@ -608,6 +628,7 @@ impl<'a> DispatchContext<'a> {
             admitted_at: self.admitted_at,
             caller_budget: self.caller_budget,
             request_budget: self.request_budget.cloned(),
+            local_transport: self.local_transport,
             notification_session_owner: self.notification_session_owner.map(str::to_owned),
             notification_request_owner: self.notification_request_owner.map(str::to_owned),
         }
@@ -629,6 +650,7 @@ pub struct OwnedDispatchContext {
     admitted_at: Option<Time>,
     caller_budget: Option<Budget>,
     request_budget: Option<RequestBudget>,
+    local_transport: bool,
     notification_session_owner: Option<String>,
     notification_request_owner: Option<String>,
 }
@@ -654,6 +676,7 @@ impl OwnedDispatchContext {
             admitted_at: self.admitted_at,
             caller_budget: self.caller_budget,
             request_budget: self.request_budget.as_ref(),
+            local_transport: self.local_transport,
             notification_session_owner: self.notification_session_owner.as_deref(),
             notification_request_owner: self.notification_request_owner.as_deref(),
         }
@@ -2713,6 +2736,7 @@ mod tests {
         let owned = DispatchContext::default()
             .with_http_session_id("session-1")
             .with_principal_key("principal-1")
+            .with_local_transport(false)
             .with_lane_identity("lane-1", 7)
             .with_request_started_at(request_started_at)
             .with_admitted_at(admitted_at)
@@ -2725,6 +2749,7 @@ mod tests {
         assert_eq!(borrowed.principal_key(), Some("principal-1"));
         assert_eq!(borrowed.lane_id(), Some("lane-1"));
         assert_eq!(borrowed.lane_generation(), Some(7));
+        assert!(!borrowed.is_local_transport());
         assert_eq!(borrowed.request_started_at(), Some(request_started_at));
         assert_eq!(borrowed.admitted_at(), Some(admitted_at));
         assert_eq!(borrowed.caller_budget(), Some(caller_budget));
