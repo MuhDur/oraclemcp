@@ -1,0 +1,38 @@
+{
+  "schema": "ws-c-red-run/v1",
+  "repo": "oraclemcp",
+  "bead_id": "oraclemcp-091-c1-oauth-literal-jwt-v9m9z",
+  "purpose": "Workstream C fixtures are a two-sided proof: the fixture must be demonstrably RED against pre-fix main, then flipped to enforced-green by the fix bead. This file records the red half so the flip is auditable rather than asserted.",
+  "expected_failure": {
+    "test": "c1_negative_tokens_are_pairwise_distinguishable_on_the_wire",
+    "file": "crates/oraclemcp-core/tests/c1_oauth_literal_jwt.rs",
+    "marker": "#[ignore] citing oraclemcp-091-b2-oauth-contract-g5xmr",
+    "flipped_green_by": "oraclemcp-091-b2-oauth-contract-g5xmr",
+    "flip_action": "delete the #[ignore] attribute; no assertion change is permitted"
+  },
+  "red_run": {
+    "command": "cargo test -p oraclemcp-core --test c1_oauth_literal_jwt -- --ignored --nocapture",
+    "toolchain": "nightly-2026-05-11",
+    "result": "FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out",
+    "panic_site": "crates/oraclemcp-core/tests/c1_oauth_literal_jwt.rs:336",
+    "panic_message": "assertion `left != right` failed: 'wrong typ (plain \"JWT\")' and 'missing client_id' are different failures and must produce different diagnostics; both said: Bearer resource_metadata=\"https://oraclemcp.c1-fixture.example/.well-known/oauth-protected-resource\", error=\"invalid_token\"",
+    "root_cause": "token_error_code (crates/oraclemcp-core/src/http/mod.rs:517-523) collapses Malformed / BadSignature / AudienceMismatch / UntrustedIssuer / Expired into one invalid_token code, and no error_description is emitted, so every rejected bearer reads identically to the client."
+  },
+  "green_half": {
+    "command": "cargo test -p oraclemcp-core --test c1_oauth_literal_jwt",
+    "result": "ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out",
+    "tests": [
+      "c1_externally_minted_token_is_accepted_by_the_production_verifier",
+      "c1_hmac_key_is_the_raw_utf8_secret_not_its_base64_decoding",
+      "c1_every_negative_is_refused_by_the_verifier",
+      "c1_externally_minted_token_authorizes_a_real_mcp_request",
+      "c1_negatives_are_refused_with_an_rfc6750_challenge"
+    ],
+    "note": "The acceptance half passes against pre-fix main. Plan sec.4-C1 predicted that asymmetry: the verifier was never broken (sec.A.5.2 refutes P1-11 as a code defect); what was missing was proof that an externally minted token is accepted at all, plus a usable diagnostic when one is not."
+  },
+  "external_mint": {
+    "tool": "PyJWT 2.10.1",
+    "in_repo_code_used": false,
+    "note": "Token and secret constants were minted once out of tree and committed as opaque strings. Regenerating them from repository code would restore exactly the self-reference this fixture exists to remove."
+  }
+}
