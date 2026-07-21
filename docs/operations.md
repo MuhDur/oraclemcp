@@ -909,7 +909,11 @@ still the write-intent/audit path, not this HTTP-edge cache.
   old-bearer requests and an old bearer that was authenticated but is still
   mid-lane creation, so it cannot acquire a new live session after the
   operation completes. Reconnect with the replacement bearer after rotation;
-  other clients remain unaffected.
+  other clients remain unaffected. These opaque client bearers have no embedded
+  expiry; rotate or revoke is their terminal lifecycle event. OAuth access-token
+  `exp` is checked when each HTTP request is authenticated: an already-expired
+  token is refused at admission, while a request already admitted runs under
+  its captured grant rather than being cancelled partway through.
 - **Audit signing key:** move the current `key_id`/`key_ref` pair into
   `[[audit.verification_keys]]`, configure a new randomly generated active key
   of at least 32 bytes, then restart. Startup authenticates the old chain and
