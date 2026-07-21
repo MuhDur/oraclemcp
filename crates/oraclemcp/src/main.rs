@@ -76,9 +76,9 @@ use oraclemcp_core::{
     ConfigOpsStatus, ConfigReloadApplier, ConfigReloadApplyReport, CustomToolCatalog,
     CustomToolDef, DASHBOARD_PAIRING_TTL_SECONDS, DEFAULT_REQUEST_TIMEOUT, DashboardAuth,
     DashboardAuthError, DispatchCloseReason, DispatchContext, DispatchFuture, DispatchOutcome,
-    DoctorAuthCapabilities, DoctorAuthModeKind, DoctorContext, DoctorLevelCaps, DoctorProfileCaps,
-    DoctorStateLayout, EffectiveHttpScheme, ExportRegistry, FeatureTiers, FileStore,
-    HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory,
+    DoctorAuditPosture, DoctorAuthCapabilities, DoctorAuthModeKind, DoctorContext, DoctorLevelCaps,
+    DoctorProfileCaps, DoctorStateLayout, EffectiveHttpScheme, ExportRegistry, FeatureTiers,
+    FileStore, HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory,
     LaneDispatchFactoryBuilder, LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture,
     MtlsClientRegistry, OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy,
     OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, PreparedLaneDispatch, ServiceOwner,
@@ -6392,6 +6392,50 @@ fn doctor_audit_path_configured() -> bool {
         .unwrap_or(false)
 }
 
+/// Derive the same no-key/reachable-write decision that startup uses without
+/// resolving an audit secret or opening the audit file. Offline doctor must not
+/// turn a diagnostic into a secret read or a filesystem mutation.
+fn doctor_audit_posture(profile: Option<&str>) -> DoctorAuditPosture {
+    let config = match OracleMcpConfig::load(None) {
+        Ok(config) => config,
+        Err(_) => {
+            return DoctorAuditPosture::Unavailable {
+                reason: "configuration could not be loaded".to_owned(),
+            };
+        }
+    };
+    let active_level = match selected_config_profile(&config, profile) {
+        Ok(Some(profile)) => oraclemcp_core::session_level_state(profile, false),
+        Ok(None) => default_read_only_level(),
+        Err(_) => {
+            return DoctorAuditPosture::Unavailable {
+                reason: "the selected profile could not be resolved".to_owned(),
+            };
+        }
+    };
+    let signing_key_configured = config.audit.key_ref.is_some()
+        || std::env::var_os(AUDIT_KEY_ENV).is_some_and(|value| !value.is_empty());
+    doctor_audit_posture_from_config(&config, &active_level, signing_key_configured)
+}
+
+/// Pure audit posture decision used by doctor and unit tests.
+fn doctor_audit_posture_from_config(
+    config: &OracleMcpConfig,
+    active_level: &SessionLevelState,
+    signing_key_configured: bool,
+) -> DoctorAuditPosture {
+    let reachable_ceiling = max_reachable_write_ceiling(config, active_level);
+    if signing_key_configured {
+        return DoctorAuditPosture::SigningKeyConfigured {
+            path: config.audit.path.clone().unwrap_or_else(default_audit_path),
+        };
+    }
+    if reachable_ceiling > OperatingLevel::ReadOnly {
+        return DoctorAuditPosture::StartupRefused { reachable_ceiling };
+    }
+    DoctorAuditPosture::DisabledReadOnly
+}
+
 fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileContext {
     let wallet_location = resolved
         .opts
@@ -6472,6 +6516,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
 fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: bool) -> ExitCode {
     // Offline by default: profile metadata inspection does not resolve secrets
     // or open Oracle. --online is the explicit live-connect boundary.
+    let audit_posture = doctor_audit_posture(profile.as_deref());
     let profile_ctx = doctor_profile_context(profile.as_deref(), online);
     let state_layout = doctor_state_layout(doctor_audit_path_configured());
     let mut fix_mutations = Vec::new();
@@ -6515,6 +6560,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
         service_health: service_app_doctor_snapshot().ok(),
         service_unit_caps: service_lifecycle::doctor_service_unit_caps(),
         state_layout,
+        audit_posture: Some(audit_posture),
         sensitive_values: profile_ctx.sensitive_values,
         credential_env_hint: profile_ctx.credential_env_hint,
     };

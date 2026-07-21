@@ -140,11 +140,12 @@ pub use dashboard_auth::{
     prepare_dashboard_pairing, probe_dashboard_http_service,
 };
 pub use doctor::{
-    AuthModeClass, CheckResult, CheckStatus, DoctorAuthCapabilities, DoctorAuthModeCapability,
-    DoctorAuthModeKind, DoctorAuthModeSupport, DoctorContext, DoctorFixOutcome, DoctorFixPolicy,
-    DoctorFixRefusal, DoctorFixReport, DoctorLegacyStateMigrationPlan, DoctorLevelCaps,
-    DoctorProfileCaps, DoctorReport, DoctorServiceUnitCaps, DoctorServiceUnitLimitCaps,
-    DoctorStateLayout, apply_legacy_state_migration, classify_auth_mode, run_doctor,
+    AuthModeClass, CheckResult, CheckStatus, DoctorAuditPosture, DoctorAuthCapabilities,
+    DoctorAuthModeCapability, DoctorAuthModeKind, DoctorAuthModeSupport, DoctorContext,
+    DoctorFixOutcome, DoctorFixPolicy, DoctorFixRefusal, DoctorFixReport,
+    DoctorLegacyStateMigrationPlan, DoctorLevelCaps, DoctorProfileCaps, DoctorReport,
+    DoctorServiceUnitCaps, DoctorServiceUnitLimitCaps, DoctorStateLayout,
+    apply_legacy_state_migration, classify_auth_mode, run_doctor,
 };
 pub use export::{
     ExportAccess, ExportContents, ExportFormat, ExportHandle, ExportRegistry,

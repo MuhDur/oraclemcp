@@ -1,0 +1,57 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T12:45:09Z",
+  "bead_id": "oraclemcp-091-b8a-doctor-audit-honesty-a2zg9",
+  "scope": {
+    "summary": "Make doctor distinguish an intentionally absent signed auditor from a configured signing source or the fail-closed no-key startup refusal; do not infer an active auditor from the default audit path.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/doctor.rs",
+      "crates/oraclemcp-core/src/lib.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs"
+    ],
+    "out_of_scope": [
+      "Implementing the separate B8c unsigned refusal/security-event trail.",
+      "Resolving the existing unrelated oraclemcp-db compilation failure."
+    ]
+  },
+  "source": {
+    "sha": "aeae5d841283355f53134f0c1f22a6205688a764",
+    "tree_clean": false,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "doctor check 13 audit/state layout",
+        "kind": "cli",
+        "trace": "CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/ws-b-lower cargo test -p oraclemcp-core --lib doctor::tests::audit_posture_is_not_inferred_from_the_default_audit_path -- --exact: 1 passed. The test asserts keyless read-only output is audit: DISABLED with Skip status, a configured signer is described as configuration rather than an active auditor, and keyless writable output is Fail with ORACLEMCP_AUDIT_KEY_REQUIRED."
+      },
+      {
+        "name": "binary startup-policy mapping",
+        "kind": "unit",
+        "trace": "crates/oraclemcp/src/main_tests.rs adds doctor_audit_posture_matches_startup_audit_policy_without_opening_a_log for read-only DISABLED, writable no-key refusal, and configured signing source. Its cargo target was blocked before this test could run by pre-existing crate oraclemcp-db error E0425: oracle_error_envelope not found at crates/oraclemcp-db/src/error.rs:420 and :440."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No live Oracle result is claimed.",
+    "The binary-target unit test remains unrun because an unrelated dirty-tree oraclemcp-db compile error blocks the package."
+  ],
+  "known_defects": [
+    "oraclemcp-db currently fails to compile because oracle_error_envelope is undefined at error.rs:420 and error.rs:440."
+  ],
+  "follow_ups": [
+    "oraclemcp-091-b8c-refusal-trail-rhg0m remains open; doctor must add the explicitly labeled unsigned refusal-trail status only when that feature lands."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-core-test; binary-target compilation blocked by unrelated existing error"
+  }
+}

@@ -404,6 +404,36 @@ pub struct DoctorStateLayout {
     pub audit_path_configured: bool,
 }
 
+/// Signed-audit posture derived by the CLI without constructing an auditor.
+///
+/// `doctor` must not claim that an audit path has an active auditor merely
+/// because the path is the default. The binary supplies this posture from the
+/// same reachable-level decision that startup uses, without resolving secrets
+/// or opening the audit file during an offline diagnostic run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DoctorAuditPosture {
+    /// A signing-key source is configured; server startup will validate it and
+    /// arm the signed chain at this path.
+    SigningKeyConfigured {
+        /// Candidate signed-audit path after applying the default.
+        path: PathBuf,
+    },
+    /// No signing key is configured and every reachable profile is read-only,
+    /// so startup intentionally constructs no auditor.
+    DisabledReadOnly,
+    /// No signing key is configured even though a reachable profile can write;
+    /// startup refuses before serving.
+    StartupRefused {
+        /// Highest operating level the server could reach.
+        reachable_ceiling: OperatingLevel,
+    },
+    /// The CLI could not derive an audit posture from the configuration.
+    Unavailable {
+        /// Non-secret reason the posture could not be derived.
+        reason: String,
+    },
+}
+
 /// Safe, scoped migration plan for a legacy audit JSONL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DoctorLegacyStateMigrationPlan {
@@ -520,6 +550,10 @@ pub struct DoctorContext<'a> {
     pub service_unit_caps: Option<DoctorServiceUnitCaps>,
     /// Service-state layout paths used to detect 0.4.x legacy files.
     pub state_layout: Option<DoctorStateLayout>,
+    /// Signed-audit posture supplied by the binary from its startup policy.
+    /// This is separate from the state-layout migration inputs: a default path
+    /// does not imply that an auditor was constructed.
+    pub audit_posture: Option<DoctorAuditPosture>,
     /// Exact setup values that must never appear in doctor output.
     pub sensitive_values: Vec<String>,
     /// A non-blocking, offline credential hint for a profile whose credential
@@ -2262,78 +2296,111 @@ async fn check_write_posture(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
 
 fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
     const ID: u8 = 13;
-    const NAME: &str = "State layout";
+    const NAME: &str = "Audit / state layout";
+
+    let (audit_status, audit_detail) = match ctx.audit_posture.as_ref() {
+        Some(DoctorAuditPosture::SigningKeyConfigured { path }) => (
+            CheckStatus::Pass,
+            format!(
+                "audit: SIGNING KEY CONFIGURED (server startup validates the key and arms the signed chain at {})",
+                path.display()
+            ),
+        ),
+        Some(DoctorAuditPosture::DisabledReadOnly) => (
+            CheckStatus::Skip,
+            "audit: DISABLED (no signing key configured; profile is read-only everywhere reachable)"
+                .to_owned(),
+        ),
+        Some(DoctorAuditPosture::StartupRefused { reachable_ceiling }) => (
+            CheckStatus::Fail,
+            format!(
+                "audit: STARTUP REFUSED (no signing key configured; a reachable profile can reach {} and server startup rejects this with ORACLEMCP_AUDIT_KEY_REQUIRED)",
+                reachable_ceiling.as_str()
+            ),
+        ),
+        Some(DoctorAuditPosture::Unavailable { reason }) => (
+            CheckStatus::Skip,
+            format!("audit: STATUS UNAVAILABLE ({reason})"),
+        ),
+        None => (
+            CheckStatus::Skip,
+            "audit: STATUS UNAVAILABLE (the binary did not supply an audit posture)".to_owned(),
+        ),
+    };
 
     let Some(layout) = ctx.state_layout.as_ref() else {
         return CheckResult::new(
             ID,
             NAME,
-            CheckStatus::Skip,
-            "state directory could not be resolved in this environment",
+            audit_status,
+            format!("{audit_detail}; state directory could not be resolved in this environment"),
         );
     };
 
-    match inspect_legacy_state_layout(layout) {
-        LegacyStateLayoutObservation::Current => CheckResult::new(
-            ID,
-            NAME,
+    let (layout_status, layout_detail, fix) = match inspect_legacy_state_layout(layout) {
+        LegacyStateLayoutObservation::Current => (
             CheckStatus::Pass,
-            format!(
-                "current XDG state layout is in use; audit default is {}",
-                layout.current_audit_path.display()
-            ),
+            "current XDG service-state layout is in use".to_owned(),
+            None,
         ),
-        LegacyStateLayoutObservation::LegacyAndCurrentAuditIdentical => CheckResult::new(
-            ID,
-            NAME,
+        LegacyStateLayoutObservation::LegacyAndCurrentAuditIdentical => (
             CheckStatus::Pass,
             format!(
                 "legacy audit JSONL remains at {} and matches current state audit {}; no merge needed",
                 layout.legacy_audit_path.display(),
                 layout.current_audit_path.display()
             ),
+            None,
         ),
-        LegacyStateLayoutObservation::ExplicitAuditPath => CheckResult::new(
-            ID,
-            NAME,
+        LegacyStateLayoutObservation::ExplicitAuditPath => (
             CheckStatus::Pass,
-            "explicit [audit].path configured; automatic default-path migration is not needed",
+            "explicit [audit].path configured; automatic default-path migration is not needed"
+                .to_owned(),
+            None,
         ),
-        LegacyStateLayoutObservation::LegacyAuditOnly => CheckResult::new(
-            ID,
-            NAME,
+        LegacyStateLayoutObservation::LegacyAuditOnly => (
             CheckStatus::Warn,
             format!(
                 "legacy audit JSONL exists at {}; current state audit path {} is absent",
                 layout.legacy_audit_path.display(),
                 layout.current_audit_path.display()
             ),
-        )
-        .with_fix(
-            "run oraclemcp doctor --fix to copy the legacy audit JSONL into the XDG state directory; the legacy file is left untouched",
+            Some(
+                "run oraclemcp doctor --fix to copy the legacy audit JSONL into the XDG state directory; the legacy file is left untouched",
+            ),
         ),
-        LegacyStateLayoutObservation::LegacyAndCurrentAudit => CheckResult::new(
-            ID,
-            NAME,
+        LegacyStateLayoutObservation::LegacyAndCurrentAudit => (
             CheckStatus::Warn,
             format!(
                 "legacy audit {} and current audit {} both exist; automatic merge is refused",
                 layout.legacy_audit_path.display(),
                 layout.current_audit_path.display()
             ),
-        )
-        .with_fix(
-            "verify both audit chains manually; doctor --fix refuses to merge divergent append-only audit logs",
+            Some(
+                "verify both audit chains manually; doctor --fix refuses to merge divergent append-only audit logs",
+            ),
         ),
-        LegacyStateLayoutObservation::Unsafe(reason) => CheckResult::new(
-            ID,
-            NAME,
+        LegacyStateLayoutObservation::Unsafe(reason) => (
             CheckStatus::Warn,
             format!("state layout requires manual review: {reason}"),
-        )
-        .with_fix(
-            "repair the filesystem layout manually; doctor --fix refuses symlinks and non-regular audit paths",
+            Some(
+                "repair the filesystem layout manually; doctor --fix refuses symlinks and non-regular audit paths",
+            ),
         ),
+    };
+    let status = if audit_status == CheckStatus::Fail {
+        CheckStatus::Fail
+    } else if layout_status == CheckStatus::Warn {
+        CheckStatus::Warn
+    } else if audit_status == CheckStatus::Skip || layout_status == CheckStatus::Skip {
+        CheckStatus::Skip
+    } else {
+        CheckStatus::Pass
+    };
+    let result = CheckResult::new(ID, NAME, status, format!("{audit_detail}; {layout_detail}"));
+    match fix {
+        Some(fix) => result.with_fix(fix),
+        None => result,
     }
 }
 
@@ -4199,6 +4266,58 @@ mod tests {
     }
 
     #[test]
+    fn audit_posture_is_not_inferred_from_the_default_audit_path() {
+        let root = doctor_tmp_dir("audit-posture");
+        let layout = DoctorStateLayout {
+            legacy_audit_path: root.join("config").join("audit.jsonl"),
+            current_audit_path: root.join("state").join("audit").join("audit.jsonl"),
+            migration_backup_dir: root.join("state").join("doctor-migrations").join("backups"),
+            audit_path_configured: false,
+        };
+
+        let disabled = doctor(&DoctorContext {
+            state_layout: Some(layout.clone()),
+            audit_posture: Some(DoctorAuditPosture::DisabledReadOnly),
+            ..DoctorContext::default()
+        });
+        let check = check_by_id(&disabled, 13);
+        assert_eq!(check.status, CheckStatus::Skip);
+        assert_eq!(
+            check.detail,
+            "audit: DISABLED (no signing key configured; profile is read-only everywhere reachable); current XDG service-state layout is in use"
+        );
+        assert!(!check.detail.contains("audit default"));
+
+        let configured = doctor(&DoctorContext {
+            state_layout: Some(layout.clone()),
+            audit_posture: Some(DoctorAuditPosture::SigningKeyConfigured {
+                path: layout.current_audit_path.clone(),
+            }),
+            ..DoctorContext::default()
+        });
+        let check = check_by_id(&configured, 13);
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert!(
+            check
+                .detail
+                .contains("audit: SIGNING KEY CONFIGURED (server startup validates the key"),
+            "{}",
+            check.detail
+        );
+
+        let refused = doctor(&DoctorContext {
+            state_layout: Some(layout),
+            audit_posture: Some(DoctorAuditPosture::StartupRefused {
+                reachable_ceiling: OperatingLevel::ReadWrite,
+            }),
+            ..DoctorContext::default()
+        });
+        let check = check_by_id(&refused, 13);
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.detail.contains("ORACLEMCP_AUDIT_KEY_REQUIRED"));
+    }
+
+    #[test]
     fn legacy_state_layout_detects_and_migrates_audit_jsonl_once() {
         let root = doctor_tmp_dir("legacy-state-migration");
         let legacy = root.join("config").join("audit.jsonl");
@@ -4218,6 +4337,9 @@ mod tests {
 
         let report = doctor(&DoctorContext {
             state_layout: Some(layout.clone()),
+            audit_posture: Some(DoctorAuditPosture::SigningKeyConfigured {
+                path: layout.current_audit_path.clone(),
+            }),
             ..DoctorContext::default()
         });
         let check = check_by_id(&report, 13);
@@ -4242,6 +4364,9 @@ mod tests {
 
         let rerun = doctor(&DoctorContext {
             state_layout: Some(layout.clone()),
+            audit_posture: Some(DoctorAuditPosture::SigningKeyConfigured {
+                path: layout.current_audit_path.clone(),
+            }),
             ..DoctorContext::default()
         })
         .with_fix_report_mutations(vec![mutation]);

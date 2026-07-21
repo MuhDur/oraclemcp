@@ -614,6 +614,62 @@ fn build_auditor_fails_closed_when_a_switchable_profile_can_write() {
 }
 
 #[test]
+fn doctor_audit_posture_matches_startup_audit_policy_without_opening_a_log() {
+    let read_only = OracleMcpConfig::from_toml_str(
+        r#"
+            [[profiles]]
+            name = "ro"
+            connect_string = "localhost:1521/FREEPDB1"
+            "#,
+    )
+    .expect("read-only config parses");
+    let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+    assert_eq!(
+        doctor_audit_posture_from_config(&read_only, &active, false),
+        DoctorAuditPosture::DisabledReadOnly,
+        "a keyless read-only server intentionally has no auditor"
+    );
+
+    let writable = OracleMcpConfig::from_toml_str(
+        r#"
+            [[profiles]]
+            name = "rw"
+            connect_string = "localhost:1521/FREEPDB1"
+            max_level = "READ_WRITE"
+            "#,
+    )
+    .expect("writable config parses");
+    assert_eq!(
+        doctor_audit_posture_from_config(&writable, &active, false),
+        DoctorAuditPosture::StartupRefused {
+            reachable_ceiling: OperatingLevel::ReadWrite,
+        },
+        "the doctor must surface the same no-key startup refusal as serve"
+    );
+
+    let signed = OracleMcpConfig::from_toml_str(
+        r#"
+            [audit]
+            path = "target/test-doctor-signed-audit.jsonl"
+            key_ref = "literal:0123456789abcdef0123456789abcdef"
+
+            [[profiles]]
+            name = "rw"
+            connect_string = "localhost:1521/FREEPDB1"
+            max_level = "READ_WRITE"
+            "#,
+    )
+    .expect("signed config parses");
+    assert_eq!(
+        doctor_audit_posture_from_config(&signed, &active, true),
+        DoctorAuditPosture::SigningKeyConfigured {
+            path: PathBuf::from("target/test-doctor-signed-audit.jsonl"),
+        },
+        "doctor may report the configured signing posture without opening a log"
+    );
+}
+
+#[test]
 fn build_auditor_installs_when_writable_profile_has_a_key() {
     // With a signing key configured, a writable reachable profile installs
     // an auditor (so the writable profile, after a switch, is audited).
