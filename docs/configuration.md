@@ -598,9 +598,42 @@ dashboard session rather than loopback alone.
 A profile may set `base = "other_profile"` to inherit every **unset** field from
 another profile (shallow-merge; the child wins on any field it sets). `name` and
 `base` itself are never inherited. Inheritance is resolved **before** validation,
-so a child still honors the effective `max_level` ceiling, the protected
-invariant, and all other validation rules. The resolver detects unknown bases,
-inheritance cycles, and duplicate profile names and rejects them at load.
+then the resolved child is validated for its own `max_level`, `protected`
+invariant, and other rules. The resolver detects unknown bases, inheritance
+cycles, and duplicate profile names and rejects them at load.
+
+**`base` does not impose a ceiling.** Because inheritance only fills unset
+fields, a child that sets `max_level` replaces the base's value and may raise it
+from `READ_ONLY` to `READ_WRITE`, `DDL`, or `ADMIN`. This is intentional: a
+base is configuration reuse owned by the operator, not a policy boundary. Do
+not use a `READ_ONLY` base as a fleet safety net:
+
+```toml
+[[profiles]]
+name = "shared_defaults"
+connect_string = "db.example:1521/service"
+credential_ref = "env:ORACLE_SHARED_PASSWORD"
+max_level = "READ_ONLY"
+
+[[profiles]]
+name = "maintenance"
+base = "shared_defaults"
+max_level = "DDL" # valid: the child's explicit value replaces the base value
+```
+
+To make a profile immutably `READ_ONLY`, set `protected = true` on that profile
+(and keep `max_level = "READ_ONLY"`); validation rejects any other ceiling. A
+protected child may still use `base` for non-security defaults, but its own
+protection is what enforces the bound:
+
+```toml
+[[profiles]]
+name = "production_ro"
+base = "shared_defaults"
+protected = true
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
+```
 
 For list-valued fields (`app_context`): a child inherits the base list when it
 omits the field, replaces the whole list when it sets entries, and can clear an

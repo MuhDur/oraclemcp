@@ -2074,6 +2074,18 @@ mod tests {
     }
 
     #[test]
+    fn child_can_raise_max_level_above_base() {
+        let mut base = p("shared");
+        base.max_level = Some(OperatingLevel::ReadOnly);
+        let mut child = p("maintenance");
+        child.base = Some("shared".to_owned());
+        child.max_level = Some(OperatingLevel::Ddl);
+        let mut profiles = vec![base, child];
+        resolve_inheritance(&mut profiles).expect("resolve");
+        assert_eq!(profiles[1].max_level(), OperatingLevel::Ddl);
+    }
+
+    #[test]
     fn unknown_base_is_rejected() {
         let mut child = p("dev");
         child.base = Some("nope".to_owned());

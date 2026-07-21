@@ -695,9 +695,12 @@ least 32 bytes of randomly generated key material.
 
 A few further profile keys are optional:
 
-- `base = "other_profile"`: inherit from another profile and override only the
-  keys you set. Inheritance is resolved before validation, so a child still
-  honors the effective `max_level` ceiling.
+- `base = "other_profile"`: inherit another profile's **unset** fields. A
+  child may override any inherited field, including raising `max_level` above
+  the base's value; `base` is configuration reuse, **not** a fleet safety
+  ceiling. To pin a production profile at `READ_ONLY`, set
+  `protected = true` (which requires `max_level = "READ_ONLY"`) on that child;
+  do not rely on a `READ_ONLY` base to constrain it.
 - `[profiles.pool]`: local client-side connection reuse settings
   (`max_size`, `min_idle`, `acquire_timeout_secs`, `statement_cache_size`).
   This enables the hybrid runtime strategy for stdio/direct dispatch and
