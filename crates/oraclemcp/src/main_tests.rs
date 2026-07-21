@@ -270,7 +270,7 @@ fn optional_pool_failure_retains_the_authoritative_primary_session() {
     assert!(connections.stateless.is_none());
     assert_eq!(
         runtime_connection_strategy(true, &connections),
-        "hybrid_pool_degraded"
+        "pinned_plus_stateless_degraded"
     );
     let error = block_on_connect(|cx| async move {
         connections
@@ -305,7 +305,7 @@ fn healthy_optional_pool_is_installed_and_reported() {
     assert!(connections.stateless.is_some());
     assert_eq!(
         runtime_connection_strategy(true, &connections),
-        "hybrid_pool"
+        "pinned_plus_stateless"
     );
 }
 
@@ -418,6 +418,7 @@ fn fresh_stateful_lane_uses_reloaded_profile_ceiling_and_timeout() {
         auditor: None,
         write_intents: None,
         exports: Arc::new(ExportRegistry::new()),
+        unsigned_refusal_log: true,
     };
 
     apply_selected_profile_to_wiring(&mut wiring, selected);
@@ -624,10 +625,25 @@ fn doctor_audit_posture_matches_startup_audit_policy_without_opening_a_log() {
     )
     .expect("read-only config parses");
     let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+    assert!(unsigned_refusal_trail_enabled(false, true));
+    assert!(!unsigned_refusal_trail_enabled(false, false));
+    assert!(!unsigned_refusal_trail_enabled(true, true));
     assert_eq!(
         doctor_audit_posture_from_config(&read_only, &active, false),
-        DoctorAuditPosture::DisabledReadOnly,
+        DoctorAuditPosture::DisabledReadOnly {
+            unsigned_refusal_trail_path: Some(default_unsigned_refusal_trail_path()),
+        },
         "a keyless read-only server intentionally has no auditor"
+    );
+
+    let mut opted_out = read_only.clone();
+    opted_out.audit.unsigned_refusal_log = false;
+    assert_eq!(
+        doctor_audit_posture_from_config(&opted_out, &active, false),
+        DoctorAuditPosture::DisabledReadOnly {
+            unsigned_refusal_trail_path: None,
+        },
+        "an explicit opt-out disables only the unsigned refusal trail"
     );
 
     let writable = OracleMcpConfig::from_toml_str(
@@ -2766,7 +2782,8 @@ fn setup_payload_is_generic_and_client_ready() {
     assert!(!profiles_toml.contains("wallet_password_ref"));
     assert!(!profiles_toml.contains("[profiles.oci]"));
     assert!(!profiles_toml.contains("[profiles.drcp]"));
-    assert!(!profiles_toml.contains("[profiles.proxy_auth]"));
+    assert!(profiles_toml.contains("[profiles.proxy_auth]"));
+    assert!(profiles_toml.contains("MCP_PROXY[APP_OWNER]"));
     assert!(!profiles_toml.contains("[[profiles.app_context]]"));
     assert!(!profiles_toml.contains("[profiles.session_identity]"));
     assert_eq!(
@@ -2782,6 +2799,10 @@ fn setup_payload_is_generic_and_client_ready() {
             .as_str()
             .expect("codex config")
             .contains("tenant_ro")
+    );
+    assert!(
+        out.get("secure_stdio").is_none(),
+        "setup must not print a server-only init-token snippet: generic MCP client configuration cannot inject initialize _meta"
     );
     assert_eq!(
         out["http_client_credentials"]["serve_args"],
@@ -2821,6 +2842,10 @@ fn setup_payload_is_generic_and_client_ready() {
     let serialized = serde_json::to_string(&out).expect("json");
     assert!(serialized.contains("dbhost.example.com"));
     assert!(!serialized.contains("literal:"));
+    assert!(
+        !serialized.contains("ORACLEMCP_STDIO_TOKEN"),
+        "the generic setup payload must not advertise a token flow it cannot complete"
+    );
     // Explicit wrapper flow: the payload must say the wrapper has to exist first.
     assert_eq!(
         out["paths"]["wrapper"],
@@ -3478,6 +3503,21 @@ fn agent_ergonomics_drift_guard_pins_help_footer() {
 }
 
 #[test]
+fn allow_no_auth_help_names_stdio_and_http_behavior() {
+    let mut command = cli_command("oraclemcp");
+    let serve = command
+        .find_subcommand_mut("serve")
+        .expect("serve subcommand exists");
+    let mut help = Vec::new();
+    serve.write_long_help(&mut help).expect("render serve help");
+    let help = String::from_utf8(help).expect("help utf8");
+
+    assert!(help.contains("stdio's init-token"));
+    assert!(help.contains("HTTP to start without configured auth"));
+    assert!(help.contains("non-loopback HTTP bind still needs"));
+}
+
+#[test]
 fn robot_docs_guide_outputs_agent_workflows() {
     let text = robot_docs::robot_docs_guide_text();
     assert!(text.contains("oraclemcp robot-docs guide"));
@@ -3613,6 +3653,80 @@ fn robot_docs_guide_outputs_agent_workflows() {
     );
 }
 
+#[test]
+fn a2a_error_statuses_preserve_actionable_causes() {
+    let (code, message) = setup_config_error_status(&ConfigOpsError::FileStore(
+        oraclemcp_core::file_store::FileStoreError::Locked,
+    ));
+    assert_eq!(code, "ORACLEMCP_STATE_STORE_LOCKED");
+    assert!(message.contains("exclusively locked"));
+    assert!(message.contains("stop that service"));
+
+    let credential_store_locked =
+        ClientCredentialError::Store(oraclemcp_core::file_store::FileStoreError::Locked);
+    assert_eq!(
+        client_credential_error_code(&credential_store_locked),
+        "ORACLEMCP_STATE_STORE_LOCKED"
+    );
+    assert!(client_credential_error_message(&credential_store_locked).contains("stop the service"));
+
+    for (error, expected_code) in [
+        (
+            ConfigOpsError::PreviewRequired,
+            "ORACLEMCP_SETUP_PREVIEW_REQUIRED",
+        ),
+        (
+            ConfigOpsError::InvalidPreviewToken,
+            "ORACLEMCP_SETUP_PREVIEW_TOKEN_INVALID",
+        ),
+        (
+            ConfigOpsError::PreviewExpired,
+            "ORACLEMCP_SETUP_PREVIEW_EXPIRED",
+        ),
+        (
+            ConfigOpsError::PreviewDraftChanged,
+            "ORACLEMCP_SETUP_PREVIEW_DRAFT_CHANGED",
+        ),
+        (
+            ConfigOpsError::PreviewConfirmationRequired,
+            "ORACLEMCP_SETUP_PREVIEW_CONFIRMATION_REQUIRED",
+        ),
+    ] {
+        let (code, message) = setup_config_error_status(&error);
+        assert_eq!(code, expected_code);
+        assert!(!message.is_empty());
+    }
+
+    let (code, message) =
+        incident_capture_error_status(&IncidentCaptureError::Io("disk full".to_owned()));
+    assert_eq!(code, "ORACLEMCP_INCIDENT_CAPTURE_IO_FAILED");
+    assert!(message.contains("disk full"));
+
+    let (code, message) = incident_capture_error_status(&IncidentCaptureError::MissingFile {
+        operation: "read incident manifest",
+    });
+    assert_eq!(code, "ORACLEMCP_INCIDENT_BUNDLE_MISSING");
+    assert!(message.contains("read incident manifest"));
+
+    let (code, message) = incident_replay_error_status(&IncidentReplayError::Capture(
+        IncidentCaptureError::Io("audit volume is full".to_owned()),
+    ));
+    assert_eq!(code, "ORACLEMCP_INCIDENT_REPLAY_IO_FAILED");
+    assert!(message.contains("audit volume is full"));
+
+    let (code, message) = incident_replay_error_status(&IncidentReplayError::Capture(
+        IncidentCaptureError::MissingFile {
+            operation: "read incident manifest",
+        },
+    ));
+    assert_eq!(code, "ORACLEMCP_INCIDENT_BUNDLE_MISSING");
+    assert!(message.contains("read incident manifest"));
+
+    let (code, message) = incident_config_load_error_status("invalid profiles TOML");
+    assert_eq!(code, "ORACLEMCP_INCIDENT_CONFIG_LOAD_FAILED");
+    assert!(message.contains("invalid profiles TOML"));
+}
+
 fn custom_def(name: &str) -> CustomToolDef {
     CustomToolDef {
         name: name.to_owned(),
@@ -3662,8 +3776,9 @@ fn production_loader_rejects_form_b_package_calls() {
         "#,
     )
     .expect("write form-b tool");
-    let err = load_custom_catalog_from_sources(Some(&tools_dir), None, false)
-        .expect_err("form B must be rejected by the production loader");
+    let err =
+        load_custom_catalog_from_sources(Some(&tools_dir), None, false, OperatingLevel::ReadOnly)
+            .expect_err("form B must be rejected by the production loader");
     assert!(
         err.message.contains("Form B"),
         "unexpected error: {}",
@@ -3686,7 +3801,8 @@ fn production_loader_rejects_form_b_package_calls() {
     )
     .expect("rewrite as form A");
     let catalog =
-        load_custom_catalog_from_sources(Some(&tools_dir), None, false).expect("form A loads");
+        load_custom_catalog_from_sources(Some(&tools_dir), None, false, OperatingLevel::ReadOnly)
+            .expect("form A loads");
     assert_eq!(catalog.len(), 1);
 }
 
@@ -3713,8 +3829,13 @@ fn custom_tool_catalog_and_sign_cli_enforce_hmac_key_size() {
         } else {
             "C".repeat(len)
         };
-        let catalog_error = load_custom_catalog_from_sources(Some(&tools_dir), Some(&secret), true)
-            .expect_err("undersized custom-tool load key must fail closed");
+        let catalog_error = load_custom_catalog_from_sources(
+            Some(&tools_dir),
+            Some(&secret),
+            true,
+            OperatingLevel::ReadOnly,
+        )
+        .expect_err("undersized custom-tool load key must fail closed");
         assert!(
             catalog_error.message.contains(&format!("{len} bytes")),
             "{}",
@@ -3757,15 +3878,139 @@ fn custom_tool_catalog_and_sign_cli_enforce_hmac_key_size() {
         .expect("write signed custom tool");
 
         assert_eq!(
-            load_custom_catalog_from_sources(Some(&tools_dir), Some(&secret), true)
-                .expect("minimum-size custom-tool load key is valid")
-                .len(),
+            load_custom_catalog_from_sources(
+                Some(&tools_dir),
+                Some(&secret),
+                true,
+                OperatingLevel::ReadOnly,
+            )
+            .expect("minimum-size custom-tool load key is valid")
+            .len(),
             1
         );
         let payload = custom_tool_signatures_with_key(&tool_path, None, &secret)
             .expect("minimum-size sign-tool key is valid");
         assert_eq!(payload["signatures"].as_array().map(Vec::len), Some(1));
     }
+}
+
+#[test]
+fn custom_tool_loader_uses_each_profiles_real_ceiling() {
+    let tools_dir = target_tmp_file("b12b-custom-tool-ceilings");
+    fs::create_dir_all(&tools_dir).expect("create tools dir");
+    let tool_path = tools_dir.join("guarded.toml");
+
+    // Static DML classifies as READ_WRITE. The unsigned/no-key path used to
+    // hard-code READ_ONLY, so every writable profile was incorrectly refused.
+    fs::write(
+        &tool_path,
+        r#"
+        [[tool]]
+        name = "app_bump"
+        description = "Update one status"
+        sql = "UPDATE accounts SET status = 'ACTIVE' WHERE id = 7"
+        output_mode = "rows"
+        "#,
+    )
+    .expect("write unsigned guarded tool");
+
+    let profile_ceiling = |max_level: &str| {
+        let config = OracleMcpConfig::from_toml_str(&format!(
+            r#"
+            [[profiles]]
+            name = "custom_tool_profile"
+            connect_string = "db:1521/service"
+            max_level = "{max_level}"
+            "#
+        ))
+        .expect("profile config parses");
+        let profile = config
+            .profile("custom_tool_profile")
+            .expect("profile exists");
+        oraclemcp_core::session_level_state(profile, false).max_level()
+    };
+
+    for (profile_max, should_load) in [
+        ("READ_ONLY", false),
+        ("READ_WRITE", true),
+        ("DDL", true),
+        ("ADMIN", true),
+    ] {
+        let result = load_custom_catalog_from_sources(
+            Some(&tools_dir),
+            None,
+            false,
+            profile_ceiling(profile_max),
+        );
+        if should_load {
+            assert_eq!(
+                result
+                    .expect("tool must load at the profile's real ceiling")
+                    .len(),
+                1,
+                "{profile_max} profile should load its READ_WRITE custom tool"
+            );
+        } else {
+            let error = result.expect_err("READ_ONLY profile must refuse a write tool");
+            assert!(
+                error.message.contains("profile ceiling is READ_ONLY"),
+                "unexpected error: {}",
+                error.message
+            );
+        }
+    }
+
+    // The signed path must report the selected profile's real ceiling too.
+    // A declaration can only raise a classifier-derived floor, so this remains
+    // a fail-closed test without requiring executable DDL in the fixture.
+    let secret = "0123456789abcdef0123456789abcdef";
+    let key = HmacSha256Key::new(secret.as_bytes().to_vec()).expect("valid signing key");
+    let mut signed = custom_def("app_schema_report");
+    signed.declared_level = Some("DDL".to_owned());
+    signed.signature = Some(sign(&signed, &key));
+    fs::write(
+        &tool_path,
+        format!(
+            r#"
+            [[tool]]
+            name = "{}"
+            description = "{}"
+            sql = "{}"
+            output_mode = "rows"
+            declared_level = "DDL"
+            signature = "{}"
+            "#,
+            signed.name,
+            signed.description,
+            signed.sql.as_deref().expect("inline SQL"),
+            signed.signature.as_deref().expect("signature"),
+        ),
+    )
+    .expect("write signed DDL-pinned tool");
+
+    let error = load_custom_catalog_from_sources(
+        Some(&tools_dir),
+        Some(secret),
+        true,
+        profile_ceiling("READ_WRITE"),
+    )
+    .expect_err("signed DDL-pinned tool must not load above the profile ceiling");
+    assert!(error.message.contains("requires DDL"), "{error}");
+    assert!(
+        error.message.contains("profile ceiling is READ_WRITE"),
+        "signed-tool refusal must name the real profile ceiling: {error}"
+    );
+    assert_eq!(
+        load_custom_catalog_from_sources(
+            Some(&tools_dir),
+            Some(secret),
+            true,
+            profile_ceiling("DDL")
+        )
+        .expect("signed DDL-pinned tool loads at DDL")
+        .len(),
+        1
+    );
 }
 
 #[test]
@@ -3815,9 +4060,14 @@ fn reloaded_generation_enforces_its_own_custom_tool_signature_policy() {
     .expect("old policy");
     assert!(!old_requires_signatures);
     assert_eq!(
-        load_custom_catalog_from_sources(Some(&tools_dir), None, old_requires_signatures,)
-            .expect("old generation admits unsigned read-only tool")
-            .len(),
+        load_custom_catalog_from_sources(
+            Some(&tools_dir),
+            None,
+            old_requires_signatures,
+            OperatingLevel::ReadOnly,
+        )
+        .expect("old generation admits unsigned read-only tool")
+        .len(),
         1
     );
 
@@ -3839,8 +4089,13 @@ fn reloaded_generation_enforces_its_own_custom_tool_signature_policy() {
     )
     .expect("new policy");
     assert!(new_requires_signatures);
-    let error = load_custom_catalog_from_sources(Some(&tools_dir), None, new_requires_signatures)
-        .expect_err("new generation refuses unsigned catalog without signing key");
+    let error = load_custom_catalog_from_sources(
+        Some(&tools_dir),
+        None,
+        new_requires_signatures,
+        OperatingLevel::ReadOnly,
+    )
+    .expect_err("new generation refuses unsigned catalog without signing key");
     assert!(error.message.contains(CUSTOM_TOOLS_HMAC_KEY_ENV));
 }
 
@@ -3883,10 +4138,11 @@ fn build_server_advertises_the_active_custom_catalog_plus_capabilities() {
             sql_policy: None,
             metrics: None,
             profile_drain: ProfileDrainState::default(),
+            unsigned_refusal_log: true,
         },
     );
     // The capabilities report carries the registry's tools.
-    let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), LIVE_DB, false);
+    let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), BUILT_WITH_LIVE_DB, false);
     assert_eq!(caps.tools.len(), registry::tool_names().len());
     let listed = server
         .handle_jsonrpc_request(
@@ -3911,6 +4167,82 @@ fn build_server_advertises_the_active_custom_catalog_plus_capabilities() {
     );
     // Smoke: the server clones (it is Clone) — proves it is fully built.
     let _ = server.clone();
+}
+
+#[test]
+fn build_capability_payloads_do_not_claim_live_connectivity() {
+    let status = serve_status_payload("stdio", None, &[]);
+    assert_eq!(status["built_with_live_db"], serde_json::json!(true));
+    assert!(status.get("live_db").is_none());
+
+    let info = info_payload();
+    assert_eq!(info["built_with_live_db"], serde_json::json!(true));
+    assert!(info.get("live_db").is_none());
+
+    let capabilities = capabilities_payload();
+    assert_eq!(
+        capabilities["features"]["built_with_live_db"],
+        serde_json::json!(true)
+    );
+    assert!(capabilities["features"].get("live_db").is_none());
+}
+
+#[test]
+fn client_credential_commands_distinguish_offline_and_live_revocation() {
+    let client_id = "client-0123456789abcdef0123456789abcdef";
+    let client_command = client_credential_client_command("ocmcp_fixture_bearer");
+    assert_eq!(
+        client_command,
+        serde_json::json!([
+            "claude",
+            "mcp",
+            "add",
+            "oracle",
+            "--transport",
+            "http",
+            "--header",
+            "Authorization: Bearer ocmcp_fixture_bearer",
+            "http://127.0.0.1:7070/mcp",
+        ])
+    );
+
+    let online = online_client_credential_revoke_command(client_id);
+    assert_eq!(online["program"], serde_json::json!("curl"));
+    assert_eq!(online["method"], serde_json::json!("POST"));
+    assert_eq!(
+        online["path"],
+        serde_json::json!("/operator/v1/client-credentials/revoke")
+    );
+    assert_eq!(
+        online["argv"][4],
+        serde_json::json!("${ORACLEMCP_CONTROL_URL}/operator/v1/client-credentials/revoke")
+    );
+    assert_eq!(
+        online["argv"][14],
+        serde_json::json!(format!("{{\"client_id\":\"{client_id}\"}}"))
+    );
+    assert!(
+        online["requires"]
+            .as_array()
+            .expect("online command requirements")
+            .iter()
+            .any(|requirement| requirement
+                .as_str()
+                .is_some_and(|requirement| requirement.contains("mTLS")))
+    );
+
+    let revoke = ClientCredentialCliCommand::Revoke(ClientCredentialIdCliArgs {
+        client_id: client_id.to_owned(),
+    });
+    assert_eq!(
+        online_revocation_for_command(&revoke),
+        Some(online_client_credential_revoke_command(client_id))
+    );
+    let issue = ClientCredentialCliCommand::Issue(ClientCredentialIssueCliArgs {
+        label: "fixture".to_owned(),
+        scopes: vec!["oracle:read".to_owned()],
+    });
+    assert!(online_revocation_for_command(&issue).is_none());
 }
 
 // ---- K4: bounded reason_class + operating_level labels on the blocked counter ----

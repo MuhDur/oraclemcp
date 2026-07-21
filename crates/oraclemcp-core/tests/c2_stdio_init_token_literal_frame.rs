@@ -226,10 +226,8 @@ fn client_facing_sources() -> Vec<PathBuf> {
     files
 }
 
-/// Bead `oraclemcp-091-b3-stdio-token-nzmiv` (B3) documents the path; deleting
-/// the `#[ignore]` is part of its acceptance.
+/// Bead `oraclemcp-091-b3-stdio-token-nzmiv` (B3) documents the path.
 #[test]
-#[ignore = "expected failure until oraclemcp-091-b3-stdio-token-nzmiv (B3) documents the init-token path"]
 fn c2_init_token_path_is_documented_somewhere_a_client_author_would_look() {
     let hits: Vec<String> = client_facing_sources()
         .into_iter()
@@ -247,9 +245,8 @@ fn c2_init_token_path_is_documented_somewhere_a_client_author_would_look() {
 }
 
 /// Bead `oraclemcp-091-b3-stdio-token-nzmiv` (B3) puts the literal path into the
-/// error text; deleting the `#[ignore]` is part of its acceptance.
+/// error text.
 #[test]
-#[ignore = "expected failure until oraclemcp-091-b3-stdio-token-nzmiv (B3) names the path in the Missing error"]
 fn c2_missing_token_error_names_the_exact_json_path() {
     let message = error_message(&send_frame(FRAME_WITHOUT_META, EXPECTED_TOKEN));
     assert!(

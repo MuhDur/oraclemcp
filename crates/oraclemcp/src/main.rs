@@ -67,7 +67,8 @@ use oraclemcp_config::{
 use oraclemcp_core::admission::DEFAULT_READ_PER_PROFILE_CAP;
 use oraclemcp_core::http::SinglePrincipalGuard;
 use oraclemcp_core::incident::{
-    Cassette, CassetteFrame, IncidentCaptureRequest, capture_bundle, replay_bundle,
+    Cassette, CassetteFrame, IncidentCaptureError, IncidentCaptureRequest, IncidentReplayError,
+    capture_bundle, replay_bundle,
 };
 use oraclemcp_core::{
     AdmissionController, CapabilitiesReport, ChangeProposalStore, ClientCredentialError,
@@ -106,8 +107,9 @@ use service_lifecycle::{
     acquire_service_instance_guard,
 };
 
-/// Whether this build includes live Oracle connectivity.
-const LIVE_DB: bool = true;
+/// Whether this binary was built with Oracle connectivity support. This is a
+/// build capability, not a claim about a currently reachable database.
+const BUILT_WITH_LIVE_DB: bool = true;
 const CUSTOM_TOOLS_DIR_ENV: &str = "ORACLEMCP_TOOLS_DIR";
 const CUSTOM_TOOLS_HMAC_KEY_ENV: &str = "ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY";
 const DEFAULT_SETUP_CONFIG_PATH: &str = "~/.config/oraclemcp/profiles.toml";
@@ -158,8 +160,10 @@ enum Command {
         /// --allow-no-auth; mTLS identities require registered leaf fingerprints.
         #[arg(long)]
         listen: Option<String>,
-        /// Run stdio without an init token (development only). Without this and
-        /// without $ORACLEMCP_STDIO_TOKEN, stdio serve refuses to start.
+        /// Permit unauthenticated development: disables stdio's init-token
+        /// requirement only when no token is configured, and permits HTTP to
+        /// start without configured auth. A non-loopback HTTP bind still needs
+        /// explicit remote opt-in; never use this for remote exposure.
         #[arg(long)]
         allow_no_auth: bool,
         /// The expected stdio init token (overrides $ORACLEMCP_STDIO_TOKEN).
@@ -413,7 +417,8 @@ struct ServiceInstallCliArgs {
     /// Connect using this named profile from the loaded config.
     #[arg(long)]
     profile: Option<String>,
-    /// Start HTTP without OAuth or registered mTLS (local development only).
+    /// Permit HTTP without configured auth (local development only). A
+    /// non-loopback bind still needs explicit remote opt-in.
     #[arg(long)]
     allow_no_auth: bool,
     /// Enable service-owned per-client bearer credentials for HTTP.
@@ -1074,8 +1079,8 @@ fn runtime_connection_strategy(
     connections: &RuntimeConnections,
 ) -> &'static str {
     match (pool_configured, connections.stateless.is_some()) {
-        (true, true) => "hybrid_pool",
-        (true, false) => "hybrid_pool_degraded",
+        (true, true) => "pinned_plus_stateless",
+        (true, false) => "pinned_plus_stateless_degraded",
         (false, _) => "single_session",
     }
 }
@@ -1307,21 +1312,28 @@ fn load_custom_catalog_for_snapshot(
     level: &SessionLevelState,
 ) -> Result<CustomToolCatalog, ErrorEnvelope> {
     let require_signed_tools = custom_tools_require_signatures(config, active_profile, level)?;
-    load_custom_catalog_with_requirement(require_signed_tools)
+    load_custom_catalog_with_requirement(require_signed_tools, level.max_level())
 }
 
 fn load_custom_catalog_with_requirement(
     require_signed_tools: bool,
+    max_level: OperatingLevel,
 ) -> Result<CustomToolCatalog, ErrorEnvelope> {
     let dir = custom_tools_dir();
     let key = std::env::var(CUSTOM_TOOLS_HMAC_KEY_ENV).ok();
-    load_custom_catalog_from_sources(dir.as_deref(), key.as_deref(), require_signed_tools)
+    load_custom_catalog_from_sources(
+        dir.as_deref(),
+        key.as_deref(),
+        require_signed_tools,
+        max_level,
+    )
 }
 
 fn load_custom_catalog_from_sources(
     dir: Option<&Path>,
     key: Option<&str>,
     require_signed_tools: bool,
+    max_level: OperatingLevel,
 ) -> Result<CustomToolCatalog, ErrorEnvelope> {
     let Some(dir) = dir else {
         return Ok(CustomToolCatalog::default());
@@ -1351,7 +1363,7 @@ fn load_custom_catalog_from_sources(
         load_tools_for_profile(
             &defs,
             &classifier,
-            OperatingLevel::ReadOnly,
+            max_level,
             key,
             true,
         )
@@ -1359,7 +1371,7 @@ fn load_custom_catalog_from_sources(
         load_tools_for_profile(
             &defs,
             &classifier,
-            OperatingLevel::ReadOnly,
+            max_level,
             key,
             false,
         )
@@ -1368,7 +1380,7 @@ fn load_custom_catalog_from_sources(
             "custom tool signatures are present but {CUSTOM_TOOLS_HMAC_KEY_ENV} is not set"
         )));
     } else {
-        load_tools(&defs, &classifier, OperatingLevel::ReadOnly)
+        load_tools(&defs, &classifier, max_level)
     }
     .map_err(|e| custom_tool_error(format!("failed to load custom tools: {e}")))?;
 
@@ -2156,6 +2168,7 @@ struct DispatcherWiring {
     auditor: Option<Arc<Auditor>>,
     write_intents: Option<Arc<WriteIntentLog>>,
     exports: Arc<ExportRegistry>,
+    unsigned_refusal_log: bool,
 }
 
 fn whole_request_timeout(call_timeout_seconds: Option<u64>) -> std::time::Duration {
@@ -2212,6 +2225,9 @@ fn build_oracle_dispatcher(
     }
     if let Some(write_intents) = &wiring.write_intents {
         dispatcher = dispatcher.with_write_intent_log(Arc::clone(write_intents));
+    }
+    if !wiring.unsigned_refusal_log {
+        dispatcher = dispatcher.without_refusal_corpus();
     }
     dispatcher
 }
@@ -2553,8 +2569,10 @@ fn stateful_lane_factory_builder(
                     ));
                 }
                 if let Some(selected) = opened.selected_profile {
-                    wiring.custom_catalog =
-                        load_custom_catalog_with_requirement(selected.require_signed_tools)?;
+                    wiring.custom_catalog = load_custom_catalog_with_requirement(
+                        selected.require_signed_tools,
+                        selected.level.max_level(),
+                    )?;
                     apply_selected_profile_to_wiring(&mut wiring, selected);
                 }
                 let dispatcher = build_oracle_dispatcher(
@@ -2906,6 +2924,7 @@ fn stateless_read_worker_factory_builder(
                     };
                     let profile = resolved.name.clone();
                     let level = resolved.level.clone();
+                    let max_level = level.max_level();
                     let request_timeout = resolved.opts.call_timeout;
                     let require_signed_tools = resolved.require_signed_tools;
                     let conn = try_open_connection(cx, resolved.opts)
@@ -2918,7 +2937,7 @@ fn stateless_read_worker_factory_builder(
                     wiring.level = level;
                     wiring.request_timeout = request_timeout;
                     wiring.custom_catalog =
-                        load_custom_catalog_with_requirement(require_signed_tools)?;
+                        load_custom_catalog_with_requirement(require_signed_tools, max_level)?;
                     let dispatcher = build_oracle_dispatcher(conn, None, &wiring)
                         .with_profile_generation_lease(
                             wiring.profile_drain.clone(),
@@ -2962,6 +2981,7 @@ struct ServerBuildOptions {
     sql_policy: Option<SqlPolicyConfig>,
     metrics: Option<Arc<Metrics>>,
     profile_drain: ProfileDrainState,
+    unsigned_refusal_log: bool,
 }
 
 struct BuiltServer {
@@ -2997,7 +3017,7 @@ fn build_server_with_lifecycle(
         registry.tools.clone(),
         level.max_level(),
         FeatureTiers {
-            live_db: LIVE_DB,
+            live_db: BUILT_WITH_LIVE_DB,
             engine: cfg!(feature = "plsql-intelligence"),
             http_transport: options.transport.is_http(),
         },
@@ -3033,6 +3053,7 @@ fn build_server_with_lifecycle(
         auditor: options.auditor,
         write_intents: options.write_intents,
         exports: Arc::clone(&exports),
+        unsigned_refusal_log: options.unsigned_refusal_log,
     };
     let mut session_lifecycle: Option<Arc<dyn HttpSessionLifecycle>> = None;
     let dispatcher: Arc<dyn ToolDispatch> = if options.transport.is_http() {
@@ -3554,6 +3575,10 @@ fn run_serve(
             return ExitCode::from(2);
         }
     };
+    // The redacted refusal trail is the unsigned floor only when no signed
+    // chain is active. An operator may disable that floor explicitly.
+    let unsigned_refusal_log =
+        unsigned_refusal_trail_enabled(auditor.is_some(), full_config.audit.unsigned_refusal_log);
     let query_cost_budget_enabled = has_cumulative_query_cost_budget(&full_config);
     let service_owner = match build_service_owner(
         listen.is_some()
@@ -3620,6 +3645,7 @@ fn run_serve(
                     sql_policy: sql_policy.clone(),
                     metrics: None,
                     profile_drain: ProfileDrainState::from_config(full_config.clone()),
+                    unsigned_refusal_log,
                 },
             );
             emit_serve_status(robot_json, "stdio", None, &advertised_tools);
@@ -3660,7 +3686,7 @@ fn run_serve(
                     Err(error) => {
                         emit_status_error(
                             robot_json,
-                            "ORACLEMCP_CLIENT_CREDENTIAL_STORE_UNAVAILABLE",
+                            client_credential_error_code(&error),
                             &client_credential_error_message(&error),
                         );
                         return ExitCode::from(2);
@@ -3777,6 +3803,7 @@ fn run_serve(
                     sql_policy: sql_policy.clone(),
                     metrics: Some(Arc::clone(&metrics)),
                     profile_drain: profile_drain.clone(),
+                    unsigned_refusal_log,
                 },
             );
             let server = built.server;
@@ -4104,28 +4131,35 @@ fn install_shutdown_signal_bridge(
 /// Emit a serve startup status line on stderr (stdout stays JSON-RPC data).
 fn emit_serve_status(robot_json: bool, transport: &str, addr: Option<&str>, tools: &[String]) {
     if robot_json {
-        eprintln!(
-            "{}",
-            serde_json::json!({
-                "kind": "status",
-                "transport": transport,
-                "listen": addr,
-                "live_db": LIVE_DB,
-                "tools": tools,
-            })
-        );
+        eprintln!("{}", serve_status_payload(transport, addr, tools));
     } else {
         match addr {
             Some(a) => eprintln!(
-                "oraclemcp serve: http transport listening on {a} ({} tools, live-db: {LIVE_DB})",
+                "oraclemcp serve: http transport listening on {a} ({} tools, built-with-live-db: {BUILT_WITH_LIVE_DB})",
                 tools.len()
             ),
             None => eprintln!(
-                "oraclemcp serve: stdio transport ready ({} tools, live-db: {LIVE_DB})",
+                "oraclemcp serve: stdio transport ready ({} tools, built-with-live-db: {BUILT_WITH_LIVE_DB})",
                 tools.len()
             ),
         }
     }
+}
+
+/// Startup status contains build facts only. Runtime connectivity is observed
+/// through `oracle_connection_info`, `oracle_capabilities`, or `doctor --online`.
+fn serve_status_payload(
+    transport: &str,
+    addr: Option<&str>,
+    tools: &[String],
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "status",
+        "transport": transport,
+        "listen": addr,
+        "built_with_live_db": BUILT_WITH_LIVE_DB,
+        "tools": tools,
+    })
 }
 
 /// Decide whether a `--listen` HTTP(S) server may start.
@@ -4342,16 +4376,20 @@ fn setup_display_path(path: &str) -> String {
     }
 }
 
-fn run_info(robot_json: bool) -> ExitCode {
-    let info = serde_json::json!({
+fn info_payload() -> serde_json::Value {
+    serde_json::json!({
         "binary": "oraclemcp",
         "version": env!("CARGO_PKG_VERSION"),
         "engine": cfg!(feature = "plsql-intelligence"),
-        "live_db": LIVE_DB,
+        "built_with_live_db": BUILT_WITH_LIVE_DB,
         "transports": ["stdio", "http"],
         "tools": registry::tool_names(),
         "mcp_protocol_version": oraclemcp_core::PROTOCOL_VERSION,
-    });
+    })
+}
+
+fn run_info(robot_json: bool) -> ExitCode {
+    let info = info_payload();
     let output = if robot_json {
         serde_json::to_string(&info).unwrap()
     } else {
@@ -4449,11 +4487,6 @@ fn setup_payload(
             toml_string_encode(snippet_command),
             toml_string_encode(profile),
         ),
-        "secure_stdio": {
-            "env": { "ORACLEMCP_STDIO_TOKEN": "<shared-init-token>" },
-            "args": ["serve", "--profile", profile],
-            "note": "Use secure stdio when the MCP client can provide the init token; otherwise keep stdio local and use --allow-no-auth intentionally."
-        },
         "http_client_credentials": {
             "issue_once": ["oraclemcp", "clients", "issue", "--label", "Claude Desktop", "--scope", "oracle:read"],
             "serve_args": ["serve", "--listen", "127.0.0.1:7070", "--client-credentials", "--profile", profile],
@@ -4611,13 +4644,39 @@ fn setup_config_error_status(error: &ConfigOpsError) -> (&'static str, String) {
             "ORACLEMCP_SETUP_ROLLBACK_UNKNOWN",
             "rollback id is unknown or already consumed".to_owned(),
         ),
-        ConfigOpsError::FileStore(_) | ConfigOpsError::Io(_) => (
-            "ORACLEMCP_SETUP_WRITE_FAILED",
-            "config workflow failed before completion".to_owned(),
+        ConfigOpsError::PreviewRequired => (
+            "ORACLEMCP_SETUP_PREVIEW_REQUIRED",
+            error.to_string(),
+        ),
+        ConfigOpsError::InvalidPreviewToken => (
+            "ORACLEMCP_SETUP_PREVIEW_TOKEN_INVALID",
+            error.to_string(),
+        ),
+        ConfigOpsError::PreviewExpired => ("ORACLEMCP_SETUP_PREVIEW_EXPIRED", error.to_string()),
+        ConfigOpsError::PreviewDraftChanged => (
+            "ORACLEMCP_SETUP_PREVIEW_DRAFT_CHANGED",
+            error.to_string(),
+        ),
+        ConfigOpsError::PreviewConfirmationRequired => (
+            "ORACLEMCP_SETUP_PREVIEW_CONFIRMATION_REQUIRED",
+            error.to_string(),
+        ),
+        ConfigOpsError::FileStore(oraclemcp_core::file_store::FileStoreError::Locked) => (
+            "ORACLEMCP_STATE_STORE_LOCKED",
+            "the state store is exclusively locked by a running oraclemcp service; stop that service before offline mutation or use its online operator workflow"
+                .to_owned(),
+        ),
+        ConfigOpsError::FileStore(_) => (
+            "ORACLEMCP_SETUP_STATE_STORE_FAILED",
+            error.to_string(),
+        ),
+        ConfigOpsError::Io(_) => (
+            "ORACLEMCP_SETUP_IO_FAILED",
+            error.to_string(),
         ),
         _ => (
             "ORACLEMCP_SETUP_WRITE_FAILED",
-            "config workflow failed before completion".to_owned(),
+            error.to_string(),
         ),
     }
 }
@@ -5374,6 +5433,37 @@ fn run_refusal_corpus_export(robot_json: bool, args: RefusalCorpusExportCliArgs)
     }
 }
 
+fn incident_capture_error_status(error: &IncidentCaptureError) -> (&'static str, String) {
+    match error {
+        IncidentCaptureError::Io(_) => ("ORACLEMCP_INCIDENT_CAPTURE_IO_FAILED", error.to_string()),
+        IncidentCaptureError::MissingFile { .. } => {
+            ("ORACLEMCP_INCIDENT_BUNDLE_MISSING", error.to_string())
+        }
+        _ => ("ORACLEMCP_INCIDENT_CAPTURE_REFUSED", error.to_string()),
+    }
+}
+
+fn incident_replay_error_status(error: &IncidentReplayError) -> (&'static str, String) {
+    match error {
+        IncidentReplayError::Capture(capture_error @ IncidentCaptureError::Io(_)) => (
+            "ORACLEMCP_INCIDENT_REPLAY_IO_FAILED",
+            capture_error.to_string(),
+        ),
+        IncidentReplayError::Capture(capture_error @ IncidentCaptureError::MissingFile { .. }) => (
+            "ORACLEMCP_INCIDENT_BUNDLE_MISSING",
+            capture_error.to_string(),
+        ),
+        _ => ("ORACLEMCP_INCIDENT_REPLAY_REFUSED", error.to_string()),
+    }
+}
+
+fn incident_config_load_error_status(error: impl std::fmt::Display) -> (&'static str, String) {
+    (
+        "ORACLEMCP_INCIDENT_CONFIG_LOAD_FAILED",
+        format!("incident capture could not load configuration: {error}"),
+    )
+}
+
 fn run_incident_capture(robot_json: bool, args: IncidentCaptureCliArgs) -> ExitCode {
     if args.bundle.exists() {
         emit_command_error(
@@ -5401,13 +5491,9 @@ fn run_incident_capture(robot_json: bool, args: IncidentCaptureCliArgs) -> ExitC
 
     let config = match OracleMcpConfig::load(None) {
         Ok(config) => config,
-        Err(_) => {
-            emit_command_error(
-                robot_json,
-                "incident capture",
-                "ORACLEMCP_INCIDENT_CONFIG_INVALID",
-                "incident capture could not load a validated configuration",
-            );
+        Err(error) => {
+            let (code, message) = incident_config_load_error_status(error);
+            emit_command_error(robot_json, "incident capture", code, &message);
             return ExitCode::from(2);
         }
     };
@@ -5463,13 +5549,9 @@ fn run_incident_capture(robot_json: bool, args: IncidentCaptureCliArgs) -> ExitC
     };
     let manifest = match capture_bundle(&args.bundle, &request) {
         Ok(manifest) => manifest,
-        Err(_) => {
-            emit_command_error(
-                robot_json,
-                "incident capture",
-                "ORACLEMCP_INCIDENT_CAPTURE_REFUSED",
-                "incident capture was refused before a bundle could be written",
-            );
+        Err(error) => {
+            let (code, message) = incident_capture_error_status(&error);
+            emit_command_error(robot_json, "incident capture", code, &message);
             return ExitCode::from(2);
         }
     };
@@ -5496,13 +5578,9 @@ fn run_incident_capture(robot_json: bool, args: IncidentCaptureCliArgs) -> ExitC
 fn run_incident_replay(robot_json: bool, args: IncidentReplayCliArgs) -> ExitCode {
     let report = match replay_bundle(&args.bundle) {
         Ok(report) => report,
-        Err(_) => {
-            emit_command_error(
-                robot_json,
-                "incident replay",
-                "ORACLEMCP_INCIDENT_REPLAY_REFUSED",
-                "incident replay refused an invalid or unsafe bundle",
-            );
+        Err(error) => {
+            let (code, message) = incident_replay_error_status(&error);
+            emit_command_error(robot_json, "incident replay", code, &message);
             return ExitCode::from(2);
         }
     };
@@ -5751,9 +5829,9 @@ fn run_audit_verify(
 }
 
 fn capabilities_payload() -> serde_json::Value {
-    // HTTP is advertised as available (the binary can serve it); live_db tracks
-    // the compiled driver feature.
-    let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), LIVE_DB, true);
+    // HTTP and Oracle-driver availability are build capabilities; the
+    // `connection` block is the separate runtime observation surface.
+    let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), BUILT_WITH_LIVE_DB, true);
     let mut value = serde_json::to_value(&caps).unwrap_or(serde_json::Value::Null);
     if let serde_json::Value::Object(obj) = &mut value {
         obj.insert("cli_contract".to_owned(), robot_docs::cli_contract_json());
@@ -5903,14 +5981,11 @@ fn run_service_cmd(robot_json: bool, command: ServiceCliCommand) -> ExitCode {
 }
 
 fn run_client_credentials_cmd(robot_json: bool, command: ClientCredentialCliCommand) -> ExitCode {
+    let online_revocation = online_revocation_for_command(&command);
     let store = match ClientCredentialStore::open_default() {
         Ok(store) => store,
         Err(error) => {
-            emit_status_error(
-                robot_json,
-                "ORACLEMCP_CLIENT_CREDENTIAL_STORE_UNAVAILABLE",
-                &client_credential_error_message(&error),
-            );
+            emit_client_credential_open_error(robot_json, &error, online_revocation.as_ref());
             return ExitCode::from(2);
         }
     };
@@ -5930,8 +6005,11 @@ fn run_client_credentials_cmd(robot_json: bool, command: ClientCredentialCliComm
                     "durability": issued.durability.as_str(),
                     "durability_warning": issued.durability.warning(),
                     "serve_args": ["serve", "--listen", "127.0.0.1:7070", "--client-credentials"],
+                    "client_command": client_credential_client_command(&bearer),
                     "rotation_command": ["oraclemcp", "clients", "rotate", client_id],
                     "revocation_command": ["oraclemcp", "clients", "revoke", issued.client_id],
+                    "offline_mutation_notice": "The local rotate and revoke commands require the service to be stopped; a running service keeps clients.json in memory.",
+                    "online_revocation_command": online_client_credential_revoke_command(&issued.client_id),
                 })
             }),
         ClientCredentialCliCommand::List => Ok(serde_json::json!({
@@ -5985,6 +6063,94 @@ fn run_client_credentials_cmd(robot_json: bool, command: ClientCredentialCliComm
             );
             ExitCode::from(2)
         }
+    }
+}
+
+fn client_credential_client_command(bearer: &str) -> serde_json::Value {
+    serde_json::json!([
+        "claude",
+        "mcp",
+        "add",
+        "oracle",
+        "--transport",
+        "http",
+        "--header",
+        format!("Authorization: Bearer {bearer}"),
+        "http://127.0.0.1:7070/mcp",
+    ])
+}
+
+fn online_client_credential_revoke_command(client_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "program": "curl",
+        "argv": [
+            "curl",
+            "--fail-with-body",
+            "--request",
+            "POST",
+            "${ORACLEMCP_CONTROL_URL}/operator/v1/client-credentials/revoke",
+            "--cert",
+            "${ORACLEMCP_OPERATOR_CERT}",
+            "--key",
+            "${ORACLEMCP_OPERATOR_KEY}",
+            "--cacert",
+            "${ORACLEMCP_CONTROL_CA}",
+            "--header",
+            "content-type: application/json",
+            "--data",
+            serde_json::json!({ "client_id": client_id }).to_string(),
+        ],
+        "method": "POST",
+        "path": "/operator/v1/client-credentials/revoke",
+        "requires": [
+            "ORACLEMCP_CONTROL_URL set to the running service's HTTPS control listener",
+            "an mTLS client certificate authorized by http.operator.allowed_subjects",
+        ],
+        "note": "This route mutates the running service's in-memory credential store and closes affected sessions without downtime. Expand or replace the ${...} placeholders before execution."
+    })
+}
+
+fn online_revocation_for_command(
+    command: &ClientCredentialCliCommand,
+) -> Option<serde_json::Value> {
+    match command {
+        ClientCredentialCliCommand::Revoke(args) => {
+            Some(online_client_credential_revoke_command(&args.client_id))
+        }
+        ClientCredentialCliCommand::Issue(_)
+        | ClientCredentialCliCommand::List
+        | ClientCredentialCliCommand::Rotate(_) => None,
+    }
+}
+
+fn emit_client_credential_open_error(
+    robot_json: bool,
+    error: &ClientCredentialError,
+    online_revocation: Option<&serde_json::Value>,
+) {
+    let code = client_credential_error_code(error);
+    let message = client_credential_error_message(error);
+    let is_locked = matches!(
+        error,
+        ClientCredentialError::Store(oraclemcp_core::file_store::FileStoreError::Locked)
+    );
+
+    if robot_json
+        && is_locked
+        && let Some(online_revocation) = online_revocation
+    {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "kind": "error",
+                "code": code,
+                "message": message,
+                "online_revocation_command": online_revocation,
+                "next_action": "Use the authenticated control-listener request above; do not edit clients.json out of process while the service is running."
+            })
+        );
+    } else {
+        emit_status_error(robot_json, code, &message);
     }
 }
 
@@ -6081,6 +6247,15 @@ fn client_credential_error_message(error: &ClientCredentialError) -> String {
             "client credential store is locked by the service; stop the service before offline mutation".to_owned()
         }
         _ => error.to_string(),
+    }
+}
+
+fn client_credential_error_code(error: &ClientCredentialError) -> &'static str {
+    match error {
+        ClientCredentialError::Store(oraclemcp_core::file_store::FileStoreError::Locked) => {
+            "ORACLEMCP_STATE_STORE_LOCKED"
+        }
+        _ => "ORACLEMCP_CLIENT_CREDENTIAL_STORE_UNAVAILABLE",
     }
 }
 
@@ -6207,6 +6382,8 @@ fn doctor_process_exit_code(report: &oraclemcp_core::DoctorReport) -> u8 {
 
 struct DoctorProfileContext {
     conn: Option<Box<dyn OracleConnection>>,
+    stateless_conn: Option<Box<dyn OracleConnection>>,
+    stateless_pool_configured: bool,
     configuration_error: Option<String>,
     connection_error: Option<String>,
     wallet_location: Option<String>,
@@ -6234,6 +6411,8 @@ impl DoctorProfileContext {
     fn offline() -> Self {
         DoctorProfileContext {
             conn: None,
+            stateless_conn: None,
+            stateless_pool_configured: false,
             configuration_error: None,
             connection_error: None,
             wallet_location: None,
@@ -6371,6 +6550,8 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
     let level = oraclemcp_core::session_level_state(chosen, false);
     DoctorProfileContext {
         conn: None,
+        stateless_conn: None,
+        stateless_pool_configured: chosen.pool.is_some(),
         configuration_error: None,
         connection_error: None,
         wallet_location: chosen
@@ -6382,7 +6563,7 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
             && level.max_level() > OperatingLevel::ReadOnly,
         connection_strategy: Some(
             if chosen.pool.is_some() {
-                "hybrid_pool"
+                "pinned_plus_stateless_configured"
             } else {
                 "single_session"
             }
@@ -6460,6 +6641,8 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
         Ok(Some(resolved)) => doctor_open_resolved_profile(resolved),
         Ok(None) => DoctorProfileContext {
             conn: None,
+            stateless_conn: None,
+            stateless_pool_configured: false,
             configuration_error: None,
             connection_error: Some(format!("connection profile `{profile}` not found")),
             wallet_location: None,
@@ -6486,6 +6669,27 @@ fn doctor_audit_path_configured() -> bool {
     OracleMcpConfig::load(None)
         .map(|config| config.audit.path.is_some())
         .unwrap_or(false)
+}
+
+/// Default location of the unsigned refusal/security-event trail. It is kept
+/// separate from `audit.jsonl` because it has neither signatures nor an anchor.
+fn default_unsigned_refusal_trail_path() -> PathBuf {
+    if let Ok(state_dir) = FileStore::default_state_dir() {
+        return state_dir.join("corpus").join("refusals.jsonl");
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".local/state/oraclemcp/corpus/refusals.jsonl"))
+        .unwrap_or_else(|| PathBuf::from("oraclemcp-refusal-corpus.jsonl"))
+}
+
+/// The unsigned trail is a floor for keyless read-only serving, never a second
+/// audit tier alongside the signed hash chain.
+const fn unsigned_refusal_trail_enabled(
+    signed_audit_active: bool,
+    configured_enabled: bool,
+) -> bool {
+    !signed_audit_active && configured_enabled
 }
 
 /// Derive the same no-key/reachable-write decision that startup uses without
@@ -6529,7 +6733,12 @@ fn doctor_audit_posture_from_config(
     if reachable_ceiling > OperatingLevel::ReadOnly {
         return DoctorAuditPosture::StartupRefused { reachable_ceiling };
     }
-    DoctorAuditPosture::DisabledReadOnly
+    DoctorAuditPosture::DisabledReadOnly {
+        unsigned_refusal_trail_path: config
+            .audit
+            .unsigned_refusal_log
+            .then(default_unsigned_refusal_trail_path),
+    }
 }
 
 fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileContext {
@@ -6549,7 +6758,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
     let pool_configured = resolved.pool_settings.is_some();
     let configured_connection_strategy = Some(
         if pool_configured {
-            "hybrid_pool"
+            "pinned_plus_stateless_configured"
         } else {
             "single_session"
         }
@@ -6567,6 +6776,8 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
                 Some(runtime_connection_strategy(pool_configured, &connections).to_owned());
             DoctorProfileContext {
                 conn: Some(connections.session),
+                stateless_conn: connections.stateless,
+                stateless_pool_configured: pool_configured,
                 configuration_error: None,
                 connection_error: None,
                 wallet_location,
@@ -6590,6 +6801,8 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
         }
         Err(e) => DoctorProfileContext {
             conn: None,
+            stateless_conn: None,
+            stateless_pool_configured: pool_configured,
             configuration_error: None,
             connection_error: Some(doctor_connection_error(e)),
             wallet_location,
@@ -6627,6 +6840,8 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
     }
     let ctx = DoctorContext {
         conn: profile_ctx.conn.as_deref(),
+        stateless_conn: profile_ctx.stateless_conn.as_deref(),
+        stateless_pool_configured: profile_ctx.stateless_pool_configured,
         configuration_error: profile_ctx.configuration_error,
         connection_error: profile_ctx.connection_error,
         tns_admin: std::env::var("TNS_ADMIN").ok(),

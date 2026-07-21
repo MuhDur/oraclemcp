@@ -33,7 +33,9 @@ pub enum InitTokenError {
     )]
     NotConfigured,
     /// The client presented no token but one is required.
-    #[error("stdio init token missing from initialize request")]
+    #[error(
+        "stdio init token missing from initialize request at params._meta[\"oraclemcp/initToken\"] (the value must be a JSON string)"
+    )]
     Missing,
     /// The presented token did not match.
     #[error("stdio init token mismatch")]
