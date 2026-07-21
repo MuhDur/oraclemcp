@@ -1,0 +1,46 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T19:35:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.12",
+  "scope": {
+    "summary": "F-LOW DB3 verified already satisfied: a failed owned-stream recovery marks the slot's quarantine_reason durably, and every later access returns the same typed Quarantined/UnknownDiscarded outcome. This close records verification, not new work.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/connection.rs"
+    ],
+    "out_of_scope": [
+      "Any code change. The misleading temporarily-unavailable path the finding describes no longer occurs after a recovery failure.",
+      "Pool-side quarantine (crates/oraclemcp-db/src/pool.rs), a separate slot lifecycle that this finding does not name and that is another agent's mid-edit."
+    ]
+  },
+  "source": {
+    "sha": "156e9a89def858554f4aa1d9c3a5501583b9697c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "quarantine_connection_slot / replace_connection_slot / lock_inner",
+        "kind": "api",
+        "trace": "Both into_connection failure sites (connection.rs:2900 recovery, 5802 chunked fallback) route through quarantine_connection_slot, which sets quarantine_reason via get_or_insert (1353) so the first reason is durable. replace_connection_slot (2734) and lock_inner (1393) both check quarantine_reason first and return Quarantined{UnknownDiscarded}. The bead's negative acceptance is tested directly by owned_stream_recovery_failure_persists_quarantine_for_later_calls, which injects a recovery failure and asserts BOTH the first error and a subsequent lock_inner return the same typed Quarantined/UnknownDiscarded with the identical message, explicitly refusing temporary unavailability."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verification of pre-existing state, not new implementation.",
+    "The positive half (successful recovery restores the connection exactly once and later queries stay usable) is covered by the surrounding recovery tests rather than by a dedicated assertion in the same test.",
+    "Scoped verification: cargo test -p oraclemcp-db --lib. No workspace-wide run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

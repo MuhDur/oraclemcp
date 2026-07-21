@@ -1,0 +1,46 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T19:35:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.11",
+  "scope": {
+    "summary": "F-LOW DB2 verified already satisfied: order_named_binds_for_driver returns Result and rejects missing or leftover names with a typed DbError::NamedBindMismatch before any driver call. This close records verification, not new work.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/connection.rs"
+    ],
+    "out_of_scope": [
+      "Any code change. The positional-append behaviour the finding describes is gone; re-implementing it would be duplicate work.",
+      "Bind handling on the plsql-intelligence and pool paths, which do not use this ordering function."
+    ]
+  },
+  "source": {
+    "sha": "156e9a89def858554f4aa1d9c3a5501583b9697c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "order_named_binds_for_driver",
+        "kind": "api",
+        "trace": "connection.rs:2207-2233 collects `missing` placeholders and leftover supplied names and returns DbError::NamedBindMismatch instead of appending positionally; both call sites (5861, 5896) propagate with `?` before any driver I/O. Tests pass and cover the bead's cases verbatim: named_bind_ordering_rejects_missing_and_unexpected_names asserts BOTH negative cases (':a,:b' supplied ':a,:unused' -> missing=[b], unexpected=[:unused]; ':a' with an extra ':unused' -> missing empty, unexpected=[:unused]), and named_binds_are_ordered_by_first_real_placeholder asserts the positive case with out-of-order, repeated, and case-varied placeholders while ignoring binds inside literals, comments, and quoted identifiers."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verification of pre-existing state: I read the cited code and ran the tests; I did not re-derive which commit replaced the positional append.",
+    "Static/local only. No live Oracle round trip was made, so 'never calls the driver' is established by the `?` propagation before the driver call, not by observing a driver that was not invoked.",
+    "Scoped verification: cargo test -p oraclemcp-db --lib. No workspace-wide run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
