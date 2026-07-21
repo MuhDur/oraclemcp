@@ -1111,6 +1111,15 @@ bootstrap or SQL rather than silently skipping those lanes. When R0 adds
 `scripts/rig/rig.sh`, it is the single operator entry point and must invoke
 this L1 helper; do not add a second container harness.
 
+The `run` cycle also seeds and verifies the D2 capability fixtures (typed
+values, LOBs, REF CURSOR/output packages, statement-cache and transaction
+targets, plus SODA/VECTOR where supported). Older XE lanes carry an explicit
+negative VECTOR probe so an unsupported capability cannot be mistaken for
+coverage. To exercise the adapter-level DRCP identity-bleed regression directly
+against FREE 23ai, run `bash scripts/rig/oracle_l1.sh drcp-identity --log`;
+this command is expected to fail until the profile switch clears prior session
+identity (B14a), which is the fixture's proof boundary.
+
 Per lane, against the real binary with a lane-scoped `max_level = "DDL"` lab
 profile and an isolated `XDG_STATE_HOME`:
 

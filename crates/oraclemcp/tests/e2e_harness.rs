@@ -224,6 +224,8 @@ fn rig_l1_dry_run_is_a_single_command_with_complete_lane_plan() {
             "container_start",
             "container_ready",
             "fixture_bootstrap",
+            "capability_fixture_seed",
+            "capability_fixture_assert",
             "smoke_query",
         ] {
             assert!(
@@ -254,11 +256,40 @@ fn rig_l1_dry_run_is_a_single_command_with_complete_lane_plan() {
         source.contains("grep -F 'DATABASE IS READY TO USE' >/dev/null"),
         "Rig L1 readiness must consume Docker logs under pipefail rather than false-time out"
     );
+    assert!(
+        source.contains("ORACLEMCP_CAP_VECTOR_NEG"),
+        "Rig L1 must actively prove a pre-23 lane rejects VECTOR rather than merely omitting it"
+    );
+    assert!(
+        source.contains("live_drcp_reuse_clears_prior_profile_identity"),
+        "Rig L1 must expose the adapter-level two-profile DRCP identity fixture"
+    );
+    let fixtures = std::fs::read_to_string(root.join("scripts/rig/oracle_l1_capabilities.sql"))
+        .expect("read D2 capability fixtures");
+    for fixture in [
+        "ORACLEMCP_CAP_TYPED",
+        "ORACLEMCP_CAP_LOB",
+        "ORACLEMCP_CAP_REFCURSOR",
+        "ORACLEMCP_CAP_OUTPUT",
+        "ORACLEMCP_CAP_STMT_CACHE",
+        "ORACLEMCP_CAP_TPC",
+        "ORACLEMCP_CAP_VECTOR",
+        "ORACLEMCP_CAP_SODA",
+    ] {
+        assert!(
+            fixtures.contains(fixture),
+            "D2 fixture file omitted {fixture}"
+        );
+    }
     let operations =
         std::fs::read_to_string(root.join("docs/operations.md")).expect("read operations guide");
     assert!(
         operations.contains("bash scripts/rig/oracle_l1.sh run --log"),
         "operations must document the one-command L1 invocation"
+    );
+    assert!(
+        operations.contains("drcp-identity"),
+        "operations must document the DRCP profile-isolation fixture and its proof boundary"
     );
 }
 
