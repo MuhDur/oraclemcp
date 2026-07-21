@@ -15329,3 +15329,65 @@ fn no_policy_configured_leaves_the_response_and_the_statement_untouched() {
     assert_eq!(out["executed"], json!(true));
     assert!(out.get("policy").is_none(), "no policy, no claim");
 }
+
+// ===================================================================
+// F-LOW DI4 — compatibility-grant eviction must be by AGE, not by
+// whatever HashMap iteration order happens to yield
+// ===================================================================
+
+/// The defect was `keys().next()`: arbitrary `HashMap` order, so a grant issued
+/// seconds ago could be evicted while an older one survived.
+///
+/// The keys here are chosen to INVERT the age order lexically — the oldest
+/// grant has the lexicographically last key and the newest has the first — so a
+/// selection that follows key order (or any order uncorrelated with age) picks
+/// the wrong entry. Sixteen entries make an accidental agreement with arbitrary
+/// order vanishingly unlikely, and the assertion names the exact key.
+#[test]
+fn compatibility_grant_eviction_picks_the_oldest_not_map_order() {
+    use std::time::Duration;
+
+    let base = Instant::now() + Duration::from_secs(600);
+    let mut grants: HashMap<String, ExecuteApprovedGrant> = HashMap::new();
+    for age in 0..16u64 {
+        // age 0 = OLDEST (earliest expiry) and gets the LAST key lexically.
+        let key = format!("k{:02}", 15 - age);
+        grants.insert(
+            key,
+            ExecuteApprovedGrant {
+                sql: format!("select {age} from dual"),
+                required_level: OperatingLevel::ReadWrite,
+                active_profile: None,
+                expires_at: base + Duration::from_secs(age),
+            },
+        );
+    }
+
+    assert_eq!(
+        oldest_execute_approved_key(&grants).as_deref(),
+        Some("k15"),
+        "eviction must select the earliest-expiring (oldest) grant, not map order"
+    );
+
+    // Draining repeatedly must keep walking oldest-first, never revisiting.
+    let mut order = Vec::new();
+    while let Some(key) = oldest_execute_approved_key(&grants) {
+        grants.remove(&key);
+        order.push(key);
+    }
+    let expected: Vec<String> = (0..16).map(|age| format!("k{:02}", 15 - age)).collect();
+    assert_eq!(
+        order, expected,
+        "repeated eviction must proceed strictly oldest-first"
+    );
+}
+
+#[test]
+fn compatibility_grant_eviction_is_a_no_op_on_an_empty_store() {
+    let grants: HashMap<String, ExecuteApprovedGrant> = HashMap::new();
+    assert_eq!(
+        oldest_execute_approved_key(&grants),
+        None,
+        "an empty store must yield no eviction candidate, so prune breaks instead of looping"
+    );
+}

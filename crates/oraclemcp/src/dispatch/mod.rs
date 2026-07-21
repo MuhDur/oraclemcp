@@ -6651,17 +6651,61 @@ fn dbms_output_json(out: &DbmsOutput, max_lines: usize, max_chars: usize) -> Val
     })
 }
 
+/// Bound the compatibility-token store, evicting by AGE and saying so.
+///
+/// Two properties this owes an operator (finding DI4). Eviction order used to be
+/// `keys().next()` — arbitrary `HashMap` iteration order — so a grant issued
+/// seconds ago could be dropped while an older one survived, making
+/// compatibility behaviour nondeterministic and retries flaky. And it was
+/// silent: a caller replaying a token that had been evicted saw the same
+/// "unknown token" it would see for an expired or forged one, with nothing
+/// anywhere recording that the store had dropped live deposits.
+///
+/// Expiry is the age key: every grant is issued with the same TTL, so the
+/// earliest `expires_at` is the earliest issuance. Counts only are logged —
+/// these are credential-adjacent deposits and the token text never appears.
 fn prune_execute_approved_tokens(state: &mut DispatcherState) {
     let now = Instant::now();
+    let before_expiry = state.execute_approved_tokens.len();
     state
         .execute_approved_tokens
         .retain(|_, grant| grant.expires_at > now);
+    let expired = before_expiry - state.execute_approved_tokens.len();
+
+    let mut evicted_live = 0usize;
     while state.execute_approved_tokens.len() >= MAX_EXECUTE_APPROVED_TOKENS {
-        let Some(key) = state.execute_approved_tokens.keys().next().cloned() else {
+        let Some(key) = oldest_execute_approved_key(&state.execute_approved_tokens) else {
             break;
         };
         state.execute_approved_tokens.remove(&key);
+        evicted_live += 1;
     }
+
+    if expired > 0 {
+        tracing::debug!(
+            expired_grants = expired,
+            "expired compatibility execute grants pruned"
+        );
+    }
+    if evicted_live > 0 {
+        tracing::warn!(
+            evicted_grants = evicted_live,
+            capacity = MAX_EXECUTE_APPROVED_TOKENS,
+            retained_grants = state.execute_approved_tokens.len(),
+            "compatibility execute-grant store hit its capacity; evicted the oldest LIVE grant(s). A caller replaying an evicted token must re-run preview_sql"
+        );
+    }
+}
+
+/// The oldest live grant, by expiry. Split out as a pure function so the
+/// eviction ORDER is testable without standing up a dispatcher: the defect this
+/// replaced was `keys().next()`, and a test that cannot see which key was chosen
+/// cannot tell the two apart.
+fn oldest_execute_approved_key(grants: &HashMap<String, ExecuteApprovedGrant>) -> Option<String> {
+    grants
+        .iter()
+        .min_by_key(|(_, grant)| grant.expires_at)
+        .map(|(key, _)| key.clone())
 }
 
 fn remember_execute_approved_token(state: &mut DispatcherState, sql: &str, preview: &Value) {
