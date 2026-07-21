@@ -601,6 +601,14 @@ jobs:
       # fails. Needs no Docker: it only aims checks at broken environments.
       - name: rig doctor selftest (D8)
         run: bash scripts/rig/rig_doctor.sh --selftest
+      # D9: vendored MIT sample schemas. The gate refuses drift against the
+      # pinned upstream commit, a missing licence, AND any file the manifest
+      # does not list — the last one is the governance half, so an unvetted
+      # schema cannot inherit the vendored tree's implied "this was checked".
+      - name: vendored sample schema governance (D9)
+        run: |
+          bash scripts/rig/verify_sample_schemas.sh
+          bash scripts/rig/verify_sample_schemas.sh --selftest
       - name: fuzz lane budget (D4)
         run: |
           python3 scripts/ci_lane_budget.py --selftest
