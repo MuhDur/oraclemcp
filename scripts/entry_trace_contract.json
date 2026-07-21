@@ -316,6 +316,11 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/test_plan_bead_graph_lint.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/test_verify_release_exact_sha.sh",
       "kind": "entry_point",
       "trace": "required-quality"
