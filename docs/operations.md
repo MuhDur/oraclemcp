@@ -1075,15 +1075,18 @@ idempotent fixture bootstrap, smoke-queries `SELECT 1 FROM dual` on each PDB,
 and tears down only lanes that this invocation started:
 
 ```bash
-ORACLEMCP_RIG_L1_ADMIN_PASSWORD='<local lab SYS password>' \
+ORACLEMCP_RIG_L1_XE18_ADMIN_PASSWORD='<XE18 SYS password>' \
+ORACLEMCP_RIG_L1_XE21_ADMIN_PASSWORD='<XE21 SYS password>' \
+ORACLEMCP_RIG_L1_FREE23_ADMIN_PASSWORD='<Free23 SYS password>' \
   bash scripts/rig/oracle_l1.sh run --log
 ```
 
 It never creates or removes a container, and it leaves pre-existing running
-lanes untouched. Use `--dry-run` to validate wiring and emit the same
-structured JSON-line plan without touching Docker. R0's `scripts/rig/rig.sh`
-is the single operator entry point and invokes this L1 helper; do not add a
-second container harness.
+lanes untouched. A single `ORACLEMCP_RIG_L1_ADMIN_PASSWORD` is accepted only
+when every local lane intentionally shares a password. Use `--dry-run` to
+validate wiring and emit the same structured JSON-line plan without touching
+Docker. R0's `scripts/rig/rig.sh` is the single operator entry point and
+invokes this L1 helper; do not add a second container harness.
 
 Per lane, against the real binary with a lane-scoped `max_level = "DDL"` lab
 profile and an isolated `XDG_STATE_HOME`:

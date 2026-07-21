@@ -22,10 +22,10 @@ DRIVER_CONTAINER="$DRIVER_ROOT/scripts/container.sh"
 DRIVER_BOOTSTRAP="$DRIVER_ROOT/scripts/bootstrap_live_schema.sh"
 READY_TIMEOUT_SECS="${ORACLEMCP_RIG_L1_READY_TIMEOUT_SECS:-300}"
 BOOTSTRAP_TIMEOUT_SECS="${ORACLEMCP_RIG_L1_BOOTSTRAP_TIMEOUT_SECS:-300}"
-# The reused XE lanes may not share the driver's Free-container password. Keep
-# this runtime-only and require it only for fixture mutation or a SQL smoke;
-# lifecycle checks and `--dry-run` need no credential.
-ADMIN_PASSWORD="${ORACLEMCP_RIG_L1_ADMIN_PASSWORD:-}"
+# Keep runtime-only credentials lane-specific: the reused XE and Free images
+# may deliberately have different SYS passwords. The shared variable remains a
+# convenience fallback for lab images that use one password everywhere.
+COMMON_ADMIN_PASSWORD="${ORACLEMCP_RIG_L1_ADMIN_PASSWORD:-}"
 OWNED_STATE_DIR="${ORACLEMCP_RIG_L1_STATE_DIR:-$ROOT/target/e2e/rig_l1}"
 OWNED_STATE_FILE="$OWNED_STATE_DIR/owned-containers.tsv"
 
@@ -48,7 +48,8 @@ Environment:
   ORACLEMCP_DRIVER_ROOT                 rust-oracledb checkout (default sibling)
   ORACLEMCP_RIG_L1_READY_TIMEOUT_SECS   per-lane bounded readiness wait (default 300)
   ORACLEMCP_RIG_L1_BOOTSTRAP_TIMEOUT_SECS  per-lane bootstrap ceiling (default 300)
-  ORACLEMCP_RIG_L1_ADMIN_PASSWORD       local lab SYS password (not logged)
+  ORACLEMCP_RIG_L1_<LANE>_ADMIN_PASSWORD  lane SYS password (XE18, XE21, FREE23; not logged)
+  ORACLEMCP_RIG_L1_ADMIN_PASSWORD         shared fallback SYS password (not logged)
 USAGE
   e2e_usage_common
 }
@@ -70,6 +71,15 @@ lane_pdb() {
   esac
 }
 
+lane_admin_password() {
+  case "$1" in
+    xe18) printf '%s\n' "${ORACLEMCP_RIG_L1_XE18_ADMIN_PASSWORD:-$COMMON_ADMIN_PASSWORD}" ;;
+    xe21) printf '%s\n' "${ORACLEMCP_RIG_L1_XE21_ADMIN_PASSWORD:-$COMMON_ADMIN_PASSWORD}" ;;
+    free23) printf '%s\n' "${ORACLEMCP_RIG_L1_FREE23_ADMIN_PASSWORD:-$COMMON_ADMIN_PASSWORD}" ;;
+    *) return 1 ;;
+  esac
+}
+
 require_runtime_tools() {
   command -v docker >/dev/null 2>&1 || e2e_finish_fail 'docker is required for rig L1'
   command -v timeout >/dev/null 2>&1 || e2e_finish_fail 'timeout is required for bounded rig L1 commands'
@@ -79,8 +89,9 @@ require_runtime_tools() {
   [ -x "$DRIVER_BOOTSTRAP" ] || e2e_finish_fail "driver bootstrap hook is not executable: $DRIVER_BOOTSTRAP"
 }
 
-require_admin_password() {
-  [ -n "$ADMIN_PASSWORD" ] || e2e_finish_fail 'set ORACLEMCP_RIG_L1_ADMIN_PASSWORD for fixture bootstrap or SQL smoke'
+require_lane_admin_password() {
+  local lane="$1"
+  [ -n "$(lane_admin_password "$lane")" ] || e2e_finish_fail "set ORACLEMCP_RIG_L1_$(printf '%s' "$lane" | tr '[:lower:]' '[:upper:]')_ADMIN_PASSWORD (or the shared ORACLEMCP_RIG_L1_ADMIN_PASSWORD) for fixture bootstrap or SQL smoke"
 }
 
 container_exists() {
@@ -152,20 +163,21 @@ wait_lane() {
 
 bootstrap_lane() {
   local lane="$1"
-  local container pdb started
+  local container pdb password started
   container="$(lane_container "$lane")"
   pdb="$(lane_pdb "$lane")"
   if [ "$E2E_DRY_RUN" = '1' ]; then
     e2e_log_event 'fixture_bootstrap' 'act' 'skipped' 0 "lane=$lane dry-run"
     return 0
   fi
-  require_admin_password
+  require_lane_admin_password "$lane"
+  password="$(lane_admin_password "$lane")"
   container_running "$container" || e2e_finish_fail "lane=$lane container is not running: $container"
   started="$(e2e_epoch_ms)"
   e2e_log_event 'fixture_bootstrap' 'act' 'running' 0 "lane=$lane driver bootstrap hook"
   # Do not use e2e_run_command: its command artifact would include the secret
   # environment assignment. The hook's normal success line contains no secret.
-  if ! ORACLEDB_CONTAINER_NAME="$container" ORACLEDB_PDB="$pdb" ORACLE_PASSWORD="$ADMIN_PASSWORD" \
+  if ! ORACLEDB_CONTAINER_NAME="$container" ORACLEDB_PDB="$pdb" ORACLE_PASSWORD="$password" \
     timeout -k 10 "$BOOTSTRAP_TIMEOUT_SECS" "$DRIVER_BOOTSTRAP" >/dev/null; then
     e2e_log_event 'fixture_bootstrap' 'assert' 'fail' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane driver bootstrap failed"
     e2e_finish_fail "lane=$lane driver bootstrap failed"
@@ -175,29 +187,30 @@ bootstrap_lane() {
 
 smoke_lane() {
   local lane="$1"
-  local container pdb started output status
+  local container pdb password started output query_exit
   container="$(lane_container "$lane")"
   pdb="$(lane_pdb "$lane")"
   if [ "$E2E_DRY_RUN" = '1' ]; then
     e2e_log_event 'smoke_query' 'assert' 'skipped' 0 "lane=$lane dry-run"
     return 0
   fi
-  require_admin_password
+  require_lane_admin_password "$lane"
+  password="$(lane_admin_password "$lane")"
   container_running "$container" || e2e_finish_fail "lane=$lane container is not running: $container"
   started="$(e2e_epoch_ms)"
   e2e_log_event 'smoke_query' 'act' 'running' 0 "lane=$lane SELECT 1 FROM dual"
   set +e
   output="$(timeout -k 5 60 docker exec -i "$container" \
-    sqlplus -S -L "sys/${ADMIN_PASSWORD}@localhost:1521/${pdb} as sysdba" <<'SQL'
+    sqlplus -S -L "sys/${password}@localhost:1521/${pdb} as sysdba" <<'SQL'
 whenever sqlerror exit failure
 set echo off feedback off heading off verify off pagesize 0
 select 1 from dual;
 exit
 SQL
   )"
-  status=$?
+  query_exit=$?
   set -e
-  if [ "$status" -ne 0 ] || ! printf '%s\n' "$output" | grep -qx '1'; then
+  if [ "$query_exit" -ne 0 ] || ! printf '%s\n' "$output" | awk 'NF == 1 && $1 == 1 { found = 1 } END { exit !found }'; then
     e2e_log_event 'smoke_query' 'assert' 'fail' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane SELECT 1 FROM dual failed"
     e2e_finish_fail "lane=$lane SELECT 1 FROM dual failed"
   fi
