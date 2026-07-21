@@ -1732,6 +1732,12 @@ pub async fn search_source(
 }
 
 /// Full source text for one object from `ALL_SOURCE`, capped by characters.
+// `from_line`/`to_line`/`max_chars` arrived together as the fetch-range cap and
+// push this to 8 parameters, one past the clippy heuristic. Suppressed rather
+// than reshaped because the three belong in one range type and that is the
+// author's call to make; this only unbreaks the required clippy lane, which has
+// been red on main since the range cap landed.
+#[allow(clippy::too_many_arguments)]
 pub async fn get_source(
     cx: &Cx,
     conn: &dyn OracleConnection,
