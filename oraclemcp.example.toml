@@ -121,6 +121,12 @@ key_ref = "env:ORACLEMCP_AUDIT_KEY"
 # Label for the active signing key, recorded per record so keys can rotate while
 # old records keep verifying. Default: "default".
 key_id = "2026-q2"
+# When a signed auditor is unavailable because every reachable profile is
+# READ_ONLY, append redacted guard refusals to the separate
+# $XDG_STATE_HOME/oraclemcp/corpus/refusals.jsonl floor. It is ON by default,
+# unsigned, and not tamper-evident; it never substitutes for audit.jsonl or
+# `oraclemcp audit verify`. Set false only to opt out explicitly.
+unsigned_refusal_log = true
 
 # During an explicit rotation, keep every prior key as verification-only until
 # all records/anchors signed by it age out. IDs and resolved key material must

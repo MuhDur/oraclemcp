@@ -2344,13 +2344,15 @@ async fn check_write_posture(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
 fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
     const ID: u8 = 13;
     const NAME: &str = "Audit / state layout";
+    const AUDIT_CONFIG_REFERENCE: &str =
+        " See README.md#signed-audit-and-unsigned-refusal-trail for the configuration reference.";
 
     let (audit_status, audit_detail) = match ctx.audit_posture.as_ref() {
         Some(DoctorAuditPosture::SigningKeyConfigured { path }) => (
             CheckStatus::Pass,
             format!(
-                "audit configuration observation: signing-key source configured at {}; unsigned refusal trail: INACTIVE (signed audit is the configured tier); this offline check does not resolve the key or construct an auditor",
-                path.display()
+                "audit configuration observation: signing-key source configured at {}; unsigned refusal trail: INACTIVE (signed audit is the configured tier); this offline check does not resolve the key or construct an auditor.{}",
+                path.display(), AUDIT_CONFIG_REFERENCE
             ),
         ),
         Some(DoctorAuditPosture::DisabledReadOnly {
@@ -2358,22 +2360,24 @@ fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
         }) => (
             CheckStatus::Skip,
             format!(
-                "audit configuration observation: disabled (no signing key configured; profile is read-only everywhere reachable); unsigned refusal trail: ACTIVE BY CONFIGURATION at {} (UNSIGNED, NOT TAMPER-EVIDENT; this offline check does not open it)",
-                path.display()
+                "audit configuration observation: disabled (no signing key configured; profile is read-only everywhere reachable); unsigned refusal trail: ACTIVE BY CONFIGURATION at {} (UNSIGNED, NOT TAMPER-EVIDENT; this offline check does not open it).{}",
+                path.display(), AUDIT_CONFIG_REFERENCE
             ),
         ),
         Some(DoctorAuditPosture::DisabledReadOnly {
             unsigned_refusal_trail_path: None,
         }) => (
             CheckStatus::Skip,
-            "audit configuration observation: disabled (no signing key configured; profile is read-only everywhere reachable); unsigned refusal trail: DISABLED BY CONFIGURATION"
-                .to_owned(),
+            format!(
+                "audit configuration observation: disabled (no signing key configured; profile is read-only everywhere reachable); unsigned refusal trail: DISABLED BY CONFIGURATION.{}",
+                AUDIT_CONFIG_REFERENCE
+            ),
         ),
         Some(DoctorAuditPosture::StartupRefused { reachable_ceiling }) => (
             CheckStatus::Fail,
             format!(
-                "audit configuration observation: startup would be refused (no signing key configured; a reachable profile can reach {} and startup policy requires ORACLEMCP_AUDIT_KEY_REQUIRED); unsigned refusal trail: UNAVAILABLE (the server does not start)",
-                reachable_ceiling.as_str()
+                "audit configuration observation: startup would be refused (no signing key configured; a reachable profile can reach {} and startup policy requires ORACLEMCP_AUDIT_KEY_REQUIRED); unsigned refusal trail: UNAVAILABLE (the server does not start).{}",
+                reachable_ceiling.as_str(), AUDIT_CONFIG_REFERENCE
             ),
         ),
         Some(DoctorAuditPosture::Unavailable { reason }) => (
@@ -4350,6 +4354,11 @@ mod tests {
         );
         assert!(check.detail.contains("UNSIGNED, NOT TAMPER-EVIDENT"));
         assert!(check.detail.contains("this offline check does not open it"));
+        assert!(
+            check
+                .detail
+                .contains("README.md#signed-audit-and-unsigned-refusal-trail")
+        );
         assert!(!check.detail.contains("audit default"));
 
         let configured = doctor(&DoctorContext {
@@ -4378,6 +4387,11 @@ mod tests {
                 .detail
                 .contains("unsigned refusal trail: INACTIVE (signed audit is the configured tier)")
         );
+        assert!(
+            check
+                .detail
+                .contains("README.md#signed-audit-and-unsigned-refusal-trail")
+        );
 
         let opted_out = doctor(&DoctorContext {
             state_layout: Some(layout.clone()),
@@ -4392,6 +4406,11 @@ mod tests {
             check
                 .detail
                 .contains("unsigned refusal trail: DISABLED BY CONFIGURATION")
+        );
+        assert!(
+            check
+                .detail
+                .contains("README.md#signed-audit-and-unsigned-refusal-trail")
         );
 
         let refused = doctor(&DoctorContext {
@@ -4409,6 +4428,11 @@ mod tests {
             check
                 .detail
                 .contains("unsigned refusal trail: UNAVAILABLE (the server does not start)")
+        );
+        assert!(
+            check
+                .detail
+                .contains("README.md#signed-audit-and-unsigned-refusal-trail")
         );
     }
 

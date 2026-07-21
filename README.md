@@ -547,6 +547,8 @@ dashboard_workbench = false
 resource = "http://127.0.0.1:7070/mcp"
 allowed_issuers = ["https://issuer.example.com"]
 authorization_servers = ["https://issuer.example.com"]
+### Signed audit and unsigned refusal trail
+
 required_scopes = ["oracle:read"]
 hs256_secret_ref = "env:ORACLEMCP_OAUTH_HS256_SECRET"
 
@@ -591,6 +593,27 @@ sdu = 32768
 login_statements = [
   "ALTER SESSION SET NLS_LANGUAGE = english",
   "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'",
+# Signed audit chain. It records every privileged action in an append-only,
+# hash-chained, HMAC-SHA256-signed JSONL stream. Omit `path` to use
+# $XDG_STATE_HOME/oraclemcp/audit/audit.jsonl (or
+# $HOME/.local/state/oraclemcp/audit/audit.jsonl when XDG_STATE_HOME is unset).
+[audit]
+path = "/var/lib/oraclemcp/audit/audit.jsonl"
+# `key_ref` resolves through SecretResolver (env:, file:, or keyring:); its
+# resolved value must be at least 32 bytes of independently random material.
+key_ref = "env:ORACLEMCP_AUDIT_KEY"
+key_id = "2026-q3"
+# Retain old verification-only keys during rotation.
+# [[audit.verification_keys]]
+# key_id = "2026-q2"
+# key_ref = "env:ORACLEMCP_AUDIT_KEY_2026_Q2"
+
+# When no signed auditor exists because every reachable profile is READ_ONLY,
+# this separate redacted refusal/security-event floor is on by default at
+# $XDG_STATE_HOME/oraclemcp/corpus/refusals.jsonl. It is unsigned and not
+# tamper-evident; it never replaces the signed chain. Set false only to opt out.
+unsigned_refusal_log = true
+
 ]
 # Optional trusted local setup, authored by the profile owner and never by the
 # agent. Use for session-local initialization that is not an ALTER SESSION.
@@ -683,6 +706,13 @@ The `oracle_connection_info` tool reports allow-listed connection posture
 status). Session identity and client topology fields such as `os_user`,
 `program`, `machine`, `terminal`, `client_driver`, `module`, `action`,
 `client_identifier`, and `client_info` are redacted by default and appear only
+Keep the signed JSONL and its `<audit path>.anchor` sidecar together. Run
+`oraclemcp audit verify /var/lib/oraclemcp/audit/audit.jsonl` with the same
+secret reference to re-walk the hashes, verify the MAC, and detect a truncated
+tail against that anchor. The unsigned refusal trail is deliberately outside
+this command and cannot provide those tamper-evidence guarantees; it is the
+diagnostic floor only while the signed tier is unavailable.
+
 as names in `redacted_fields` when present. The Rust thin backend can still set
 the connect-time client identity fields (`program`, `machine`, `os_user`,
 `terminal`, and `driver_name`) from profile config, and it applies `module`,
