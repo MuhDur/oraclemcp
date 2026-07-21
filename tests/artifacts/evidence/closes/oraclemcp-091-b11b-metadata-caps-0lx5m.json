@@ -1,0 +1,64 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T17:28:39Z",
+  "bead_id": "oraclemcp-091-b11b-metadata-caps-0lx5m",
+  "scope": {
+    "summary": "Caps compile errors, describe constraints, and PL/Scope arrays, and makes the fixed DDL prefix explicitly loss-aware.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/intelligence.rs",
+      "crates/oraclemcp-db/src/lib.rs",
+      "crates/oraclemcp-db/src/plscope.rs",
+      "crates/oraclemcp/src/dispatch/args.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp/src/registry.rs"
+    ],
+    "out_of_scope": [
+      "The separate full tool-surface R2 byte-budget sweep.",
+      "Complete DDL continuation beyond the fixed 4000-character DBMS_METADATA prefix."
+    ]
+  },
+  "source": {
+    "sha": "9ea3425ee7d937fa3bfbf0a72e00cae427149e52",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_get_ddl",
+        "kind": "tool",
+        "trace": "get_ddl reads DBMS_LOB.GETLENGTH beside the fixed prefix and the dispatcher returns full and returned character counts, truncated, and a partial-DDL next step."
+      },
+      {
+        "name": "oracle_compile_errors and oracle_describe",
+        "kind": "tool",
+        "trace": "Both parse max_rows under a server ceiling, fetch one sentinel row, and return explicit truncation fields rather than inferring loss silently."
+      },
+      {
+        "name": "oracle_plscope_inspect",
+        "kind": "tool",
+        "trace": "Identifier and statement arrays are independently capped; a partial identifier graph suppresses the otherwise unsafe unused-declaration verdict."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "A clean detached worktree at source.sha passed cargo fmt --all -- --check.",
+    "The clean-worktree cargo check -p oraclemcp --lib --locked was refused because its committed Cargo.lock requires an update; no clean-tree build pass is claimed.",
+    "The required R2 serialized-byte sweep was not run here and remains the independent acceptance lane."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-r2-tool-sweep-nvxo4"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
