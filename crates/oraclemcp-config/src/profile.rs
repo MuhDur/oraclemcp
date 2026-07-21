@@ -224,12 +224,24 @@ impl ProxyAuthConfig {
     }
 }
 
+/// A bracket form the server recognizes but deliberately does not support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyBracketUsernameError {
+    /// The bracket syntax is malformed and cannot be normalized safely.
+    Malformed,
+    /// The driver accepts `[proxy]` for token-auth proxy-only sessions, but a
+    /// server profile has no base identity to bind to that form.
+    ProxyOnly,
+}
+
 /// Parse Oracle's `proxy_user[target_schema]` username shorthand without
 /// treating brackets inside a quoted Oracle identifier as proxy syntax.
 ///
 /// The values are configuration material, so callers must report only the
 /// profile name on an error rather than echoing either component.
-fn proxy_bracket_username(username: &str) -> Result<Option<(String, String)>, ()> {
+fn proxy_bracket_username(
+    username: &str,
+) -> Result<Option<(String, String)>, ProxyBracketUsernameError> {
     let username = username.trim();
     let mut quoted = false;
     let mut saw_bracket = false;
@@ -254,13 +266,13 @@ fn proxy_bracket_username(username: &str) -> Result<Option<(String, String)>, ()
             '[' => {
                 saw_bracket = true;
                 if opening.replace(index).is_some() || closing.is_some() {
-                    return Err(());
+                    return Err(ProxyBracketUsernameError::Malformed);
                 }
             }
             ']' => {
                 saw_bracket = true;
                 if opening.is_none() || closing.replace(index).is_some() {
-                    return Err(());
+                    return Err(ProxyBracketUsernameError::Malformed);
                 }
             }
             _ => {}
@@ -271,15 +283,18 @@ fn proxy_bracket_username(username: &str) -> Result<Option<(String, String)>, ()
         return Ok(None);
     }
     let (Some(opening), Some(closing)) = (opening, closing) else {
-        return Err(());
+        return Err(ProxyBracketUsernameError::Malformed);
     };
     if quoted || closing + 1 != username.len() {
-        return Err(());
+        return Err(ProxyBracketUsernameError::Malformed);
     }
     let proxy_user = username[..opening].trim();
     let target_schema = username[opening + 1..closing].trim();
+    if proxy_user.is_empty() && !target_schema.is_empty() {
+        return Err(ProxyBracketUsernameError::ProxyOnly);
+    }
     if proxy_user.is_empty() || target_schema.is_empty() {
-        return Err(());
+        return Err(ProxyBracketUsernameError::Malformed);
     }
     Ok(Some((proxy_user.to_owned(), target_schema.to_owned())))
 }
@@ -966,8 +981,15 @@ impl ConnectionProfile {
         let Some(username) = self.username.as_deref() else {
             return Ok(());
         };
-        let Some((proxy_user, target_schema)) = proxy_bracket_username(username)
-            .map_err(|()| ConfigError::MalformedProxyBracketUsername(self.name.clone()))?
+        let Some((proxy_user, target_schema)) =
+            proxy_bracket_username(username).map_err(|error| match error {
+                ProxyBracketUsernameError::Malformed => {
+                    ConfigError::MalformedProxyBracketUsername(self.name.clone())
+                }
+                ProxyBracketUsernameError::ProxyOnly => {
+                    ConfigError::ProxyOnlyBracketUsername(self.name.clone())
+                }
+            })?
         else {
             return Ok(());
         };
@@ -1783,6 +1805,27 @@ mod tests {
             ConfigError::MalformedProxyBracketUsername(_)
         ));
         assert!(malformed.to_string().contains("proxy_user[target_schema]"));
+
+        let proxy_only = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "proxy"
+            connect_string = "localhost:1521/FREEPDB1"
+            username = "[IAM_PROXY]"
+            "#,
+        )
+        .expect_err("the driver-only proxy form must fail before connect");
+        assert!(matches!(
+            &proxy_only,
+            ConfigError::ProxyOnlyBracketUsername(_)
+        ));
+        let proxy_only_message = proxy_only.to_string();
+        assert!(proxy_only_message.contains("proxy-only"));
+        assert!(proxy_only_message.contains("proxy_user[target_schema]"));
+        assert!(
+            !proxy_only_message.contains("IAM_PROXY"),
+            "configuration errors must not echo the proxy identity"
+        );
 
         let duplicate = crate::OracleMcpConfig::from_toml_str(
             r#"

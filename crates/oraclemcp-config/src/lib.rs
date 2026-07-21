@@ -1644,6 +1644,12 @@ pub enum ConfigError {
         "connection profile `{0}` has malformed proxy username syntax; use username = \"proxy_user[target_schema]\" or an explicit [profiles.proxy_auth] block"
     )]
     MalformedProxyBracketUsername(String),
+    /// The driver's token-auth-only proxy syntax has no base identity that a
+    /// server profile can bind to.
+    #[error(
+        "connection profile `{0}` cannot use the driver's proxy-only username form \"[proxy]\"; use username = \"proxy_user[target_schema]\" or an explicit [profiles.proxy_auth] block"
+    )]
+    ProxyOnlyBracketUsername(String),
     /// Both supported proxy-auth configuration shapes were specified together.
     #[error(
         "connection profile `{0}` configures both username = \"proxy_user[target_schema]\" and [profiles.proxy_auth]; choose one form"
