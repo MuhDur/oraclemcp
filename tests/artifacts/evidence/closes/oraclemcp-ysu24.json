@@ -1,0 +1,27 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T16:05:00Z",
+  "bead_id": "oraclemcp-ysu24",
+  "scope": {
+    "summary": "Verified already satisfied: _quality.yml is a local-Required projection living at .github/required/, and verify_required_local.py resolves it there with its contract test green.",
+    "in_scope": [".github/required/_quality.yml", "scripts/verify_required_local.py"],
+    "out_of_scope": [
+      "Any code change: this item was already satisfied in the tree. The close records verification, not new work.",
+      "The driver-side half of Cluster B (plan §25.2 P0.1-P0.4 in rust-oracledb), tracked as oraclemcp-dapll."
+    ]
+  },
+  "source": { "sha": "d9c7f96c7c645a1f4d42a3e96b2a6a198111f15c", "tree_clean": true, "branch": "main" },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [ { "name": "scripts/verify_required_local.py — the local-Required graph parser", "kind": "cli", "trace": "QUALITY_WORKFLOW at scripts/verify_required_local.py:23 resolves to .github/required/_quality.yml (not .github/workflows/); the shape contract holds: bash scripts/test_verify_required_local.sh exits 0. The file is absent from .github/workflows/, so GitHub no longer schedules a projection as a workflow." } ]
+  },
+  "live_evidence": { "claimed": false, "artifacts": [] },
+  "limitations": [
+    "Verification of pre-existing state, not new implementation. I ran the checks named in the trace and read the cited files; I did not re-derive why the original change was made.",
+    "Static/local verification only. The full workspace gate was not run for this close, and no CI run was dispatched to observe the behaviour end to end."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": { "claim": "not-ready", "basis": "manual-review" }
+}

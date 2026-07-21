@@ -1,0 +1,27 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T16:05:00Z",
+  "bead_id": "oraclemcp-r6agn",
+  "scope": {
+    "summary": "Verified already satisfied: release.yml overlaps the build matrix with the acceptance suite per plan §25.3 P1.1 while keeping publishing fully gated.",
+    "in_scope": [".github/workflows/release.yml"],
+    "out_of_scope": [
+      "Any code change: this item was already satisfied in the tree. The close records verification, not new work.",
+      "The driver-side half of Cluster B (plan §25.2 P0.1-P0.4 in rust-oracledb), tracked as oraclemcp-dapll."
+    ]
+  },
+  "source": { "sha": "d9c7f96c7c645a1f4d42a3e96b2a6a198111f15c", "tree_clean": true, "branch": "main" },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [ { "name": "release.yml job graph — build vs release-acceptance", "kind": "config-gate", "trace": "build.needs is [checks, pinned-nightly, web-build] with release-acceptance deliberately excluded and an in-file comment at release.yml:213-219 citing plan §25.3 P1.1 and the ~14 min saved; publish-crates.needs is [build, release-acceptance], so the acceptance suite still gates every publish." } ]
+  },
+  "live_evidence": { "claimed": false, "artifacts": [] },
+  "limitations": [
+    "Verification of pre-existing state, not new implementation. I ran the checks named in the trace and read the cited files; I did not re-derive why the original change was made.",
+    "Static/local verification only. The full workspace gate was not run for this close, and no CI run was dispatched to observe the behaviour end to end."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": { "claim": "not-ready", "basis": "manual-review" }
+}

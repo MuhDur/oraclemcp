@@ -1,0 +1,27 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T16:05:00Z",
+  "bead_id": "oraclemcp-ircfv",
+  "scope": {
+    "summary": "Verified already satisfied: the feature-powerset job asserts free disk before it runs, and the script is registered in the entry-trace inventory.",
+    "in_scope": ["scripts/feature_powerset_disk_preflight.sh", ".github/workflows/ci.yml"],
+    "out_of_scope": [
+      "Any code change: this item was already satisfied in the tree. The close records verification, not new work.",
+      "The driver-side half of Cluster B (plan §25.2 P0.1-P0.4 in rust-oracledb), tracked as oraclemcp-dapll."
+    ]
+  },
+  "source": { "sha": "d9c7f96c7c645a1f4d42a3e96b2a6a198111f15c", "tree_clean": true, "branch": "main" },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [ { "name": "ci.yml feature-powerset job disk preflight", "kind": "config-gate", "trace": "scripts/feature_powerset_disk_preflight.sh exists and is invoked at .github/workflows/ci.yml:270 before the powerset run; it is registered in scripts/entry_trace_contract.json, and bash scripts/check_entry_trace_contract.sh reports OK." } ]
+  },
+  "live_evidence": { "claimed": false, "artifacts": [] },
+  "limitations": [
+    "Verification of pre-existing state, not new implementation. I ran the checks named in the trace and read the cited files; I did not re-derive why the original change was made.",
+    "Static/local verification only. The full workspace gate was not run for this close, and no CI run was dispatched to observe the behaviour end to end."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": { "claim": "not-ready", "basis": "manual-review" }
+}
