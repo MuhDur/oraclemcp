@@ -2017,6 +2017,14 @@ fn connection_info_reports_the_active_profile() {
             "{field} should be marked redacted in {out}"
         );
     }
+    assert_eq!(out["connection"]["current_schema"], json!("APP"));
+    assert_eq!(out["connection"]["service_name"], json!("freepdb1"));
+    for field in ["current_schema", "service_name"] {
+        assert!(
+            !redacted_fields.contains(&json!(field)),
+            "{field} should be visible to a local transport: {out}"
+        );
+    }
     assert_eq!(out["connection"]["read_only"], json!(false));
     let serialized = out.to_string();
     for forbidden in [
