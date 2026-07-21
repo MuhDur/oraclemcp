@@ -126,6 +126,27 @@ fn target_tmp_file(name: &str) -> PathBuf {
 }
 
 #[test]
+fn online_setup_control_origin_is_https_and_pathless() {
+    let endpoint = OperatorControlEndpoint::parse("https://control.example.test:9443")
+        .expect("HTTPS control origin parses");
+    assert_eq!(endpoint.authority, "control.example.test:9443");
+    assert_eq!(endpoint.host, "control.example.test");
+    assert_eq!(endpoint.port, 9443);
+
+    for invalid in [
+        "http://control.example.test:9443",
+        "https://control.example.test:9443/operator/v1/config",
+        "https://operator@control.example.test:9443",
+        "https://control.example.test:invalid",
+    ] {
+        assert!(
+            OperatorControlEndpoint::parse(invalid).is_err(),
+            "unsafe control URL was accepted: {invalid}"
+        );
+    }
+}
+
+#[test]
 fn ci_lane_snapshot_default_never_overwrites_an_explicit_transport_path() {
     let explicit = PathBuf::from("/operator/configured/ci-lanes.json");
     let mut transport = HttpTransportConfig {

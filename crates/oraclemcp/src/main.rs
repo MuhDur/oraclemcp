@@ -36,12 +36,12 @@ use audit_evidence::{
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use asupersync::Cx;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
@@ -101,6 +101,9 @@ use oraclemcp_guard::{
     Classifier, ClassifierConfig, OperatingLevel, SessionLevelState, SqlPolicyConfig,
 };
 use oraclemcp_telemetry::{HealthState, Metrics, OtlpConfig};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use service_lifecycle::{
     ServiceBackupOptions, ServiceCommand as ServiceLifecycleCommand, ServiceInstallOptions,
     ServiceLogsOptions, ServiceMutationOptions, ServiceReadOptions, ServiceRestoreOptions,
@@ -118,6 +121,12 @@ const DEFAULT_SETUP_CONFIG_PATH: &str = "~/.config/oraclemcp/profiles.toml";
 const AUDIT_KEY_ENV: &str = "ORACLEMCP_AUDIT_KEY";
 const DEFAULT_BINARY_NAME: &str = "oraclemcp";
 const SHORT_BINARY_ALIAS: &str = "om";
+const CONTROL_URL_ENV: &str = "ORACLEMCP_CONTROL_URL";
+const OPERATOR_CERT_ENV: &str = "ORACLEMCP_OPERATOR_CERT";
+const OPERATOR_KEY_ENV: &str = "ORACLEMCP_OPERATOR_KEY";
+const CONTROL_CA_ENV: &str = "ORACLEMCP_CONTROL_CA";
+const OPERATOR_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_OPERATOR_CONTROL_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -4521,6 +4530,333 @@ struct SetupWriteResult {
     status: ConfigOpsStatus,
 }
 
+/// A successful `setup --write` applied through the running service's
+/// authenticated control listener. The server owns both the file-store lock and
+/// the live config snapshot, so this path never races an offline writer.
+#[derive(Debug)]
+struct OnlineSetupWriteResult {
+    control_url: String,
+    target_path: PathBuf,
+    preview: serde_json::Value,
+    outcome: serde_json::Value,
+}
+
+#[derive(Debug)]
+enum SetupWriteSource {
+    Offline(SetupWriteResult),
+    Online(OnlineSetupWriteResult),
+}
+
+#[derive(Debug)]
+struct OperatorControlEndpoint {
+    authority: String,
+    host: String,
+    port: u16,
+}
+
+impl OperatorControlEndpoint {
+    fn parse(value: &str) -> Result<Self, String> {
+        let value = value.trim();
+        let Some(value) = value.strip_prefix("https://") else {
+            return Err(
+                "ORACLEMCP_CONTROL_URL must use https:// for the mTLS control listener".to_owned(),
+            );
+        };
+        let authority = value.strip_suffix('/').unwrap_or(value);
+        if authority.is_empty()
+            || authority.contains(['/', '?', '#', '@', '\\', '\r', '\n'])
+            || authority.chars().any(char::is_whitespace)
+        {
+            return Err(
+                "ORACLEMCP_CONTROL_URL must be an HTTPS origin without a path, query, or credentials"
+                    .to_owned(),
+            );
+        }
+
+        let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+            let Some((host, suffix)) = bracketed.split_once(']') else {
+                return Err("ORACLEMCP_CONTROL_URL has an invalid bracketed host".to_owned());
+            };
+            let port = match suffix {
+                "" => 443,
+                _ => suffix
+                    .strip_prefix(':')
+                    .ok_or_else(|| "ORACLEMCP_CONTROL_URL has an invalid host port".to_owned())?
+                    .parse::<u16>()
+                    .map_err(|_| "ORACLEMCP_CONTROL_URL has an invalid host port".to_owned())?,
+            };
+            (host.to_owned(), port)
+        } else if let Some((host, port)) = authority.rsplit_once(':') {
+            if host.contains(':') {
+                return Err(
+                    "ORACLEMCP_CONTROL_URL must bracket an IPv6 host before its port".to_owned(),
+                );
+            }
+            if !port.chars().all(|character| character.is_ascii_digit()) {
+                return Err("ORACLEMCP_CONTROL_URL has an invalid host port".to_owned());
+            }
+            (
+                host.to_owned(),
+                port.parse::<u16>()
+                    .map_err(|_| "ORACLEMCP_CONTROL_URL has an invalid host port".to_owned())?,
+            )
+        } else {
+            (authority.to_owned(), 443)
+        };
+
+        if host.is_empty()
+            || !host.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | ':')
+            })
+        {
+            return Err("ORACLEMCP_CONTROL_URL has an invalid host".to_owned());
+        }
+        Ok(Self {
+            authority: authority.to_owned(),
+            host,
+            port,
+        })
+    }
+
+    fn socket_addresses(&self) -> Result<Vec<std::net::SocketAddr>, String> {
+        let target = if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        };
+        target
+            .to_socket_addrs()
+            .map(|addresses| addresses.collect())
+            .map_err(|error| format!("could not resolve control listener {target}: {error}"))
+    }
+}
+
+struct OperatorControlClient {
+    endpoint: OperatorControlEndpoint,
+    tls: Arc<ClientConfig>,
+}
+
+impl OperatorControlClient {
+    fn from_environment() -> Result<Self, String> {
+        let control_url = required_control_environment(CONTROL_URL_ENV)?;
+        let endpoint = OperatorControlEndpoint::parse(&control_url)?;
+        let client_cert = read_control_pem(OPERATOR_CERT_ENV)?;
+        let client_key = read_control_pem(OPERATOR_KEY_ENV)?;
+        let control_ca = read_control_pem(CONTROL_CA_ENV)?;
+        let tls = control_client_tls_config(&client_cert, &client_key, &control_ca)?;
+        Ok(Self { endpoint, tls })
+    }
+
+    fn post_json(
+        &self,
+        path: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let body = serde_json::to_vec(&payload)
+            .map_err(|error| format!("could not encode control request: {error}"))?;
+        let tcp = self.connect()?;
+        let server_name = ServerName::try_from(self.endpoint.host.clone())
+            .map_err(|error| format!("invalid control TLS server name: {error}"))?;
+        let connection = ClientConnection::new(Arc::clone(&self.tls), server_name)
+            .map_err(|error| format!("could not start control TLS client: {error}"))?;
+        let mut stream = StreamOwned::new(connection, tcp);
+        write!(
+            stream,
+            "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+            self.endpoint.authority,
+            body.len()
+        )
+        .and_then(|()| stream.write_all(&body))
+        .and_then(|()| stream.flush())
+        .map_err(|error| format!("could not send control request: {error}"))?;
+
+        let response = read_bounded_control_response(&mut stream)?;
+        let (status, body) = split_control_http_response(&response)?;
+        let json = serde_json::from_slice::<serde_json::Value>(body).map_err(|error| {
+            format!("control listener returned a non-JSON response (HTTP {status}): {error}")
+        })?;
+        if !(200..300).contains(&status) {
+            let message = json
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("no operator error message returned");
+            return Err(format!(
+                "control listener rejected {path} with HTTP {status}: {message}"
+            ));
+        }
+        Ok(json)
+    }
+
+    fn connect(&self) -> Result<TcpStream, String> {
+        let addresses = self.endpoint.socket_addresses()?;
+        if addresses.is_empty() {
+            return Err("control listener hostname resolved to no addresses".to_owned());
+        }
+        let mut last_error = None;
+        for address in addresses {
+            match TcpStream::connect_timeout(&address, OPERATOR_CONTROL_TIMEOUT) {
+                Ok(stream) => {
+                    stream
+                        .set_read_timeout(Some(OPERATOR_CONTROL_TIMEOUT))
+                        .and_then(|()| stream.set_write_timeout(Some(OPERATOR_CONTROL_TIMEOUT)))
+                        .map_err(|error| {
+                            format!("could not configure control listener timeout: {error}")
+                        })?;
+                    return Ok(stream);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(format!(
+            "could not connect to the configured control listener: {}",
+            last_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "no address was attempted".to_owned())
+        ))
+    }
+}
+
+fn required_control_environment(name: &str) -> Result<String, String> {
+    std::env::var(name)
+        .map(|value| value.trim().to_owned())
+        .map_err(|_| {
+            format!("{name} must name the running service's mTLS control listener or PEM file")
+        })
+        .and_then(|value| {
+            if value.is_empty() {
+                Err(format!("{name} must not be empty"))
+            } else {
+                Ok(value)
+            }
+        })
+}
+
+fn read_control_pem(name: &str) -> Result<Vec<u8>, String> {
+    let path = required_control_environment(name)?;
+    fs::read(&path).map_err(|error| format!("could not read {name} at {path}: {error}"))
+}
+
+fn control_client_tls_config(
+    client_cert_pem: &[u8],
+    client_key_pem: &[u8],
+    control_ca_pem: &[u8],
+) -> Result<Arc<ClientConfig>, String> {
+    let ca_certs = CertificateDer::pem_slice_iter(control_ca_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("could not parse {CONTROL_CA_ENV}: {error}"))?;
+    if ca_certs.is_empty() {
+        return Err(format!("{CONTROL_CA_ENV} contains no certificate"));
+    }
+    let mut roots = RootCertStore::empty();
+    for cert in ca_certs {
+        roots
+            .add(cert)
+            .map_err(|error| format!("could not add {CONTROL_CA_ENV} certificate: {error}"))?;
+    }
+    let client_certs = CertificateDer::pem_slice_iter(client_cert_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("could not parse {OPERATOR_CERT_ENV}: {error}"))?;
+    if client_certs.is_empty() {
+        return Err(format!("{OPERATOR_CERT_ENV} contains no certificate"));
+    }
+    let client_key = PrivateKeyDer::from_pem_slice(client_key_pem)
+        .map_err(|_| format!("{OPERATOR_KEY_ENV} contains no private key"))?;
+    ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .map_err(|error| format!("could not select control TLS protocol versions: {error}"))?
+        .with_root_certificates(roots)
+        .with_client_auth_cert(client_certs, client_key)
+        .map(Arc::new)
+        .map_err(|error| format!("could not build mTLS control client: {error}"))
+}
+
+fn read_bounded_control_response(stream: &mut impl Read) -> Result<Vec<u8>, String> {
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = stream
+            .read(&mut buffer)
+            .map_err(|error| format!("could not read control response: {error}"))?;
+        if count == 0 {
+            return Ok(response);
+        }
+        if response.len().saturating_add(count) > MAX_OPERATOR_CONTROL_RESPONSE_BYTES {
+            return Err(format!(
+                "control response exceeds {MAX_OPERATOR_CONTROL_RESPONSE_BYTES} bytes"
+            ));
+        }
+        response.extend_from_slice(&buffer[..count]);
+    }
+}
+
+fn split_control_http_response(response: &[u8]) -> Result<(u16, &[u8]), String> {
+    let Some(separator) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return Err("control listener returned an incomplete HTTP response".to_owned());
+    };
+    let headers = std::str::from_utf8(&response[..separator])
+        .map_err(|_| "control listener returned non-UTF-8 HTTP headers".to_owned())?;
+    let status = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .ok_or_else(|| "control listener returned an invalid HTTP status line".to_owned())?
+        .parse::<u16>()
+        .map_err(|_| "control listener returned an invalid HTTP status".to_owned())?;
+    Ok((status, &response[separator + 4..]))
+}
+
+fn online_setup_write(
+    target_path: &Path,
+    draft_toml: &str,
+) -> Result<OnlineSetupWriteResult, String> {
+    let control_url = required_control_environment(CONTROL_URL_ENV)?;
+    let client = OperatorControlClient::from_environment()?;
+    let draft = client.post_json(
+        "/operator/v1/config/draft",
+        serde_json::json!({ "draft_toml": draft_toml }),
+    )?;
+    let preview = draft
+        .get("preview")
+        .ok_or_else(|| "control listener draft response omitted preview".to_owned())?;
+    let remote_target = preview
+        .get("target_path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "control listener draft response omitted target_path".to_owned())?;
+    if Path::new(remote_target) != target_path {
+        return Err(format!(
+            "control listener manages {}, but setup --write requested {}; refusing to write a different config target",
+            remote_target,
+            target_path.display()
+        ));
+    }
+    let preview_token = preview
+        .get("preview_token")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "control listener draft response omitted preview_token".to_owned())?;
+    let expected_draft_sha256 = preview
+        .get("draft_sha256")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "control listener draft response omitted draft_sha256".to_owned())?;
+    let outcome = client.post_json(
+        "/operator/v1/config/apply",
+        serde_json::json!({
+            "draft_toml": draft_toml,
+            "preview_token": preview_token,
+            "expected_draft_sha256": expected_draft_sha256,
+            "confirm_preview": true,
+        }),
+    )?;
+    if outcome.get("outcome").is_none() {
+        return Err("control listener apply response omitted outcome".to_owned());
+    }
+    Ok(OnlineSetupWriteResult {
+        control_url,
+        target_path: PathBuf::from(remote_target),
+        preview: preview.clone(),
+        outcome,
+    })
+}
+
 fn setup_write_target_path(config_path: &str) -> PathBuf {
     if config_path == DEFAULT_SETUP_CONFIG_PATH {
         return operator_config_target_path();
@@ -4586,13 +4922,12 @@ fn setup_apply_discovery_config(
 fn setup_write_payload(
     mut payload: serde_json::Value,
     target_path: &Path,
-    result: &SetupWriteResult,
+    result: &SetupWriteSource,
 ) -> serde_json::Value {
     if let Some(obj) = payload.as_object_mut() {
         obj.remove("profiles_toml");
-        obj.insert(
-            "write".to_owned(),
-            serde_json::json!({
+        let write = match result {
+            SetupWriteSource::Offline(result) => serde_json::json!({
                 "enabled": true,
                 "source": "config_ops",
                 "target_path": target_path,
@@ -4601,7 +4936,17 @@ fn setup_write_payload(
                 "status": &result.status,
                 "redaction": "profiles TOML and secret references are not echoed by setup --write"
             }),
-        );
+            SetupWriteSource::Online(result) => serde_json::json!({
+                "enabled": true,
+                "source": "authenticated_control_listener",
+                "control_url": &result.control_url,
+                "target_path": &result.target_path,
+                "preview": &result.preview,
+                "outcome": &result.outcome,
+                "redaction": "profiles TOML and secret references are not echoed by setup --write"
+            }),
+        };
+        obj.insert("write".to_owned(), write);
         obj.insert(
             "next_actions".to_owned(),
             serde_json::json!([
@@ -4720,16 +5065,33 @@ fn run_setup(
             .as_str()
             .expect("setup payload includes profiles_toml")
             .to_owned();
-        let backend = match ConfigOpsBackend::open_default() {
-            Ok(backend) => backend,
-            Err(error) => {
-                let (code, message) = setup_config_error_status(&error);
-                emit_command_error(robot_json, "setup", code, &message);
-                return ExitCode::from(2);
+        match ConfigOpsBackend::open_default() {
+            Ok(backend) => {
+                match setup_apply_config_with_backend(backend, target_path.clone(), &draft_toml) {
+                    Ok(result) => Some(SetupWriteSource::Offline(result)),
+                    Err(error) => {
+                        let (code, message) = setup_config_error_status(&error);
+                        emit_command_error(robot_json, "setup", code, &message);
+                        return ExitCode::from(2);
+                    }
+                }
             }
-        };
-        match setup_apply_config_with_backend(backend, target_path.clone(), &draft_toml) {
-            Ok(result) => Some(result),
+            Err(ConfigOpsError::FileStore(oraclemcp_core::file_store::FileStoreError::Locked)) => {
+                match online_setup_write(&target_path, &draft_toml) {
+                    Ok(result) => Some(SetupWriteSource::Online(result)),
+                    Err(error) => {
+                        emit_command_error(
+                            robot_json,
+                            "setup",
+                            "ORACLEMCP_SETUP_ONLINE_WORKFLOW_FAILED",
+                            &format!(
+                                "the local state store is owned by a running service and the authenticated online fallback could not complete: {error}; configure {CONTROL_URL_ENV}, {OPERATOR_CERT_ENV}, {OPERATOR_KEY_ENV}, and {CONTROL_CA_ENV}, or stop the service before offline mutation"
+                            ),
+                        );
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             Err(error) => {
                 let (code, message) = setup_config_error_status(&error);
                 emit_command_error(robot_json, "setup", code, &message);
@@ -4760,17 +5122,42 @@ fn run_setup(
         );
         output.push_str(&format!("Profiles path:\n  {setup_config_path}\n\n"));
         if let Some(result) = write_result.as_ref() {
-            output.push_str("profiles.toml written through config-ops:\n");
-            output.push_str(&format!(
-                "  target: {}\n",
-                result.outcome.apply.target_path.display()
-            ));
-            output.push_str(&format!(
-                "  backup: {}\n",
-                result.outcome.apply.backup_path.display()
-            ));
-            output.push_str(&format!("  rollback: {}\n", result.outcome.rollback_id));
-            output.push_str(&format!("  reload: {}\n", result.outcome.reload.status));
+            match result {
+                SetupWriteSource::Offline(result) => {
+                    output.push_str("profiles.toml written through config-ops:\n");
+                    output.push_str(&format!(
+                        "  target: {}\n",
+                        result.outcome.apply.target_path.display()
+                    ));
+                    output.push_str(&format!(
+                        "  backup: {}\n",
+                        result.outcome.apply.backup_path.display()
+                    ));
+                    output.push_str(&format!("  rollback: {}\n", result.outcome.rollback_id));
+                    output.push_str(&format!("  reload: {}\n", result.outcome.reload.status));
+                }
+                SetupWriteSource::Online(result) => {
+                    output.push_str(
+                        "profiles.toml written through the authenticated control listener:\n",
+                    );
+                    output.push_str(&format!("  target: {}\n", result.target_path.display()));
+                    output.push_str(&format!("  control: {}\n", result.control_url));
+                    let outcome = result.outcome.get("outcome").unwrap_or(&result.outcome);
+                    if let Some(rollback) = outcome
+                        .get("rollback_id")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        output.push_str(&format!("  rollback: {rollback}\n"));
+                    }
+                    if let Some(reload) = outcome
+                        .get("reload")
+                        .and_then(|reload| reload.get("status"))
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        output.push_str(&format!("  reload: {reload}\n"));
+                    }
+                }
+            }
             output.push_str("  redaction: profiles TOML and secret references are not echoed by setup --write\n\n");
         } else {
             output.push_str(&format!(
