@@ -1,0 +1,57 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T12:36:31Z",
+  "bead_id": "oraclemcp-091-b10-message-sweep-1pt6b",
+  "scope": {
+    "summary": "Classify semantic catalog misses and ORA-31603 as object-not-found, while keeping unprovable reads refused and directing operators to sanctioned discovery tools.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp-error/src/lib.rs",
+      "crates/oraclemcp-db/src/error.rs"
+    ],
+    "out_of_scope": [
+      "Admitting raw-SQL views or other dependencies that the semantic read gate cannot prove safe.",
+      "Changing operating-level escalation, profile maxima, or the transient driver-error classification work assigned elsewhere."
+    ]
+  },
+  "source": {
+    "sha": "b614dba3fff105f96d8a35c5bd2f8928cf40b190",
+    "tree_clean": false,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_query semantic read admission",
+        "kind": "tool",
+        "trace": "cargo test -p oraclemcp --lib served_read_gate_ -- --nocapture: 3 passed, including catalog-miss ObjectNotFound text, refusal next steps, and zero caller queries."
+      },
+      {
+        "name": "oracle_connection_info structured failure response",
+        "kind": "tool",
+        "trace": "cargo test -p oraclemcp --lib connection_info_degrades_when_describe_fails -- --nocapture: 1 passed; the nested connection_error carries oracle_list_profiles and a diagnostic next step."
+      },
+      {
+        "name": "driver error envelope classification",
+        "kind": "api",
+        "trace": "cargo test -p oraclemcp-error --lib -- --nocapture: 20 passed; cargo test -p oraclemcp-db dbms_metadata_missing_object_does_not_fall_back_to_connection_failed -- --nocapture: 1 passed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No live Oracle result is claimed; this close records local refusal grammar and driver-message classification behavior."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
