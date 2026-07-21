@@ -1,0 +1,43 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T12:44:41Z",
+  "bead_id": "oraclemcp-091-p2-9-stale-lock-stderr-4vqcm",
+  "scope": {
+    "summary": "Capture the expected failing kill -0 probe so stale service-instance-lock recovery does not leak its shell diagnostic to stderr.",
+    "in_scope": [
+      "crates/oraclemcp/src/service_lifecycle.rs"
+    ],
+    "out_of_scope": [
+      "Changing the stale-lock reclaim decision, holder metadata, or lock-file lifecycle."
+    ]
+  },
+  "source": {
+    "sha": "a1041b03b5dca4883911443b511f807e18488665",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "service-instance stale-lock reclaim",
+        "kind": "cli",
+        "trace": "service_instance_guard_clears_stale_lock_when_recorded_pid_is_dead writes a stale dead-pid lock and acquires its replacement. It ran with --nocapture and passed without emitting the previous kill diagnostic."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped test only: CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp service_instance_guard_clears_stale_lock_when_recorded_pid_is_dead -- --nocapture (1 passed). The full workspace gate was not run for this close."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
