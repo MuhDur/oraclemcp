@@ -1065,6 +1065,26 @@ lanes — Oracle XE 18, XE 21, and FREE 23ai (`free23` is the regression bar).
 It is a **required** item on the [release checklist](release-checklist.md)
 (operator-run; CI has no live databases).
 
+#### Rig L1: local container lifecycle
+
+The local rig's L1 helper reuses the three existing lab containers
+(`oracle-xe18-1518`, `oracle-xe21-1520`, and `rust-oracledb-free`) rather than
+creating a parallel compose stack. One command starts any stopped lanes, waits
+for the driver's `DATABASE IS READY TO USE` sentinel, invokes the driver's
+idempotent fixture bootstrap, smoke-queries `SELECT 1 FROM dual` on each PDB,
+and tears down only lanes that this invocation started:
+
+```bash
+ORACLEMCP_RIG_L1_ADMIN_PASSWORD='<local lab SYS password>' \
+  bash scripts/rig/oracle_l1.sh run --log
+```
+
+It never creates or removes a container, and it leaves pre-existing running
+lanes untouched. Use `--dry-run` to validate wiring and emit the same
+structured JSON-line plan without touching Docker. R0's `scripts/rig/rig.sh`
+is the single operator entry point and invokes this L1 helper; do not add a
+second container harness.
+
 Per lane, against the real binary with a lane-scoped `max_level = "DDL"` lab
 profile and an isolated `XDG_STATE_HOME`:
 
