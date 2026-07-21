@@ -1496,6 +1496,8 @@ pub async fn get_source(
     owner: &str,
     name: &str,
     object_type: &str,
+    from_line: Option<usize>,
+    to_line: Option<usize>,
     max_chars: usize,
 ) -> Result<SourceText, DbError> {
     let Some(source_type) = normalize_source_object_type(object_type) else {
@@ -1505,6 +1507,8 @@ pub async fn get_source(
     };
     let sql = "SELECT line, text FROM all_source \
                WHERE owner = :1 AND name = :2 AND type = :3 \
+                 AND (:4 IS NULL OR line >= :4) \
+                 AND (:5 IS NULL OR line <= :5) \
                ORDER BY line";
     let rows = conn
         .query_rows(
@@ -1514,6 +1518,8 @@ pub async fn get_source(
                 OracleBind::from(owner.to_ascii_uppercase()),
                 OracleBind::from(name.to_ascii_uppercase()),
                 OracleBind::from(source_type),
+                from_line.map_or(OracleBind::Null, |line| OracleBind::from(line as i64)),
+                to_line.map_or(OracleBind::Null, |line| OracleBind::from(line as i64)),
             ],
         )
         .await?;
@@ -1597,11 +1603,25 @@ pub async fn get_sources_by_name(
     conn: &dyn OracleConnection,
     owner: &str,
     name: &str,
+    from_line: Option<usize>,
+    to_line: Option<usize>,
     max_chars: usize,
 ) -> Result<Vec<SourceText>, DbError> {
     let mut out = Vec::new();
     for source_type in list_source_types(cx, conn, owner, name).await? {
-        out.push(get_source(cx, conn, owner, name, &source_type, max_chars).await?);
+        out.push(
+            get_source(
+                cx,
+                conn,
+                owner,
+                name,
+                &source_type,
+                from_line,
+                to_line,
+                max_chars,
+            )
+            .await?,
+        );
     }
     Ok(out)
 }
@@ -2891,9 +2911,18 @@ mod tests {
     #[test]
     fn get_source_caps_text_and_reports_metadata() {
         let source = run_with_cx(|cx| async move {
-            get_source(&cx, &SourceMock, "hr", "emp_api", "package_body", 8)
-                .await
-                .unwrap()
+            get_source(
+                &cx,
+                &SourceMock,
+                "hr",
+                "emp_api",
+                "package_body",
+                None,
+                None,
+                8,
+            )
+            .await
+            .unwrap()
         });
         assert_eq!(source.owner, "HR");
         assert_eq!(source.name, "EMP_API");
@@ -2905,9 +2934,48 @@ mod tests {
     }
 
     #[test]
+    fn get_source_range_binds_inclusive_line_bounds() {
+        let conn = CaptureMock::default();
+        let conn_ref = &conn;
+        run_with_cx(|cx| async move {
+            get_source(
+                &cx,
+                conn_ref,
+                "hr",
+                "emp_api",
+                "package_body",
+                Some(37),
+                Some(42),
+                1_000,
+            )
+            .await
+            .expect("range lookup succeeds")
+        });
+        let (sql, binds) = conn
+            .calls
+            .lock()
+            .expect("calls")
+            .first()
+            .cloned()
+            .expect("one source query");
+        assert!(sql.contains("line >= :4"));
+        assert!(sql.contains("line <= :5"));
+        assert_eq!(
+            binds,
+            vec![
+                OracleBind::String("HR".to_owned()),
+                OracleBind::String("EMP_API".to_owned()),
+                OracleBind::String("PACKAGE BODY".to_owned()),
+                OracleBind::I64(37),
+                OracleBind::I64(42),
+            ]
+        );
+    }
+
+    #[test]
     fn get_sources_by_name_lists_source_types_and_fetches_each() {
         let sources = run_with_cx(|cx| async move {
-            get_sources_by_name(&cx, &MultiSourceMock, "hr", "emp_api", 64)
+            get_sources_by_name(&cx, &MultiSourceMock, "hr", "emp_api", None, None, 64)
                 .await
                 .unwrap()
         });

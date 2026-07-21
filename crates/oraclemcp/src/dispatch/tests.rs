@@ -2169,7 +2169,7 @@ fn connection_info_reports_stateless_read_strategy_when_configured() {
 
     assert_eq!(
         out["connection"]["connection_strategy"],
-        json!("single_session")
+        json!("pinned_plus_stateless")
     );
     assert_eq!(
         out["stateless_read_connection"]["strategy"],
@@ -3719,6 +3719,61 @@ fn get_source_without_object_type_returns_all_visible_sources() {
     assert_eq!(out["source_count"], json!(2));
     assert_eq!(out["sources"][0]["object_type"], json!("PACKAGE"));
     assert_eq!(out["sources"][1]["object_type"], json!("PACKAGE BODY"));
+}
+
+#[test]
+fn get_source_returns_requested_line_range_metadata() {
+    let dispatcher = OracleDispatcher::new(Box::new(SourceLookupMock));
+    let out = dispatcher
+        .dispatch(
+            "oracle_get_source",
+            json!({
+                "name": "EMP_API",
+                "object_type": "PACKAGE",
+                "from_line": 40,
+                "to_line": 48,
+            }),
+        )
+        .expect("source range fetch is accepted");
+    assert_eq!(out["range"]["from_line"], json!(40));
+    assert_eq!(out["range"]["to_line"], json!(48));
+
+    let err = dispatcher
+        .dispatch(
+            "oracle_get_source",
+            json!({
+                "name": "EMP_API",
+                "object_type": "PACKAGE",
+                "from_line": 48,
+                "to_line": 40,
+            }),
+        )
+        .expect_err("backwards source range is refused");
+    assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+    assert!(err.message.contains("from_line must not exceed to_line"));
+}
+
+#[test]
+fn source_search_line_cap_keeps_line_metadata_and_marks_truncation() {
+    let rows = [OracleRow {
+        columns: vec![
+            (
+                "LINE".to_owned(),
+                OracleCell::new("NUMBER", Some("42".to_owned())),
+            ),
+            (
+                "TEXT".to_owned(),
+                OracleCell::new("VARCHAR2", Some("abcdefghij0123456789".to_owned())),
+            ),
+        ],
+    }];
+
+    let (matches, truncated_lines) = source_search_rows_to_json(&rows, 16);
+    assert_eq!(truncated_lines, 1);
+    assert_eq!(matches[0]["LINE"], json!("42"));
+    assert_eq!(matches[0]["TEXT"], json!("abc… [truncated]"));
+    assert_eq!(matches[0]["TEXT_TRUNCATED"], json!(true));
+    assert_eq!(matches[0]["TEXT_CHAR_COUNT"], json!(20));
 }
 
 #[test]

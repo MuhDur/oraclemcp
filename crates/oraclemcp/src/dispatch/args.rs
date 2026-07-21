@@ -480,6 +480,10 @@ pub(super) struct GetSourceArgs {
     pub(super) object_type: Option<String>,
     #[serde(default)]
     pub(super) max_chars: Option<usize>,
+    #[serde(default)]
+    pub(super) from_line: Option<usize>,
+    #[serde(default)]
+    pub(super) to_line: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -574,6 +578,8 @@ pub(super) struct SearchSourceArgs {
     pub(super) name_like: Option<String>,
     #[serde(default, alias = "limit")]
     pub(super) max_rows: Option<usize>,
+    #[serde(default)]
+    pub(super) max_line_chars: Option<usize>,
 }
 
 #[derive(Deserialize)]

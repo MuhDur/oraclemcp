@@ -90,6 +90,13 @@ use serde_json::{Value, json};
 const DEFAULT_SEARCH_MAX_ROWS: usize = 200;
 /// Hard cap on `oracle_search_source` for a single call.
 const MAX_SEARCH_MAX_ROWS: usize = 5_000;
+/// Default cap on each `oracle_search_source` source line.
+const DEFAULT_SEARCH_MAX_LINE_CHARS: usize = 500;
+/// Smallest cap that still leaves an explicit truncation marker in the result.
+const MIN_SEARCH_MAX_LINE_CHARS: usize = 16;
+/// Oracle source text rows are at most 4,000 characters in the dictionary.
+const MAX_SEARCH_MAX_LINE_CHARS: usize = 4_000;
+const SOURCE_SEARCH_LINE_TRUNCATION_MARKER: &str = "… [truncated]";
 /// Default cap on `oracle_get_source` source text when the caller omits it.
 const DEFAULT_SOURCE_MAX_CHARS: usize = 1_000_000;
 /// Cap on before/after snippets in `oracle_patch_source` previews.
@@ -1950,6 +1957,44 @@ impl SideEffectOracle for GeneratedReadPurityOracle {
 fn rows_to_json(rows: &[oraclemcp_db::OracleRow]) -> Value {
     let opts = SerializeOptions::default();
     Value::Array(rows.iter().map(|r| serialize_row(r, &opts)).collect())
+}
+
+/// Serialize source-search rows with a per-line cap before they enter an MCP
+/// response. `ALL_SOURCE.TEXT` is normally short, but generated source can use
+/// multi-thousand-character lines; preserving the line number while bounding
+/// its text lets callers fetch an exact range with `oracle_get_source`.
+fn source_search_rows_to_json(
+    rows: &[oraclemcp_db::OracleRow],
+    max_line_chars: usize,
+) -> (Value, usize) {
+    let Value::Array(mut matches) = rows_to_json(rows) else {
+        unreachable!("rows_to_json always produces an array")
+    };
+    let marker_chars = SOURCE_SEARCH_LINE_TRUNCATION_MARKER.chars().count();
+    let content_cap = max_line_chars.saturating_sub(marker_chars);
+    let mut truncated_lines = 0_usize;
+
+    for matched in &mut matches {
+        let Some(object) = matched.as_object_mut() else {
+            continue;
+        };
+        let Some(text) = object.get("TEXT").and_then(Value::as_str) else {
+            continue;
+        };
+        let char_count = text.chars().count();
+        if char_count <= max_line_chars {
+            continue;
+        }
+
+        let mut truncated = text.chars().take(content_cap).collect::<String>();
+        truncated.push_str(SOURCE_SEARCH_LINE_TRUNCATION_MARKER);
+        object.insert("TEXT".to_owned(), Value::String(truncated));
+        object.insert("TEXT_TRUNCATED".to_owned(), Value::Bool(true));
+        object.insert("TEXT_CHAR_COUNT".to_owned(), json!(char_count));
+        truncated_lines = truncated_lines.saturating_add(1);
+    }
+
+    (Value::Array(matches), truncated_lines)
 }
 
 async fn send_stream_frame(cx: &Cx, frames: &ToolStreamSender, frame: ToolStreamFrame) -> bool {
@@ -4803,6 +4848,27 @@ fn json_to_bind(v: &Value) -> Result<OracleBind, ErrorEnvelope> {
 /// Build an `InvalidArguments` envelope (malformed args / unknown tool).
 fn invalid_args(message: impl Into<String>) -> ErrorEnvelope {
     ErrorEnvelope::new(ErrorClass::InvalidArguments, message)
+}
+
+/// Validate the inclusive line range accepted by `oracle_get_source` before
+/// it reaches the bound `ALL_SOURCE` query.
+fn source_line_range(
+    from_line: Option<usize>,
+    to_line: Option<usize>,
+) -> Result<(Option<usize>, Option<usize>), ErrorEnvelope> {
+    if from_line == Some(0) || to_line == Some(0) {
+        return Err(invalid_args(
+            "invalid arguments for oracle_get_source: from_line and to_line must be at least 1",
+        ));
+    }
+    if let (Some(from_line), Some(to_line)) = (from_line, to_line)
+        && from_line > to_line
+    {
+        return Err(invalid_args(
+            "invalid arguments for oracle_get_source: from_line must not exceed to_line",
+        ));
+    }
+    Ok((from_line, to_line))
 }
 
 /// Deserialize a tool's args struct, mapping a serde error to a structured
@@ -10080,7 +10146,7 @@ async fn fetch_patch_source_document(
     }
 
     dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.get_source.before")?;
-    let source = get_source(cx, conn, owner, name, object_type, max_chars)
+    let source = get_source(cx, conn, owner, name, object_type, None, None, max_chars)
         .await
         .map_err(DbError::into_envelope)?;
     dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.get_source.after")?;
@@ -12838,6 +12904,14 @@ impl OracleDispatcher {
                             "stateless_read_connection".to_owned(),
                             connection_strategy_json(cx, stateless_conn.as_ref()).await,
                         );
+                        if let Some(connection) =
+                            map.get_mut("connection").and_then(Value::as_object_mut)
+                        {
+                            connection.insert(
+                                "connection_strategy".to_owned(),
+                                json!("pinned_plus_stateless"),
+                            );
+                        }
                     }
                 }
                 Ok(value)
@@ -13467,6 +13541,7 @@ impl OracleDispatcher {
             "oracle_get_source" => {
                 let a: GetSourceArgs = parse_args(name, args)?;
                 let max_chars = a.max_chars.unwrap_or(DEFAULT_SOURCE_MAX_CHARS);
+                let (from_line, to_line) = source_line_range(a.from_line, a.to_line)?;
                 let (owner, object_name) =
                     owner_and_name_arg(cx, &observed_metadata_conn, a.owner, a.name, "name")
                         .await?;
@@ -13479,12 +13554,20 @@ impl OracleDispatcher {
                             &owner,
                             &object_name,
                             object_type,
+                            from_line,
+                            to_line,
                             max_chars,
                         )
                         .await
                         .map_err(DbError::into_envelope)?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.get_source.after")?;
-                        Ok(json!({ "source": source }))
+                        Ok(json!({
+                            "source": source,
+                            "range": {
+                                "from_line": from_line,
+                                "to_line": to_line,
+                            },
+                        }))
                     }
                     None => {
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.get_sources_by_name.before")?;
@@ -13493,6 +13576,8 @@ impl OracleDispatcher {
                             &guarded_metadata_conn,
                             &owner,
                             &object_name,
+                            from_line,
+                            to_line,
                             max_chars,
                         )
                         .await
@@ -13502,6 +13587,10 @@ impl OracleDispatcher {
                             "owner": owner,
                             "name": object_name,
                             "source_count": sources.len(),
+                            "range": {
+                                "from_line": from_line,
+                                "to_line": to_line,
+                            },
                             "sources": sources,
                         }))
                     }
@@ -13733,6 +13822,10 @@ impl OracleDispatcher {
                     .max_rows
                     .unwrap_or(DEFAULT_SEARCH_MAX_ROWS)
                     .clamp(1, MAX_SEARCH_MAX_ROWS);
+                let max_line_chars = a
+                    .max_line_chars
+                    .unwrap_or(DEFAULT_SEARCH_MAX_LINE_CHARS)
+                    .clamp(MIN_SEARCH_MAX_LINE_CHARS, MAX_SEARCH_MAX_LINE_CHARS);
                 let requested_owner = non_empty_arg(a.owner);
                 let owner = match requested_owner.as_deref() {
                     Some("*") => None,
@@ -13758,12 +13851,15 @@ impl OracleDispatcher {
                 .await
                 .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.search_source.after")?;
+                let (matches, truncated_lines) = source_search_rows_to_json(&rows, max_line_chars);
                 Ok(json!({
                     "owner": owner.as_deref().unwrap_or("*"),
                     "object_type": object_type,
                     "name_like": name_like,
                     "max_rows": max_rows,
-                    "matches": rows_to_json(&rows),
+                    "max_line_chars": max_line_chars,
+                    "truncated_lines": truncated_lines,
+                    "matches": matches,
                 }))
             }
             "oracle_plscope_inspect" => {

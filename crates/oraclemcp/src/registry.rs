@@ -1002,7 +1002,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_get_source",
             ToolTier::FoundationLiveDb,
-            "Fetch an object's full source text from ALL_SOURCE with a character cap. Omit object_type to return every visible source variant for the object name.",
+            "Fetch an object's full source text or inclusive line range from ALL_SOURCE with a character cap. Omit object_type to return every visible source variant for the object name.",
         )
         .with_input_schema(object_schema(
             json!({
@@ -1010,7 +1010,9 @@ pub fn tool_registry() -> ToolRegistry {
                 "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
                 "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." },
                 "object_type": { "type": "string", "description": "Optional supported source type: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY. When omitted, all visible source types for this name are returned." },
-                "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum source characters to return (default 1000000)." }
+                "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum source characters to return (default 1000000)." },
+                "from_line": { "type": "integer", "minimum": 1, "description": "Optional first ALL_SOURCE line to return, inclusive. Pair with oracle_search_source's LINE result." },
+                "to_line": { "type": "integer", "minimum": 1, "description": "Optional last ALL_SOURCE line to return, inclusive. Must not be lower than from_line." }
             }),
             &[],
         )),
@@ -1077,7 +1079,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_search_source",
             ToolTier::FoundationLiveDb,
-            "Full-text search across ALL_SOURCE for a needle (row-capped).",
+            "Full-text search across ALL_SOURCE for a needle (row- and line-capped).",
         )
         .with_input_schema(object_schema(
             json!({
@@ -1086,7 +1088,8 @@ pub fn tool_registry() -> ToolRegistry {
                 "object_type": { "type": "string", "description": "Optional source type filter: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY." },
                 "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for source object names, e.g. EMP%." },
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum matching source lines to return (default 200, hard cap 5000)." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." }
+                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
+                "max_line_chars": { "type": "integer", "minimum": 16, "maximum": 4000, "description": "Maximum characters retained from each matching source line (default 500). Longer lines end with an explicit truncation marker; use oracle_get_source with from_line/to_line for the exact source range." }
             }),
             &["needle"],
         )),
@@ -2315,7 +2318,15 @@ mod tests {
             ("get_ddl", &["object_type", "owner", "name", "object_name"]),
             (
                 "oracle_get_source",
-                &["owner", "name", "object_name", "object_type", "max_chars"],
+                &[
+                    "owner",
+                    "name",
+                    "object_name",
+                    "object_type",
+                    "max_chars",
+                    "from_line",
+                    "to_line",
+                ],
             ),
             (
                 "get_object_source",
@@ -2366,6 +2377,7 @@ mod tests {
                     "name_like",
                     "max_rows",
                     "limit",
+                    "max_line_chars",
                 ],
             ),
             ("oracle_plscope_inspect", &["owner", "name", "object_name"]),
