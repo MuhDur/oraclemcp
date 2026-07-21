@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T19:58:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.3",
+  "scope": {
+    "summary": "F-LOW DC7: an AUTH_SERIAL_NUM outside u16 was silently wrapped (70000 -> 4464), reporting a session serial the server never issued; it is now rejected through the existing typed session-field error.",
+    "in_scope": [
+      "tests/artifacts/evidence/oraclemcp-eng-program-bp8ia.7.11.3-driver-handoff.json"
+    ],
+    "out_of_scope": [
+      "The code itself, which is driver-side (rust-oracledb crates/oracledb/src/lib.rs) and cannot appear in this repo's in_scope; the handoff artifact binds the exact driver commit and file digest instead.",
+      "Other session fields parsed elsewhere: only parse_session_u16 carried the wrapping cast.",
+      "The three sibling driver-side F-LOW beads (DC5, DC6, DK1, DK2), which remain open."
+    ]
+  },
+  "source": {
+    "sha": "2d971f79f4efaaf4adb1ed13f17a9ff942c40461",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "parse_session_u16 (rust-oracledb crates/oracledb/src/lib.rs)",
+        "kind": "api",
+        "trace": "Driver commit 5ed87b09ef39, pushed to rust-oracledb main and bound by digest in the in-scope handoff artifact. `.parse::<u64>().map(|v| v as u16)` became `.parse::<u16>()`, so an out-of-range value returns Error::MissingSessionField instead of a wrapped number. Negative acceptance: 65536, 70000, 4294967296 and -1 are all refused (auth_serial_num_out_of_u16_range_is_rejected_not_wrapped). Positive acceptance: 0, 1, 4464 and 65535 parse exactly (auth_serial_num_parses_the_full_u16_domain_exactly). 347 oracledb lib tests pass; clippy clean."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Discriminating, verified by mutation: restoring the `as u16` cast fails the rejection test with 'a serial outside u16 must not be silently wrapped: 0'.",
+    "The pre-existing test auth_serial_num_truncates_to_low_u16_instead_of_rejecting was REPLACED, not extended: it asserted 70000 -> 4464 as intended behaviour, which is the defect. The replacement covers strictly more input.",
+    "Unit-level. No live Oracle authentication produced an out-of-range AUTH_SERIAL_NUM; the fixtures are constructed session maps.",
+    "Cross-repo close: this repo's evidence binds a driver commit by SHA and file digest. The oraclemcp source tree is unchanged by this bead."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
