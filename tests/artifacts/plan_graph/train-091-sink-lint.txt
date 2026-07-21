@@ -1,0 +1,3 @@
+lint: WARN W1 legacy train bead without acceptance text: oraclemcp-dapll
+lint: WARN W1 legacy train bead without acceptance text: oraclemcp-plan-bead-graph-lint-eshv
+plan-bead-graph-lint: PASS — train beads=113 hard=0 warn=2
