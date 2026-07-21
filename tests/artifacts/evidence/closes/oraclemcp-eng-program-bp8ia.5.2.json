@@ -1,0 +1,63 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T17:20:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.5.2",
+  "scope": {
+    "summary": "D2 changed-line coverage ratchet made real: the leg's pathspec selected nothing, so it reported 'trivially green' on every diff ever measured; it now measures the diff, fails uncovered changed lines, and the lane attests only the legs that actually ran.",
+    "in_scope": [
+      "scripts/coverage_ratchet.sh",
+      "scripts/mutation_safety_gate.sh",
+      ".github/workflows/ci.yml"
+    ],
+    "out_of_scope": [
+      "The mutation-floor leg's ENFORCEMENT. It remains advisory this train under ALLOW_STALE_MUTATION_SEAL (operator ruling 2026-07-21, plan v8 \u00a7Z2); docs/quality/mutation-safety-d2.md does not exist yet and the seal is bead oraclemcp-091-rc-mutation-seal-5aqwf. This close makes that deferral HONEST (attested SKIP, never PASS); it does not lift it.",
+      "The evaluator itself (scripts/coverage_ratchet.py) and the D1 baseline (bead 5.1, closed): both were already correct and are unchanged.",
+      "docs/test-tiers.md \u00a77, which still describes the mutation-floor leg as required rather than deferred. The file was under another agent's active lease at close time; tracked as oraclemcp-f7572.",
+      "The driver repo half of D2."
+    ]
+  },
+  "source": {
+    "sha": "efe8975c88fdcd9508329a9c158062a238d99f0f",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/coverage_ratchet.sh run --base <sha>",
+        "kind": "cli",
+        "trace": "Real instrumented run (cargo llvm-cov -p oraclemcp-error, under scripts/build_lease.sh, disk-backed CARGO_TARGET_DIR, in a clean worktree at HEAD). NEGATIVE: four added lines with no test -> 'FAIL -- changed-line coverage below the floor', table 'oraclemcp-error 4 changed 0 covered 0.0% floor 80.0% FAIL' naming crates/oraclemcp-error/src/fuzzy.rs:170-173, exit 1. The SAME diff before the pathspec fix printed 'no changed crates/<crate>/src/*.rs lines -- changed-line leg trivially green', exit 0. POSITIVE: adding a test that calls the function -> '7 changed 7 covered 100.0% PASS', 'changed-line leg OK', exit 0, status file changed_line=enforced."
+      },
+      {
+        "name": "scripts/coverage_ratchet.sh attestation-outcomes",
+        "kind": "cli",
+        "trace": "Derives the lane's attested outcomes from what ran. After the enforced run: 'coverage-ratchet:changed-line-floor=PASS' + 'coverage-ratchet:mutation-floor=SKIP'. After a --check run with no diff: both SKIP. ci.yml's attestation step now consumes this instead of the hard-coded 'changed-line-floor=PASS / mutation-floor=PASS' pair; the emitter accepts PASS|SKIP|FAIL (crates/oraclemcp-verifier/src/bin/oraclemcp-test-attest.rs:142-145)."
+      },
+      {
+        "name": "scripts/coverage_ratchet.sh --self-test",
+        "kind": "cli",
+        "trace": "Three suites, exit 0: the existing evaluator fixtures; a new pathspec test that builds a temp repo and asserts the pathspec selects crates/demo/src/lib.rs, excludes tests/, AND that the old 'crates/*/src' shape still selects nothing (so a simplification back to it fails); and the status->outcome mapping (deferred attests SKIP, enforced attests PASS, no-changed-lines attests SKIP, an absent status file fails closed). scripts/mutation_safety_gate.sh self-test additionally asserts both STATUS tokens and stays green (run from a clean worktree; see limitations)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The mutation gate's self-test cannot pass in a dirty shared checkout: scope_state hashes the WORKTREE, so another agent's uncommitted crates/oraclemcp-db/src edits raise E_SEAL_SOURCE_MISMATCH. That is correct staleness detection, not a defect; every self-test result cited here was produced from a clean worktree at HEAD.",
+    "The instrumented proof used oraclemcp-error (a leaf crate) to keep one build-lease slot occupied briefly among five agents. The safety-crate 90% floor is exercised by the evaluator's committed fixtures, not by a second live run.",
+    "No CI run was dispatched from this close. The ci.yml wiring is verified by parsing the workflow (no duplicate keys, step order correct) and by running the exact command sequence locally.",
+    "Consequence to expect, stated plainly: this lane was vacuous and is now enforcing, so the next push whose crates/<crate>/src lines are under-covered will fail a job that used to pass unconditionally. Recent history is a small blast radius (one oraclemcp-db source file across the last 12 commits)."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-f7572"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
