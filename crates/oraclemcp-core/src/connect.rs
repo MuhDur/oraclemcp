@@ -411,6 +411,7 @@ fn split_login_script(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use oraclemcp_config::OracleMcpConfig;
+    use oraclemcp_guard::SET_TRANSACTION_READ_ONLY;
 
     fn profile(toml: &str) -> ConnectionProfile {
         OracleMcpConfig::from_toml_str(toml)
@@ -853,6 +854,113 @@ mod tests {
         assert_eq!(
             ctx.options.session_statements.last().map(String::as_str),
             Some("BEGIN DBMS_OUTPUT.ENABLE(500000); END;")
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // C5 fixture — session-setup ordering, asserted per profile posture.
+    // Plan §4-C5 / §A.2.2, bead oraclemcp-091-c5-setup-ordering-postures-02d0i.
+    // ---------------------------------------------------------------------
+
+    /// The same profile body under both postures, so the only variable is the
+    /// ceiling. `DBMS_SESSION.SET_CONTEXT` is the realistic case: a table-backed
+    /// application context is the standard way to drive VPD, and it writes.
+    const C5_TRUSTED_SETUP: &str =
+        "BEGIN DBMS_SESSION.SET_CONTEXT('APP_CTX','TENANT','acme'); END;";
+
+    fn c5_profile(extra: &str) -> ConnectionProfile {
+        profile(&format!(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            {extra}
+            login_statements = [
+              "ALTER SESSION SET NLS_LANGUAGE=english",
+            ]
+            trusted_session_statements = [
+              "BEGIN DBMS_SESSION.SET_CONTEXT('APP_CTX','TENANT','acme'); END;",
+            ]
+            "#
+        ))
+    }
+
+    fn c5_statements(extra: &str) -> Vec<String> {
+        build_session_context(&c5_profile(extra), None, None, false)
+            .expect("context")
+            .options
+            .session_statements
+    }
+
+    fn position_of(statements: &[String], needle: &str) -> usize {
+        statements
+            .iter()
+            .position(|s| s == needle)
+            .unwrap_or_else(|| panic!("{needle:?} is missing from {statements:?}"))
+    }
+
+    /// Green half, posture 1: a writable profile takes no read-only backstop at
+    /// all, so trusted setup is unconstrained. Pinned so the fix cannot "solve"
+    /// the ordering problem by emitting the backstop where it was never wanted.
+    #[test]
+    fn c5_a_writable_posture_takes_no_read_only_backstop() {
+        let statements =
+            c5_statements("max_level = \"READ_WRITE\"\n            default_level = \"READ_WRITE\"");
+        assert!(
+            !statements.iter().any(|s| s == SET_TRANSACTION_READ_ONLY),
+            "a READ_WRITE profile must not open a read-only transaction: {statements:?}"
+        );
+        assert!(
+            statements.iter().any(|s| s == C5_TRUSTED_SETUP),
+            "trusted setup is still applied: {statements:?}"
+        );
+    }
+
+    /// Green half, posture 2: the read-only backstop *is* present on a protected
+    /// profile. The defect is where it sits, not whether it exists — asserting
+    /// its presence keeps the fix from deleting it.
+    #[test]
+    fn c5_a_protected_posture_still_gets_the_read_only_backstop() {
+        let statements = c5_statements("protected = true");
+        assert!(
+            statements.iter().any(|s| s == SET_TRANSACTION_READ_ONLY),
+            "a protected profile keeps its read-only backstop: {statements:?}"
+        );
+        assert!(
+            statements.iter().any(|s| s == C5_TRUSTED_SETUP),
+            "a protected profile still applies trusted setup: {statements:?}"
+        );
+    }
+
+    /// The failing half of C5.
+    ///
+    /// `profile_session_statements` pushes the backstop first whenever the
+    /// ceiling is `READ_ONLY`, then login statements, then trusted setup. On a
+    /// protected profile — the posture the README actively recommends — every
+    /// trusted session statement therefore runs inside an already-open read-only
+    /// transaction. Anything that writes fails with ORA-01456, which makes
+    /// table-backed application context, and so the standard way of driving VPD,
+    /// impossible by construction rather than by policy.
+    ///
+    /// The existing `trusted_session_statements_are_carried_after_guarded_login_statements`
+    /// cannot catch this: it uses one unprotected profile, so the posture where
+    /// the backstop appears at all is never built. Test-shape rule §A.8-5 —
+    /// setup ordering is part of the contract, so assert it per posture.
+    ///
+    /// Bead `oraclemcp-091-a1b-*` (A1b) reorders: trusted setup first, backstop
+    /// re-asserted after. Flipping this green means removing the `#[ignore]`;
+    /// the assertion must not change.
+    #[test]
+    #[ignore = "expected failure until A1b re-asserts the read-only backstop after trusted setup (bead oraclemcp-091-c5-setup-ordering-postures-02d0i)"]
+    fn c5_a_protected_posture_runs_trusted_setup_before_the_read_only_backstop() {
+        let statements = c5_statements("protected = true");
+        let backstop = position_of(&statements, SET_TRANSACTION_READ_ONLY);
+        let trusted = position_of(&statements, C5_TRUSTED_SETUP);
+        assert!(
+            trusted < backstop,
+            "trusted session setup must run before the read-only transaction opens, or a \
+             table-backed application context cannot be established at all (ORA-01456); \
+             got backstop at {backstop} and trusted setup at {trusted}: {statements:?}"
         );
     }
 
