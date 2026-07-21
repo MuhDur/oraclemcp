@@ -609,6 +609,13 @@ jobs:
         run: |
           bash scripts/rig/verify_sample_schemas.sh
           bash scripts/rig/verify_sample_schemas.sh --selftest
+      # D4: the same mistake bit the driver repo twice — a required step that
+      # needed a tool the job had not installed yet. This refuses a workflow
+      # where a step uses a tool its own job installs LATER, or never.
+      - name: CI step tool-order (D4)
+        run: |
+          python3 scripts/ci_step_tool_order_lint.py --selftest
+          python3 scripts/ci_step_tool_order_lint.py
       - name: fuzz lane budget (D4)
         run: |
           python3 scripts/ci_lane_budget.py --selftest

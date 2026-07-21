@@ -86,6 +86,11 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/ci_step_tool_order_lint.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/ci_taxonomy.py",
       "kind": "entry_point",
       "trace": "required-quality"
