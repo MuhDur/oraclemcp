@@ -75,9 +75,10 @@ if [ "$E2E_DRY_RUN" != "1" ]; then
   require_live_console_env
 fi
 
-# The web client's node modules are a prerequisite; skip cleanly if absent rather
-# than fail the aggregate suite on a machine that never installed them.
-if [ ! -d "$ROOT/web/node_modules/vitest" ]; then
+# The web client's node modules are a prerequisite for the live Vitest phase,
+# not for dry-run. Dry-run must still schedule the server build so the harness
+# can prove its registered wiring on a host without web assets.
+if [ "$E2E_DRY_RUN" != "1" ] && [ ! -d "$ROOT/web/node_modules/vitest" ]; then
   e2e_finish_skip "web/node_modules is not installed (run npm --prefix web ci)"
 fi
 
