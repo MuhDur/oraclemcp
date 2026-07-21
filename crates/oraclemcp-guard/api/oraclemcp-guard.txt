@@ -3130,58 +3130,6 @@ impl<T> typenum::type_operators::Same for oraclemcp_guard::policy_gate::Statemen
 pub type oraclemcp_guard::policy_gate::StatementPolicyFacts::Output = T
 pub fn oraclemcp_guard::policy_gate::enforce_sql_policy(&oraclemcp_guard::policy_gate::PolicyGateRequest<'_>) -> oraclemcp_guard::policy_gate::PolicyGate
 pub mod oraclemcp_guard::purity
-#[non_exhaustive] pub enum oraclemcp_guard::purity::OperatorPureFunctionError
-pub oraclemcp_guard::purity::OperatorPureFunctionError::AmbiguousIdentity
-pub oraclemcp_guard::purity::OperatorPureFunctionError::InvalidFunctionIdentifier
-pub oraclemcp_guard::purity::OperatorPureFunctionError::InvalidSchemaIdentifier
-pub oraclemcp_guard::purity::OperatorPureFunctionError::MissingSchema
-impl core::clone::Clone for oraclemcp_guard::purity::OperatorPureFunctionError
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::clone(&self) -> oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::cmp::Eq for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::cmp::PartialEq for oraclemcp_guard::purity::OperatorPureFunctionError
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::eq(&self, &oraclemcp_guard::purity::OperatorPureFunctionError) -> bool
-impl core::error::Error for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::fmt::Debug for oraclemcp_guard::purity::OperatorPureFunctionError
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for oraclemcp_guard::purity::OperatorPureFunctionError
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::marker::StructuralPartialEq for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::marker::Freeze for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::marker::Send for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::marker::Sync for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::marker::Unpin for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::marker::UnsafeUnpin for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::purity::OperatorPureFunctionError
-impl<T, U> core::convert::Into<U> for oraclemcp_guard::purity::OperatorPureFunctionError where U: core::convert::From<T>
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::purity::OperatorPureFunctionError where U: core::convert::Into<T>
-pub type oraclemcp_guard::purity::OperatorPureFunctionError::Error = core::convert::Infallible
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::purity::OperatorPureFunctionError where U: core::convert::TryFrom<T>
-pub type oraclemcp_guard::purity::OperatorPureFunctionError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for oraclemcp_guard::purity::OperatorPureFunctionError where T: core::clone::Clone
-pub type oraclemcp_guard::purity::OperatorPureFunctionError::Owned = T
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::clone_into(&self, &mut T)
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::to_owned(&self) -> T
-impl<T> alloc::string::ToString for oraclemcp_guard::purity::OperatorPureFunctionError where T: core::fmt::Display + ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for oraclemcp_guard::purity::OperatorPureFunctionError where T: 'static + ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for oraclemcp_guard::purity::OperatorPureFunctionError where T: ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::purity::OperatorPureFunctionError where T: ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for oraclemcp_guard::purity::OperatorPureFunctionError where T: core::clone::Clone
-pub unsafe fn oraclemcp_guard::purity::OperatorPureFunctionError::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for oraclemcp_guard::purity::OperatorPureFunctionError
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::from(T) -> T
-impl<T> tracing::instrument::Instrument for oraclemcp_guard::purity::OperatorPureFunctionError
-impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::purity::OperatorPureFunctionError
-impl<T> typenum::type_operators::Same for oraclemcp_guard::purity::OperatorPureFunctionError
-pub type oraclemcp_guard::purity::OperatorPureFunctionError::Output = T
 #[non_exhaustive] pub enum oraclemcp_guard::purity::Purity
 pub oraclemcp_guard::purity::Purity::ProvenReadOnly
 pub oraclemcp_guard::purity::Purity::ProvenSideEffecting
@@ -3289,99 +3237,6 @@ impl<T> tracing::instrument::Instrument for oraclemcp_guard::purity::ObjectRef
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::purity::ObjectRef
 impl<T> typenum::type_operators::Same for oraclemcp_guard::purity::ObjectRef
 pub type oraclemcp_guard::purity::ObjectRef::Output = T
-pub struct oraclemcp_guard::purity::OperatorPureFunction(_)
-impl oraclemcp_guard::purity::OperatorPureFunction
-pub fn oraclemcp_guard::purity::OperatorPureFunction::parse(&str) -> core::result::Result<Self, oraclemcp_guard::purity::OperatorPureFunctionError>
-pub fn oraclemcp_guard::purity::OperatorPureFunction::qualified_name(&self) -> alloc::string::String
-impl core::clone::Clone for oraclemcp_guard::purity::OperatorPureFunction
-pub fn oraclemcp_guard::purity::OperatorPureFunction::clone(&self) -> oraclemcp_guard::purity::OperatorPureFunction
-impl core::cmp::Eq for oraclemcp_guard::purity::OperatorPureFunction
-impl core::cmp::PartialEq for oraclemcp_guard::purity::OperatorPureFunction
-pub fn oraclemcp_guard::purity::OperatorPureFunction::eq(&self, &oraclemcp_guard::purity::OperatorPureFunction) -> bool
-impl core::fmt::Debug for oraclemcp_guard::purity::OperatorPureFunction
-pub fn oraclemcp_guard::purity::OperatorPureFunction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for oraclemcp_guard::purity::OperatorPureFunction
-pub fn oraclemcp_guard::purity::OperatorPureFunction::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::StructuralPartialEq for oraclemcp_guard::purity::OperatorPureFunction
-impl core::marker::Freeze for oraclemcp_guard::purity::OperatorPureFunction
-impl core::marker::Send for oraclemcp_guard::purity::OperatorPureFunction
-impl core::marker::Sync for oraclemcp_guard::purity::OperatorPureFunction
-impl core::marker::Unpin for oraclemcp_guard::purity::OperatorPureFunction
-impl core::marker::UnsafeUnpin for oraclemcp_guard::purity::OperatorPureFunction
-impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::purity::OperatorPureFunction
-impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::purity::OperatorPureFunction
-impl<T, U> core::convert::Into<U> for oraclemcp_guard::purity::OperatorPureFunction where U: core::convert::From<T>
-pub fn oraclemcp_guard::purity::OperatorPureFunction::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::purity::OperatorPureFunction where U: core::convert::Into<T>
-pub type oraclemcp_guard::purity::OperatorPureFunction::Error = core::convert::Infallible
-pub fn oraclemcp_guard::purity::OperatorPureFunction::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::purity::OperatorPureFunction where U: core::convert::TryFrom<T>
-pub type oraclemcp_guard::purity::OperatorPureFunction::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn oraclemcp_guard::purity::OperatorPureFunction::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for oraclemcp_guard::purity::OperatorPureFunction where T: core::clone::Clone
-pub type oraclemcp_guard::purity::OperatorPureFunction::Owned = T
-pub fn oraclemcp_guard::purity::OperatorPureFunction::clone_into(&self, &mut T)
-pub fn oraclemcp_guard::purity::OperatorPureFunction::to_owned(&self) -> T
-impl<T> core::any::Any for oraclemcp_guard::purity::OperatorPureFunction where T: 'static + ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunction::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for oraclemcp_guard::purity::OperatorPureFunction where T: ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunction::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::purity::OperatorPureFunction where T: ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunction::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for oraclemcp_guard::purity::OperatorPureFunction where T: core::clone::Clone
-pub unsafe fn oraclemcp_guard::purity::OperatorPureFunction::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for oraclemcp_guard::purity::OperatorPureFunction
-pub fn oraclemcp_guard::purity::OperatorPureFunction::from(T) -> T
-impl<T> tracing::instrument::Instrument for oraclemcp_guard::purity::OperatorPureFunction
-impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::purity::OperatorPureFunction
-impl<T> typenum::type_operators::Same for oraclemcp_guard::purity::OperatorPureFunction
-pub type oraclemcp_guard::purity::OperatorPureFunction::Output = T
-pub struct oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::admitted_routine(&self, &oraclemcp_guard::purity::ObjectRef) -> core::option::Option<&oraclemcp_guard::purity::OperatorPureFunction>
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::new(impl core::iter::traits::collect::IntoIterator<Item = oraclemcp_guard::purity::OperatorPureFunction>) -> Self
-impl core::clone::Clone for oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::clone(&self) -> oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::default::Default for oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::default() -> oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::fmt::Debug for oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
-impl core::marker::Freeze for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::marker::Send for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::marker::Sync for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::marker::Unpin for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::marker::UnsafeUnpin for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl<T, U> core::convert::Into<U> for oraclemcp_guard::purity::OperatorPureFunctionOracle where U: core::convert::From<T>
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::purity::OperatorPureFunctionOracle where U: core::convert::Into<T>
-pub type oraclemcp_guard::purity::OperatorPureFunctionOracle::Error = core::convert::Infallible
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::purity::OperatorPureFunctionOracle where U: core::convert::TryFrom<T>
-pub type oraclemcp_guard::purity::OperatorPureFunctionOracle::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for oraclemcp_guard::purity::OperatorPureFunctionOracle where T: core::clone::Clone
-pub type oraclemcp_guard::purity::OperatorPureFunctionOracle::Owned = T
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::clone_into(&self, &mut T)
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::to_owned(&self) -> T
-impl<T> core::any::Any for oraclemcp_guard::purity::OperatorPureFunctionOracle where T: 'static + ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for oraclemcp_guard::purity::OperatorPureFunctionOracle where T: ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::purity::OperatorPureFunctionOracle where T: ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for oraclemcp_guard::purity::OperatorPureFunctionOracle where T: core::clone::Clone
-pub unsafe fn oraclemcp_guard::purity::OperatorPureFunctionOracle::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::from(T) -> T
-impl<T> tracing::instrument::Instrument for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl<T> typenum::type_operators::Same for oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub type oraclemcp_guard::purity::OperatorPureFunctionOracle::Output = T
 pub struct oraclemcp_guard::purity::UnknownOracle
 impl core::clone::Clone for oraclemcp_guard::purity::UnknownOracle
 pub fn oraclemcp_guard::purity::UnknownOracle::clone(&self) -> oraclemcp_guard::purity::UnknownOracle
@@ -3429,9 +3284,6 @@ pub type oraclemcp_guard::purity::UnknownOracle::Output = T
 pub trait oraclemcp_guard::purity::SideEffectOracle: core::marker::Send + core::marker::Sync
 pub fn oraclemcp_guard::purity::SideEffectOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::purity::SideEffectOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
-impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
 impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::UnknownOracle
 pub fn oraclemcp_guard::purity::UnknownOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::purity::UnknownOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
@@ -5481,58 +5333,6 @@ impl<T> tracing::instrument::Instrument for oraclemcp_guard::levels::OperatingLe
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::levels::OperatingLevel
 impl<T> typenum::type_operators::Same for oraclemcp_guard::levels::OperatingLevel
 pub type oraclemcp_guard::levels::OperatingLevel::Output = T
-#[non_exhaustive] pub enum oraclemcp_guard::OperatorPureFunctionError
-pub oraclemcp_guard::OperatorPureFunctionError::AmbiguousIdentity
-pub oraclemcp_guard::OperatorPureFunctionError::InvalidFunctionIdentifier
-pub oraclemcp_guard::OperatorPureFunctionError::InvalidSchemaIdentifier
-pub oraclemcp_guard::OperatorPureFunctionError::MissingSchema
-impl core::clone::Clone for oraclemcp_guard::purity::OperatorPureFunctionError
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::clone(&self) -> oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::cmp::Eq for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::cmp::PartialEq for oraclemcp_guard::purity::OperatorPureFunctionError
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::eq(&self, &oraclemcp_guard::purity::OperatorPureFunctionError) -> bool
-impl core::error::Error for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::fmt::Debug for oraclemcp_guard::purity::OperatorPureFunctionError
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for oraclemcp_guard::purity::OperatorPureFunctionError
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::marker::StructuralPartialEq for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::marker::Freeze for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::marker::Send for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::marker::Sync for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::marker::Unpin for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::marker::UnsafeUnpin for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::purity::OperatorPureFunctionError
-impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::purity::OperatorPureFunctionError
-impl<T, U> core::convert::Into<U> for oraclemcp_guard::purity::OperatorPureFunctionError where U: core::convert::From<T>
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::purity::OperatorPureFunctionError where U: core::convert::Into<T>
-pub type oraclemcp_guard::purity::OperatorPureFunctionError::Error = core::convert::Infallible
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::purity::OperatorPureFunctionError where U: core::convert::TryFrom<T>
-pub type oraclemcp_guard::purity::OperatorPureFunctionError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for oraclemcp_guard::purity::OperatorPureFunctionError where T: core::clone::Clone
-pub type oraclemcp_guard::purity::OperatorPureFunctionError::Owned = T
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::clone_into(&self, &mut T)
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::to_owned(&self) -> T
-impl<T> alloc::string::ToString for oraclemcp_guard::purity::OperatorPureFunctionError where T: core::fmt::Display + ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for oraclemcp_guard::purity::OperatorPureFunctionError where T: 'static + ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for oraclemcp_guard::purity::OperatorPureFunctionError where T: ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::purity::OperatorPureFunctionError where T: ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for oraclemcp_guard::purity::OperatorPureFunctionError where T: core::clone::Clone
-pub unsafe fn oraclemcp_guard::purity::OperatorPureFunctionError::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for oraclemcp_guard::purity::OperatorPureFunctionError
-pub fn oraclemcp_guard::purity::OperatorPureFunctionError::from(T) -> T
-impl<T> tracing::instrument::Instrument for oraclemcp_guard::purity::OperatorPureFunctionError
-impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::purity::OperatorPureFunctionError
-impl<T> typenum::type_operators::Same for oraclemcp_guard::purity::OperatorPureFunctionError
-pub type oraclemcp_guard::purity::OperatorPureFunctionError::Output = T
 pub enum oraclemcp_guard::PolicyDecision
 pub oraclemcp_guard::PolicyDecision::Allow
 pub oraclemcp_guard::PolicyDecision::Deny
@@ -7030,99 +6830,6 @@ impl<T> tracing::instrument::Instrument for oraclemcp_guard::purity::ObjectRef
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::purity::ObjectRef
 impl<T> typenum::type_operators::Same for oraclemcp_guard::purity::ObjectRef
 pub type oraclemcp_guard::purity::ObjectRef::Output = T
-pub struct oraclemcp_guard::OperatorPureFunction(_)
-impl oraclemcp_guard::purity::OperatorPureFunction
-pub fn oraclemcp_guard::purity::OperatorPureFunction::parse(&str) -> core::result::Result<Self, oraclemcp_guard::purity::OperatorPureFunctionError>
-pub fn oraclemcp_guard::purity::OperatorPureFunction::qualified_name(&self) -> alloc::string::String
-impl core::clone::Clone for oraclemcp_guard::purity::OperatorPureFunction
-pub fn oraclemcp_guard::purity::OperatorPureFunction::clone(&self) -> oraclemcp_guard::purity::OperatorPureFunction
-impl core::cmp::Eq for oraclemcp_guard::purity::OperatorPureFunction
-impl core::cmp::PartialEq for oraclemcp_guard::purity::OperatorPureFunction
-pub fn oraclemcp_guard::purity::OperatorPureFunction::eq(&self, &oraclemcp_guard::purity::OperatorPureFunction) -> bool
-impl core::fmt::Debug for oraclemcp_guard::purity::OperatorPureFunction
-pub fn oraclemcp_guard::purity::OperatorPureFunction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for oraclemcp_guard::purity::OperatorPureFunction
-pub fn oraclemcp_guard::purity::OperatorPureFunction::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::StructuralPartialEq for oraclemcp_guard::purity::OperatorPureFunction
-impl core::marker::Freeze for oraclemcp_guard::purity::OperatorPureFunction
-impl core::marker::Send for oraclemcp_guard::purity::OperatorPureFunction
-impl core::marker::Sync for oraclemcp_guard::purity::OperatorPureFunction
-impl core::marker::Unpin for oraclemcp_guard::purity::OperatorPureFunction
-impl core::marker::UnsafeUnpin for oraclemcp_guard::purity::OperatorPureFunction
-impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::purity::OperatorPureFunction
-impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::purity::OperatorPureFunction
-impl<T, U> core::convert::Into<U> for oraclemcp_guard::purity::OperatorPureFunction where U: core::convert::From<T>
-pub fn oraclemcp_guard::purity::OperatorPureFunction::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::purity::OperatorPureFunction where U: core::convert::Into<T>
-pub type oraclemcp_guard::purity::OperatorPureFunction::Error = core::convert::Infallible
-pub fn oraclemcp_guard::purity::OperatorPureFunction::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::purity::OperatorPureFunction where U: core::convert::TryFrom<T>
-pub type oraclemcp_guard::purity::OperatorPureFunction::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn oraclemcp_guard::purity::OperatorPureFunction::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for oraclemcp_guard::purity::OperatorPureFunction where T: core::clone::Clone
-pub type oraclemcp_guard::purity::OperatorPureFunction::Owned = T
-pub fn oraclemcp_guard::purity::OperatorPureFunction::clone_into(&self, &mut T)
-pub fn oraclemcp_guard::purity::OperatorPureFunction::to_owned(&self) -> T
-impl<T> core::any::Any for oraclemcp_guard::purity::OperatorPureFunction where T: 'static + ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunction::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for oraclemcp_guard::purity::OperatorPureFunction where T: ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunction::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::purity::OperatorPureFunction where T: ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunction::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for oraclemcp_guard::purity::OperatorPureFunction where T: core::clone::Clone
-pub unsafe fn oraclemcp_guard::purity::OperatorPureFunction::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for oraclemcp_guard::purity::OperatorPureFunction
-pub fn oraclemcp_guard::purity::OperatorPureFunction::from(T) -> T
-impl<T> tracing::instrument::Instrument for oraclemcp_guard::purity::OperatorPureFunction
-impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::purity::OperatorPureFunction
-impl<T> typenum::type_operators::Same for oraclemcp_guard::purity::OperatorPureFunction
-pub type oraclemcp_guard::purity::OperatorPureFunction::Output = T
-pub struct oraclemcp_guard::OperatorPureFunctionOracle
-impl oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::admitted_routine(&self, &oraclemcp_guard::purity::ObjectRef) -> core::option::Option<&oraclemcp_guard::purity::OperatorPureFunction>
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::new(impl core::iter::traits::collect::IntoIterator<Item = oraclemcp_guard::purity::OperatorPureFunction>) -> Self
-impl core::clone::Clone for oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::clone(&self) -> oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::default::Default for oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::default() -> oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::fmt::Debug for oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
-impl core::marker::Freeze for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::marker::Send for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::marker::Sync for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::marker::Unpin for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::marker::UnsafeUnpin for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl<T, U> core::convert::Into<U> for oraclemcp_guard::purity::OperatorPureFunctionOracle where U: core::convert::From<T>
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::purity::OperatorPureFunctionOracle where U: core::convert::Into<T>
-pub type oraclemcp_guard::purity::OperatorPureFunctionOracle::Error = core::convert::Infallible
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::purity::OperatorPureFunctionOracle where U: core::convert::TryFrom<T>
-pub type oraclemcp_guard::purity::OperatorPureFunctionOracle::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for oraclemcp_guard::purity::OperatorPureFunctionOracle where T: core::clone::Clone
-pub type oraclemcp_guard::purity::OperatorPureFunctionOracle::Owned = T
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::clone_into(&self, &mut T)
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::to_owned(&self) -> T
-impl<T> core::any::Any for oraclemcp_guard::purity::OperatorPureFunctionOracle where T: 'static + ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for oraclemcp_guard::purity::OperatorPureFunctionOracle where T: ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::purity::OperatorPureFunctionOracle where T: ?core::marker::Sized
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for oraclemcp_guard::purity::OperatorPureFunctionOracle where T: core::clone::Clone
-pub unsafe fn oraclemcp_guard::purity::OperatorPureFunctionOracle::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::from(T) -> T
-impl<T> tracing::instrument::Instrument for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::purity::OperatorPureFunctionOracle
-impl<T> typenum::type_operators::Same for oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub type oraclemcp_guard::purity::OperatorPureFunctionOracle::Output = T
 pub struct oraclemcp_guard::PolicyGateAdmission
 pub oraclemcp_guard::PolicyGateAdmission::attachment: core::option::Option<serde_json::value::Value>
 pub oraclemcp_guard::PolicyGateAdmission::danger: oraclemcp_guard::levels::DangerLevel
@@ -8508,9 +8215,6 @@ pub fn oraclemcp_guard::resolver::UnresolvedCatalogResolver::resolve(&self, &ora
 pub trait oraclemcp_guard::SideEffectOracle: core::marker::Send + core::marker::Sync
 pub fn oraclemcp_guard::SideEffectOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::SideEffectOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
-impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::OperatorPureFunctionOracle
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
-pub fn oraclemcp_guard::purity::OperatorPureFunctionOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
 impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::UnknownOracle
 pub fn oraclemcp_guard::purity::UnknownOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::purity::UnknownOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
