@@ -78,8 +78,10 @@ docker run -i --rm \
 ```
 
 `--allow-no-auth` is baked into the default `CMD` because, over stdio, the
-trusted peer is the parent process that launched the container. Do **not** carry
-that assumption over to the HTTP transport (see §4).
+trusted peer is the parent process that launched the container. The flag also
+allows an HTTP listener to start without configured authentication, so for HTTP
+it is only an explicit local-development opt-in; non-loopback HTTP still needs
+the separate remote-bind opt-in (see §4).
 
 To verify what you are about to run before wiring it into a client:
 
@@ -365,7 +367,9 @@ surface. Everything below concerns the HTTP transport (`serve --listen`).
 - **Fail-closed start.** The HTTP listener starts **only** when service-owned
   per-client credentials, OAuth bearer enforcement, mTLS client-certificate
   verification, or `--allow-no-auth` is explicitly supplied. With none of
-  those, it refuses to bind. `--allow-no-auth` is for local development only.
+  those, it refuses to bind. `--allow-no-auth` is for local development only;
+  it permits an unauthenticated listener, rather than applying stdio's
+  parent-process trust boundary to HTTP.
 - **Loopback by default.** A non-loopback bind (anything other than
   `127.0.0.1`/`::1`) is refused unless `ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set.
   This is a deliberate guard against accidentally exposing the server; set it

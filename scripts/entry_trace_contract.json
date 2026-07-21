@@ -296,11 +296,6 @@
       "trace": "required-quality"
     },
     {
-      "path": "scripts/swarm_discipline.sh",
-      "kind": "entry_point",
-      "trace": "required-quality"
-    },
-    {
       "path": "scripts/swarm_spawn_preflight.sh",
       "kind": "entry_point",
       "trace": "required-quality"
