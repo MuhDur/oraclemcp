@@ -15774,3 +15774,70 @@ fn compatibility_grant_eviction_is_a_no_op_on_an_empty_store() {
         "an empty store must yield no eviction candidate, so prune breaks instead of looping"
     );
 }
+
+/// DI2 — the witness page is clamped, including at the inputs a conforming
+/// client never sends. `oracle_preview_dml` used to copy `args.max_rows`
+/// straight into `QueryCaps`, so a caller could ask a dry run to materialize an
+/// unbounded page: Oracle work and server memory proportional to whatever
+/// number reached the wire, from the one tool whose job is to show a SAMPLE.
+#[test]
+fn preview_witness_max_rows_is_clamped_at_the_query_ceiling() {
+    // Negative acceptance: usize-scale and over-cap requests cannot produce an
+    // over-cap fetch.
+    assert_eq!(
+        preview_witness_max_rows(Some(usize::MAX)),
+        MAX_QUERY_MAX_ROWS
+    );
+    assert_eq!(preview_witness_max_rows(Some(100_000)), MAX_QUERY_MAX_ROWS);
+    assert_eq!(
+        preview_witness_max_rows(Some(MAX_QUERY_MAX_ROWS + 1)),
+        MAX_QUERY_MAX_ROWS
+    );
+
+    // The schema forbids 0, which is exactly why the runtime must not trust it:
+    // a zero page would make the witness silently useless rather than refused.
+    assert_eq!(preview_witness_max_rows(Some(0)), 1);
+
+    // Positive acceptance: 1 and the default keep their existing meaning
+    // exactly, so the clamp changes no well-formed call.
+    assert_eq!(preview_witness_max_rows(Some(1)), 1);
+    assert_eq!(
+        preview_witness_max_rows(None),
+        QueryCaps::default().max_rows,
+        "omitting max_rows must still mean the profile page size"
+    );
+    assert_eq!(
+        preview_witness_max_rows(Some(MAX_QUERY_MAX_ROWS)),
+        MAX_QUERY_MAX_ROWS,
+        "a request exactly at the ceiling is honoured, not cut to ceiling-1"
+    );
+}
+
+/// The published schema and the runtime clamp must name the SAME ceiling. A
+/// schema advertising a bound the runtime does not enforce is the defect DI2
+/// started as; a runtime bound the schema does not advertise sends callers into
+/// silent truncation. This fails if either side moves alone.
+#[test]
+fn preview_dml_schema_publishes_the_enforced_row_ceiling() {
+    let registry = crate::registry::tool_registry();
+    let tool = registry
+        .tools
+        .iter()
+        .find(|t| t.name == "oracle_preview_dml")
+        .expect("oracle_preview_dml is registered");
+    let schema = tool
+        .input_schema
+        .as_ref()
+        .expect("oracle_preview_dml publishes an input schema");
+    let published = schema["properties"]["max_rows"]["maximum"]
+        .as_u64()
+        .expect("oracle_preview_dml must publish a finite max_rows maximum");
+    assert_eq!(
+        published as usize, MAX_QUERY_MAX_ROWS,
+        "the advertised max_rows ceiling drifted from the one the dispatcher enforces"
+    );
+    let minimum = schema["properties"]["max_rows"]["minimum"]
+        .as_u64()
+        .expect("max_rows keeps its minimum");
+    assert_eq!(minimum, 1);
+}

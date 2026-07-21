@@ -734,7 +734,7 @@ pub fn tool_registry() -> ToolRegistry {
                         "description": "Positional bind values for the witness SELECT.",
                         "items": {}
                     },
-                    "max_rows": { "type": "integer", "minimum": 1, "description": "Row cap for each witness read (default: the profile page size)." }
+                    "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Row cap for each witness read (default: the profile page size, ceiling 5000). A larger request is clamped to the ceiling and the response says so; when the witness hits the cap the response also flags witness_truncated, because the rows shown are then not the whole set." }
                 }),
                 &[timeout_seconds_prop()],
             ),
