@@ -7630,20 +7630,24 @@ fn query_timeout_override_cannot_widen_profile_timeout() {
 
 #[test]
 fn zero_timeout_is_rejected_before_normal_dispatch_reaches_oracle() {
-    for (tool, args) in [
-        (
-            "oracle_query",
-            json!({ "sql": "SELECT 1 FROM dual", "timeout_seconds": 0 }),
-        ),
-        (
-            "oracle_preview_sql",
-            json!({ "sql": "SELECT 1 FROM dual", "timeout_seconds": 0 }),
-        ),
-        (
-            "oracle_execute",
-            json!({ "sql": "UPDATE employees SET name = name", "timeout_seconds": 0 }),
-        ),
-    ] {
+    let timeout_tools: Vec<String> = crate::registry::tool_registry()
+        .tools
+        .into_iter()
+        .filter(|tool| {
+            tool.input_schema
+                .as_ref()
+                .and_then(|schema| schema.get("properties"))
+                .and_then(Value::as_object)
+                .is_some_and(|properties| properties.contains_key("timeout_seconds"))
+        })
+        .map(|tool| tool.name)
+        .collect();
+    assert!(
+        !timeout_tools.is_empty(),
+        "this regression must exercise every tool that advertises timeout_seconds"
+    );
+
+    for tool in timeout_tools {
         let state = Arc::new(ExecState::default());
         let dispatcher = OracleDispatcher::new_with_profile_level(
             Box::new(ExecRecordingMock::new(Arc::clone(&state))),
@@ -7652,7 +7656,7 @@ fn zero_timeout_is_rejected_before_normal_dispatch_reaches_oracle() {
         );
 
         let error = dispatcher
-            .dispatch(tool, args)
+            .dispatch(&tool, json!({ "timeout_seconds": 0 }))
             .expect_err("an explicit zero timeout is rejected before tool dispatch");
         assert_eq!(error.error_class, ErrorClass::InvalidArguments, "{tool}");
         assert_eq!(
