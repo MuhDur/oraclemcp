@@ -99,6 +99,9 @@ jobs:
         env:
           VERSION: ${{ steps.release.outputs.version }}
           VARIANT: ${{ steps.release.outputs.variant }}
+          # Operator ruling 2026-07-21 (plan v8 §Z2): mutation seal advisory
+          # this train — loud warning, never a release blocker.
+          ALLOW_STALE_MUTATION_SEAL: "1"
         run: |
           set -euo pipefail
           tag="refs/tags/v$VERSION"

@@ -56,6 +56,30 @@ SHARD=""
 
 die() { echo "mutation-gate: $*" >&2; exit 1; }
 
+# MUTATION_OOM_POLICY=warn (set only on the scheduled nightly rotation): a
+# resource-capped shard is recorded errored in its integrity sidecar and then
+# VOIDED — skipped with a loud warning instead of failing the lane. A void
+# shard never grades a mutant caught and never contributes seal evidence
+# (migrate_mutation_result.py still rejects errored integrity sidecars), so
+# honesty is unchanged; only the front-page red is removed. Operator ruling
+# 2026-07-21 (plan v8 §Z2): mutation lanes must never stall or red the train
+# on a resource kill. The default (fail) keeps seal campaigns, manual
+# dispatches, and local runs strict.
+resource_capped_shard() {
+  local msg="$1"
+  case "${MUTATION_OOM_POLICY:-fail}" in
+    warn)
+      echo "mutation-gate: WARNING $msg — shard VOID under MUTATION_OOM_POLICY=warn (integrity=errored, no seal evidence, never graded caught)" >&2
+      if [ -n "${GITHUB_OUTPUT:-}" ]; then
+        echo "shard_void=1" >>"$GITHUB_OUTPUT"
+      fi
+      return 0
+      ;;
+    fail) die "$msg" ;;
+    *) die "invalid MUTATION_OOM_POLICY '${MUTATION_OOM_POLICY}' (expected warn | fail)" ;;
+  esac
+}
+
 scope_package() {
   case "$1" in
     guard) echo oraclemcp-guard ;;
@@ -287,13 +311,15 @@ cmd_run_shard() {
   oom_delta="$(awk -F= '$1 == "oom_kill_delta" {print $2}' "$cgroup_status")"
   if [ -z "$oom_delta" ] || [ "$oom_delta" -ne 0 ]; then
     write_integrity "$integrity" errored "$outcomes" "$inventory" "$full_inventory" "$cgroup_status" "$scratch" "$scratch_fs"
-    die "E_OOM_MUTANT: $SCOPE shard $SHARD observed oom_kill delta ${oom_delta:-unknown}; graded ERRORED, never caught"
+    resource_capped_shard "E_OOM_MUTANT: $SCOPE shard $SHARD observed oom_kill delta ${oom_delta:-unknown}; graded ERRORED, never caught"
+    return 0
   fi
   local pid_delta
   pid_delta="$(awk -F= '$1 == "pid_max_delta" {print $2}' "$cgroup_status")"
   if [ -z "$pid_delta" ] || [ "$pid_delta" -ne 0 ]; then
     write_integrity "$integrity" errored "$outcomes" "$inventory" "$full_inventory" "$cgroup_status" "$scratch" "$scratch_fs"
-    die "E_TASK_CAP: $SCOPE shard $SHARD hit TasksMax ${pid_delta:-unknown} time(s); graded ERRORED, never caught"
+    resource_capped_shard "E_TASK_CAP: $SCOPE shard $SHARD hit TasksMax ${pid_delta:-unknown} time(s); graded ERRORED, never caught"
+    return 0
   fi
   [ -f "$outcomes" ] || {
     write_integrity "$integrity" incomplete "" "$inventory" "$full_inventory" "$cgroup_status" "$scratch" "$scratch_fs"
@@ -341,14 +367,17 @@ cmd_check_report() {
   [ "$version" = 2 ] || die "unsupported mutation marker version: $version"
   echo "mutation-gate: marker v=2 source=$source scopes=$scopes files=$files mutants=$mutants shards=$shards oom=$oom status=$status"
   if [ "$status" != "enforcing" ]; then
-    # Z2 (the fresh five-surface campaign) is deferred out of the 0.9.1 train
-    # (plan v7 §Z2): a seal binds to a source SHA and re-stales on every safety-crate
-    # fix, so it is produced ONCE on the release candidate. ALLOW_STALE_MUTATION_SEAL
-    # is set for per-push development CI only (ci.yml) — the release path
-    # (release.yml / docker.yml / publish-mcp.yml) does NOT set it, so an actual
-    # release still hard-fails without a fresh seal.
+    # Z2 (the fresh five-surface campaign) is deferred out of the 0.9.1 train,
+    # and per the operator ruling of 2026-07-21 (plan v8 §Z2) the mutation seal
+    # is ADVISORY for this train: a day-scale campaign must never stall
+    # development pushes OR a release. ALLOW_STALE_MUTATION_SEAL is therefore
+    # set on per-push CI (ci.yml) AND the release path (release.yml /
+    # docker.yml / publish-mcp.yml). Compensating controls while stale: the
+    # bounded nightly shard rotation keeps sampling mutants, the changed-line
+    # coverage ratchet still gates, and stale/errored evidence can never enter
+    # a seal (migrate_mutation_result.py stays strict).
     if [ "${ALLOW_STALE_MUTATION_SEAL:-0}" = 1 ]; then
-      echo "mutation-gate: WARNING E_STALE_SEAL deferred (status=$status) — ALLOW_STALE_MUTATION_SEAL set; the fresh seal is a release-candidate gate (plan v7 §Z2), enforced on the release path, not per-push." >&2
+      echo "mutation-gate: WARNING E_STALE_SEAL deferred (status=$status) — ALLOW_STALE_MUTATION_SEAL set; the mutation seal is advisory this train (operator ruling 2026-07-21, plan v8 §Z2) and accrues from the scheduled shard rotation." >&2
       return 0
     fi
     die "E_STALE_SEAL: committed mutation marker status=$status; a fresh complete five-surface campaign is required"
@@ -393,12 +422,12 @@ cmd_check_report() {
 # complete. Both use the same shard integrity mechanism and confirmed-failure
 # denominator; neither can borrow partial or OOM-affected counters from the other.
 cmd_check_floor_report() {
-  # The whole D2 mutation-floor enforcement is deferred with Z2 (plan v7 §Z2):
-  # the fresh five-surface campaign that produces both the floor report and its
-  # enforcing seal is a release-candidate gate, not per-push. Set for per-push CI
-  # only (ci.yml); the release path does not set it and therefore still enforces.
+  # The whole D2 mutation-floor enforcement is deferred with Z2, and per the
+  # operator ruling of 2026-07-21 (plan v8 §Z2) the seal is ADVISORY for this
+  # train: ALLOW_STALE_MUTATION_SEAL is set on per-push CI (ci.yml) AND the
+  # release path, so a day-scale campaign never stalls development or a release.
   if [ "${ALLOW_STALE_MUTATION_SEAL:-0}" = 1 ]; then
-    echo "mutation-gate: WARNING D2 mutation-floor check deferred — ALLOW_STALE_MUTATION_SEAL set; the floor report + seal are a release-candidate gate (plan v7 §Z2), enforced on the release path, not per-push." >&2
+    echo "mutation-gate: WARNING D2 mutation-floor check deferred — ALLOW_STALE_MUTATION_SEAL set; the mutation floor is advisory this train (operator ruling 2026-07-21, plan v8 §Z2)." >&2
     return 0
   fi
   [ -f "$FLOOR_REPORT" ] || die "committed D2 mutation-floor report missing: $FLOOR_REPORT"
@@ -423,10 +452,10 @@ cmd_check_floor_report() {
   status="$(marker_value status)"
   [ "$version" = 1 ] || die "unsupported D2 mutation-floor marker version: $version"
   if [ "$status" != enforcing ]; then
-    # See the check-report note above — the fresh seal is a release-candidate gate
-    # (plan v7 §Z2), deferred for per-push CI, enforced on the release path.
+    # See the check-report note above — the seal is advisory this train
+    # (operator ruling 2026-07-21, plan v8 §Z2).
     if [ "${ALLOW_STALE_MUTATION_SEAL:-0}" = 1 ]; then
-      echo "mutation-gate: WARNING E_STALE_SEAL (D2 floor) deferred (status=$status) — ALLOW_STALE_MUTATION_SEAL set; enforced on the release path, not per-push." >&2
+      echo "mutation-gate: WARNING E_STALE_SEAL (D2 floor) deferred (status=$status) — ALLOW_STALE_MUTATION_SEAL set; advisory this train (operator ruling 2026-07-21, plan v8 §Z2)." >&2
       return 0
     fi
     die "E_STALE_SEAL: D2 mutation-floor marker status=$status"

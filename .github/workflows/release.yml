@@ -95,6 +95,11 @@ jobs:
         env:
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           RELEASE_REQUIRE_MAIN: ${{ startsWith(github.ref, 'refs/tags/') }}
+          # Operator ruling 2026-07-21 (plan v8 §Z2): the mutation seal is
+          # advisory for this train — a day-scale campaign must never stall a
+          # release. Loud E_STALE_SEAL warning instead of a hard fail; seal
+          # evidence accrues from the scheduled shard rotation.
+          ALLOW_STALE_MUTATION_SEAL: "1"
         run: bash scripts/release_preflight.sh
 
       - name: Validate workflow dependency policy

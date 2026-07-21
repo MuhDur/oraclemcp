@@ -42,6 +42,13 @@ jobs:
     name: ${{ matrix.scope }} shard offset ${{ matrix.offset }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      # Operator ruling 2026-07-21 (plan v8 §Z2): the nightly rotation must
+      # never red the front page on a resource-capped mutant. An OOM/TasksMax
+      # hit records the shard errored/VOID (loud warning, no seal evidence,
+      # never graded caught) and the lane stays green. Seal campaigns and
+      # manual dispatches keep the strict default (fail).
+      MUTATION_OOM_POLICY: warn
     strategy:
       fail-fast: false
       matrix:
@@ -103,6 +110,9 @@ jobs:
           echo "shard=$shard" >> "$GITHUB_OUTPUT"
           echo "shard_dir=shard-${index}of${TOTAL}" >> "$GITHUB_OUTPUT"
       - name: Record mutation-lane attestation status
+        # A VOID shard (MUTATION_OOM_POLICY=warn resource kill) exits 0 but did
+        # NOT complete — never attest complete=PASS for it.
+        if: ${{ steps.mutation.outputs.shard_void != '1' }}
         uses: ./.github/actions/test-attestation
         env:
           ORACLEMCP_TEST_ATTESTATION_KEY: ${{ secrets.ORACLEMCP_TEST_ATTESTATION_KEY }}
