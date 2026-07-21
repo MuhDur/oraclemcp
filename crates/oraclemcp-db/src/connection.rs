@@ -2181,10 +2181,14 @@ mod driver {
         Ok(out)
     }
 
-    fn order_named_binds_for_driver(sql: &str, named: Vec<(String, BindValue)>) -> Vec<BindValue> {
+    fn order_named_binds_for_driver(
+        sql: &str,
+        named: Vec<(String, BindValue)>,
+    ) -> Result<Vec<BindValue>, DbError> {
         let order = placeholder_order(sql);
         let mut remaining = named;
         let mut out = Vec::with_capacity(remaining.len());
+        let mut missing = Vec::new();
         for placeholder in &order {
             if let Some(pos) = remaining
                 .iter()
@@ -2192,12 +2196,17 @@ mod driver {
             {
                 let (_, value) = remaining.remove(pos);
                 out.push(value);
+            } else {
+                missing.push(placeholder.clone());
             }
         }
-        for (_, value) in remaining {
-            out.push(value);
+        if !missing.is_empty() || !remaining.is_empty() {
+            return Err(DbError::NamedBindMismatch {
+                missing,
+                unexpected: remaining.into_iter().map(|(name, _)| name).collect(),
+            });
         }
-        out
+        Ok(out)
     }
 
     fn name_matches(supplied: &str, scanned: &str) -> bool {
@@ -4179,18 +4188,48 @@ mod driver {
                 "select ':ignored' as s, :a, :b, :a from dual -- :commented\n\
                  where c = :c /* :also_ignored */ and quoted = \":identifier\"",
                 vec![
-                    (":c".to_owned(), BindValue::Text("three".to_owned())),
-                    (":b".to_owned(), BindValue::Number("2".to_owned())),
-                    (":a".to_owned(), BindValue::Number("1".to_owned())),
-                    (":unused".to_owned(), BindValue::Text("tail".to_owned())),
+                    (":C".to_owned(), BindValue::Text("three".to_owned())),
+                    (":B".to_owned(), BindValue::Number("2".to_owned())),
+                    ("a".to_owned(), BindValue::Number("1".to_owned())),
                 ],
-            );
+            )
+            .expect("out-of-order named binds should be ordered");
 
-            assert_eq!(ordered.len(), 4);
+            assert_eq!(ordered.len(), 3);
             assert!(matches!(&ordered[0], BindValue::Number(value) if value == "1"));
             assert!(matches!(&ordered[1], BindValue::Number(value) if value == "2"));
             assert!(matches!(&ordered[2], BindValue::Text(value) if value == "three"));
-            assert!(matches!(&ordered[3], BindValue::Text(value) if value == "tail"));
+        }
+
+        #[test]
+        fn named_bind_ordering_rejects_missing_and_unexpected_names() {
+            let missing_and_unexpected = order_named_binds_for_driver(
+                "select :a, :b from dual",
+                vec![
+                    (":a".to_owned(), BindValue::Number("1".to_owned())),
+                    (":unused".to_owned(), BindValue::Number("2".to_owned())),
+                ],
+            )
+            .expect_err("named binds must match placeholders exactly");
+            assert!(matches!(
+                missing_and_unexpected,
+                DbError::NamedBindMismatch { missing, unexpected }
+                    if missing == ["b"] && unexpected == [":unused"]
+            ));
+
+            let unexpected = order_named_binds_for_driver(
+                "select :a from dual",
+                vec![
+                    (":a".to_owned(), BindValue::Number("1".to_owned())),
+                    (":unused".to_owned(), BindValue::Number("2".to_owned())),
+                ],
+            )
+            .expect_err("an extra named bind must not be appended positionally");
+            assert!(matches!(
+                unexpected,
+                DbError::NamedBindMismatch { missing, unexpected }
+                    if missing.is_empty() && unexpected == [":unused"]
+            ));
         }
 
         #[test]
@@ -5682,13 +5721,9 @@ mod driver {
                 .iter()
                 .map(|(name, bind)| (name.clone(), to_bind(bind)))
                 .collect();
+            let ordered_binds = order_named_binds_for_driver(sql, binds)?;
             let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
-            let ordered_binds = if binds.is_empty() {
-                Vec::new()
-            } else {
-                order_named_binds_for_driver(sql, binds)
-            };
             let result = execute_with_timeout(
                 cx,
                 &mut inner,
@@ -5721,11 +5756,7 @@ mod driver {
                 .iter()
                 .map(|(name, bind)| (name.clone(), to_bind(bind)))
                 .collect();
-            let ordered_binds = if binds.is_empty() {
-                Vec::new()
-            } else {
-                order_named_binds_for_driver(sql, binds)
-            };
+            let ordered_binds = order_named_binds_for_driver(sql, binds)?;
             let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
             let result = execute_with_timeout(

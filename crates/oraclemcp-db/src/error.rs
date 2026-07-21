@@ -391,6 +391,15 @@ pub enum DbError {
     /// A query failed.
     #[error("oracle query failed: {0}")]
     Query(String),
+    /// Named bind names did not exactly match the SQL placeholders, so the
+    /// driver was not called with values that could be positionally misbound.
+    #[error("named bind mismatch: missing {missing:?}; unexpected {unexpected:?}")]
+    NamedBindMismatch {
+        /// Placeholders present in SQL but absent from the supplied bind list.
+        missing: Vec<String>,
+        /// Supplied bind names with no remaining matching placeholder.
+        unexpected: Vec<String>,
+    },
     /// The driver proved that the Oracle session/socket was lost. The pool must
     /// discard this connection before an idempotent read can be retried.
     #[error("Oracle connection lost: {0}")]
@@ -550,6 +559,16 @@ impl DbError {
                     env
                 }
             }
+            DbError::NamedBindMismatch {
+                missing,
+                unexpected,
+            } => ErrorEnvelope::new(
+                ErrorClass::InvalidArguments,
+                format!(
+                    "named bind names must exactly match SQL placeholders; missing {missing:?}; unexpected {unexpected:?}"
+                ),
+            )
+            .with_next_step("supply each named placeholder exactly once and remove unused bind names"),
             DbError::ConnectionLost(msg) => {
                 let mut env = transport_lost_envelope(&msg);
                 if let Some(code) = parse_ora_code(&msg) {
