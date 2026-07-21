@@ -1,0 +1,53 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T15:00:28Z",
+  "bead_id": "oraclemcp-091-b8b-audit-doc-thf7d",
+  "scope": {
+    "summary": "Document the concrete signed-audit configuration, its verification workflow, and the explicitly lower-tier unsigned refusal trail.",
+    "in_scope": [
+      "README.md",
+      "oraclemcp.example.toml",
+      "crates/oraclemcp-core/src/doctor.rs"
+    ],
+    "out_of_scope": [
+      "Implementing the B8c refusal trail itself.",
+      "Live Oracle or external WORM/SIEM verification."
+    ]
+  },
+  "source": {
+    "sha": "13a7e6fe4848b84efd9c6ab38eb25a52ba798f20",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "example configuration load and validation",
+        "kind": "config-gate",
+        "trace": "scripts/swarm_discipline.sh bounded-run --timeout 120 -- env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp-target/ws-b-b8c-evidence cargo test -p oraclemcp-config example_config_parses: 1 passed in the dedicated clean worktree at 13a7e6fe4848b84efd9c6ab38eb25a52ba798f20. It parses the shipped [audit] block, including its strict typed keys."
+      },
+      {
+        "name": "doctor audit-state configuration reference",
+        "kind": "cli",
+        "trace": "Source inspection at 13a7e6fe4848b84efd9c6ab38eb25a52ba798f20: doctor check 13 emits README.md#signed-audit-and-unsigned-refusal-trail in every audit posture, while the documented block explains the signed chain, anchor verification, and unsigned floor boundary."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No live Oracle, audit-key, or external shipping destination was exercised."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-b8c-refusal-trail-rhg0m"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
