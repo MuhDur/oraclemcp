@@ -18,7 +18,7 @@
   },
   "source": {
     "sha": "b614dba3fff105f96d8a35c5bd2f8928cf40b190",
-    "tree_clean": false,
+    "tree_clean": true,
     "branch": "main"
   },
   "proofs": [],
