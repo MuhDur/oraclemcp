@@ -1,0 +1,52 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T14:20:00Z",
+  "bead_id": "oraclemcp-091-c8-blind-catalog-refuse-w9iie",
+  "scope": {
+    "summary": "Commits the C8 fixture: a mock connection that models dictionary visibility as a property of the principal, a green test proving a sighted principal on a clean table still gets a read-only proof (and that both probes run), and a committed-red test asserting a catalog-blind principal must yield Purity::Unknown instead of falling through to ProvenReadOnly.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/catalog_resolver.rs",
+      "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c8-blind-catalog-refuse-w9iie.json"
+    ],
+    "out_of_scope": [
+      "Requiring positive catalog visibility — A1a owns the fix; this bead owns only the fixture and deliberately does not model A1a's chosen control mechanism.",
+      "Per-view partial blindness (readable ALL_POLICIES but unreadable ALL_TAB_COLS). Realistic under per-view grants, but modelling it requires guessing A1a's probe shape, which would make the fixture unflippable.",
+      "Any change to the two probe SQLs, to Purity, or to the caller that consumes the verdict."
+    ]
+  },
+  "source": {
+    "sha": "bf409f9b281fcde9ce2d5c2a3eb5d6ace928146e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "resolved_relations_read_purity — the SELECT-side purity proof behind guarded reads",
+        "kind": "api",
+        "trace": "c8_a_sighted_principal_on_a_clean_table_still_proves_read_only drives the real resolver against a mock connection, asserts ProvenReadOnly, and asserts that both SELECT_POLICY_SQL and VIRTUAL_COLUMN_SQL were actually issued — pinning that the red case covers both gates rather than the first short-circuiting"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped test only: cargo test -p oraclemcp-db --lib (453 passed, 2 expected-failure) plus the deliberate red run. The full workspace gate was not run for this commit.",
+    "The blind-principal assertion is committed red by design and does not execute in the default run; it is not cited as proof of anything here.",
+    "The fixture proves the resolver returns ProvenReadOnly for a blind principal. It does NOT execute a real VPD-filtered read end to end, so the downstream consequence (silently filtered rows returned with exit-success) is reasoned from the call site rather than demonstrated live. A live proof needs the D1 container harness with a VPD policy and a least-privilege principal.",
+    "Only total dictionary blindness is modelled. Per-view partial blindness is realistic under individual grants and is left to A1a, whose probe design determines how to express it."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "A1a must delete the #[ignore] on c8_a_catalog_blind_principal_must_not_yield_a_read_only_proof, leaving the assertion unchanged, and must not satisfy it by returning Unknown unconditionally — c8_a_sighted_principal_on_a_clean_table_still_proves_read_only is the guard against that.",
+    "A1a must deliberately update relation_purity_requires_plain_policy_free_non_virtual_tables, which pins queries.len() == 2 and the exact probe order."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
