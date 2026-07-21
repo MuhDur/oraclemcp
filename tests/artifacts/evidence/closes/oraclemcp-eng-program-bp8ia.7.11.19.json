@@ -1,0 +1,51 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T16:55:34Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.19",
+  "scope": {
+    "summary": "CF3 migrates legacy audit state through verified capability directory handles, no-follow operations, identity checks, and an atomic create-new hard-link install that refuses destination replacement.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/doctor.rs"
+    ],
+    "out_of_scope": [
+      "The migration's layout policy and legacy/current conflict handling are unchanged.",
+      "No general filesystem sandbox or unrelated doctor repair behavior is claimed.",
+      "The supporting cap_std and cap_fs_ext dependency entries landed with ee1b23ad, but the generated Cargo.lock is deliberately excluded from this source-behavior close scope because another pane currently owns a separate lockfile hunk."
+    ]
+  },
+  "source": {
+    "sha": "b64958281af36264cd50d545a84679d5b5e280fb",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "apply_legacy_state_migration",
+        "kind": "cli",
+        "trace": "Implementing commit ee1b23ad reads and creates via cap_std directory handles traversed with open_dir_nofollow, writes 0600 create-new files and fsyncs both file and directory, validates parent and file device/inode identities, and atomically hard-links the verified temp to the final name. A hard link preserves create-new semantics where a pathname rename would overwrite a destination introduced during the race. legacy_migration_refuses_symlink_swaps_at_atomic_install deterministically replaces the parent and final destination with symlinks; the code refuses before writing through either replacement. The existing normal migration test retains byte-identical current/backup files and the legacy source."
+      },
+      {
+        "name": "scoped compile verification",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target-lavendertern cargo check -p oraclemcp-core --tests --locked completed successfully after the implementation, compiling the migration and deterministic race-hook tests. cargo fmt --all -- --check also completed successfully."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped cargo check compiled the tests; the runtime test suite was not run because the operator limited this wave to scoped cargo check commands.",
+    "The deterministic symlink-race regression test is Unix-only, matching the filesystem behavior it asserts."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
