@@ -1,0 +1,40 @@
+{
+  "schema": "ws-c-red-run/v1",
+  "repo": "oraclemcp",
+  "bead_id": "oraclemcp-091-c3-mtls-literal-fingerprints-fqh5k",
+  "purpose": "Workstream C fixtures are a two-sided proof: the fixture must be demonstrably RED against pre-fix main, then flipped to enforced-green by the fix bead. This file records the red half so the flip is auditable rather than asserted.",
+  "expected_failure": {
+    "test": "c3_operator_allowed_subjects_authorize_in_every_accepted_spelling",
+    "file": "crates/oraclemcp-core/tests/c3_mtls_literal_fingerprints.rs",
+    "marker": "#[ignore] citing oraclemcp-091-b1a-mtls-normalize-eg2il",
+    "flipped_green_by": "oraclemcp-091-b1a-mtls-normalize-eg2il",
+    "flip_action": "delete the #[ignore] attribute; no assertion change is permitted"
+  },
+  "red_run": {
+    "command": "cargo test -p oraclemcp-core --test c3_mtls_literal_fingerprints -- --ignored --nocapture",
+    "toolchain": "nightly-2026-05-11",
+    "result": "FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out",
+    "panic_site": "crates/oraclemcp-core/tests/c3_mtls_literal_fingerprints.rs:271",
+    "panic_message": "an operator subject written as uppercase hex with uppercase prefix and stray padding passes config validation, so it must also authorize the certificate it names — otherwise the service starts, reports the control transport enabled, and refuses every request without ever saying why",
+    "root_cause": "http.operator.allowed_subjects is stored trim-only (crates/oraclemcp/src/main.rs:3352-3360) and compared with a raw == (crates/oraclemcp-core/src/admin_auth.rs:102-107), while the runtime principal key is always mtls:sha256:<64 lowercase hex>. The sibling field http.mtls.client_fingerprints normalizes on store and on lookup (crates/oraclemcp-core/src/http/config.rs:92,:107), and the control-listener precondition check normalizes both sides (crates/oraclemcp-config/src/lib.rs:648-660) — so the same fingerprint spelling validates cleanly and then authorizes nobody."
+  },
+  "green_half": {
+    "command": "cargo test -p oraclemcp-core --test c3_mtls_literal_fingerprints",
+    "result": "ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out",
+    "tests": [
+      "c3_committed_certificate_hashes_to_the_literal_hex",
+      "c3_client_fingerprints_authorize_in_every_accepted_spelling",
+      "c3_an_unrelated_registered_fingerprint_does_not_authorize",
+      "c3_operator_allowed_subject_authorizes_in_the_canonical_spelling",
+      "c3_config_load_accepts_every_operator_subject_spelling"
+    ],
+    "note": "c3_config_load_accepts_every_operator_subject_spelling is deliberately green and must stay green: it pins that config validation ACCEPTS all five spellings. That is what makes the runtime rejection silent, and keeping it green stops the fix from 'solving' the problem by rejecting the operator's config instead of normalizing it."
+  },
+  "external_mint": {
+    "tool": "openssl req/x509 (real X.509 certificate) + openssl x509 -fingerprint -sha256",
+    "in_repo_code_used": false,
+    "certificate": "crates/oraclemcp-core/tests/fixtures/mtls/c3_client.der",
+    "fingerprint_sha256": "e054ab20728e767d8345c46ff53c4f33453094af5688cdff64b45922c01aef01",
+    "note": "The certificate is a real self-signed leaf generated once out of tree; its private key was discarded because the fixture never completes a handshake. The literal hex came from openssl, not repository code, and c3_committed_certificate_hashes_to_the_literal_hex re-derives it from the committed DER so the two cannot drift apart unnoticed. Per test-shape rule A.8-2 the accepted spellings are exercised ugliest-first: uppercase hex with an uppercase SHA256: prefix and stray padding."
+  }
+}
