@@ -58,7 +58,6 @@ pub mod response_budget;
 mod schema_diff_export;
 pub mod server;
 pub mod service_app;
-pub mod session_tool;
 pub mod shutdown;
 pub mod source_history;
 pub mod subscriptions;
@@ -196,7 +195,6 @@ pub use service_app::{
     service_app_doctor_snapshot, service_app_start_order, start_oraclemcp_service_app,
     start_oraclemcp_service_app_with_transport,
 };
-pub use session_tool::{LeaseAcquirer, SessionAction, SessionDeps, oracle_session};
 pub use subscriptions::{
     CqnCallbackFanout, CqnFanoutOutcome, CqnRegistrationError, CqnRegistrationGate,
     CqnRegistrationPermit, CqnRegistrationScope, PollingSource, SubscribeSource, SubscriptionHub,

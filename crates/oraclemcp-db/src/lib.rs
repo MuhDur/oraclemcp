@@ -14,7 +14,7 @@
 //! correctness-critical Oracle layer that both `oraclemcp` and the sibling
 //! PL/SQL-intelligence superset (`plsql-mcp`) build on: thin connectivity, the
 //! NLS-stable serializer with NUMBER→string fidelity, dictionary operations,
-//! session leases, and the connection pool. `plsql-mcp` converges onto this
+//! and the connection pool. `plsql-mcp` converges onto this
 //! crate (and the other engine-free spine crates `oraclemcp-error` /
 //! `oraclemcp-guard`) rather than carrying its own copies; its added value
 //! (offline PL/SQL parse/analyze, lineage, SAST) layers *on top*. Because this
@@ -41,8 +41,8 @@
 //! - [`detect_oracle_driver`] — thin-driver posture data for `doctor`; thin
 //!   mode never requires Instant Client.
 //!
-//! The session-lease primitive (P0-4) and the deterministic NUMBER→string /
-//! ISO-8601 / NLS serializer (P0-5) build on these.
+//! The deterministic NUMBER→string / ISO-8601 / NLS serializer (P0-5) builds
+//! on these.
 //!
 //! # Stability
 //!
@@ -68,7 +68,6 @@ mod drcp;
 mod error;
 mod health;
 mod intelligence;
-mod lease;
 mod masking;
 mod native_redaction;
 mod oci;
@@ -134,7 +133,6 @@ pub use intelligence::{
     semantic_search_query_with_filter, semantic_search_text_query,
     semantic_search_text_query_with_filter,
 };
-pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_id};
 pub use masking::{
     IncomparableMaskedColumn, MASKED_RESULT_VALUE, MIN_PROFILE_MASKING_SALT_BYTES,
     MaskComparabilityBreak, MaskingPolicyError, ProfileMaskingSalt, ResultColumnMatch,

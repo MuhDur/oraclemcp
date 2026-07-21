@@ -130,12 +130,12 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
     FieldDisposition {
         field: "login_script",
         disposition: Disposition::Commented,
-        help: "Path to an allowlisted `ALTER SESSION …` login script run on lease acquire.",
+        help: "Path to an allowlisted `ALTER SESSION …` login script run during connection setup.",
     },
     FieldDisposition {
         field: "login_statements",
         disposition: Disposition::Commented,
-        help: "Inline allowlist-validated `ALTER SESSION SET …` statements run on lease acquire.",
+        help: "Inline allowlist-validated `ALTER SESSION SET …` statements run during connection setup.",
     },
     FieldDisposition {
         field: "trusted_session_statements",

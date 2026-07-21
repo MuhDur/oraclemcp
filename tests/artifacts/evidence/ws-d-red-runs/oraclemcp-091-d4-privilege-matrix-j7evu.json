@@ -1,0 +1,56 @@
+{
+  "schema": "ws-d-red-run/v1",
+  "repo": "oraclemcp",
+  "bead_id": "oraclemcp-091-d4-privilege-matrix-j7evu",
+  "purpose": "Record D4's two real Free23 negative privilege cases before A3a/A3b and A1a change their behavior. The fixture must prove a refusal/quarantine bug and a catalog fail-open, not merely that a privileged account can connect.",
+  "source": {
+    "commit": "162b47dd524c3ae3cfd8cda3a82bf7542bba1187",
+    "paths": [
+      "scripts/rig/oracle_l1_privilege_matrix.sql",
+      "crates/oraclemcp-db/tests/privilege_matrix_live.rs"
+    ]
+  },
+  "fixture_setup": {
+    "target": "local synthetic Free23 container only",
+    "result": "PASS",
+    "checks": [
+      "The fixture recreated only ORACLEMCP_D4_OWNER, ORACLEMCP_D4_NO_FLASHBACK, and ORACLEMCP_D4_CATALOG_BLIND.",
+      "SYSDBA verification found exactly one enabled SELECT VPD policy and one virtual column on ORACLEMCP_D4_OWNER.ORACLEMCP_D4_GUARDED.",
+      "The catalog target's numeric object identity was passed to the Rust test, preventing the unrelated zero-identity guard from producing Unknown before either catalog probe ran.",
+      "As ORACLEMCP_D4_CATALOG_BLIND, ALL_POLICIES and ALL_TAB_COLS each returned a successful count of zero for the known guarded target."
+    ],
+    "credential_handling": "The local SYSDBA credential was read only from the existing Docker container configuration and was neither printed nor recorded. The restricted-principal password is a synthetic fixture value and is not included here."
+  },
+  "red_runs": [
+    {
+      "test": "d4_no_flashback_principal_gets_typed_refusal_and_connection_stays_usable",
+      "command": "CARGO_TARGET_DIR=target/sageraven-d4 cargo test -p oraclemcp-db --features live-xe --test privilege_matrix_live d4_no_flashback_principal_gets_typed_refusal_and_connection_stays_usable -- --exact --ignored --nocapture",
+      "precondition": "ORACLEMCP_D4_DSN targeted local Free23 host port 1522 and the no-flashback fixture principal had CREATE SESSION but no EXECUTE ON DBMS_FLASHBACK.",
+      "result": "FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out",
+      "observed": "The initial request was typed as FLASHBACK_CAPABILITY_UNAVAILABLE, then the required post-refusal SELECT 42 failed because DBMS_FLASHBACK.DISABLE cleanup returned ORA-06550 / PLS-00201 and the thin connection was quarantined with unknown_discarded.",
+      "mechanism": "read_query_as_of performs rollback and DBMS_FLASHBACK.DISABLE before a capability preflight; a predictable missing-package privilege error is therefore treated like an unprovable teardown and permanently discards the otherwise usable session.",
+      "flipped_green_by": "A3a preflights the capability before session-state mutation and A3b keeps quarantine only for genuine post-change teardown failures.",
+      "flip_action": "Delete this test's #[ignore] without changing its two-request or post-refusal usability assertions."
+    },
+    {
+      "test": "d4_catalog_blind_principal_cannot_prove_the_known_guarded_table_read_only",
+      "command": "CARGO_TARGET_DIR=target/sageraven-d4 cargo test -p oraclemcp-db --features live-xe --test privilege_matrix_live d4_catalog_blind_principal_cannot_prove_the_known_guarded_table_read_only -- --exact --ignored --nocapture",
+      "precondition": "ORACLEMCP_D4_CATALOG_BLIND had CREATE SESSION only. The two real dictionary probes returned successful empty results against a target independently verified to have a SELECT VPD policy and virtual column.",
+      "result": "FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out",
+      "observed": "resolved_relations_read_purity returned ProvenReadOnly where the assertion requires Unknown.",
+      "mechanism": "The current policy and virtual-column gates treat !rows.is_empty() as the only danger signal, so a catalog-blind principal's successful empty probes fall through to ProvenReadOnly despite known hidden behavior on the target.",
+      "flipped_green_by": "A1a requires positive catalog visibility before issuing a read-only proof.",
+      "flip_action": "Delete this test's #[ignore] without changing its known-guarded-object or expected-Unknown assertion."
+    }
+  ],
+  "green_half": {
+    "required_after_fixes": [
+      "The no-flashback case returns the typed capability envelope twice and SELECT 42 succeeds after each refusal.",
+      "The catalog-blind case returns Unknown; a separate sighted clean-table case must remain ProvenReadOnly so A1a cannot close the fail-open by refusing every table."
+    ]
+  },
+  "limitations": [
+    "This run used Free23 only. The fixture source is portable to the Rig L1 XE18, XE21, and Free23 lanes, but the existing Rig L1 entrypoint had not yet been wired to invoke D4 at the time of this recording.",
+    "The catalog test is the live twin of C8's relation-purity boundary. It proves the real restricted-principal dictionary responses; A1a owns the later dispatcher-level refusal behavior."
+  ]
+}

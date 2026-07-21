@@ -99,7 +99,7 @@ impl ErrorClass {
         match self {
             ErrorClass::ObjectNotFound => Some("oracle_schema_inspect"),
             ErrorClass::OperatingLevelTooLow | ErrorClass::ChallengeRequired => {
-                Some("oracle_session")
+                Some("oracle_set_session_level")
             }
             ErrorClass::RuntimeStateRequired | ErrorClass::ConnectionFailed => {
                 Some("oracle_connect")
@@ -591,9 +591,6 @@ pub enum OracleMcpError {
     /// The statement failed the fail-closed classifier.
     #[error("statement refused by guard: {0}")]
     ForbiddenStatement(String),
-    /// A stateful operation needs a lease.
-    #[error("session lease required: {0}")]
-    LeaseRequired(String),
     /// Required operating level exceeds the current level.
     #[error("operating level too low: {0}")]
     OperatingLevelTooLow(String),
@@ -640,13 +637,9 @@ impl OracleMcpError {
             OracleMcpError::ForbiddenStatement(msg) => {
                 ErrorEnvelope::new(ErrorClass::ForbiddenStatement, msg)
             }
-            OracleMcpError::LeaseRequired(msg) => {
-                ErrorEnvelope::new(ErrorClass::LeaseRequired, msg)
-                    .with_next_step("call oracle_session(acquire_lease) and pass the lease_id")
-            }
             OracleMcpError::OperatingLevelTooLow(msg) => {
                 ErrorEnvelope::new(ErrorClass::OperatingLevelTooLow, msg)
-                    .with_next_step("call oracle_session(escalate, target=<level>)")
+                    .with_next_step("call oracle_set_session_level with the requested target level")
             }
             OracleMcpError::ChallengeRequired(msg) => {
                 ErrorEnvelope::new(ErrorClass::ChallengeRequired, msg)
@@ -804,16 +797,6 @@ mod tests {
             OracleMcpError::ForbiddenStatement("multi-statement batch".to_owned()).into_envelope();
         assert_eq!(forbidden.error_class, ErrorClass::ForbiddenStatement);
 
-        let lease_required =
-            OracleMcpError::LeaseRequired("no active lease".to_owned()).into_envelope();
-        assert_eq!(lease_required.error_class, ErrorClass::LeaseRequired);
-        assert!(
-            lease_required
-                .next_steps
-                .iter()
-                .any(|step| step.contains("acquire_lease"))
-        );
-
         let level_too_low =
             OracleMcpError::OperatingLevelTooLow("needs READ_WRITE".to_owned()).into_envelope();
         assert_eq!(level_too_low.error_class, ErrorClass::OperatingLevelTooLow);
@@ -821,7 +804,7 @@ mod tests {
             level_too_low
                 .next_steps
                 .iter()
-                .any(|step| step.contains("escalate"))
+                .any(|step| step.contains("oracle_set_session_level"))
         );
 
         let challenge =
@@ -908,8 +891,11 @@ mod tests {
 
     #[test]
     fn envelope_serde_roundtrip_is_stable() {
-        let env = ErrorEnvelope::new(ErrorClass::LeaseRequired, "needs a lease")
-            .with_next_step("call oracle_session(acquire_lease)");
+        let env = ErrorEnvelope::new(
+            ErrorClass::LeaseRequired,
+            "stateful HTTP dispatch requires an MCP-session-bound lane context",
+        )
+        .with_next_step("initialize the Streamable HTTP session before calling tools");
         let json = serde_json::to_string(&env).expect("serialize");
         let back: ErrorEnvelope = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(env, back);

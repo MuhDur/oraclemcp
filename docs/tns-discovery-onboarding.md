@@ -172,8 +172,8 @@ one-line help string using the exact serde name.
 | `max_level` | **SET** | `= "READ_ONLY"`. Per-target operating-level ceiling; the immutable cap escalation can never exceed. |
 | `default_level` | **SET** | `= "READ_ONLY"`. Level a fresh session starts at; must not exceed `max_level`. |
 | `username` | **SET?** | Oracle username; set only when a least-privilege convention is known, else commented (none for wallet / OS-auth / OCI-IAM). |
-| `login_script` | **COMMENTED** | Path to an allowlisted `ALTER SESSION …` login script run on lease acquire. |
-| `login_statements` | **COMMENTED** | Inline allowlist-validated `ALTER SESSION SET …` statements run on lease acquire. |
+| `login_script` | **COMMENTED** | Path to an allowlisted `ALTER SESSION …` login script run during connection setup. |
+| `login_statements` | **COMMENTED** | Inline allowlist-validated `ALTER SESSION SET …` statements run during connection setup. |
 | `trusted_session_statements` | **COMMENTED** | Trusted local session setup, authored by the profile owner, never accepted from agent tool calls. |
 | `call_timeout_seconds` | **COMMENTED** | Per-round-trip Oracle call timeout, in seconds (default 30 when omitted). |
 | `max_query_cost` | **COMMENTED** | Per-query cooperative cost ceiling for `oracle_query`; per-call overrides may only lower it. |

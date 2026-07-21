@@ -85,7 +85,7 @@ pub fn to_challenge_required(challenge: &StepUpChallenge) -> ChallengeRequired {
         status: "CHALLENGE_REQUIRED".to_owned(),
         challenge_id: challenge.challenge_id.clone(),
         poll_with: format!(
-            "oracle_session(poll_challenge, id={})",
+            "oracle_set_session_level(challenge_id={})",
             challenge.challenge_id
         ),
         elicitation: to_elicitation(challenge),
@@ -129,7 +129,7 @@ mod tests {
     fn challenge_required_uses_poll_not_long_request() {
         let cr = to_challenge_required(&challenge());
         assert_eq!(cr.status, "CHALLENGE_REQUIRED");
-        assert!(cr.poll_with.contains("poll_challenge"));
+        assert!(cr.poll_with.contains("oracle_set_session_level"));
         assert_eq!(cr.challenge_id, cr.elicitation.challenge_id);
     }
 

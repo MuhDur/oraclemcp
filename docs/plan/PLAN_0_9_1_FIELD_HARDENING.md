@@ -811,30 +811,21 @@ nothing suggests retrying), with wire internals leaked into agent-facing text, a
   transient/retryable, retry once on a fresh round trip (rides A4b), and map it to a typed envelope
   instead of leaking `unknown TTC message type N` (rides A4d).
 
-#### B14 [P1] DRCP `purity=reuse`: clear-before-set, and decide the dead lease subsystem
+#### B14 [P1] DRCP `purity=reuse`: clear-before-set, and delete the dead lease subsystem
 *Round-2 sweep (§A.10). Security-relevant: cross-tenant identity bleed on pooled server sessions.
 Not a field finding — the field never exercised DRCP — which is exactly why it belongs here.*
 
 With `[profiles.drcp] purity = "reuse"` (the DEFAULT — `drcp.rs:38-45`, `profile.rs:257-258`), the
 server session handed back may still carry a prior client's `CLIENT_IDENTIFIER` / `MODULE` /
-app-context. The wired identity path, `apply_session_identity` (`connection.rs:1897-1954`, called on
-connect at `:1580`), **never clears before setting** — it early-returns when identity is None and
-otherwise sets only the fields present, so anything the new profile omits **keeps the previous
-session's value**. Meanwhile the correct clear-and-reset machinery exists and is DEAD:
-`session_tag_statements` (`lease.rs:68-102`: `CLEAR_IDENTIFIER` + `SET_MODULE(NULL,NULL)` +
-`SET_CLIENT_INFO(NULL)` then set) belongs to a `LeaseManager`/`oracle_session` subsystem with **zero
-production callers and no tool registration** (constructed only in tests; `LeaseAcquirer` impls are
-test-only).
+app-context. B14a moved the required clear-before-set sequence into the wired
+`apply_session_identity` connection path. B14b then removed the unregistered,
+test-only session subsystem, leaving that connection
+path as the only identity setup mechanism.
 
-- **B14a** — make the wired path clear-before-set (unconditionally reassert the full identity set on
-  every connect; on DRCP that is the only safe posture). `CLIENT_IDENTIFIER` is a canonical VPD key —
-  this also feeds the A1/H1 story.
-- **B14b — OPERATOR RULING (2026-07-20): DELETE it** ("delete it if truly not needed, no dead
-  code"). Verified truly unwired: `LeaseManager::acquire` has zero production callers, all
-  `LeaseAcquirer` impls are test-only, `oracle_session` has no dispatch or registry entry. Removal
-  keeps B14a's clear-before-set as the single identity path; salvage the `session_tag_statements`
-  clear-sequence (CLEAR_IDENTIFIER → SET_MODULE(NULL,NULL) → SET_CLIENT_INFO(NULL) → set) into B14a
-  before deleting the module.
+- **B14a** — clear-before-set unconditionally on every connect; `CLIENT_IDENTIFIER` is a canonical
+  VPD key.
+- **B14b — completed** — removed the unregistered, test-only lease subsystem after confirming it
+  had no dispatch or registry entry.
 - **Test:** D-lane DRCP fixture — two profiles alternating on a pooled server session, asserting no
   identity/context bleed.
 
@@ -1700,14 +1691,11 @@ name likewise returns empty, and `to_ascii_uppercase()` silently misses quoted l
 
 **Fix:** return a structured not-found / not-visible instead of `Ok(vec![])`.
 
-### A.2.6 LATENT (ruled out for this round): CLIENT_IDENTIFIER clobber
-`crates/oraclemcp-db/src/lease.rs:271-283` inverts the order — login statements (`:271-273`) then
-`session_tag_statements` (`:281-283`), whose first element is `DBMS_SESSION.CLEAR_IDENTIFIER`
-(`lease.rs:83-85`) followed by `SET_IDENTIFIER` (`:98`). `CLIENT_IDENTIFIER` is *the* canonical Oracle
-key for pooled-application VPD.
-**But `LeaseManager::acquire` has no production caller** — every call site is a test. Real latent bug;
-not this field symptom. (Contrast the safe path: `apply_session_identity` runs *before*
-`session_statements` — `connection.rs:1580` vs `:1584`.)
+### A.2.6 RESOLVED: CLIENT_IDENTIFIER clobber
+
+The former test-only lease path was deleted. The wired connection path now clears
+identity before applying the active profile, so a reused DRCP session cannot retain
+a prior profile's `CLIENT_IDENTIFIER`.
 
 ### A.2.7 Ranked hypotheses for the field symptom
 | # | Hypothesis | Confidence | Decided by |

@@ -80,7 +80,6 @@ pub oraclemcp_error::OracleMcpError::ForbiddenStatement(alloc::string::String)
 pub oraclemcp_error::OracleMcpError::InsufficientPrivilege(alloc::string::String)
 pub oraclemcp_error::OracleMcpError::Internal(alloc::string::String)
 pub oraclemcp_error::OracleMcpError::InvalidArguments(alloc::string::String)
-pub oraclemcp_error::OracleMcpError::LeaseRequired(alloc::string::String)
 pub oraclemcp_error::OracleMcpError::ObjectNotFound
 pub oraclemcp_error::OracleMcpError::ObjectNotFound::fuzzy_matches: alloc::vec::Vec<alloc::string::String>
 pub oraclemcp_error::OracleMcpError::ObjectNotFound::name: alloc::string::String

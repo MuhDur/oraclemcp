@@ -20,6 +20,7 @@ it never regenerates them.
 | `undecryptable_with_sso/`    | `ewallet.pem` + `cwallet.sso`  | `ewallet_undecryptable_sso_fallthrough` — "ewallet undecryptable (KeyDecrypt) — would fall through to cwallet.sso" |
 | `undecryptable_without_sso/` | `ewallet.pem`                  | `wallet_load_would_fail` — "wallet load would fail: KeyDecrypt, no auto-login fallback" |
 | `expired_cert/`              | `ewallet.pem` (cert only)      | `primary_usable`, but the K1 cert-expiry probe escalates the TNS/wallet check to a WARN — the certificate has expired |
+| `legacy_3des_p12/`           | `ewallet.p12` (legacy 3DES)    | `primary_usable` — decrypts through the driver's `parse_ewallet_p12` |
 
 The `undecryptable_*` postures arise because the test probes the encrypted
 `ewallet.pem` with the **wrong** wallet password, so the driver's
@@ -84,3 +85,40 @@ will fall through to auto-login.
   p12_wallet_path, sso_wallet_path, parse_ewallet_pem, parse_ewallet_p12,
   SSO_WALLET_FILE_NAME}`
 * `oracledb_protocol::tls::sso::parse_cwallet_sso`
+
+## `legacy_3des_p12/` — P-U4 (D6 rider)
+
+Oracle wallets in the field are still frequently sealed with PKCS#12's **legacy**
+`pbeWithSHA1And3-KeyTripleDES-CBC` (OID `1.2.840.113549.1.12.1.3`). OpenSSL 3
+will not produce it without `-legacy`, so a loader that quietly handled only
+modern PBES2 would pass every other fixture here. This fixture exists so the
+server wallet path is proven against the legacy shape, not just the modern one.
+
+Note `oci::classify_wallet` only observes that a file named `ewallet.p12`
+*exists* (`has_p12`); the decryption that matters happens in the doctor probe
+over the driver's `parse_ewallet_p12`, which is what
+`doctor_wallet_posture.rs::legacy_3des_p12_decrypts_through_the_server_wallet_path`
+asserts. Its sibling control re-probes the SAME bytes with the wrong password and
+requires failure — without that, a probe that merely noticed the filename would
+report `primary_usable` regardless of the bytes.
+
+Sealed with the shared fixture password `oracle-test-wallet-16`. Cert + key only;
+no `cwallet.sso`, so the p12 is unambiguously the primary.
+
+```bash
+SUBJ="/CN=oracle-test.invalid/O=Oracle Synthetic Test/C=US"
+openssl genrsa -out s.key 2048
+openssl req -new -x509 -days 3650 -key s.key -out s.pem -subj "$SUBJ"
+openssl pkcs12 -export -legacy \
+  -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 \
+  -inkey s.key -in s.pem -out ewallet.p12 \
+  -passout pass:oracle-test-wallet-16 -name oracle-test-invalid
+```
+
+Verify the committed bytes really are legacy (both bags must say TripleDES):
+
+```bash
+openssl pkcs12 -info -in ewallet.p12 -passin pass:oracle-test-wallet-16 -nodes -legacy
+#   PKCS7 Encrypted data: pbeWithSHA1And3-KeyTripleDES-CBC, Iteration 2048
+#   Shrouded Keybag:      pbeWithSHA1And3-KeyTripleDES-CBC, Iteration 2048
+```

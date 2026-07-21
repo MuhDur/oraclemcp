@@ -616,8 +616,6 @@ pub oraclemcp_db::DbError::FlashbackRefusal::kind: oraclemcp_db::FlashbackRefusa
 pub oraclemcp_db::DbError::FlashbackRefusal::message: alloc::string::String
 pub oraclemcp_db::DbError::FlashbackRefusal::ora_code: core::option::Option<i32>
 pub oraclemcp_db::DbError::Internal(alloc::string::String)
-pub oraclemcp_db::DbError::LeaseNotFound(alloc::string::String)
-pub oraclemcp_db::DbError::LeaseRequired(alloc::string::String)
 pub oraclemcp_db::DbError::NamedBindMismatch
 pub oraclemcp_db::DbError::NamedBindMismatch::missing: alloc::vec::Vec<alloc::string::String>
 pub oraclemcp_db::DbError::NamedBindMismatch::unexpected: alloc::vec::Vec<alloc::string::String>
@@ -3949,190 +3947,6 @@ pub type oraclemcp_db::IndexDescription::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::IndexDescription where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::IndexDescription where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::IndexDescription::vzip(self) -> V
-pub struct oraclemcp_db::LeaseId(pub alloc::string::String)
-impl core::clone::Clone for oraclemcp_db::LeaseId
-pub fn oraclemcp_db::LeaseId::clone(&self) -> oraclemcp_db::LeaseId
-impl core::cmp::Eq for oraclemcp_db::LeaseId
-impl core::cmp::PartialEq for oraclemcp_db::LeaseId
-pub fn oraclemcp_db::LeaseId::eq(&self, &oraclemcp_db::LeaseId) -> bool
-impl core::fmt::Debug for oraclemcp_db::LeaseId
-pub fn oraclemcp_db::LeaseId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for oraclemcp_db::LeaseId
-pub fn oraclemcp_db::LeaseId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for oraclemcp_db::LeaseId
-pub fn oraclemcp_db::LeaseId::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::StructuralPartialEq for oraclemcp_db::LeaseId
-impl serde_core::ser::Serialize for oraclemcp_db::LeaseId
-pub fn oraclemcp_db::LeaseId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::LeaseId
-pub fn oraclemcp_db::LeaseId::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for oraclemcp_db::LeaseId
-impl core::marker::Send for oraclemcp_db::LeaseId
-impl core::marker::Sync for oraclemcp_db::LeaseId
-impl core::marker::Unpin for oraclemcp_db::LeaseId
-impl core::marker::UnsafeUnpin for oraclemcp_db::LeaseId
-impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::LeaseId
-impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::LeaseId
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::LeaseId where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::LeaseId where T: 'a
-impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::LeaseId where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn oraclemcp_db::LeaseId::equivalent(&self, &K) -> bool
-impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::LeaseId where ST: ?core::marker::Sized, DT: ?core::marker::Sized
-impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::LeaseId where ST: ?core::marker::Sized, DT: ?core::marker::Sized
-impl<T, U> core::convert::Into<U> for oraclemcp_db::LeaseId where U: core::convert::From<T>
-pub fn oraclemcp_db::LeaseId::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::LeaseId where U: core::convert::Into<T>
-pub type oraclemcp_db::LeaseId::Error = core::convert::Infallible
-pub fn oraclemcp_db::LeaseId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for oraclemcp_db::LeaseId where U: core::convert::TryFrom<T>
-pub type oraclemcp_db::LeaseId::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn oraclemcp_db::LeaseId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for oraclemcp_db::LeaseId where T: core::clone::Clone
-pub type oraclemcp_db::LeaseId::Owned = T
-pub fn oraclemcp_db::LeaseId::clone_into(&self, &mut T)
-pub fn oraclemcp_db::LeaseId::to_owned(&self) -> T
-impl<T> alloc::string::ToString for oraclemcp_db::LeaseId where T: core::fmt::Display + ?core::marker::Sized
-pub fn oraclemcp_db::LeaseId::to_string(&self) -> alloc::string::String
-impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::LeaseId
-impl<T> core::any::Any for oraclemcp_db::LeaseId where T: 'static + ?core::marker::Sized
-pub fn oraclemcp_db::LeaseId::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for oraclemcp_db::LeaseId where T: ?core::marker::Sized
-pub fn oraclemcp_db::LeaseId::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::LeaseId where T: ?core::marker::Sized
-pub fn oraclemcp_db::LeaseId::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for oraclemcp_db::LeaseId where T: core::clone::Clone
-pub unsafe fn oraclemcp_db::LeaseId::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for oraclemcp_db::LeaseId
-pub fn oraclemcp_db::LeaseId::from(T) -> T
-impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::LeaseId
-impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::LeaseId where T: for<'de> serde_core::de::Deserialize<'de>
-impl<T> tracing::instrument::Instrument for oraclemcp_db::LeaseId
-impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::LeaseId
-impl<T> typenum::type_operators::Same for oraclemcp_db::LeaseId
-pub type oraclemcp_db::LeaseId::Output = T
-impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::LeaseId where T: ?core::marker::Sized
-impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::LeaseId where V: ppv_lite86::types::MultiLane<T>
-pub fn oraclemcp_db::LeaseId::vzip(self) -> V
-pub struct oraclemcp_db::LeaseInfo
-pub oraclemcp_db::LeaseInfo::agent_identity: alloc::string::String
-pub oraclemcp_db::LeaseInfo::expires_in_ms: u128
-pub oraclemcp_db::LeaseInfo::generation: u64
-pub oraclemcp_db::LeaseInfo::in_transaction: bool
-pub oraclemcp_db::LeaseInfo::lease_id: alloc::string::String
-pub oraclemcp_db::LeaseInfo::profile: alloc::string::String
-pub oraclemcp_db::LeaseInfo::ttl_seconds: u64
-impl core::clone::Clone for oraclemcp_db::LeaseInfo
-pub fn oraclemcp_db::LeaseInfo::clone(&self) -> oraclemcp_db::LeaseInfo
-impl core::cmp::Eq for oraclemcp_db::LeaseInfo
-impl core::cmp::PartialEq for oraclemcp_db::LeaseInfo
-pub fn oraclemcp_db::LeaseInfo::eq(&self, &oraclemcp_db::LeaseInfo) -> bool
-impl core::fmt::Debug for oraclemcp_db::LeaseInfo
-pub fn oraclemcp_db::LeaseInfo::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for oraclemcp_db::LeaseInfo
-impl serde_core::ser::Serialize for oraclemcp_db::LeaseInfo
-pub fn oraclemcp_db::LeaseInfo::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::LeaseInfo
-pub fn oraclemcp_db::LeaseInfo::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for oraclemcp_db::LeaseInfo
-impl core::marker::Send for oraclemcp_db::LeaseInfo
-impl core::marker::Sync for oraclemcp_db::LeaseInfo
-impl core::marker::Unpin for oraclemcp_db::LeaseInfo
-impl core::marker::UnsafeUnpin for oraclemcp_db::LeaseInfo
-impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::LeaseInfo
-impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::LeaseInfo
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::LeaseInfo where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::LeaseInfo where T: 'a
-impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::LeaseInfo where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn oraclemcp_db::LeaseInfo::equivalent(&self, &K) -> bool
-impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::LeaseInfo where ST: ?core::marker::Sized, DT: ?core::marker::Sized
-impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::LeaseInfo where ST: ?core::marker::Sized, DT: ?core::marker::Sized
-impl<T, U> core::convert::Into<U> for oraclemcp_db::LeaseInfo where U: core::convert::From<T>
-pub fn oraclemcp_db::LeaseInfo::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::LeaseInfo where U: core::convert::Into<T>
-pub type oraclemcp_db::LeaseInfo::Error = core::convert::Infallible
-pub fn oraclemcp_db::LeaseInfo::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for oraclemcp_db::LeaseInfo where U: core::convert::TryFrom<T>
-pub type oraclemcp_db::LeaseInfo::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn oraclemcp_db::LeaseInfo::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for oraclemcp_db::LeaseInfo where T: core::clone::Clone
-pub type oraclemcp_db::LeaseInfo::Owned = T
-pub fn oraclemcp_db::LeaseInfo::clone_into(&self, &mut T)
-pub fn oraclemcp_db::LeaseInfo::to_owned(&self) -> T
-impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::LeaseInfo
-impl<T> core::any::Any for oraclemcp_db::LeaseInfo where T: 'static + ?core::marker::Sized
-pub fn oraclemcp_db::LeaseInfo::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for oraclemcp_db::LeaseInfo where T: ?core::marker::Sized
-pub fn oraclemcp_db::LeaseInfo::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::LeaseInfo where T: ?core::marker::Sized
-pub fn oraclemcp_db::LeaseInfo::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for oraclemcp_db::LeaseInfo where T: core::clone::Clone
-pub unsafe fn oraclemcp_db::LeaseInfo::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for oraclemcp_db::LeaseInfo
-pub fn oraclemcp_db::LeaseInfo::from(T) -> T
-impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::LeaseInfo
-impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::LeaseInfo where T: for<'de> serde_core::de::Deserialize<'de>
-impl<T> tracing::instrument::Instrument for oraclemcp_db::LeaseInfo
-impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::LeaseInfo
-impl<T> typenum::type_operators::Same for oraclemcp_db::LeaseInfo
-pub type oraclemcp_db::LeaseInfo::Output = T
-impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::LeaseInfo where T: ?core::marker::Sized
-impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::LeaseInfo where V: ppv_lite86::types::MultiLane<T>
-pub fn oraclemcp_db::LeaseInfo::vzip(self) -> V
-pub struct oraclemcp_db::LeaseManager
-impl oraclemcp_db::LeaseManager
-pub async fn oraclemcp_db::LeaseManager::acquire(&self, &asupersync::cx::cx::Cx, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::time::Duration, &[alloc::string::String], alloc::boxed::Box<dyn oraclemcp_db::OracleConnection>) -> core::result::Result<oraclemcp_db::LeaseId, oraclemcp_db::DbError>
-pub fn oraclemcp_db::LeaseManager::active_count(&self) -> usize
-pub async fn oraclemcp_db::LeaseManager::apply_session_statement(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId, &str) -> core::result::Result<(), oraclemcp_db::DbError>
-pub async fn oraclemcp_db::LeaseManager::begin_transaction(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId) -> core::result::Result<(), oraclemcp_db::DbError>
-pub async fn oraclemcp_db::LeaseManager::commit(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId) -> core::result::Result<(), oraclemcp_db::DbError>
-pub async fn oraclemcp_db::LeaseManager::enable_dbms_output(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId) -> core::result::Result<(), oraclemcp_db::DbError>
-pub async fn oraclemcp_db::LeaseManager::info(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId) -> core::result::Result<oraclemcp_db::LeaseInfo, oraclemcp_db::DbError>
-pub fn oraclemcp_db::LeaseManager::new() -> Self
-pub async fn oraclemcp_db::LeaseManager::preview_dml(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId, &str, &[oraclemcp_db::OracleBind]) -> core::result::Result<oraclemcp_db::PreviewImpact, oraclemcp_db::DbError>
-pub async fn oraclemcp_db::LeaseManager::reap_expired(&self, &asupersync::cx::cx::Cx) -> usize
-pub async fn oraclemcp_db::LeaseManager::release(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId) -> core::result::Result<(), oraclemcp_db::DbError>
-pub async fn oraclemcp_db::LeaseManager::release_all(&self, &asupersync::cx::cx::Cx) -> usize
-pub async fn oraclemcp_db::LeaseManager::renew(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId) -> core::result::Result<oraclemcp_db::LeaseInfo, oraclemcp_db::DbError>
-pub async fn oraclemcp_db::LeaseManager::rollback(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId) -> core::result::Result<(), oraclemcp_db::DbError>
-pub async fn oraclemcp_db::LeaseManager::savepoint(&self, &asupersync::cx::cx::Cx, &str, &oraclemcp_db::LeaseId, &str) -> core::result::Result<(), oraclemcp_db::DbError>
-impl core::default::Default for oraclemcp_db::LeaseManager
-pub fn oraclemcp_db::LeaseManager::default() -> oraclemcp_db::LeaseManager
-impl !core::marker::Freeze for oraclemcp_db::LeaseManager
-impl core::marker::Send for oraclemcp_db::LeaseManager
-impl core::marker::Sync for oraclemcp_db::LeaseManager
-impl core::marker::Unpin for oraclemcp_db::LeaseManager
-impl core::marker::UnsafeUnpin for oraclemcp_db::LeaseManager
-impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::LeaseManager
-impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::LeaseManager
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::LeaseManager where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::LeaseManager where T: 'a
-impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::LeaseManager where ST: ?core::marker::Sized, DT: ?core::marker::Sized
-impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::LeaseManager where ST: ?core::marker::Sized, DT: ?core::marker::Sized
-impl<T, U> core::convert::Into<U> for oraclemcp_db::LeaseManager where U: core::convert::From<T>
-pub fn oraclemcp_db::LeaseManager::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::LeaseManager where U: core::convert::Into<T>
-pub type oraclemcp_db::LeaseManager::Error = core::convert::Infallible
-pub fn oraclemcp_db::LeaseManager::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for oraclemcp_db::LeaseManager where U: core::convert::TryFrom<T>
-pub type oraclemcp_db::LeaseManager::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn oraclemcp_db::LeaseManager::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::LeaseManager
-impl<T> core::any::Any for oraclemcp_db::LeaseManager where T: 'static + ?core::marker::Sized
-pub fn oraclemcp_db::LeaseManager::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for oraclemcp_db::LeaseManager where T: ?core::marker::Sized
-pub fn oraclemcp_db::LeaseManager::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::LeaseManager where T: ?core::marker::Sized
-pub fn oraclemcp_db::LeaseManager::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for oraclemcp_db::LeaseManager
-pub fn oraclemcp_db::LeaseManager::from(T) -> T
-impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::LeaseManager
-impl<T> tracing::instrument::Instrument for oraclemcp_db::LeaseManager
-impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::LeaseManager
-impl<T> typenum::type_operators::Same for oraclemcp_db::LeaseManager
-pub type oraclemcp_db::LeaseManager::Output = T
-impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::LeaseManager where T: ?core::marker::Sized
-impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::LeaseManager where V: ppv_lite86::types::MultiLane<T>
-pub fn oraclemcp_db::LeaseManager::vzip(self) -> V
 pub struct oraclemcp_db::LobText
 pub oraclemcp_db::LobText::char_count: usize
 pub oraclemcp_db::LobText::column: alloc::string::String
@@ -6191,67 +6005,6 @@ pub type oraclemcp_db::PreflightReport::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PreflightReport where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PreflightReport where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::PreflightReport::vzip(self) -> V
-pub struct oraclemcp_db::PreviewImpact
-pub oraclemcp_db::PreviewImpact::rolled_back: bool
-pub oraclemcp_db::PreviewImpact::rows_affected: u64
-impl core::clone::Clone for oraclemcp_db::PreviewImpact
-pub fn oraclemcp_db::PreviewImpact::clone(&self) -> oraclemcp_db::PreviewImpact
-impl core::cmp::Eq for oraclemcp_db::PreviewImpact
-impl core::cmp::PartialEq for oraclemcp_db::PreviewImpact
-pub fn oraclemcp_db::PreviewImpact::eq(&self, &oraclemcp_db::PreviewImpact) -> bool
-impl core::fmt::Debug for oraclemcp_db::PreviewImpact
-pub fn oraclemcp_db::PreviewImpact::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for oraclemcp_db::PreviewImpact
-impl core::marker::StructuralPartialEq for oraclemcp_db::PreviewImpact
-impl serde_core::ser::Serialize for oraclemcp_db::PreviewImpact
-pub fn oraclemcp_db::PreviewImpact::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::PreviewImpact
-pub fn oraclemcp_db::PreviewImpact::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for oraclemcp_db::PreviewImpact
-impl core::marker::Send for oraclemcp_db::PreviewImpact
-impl core::marker::Sync for oraclemcp_db::PreviewImpact
-impl core::marker::Unpin for oraclemcp_db::PreviewImpact
-impl core::marker::UnsafeUnpin for oraclemcp_db::PreviewImpact
-impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::PreviewImpact
-impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::PreviewImpact
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::PreviewImpact where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::PreviewImpact where T: 'a
-impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::PreviewImpact where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn oraclemcp_db::PreviewImpact::equivalent(&self, &K) -> bool
-impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::PreviewImpact where ST: ?core::marker::Sized, DT: ?core::marker::Sized
-impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::PreviewImpact where ST: ?core::marker::Sized, DT: ?core::marker::Sized
-impl<T, U> core::convert::Into<U> for oraclemcp_db::PreviewImpact where U: core::convert::From<T>
-pub fn oraclemcp_db::PreviewImpact::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::PreviewImpact where U: core::convert::Into<T>
-pub type oraclemcp_db::PreviewImpact::Error = core::convert::Infallible
-pub fn oraclemcp_db::PreviewImpact::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for oraclemcp_db::PreviewImpact where U: core::convert::TryFrom<T>
-pub type oraclemcp_db::PreviewImpact::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn oraclemcp_db::PreviewImpact::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for oraclemcp_db::PreviewImpact where T: core::clone::Clone
-pub type oraclemcp_db::PreviewImpact::Owned = T
-pub fn oraclemcp_db::PreviewImpact::clone_into(&self, &mut T)
-pub fn oraclemcp_db::PreviewImpact::to_owned(&self) -> T
-impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::PreviewImpact
-impl<T> core::any::Any for oraclemcp_db::PreviewImpact where T: 'static + ?core::marker::Sized
-pub fn oraclemcp_db::PreviewImpact::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for oraclemcp_db::PreviewImpact where T: ?core::marker::Sized
-pub fn oraclemcp_db::PreviewImpact::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::PreviewImpact where T: ?core::marker::Sized
-pub fn oraclemcp_db::PreviewImpact::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for oraclemcp_db::PreviewImpact where T: core::clone::Clone
-pub unsafe fn oraclemcp_db::PreviewImpact::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for oraclemcp_db::PreviewImpact
-pub fn oraclemcp_db::PreviewImpact::from(T) -> T
-impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PreviewImpact
-impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::PreviewImpact where T: for<'de> serde_core::de::Deserialize<'de>
-impl<T> tracing::instrument::Instrument for oraclemcp_db::PreviewImpact
-impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PreviewImpact
-impl<T> typenum::type_operators::Same for oraclemcp_db::PreviewImpact
-pub type oraclemcp_db::PreviewImpact::Output = T
-impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PreviewImpact where T: ?core::marker::Sized
-impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PreviewImpact where V: ppv_lite86::types::MultiLane<T>
-pub fn oraclemcp_db::PreviewImpact::vzip(self) -> V
 pub struct oraclemcp_db::PrivilegeProfile
 pub oraclemcp_db::PrivilegeProfile::diagnostics_pack: bool
 pub oraclemcp_db::PrivilegeProfile::dictionary_tier: oraclemcp_db::DictionaryTier
@@ -9092,7 +8845,6 @@ pub async fn oraclemcp_db::read_query_named(&asupersync::cx::cx::Cx, &dyn oracle
 pub fn oraclemcp_db::recompile_with_plscope_statements(&str, &str, &str) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
 pub const fn oraclemcp_db::redacted_named_oracle_binds(&[(alloc::string::String, oraclemcp_db::OracleBind)]) -> oraclemcp_db::RedactedNamedOracleBinds<'_>
 pub const fn oraclemcp_db::redacted_oracle_binds(&[oraclemcp_db::OracleBind]) -> oraclemcp_db::RedactedOracleBinds<'_>
-pub fn oraclemcp_db::require_lease_id(core::option::Option<&str>) -> core::result::Result<&str, oraclemcp_db::DbError>
 pub fn oraclemcp_db::requirement_matrix() -> &'static [oraclemcp_db::ToolRequirement]
 pub async fn oraclemcp_db::resolve_top_sql_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, bool) -> core::result::Result<oraclemcp_db::DiagnosticsSource, oraclemcp_db::DbError>
 pub fn oraclemcp_db::resolve_wallet_choice(&std::path::Path, core::option::Option<&str>) -> core::result::Result<oraclemcp_db::WalletResolutionReport, oraclemcp_db::WalletResolveError>

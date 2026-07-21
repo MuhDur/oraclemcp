@@ -191,7 +191,7 @@ field is unset after inheritance.
 | `inactivity_timeout_seconds` | integer | none | no | Per-read inactivity deadline on an established session. Omit to keep the driver's default read behavior. Set a positive value to bound silent or half-open sessions; `0` is treated as unset and `doctor` warns. |
 | `keepalive_minutes` | integer | none | no | Oracle dead-connection-detection probe interval (`EXPIRE_TIME`), in minutes. Omit to disable probes. Set a positive value to request keepalive probes; `0` is treated as unset and `doctor` warns. |
 | `sdu` | integer | none | no | Thin Session Data Unit request size. Validated as `512..=65535`; omit to keep the negotiated default. |
-| `login_script` | path | none | no | Path to a login script run on lease acquire. Restricted to allowlisted `ALTER SESSION SET …` parameters. |
+| `login_script` | path | none | no | Path to a login script run during connection setup. Restricted to allowlisted `ALTER SESSION SET …` parameters. |
 | `login_statements` | array of strings | none | no | Inline login statements (allowlist-validated `ALTER SESSION SET …`). |
 | `trusted_session_statements` | array of strings | none | no | Trusted local session setup, authored by the profile owner and **never** accepted from agent tool calls; run verbatim after the guarded login statements. |
 | `base` | string | none | no | Inherit unset fields from another profile (shallow-merge, child wins). See [Base inheritance](#base-inheritance). |
