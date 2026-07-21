@@ -1,0 +1,46 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T14:46:00Z",
+  "bead_id": "oraclemcp-091-a1f-robot-docs-pool-setup-9y1bl",
+  "scope": {
+    "summary": "Corrects both robot-docs pool descriptions: user SQL remains pinned, while login setup and session identity apply to every newly opened connection, including local-pool connections, and setup failures fail the connection.",
+    "in_scope": [
+      "crates/oraclemcp/src/robot_docs.rs"
+    ],
+    "out_of_scope": [
+      "Changing pool connection construction or session-setup failure handling; this close documents the existing connect path only.",
+      "The unrelated secure-stdio documentation work present in the shared checkout.",
+      "A live Oracle pool run; the committed regression is a documentation-contract unit test."
+    ]
+  },
+  "source": {
+    "sha": "d3d5fc107ad216ffa5eab830dd40073b7250f350",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "robot-docs guide text and JSON configuration guidance",
+        "kind": "cli",
+        "trace": "robot_docs::tests::pool_setup_guidance_covers_each_new_connection renders both surfaces and asserts the every-new-connection, pool-connection, and fail-closed setup wording while rejecting the old pinned-only claim."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The regression validates rendered documentation, not a live Oracle pool connection.",
+    "The underlying runtime behavior is documented from the shared connect path; this bead makes no runtime change."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
