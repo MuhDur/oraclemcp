@@ -6,14 +6,14 @@
   "scope": {
     "summary": "Dedup: duplicate of oraclemcp-eng-program-bp8ia.7.11.10 (G1 VECTOR_EMBEDDING normalization in every batch statement).",
     "in_scope": [
-      "tests/artifacts/evidence/closes/oraclemcp-f-server-g1-vector-batch-normalization-4jku.json"
+      "docs/plan/PLAN_0_9_1_FIELD_HARDENING.md"
     ],
     "out_of_scope": [
       "The defect fix itself: it is tracked and will be evidence-closed on the canonical bead oraclemcp-eng-program-bp8ia.7.11.10."
     ]
   },
   "source": {
-    "sha": "90246d4d2febfc1e1fa6f468aafb5eef9f4255ab",
+    "sha": "8b4cfb526f69e682ba583a71cc71b4d8ddb1216b",
     "tree_clean": true,
     "branch": "main"
   },

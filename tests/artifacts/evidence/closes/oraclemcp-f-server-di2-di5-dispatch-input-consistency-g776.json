@@ -6,14 +6,14 @@
   "scope": {
     "summary": "Dedup: duplicate of oraclemcp-eng-program-bp8ia.7.11.6 (DI2 preview witness-row clamp) and .7.11.8 (DI5 uniform timeout_seconds zero rejection).",
     "in_scope": [
-      "tests/artifacts/evidence/closes/oraclemcp-f-server-di2-di5-dispatch-input-consistency-g776.json"
+      "docs/plan/PLAN_0_9_1_FIELD_HARDENING.md"
     ],
     "out_of_scope": [
       "The defect fix itself: it is tracked and will be evidence-closed on the canonical bead oraclemcp-eng-program-bp8ia.7.11.6 + .7.11.8."
     ]
   },
   "source": {
-    "sha": "90246d4d2febfc1e1fa6f468aafb5eef9f4255ab",
+    "sha": "8b4cfb526f69e682ba583a71cc71b4d8ddb1216b",
     "tree_clean": true,
     "branch": "main"
   },
