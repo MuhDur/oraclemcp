@@ -3085,6 +3085,34 @@ fn doctor_oauth_diagnostic_is_precise_and_never_renders_token_material() {
     assert_eq!(unsupported.token_error, Some("unsupported_algorithm"));
     assert_eq!(unsupported.supported_algorithms, vec!["HS256"]);
 
+    let wrong_type_token = mint_doctor_oauth_test_token(
+        serde_json::json!({ "alg": "HS256", "typ": "JWT" }),
+        doctor_oauth_test_claims(),
+    );
+    let wrong_type = doctor_oauth_diagnostic(&config, &verifier, &wrong_type_token, 1_600_000_000);
+    assert_eq!(wrong_type.token_error, Some("unexpected_token_type"));
+
+    let mut future_claims = doctor_oauth_test_claims();
+    future_claims["nbf"] = serde_json::json!(1_700_000_000);
+    let future_token = mint_doctor_oauth_test_token(header.clone(), future_claims);
+    let not_yet_valid = doctor_oauth_diagnostic(&config, &verifier, &future_token, 1_600_000_000);
+    assert_eq!(not_yet_valid.token_error, Some("not_yet_valid"));
+
+    let mut untrusted_issuer_claims = doctor_oauth_test_claims();
+    untrusted_issuer_claims["iss"] = serde_json::json!("https://untrusted.example");
+    let untrusted_issuer_token =
+        mint_doctor_oauth_test_token(header.clone(), untrusted_issuer_claims);
+    let untrusted_issuer =
+        doctor_oauth_diagnostic(&config, &verifier, &untrusted_issuer_token, 1_600_000_000);
+    assert_eq!(untrusted_issuer.token_error, Some("untrusted_issuer"));
+
+    let mut wrong_audience_claims = doctor_oauth_test_claims();
+    wrong_audience_claims["aud"] = serde_json::json!("https://other-resource.example/mcp");
+    let wrong_audience_token = mint_doctor_oauth_test_token(header.clone(), wrong_audience_claims);
+    let wrong_audience =
+        doctor_oauth_diagnostic(&config, &verifier, &wrong_audience_token, 1_600_000_000);
+    assert_eq!(wrong_audience.token_error, Some("audience_mismatch"));
+
     let scoped = doctor_oauth_test_config(vec!["oracle:admin"]);
     let insufficient_scope =
         doctor_oauth_diagnostic(&scoped, &verifier, &valid_token, 1_600_000_000);
@@ -3097,6 +3125,10 @@ fn doctor_oauth_diagnostic_is_precise_and_never_renders_token_material() {
         expired,
         missing_claim,
         unsupported,
+        wrong_type,
+        not_yet_valid,
+        untrusted_issuer,
+        wrong_audience,
         insufficient_scope,
     ] {
         let rendered = diagnostic.to_json().to_string();
@@ -3104,7 +3136,9 @@ fn doctor_oauth_diagnostic_is_precise_and_never_renders_token_material() {
             !rendered.contains(&valid_token)
                 && !rendered.contains(DOCTOR_OAUTH_TEST_SECRET)
                 && !rendered.contains("synthetic-subject")
-                && !rendered.contains("RS256"),
+                && !rendered.contains("RS256")
+                && !rendered.contains("https://untrusted.example")
+                && !rendered.contains("https://other-resource.example/mcp"),
             "doctor OAuth output leaked token material: {rendered}"
         );
     }
