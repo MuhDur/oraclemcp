@@ -512,6 +512,9 @@ per-client credentials, OAuth, or an explicit `--allow-no-auth` development
 opt-in. Non-loopback binds require `ORACLEMCP_HTTP_ALLOW_REMOTE=1` even with
 TLS.
 
+When Claude Code connects over HTTPS to a self-signed or private-CA listener,
+start it with that CA PEM in Node's trust store: `NODE_EXTRA_CA_CERTS=/path/to/private-ca.pem claude`.
+
 Connection profiles are resolved from layered configuration (`oraclemcp-config`); select one with `serve --profile <name>`.
 
 ### Connection profiles
