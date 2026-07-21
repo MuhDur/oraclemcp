@@ -5436,9 +5436,6 @@ fn run_refusal_corpus_export(robot_json: bool, args: RefusalCorpusExportCliArgs)
 fn incident_capture_error_status(error: &IncidentCaptureError) -> (&'static str, String) {
     match error {
         IncidentCaptureError::Io(_) => ("ORACLEMCP_INCIDENT_CAPTURE_IO_FAILED", error.to_string()),
-        IncidentCaptureError::MissingFile { .. } => {
-            ("ORACLEMCP_INCIDENT_BUNDLE_MISSING", error.to_string())
-        }
         _ => ("ORACLEMCP_INCIDENT_CAPTURE_REFUSED", error.to_string()),
     }
 }
@@ -5447,10 +5444,6 @@ fn incident_replay_error_status(error: &IncidentReplayError) -> (&'static str, S
     match error {
         IncidentReplayError::Capture(capture_error @ IncidentCaptureError::Io(_)) => (
             "ORACLEMCP_INCIDENT_REPLAY_IO_FAILED",
-            capture_error.to_string(),
-        ),
-        IncidentReplayError::Capture(capture_error @ IncidentCaptureError::MissingFile { .. }) => (
-            "ORACLEMCP_INCIDENT_BUNDLE_MISSING",
             capture_error.to_string(),
         ),
         _ => ("ORACLEMCP_INCIDENT_REPLAY_REFUSED", error.to_string()),

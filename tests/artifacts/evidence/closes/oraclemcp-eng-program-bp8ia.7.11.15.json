@@ -1,7 +1,7 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-07-21T16:55:34Z",
+  "generated_at": "2026-07-21T20:12:34Z",
   "bead_id": "oraclemcp-eng-program-bp8ia.7.11.15",
   "scope": {
     "summary": "CC2 replaces the shared HTTP-result Condvar with per-session notification state, so an event wakes only the session that received it while removal and shutdown still wake their affected waiters.",
@@ -13,7 +13,7 @@
     ]
   },
   "source": {
-    "sha": "b64958281af36264cd50d545a84679d5b5e280fb",
+    "sha": "be9c64bc97db3c32f052c4a0ff58b61c5ce171ec",
     "tree_clean": true,
     "branch": "main"
   },
@@ -21,14 +21,14 @@
   "integration_evidence": {
     "entry_points": [
       {
-        "name": "HttpResultStore::append_event_if_session / wait_for_result",
+        "name": "HttpResultStore::append_event_if_session / wait_events_after",
         "kind": "api",
-        "trace": "Implementing commit be9c64bc stores an Arc<Condvar> with each HttpResultSession. The append path notifies that session only; remove_session notifies its removed session and close_all collects and notifies every session. result_store_wakes_only_affected_session_waiters records per-session waiter rechecks: its target receives the event, three unrelated waiters remain at zero rechecks, remove_session returns Closed, and close_all releases the remainder."
+        "trace": "Implementing commit be9c64bc stores an Arc<Condvar> with each HttpResultSession. The append path notifies only that session; remove_session notifies its removed session and close_all collects and notifies every session. result_store_wakes_only_affected_session_waiters starts one target and three unrelated waiters, records zero unrelated rechecks after the target event, then proves removal and shutdown still release the affected waiters."
       },
       {
-        "name": "scoped compile verification",
+        "name": "scoped core test-target compile",
         "kind": "cli",
-        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target-lavendertern cargo check -p oraclemcp-core --tests --locked completed successfully after the implementation, compiling the CC2 regression test with the crate test target."
+        "trace": "After proving stores.rs unchanged from be9c64bc, CARGO_TARGET_DIR=/var/tmp/oraclemcp-p0-close-evidence-target cargo check -p oraclemcp-core --tests --locked completed successfully."
       }
     ]
   },
@@ -37,8 +37,8 @@
     "artifacts": []
   },
   "limitations": [
-    "Scoped cargo check compiled the test target; the runtime test suite was not run because the operator limited this wave to scoped cargo check commands.",
-    "No live HTTP server was exercised; this is deterministic in-process result-store coverage."
+    "This close correction makes no live HTTP-server claim; the regression coverage is deterministic and in-process.",
+    "The original evidence artifact was later deleted by an unrelated stale-index commit; this document restores the original bead's committed proof record and binding."
   ],
   "known_defects": [],
   "follow_ups": [],

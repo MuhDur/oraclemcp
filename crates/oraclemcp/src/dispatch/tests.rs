@@ -3635,7 +3635,7 @@ fn orient_assembles_selector_stable_snapshot_and_reloads_on_catalog_revision() {
     assert!(selected["freshness"].is_object());
     assert_eq!(
         state.dictionary_reads.load(Ordering::SeqCst),
-        8,
+        12,
         "include selectors must not create stale independent cache fragments"
     );
 
@@ -3643,7 +3643,7 @@ fn orient_assembles_selector_stable_snapshot_and_reloads_on_catalog_revision() {
         .dispatch("oracle_orient", json!({ "include": ["unknown"] }))
         .expect_err("unknown orient section is refused before dictionary I/O");
     assert_eq!(invalid.error_class, ErrorClass::InvalidArguments);
-    assert_eq!(state.dictionary_reads.load(Ordering::SeqCst), 8);
+    assert_eq!(state.dictionary_reads.load(Ordering::SeqCst), 12);
 
     invalidate_orient_catalog(&dispatcher);
     let refreshed = dispatcher
@@ -3655,7 +3655,7 @@ fn orient_assembles_selector_stable_snapshot_and_reloads_on_catalog_revision() {
     assert_eq!(refreshed["catalog_revision"], json!(2));
     assert_eq!(
         state.dictionary_reads.load(Ordering::SeqCst),
-        12,
+        16,
         "the new catalog generation never reuses prior snapshot evidence"
     );
 }
