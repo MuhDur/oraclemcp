@@ -201,6 +201,7 @@ export -n ORACLEMCP_E2E_ARTIFACT_DIR ORACLEMCP_E2E_SEED \
   ORACLEMCP_LIVE_XE ORACLEMCP_ORACLE_MATRIX_BINARY
 
 audit_key="$(openssl rand -hex 32 2>/dev/null || date +%s%N | sha256sum | cut -d' ' -f1)"
+tools_hmac_key="$(openssl rand -hex 32 2>/dev/null || date +%s%N | sha256sum | cut -d' ' -f1)"
 
 # Per-lane wall-clock ceilings: a hung lane (stuck DB, wedged stdio session)
 # must fail THAT lane, never hang the whole matrix / run_all. GNU coreutils
@@ -228,7 +229,7 @@ run_lane() {
   local state_dir="$lane_dir/state"
   mkdir -p "$lane_dir" "$state_dir"
 
-  # Lane-scoped profile config: writable lab profile with max_level = DDL for
+  # Lane-scoped profile config: writable lab profile with max_level = ADMIN for
   # the ladder tests; READ_ONLY stays the default level (the ladder proves the
   # step-ups). A second READ_ONLY-ceiling sibling profile ("${lane}_ro", same
   # lane DSN) backs the oracle_switch_profile reconnect + posture assertions.
@@ -236,11 +237,31 @@ run_lane() {
   # cannot create an unmasked egress side-channel.
   # Secrets go through credential_ref, never into the file.
   local ro_profile="${lane}_ro"
+  local protected_profile="${lane}_protected"
   local semantic_masked_profile="${lane}_semantic_masked"
+  local http_port
+  http_port="$(python3 - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+    listener.bind(("127.0.0.1", 0))
+    print(listener.getsockname()[1])
+PY
+)"
+  local http_audience="http://127.0.0.1:${http_port}/mcp"
+  local http_oauth_secret
+  http_oauth_secret="$(openssl rand -hex 32 2>/dev/null || date +%s%N | sha256sum | cut -d' ' -f1)"
   local profiles_file="$lane_dir/profiles.toml"
   cat >"$profiles_file" <<PROFILES
 schema_version = 2
 default_profile = "$lane"
+
+[http.oauth]
+resource = "$http_audience"
+allowed_issuers = ["https://synthetic-ladder.invalid"]
+authorization_servers = ["https://synthetic-ladder.invalid"]
+required_scopes = ["oracle:read"]
+hs256_secret_ref = "env:E2E_LADDER_OAUTH_HS256_SECRET"
 
 [[profiles]]
 name = "$lane"
@@ -248,7 +269,7 @@ description = "version-matrix lab lane $lane (throwaway container)"
 connect_string = "$dsn"
 username = "$user"
 credential_ref = "env:ORACLE_MATRIX_ACTIVE_PASSWORD"
-max_level = "DDL"
+max_level = "ADMIN"
 default_level = "READ_ONLY"
 
 [[profiles]]
@@ -259,6 +280,16 @@ username = "$user"
 credential_ref = "env:ORACLE_MATRIX_ACTIVE_PASSWORD"
 max_level = "READ_ONLY"
 default_level = "READ_ONLY"
+
+[[profiles]]
+name = "$protected_profile"
+description = "version-matrix lab lane $lane protected sibling (throwaway)"
+connect_string = "$dsn"
+username = "$user"
+credential_ref = "env:ORACLE_MATRIX_ACTIVE_PASSWORD"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
+protected = true
 
 [[profiles]]
 name = "$semantic_masked_profile"
@@ -295,11 +326,23 @@ TOOLS
   export ORACLE_MATRIX_ACTIVE_PASSWORD="$password"
   export XDG_STATE_HOME="$state_dir"
   export ORACLEMCP_AUDIT_KEY="$audit_key"
+  export ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY="$tools_hmac_key"
   export ORACLEMCP_TOOLS_DIR="$tools_dir"
+  export E2E_LADDER_OAUTH_HS256_SECRET="$http_oauth_secret"
   export E2E_LANE="$lane" E2E_PROFILE="$lane"
 
+  # The protected sibling implies require_signed_tools. Sign the same synthetic
+  # READ_ONLY definition that the primary lane serves, so switching profiles
+  # proves the protected ceiling rather than failing earlier on unsigned setup.
+  if ! "$BINARY" --json sign-tool "$tools_dir/matrix_ro_probe.toml" --write \
+    >"$lane_dir/custom_tool_sign.json" 2>"$lane_dir/custom_tool_sign.stderr"; then
+    e2e_log_event "custom_tool_sign" "assert" "fail" 0 "lane $lane: could not sign the synthetic READ_ONLY custom tool for the protected-profile lane"
+    return 1
+  fi
+  e2e_log_event "custom_tool_sign" "assert" "pass" 0 "lane $lane: signed synthetic READ_ONLY custom tool for protected-profile switching"
+
   # Fail-closed custom-tool load: this write tool is explicitly pinned at ADMIN,
-  # above the lane's DDL ceiling, so it must be refused at LOAD (the server exits
+  # above the READ_ONLY sibling ceiling, so it must be refused at LOAD (the server exits
   # non-zero with ORACLEMCP_CUSTOM_TOOLS_INVALID and never serves it). Ordinary
   # READ_WRITE tools are intentionally permitted below a writable profile's
   # ceiling and remain guarded at execution; this probe covers the actual
@@ -309,16 +352,16 @@ TOOLS
   cat >"$bad_tools_dir/writer.toml" <<'BADTOOL'
 [[tool]]
 name = "matrix_over_ceiling_writer_refused"
-description = "ADMIN-pinned write custom tool: must be refused above the DDL profile ceiling"
+description = "ADMIN-pinned write custom tool: must be refused above the READ_ONLY sibling ceiling"
 sql = "UPDATE matrix_probe_target SET x = 1"
 output_mode = "rows"
 declared_level = "ADMIN"
 BADTOOL
   local bad_load_stderr="$lane_dir/custom_tool_write_refused.stderr"
-  e2e_log_event "custom_tool_write_refused" "act" "running" 0 "lane $lane: an ADMIN-pinned write custom tool must refuse above the DDL ceiling"
+  e2e_log_event "custom_tool_write_refused" "act" "running" 0 "lane $lane: an ADMIN-pinned write custom tool must refuse above the READ_ONLY sibling ceiling"
   set +e
   ORACLEMCP_TOOLS_DIR="$bad_tools_dir" timeout -k 5 30 \
-    "$BINARY" --json serve --profile "$lane" --allow-no-auth </dev/null \
+    "$BINARY" --json serve --profile "$ro_profile" --allow-no-auth </dev/null \
     >"$lane_dir/custom_tool_write_refused.stdout" 2>"$bad_load_stderr"
   local bad_load_status=$?
   set -e
@@ -371,7 +414,7 @@ BADTOOL
   timeout -k 15 "$lane_timeout_secs" \
     python3 "$ROOT/scripts/e2e/oracle_ladder_session.py" \
     --binary "$BINARY" --profile "$lane" --server-version-regex "$server_version_regex" \
-    --ro-profile "$ro_profile" --custom-tool matrix_ro_probe \
+    --ro-profile "$ro_profile" --protected-profile "$protected_profile" --custom-tool matrix_ro_probe \
     --semantic-masked-profile "$semantic_masked_profile" \
     --table "$table" --evidence "$evidence" "${vector_smoke_args[@]}" >"$lane_dir/ladder_stdout.txt"
   local ladder_status=$?
@@ -386,6 +429,34 @@ BADTOOL
     return 1
   fi
   e2e_log_event "ladder_session" "assert" "pass" 0 "lane $lane: full ladder green (evidence: $evidence)"
+
+  # Cross the real stateful Streamable-HTTP MCP boundary over the same live
+  # profile. The session driver replays the ladder's elevation/confirmation,
+  # DML rollback, real-clock TTL, protected-ceiling, and OAuth scope-lowering
+  # assertions, emitting the same JSON-line evidence contract as stdio.
+  local http_evidence="$lane_dir/ladder_http_evidence.jsonl"
+  local http_table="${table}_HTTP"
+  e2e_log_event "ladder_http_session" "act" "running" 0 "lane $lane: stateful Streamable HTTP ladder session (table $http_table)"
+  set +e
+  timeout -k 15 "$lane_timeout_secs" \
+    python3 "$ROOT/scripts/e2e/oracle_ladder_session.py" \
+    --transport streamable-http --http-listen "127.0.0.1:$http_port" --http-audience "$http_audience" \
+    --binary "$BINARY" --profile "$lane" --server-version-regex "$server_version_regex" \
+    --ro-profile "$ro_profile" --protected-profile "$protected_profile" --custom-tool matrix_ro_probe \
+    --semantic-masked-profile "$semantic_masked_profile" \
+    --table "$http_table" --evidence "$http_evidence" "${vector_smoke_args[@]}" >"$lane_dir/ladder_http_stdout.txt"
+  local http_ladder_status=$?
+  set -e
+  cat "$lane_dir/ladder_http_stdout.txt"
+  if [ "$http_ladder_status" -eq 124 ]; then
+    e2e_log_event "ladder_http_session" "assert" "fail" 0 "lane $lane: Streamable HTTP ladder session exceeded the ${lane_timeout_secs}s wall-clock ceiling (evidence: $http_evidence)"
+    return 1
+  fi
+  if [ "$http_ladder_status" -ne 0 ]; then
+    e2e_log_event "ladder_http_session" "assert" "fail" 0 "lane $lane: Streamable HTTP ladder session failed (evidence: $http_evidence)"
+    return 1
+  fi
+  e2e_log_event "ladder_http_session" "assert" "pass" 0 "lane $lane: full Streamable HTTP ladder green (evidence: $http_evidence)"
 
   # Step 5b (bead oraclemcp-ow3v): restart-resume across server sessions. A
   # SECOND oraclemcp process opening the SAME audit.jsonl must CONTINUE the one
@@ -405,7 +476,7 @@ BADTOOL
   timeout -k 15 "$lane_timeout_secs" \
     python3 "$ROOT/scripts/e2e/oracle_ladder_session.py" \
     --binary "$BINARY" --profile "$lane" --server-version-regex "$server_version_regex" \
-    --ro-profile "$ro_profile" --custom-tool matrix_ro_probe \
+    --ro-profile "$ro_profile" --protected-profile "$protected_profile" --custom-tool matrix_ro_probe \
     --table "$table_r2" --evidence "$evidence_r2" >"$lane_dir/ladder_stdout_r2.txt"
   local resume_status=$?
   set -e

@@ -259,13 +259,20 @@ fn lane_backed_blocking_server(
 }
 
 fn per_lane_dispatcher_server(max_level: OperatingLevel) -> OracleMcpServer {
+    per_lane_dispatcher_server_with_profile_level(max_level, false)
+}
+
+fn per_lane_dispatcher_server_with_profile_level(
+    max_level: OperatingLevel,
+    protected: bool,
+) -> OracleMcpServer {
     let registry = tool_registry();
     let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, _lane_context| {
         Box::pin(async move {
             Ok(Arc::new(OracleDispatcher::new_with_profile_level(
                 Box::new(NoExecMock),
                 Some("http-lane-e2e".to_owned()),
-                SessionLevelState::new(max_level, false),
+                SessionLevelState::new(max_level, protected),
             )) as Arc<dyn ToolDispatch>)
         })
     });
@@ -520,6 +527,47 @@ fn stateful_tool_call(
     );
     assert_eq!(status, 200);
     sse_last_json(&body)
+}
+
+fn stateful_elevate(
+    addr: SocketAddr,
+    token: &str,
+    session_id: &str,
+    level: &str,
+    ttl_seconds: u64,
+) -> Value {
+    let preview = stateful_tool_call(
+        addr,
+        token,
+        session_id,
+        "oracle_set_session_level",
+        json!({ "level": level, "ttl_seconds": ttl_seconds }),
+    );
+    let content = &preview["result"]["structuredContent"];
+    assert_ne!(preview["result"]["isError"], json!(true), "{preview}");
+    let confirm = content["confirmation"]["confirm"]
+        .as_str()
+        .expect("elevation preview returns a confirmation token")
+        .to_owned();
+    let applied = stateful_tool_call(
+        addr,
+        token,
+        session_id,
+        "oracle_set_session_level",
+        json!({
+            "level": level,
+            "ttl_seconds": ttl_seconds,
+            "execute": true,
+            "confirm": confirm,
+        }),
+    );
+    assert_ne!(applied["result"]["isError"], json!(true), "{applied}");
+    assert_eq!(
+        applied["result"]["structuredContent"]["session"]["current_level"],
+        json!(level),
+        "the confirmed Streamable HTTP elevation reaches {level}: {applied}"
+    );
+    applied
 }
 
 #[test]
@@ -787,6 +835,112 @@ fn stateful_http_lanes_keep_operating_level_isolated_per_session_and_subject() {
         json!("READ_WRITE"),
         "OAuth scope narrowing must not permanently lower the lane state"
     );
+}
+
+#[test]
+fn streamable_http_e1_ladder_expiry_protected_and_scope_ceiling() {
+    let mut config = oauth_config(Vec::new());
+    config.stateful = true;
+    config.single_principal_guard = None;
+    let harness = spawn_http_with_server(config, per_lane_dispatcher_server(OperatingLevel::Admin));
+    let admin = jwt_with_scope_and_subject("oracle:admin", Some("e1-ladder"));
+    let read = jwt_with_scope_and_subject("oracle:read", Some("e1-ladder"));
+    let session = stateful_initialize(harness.addr, &admin, "e1-streamable-http");
+
+    let initial = stateful_tool_call(
+        harness.addr,
+        &admin,
+        &session,
+        "oracle_set_session_level",
+        json!({ "action": "status" }),
+    );
+    assert_eq!(
+        initial["result"]["structuredContent"]["session"]["current_level"],
+        json!("READ_ONLY"),
+        "a fresh Streamable HTTP session begins read-only"
+    );
+    assert_eq!(
+        initial["result"]["structuredContent"]["session"]["max_level"],
+        json!("ADMIN"),
+        "the fixture exposes the real profile ceiling separately from current authority"
+    );
+
+    for level in ["READ_WRITE", "DDL", "ADMIN"] {
+        stateful_elevate(harness.addr, &admin, &session, level, 60);
+    }
+
+    let narrowed = stateful_tool_call(
+        harness.addr,
+        &read,
+        &session,
+        "oracle_set_session_level",
+        json!({ "action": "status" }),
+    );
+    assert_eq!(
+        narrowed["result"]["structuredContent"]["session"]["current_level"],
+        json!("READ_ONLY"),
+        "an OAuth read scope lowers an already-admin effective session"
+    );
+    let restored = stateful_tool_call(
+        harness.addr,
+        &admin,
+        &session,
+        "oracle_set_session_level",
+        json!({ "action": "status" }),
+    );
+    assert_eq!(
+        restored["result"]["structuredContent"]["session"]["current_level"],
+        json!("ADMIN"),
+        "a broader request scope cannot persistently mutate the profile session"
+    );
+
+    let dropped = stateful_tool_call(
+        harness.addr,
+        &admin,
+        &session,
+        "oracle_set_session_level",
+        json!({ "action": "drop" }),
+    );
+    assert_eq!(
+        dropped["result"]["structuredContent"]["session"]["current_level"],
+        json!("READ_ONLY"),
+        "drop returns the HTTP lane to the read-only floor"
+    );
+    stateful_elevate(harness.addr, &admin, &session, "READ_WRITE", 1);
+    std::thread::sleep(Duration::from_millis(1_100));
+    let expired = stateful_tool_call(
+        harness.addr,
+        &admin,
+        &session,
+        "oracle_set_session_level",
+        json!({ "action": "status" }),
+    );
+    assert_eq!(
+        expired["result"]["structuredContent"]["session"]["current_level"],
+        json!("READ_ONLY"),
+        "the elapsed one-second Streamable HTTP elevation expires without a mocked clock"
+    );
+
+    let mut protected_config = oauth_config(Vec::new());
+    protected_config.stateful = true;
+    protected_config.single_principal_guard = None;
+    let protected = spawn_http_with_server(
+        protected_config,
+        per_lane_dispatcher_server_with_profile_level(OperatingLevel::ReadOnly, true),
+    );
+    let protected_session = stateful_initialize(protected.addr, &admin, "e1-protected-http");
+    let denied = stateful_tool_call(
+        protected.addr,
+        &admin,
+        &protected_session,
+        "oracle_set_session_level",
+        json!({ "level": "READ_WRITE", "ttl_seconds": 60 }),
+    );
+    let denial = &denied["result"]["structuredContent"];
+    assert_eq!(denial["session"]["max_level"], json!("READ_ONLY"));
+    assert_eq!(denial["session"]["protected"], json!(true));
+    assert_eq!(denial["gate"]["decision"], json!("blocked"));
+    assert_eq!(denial["gate"]["reason"]["type"], json!("exceeds_ceiling"));
 }
 
 #[test]

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Operating-level ladder e2e session driver for oracle_version_matrix.sh.
 
-Drives the REAL oraclemcp binary over MCP stdio (newline-delimited JSON-RPC:
-initialize -> notifications/initialized -> tools/call ...) and walks the full
-operating-level ladder READ_ONLY -> DDL -> READ_ONLY -> READ_WRITE -> DDL ->
-READ_ONLY against one live lab lane, asserting row VALUES, refusal envelopes,
-preview verdicts, confirmation grants, rollback-by-default, governed DDL, and
-the on-disk audit hash-chain records for every privileged step.
+Drives the REAL oraclemcp binary over either MCP stdio (newline-delimited
+JSON-RPC) or stateful Streamable HTTP and walks the full operating-level ladder
+READ_ONLY -> READ_WRITE -> DDL -> ADMIN -> READ_ONLY against one live lab lane,
+asserting row VALUES, refusal envelopes, preview verdicts, confirmation grants,
+rollback-by-default, governed DDL, expiry, protected ceilings, and the on-disk
+audit hash-chain records for every privileged step.
 
 Contract with the wrapping bash script (scripts/e2e/lib.sh conventions):
   - JSON-line step events go to stderr when E2E_LOG=1, in the harness schema
@@ -20,6 +20,10 @@ Sanitization: this driver only ever talks to the profile the wrapper generated
 """
 
 import argparse
+import base64
+import hashlib
+import hmac
+import http.client
 import json
 import os
 import queue
@@ -154,6 +158,175 @@ class McpSession:
             self.proc.wait(timeout=15)
 
 
+class HttpMcpSession:
+    """One stateful Streamable-HTTP MCP session against the real binary.
+
+    The stdio driver above is intentionally retained as the primary matrix
+    transport. This companion uses the same real profile and same tool calls,
+    but crosses the served HTTP boundary and carries OAuth credentials so scope
+    ceilings are exercised where they exist. It does not mock either the MCP
+    transport or Oracle connection.
+    """
+
+    def __init__(self, binary, profile, listen, audience, oauth_secret):
+        host, port_text = listen.rsplit(":", 1)
+        self.host = host
+        self.port = int(port_text)
+        self.audience = audience
+        self.oauth_secret = oauth_secret
+        # `http.oauth.required_scopes` requires oracle:read for every request;
+        # the additional admin scope grants the initial high ceiling. Narrowing
+        # below deliberately removes only that latter authority.
+        self.scope = "oracle:read oracle:admin"
+        self.session_id = None
+        self.protocol_version = None
+        self.request_id = 0
+        self.proc = subprocess.Popen(
+            [
+                binary,
+                "--json",
+                "serve",
+                "--listen",
+                listen,
+                "--http-stateful",
+                "--http-json-response",
+                "--profile",
+                profile,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        threading.Thread(target=self._drain, args=(self.proc.stdout,), daemon=True).start()
+        threading.Thread(target=self._drain, args=(self.proc.stderr,), daemon=True).start()
+        self._wait_ready()
+
+    @staticmethod
+    def _drain(stream):
+        if stream is not None:
+            for _ in stream:
+                pass
+
+    @staticmethod
+    def _b64url(value):
+        return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+    def _token(self):
+        header = self._b64url(b'{"alg":"HS256","typ":"at+jwt"}')
+        now = int(time.time())
+        claims = {
+            "iss": "https://synthetic-ladder.invalid",
+            "aud": self.audience,
+            "exp": now + 900,
+            "iat": now,
+            "sub": "synthetic-ladder-e2e",
+            "client_id": "oraclemcp-ladder-e2e",
+            "jti": "synthetic-ladder-e2e",
+            "scope": self.scope,
+        }
+        payload = self._b64url(
+            json.dumps(claims, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        )
+        signing_input = f"{header}.{payload}".encode("ascii")
+        signature = self._b64url(
+            hmac.new(self.oauth_secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
+        )
+        return f"{signing_input.decode('ascii')}.{signature}"
+
+    @staticmethod
+    def _decode_response(raw, path):
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError:
+            frames = []
+            for line in raw.decode("utf-8", errors="replace").splitlines():
+                if line.startswith("data: ") and line[6:] != "null":
+                    try:
+                        frames.append(json.loads(line[6:]))
+                    except json.JSONDecodeError:
+                        continue
+            if not frames:
+                raise StepFailure(f"served endpoint returned no JSON message for {path}")
+            decoded = frames[-1]
+        require(isinstance(decoded, dict), f"served endpoint returned non-object JSON for {path}", decoded)
+        return decoded
+
+    def _request(self, method, path, body=None, include_auth=True):
+        payload = b"" if body is None else json.dumps(body, separators=(",", ":")).encode("utf-8")
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }
+        if include_auth:
+            headers["Authorization"] = f"Bearer {self._token()}"
+        if self.session_id:
+            headers["mcp-session-id"] = self.session_id
+        if self.protocol_version:
+            headers["mcp-protocol-version"] = self.protocol_version
+        connection = http.client.HTTPConnection(self.host, self.port, timeout=20)
+        try:
+            connection.request(method, path, body=payload, headers=headers)
+            response = connection.getresponse()
+            raw = response.read()
+            response_headers = {name.lower(): value for name, value in response.getheaders()}
+            return response.status, response_headers, raw
+        except (OSError, http.client.HTTPException) as exc:
+            raise StepFailure(f"Streamable HTTP request to {path} failed: {exc}") from exc
+        finally:
+            connection.close()
+
+    def _wait_ready(self):
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if self.proc.poll() is not None:
+                raise StepFailure("served Streamable HTTP MCP process exited before readiness")
+            try:
+                status, _, _ = self._request("GET", "/readyz", include_auth=False)
+                if status == 200:
+                    return
+            except StepFailure:
+                pass
+            time.sleep(0.1)
+        raise StepFailure("served Streamable HTTP MCP process did not become ready")
+
+    def set_scope(self, scope):
+        self.scope = scope
+
+    def rpc(self, method, params=None):
+        self.request_id += 1
+        request = {"jsonrpc": "2.0", "id": self.request_id, "method": method}
+        if params is not None:
+            request["params"] = params
+        status, headers, raw = self._request("POST", "/mcp", request)
+        require(status == 200, f"Streamable HTTP {method} returns HTTP 200", {"status": status})
+        if method == "initialize":
+            self.session_id = headers.get("mcp-session-id")
+            require(self.session_id, "stateful initialize returns mcp-session-id", headers)
+            self.protocol_version = (params or {}).get("protocolVersion")
+        return self._decode_response(raw, "/mcp")
+
+    def notify(self, method):
+        status, _, _ = self._request("POST", "/mcp", {"jsonrpc": "2.0", "method": method})
+        require(status in {200, 202}, f"Streamable HTTP notification {method} is accepted", {"status": status})
+
+    def call(self, tool, arguments):
+        reply = self.rpc("tools/call", {"name": tool, "arguments": arguments})
+        if "error" in reply:
+            raise StepFailure(f"{tool}: JSON-RPC error: {reply['error']}")
+        return reply["result"]
+
+    def close(self):
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(timeout=15)
+
+
 def structured(result):
     content = result.get("structuredContent")
     if content is None:
@@ -170,10 +343,11 @@ class Ladder:
     def __init__(self, args, harness):
         self.args = args
         self.harness = harness
-        self.session = McpSession(args.binary, args.profile)
+        self.session = self.new_session(args.profile)
         self.table = args.table
         self.primary_profile = args.profile
         self.ro_profile = getattr(args, "ro_profile", None)
+        self.protected_profile = getattr(args, "protected_profile", None)
         self.semantic_masked_profile = getattr(args, "semantic_masked_profile", None)
         self.custom_tool = getattr(args, "custom_tool", None)
         self.vector_smoke = getattr(args, "vector_smoke", False)
@@ -196,6 +370,17 @@ class Ladder:
         self.proc_created = False
         self.proc_dropped = False
         self.failures = 0
+
+    def new_session(self, profile):
+        if self.args.transport == "stdio":
+            return McpSession(self.args.binary, profile)
+        return HttpMcpSession(
+            self.args.binary,
+            profile,
+            self.args.http_listen,
+            self.args.http_audience,
+            os.environ["E2E_LADDER_OAUTH_HS256_SECRET"],
+        )
 
     # -- step plumbing ------------------------------------------------------
 
@@ -261,9 +446,12 @@ class Ladder:
     def preview(self, sql):
         return structured(self.session.call("oracle_preview_sql", {"sql": sql}))
 
-    def elevate(self, level):
+    def elevate(self, level, ttl_seconds=60):
         preview = structured(
-            self.session.call("oracle_set_session_level", {"level": level})
+            self.session.call(
+                "oracle_set_session_level",
+                {"level": level, "ttl_seconds": ttl_seconds},
+            )
         )
         confirmation = preview.get("confirmation") or {}
         token = confirmation.get("confirm")
@@ -272,7 +460,12 @@ class Ladder:
         applied = structured(
             self.session.call(
                 "oracle_set_session_level",
-                {"level": level, "execute": True, "confirm": token},
+                {
+                    "level": level,
+                    "ttl_seconds": ttl_seconds,
+                    "execute": True,
+                    "confirm": token,
+                },
             )
         )
         session = applied.get("session") or {}
@@ -423,7 +616,9 @@ class Ladder:
             init = self.session.rpc(
                 "initialize",
                 {
-                    "protocolVersion": "2025-03-26",
+                    "protocolVersion": "2025-11-25"
+                    if isinstance(self.session, HttpMcpSession)
+                    else "2025-03-26",
                     "capabilities": {},
                     "clientInfo": {"name": "oracle-version-matrix-e2e", "version": "1"},
                 },
@@ -630,7 +825,48 @@ class Ladder:
             )
             return verdict
 
-        def elevate_ddl():
+        def elevate_read_write_initial():
+            return self.elevate("READ_WRITE")
+
+        def elevate_ddl_initial():
+            return self.elevate("DDL")
+
+        def elevate_admin():
+            return self.elevate("ADMIN")
+
+        def oauth_scope_can_only_lower_effective_level():
+            if not isinstance(self.session, HttpMcpSession):
+                return {"skipped": "OAuth scope ceilings apply at the HTTP boundary"}
+            self.session.set_scope("oracle:read")
+            narrowed = structured(
+                self.session.call("oracle_set_session_level", {"action": "status"})
+            )
+            require(
+                (narrowed.get("session") or {}).get("current_level") == "READ_ONLY",
+                "an OAuth read scope lowers the HTTP session from ADMIN to READ_ONLY",
+                narrowed,
+            )
+            self.session.set_scope("oracle:admin")
+            restored = structured(
+                self.session.call("oracle_set_session_level", {"action": "status"})
+            )
+            require(
+                (restored.get("session") or {}).get("current_level") == "ADMIN",
+                "restoring the granted OAuth scope reveals, but does not raise, the ADMIN session",
+                restored,
+            )
+            return {"narrowed": narrowed, "restored": restored}
+
+        def drop_to_read_only_after_admin():
+            dropped = self.drop_level()
+            require(
+                (dropped.get("session") or {}).get("max_level") == "ADMIN",
+                "dropping ADMIN preserves the profile's ADMIN ceiling",
+                dropped,
+            )
+            return dropped
+
+        def elevate_ddl_for_fixture():
             return self.elevate("DDL")
 
         def ddl_create_table():
@@ -808,12 +1044,14 @@ class Ladder:
             # is not a retry and is deliberately short; the following served
             # call still has exactly one chance to prove masked egress.
             time.sleep(2)
-            masked = McpSession(self.args.binary, self.semantic_masked_profile)
+            masked = self.new_session(self.semantic_masked_profile)
             try:
                 init = masked.rpc(
                     "initialize",
                     {
-                        "protocolVersion": "2025-03-26",
+                        "protocolVersion": "2025-11-25"
+                        if isinstance(masked, HttpMcpSession)
+                        else "2025-03-26",
                         "capabilities": {},
                         "clientInfo": {"name": "oracle-vector-mask-e2e", "version": "1"},
                     },
@@ -862,11 +1100,13 @@ class Ladder:
             # Resume the main ladder on a fresh primary session. The fixture's
             # DDL/DML was committed through the prior governed session, and the
             # cleanup below still goes through the normal DDL confirmation gate.
-            self.session = McpSession(self.args.binary, self.primary_profile)
+            self.session = self.new_session(self.primary_profile)
             resumed = self.session.rpc(
                 "initialize",
                 {
-                    "protocolVersion": "2025-03-26",
+                    "protocolVersion": "2025-11-25"
+                    if isinstance(self.session, HttpMcpSession)
+                    else "2025-03-26",
                     "capabilities": {},
                     "clientInfo": {"name": "oracle-vector-resume-e2e", "version": "1"},
                 },
@@ -1530,6 +1770,33 @@ class Ladder:
             )
             return {"dropped": dropped, "refusal": refusal}
 
+        def real_ttl_expiry_returns_to_read_only():
+            # This is deliberately a wall-clock interval through the served MCP
+            # process, not a mocked deadline. The status request is the observable
+            # boundary: it must reap the elapsed window before it reports a level
+            # or permits a new write confirmation.
+            self.elevate("READ_WRITE", ttl_seconds=1)
+            time.sleep(1.1)
+            status = structured(
+                self.session.call("oracle_set_session_level", {"action": "status"})
+            )
+            session = status.get("session") or {}
+            require(
+                session.get("current_level") == "READ_ONLY",
+                "the real one-second elevation window expires back to READ_ONLY",
+                status,
+            )
+            preview = self.preview(
+                f"INSERT INTO {table} (id, note) VALUES (3, 'expired-window')"
+            )
+            require(
+                preview.get("gate_decision") == "require_step_up"
+                and preview.get("execute_confirmation") is None,
+                "expired elevation cannot mint a write execution grant",
+                preview,
+            )
+            return {"status": status, "preview": preview}
+
         def switch_profile_reconnect_and_posture():
             # oracle_switch_profile: reconnect to a READ_ONLY-ceiling sibling and
             # prove the posture CHANGED (elevation blocked by the ceiling), then
@@ -1586,6 +1853,48 @@ class Ladder:
             )
             return {"switched_to": self.ro_profile, "restored": self.primary_profile}
 
+        def protected_profile_stays_read_only():
+            if not self.protected_profile:
+                return {"skipped": "no --protected-profile provided"}
+
+            switched = self.switch_profile(self.protected_profile)
+            session = switched.get("session") or {}
+            require(
+                switched.get("connected") is True
+                and switched.get("active_profile") == self.protected_profile,
+                "switch reconnects to the protected sibling profile",
+                switched,
+            )
+            require(
+                session.get("max_level") == "READ_ONLY"
+                and session.get("protected") is True,
+                "protected profile reports its immutable READ_ONLY ceiling",
+                switched,
+            )
+            blocked = self.preview_elevation("ADMIN")
+            gate = blocked.get("gate") or {}
+            reason = gate.get("reason") or {}
+            require(
+                gate.get("decision") == "blocked"
+                and reason.get("type") == "exceeds_ceiling",
+                "protected profile cannot elevate to ADMIN",
+                blocked,
+            )
+            require(
+                (blocked.get("session") or {}).get("max_level") == "READ_ONLY"
+                and (blocked.get("session") or {}).get("protected") is True,
+                "a denied protected escalation cannot change its READ_ONLY posture",
+                blocked,
+            )
+            back = self.switch_profile(self.primary_profile)
+            require(
+                back.get("connected") is True
+                and back.get("active_profile") == self.primary_profile,
+                "switch reconnects back from the protected profile",
+                back,
+            )
+            return {"switched_to": self.protected_profile, "restored": self.primary_profile}
+
         steps = [
             ("session_initialize", session_initialize),
             ("read_only_server_version", read_only_server_version),
@@ -1612,7 +1921,12 @@ class Ladder:
             ),
             ("custom_read_only_tool_callable", custom_read_only_tool_callable),
             ("preview_insert_requires_step_up", preview_insert_requires_step_up),
-            ("elevate_ddl", elevate_ddl),
+            ("elevate_read_write_initial", elevate_read_write_initial),
+            ("elevate_ddl_initial", elevate_ddl_initial),
+            ("elevate_admin", elevate_admin),
+            ("oauth_scope_can_only_lower_effective_level", oauth_scope_can_only_lower_effective_level),
+            ("drop_to_read_only_after_admin", drop_to_read_only_after_admin),
+            ("elevate_ddl_for_fixture", elevate_ddl_for_fixture),
             ("ddl_create_table", ddl_create_table),
             ("vector_distance_smoke", vector_distance_smoke),
             ("verify_table_exists", verify_table_exists),
@@ -1653,10 +1967,12 @@ class Ladder:
             ("elevate_ddl_again", elevate_ddl_again),
             ("ddl_drop_table", ddl_drop_table),
             ("drop_to_read_only_final", drop_to_read_only_final),
+            ("real_ttl_expiry_returns_to_read_only", real_ttl_expiry_returns_to_read_only),
             (
                 "switch_profile_reconnect_and_posture",
                 switch_profile_reconnect_and_posture,
             ),
+            ("protected_profile_stays_read_only", protected_profile_stays_read_only),
         ]
         try:
             for name, fn in steps:
@@ -1828,6 +2144,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True)
     parser.add_argument("--profile", required=True)
+    parser.add_argument(
+        "--transport",
+        choices=("stdio", "streamable-http"),
+        default="stdio",
+        help="MCP transport to exercise against the real configured profile",
+    )
+    parser.add_argument(
+        "--http-listen",
+        default=None,
+        help="loopback host:port for --transport streamable-http",
+    )
+    parser.add_argument(
+        "--http-audience",
+        default=None,
+        help="configured OAuth resource audience for --transport streamable-http",
+    )
     parser.add_argument("--server-version-regex", required=True)
     parser.add_argument("--table", required=True)
     parser.add_argument("--evidence", required=True)
@@ -1836,6 +2168,11 @@ def main():
     # to the generated config. Absent -> the switch-profile step is skipped
     # (kept optional so the driver still runs standalone).
     parser.add_argument("--ro-profile", default=None)
+    parser.add_argument(
+        "--protected-profile",
+        default=None,
+        help="protected READ_ONLY sibling profile for immutable-ceiling assertions",
+    )
     # An operator-defined READ_ONLY custom tool the wrapper wrote into
     # ORACLEMCP_TOOLS_DIR; the ladder asserts it is served and returns its value.
     parser.add_argument("--custom-tool", default=None)
@@ -1850,6 +2187,10 @@ def main():
         help="READ_ONLY sibling profile whose masking policy proves vector-search egress",
     )
     args = parser.parse_args()
+    if args.transport == "streamable-http" and (
+        not args.http_listen or not args.http_audience
+    ):
+        parser.error("--transport streamable-http requires --http-listen and --http-audience")
 
     harness = Harness(args.evidence)
     ladder = Ladder(args, harness)
