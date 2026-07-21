@@ -3775,8 +3775,13 @@ impl Classifier {
                 verified_local_vector_embedding,
             )]
         } else {
-            // Multi-statement pure SQL: let the parser split, classify each.
-            match Parser::parse_sql(&OracleDialect {}, sql) {
+            // Multi-statement pure SQL: normalize only the parser copy before
+            // splitting. Oracle 23ai's `VECTOR_EMBEDDING(model USING :bind)`
+            // grammar is not understood by sqlparser, but the narrow rewrite
+            // above is enough to find the original statement boundaries. The
+            // verdict certificate remains bound to `sql`, never this copy.
+            let parser_sql = normalize_vector_embedding_for_parser(sql);
+            match Parser::parse_sql(&OracleDialect {}, &parser_sql) {
                 Ok(stmts) => stmts
                     .iter()
                     .map(|s| {
@@ -4213,6 +4218,55 @@ mod tests {
                  needs catalog proof: {sql}"
             );
         }
+    }
+
+    #[test]
+    fn vector_embedding_batch_normalizes_only_for_parser_splitting() {
+        let verified_batch = "SELECT VECTOR_EMBEDDING(LOCAL_ONNX_MODEL USING :1) FROM dual; \
+            SELECT VECTOR_EMBEDDING(LOCAL_ONNX_MODEL USING :2) FROM dual";
+        let classifier = Classifier::default();
+
+        let verified = classifier.classify_verified_local_vector_embedding(verified_batch);
+        assert_eq!(verified.danger, DangerLevel::Safe, "{verified:?}");
+        assert_eq!(verified.required_level, Some(OperatingLevel::ReadOnly));
+        assert_eq!(
+            verified
+                .verdict_certificate
+                .as_ref()
+                .expect("certificate")
+                .stmt_digest,
+            oraclemcp_audit::sha256_hex(verified_batch.as_bytes()),
+            "the certificate must remain bound to the caller's original bytes"
+        );
+
+        let unverified = classifier.classify(verified_batch);
+        assert_eq!(
+            unverified.danger,
+            DangerLevel::Guarded,
+            "normalizing parser syntax must not trust a caller UDF"
+        );
+
+        for sql in [
+            "SELECT app.VECTOR_EMBEDDING(LOCAL_ONNX_MODEL USING :1) FROM dual; SELECT 1 FROM dual",
+            "SELECT \"VECTOR_EMBEDDING\"(LOCAL_ONNX_MODEL USING :1) FROM dual; SELECT 1 FROM dual",
+            "SELECT VECTOR_EMBEDDING(LOCAL_ONNX_MODEL USING local_vector) FROM dual; SELECT 1 FROM dual",
+        ] {
+            let decision = classifier.classify_verified_local_vector_embedding(sql);
+            assert_eq!(
+                decision.danger,
+                DangerLevel::Forbidden,
+                "only the exact verified-local grammar may be normalized: {sql}"
+            );
+        }
+
+        let with_dml = classifier.classify_verified_local_vector_embedding(
+            "SELECT VECTOR_EMBEDDING(LOCAL_ONNX_MODEL USING :1) FROM dual; DELETE FROM docs",
+        );
+        assert_eq!(
+            with_dml.danger,
+            DangerLevel::Destructive,
+            "a normalized read may not hide the maximum batch danger"
+        );
     }
 
     #[test]
