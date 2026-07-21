@@ -1,0 +1,64 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T15:38:47Z",
+  "bead_id": "oraclemcp-091-a2a-error-collapse-quu5b",
+  "scope": {
+    "summary": "Preserves actionable state-store, setup-preview, incident, and client-credential causes instead of collapsing them into generic failure responses.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/file_store.rs",
+      "crates/oraclemcp-core/src/incident.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs",
+      "crates/oraclemcp/tests/c6_cli_vs_running_server.rs"
+    ],
+    "out_of_scope": [
+      "Changing file-store lock granularity or service reload behavior.",
+      "Changing config validation rules, incident artifact contents, or SQL guard policy."
+    ]
+  },
+  "source": {
+    "sha": "780422b55d15ced8fa43d3c4432698d183d004ea",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "setup --write",
+        "kind": "cli",
+        "trace": "setup_config_error_status gives FileStoreError::Locked its own ORACLEMCP_STATE_STORE_LOCKED code and preserves each preview-flow error with a separate code."
+      },
+      {
+        "name": "clients revoke",
+        "kind": "cli",
+        "trace": "client credential store-opening call sites now use client_credential_error_code so a running service lock has the same actionable code."
+      },
+      {
+        "name": "incident capture and replay",
+        "kind": "cli",
+        "trace": "incident capture distinguishes config load, I/O, and absent bundle files; replay distinguishes I/O and absent bundle files instead of reporting a generic policy refusal."
+      },
+      {
+        "name": "C6 state-store collision fixture",
+        "kind": "cli",
+        "trace": "c6_a_store_collision_names_the_lock_holder_and_the_remedy runs setup --write and clients revoke against a separately owned store and requires an actionable lock code rather than the old generic message."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped offline verification passed: cargo fmt -p oraclemcp -p oraclemcp-core -- --check; cargo test -p oraclemcp --bin oraclemcp a2a_error_statuses_preserve_actionable_causes -- --nocapture; cargo test -p oraclemcp --test c6_cli_vs_running_server -- --nocapture (2 passed).",
+    "No live service or live Oracle environment is claimed; C6 supplies a separate process holding the real file-store flock and deterministic tests cover the status mappings."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
