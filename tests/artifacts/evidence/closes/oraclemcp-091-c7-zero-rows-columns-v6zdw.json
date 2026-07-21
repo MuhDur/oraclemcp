@@ -1,0 +1,51 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T13:55:00Z",
+  "bead_id": "oraclemcp-091-c7-zero-rows-columns-v6zdw",
+  "scope": {
+    "summary": "Commits the C7 fixture: a green test pinning that a page with rows reports its select-list columns, and a committed-red test asserting a zero-row page must do the same, which A1c flips by populating QueryPageBuilder from statement describe metadata.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/query.rs",
+      "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c7-zero-rows-columns-v6zdw.json"
+    ],
+    "out_of_scope": [
+      "Populating columns from describe metadata — A1c owns the fix; this bead owns only the fixture.",
+      "Changing QueryPageBuilder::new's signature, which the fix requires and this bead deliberately does not make.",
+      "The oracle_describe not-found contract (A1d) and the live e2e ladder that asserts it; tracked separately."
+    ]
+  },
+  "source": {
+    "sha": "98380bd7a5698e6e1b925fd6bbbc5e8d36b72506",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_query page construction (QueryPageBuilder -> QueryResponse.columns)",
+        "kind": "api",
+        "trace": "c7_a_page_with_rows_reports_its_columns builds a response through query_response_from_rows_checked and asserts the select-list columns are reported, pinning the working half of the contract that the zero-row case violates"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped test only: cargo test -p oraclemcp-db --lib (452 passed, 1 expected-failure) plus the deliberate red run of that expected failure. The full workspace gate was not run for this commit.",
+    "The zero-row assertion is committed red by design and does not execute in the default run; it is not cited as proof of anything here.",
+    "The flip is NOT attribute-only, unlike C1-C3. QueryPageBuilder::new has no metadata parameter today, so a fixture that compiles now cannot call the post-fix constructor. A1c must change the construction line as well as delete the #[ignore]; the assertion is the invariant and must stay byte-identical.",
+    "The fixture asserts at the QueryPageBuilder seam, not through a live oracle_query against a VPD-filtered table. It proves the page forgets its schema; it does not by itself prove the end-to-end agent-visible symptom on a real database."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "A1c must delete the #[ignore] on query::tests::c7_a_zero_row_page_still_reports_its_columns and pass statement describe metadata into QueryPageBuilder::new, leaving the assertion unchanged."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
