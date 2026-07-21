@@ -1325,6 +1325,18 @@ struct RustOracleConnectionSlot {
     quarantine_reason: Option<String>,
 }
 
+const EXPLICIT_LOGOFF_CLOSED_REASON: &str = "thin connection was closed by explicit logical logoff";
+
+impl RustOracleConnectionSlot {
+    /// A completed logical logoff is terminal but successful. Repeated close
+    /// requests must be harmless rather than treating the consumed driver
+    /// connection as an internal error.
+    fn is_explicitly_closed(&self) -> bool {
+        self.connection.is_none()
+            && self.quarantine_reason.as_deref() == Some(EXPLICIT_LOGOFF_CLOSED_REASON)
+    }
+}
+
 struct RustOracleConnectionGuard<'a> {
     guard: asupersync::sync::MutexGuard<'a, RustOracleConnectionSlot>,
 }
@@ -5445,36 +5457,34 @@ mod driver {
             // the driver's consuming close path still gets its bounded chance
             // to roll back, send LOGOFF, and emit TLS close_notify.
             try_commit_section(cx, super::CLEANUP_MASKED_POLLS, async {
-                let connection = {
-                    let mut slot = self.inner.lock(cx).await.map_err(|err| {
-                        DbError::Internal(format!("thin connection lock failed: {err}"))
-                    })?;
-                    if let Some(reason) = slot.quarantine_reason.as_deref() {
-                        return Err(DbError::Quarantined {
-                            outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
-                            message: reason.to_owned(),
-                        });
-                    }
-                    slot.connection.take().ok_or_else(|| {
-                        DbError::Internal(
-                            "thin connection is unavailable for logical close".to_owned(),
-                        )
-                    })?
-                };
-
+                // Keep the slot lock across the consuming driver close. Queries
+                // already do this for their whole driver round trip, and it
+                // makes concurrent close calls serialize: the second caller
+                // observes the completed terminal state instead of attempting
+                // another LOGOFF against an already-consumed session.
+                let mut slot = self.inner.lock(cx).await.map_err(|err| {
+                    DbError::Internal(format!("thin connection lock failed: {err}"))
+                })?;
+                if slot.is_explicitly_closed() {
+                    return Ok(());
+                }
+                if let Some(reason) = slot.quarantine_reason.as_deref() {
+                    return Err(DbError::Quarantined {
+                        outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                        message: reason.to_owned(),
+                    });
+                }
+                let connection = slot.connection.take().ok_or_else(|| {
+                    DbError::Internal("thin connection is unavailable for logical close".to_owned())
+                })?;
                 let result = connection
                     .close(cx)
                     .await
                     .map_err(|err| driver_query_error(err, &self.opts, None));
-
-                let mut slot = self.inner.lock(cx).await.map_err(|err| {
-                    DbError::Internal(format!("thin connection lock failed: {err}"))
-                })?;
                 match result {
                     Ok(()) => {
-                        slot.quarantine_reason = Some(
-                            "thin connection was closed by explicit logical logoff".to_owned(),
-                        );
+                        slot.quarantine_reason =
+                            Some(super::EXPLICIT_LOGOFF_CLOSED_REASON.to_owned());
                         Ok(())
                     }
                     Err(error) => {
@@ -6529,6 +6539,33 @@ mod tests {
             ),
             "subsequent use remains structurally quarantined: {error:?}"
         );
+    }
+
+    #[test]
+    fn explicit_logoff_is_idempotent_after_the_driver_session_is_consumed() {
+        use asupersync::runtime::RuntimeBuilder;
+
+        let conn = RustOracleConnection {
+            opts: OracleConnectOptions::default(),
+            inner: Arc::new(AsyncMutex::new(RustOracleConnectionSlot {
+                connection: None,
+                quarantine_reason: Some(EXPLICIT_LOGOFF_CLOSED_REASON.to_owned()),
+            })),
+            wire_limits: Mutex::new(WireLimits::default()),
+            cqn_client_ids: Mutex::new(HashMap::new()),
+        };
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            conn.close(&cx)
+                .await
+                .expect("a completed explicit logoff is safe to repeat");
+            conn.close(&cx)
+                .await
+                .expect("a second explicit logoff must not re-release the session");
+        });
     }
 
     #[test]

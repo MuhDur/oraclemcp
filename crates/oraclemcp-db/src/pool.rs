@@ -187,6 +187,9 @@ impl PoolMetrics {
 struct PoolState {
     idle: Vec<RustOracleConnection>,
     open_count: u32,
+    /// Once shutdown begins, no checkout may create or reuse a session and a
+    /// late check-in is discarded instead of returning to the idle set.
+    closing: bool,
     /// In-flight (checked-out) connections — the difference between a checkout
     /// and its matching check-in. Drives the zero-leaked-session accounting.
     in_use: u32,
@@ -275,6 +278,7 @@ impl OraclePool {
             state: Arc::new(Mutex::new(PoolState {
                 open_count: idle.len() as u32,
                 idle,
+                closing: false,
                 in_use: 0,
                 acquired: 0,
                 released: 0,
@@ -297,6 +301,38 @@ impl OraclePool {
     #[must_use]
     pub fn settings(&self) -> PoolSettings {
         self.settings
+    }
+
+    /// Log off every idle physical session and prevent future reuse.
+    ///
+    /// A lane calls this only after it has stopped dispatching through the
+    /// pool. If a checkout is still unwinding, its check-in observes `closing`
+    /// and discards that session instead of putting it back into the idle set.
+    pub async fn close(&self, cx: &Cx) -> Result<(), DbError> {
+        let idle = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
+            state.closing = true;
+            let idle = std::mem::take(&mut state.idle);
+            state.open_count = state.open_count.saturating_sub(idle.len() as u32);
+            idle
+        };
+
+        let mut first_error = None;
+        for connection in idle {
+            if let Err(error) = connection.close(cx).await {
+                tracing::warn!(error = %error, "pooled Oracle session logical close failed");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// A snapshot of checkout accounting (B3/B4 zero-leaked-session evidence).
@@ -459,7 +495,11 @@ impl OraclePool {
                 .connection()
                 .set_request_deadline(cx, previous_deadline);
             let restore_error = quota_restore.err().or_else(|| deadline_restore.err());
-            checkout.finish(broken || restore_error.is_some())?;
+            let discard = broken || restore_error.is_some();
+            if discard && let Err(error) = checkout.connection().close(cx).await {
+                tracing::warn!(error = %error, "discarded pooled Oracle session logical close failed");
+            }
+            checkout.finish(discard)?;
             if retry_fresh && restore_error.is_none() {
                 attempt += 1;
                 asupersync::runtime::yield_now().await;
@@ -501,6 +541,11 @@ impl OraclePool {
     }
 
     async fn try_checkout(&self, cx: &Cx) -> Result<Option<RustOracleConnection>, DbError> {
+        if self.is_closing()? {
+            return Err(DbError::Pool(
+                "thin Oracle connection pool is closing".to_owned(),
+            ));
+        }
         loop {
             if let Some(conn) = self.take_idle_connection()? {
                 let pending_slot = PendingOpenSlot::new(Arc::clone(&self.state));
@@ -541,7 +586,7 @@ impl OraclePool {
             .state
             .lock()
             .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
-        if state.open_count < self.settings.max_size {
+        if !state.closing && state.open_count < self.settings.max_size {
             state.open_count += 1;
             Ok(true)
         } else {
@@ -559,6 +604,13 @@ impl OraclePool {
         Ok(())
     }
 
+    fn is_closing(&self) -> Result<bool, DbError> {
+        self.state
+            .lock()
+            .map(|state| state.closing)
+            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))
+    }
+
     /// Build a pool WITHOUT connecting, pre-seeded to a chosen open-count, for
     /// offline tests of the bounded-reservation and acquire-timeout paths (B4).
     /// The manager is never used to `connect` in these tests because every
@@ -573,6 +625,7 @@ impl OraclePool {
             state: Arc::new(Mutex::new(PoolState {
                 idle: Vec::new(),
                 open_count,
+                closing: false,
                 in_use: 0,
                 acquired: 0,
                 released: 0,
@@ -715,7 +768,7 @@ fn record_checkin(state: &mut PoolState, broken: bool) -> bool {
     // Every checkout decrements in-use exactly once here, regardless of whether
     // the connection is returned clean or discarded dirty.
     state.in_use = state.in_use.saturating_sub(1);
-    if broken {
+    if broken || state.closing {
         state.open_count = state.open_count.saturating_sub(1);
         state.discarded += 1;
         false
@@ -749,6 +802,10 @@ impl OracleConnection for OraclePool {
 
     async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
         OraclePool::ping(self, cx).await
+    }
+
+    async fn close(&self, cx: &Cx) -> Result<(), DbError> {
+        OraclePool::close(self, cx).await
     }
 
     async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
@@ -1025,6 +1082,7 @@ mod tests {
         PoolState {
             idle: Vec::new(),
             open_count,
+            closing: false,
             in_use: 1,
             acquired: 1,
             released: 0,
@@ -1062,6 +1120,21 @@ mod tests {
         assert_eq!(state.in_use, 0);
         // Accounting balances: 1 acquired == 0 released + 1 discarded.
         assert_eq!(state.acquired, state.released + state.discarded);
+    }
+
+    #[test]
+    fn closing_pool_discards_a_late_clean_checkin() {
+        // A shutdown race must never reintroduce a session after `close` has
+        // drained the idle set. The late checkout is discarded and its slot is
+        // accounted for exactly like a broken connection.
+        let mut state = seeded_state(3);
+        state.closing = true;
+        let stash = record_checkin(&mut state, false);
+        assert!(!stash, "a closing pool never reuses a checked-in session");
+        assert_eq!(state.discarded, 1);
+        assert_eq!(state.released, 0);
+        assert_eq!(state.open_count, 2);
+        assert_eq!(state.in_use, 0);
     }
 
     #[test]
@@ -1223,6 +1296,7 @@ mod tests {
         let state = Arc::new(Mutex::new(PoolState {
             idle: Vec::new(),
             open_count: 1,
+            closing: false,
             in_use: 0,
             acquired: 0,
             released: 0,
