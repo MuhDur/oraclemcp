@@ -1629,6 +1629,21 @@ fn user_defined_calls(sql: &str, verified_local_vector_embedding: bool) -> Vec<O
             let is_qualified = i >= 3
                 && matches!(toks[i - 2], Token::Period)
                 && matches!(toks[i - 3], Token::Word(_));
+            // `owner.package.function(` is richer than the two-part identity
+            // carried by ObjectRef. Never collapse it to `package.function`:
+            // an exact operator declaration for the latter must not prove an
+            // arbitrary owner's package member pure.
+            let has_owner_chain = is_qualified
+                && i >= 5
+                && matches!(toks[i - 4], Token::Period)
+                && matches!(toks[i - 5], Token::Word(_));
+            // Quoted identifiers are case-sensitive Oracle identities, while
+            // the engine-free ObjectRef stores only the text. Treat them as
+            // unproven rather than letting an unquoted allowlist declaration
+            // accidentally cover a distinct quoted routine.
+            let has_quoted_identifier = name.quote_style.is_some()
+                || (is_qualified
+                    && matches!(toks[i - 3], Token::Word(schema) if schema.quote_style.is_some()));
             // A schema-qualified `schema.name(` is unambiguously a routine call
             // (SQL constructs like VALUES/IN/CAST/AS are never schema-qualified),
             // so it is NEVER skipped — closing the headline `billing.purge()`
@@ -1650,7 +1665,7 @@ fn user_defined_calls(sql: &str, verified_local_vector_embedding: bool) -> Vec<O
             // is STILL pushed (over-detection only adds Guarded), so an
             // unexpected state refuses by flagging rather than unwinding out of
             // classification or fail-opening to Safe.
-            let (schema, fname) = if is_qualified {
+            let (schema, fname) = if is_qualified && !has_owner_chain && !has_quoted_identifier {
                 match toks[i - 3] {
                     Token::Word(s) => (Some(s.value.clone()), name.value.clone()),
                     _ => (None, name.value.clone()),
@@ -4596,6 +4611,48 @@ mod tests {
         let c = Classifier::default().with_oracle(Arc::new(ProvenOracle));
         let d = c.classify("SELECT billing.lookup(x) FROM dual");
         assert_eq!(d.danger, DangerLevel::Safe);
+    }
+
+    #[test]
+    fn udf_purity_proof_cannot_launder_owner_chains_or_quoted_identifiers() {
+        struct TwoPartProof;
+        impl SideEffectOracle for TwoPartProof {
+            fn routine_purity(&self, routine: &ObjectRef) -> Purity {
+                if routine.schema.as_deref() == Some("pkg")
+                    && routine.name.eq_ignore_ascii_case("run")
+                {
+                    Purity::ProvenReadOnly
+                } else {
+                    Purity::Unknown
+                }
+            }
+        }
+
+        let classifier = Classifier::default().with_oracle(Arc::new(TwoPartProof));
+        assert_eq!(
+            classifier.classify("SELECT pkg.run(x) FROM dual").danger,
+            DangerLevel::Safe,
+            "the exact reviewed two-part identity remains eligible for proof"
+        );
+
+        for sql in [
+            "SELECT trusted_owner.pkg.run(x) FROM dual",
+            "SELECT evil_owner.pkg.run(x) FROM dual",
+            "SELECT \"pkg\".run(x) FROM dual",
+            "SELECT pkg.\"run\"(x) FROM dual",
+        ] {
+            let decision = classifier.classify(sql);
+            assert_eq!(
+                decision.danger,
+                DangerLevel::Guarded,
+                "a two-part proof must not clear a richer or quoted identity: {sql:?}"
+            );
+            assert_eq!(
+                decision.required_level,
+                Some(OperatingLevel::ReadWrite),
+                "{sql:?}"
+            );
+        }
     }
 
     #[test]

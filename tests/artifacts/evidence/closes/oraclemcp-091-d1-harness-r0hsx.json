@@ -1,0 +1,49 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T19:30:24Z",
+  "bead_id": "oraclemcp-091-d1-harness-r0hsx",
+  "scope": {
+    "summary": "Makes the local XE18/XE21/Free23 rig a credential-free, one-command lifecycle harness with an explicit safe fallback when local credentials cannot be discovered.",
+    "in_scope": [
+      "scripts/rig/oracle_l1.sh",
+      "docs/operations.md",
+      "crates/oraclemcp/tests/e2e_harness.rs"
+    ],
+    "out_of_scope": [
+      "Remote Oracle databases and OCI Autonomous DB.",
+      "A container whose SYS password was rotated after creation and is absent from Docker config; the harness fails before bootstrap or smoke unless the operator supplies the lane override.",
+      "Stopping containers that were already running before the invocation."
+    ]
+  },
+  "source": {
+    "sha": "96e43f4fd179cc7c1bae3dc4b03d6febb2ca57b4",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Rig L1 local Docker command",
+        "kind": "cli",
+        "trace": "A clean detached worktree at source.sha ran `bash scripts/rig/oracle_l1.sh run --log` with no credential variables. The JSON-line result passed readiness, driver bootstrap, and SELECT 1 FROM dual for xe18, xe21, and free23. Two subsequent `down --log` commands both passed and the three pre-existing containers remained running. `rig_l1_dry_run_is_a_single_command_with_complete_lane_plan` also passed (1 passed) and asserts all three lane plans plus the no-credential command and pipefail-safe readiness check."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The local container run is integration evidence only: no committed exact-SHA live-evidence artifact was produced, so this close does not claim live-evidence readiness.",
+    "The lab containers were already running, so teardown was proved as an idempotent safe no-op twice; this close does not claim to have stopped and restarted a container owned by another process.",
+    "The full workspace quality gate was not run for this source commit."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

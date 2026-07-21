@@ -1,0 +1,21 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T19:58:00Z",
+  "bead_id": "oraclemcp-091-b14a-drcp-clear-before-set-jzgub",
+  "scope": {
+    "summary": "DRCP session identity is cleared before optional identity application, including the no-identity path; the live fixture proves principal A cannot bleed into principal B on reused sessions.",
+    "in_scope": ["crates/oraclemcp-db/src/connection.rs", "crates/oraclemcp-db/tests/live_oracle.rs"],
+    "out_of_scope": ["Live DRCP execution requires the operator's DRCP-enabled Oracle lane."]
+  },
+  "source": {"sha": "e724338c25c5ddc34adad98476e562612500d395", "tree_clean": true, "branch": "main"},
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [{"name": "DRCP identity regression test", "kind": "cli", "trace": "The live_oracle fixture seeds profile A, releases it, reacquires profile B with no identity, requires physical SID reuse, and rejects all A tags."}]
+  },
+  "live_evidence": {"claimed": false, "artifacts": []},
+  "limitations": ["The DRCP fixture was not run because no live DRCP lane was available in this turn."],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {"claim": "not-ready", "basis": "scoped-test"}
+}

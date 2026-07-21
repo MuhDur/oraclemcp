@@ -4533,6 +4533,17 @@ fn call_timeout_duration(seconds: Option<u64>) -> Result<Option<Duration>, Error
     )))
 }
 
+/// Parse the per-call timeout override at the dispatch boundary.
+///
+/// This must run before tool-specific argument parsing: every live-DB tool
+/// advertises `timeout_seconds`, but not every DTO carries the field.  Letting
+/// an explicit zero fall through made its meaning depend on which handler a
+/// caller selected.  Reuse [`call_timeout_duration`] so the boundary and the
+/// handlers share the same fail-closed zero refusal and positive-value clamp.
+fn explicit_timeout_duration(args: &Value) -> Result<Option<Duration>, ErrorEnvelope> {
+    call_timeout_duration(args.get("timeout_seconds").and_then(Value::as_u64))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CompletionPolicy {
     /// The body is a read or preview. A deadline observed after it completes
@@ -12118,14 +12129,8 @@ impl OracleDispatcher {
         args: Value,
     ) -> Result<Value, ErrorEnvelope> {
         let mut request_budget = self.dispatch_request_budget(cx, context)?;
-        if let Some(timeout_seconds) = args
-            .get("timeout_seconds")
-            .and_then(Value::as_u64)
-            .filter(|seconds| *seconds > 0)
-        {
-            request_budget = request_budget.tighten_timeout(Duration::from_secs(
-                timeout_seconds.min(MAX_CALL_TIMEOUT_SECONDS),
-            ));
+        if let Some(timeout) = explicit_timeout_duration(&args)? {
+            request_budget = request_budget.tighten_timeout(timeout);
             request_budget.enforce(cx).map_err(DbError::into_envelope)?;
         }
         let tool = canonical_tool_name(name);
@@ -14882,14 +14887,8 @@ impl OracleDispatcher {
         frames: ToolStreamSender,
     ) -> Result<Value, ErrorEnvelope> {
         let mut request_budget = self.dispatch_request_budget(cx, context)?;
-        if let Some(timeout_seconds) = args
-            .get("timeout_seconds")
-            .and_then(Value::as_u64)
-            .filter(|seconds| *seconds > 0)
-        {
-            request_budget = request_budget.tighten_timeout(Duration::from_secs(
-                timeout_seconds.min(MAX_CALL_TIMEOUT_SECONDS),
-            ));
+        if let Some(timeout) = explicit_timeout_duration(&args)? {
+            request_budget = request_budget.tighten_timeout(timeout);
             request_budget.enforce(cx).map_err(DbError::into_envelope)?;
         }
         if let Some(quarantine) = self.connection_quarantine()? {

@@ -20,8 +20,14 @@ export E2E_SCENARIO E2E_LANE E2E_PROFILE E2E_LEVEL
 DRIVER_ROOT="${ORACLEMCP_DRIVER_ROOT:-$ROOT/../rust-oracledb}"
 DRIVER_CONTAINER="$DRIVER_ROOT/scripts/container.sh"
 DRIVER_BOOTSTRAP="$DRIVER_ROOT/scripts/bootstrap_live_schema.sh"
+CAPABILITY_FIXTURES_SQL="$ROOT/scripts/rig/oracle_l1_capabilities.sql"
 READY_TIMEOUT_SECS="${ORACLEMCP_RIG_L1_READY_TIMEOUT_SECS:-300}"
 BOOTSTRAP_TIMEOUT_SECS="${ORACLEMCP_RIG_L1_BOOTSTRAP_TIMEOUT_SECS:-300}"
+# The driver bootstrap owns this throwaway principal. Keep the D2 fixture
+# credentials aligned with it while permitting an operator to override a
+# rotated lab password without printing it.
+FIXTURE_USER="${PYO_TEST_MAIN_USER:-pythontest}"
+FIXTURE_PASSWORD="${ORACLEMCP_RIG_L1_FIXTURE_PASSWORD:-${PYO_TEST_MAIN_PASSWORD:-testpw}}"
 # Keep runtime-only credentials lane-specific: the reused XE and Free images
 # may deliberately have different SYS passwords. The shared variable remains a
 # convenience fallback for lab images that use one password everywhere.
@@ -37,12 +43,17 @@ Rig L1 Oracle container harness.
 
 Usage:
   bash scripts/rig/oracle_l1.sh run --log
-  bash scripts/rig/oracle_l1.sh <up|wait|bootstrap|smoke|down|run> [--log|--dry-run]
+  bash scripts/rig/oracle_l1.sh <up|wait|bootstrap|fixtures|smoke|drcp-identity|down|run> [--log|--dry-run]
 
 `run` is the one-command L1 cycle: start stopped existing containers, wait for
 the Oracle readiness sentinel, seed the reusable driver schema, smoke-query
-each lane, then stop only containers this process started. It never creates or
-removes a container and leaves pre-existing running lanes untouched.
+and verify D2 capability fixtures in each lane, then stop only containers this
+process started. It never creates or removes a container and leaves pre-existing
+running lanes untouched.
+
+`drcp-identity` runs the two-profile DRCP reuse assertion against FREE 23ai.
+It intentionally fails until B14a clears identity before setting it; that red
+result is the fixture's proof that it can catch the cross-profile bleed.
 
 Environment:
   ORACLEMCP_DRIVER_ROOT                 rust-oracledb checkout (default sibling)
@@ -50,6 +61,7 @@ Environment:
   ORACLEMCP_RIG_L1_BOOTSTRAP_TIMEOUT_SECS  per-lane bootstrap ceiling (default 300)
   ORACLEMCP_RIG_L1_<LANE>_ADMIN_PASSWORD  lane SYS password (XE18, XE21, FREE23; not logged)
   ORACLEMCP_RIG_L1_ADMIN_PASSWORD         shared fallback SYS password (not logged)
+  ORACLEMCP_RIG_L1_FIXTURE_PASSWORD       PYO_TEST_MAIN_USER password after bootstrap (default: testpw; not logged)
 USAGE
   e2e_usage_common
 }
@@ -102,6 +114,7 @@ require_runtime_tools() {
   [[ "$BOOTSTRAP_TIMEOUT_SECS" =~ ^[1-9][0-9]*$ ]] || e2e_finish_fail 'ORACLEMCP_RIG_L1_BOOTSTRAP_TIMEOUT_SECS must be a positive integer'
   [ -x "$DRIVER_CONTAINER" ] || e2e_finish_fail "driver container helper is not executable: $DRIVER_CONTAINER"
   [ -x "$DRIVER_BOOTSTRAP" ] || e2e_finish_fail "driver bootstrap hook is not executable: $DRIVER_BOOTSTRAP"
+  [ -r "$CAPABILITY_FIXTURES_SQL" ] || e2e_finish_fail "D2 capability fixture SQL is not readable: $CAPABILITY_FIXTURES_SQL"
 }
 
 require_lane_admin_password() {
@@ -203,6 +216,174 @@ bootstrap_lane() {
   e2e_log_event 'fixture_bootstrap' 'assert' 'pass' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane driver bootstrap completed"
 }
 
+seed_capability_lane() {
+  local lane="$1"
+  local container pdb started output fixture_exit
+  container="$(lane_container "$lane")"
+  pdb="$(lane_pdb "$lane")"
+  if [ "$E2E_DRY_RUN" = '1' ]; then
+    e2e_log_event 'capability_fixture_seed' 'act' 'skipped' 0 "lane=$lane dry-run"
+    return 0
+  fi
+  [ -n "$FIXTURE_USER" ] || e2e_finish_fail 'PYO_TEST_MAIN_USER must not be empty for D2 fixtures'
+  [ -n "$FIXTURE_PASSWORD" ] || e2e_finish_fail 'ORACLEMCP_RIG_L1_FIXTURE_PASSWORD must not be empty for D2 fixtures'
+  container_running "$container" || e2e_finish_fail "lane=$lane container is not running: $container"
+  started="$(e2e_epoch_ms)"
+  e2e_log_event 'capability_fixture_seed' 'act' 'running' "0" "lane=$lane schema=ORACLEMCP_CAP_*"
+  set +e
+  output="$(timeout -k 10 "$BOOTSTRAP_TIMEOUT_SECS" docker exec -i "$container" \
+    sqlplus -S -L "${FIXTURE_USER}/${FIXTURE_PASSWORD}@localhost:1521/${pdb}" \
+    <"$CAPABILITY_FIXTURES_SQL")"
+  fixture_exit=$?
+  set -e
+  if [ "$fixture_exit" -ne 0 ]; then
+    e2e_log_event 'capability_fixture_seed' 'assert' 'fail' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane D2 schema seed failed"
+    e2e_finish_fail "lane=$lane D2 capability schema seed failed"
+  fi
+  e2e_log_event 'capability_fixture_seed' 'assert' 'pass' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane schema=ORACLEMCP_CAP_* seeded"
+}
+
+verify_capability_lane() {
+  local lane="$1"
+  local container pdb started output fixture_exit
+  container="$(lane_container "$lane")"
+  pdb="$(lane_pdb "$lane")"
+  if [ "$E2E_DRY_RUN" = '1' ]; then
+    e2e_log_event 'capability_fixture_assert' 'assert' 'skipped' 0 "lane=$lane dry-run"
+    return 0
+  fi
+  container_running "$container" || e2e_finish_fail "lane=$lane container is not running: $container"
+  started="$(e2e_epoch_ms)"
+  e2e_log_event 'capability_fixture_assert' 'act' 'running' 0 "lane=$lane typed,lob,refcursor,soda,vector,tpc,output,edition,statement-cache"
+  set +e
+  output="$(timeout -k 10 "$BOOTSTRAP_TIMEOUT_SECS" docker exec -i "$container" \
+    sqlplus -S -L "${FIXTURE_USER}/${FIXTURE_PASSWORD}@localhost:1521/${pdb}" <<'SQL'
+whenever sqlerror exit failure
+set echo off feedback off heading off verify off serveroutput on size 1000000
+declare
+  l_major pls_integer;
+  l_count pls_integer;
+  l_number number;
+  l_text varchar2(64);
+  l_raw raw(4);
+  l_lob_chars pls_integer;
+  l_lob_bytes pls_integer;
+  l_cache_value varchar2(32);
+  l_tpc_state varchar2(16);
+  l_ref sys_refcursor;
+  l_ref_id number;
+  l_ref_number number;
+  l_ref_text varchar2(64);
+  l_collection soda_collection_t;
+begin
+  select to_number(regexp_substr(version, '^[0-9]+')) into l_major from v$instance;
+  select number_value, text_value, raw_value
+    into l_number, l_text, l_raw
+    from ORACLEMCP_CAP_TYPED where id = 1;
+  if l_number != 42.125 or l_text != 'd2 typed row' or rawtohex(l_raw) != 'DEADBEEF' then
+    raise_application_error(-20001, 'typed fixture drift');
+  end if;
+  select dbms_lob.getlength(text_value), dbms_lob.getlength(blob_value)
+    into l_lob_chars, l_lob_bytes
+    from ORACLEMCP_CAP_LOB where id = 1;
+  if l_lob_chars != 96 or l_lob_bytes != 8 then
+    raise_application_error(-20002, 'LOB fixture drift');
+  end if;
+  ORACLEMCP_CAP_REFCURSOR.open_typed_rows(l_ref);
+  fetch l_ref into l_ref_id, l_ref_number, l_ref_text;
+  close l_ref;
+  if l_ref_id != 1 or l_ref_number != 42.125 or l_ref_text != 'd2 typed row' then
+    raise_application_error(-20003, 'REF CURSOR fixture drift');
+  end if;
+  select cache_value into l_cache_value from ORACLEMCP_CAP_STMT_CACHE where cache_key = 2;
+  select state into l_tpc_state from ORACLEMCP_CAP_TPC where branch_id = 'd2-local-only';
+  if l_cache_value != 'second cached row' or l_tpc_state != 'unprepared' then
+    raise_application_error(-20004, 'statement-cache or TPC fixture drift');
+  end if;
+  select count(*) into l_count from all_editions where edition_name = 'E_TEST';
+  if l_count != 1 then
+    raise_application_error(-20005, 'edition fixture missing E_TEST');
+  end if;
+  if l_major >= 23 then
+    select count(*) into l_count from user_tables where table_name = 'ORACLEMCP_CAP_VECTOR';
+    if l_count != 1 then
+      raise_application_error(-20006, '23ai vector fixture missing');
+    end if;
+    l_collection := dbms_soda.open_collection('ORACLEMCP_CAP_SODA');
+    if l_collection is null then
+      raise_application_error(-20007, '23ai SODA fixture missing');
+    end if;
+  else
+    -- This is a negative fixture, not an omission: an XE lane must reject the
+    -- 23ai VECTOR DDL. A mistaken broad generation gate makes this fail.
+    begin
+      execute immediate 'create table ORACLEMCP_CAP_VECTOR_NEG (v vector(3, float32))';
+      execute immediate 'drop table ORACLEMCP_CAP_VECTOR_NEG purge';
+      raise_application_error(-20008, 'pre-23 lane unexpectedly accepted VECTOR');
+    exception
+      when others then
+        if sqlcode = -20008 then
+          raise;
+        end if;
+    end;
+    select count(*) into l_count from user_tables where table_name = 'ORACLEMCP_CAP_VECTOR';
+    if l_count != 0 then
+      raise_application_error(-20009, 'pre-23 lane has a vector fixture');
+    end if;
+  end if;
+  ORACLEMCP_CAP_OUTPUT.emit_fixture_line;
+  dbms_output.put_line('oraclemcp-d2-capabilities-pass');
+end;
+/
+exit
+SQL
+  )"
+  fixture_exit=$?
+  set -e
+  if [ "$fixture_exit" -ne 0 ] || ! printf '%s\n' "$output" | grep -Fx 'oraclemcp-d2-capabilities-pass' >/dev/null; then
+    e2e_log_event 'capability_fixture_assert' 'assert' 'fail' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane D2 live capability assertion failed"
+    e2e_finish_fail "lane=$lane D2 live capability assertion failed"
+  fi
+  if ! printf '%s\n' "$output" | grep -Fx 'oraclemcp-d2-output' >/dev/null; then
+    e2e_log_event 'capability_fixture_assert' 'assert' 'fail' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane DBMS_OUTPUT fixture did not emit"
+    e2e_finish_fail "lane=$lane DBMS_OUTPUT fixture did not emit"
+  fi
+  e2e_log_event 'capability_fixture_assert' 'assert' 'pass' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane live capability fixtures asserted"
+}
+
+drcp_identity_fixture() {
+  local lane='free23'
+  local container pdb started test_exit
+  container="$(lane_container "$lane")"
+  pdb="$(lane_pdb "$lane")"
+  if [ "$E2E_DRY_RUN" = '1' ]; then
+    e2e_log_event 'drcp_identity_fixture' 'assert' 'skipped' 0 'lane=free23 dry-run'
+    return 0
+  fi
+  container_running "$container" || e2e_finish_fail "lane=$lane container is not running: $container"
+  started="$(e2e_epoch_ms)"
+  e2e_log_event 'drcp_identity_fixture' 'act' 'running' 0 'lane=free23 two profiles, same DRCP class'
+  # This is intentionally a focused crate test. It uses the actual adapter
+  # connection path, not a SQLPlus approximation, and so is expected to be red
+  # before B14a's clear-before-set fix lands.
+  set +e
+  ORACLEMCP_TEST_DSN="//localhost:1521/${pdb}" \
+    ORACLEMCP_TEST_USER="$FIXTURE_USER" \
+    ORACLEMCP_TEST_PASSWORD="$FIXTURE_PASSWORD" \
+    ORACLEMCP_TEST_DRCP=1 \
+    ORACLEMCP_TEST_DRCP_IDENTITY=1 \
+    ORACLEMCP_TEST_DRCP_CLASS='oraclemcp-d2-identity' \
+    timeout -k 20 "$BOOTSTRAP_TIMEOUT_SECS" \
+    cargo test -p oraclemcp-db --features live-xe live_drcp_reuse_clears_prior_profile_identity -- --exact --nocapture
+  test_exit=$?
+  set -e
+  if [ "$test_exit" -ne 0 ]; then
+    e2e_log_event 'drcp_identity_fixture' 'assert' 'fail' "$(( $(e2e_epoch_ms) - started ))" 'lane=free23 DRCP profile isolation failed (expected before B14a)'
+    return "$test_exit"
+  fi
+  e2e_log_event 'drcp_identity_fixture' 'assert' 'pass' "$(( $(e2e_epoch_ms) - started ))" 'lane=free23 DRCP profile isolation held'
+}
+
 smoke_lane() {
   local lane="$1"
   local container pdb password started output query_exit
@@ -267,6 +448,8 @@ run_all_lanes() {
   done
   for lane in "${lanes[@]}"; do
     bootstrap_lane "$lane"
+    seed_capability_lane "$lane"
+    verify_capability_lane "$lane"
     smoke_lane "$lane"
   done
 }
@@ -274,7 +457,7 @@ run_all_lanes() {
 command='run'
 if [ "$#" -gt 0 ]; then
   case "$1" in
-    up | wait | bootstrap | smoke | down | run)
+    up | wait | bootstrap | fixtures | smoke | drcp-identity | down | run)
       command="$1"
       shift
       ;;
@@ -305,8 +488,18 @@ case "$command" in
   bootstrap)
     for lane in "${lanes[@]}"; do bootstrap_lane "$lane"; done
     ;;
+  fixtures)
+    for lane in "${lanes[@]}"; do
+      bootstrap_lane "$lane"
+      seed_capability_lane "$lane"
+      verify_capability_lane "$lane"
+    done
+    ;;
   smoke)
     for lane in "${lanes[@]}"; do smoke_lane "$lane"; done
+    ;;
+  drcp-identity)
+    drcp_identity_fixture
     ;;
   down)
     teardown_owned_lanes

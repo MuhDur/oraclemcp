@@ -1,0 +1,56 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T20:00:14Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.8",
+  "scope": {
+    "summary": "DI5 rejects an explicit timeout_seconds of zero at both buffered and streaming dispatch entry points before handler-specific parsing or Oracle I/O.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs"
+    ],
+    "out_of_scope": [
+      "Profile call_timeout_seconds=0 remains the separately documented no-timeout posture; this change only governs per-call arguments.",
+      "No registry schema change: timeout_seconds already advertised a minimum of 1."
+    ]
+  },
+  "source": {
+    "sha": "34f66afc13d729887c1ebf033f806f074245d5f1",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "OracleDispatcher buffered dispatch",
+        "kind": "tool",
+        "trace": "zero_timeout_is_rejected_before_normal_dispatch_reaches_oracle enumerates every registered tool whose public input schema advertises timeout_seconds; each receives InvalidArguments before the recording connection observes query or execute I/O."
+      },
+      {
+        "name": "OracleDispatcher streaming query dispatch",
+        "kind": "tool",
+        "trace": "zero_timeout_is_rejected_before_streaming_query_reaches_oracle invokes dispatch_stream for oracle_query and proves the same InvalidArguments envelope before recording-connection I/O."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped verification only: clean-worktree oraclemcp unit tests for zero rejection and existing positive query/execute timeout override restoration; no live Oracle run.",
+    "A full workspace gate is not claimed: open G1 has an independently reproduced committed guard-test failure."
+  ],
+  "known_defects": [
+    {
+      "description": "G1's committed negative vector embedding batch test is red: a qualified app.VECTOR_EMBEDDING lookalike is Guarded instead of Forbidden because the parser-only normalizer matches after a dot.",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.10"
+    }
+  ],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

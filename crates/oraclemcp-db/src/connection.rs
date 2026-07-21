@@ -1946,6 +1946,19 @@ mod driver {
         identity: Option<&OracleSessionIdentity>,
         opts: &OracleConnectOptions,
     ) -> Result<(), DbError> {
+        // DRCP `purity=reuse` may hand this physical session to a different
+        // principal. Clear every persistent tag before applying the new
+        // identity, including the no-identity case; otherwise a profile that
+        // omits tags would inherit the previous tenant's values.
+        execute_raw(
+            cx,
+            inner,
+            "BEGIN DBMS_APPLICATION_INFO.SET_MODULE(NULL, NULL); DBMS_APPLICATION_INFO.SET_CLIENT_INFO(NULL); DBMS_SESSION.CLEAR_IDENTIFIER; END;",
+            &[],
+            opts,
+            "session identity clear",
+        )
+        .await?;
         let Some(identity) = identity.filter(|identity| !identity.is_empty()) else {
             return Ok(());
         };
