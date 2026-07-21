@@ -1,0 +1,22 @@
+{
+  "schema": "wave1-cross-repo-handoff/v1",
+  "generated_at": "2026-07-21T18:18:23Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.4",
+  "summary": "F-LOW DK1 was already landed driver-side: PoolEngine now elects exactly one final drop with an AtomicUsize handle count, and its regression test releases 16 clones through a Barrier before asserting one physical close.",
+  "driver": {
+    "repo": "rust-oracledb",
+    "commit_sha": "19124558676422f3bcc5c7031576d3657df2a025",
+    "tree_sha": "c2bf1ec0b5862936995d08451ac9ac56e97a6f11",
+    "files": [
+      {
+        "path": "crates/oracledb/src/pool.rs",
+        "sha256": "84add5ad07742269e586abae37c5723f245be24aa564dc2181d22d9012b514af"
+      }
+    ],
+    "verification": [
+      "Commit review: Clone increments handles; Drop uses fetch_sub(Ordering::AcqRel) and only prev == 1 calls close_all_connections.",
+      "Commit review: racing_pool_handle_drops_close_exactly_once creates 16 clones, releases them through std::sync::Barrier, joins every drop thread, waits for worker exit, and asserts backend.closed == 1.",
+      "A fresh CARGO_TARGET_DIR=target/lavender-dk1 cargo test -p oracledb --lib racing_pool_handle_drops_close_exactly_once was bounded to 180 seconds and timed out while compiling asupersync; no current-session passing test result is claimed."
+    ]
+  }
+}

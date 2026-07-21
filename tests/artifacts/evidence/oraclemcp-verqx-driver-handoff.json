@@ -1,0 +1,27 @@
+{
+  "schema": "wave1-cross-repo-handoff/v1",
+  "generated_at": "2026-07-21T18:18:23Z",
+  "bead_id": "oraclemcp-verqx",
+  "summary": "B16a follow-up: rust-oracledb can now retain an OCI IAM TokenSource and the token's bound PKCS#8 proof-of-possession key together, without retaining a static token.",
+  "driver": {
+    "repo": "rust-oracledb",
+    "commit_sha": "c3885783a6b869615ae2ea2408aea9cba3282a6f",
+    "tree_sha": "f17687c2acf1ae4ca4a78a307e3038cdc8044fdb",
+    "files": [
+      {
+        "path": "crates/oracledb/src/lib.rs",
+        "sha256": "04c157b822ab983d4a30c78e7ddffdcb2feaa43f70f1d7b5c2228c0b6c21cfb7"
+      },
+      {
+        "path": "crates/oracledb/tests/token_source.rs",
+        "sha256": "548d3092891582b371ff005ac98b074a060911d9f797f58112f6cffbd824ace9"
+      }
+    ],
+    "verification": [
+      "cargo fmt --all -- --check passed",
+      "cargo check -p oracledb passed",
+      "cargo test -p oracledb --test token_source passed: 6 passed, 0 failed",
+      "scripts/gen_baseline.sh completed; all supported public-API snapshots contain ConnectOptions::with_token_source_and_key"
+    ]
+  }
+}
