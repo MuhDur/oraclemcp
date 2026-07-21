@@ -1,0 +1,63 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T17:10:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.6",
+  "scope": {
+    "summary": "Cluster E complete on the oraclemcp side: the swarm constitution is Charter v2 (eighteen rules), and rules 13-18 each ship a mechanism that settles their question from git or an exit status, wired into the CI lint job.",
+    "in_scope": [
+      "AGENTS.md",
+      "scripts/swarm_discipline.sh",
+      "scripts/audit_bead_closes.py",
+      "scripts/entry_trace_contract.json",
+      ".github/workflows/ci.yml"
+    ],
+    "out_of_scope": [
+      "The rust-oracledb half of 'both repos': rules 13-18 and the script landed in oraclemcp only, because that checkout belongs to the driver panes. Tracked open as oraclemcp-m02vm, which is why this close claims not-ready.",
+      "Enforcement by git hook: every mechanism is a refusal an agent runs, not a locked door. CI runs the selftest and the unbounded-wait lint; it does not run the per-path, per-commit queries.",
+      "The workspace gate itself: verified-push requires --gate-cmd and is deliberately unopinionated about which gate you ran."
+    ]
+  },
+  "source": {
+    "sha": "64a1194b092bf1e42fbf6bed1103dcf94143a284",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/swarm_discipline.sh --selftest",
+        "kind": "cli",
+        "trace": "14 assertions, both directions of every mechanism, exit 0: AT-HEAD vs FOREIGN-EDIT (13), proof-vs-close tree_clean (14), a failed gate refusing the push and recording {\"status\": \"fail\"} (15), a deadline returning 124 and a fast command untouched (16), tail -f refused while build_lease.sh's deadline-bounded loop passes (16), a split struct field refused and the complete change accepted (17), a delete of a live path refused (18). Wired into .github/workflows/ci.yml as 'swarm discipline (constitution rules 13-17)' alongside `unbounded-wait-lint`, which is clean over the repository's 96 committed shell files."
+      },
+      {
+        "name": "python3 scripts/audit_bead_closes.py --template <id> --scope <path>",
+        "kind": "cli",
+        "trace": "The scaffold that caused the E_TREE_DIRTY close now scopes tree_clean to the bead's claimed paths: on this live tree (35-39 foreign dirty paths) unscoped emits false, a clean scope emits true plus a foreign-dirt note, and a dirty scope emits false plus the paths to commit. `--self-test` PASS; `check_bead_close_evidence.sh` reports 0 hard findings."
+      },
+      {
+        "name": "scripts/swarm_discipline.sh stale-delete-check --commit ebac68f",
+        "kind": "cli",
+        "trace": "Replayed against the session's own stale-index commit it names all five deleted-but-present evidence documents and exits 65 \u2014 the mechanism catching the incident that produced it."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Six of the eight original children (E1-E7 plus the E4 follow-up) were closed by earlier sessions; this close verifies the Charter v2 half it delivered and does not re-audit theirs.",
+    "The mechanisms are static and local: no CI run was dispatched from this close, and the ci.yml wiring is verified by reading the file and running both commands locally.",
+    "Rule 17's check is static, not a compiler; rule 16's loop heuristic proves the shape of a bound, not that the bound is correct."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-m02vm"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
