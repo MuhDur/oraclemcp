@@ -1,0 +1,47 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T18:35:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.13",
+  "scope": {
+    "summary": "F-LOW DB4: four INTERVAL DAY TO SECOND serializers interpolated individually-signed i32 components, so a negative interval rendered with embedded minus signs; one checked formatter now owns the sign for every path.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/connection.rs"
+    ],
+    "out_of_scope": [
+      "INTERVAL YEAR TO MONTH, which formats two components and is not part of this finding.",
+      "The typed numeric fields in the structured and OSON payloads: they keep their original signed values, as the bead requires. Only the rendered text is canonicalized.",
+      "The driver's own Arrow/OSON rendering in oracledb 0.8.4, which has the same shape upstream; this fixes the server's serializers only."
+    ]
+  },
+  "source": {
+    "sha": "4077dd6c156c59b3e65d99a3915be2668605b90e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "format_interval_ds / format_interval_ds_iso / interval_ds_mixed_sign_marker",
+        "kind": "api",
+        "trace": "464 oraclemcp-db lib tests pass. Negative acceptance: a wholly negative interval renders '-1 02:03:04.000000005' and '-P1DT2H3M4.000000005S', each containing exactly one '-'; the sub-day case (0,0,0,0,-1) renders '-0 00:00:00.000000001' with no sign after the first character. Positive acceptance: positive and zero intervals are asserted byte-identical to the previous format string in both the direct and ISO forms. Mixed signs return None and the structured paths emit a typed unsupported marker with value=null and the original signed fields preserved. i32::MIN renders '-2147483648 00:00:00.000000000' via unsigned_abs rather than overflowing."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Discriminating, but the first mutation attempt silently no-op'd on an indentation mismatch and left the suite green \u2014 which would have recorded a false 'discriminating' result. Re-run with an assertion that the replacement landed, removing the leading sign fails 3 of the 5 tests.",
+    "Unit-level: no live Oracle session produced a negative INTERVAL DS during this work, so the fixtures are constructed values rather than driver-decoded ones.",
+    "Scoped verification: cargo test -p oraclemcp-db --lib and clippy over the touched file. No workspace-wide run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
