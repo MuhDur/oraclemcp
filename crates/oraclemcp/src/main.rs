@@ -274,6 +274,9 @@ enum Command {
         /// Sign only this tool name from the file.
         #[arg(long)]
         tool: Option<String>,
+        /// Write each generated signature into its matching [[tool]] block.
+        #[arg(long, alias = "in-place")]
+        write: bool,
     },
     /// Operate on the out-of-band audit log (verify the signed hash chain).
     Audit {
@@ -696,7 +699,9 @@ fn main() -> ExitCode {
             }
         }
         Command::SelfUpdate(args) => run_self_update_cmd(robot_json, args),
-        Command::SignTool { path, tool } => run_sign_tool(robot_json, &path, tool.as_deref()),
+        Command::SignTool { path, tool, write } => {
+            run_sign_tool(robot_json, &path, tool.as_deref(), write)
+        }
         Command::Audit { command } => match command {
             AuditCommand::Verify {
                 file,
@@ -5138,19 +5143,30 @@ fn run_self_update_cmd(robot_json: bool, args: SelfUpdateCliArgs) -> ExitCode {
 fn custom_tool_signatures(
     path: &Path,
     only_tool: Option<&str>,
+    write: bool,
 ) -> Result<serde_json::Value, ErrorEnvelope> {
     let key = std::env::var(CUSTOM_TOOLS_HMAC_KEY_ENV).map_err(|_| {
         custom_tool_error(format!(
             "{CUSTOM_TOOLS_HMAC_KEY_ENV} is required to sign custom tool definitions"
         ))
     })?;
-    custom_tool_signatures_with_key(path, only_tool, &key)
+    custom_tool_signatures_with_key_and_write(path, only_tool, &key, write)
 }
 
+#[cfg(test)]
 fn custom_tool_signatures_with_key(
     path: &Path,
     only_tool: Option<&str>,
     key: &str,
+) -> Result<serde_json::Value, ErrorEnvelope> {
+    custom_tool_signatures_with_key_and_write(path, only_tool, key, false)
+}
+
+fn custom_tool_signatures_with_key_and_write(
+    path: &Path,
+    only_tool: Option<&str>,
+    key: &str,
+    write: bool,
 ) -> Result<serde_json::Value, ErrorEnvelope> {
     let key = HmacSha256Key::new(key.as_bytes().to_vec()).map_err(|error| {
         custom_tool_error(format!("{CUSTOM_TOOLS_HMAC_KEY_ENV} is invalid: {error}"))
@@ -5172,30 +5188,105 @@ fn custom_tool_signatures_with_key(
         if only_tool.is_some_and(|name| name != def.name.as_str()) {
             continue;
         }
-        signatures.push(serde_json::json!({
-            "name": def.name,
-            "signature": sign(&def, &key),
-        }));
+        let signature = sign(&def, &key);
+        signatures.push((def.name, signature));
     }
     if signatures.is_empty() {
         return Err(custom_tool_error(
             "no matching custom tool definitions found",
         ));
     }
+    if write {
+        write_custom_tool_signatures(path, &src, &signatures)?;
+    }
     Ok(serde_json::json!({
         "ok": true,
         "path": path.display().to_string(),
-        "signatures": signatures,
+        "written": write,
+        "signatures": signatures.iter().map(|(name, signature)| serde_json::json!({
+            "name": name,
+            "signature": signature,
+        })).collect::<Vec<_>>(),
         "next_actions": [
-            "copy each signature into its matching [[tool]] block as signature = \"...\"",
+            if write {
+                "signatures were written into their matching [[tool]] blocks"
+            } else {
+                "copy each signature into its matching [[tool]] block as signature = \"...\", or re-run with --write"
+            },
             "set ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY in the MCP server environment",
             "run oraclemcp --json doctor --online --profile <profile> before restarting clients"
         ]
     }))
 }
 
-fn run_sign_tool(robot_json: bool, path: &Path, only_tool: Option<&str>) -> ExitCode {
-    match custom_tool_signatures(path, only_tool) {
+/// Atomically update only the matching top-level `[[tool]]` tables. TOML's
+/// nested `[[tool.params]]` tables stay nested, so a signature can never be
+/// appended under the final parameter by accident.
+fn write_custom_tool_signatures(
+    path: &Path,
+    src: &str,
+    signatures: &[(String, String)],
+) -> Result<(), ErrorEnvelope> {
+    let mut document = src.parse::<toml_edit::DocumentMut>().map_err(|error| {
+        custom_tool_error(format!(
+            "failed to edit custom tool file {}: {error}",
+            path.display()
+        ))
+    })?;
+    let tools = document
+        .get_mut("tool")
+        .and_then(toml_edit::Item::as_array_of_tables_mut)
+        .ok_or_else(|| custom_tool_error("custom tool file contains no [[tool]] definitions"))?;
+    let mut written = 0usize;
+    for tool in tools.iter_mut() {
+        let Some(name) = tool.get("name").and_then(toml_edit::Item::as_str) else {
+            continue;
+        };
+        let Some((_, signature)) = signatures
+            .iter()
+            .find(|(candidate, _)| candidate.as_str() == name)
+        else {
+            continue;
+        };
+        tool["signature"] = toml_edit::value(signature.clone());
+        written += 1;
+    }
+    if written != signatures.len() {
+        return Err(custom_tool_error(
+            "could not locate every requested custom tool while writing signatures",
+        ));
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    let mut temporary = tempfile::NamedTempFile::new_in(parent.unwrap_or_else(|| Path::new(".")))
+        .map_err(|error| {
+        custom_tool_error(format!(
+            "failed to create temporary signed tool file beside {}: {error}",
+            path.display()
+        ))
+    })?;
+    temporary
+        .write_all(document.to_string().as_bytes())
+        .and_then(|()| temporary.as_file().sync_all())
+        .map_err(|error| {
+            custom_tool_error(format!(
+                "failed to write signed custom tool file {}: {error}",
+                path.display()
+            ))
+        })?;
+    temporary.persist(path).map_err(|error| {
+        custom_tool_error(format!(
+            "failed to replace signed custom tool file {}: {}",
+            path.display(),
+            error.error
+        ))
+    })?;
+    Ok(())
+}
+
+fn run_sign_tool(robot_json: bool, path: &Path, only_tool: Option<&str>, write: bool) -> ExitCode {
+    match custom_tool_signatures(path, only_tool, write) {
         Ok(payload) => {
             let output = if robot_json {
                 serde_json::to_string(&payload).unwrap()

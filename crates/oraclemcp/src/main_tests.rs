@@ -3008,6 +3008,7 @@ fn setup_and_sign_tool_commands_parse() {
         "tools.toml",
         "--tool",
         "app_lookup",
+        "--write",
     ])
     .expect("parse sign-tool");
     assert!(matches!(
@@ -3015,8 +3016,75 @@ fn setup_and_sign_tool_commands_parse() {
         Some(Command::SignTool {
             ref path,
             ref tool,
+            write: true,
         }) if path == Path::new("tools.toml") && tool.as_deref() == Some("app_lookup")
     ));
+
+    let sign_in_place = Cli::try_parse_from(["oraclemcp", "sign-tool", "tools.toml", "--in-place"])
+        .expect("parse sign-tool --in-place alias");
+    assert!(matches!(
+        sign_in_place.command,
+        Some(Command::SignTool { write: true, .. })
+    ));
+}
+
+#[test]
+fn sign_tool_write_places_signatures_inside_tool_blocks_before_trailing_params() {
+    let tool_path = target_tmp_file("sign-tool-write-placement").with_extension("toml");
+    fs::write(
+        &tool_path,
+        r#"# Deliberately leave the final nested parameter table trailing.
+[[tool]]
+name = "first_lookup"
+description = "First signed lookup"
+sql = "SELECT :id FROM dual"
+
+[[tool.params]]
+name = "id"
+type = "integer"
+required = true
+
+[[tool]]
+name = "second_lookup"
+description = "Second signed lookup"
+sql = "SELECT :name FROM dual"
+
+[[tool.params]]
+name = "name"
+type = "string"
+required = true
+"#,
+    )
+    .expect("write unsigned multi-tool file");
+    let key = "0123456789abcdef0123456789abcdef";
+    let payload = custom_tool_signatures_with_key_and_write(&tool_path, None, key, true)
+        .expect("write signatures into matching tool tables");
+    assert_eq!(payload["written"], serde_json::json!(true));
+
+    let signed = fs::read_to_string(&tool_path).expect("read signed tools");
+    let first_signature = signed.find("signature = ").expect("first signature");
+    let first_params = signed.find("[[tool.params]]").expect("first params table");
+    let second_signature = signed.rfind("signature = ").expect("second signature");
+    let trailing_params = signed
+        .rfind("[[tool.params]]")
+        .expect("trailing params table");
+    assert!(
+        first_signature < first_params,
+        "first signature escaped its tool: {signed}"
+    );
+    assert!(
+        second_signature < trailing_params,
+        "second signature escaped its tool: {signed}"
+    );
+
+    let key = HmacSha256Key::new(key.as_bytes().to_vec()).expect("test signing key");
+    let defs = parse_tools_file(&signed).expect("written TOML parses as custom tools");
+    assert_eq!(defs.len(), 2);
+    assert!(
+        defs.iter()
+            .all(|def| oraclemcp_core::verify_signature(def, &key)),
+        "each in-place signature round-trips through the production verifier: {defs:?}"
+    );
 }
 
 #[test]

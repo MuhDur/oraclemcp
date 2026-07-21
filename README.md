@@ -917,11 +917,13 @@ Sign local tool definitions from the same binary:
 
 ```sh
 export ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY='...'
-oraclemcp sign-tool ~/.config/oraclemcp/tools.d/customer.toml --tool app_customer_lookup
+oraclemcp sign-tool ~/.config/oraclemcp/tools.d/customer.toml --tool app_customer_lookup --write
 ```
 
-The command prints the signature values to place into matching `[[tool]]`
-blocks; it does not print the HMAC key.
+By default the command prints signature values to place into matching `[[tool]]`
+blocks; it does not print the HMAC key. Pass `--write` (alias `--in-place`) to
+atomically place each generated signature in its matching `[[tool]]` block —
+including when the file ends with `[[tool.params]]`.
 
 Custom-tool signatures use the self-identifying
 `oraclemcp-custom-tool:v2:hmac-sha256:…` format. Version 2 authenticates every
