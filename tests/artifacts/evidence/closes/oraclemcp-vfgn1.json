@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T14:43:00Z",
+  "bead_id": "oraclemcp-vfgn1",
+  "scope": {
+    "summary": "Records the landed E2E-ladder contract repair: after dropping a table, oracle_describe must return the structured OBJECT_NOT_FOUND refusal with actionable next steps rather than the retired empty-columns success shape.",
+    "in_scope": [
+      "scripts/e2e/oracle_ladder_session.py"
+    ],
+    "out_of_scope": [
+      "The original A1d structured-not-found implementation, which is closed under oraclemcp-091-a1d-describe-notfound-q9e4v.",
+      "A current live Oracle matrix rerun; this close records the committed ladder assertion and does not claim a fresh external-system pass.",
+      "Auditing every future response-shape change for stale E2E assertions; the fix commit checked the remaining oracle_describe call, while the broader regression-prevention process remains follow-up work."
+    ]
+  },
+  "source": {
+    "sha": "f00e03e81707b259854200f107f66d47dafedd37",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Oracle ladder ddl_drop_table postcondition",
+        "kind": "tool",
+        "trace": "Ladder.ddl_drop_table invokes oracle_describe after dropping the table and asserts JSON-RPC isError=true, error_class=OBJECT_NOT_FOUND, and non-empty next_steps."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Validated locally only with Python syntax compilation; no fresh Oracle FREE 23ai matrix run is claimed for the already-landed f00e03e source commit.",
+    "The assertion covers the ladder's dropped-table postcondition. It does not replace A1d's unit coverage for quoted identifiers or unresolved synonyms."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-a1c-columns-describe-rvg64"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
