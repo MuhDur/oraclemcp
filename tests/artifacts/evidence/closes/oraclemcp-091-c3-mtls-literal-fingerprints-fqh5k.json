@@ -1,0 +1,63 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T13:25:00Z",
+  "bead_id": "oraclemcp-091-c3-mtls-literal-fingerprints-fqh5k",
+  "scope": {
+    "summary": "Commits the C3 wire-contract fixture: a real X.509 client leaf certificate plus its openssl-computed SHA-256 as a literal, with hand-written operator-style fingerprint spellings asserted against the runtime mtls:sha256:<hex> principal key, and the operator-authority axis committed red for bead oraclemcp-091-b1a-mtls-normalize-eg2il.",
+    "in_scope": [
+      "crates/oraclemcp-core/tests/c3_mtls_literal_fingerprints.rs",
+      "crates/oraclemcp-core/tests/fixtures/mtls/c3_client.der",
+      "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c3-mtls-literal-fingerprints-fqh5k.json"
+    ],
+    "out_of_scope": [
+      "Normalizing http.operator.allowed_subjects at load — B1a (oraclemcp-091-b1a-mtls-normalize-eg2il) owns the fix; this bead owns only the fixture.",
+      "The control-listener reset behaviour (B1b drop-log) and the ingress budget (B1c); this fixture asserts authorization outcomes, not socket-level symptoms.",
+      "Colon-separated openssl output (AA:BB:...) — that spelling is accepted by neither field, so it is not one of the accepted spellings this rule covers.",
+      "Any live TLS handshake: the fixture carries the certificate's identity through the authorization path and never negotiates TLS, so no private key is committed."
+    ]
+  },
+  "source": {
+    "sha": "b7ac85db99beb3724adfda93029b9a44dbfc04be",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "POST /mcp presenting a verified client certificate (http.mtls.client_fingerprints)",
+        "kind": "route",
+        "trace": "c3_client_fingerprints_authorize_in_every_accepted_spelling drives handle_http_request for all five spellings and asserts 200 rather than the mtls_client_not_registered 403; c3_an_unrelated_registered_fingerprint_does_not_authorize asserts a different registered certificate still yields that 403"
+      },
+      {
+        "name": "OperatorAuthorityPolicy::authorize for an mTLS principal (http.operator.allowed_subjects)",
+        "kind": "config-gate",
+        "trace": "c3_operator_allowed_subject_authorizes_in_the_canonical_spelling proves the one working spelling; c3_config_load_accepts_every_operator_subject_spelling proves OracleMcpConfig::from_toml_str accepts all five, which is what makes the runtime rejection silent"
+      },
+      {
+        "name": "certificate-to-fingerprint transcription boundary",
+        "kind": "api",
+        "trace": "c3_committed_certificate_hashes_to_the_literal_hex re-derives SHA-256 over the committed DER and asserts it equals the openssl-produced literal and the derived mtls:sha256:<hex> principal key"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped test only: cargo test -p oraclemcp-core --test c3_mtls_literal_fingerprints (5 passed, 1 expected-failure) plus the deliberate red run of that expected failure. The full workspace gate was not run for this commit.",
+    "The operator-authority assertion is committed red by design and does not execute in the default run; it is not cited as proof of anything here. Its recorded red output is the deliverable, and B1a flips it green by deleting the #[ignore] with the assertions unchanged.",
+    "The operator-authority axis is asserted directly against OperatorAuthorityPolicy::authorize rather than through a live control-listener request. That is the enforcement function the raw == comparison lives in, but it does not exercise the TLS listener, so B1a's own acceptance still needs the rig R1 http lane to complete a real operator API call with an uppercase bare-hex subject.",
+    "The certificate is self-signed and its private key was discarded, so this fixture cannot be extended to a real handshake without regenerating the material out of tree."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-b1a-mtls-normalize-eg2il must delete the #[ignore] on c3_operator_allowed_subjects_authorize_in_every_accepted_spelling as part of its acceptance, and must not make c3_config_load_accepts_every_operator_subject_spelling red by rejecting the config instead of normalizing it."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
