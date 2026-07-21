@@ -1,0 +1,61 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T16:55:14Z",
+  "bead_id": "oraclemcp-091-a2c-lock-granularity-fmb0e",
+  "scope": {
+    "summary": "Routes a locked setup --write through the running service's reviewed mTLS config API without weakening the service-owner flock.",
+    "in_scope": [
+      "Cargo.lock",
+      "crates/oraclemcp/Cargo.toml",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs",
+      "crates/oraclemcp/tests/c6_cli_vs_running_server.rs"
+    ],
+    "out_of_scope": [
+      "Changing the service-owner flock into a per-operation lock.",
+      "Provisioning a live control listener, operator certificate, or authorized mTLS subject.",
+      "Proving B1a control-listener admission or a live Oracle environment."
+    ]
+  },
+  "source": {
+    "sha": "b64958281af36264cd50d545a84679d5b5e280fb",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oraclemcp --json setup --write with an owned state store",
+        "kind": "cli",
+        "trace": "C6 holds the real FileStore service-owner flock, configures an mTLS control listener, and proves the CLI sends the reviewed draft request followed by an apply request carrying the same draft, preview token, digest, and confirmation."
+      },
+      {
+        "name": "running service operator config API",
+        "kind": "https control route",
+        "trace": "The fallback accepts only an HTTPS origin and explicit CA/client certificate/key inputs, verifies the configured server identity, rejects a remote target path that differs from the requested config, and invokes /operator/v1/config/draft then /operator/v1/config/apply."
+      },
+      {
+        "name": "offline state-mutating CLI collision",
+        "kind": "cli",
+        "trace": "C6 retains the two existing collision checks: direct setup/client mutations do not report success under the held lock, and a fallback setup failure remains actionable rather than generic."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped offline verification passed: cargo fmt -p oraclemcp -- --check; cargo test -p oraclemcp --test c6_cli_vs_running_server -- --nocapture (3 passed); cargo test -p oraclemcp --bin oraclemcp -- --nocapture (133 passed).",
+    "C6 is an mTLS wire-contract fixture, not a live served-oraclemcp or live Oracle proof; it verifies the lock-preserving client handoff and reviewed request binding, not B1a's real control-listener admission or a live reload result.",
+    "cargo clippy -p oraclemcp --bin oraclemcp -- -D warnings remains blocked before this change reaches A2c by crates/oraclemcp-db/src/intelligence.rs:1493, clippy::too_many_arguments on get_source."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
