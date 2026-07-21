@@ -1,0 +1,45 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T12:56:25Z",
+  "bead_id": "oraclemcp-091-p2-12-base-ceiling-doc-y5szi",
+  "scope": {
+    "summary": "Correct the base-inheritance ceiling documentation without changing inheritance behavior, and prove a child may explicitly raise max_level above its base.",
+    "in_scope": [
+      "README.md",
+      "docs/configuration.md",
+      "crates/oraclemcp-config/src/profile.rs"
+    ],
+    "out_of_scope": [
+      "Changing profile inheritance or protected-profile semantics."
+    ]
+  },
+  "source": {
+    "sha": "84cc174fe50f6b9a4dbad2302978c08527f1ad85",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "profile base inheritance",
+        "kind": "config",
+        "trace": "child_can_raise_max_level_above_base resolves a READ_ONLY base plus a DDL child and asserts the effective child ceiling is DDL. README and configuration docs state that base is field reuse, not a fleet ceiling, and show protected=true as the immutable READ_ONLY control."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped check only: CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-config child_can_raise_max_level_above_base -- --nocapture (1 passed), plus rustfmt --check on crates/oraclemcp-config/src/profile.rs and git diff --check. The full workspace gate was not run for this close."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
