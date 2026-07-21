@@ -1088,10 +1088,18 @@ fn check_oracle_driver() -> CheckResult {
             1,
             "Oracle thin driver",
             CheckStatus::Skip,
-            "built without Oracle connectivity",
+            "build-feature observation: built without Oracle connectivity; no connection was attempted",
         );
     }
-    CheckResult::new(1, "Oracle thin driver", CheckStatus::Pass, p.note)
+    CheckResult::new(
+        1,
+        "Oracle thin driver",
+        CheckStatus::Pass,
+        format!(
+            "build-feature observation: {}; no connection was attempted",
+            p.note
+        ),
+    )
 }
 
 fn sanitized_detail(ctx: &DoctorContext, detail: impl Into<String>) -> String {
@@ -1104,7 +1112,7 @@ fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
             2,
             "TNS/wallet",
             CheckStatus::Skip,
-            "no TNS_ADMIN or wallet configured (EZConnect-only is fine)",
+            "configuration observation: no TNS_ADMIN or wallet path is configured (EZConnect-only is fine)",
         ),
         _ => {
             for (label, dir) in [
@@ -1117,7 +1125,7 @@ fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
                             2,
                             "TNS/wallet",
                             CheckStatus::Fail,
-                            format!("{label} directory is configured but is not readable as a directory"),
+                            format!("filesystem metadata observation: configured {label} path is not a directory"),
                         )
                         .with_fix(format!(
                             "create the configured directory or correct the {label} setting, then rerun `oraclemcp --json doctor --profile <profile>`"
@@ -1130,7 +1138,7 @@ fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
                 2,
                 "TNS/wallet",
                 CheckStatus::Pass,
-                "configured directory resolves",
+                "filesystem metadata observation: every configured TNS_ADMIN/wallet path is a directory; readability and a live connection were not probed",
             );
             attach_wallet_posture(ctx, base)
         }
@@ -1222,8 +1230,8 @@ fn fold_cert_expiry(
 /// Fold the offline wallet-posture probe (B2.1) into the TNS/wallet check when a
 /// wallet directory resolves and holds wallet material. When the resolved
 /// directory has no wallet files (e.g. a TNS_ADMIN dir with only `tnsnames.ora`),
-/// the base "configured directory resolves" result is kept unchanged — EZConnect
-/// / system-trust connections legitimately need no wallet.
+/// the base filesystem-metadata result is kept unchanged — EZConnect / system-
+/// trust connections legitimately need no wallet.
 ///
 /// K1 (iec3.6.6): when the resolved wallet holds a parseable certificate, its
 /// earliest expiry is read offline through the `oraclemcp-db` seam and folded in
@@ -2336,29 +2344,29 @@ fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
         Some(DoctorAuditPosture::SigningKeyConfigured { path }) => (
             CheckStatus::Pass,
             format!(
-                "audit: SIGNING KEY CONFIGURED (server startup validates the key and arms the signed chain at {})",
+                "audit configuration observation: signing-key source configured at {}; this offline check does not resolve the key or construct an auditor",
                 path.display()
             ),
         ),
         Some(DoctorAuditPosture::DisabledReadOnly) => (
             CheckStatus::Skip,
-            "audit: DISABLED (no signing key configured; profile is read-only everywhere reachable)"
+            "audit configuration observation: disabled (no signing key configured; profile is read-only everywhere reachable)"
                 .to_owned(),
         ),
         Some(DoctorAuditPosture::StartupRefused { reachable_ceiling }) => (
             CheckStatus::Fail,
             format!(
-                "audit: STARTUP REFUSED (no signing key configured; a reachable profile can reach {} and server startup rejects this with ORACLEMCP_AUDIT_KEY_REQUIRED)",
+                "audit configuration observation: startup would be refused (no signing key configured; a reachable profile can reach {} and startup policy requires ORACLEMCP_AUDIT_KEY_REQUIRED)",
                 reachable_ceiling.as_str()
             ),
         ),
         Some(DoctorAuditPosture::Unavailable { reason }) => (
             CheckStatus::Skip,
-            format!("audit: STATUS UNAVAILABLE ({reason})"),
+            format!("audit configuration observation unavailable ({reason})"),
         ),
         None => (
             CheckStatus::Skip,
-            "audit: STATUS UNAVAILABLE (the binary did not supply an audit posture)".to_owned(),
+            "audit configuration observation unavailable (the binary did not supply an audit posture)".to_owned(),
         ),
     };
 
@@ -2374,13 +2382,13 @@ fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
     let (layout_status, layout_detail, fix) = match inspect_legacy_state_layout(layout) {
         LegacyStateLayoutObservation::Current => (
             CheckStatus::Pass,
-            "current XDG service-state layout is in use".to_owned(),
+            "filesystem observation: legacy default audit JSONL is absent; no default-path migration is needed".to_owned(),
             None,
         ),
         LegacyStateLayoutObservation::LegacyAndCurrentAuditIdentical => (
             CheckStatus::Pass,
             format!(
-                "legacy audit JSONL remains at {} and matches current state audit {}; no merge needed",
+                "filesystem observation: legacy audit JSONL remains at {} and matches current state audit {}; no merge needed",
                 layout.legacy_audit_path.display(),
                 layout.current_audit_path.display()
             ),
@@ -2388,14 +2396,14 @@ fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
         ),
         LegacyStateLayoutObservation::ExplicitAuditPath => (
             CheckStatus::Pass,
-            "explicit [audit].path configured; automatic default-path migration is not needed"
+            "configuration observation: explicit [audit].path configured; default-path migration was not evaluated"
                 .to_owned(),
             None,
         ),
         LegacyStateLayoutObservation::LegacyAuditOnly => (
             CheckStatus::Warn,
             format!(
-                "legacy audit JSONL exists at {}; current state audit path {} is absent",
+                "filesystem observation: legacy audit JSONL exists at {}; current state audit path {} is absent",
                 layout.legacy_audit_path.display(),
                 layout.current_audit_path.display()
             ),
@@ -2406,7 +2414,7 @@ fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
         LegacyStateLayoutObservation::LegacyAndCurrentAudit => (
             CheckStatus::Warn,
             format!(
-                "legacy audit {} and current audit {} both exist; automatic merge is refused",
+                "filesystem observation: legacy audit {} and current audit {} both exist; automatic merge is refused",
                 layout.legacy_audit_path.display(),
                 layout.current_audit_path.display()
             ),
@@ -2416,7 +2424,7 @@ fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
         ),
         LegacyStateLayoutObservation::Unsafe(reason) => (
             CheckStatus::Warn,
-            format!("state layout requires manual review: {reason}"),
+            format!("filesystem observation requires manual state-layout review: {reason}"),
             Some(
                 "repair the filesystem layout manually; doctor --fix refuses symlinks and non-regular audit paths",
             ),
@@ -2535,7 +2543,7 @@ fn check_call_timeout(ctx: &DoctorContext<'_>) -> CheckResult {
             ID,
             NAME,
             CheckStatus::Skip,
-            "no profile resolved — direct oraclemcp-db callers still default to a 30s call timeout",
+            "configuration observation unavailable: no profile resolved; this check does not probe direct oraclemcp-db caller timeouts",
         );
     }
 
@@ -2547,12 +2555,12 @@ fn check_call_timeout(ctx: &DoctorContext<'_>) -> CheckResult {
 
     match ctx.call_timeout {
         Some(timeout) if !timeout.is_zero() => details.push(format!(
-            "Oracle call timeout is {}s; request budget uses the same profile ceiling",
+            "configuration sets Oracle call timeout to {}s; request budget uses the same profile ceiling",
             timeout.as_secs()
         )),
         Some(_) | None => {
             details.push(
-                "Oracle call timeout is disabled; a driver round trip can wait indefinitely"
+                "configuration disables Oracle call timeout; this check does not observe a driver round trip"
                     .to_owned(),
             );
             fixes.push("remove call_timeout_seconds = 0 or set it to a positive value such as 30");
@@ -2561,17 +2569,16 @@ fn check_call_timeout(ctx: &DoctorContext<'_>) -> CheckResult {
     match ctx.connect_timeout_seconds {
         Some(0) => {
             details.push(
-                "Oracle connect timeout is configured as 0; the thin driver uses its 20s default \
-                 instead"
+                "configuration sets Oracle connect timeout to 0; the documented thin-driver default is 20s (not probed)"
                     .to_owned(),
             );
             fixes.push(
                 "remove connect_timeout_seconds = 0 or set it to a positive value such as 20",
             );
         }
-        Some(seconds) => details.push(format!("Oracle connect timeout is {seconds}s")),
+        Some(seconds) => details.push(format!("configuration sets Oracle connect timeout to {seconds}s")),
         None => {
-            details.push("Oracle connect timeout uses the thin driver default (20s)".to_owned())
+            details.push("no configured Oracle connect timeout; the documented thin-driver default is 20s (not probed)".to_owned())
         }
     }
     // B1: an authored `0` for either field is meaningless (both treat 0 as unset);
@@ -2579,33 +2586,31 @@ fn check_call_timeout(ctx: &DoctorContext<'_>) -> CheckResult {
     match ctx.inactivity_timeout_seconds {
         Some(0) => {
             details.push(
-                "Oracle inactivity timeout is configured as 0; idle reads on an established \
-                 session stay unbounded"
+                "configuration sets Oracle inactivity timeout to 0; established-session behavior is not probed"
                     .to_owned(),
             );
             fixes.push(
                 "remove inactivity_timeout_seconds = 0 or set it to a positive value such as 300",
             );
         }
-        Some(seconds) => details.push(format!("Oracle inactivity timeout is {seconds}s")),
+        Some(seconds) => details.push(format!("configuration sets Oracle inactivity timeout to {seconds}s")),
         None => details.push(
-            "Oracle inactivity timeout uses the thin driver default (unbounded idle reads)"
+            "no configured Oracle inactivity timeout; documented default is unbounded idle reads (not probed)"
                 .to_owned(),
         ),
     }
     match ctx.keepalive_minutes {
         Some(0) => {
             details.push(
-                "Oracle keepalive (EXPIRE_TIME) is configured as 0; dead-connection-detection \
-                 probes are disabled"
+                "configuration sets Oracle keepalive (EXPIRE_TIME) to 0; dead-connection detection is not probed"
                     .to_owned(),
             );
             fixes.push("remove keepalive_minutes = 0 or set it to a positive value such as 10");
         }
         Some(minutes) => details.push(format!(
-            "Oracle keepalive (EXPIRE_TIME) probes every {minutes}m"
+            "configuration requests Oracle keepalive (EXPIRE_TIME) every {minutes}m; runtime application is not probed"
         )),
-        None => details.push("Oracle keepalive (EXPIRE_TIME) probes are disabled".to_owned()),
+        None => details.push("no configured Oracle keepalive (EXPIRE_TIME); runtime application is not probed".to_owned()),
     }
 
     let mut result = CheckResult::new(
@@ -2626,16 +2631,6 @@ fn check_call_timeout(ctx: &DoctorContext<'_>) -> CheckResult {
 
 /// Upstream repository of the pinned thin `oracledb` driver (behavior-inventory).
 const DRIVER_UPSTREAM_REPO: &str = "https://github.com/MuhDur/rust-oracledb";
-
-/// Known-open upstream `oracledb` issues surfaced in trio-stack provenance so an
-/// operator can correlate observed runtime behavior with tracked upstream work.
-/// Keep an entry while its issue is open; drop it once upstream closes it.
-/// `rust-oracledb#14`: `expire_time` / keepalive + transport timeout is parsed
-/// but not yet wired into the runtime (see `oraclemcp-db` connection.rs).
-const DRIVER_UPSTREAM_ISSUES: &[(&str, &str)] = &[(
-    "rust-oracledb#14",
-    "https://github.com/MuhDur/rust-oracledb/issues/14",
-)];
 
 /// Check 15 (B5): thin trio-stack provenance — the server, the pinned thin
 /// `oracledb` driver, and the optional plsql-intelligence engine. This is an
@@ -2666,19 +2661,13 @@ fn check_trio_stack(ctx: &DoctorContext<'_>) -> CheckResult {
         "not detected"
     };
 
-    let issues = DRIVER_UPSTREAM_ISSUES
-        .iter()
-        .map(|(name, url)| format!("{name} {url}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-
     CheckResult::new(
         ID,
         NAME,
         CheckStatus::Pass,
         format!(
-            "server db {server_version}; driver {driver_line} ({DRIVER_UPSTREAM_REPO}); \
-             plsql-intelligence {plsql_status}; open upstream driver issues: {issues}"
+            "build metadata observation: server db {server_version}; pinned driver {driver_line} ({DRIVER_UPSTREAM_REPO}); \
+             plsql-intelligence {plsql_status}; this provenance check does not probe live connection options or runtime timeout behavior"
         ),
     )
 }
@@ -2889,9 +2878,9 @@ mod tests {
     }
 
     #[test]
-    fn report_has_fifteen_checks_and_classifier_self_test_passes() {
+    fn report_has_sixteen_checks_and_classifier_self_test_passes() {
         let report = doctor(&DoctorContext::default());
-        assert_eq!(report.checks.len(), 15);
+        assert_eq!(report.checks.len(), 16);
         let selftest = report.checks.iter().find(|c| c.id == 8).unwrap();
         assert_eq!(selftest.status, CheckStatus::Pass, "{}", selftest.detail);
         // The IAM-token near-expiry check (14) skips cleanly when no token is set.
@@ -2945,7 +2934,12 @@ mod tests {
         let report = doctor(&ctx);
         let timeout = report.checks.iter().find(|c| c.id == 12).unwrap();
         assert_eq!(timeout.status, CheckStatus::Warn, "{}", timeout.detail);
-        assert!(timeout.detail.contains("disabled"));
+        assert!(timeout.detail.contains("configuration disables"));
+        assert!(
+            timeout
+                .detail
+                .contains("does not observe a driver round trip")
+        );
         assert!(
             timeout
                 .fix
@@ -2966,7 +2960,11 @@ mod tests {
         let report = doctor(&ctx);
         let timeout = report.checks.iter().find(|c| c.id == 12).unwrap();
         assert_eq!(timeout.status, CheckStatus::Pass, "{}", timeout.detail);
-        assert!(timeout.detail.contains("connect timeout is 20s"));
+        assert!(
+            timeout
+                .detail
+                .contains("configuration sets Oracle connect timeout to 20s")
+        );
     }
 
     #[test]
@@ -2983,7 +2981,7 @@ mod tests {
         assert!(
             timeout
                 .detail
-                .contains("connect timeout is configured as 0")
+                .contains("configuration sets Oracle connect timeout to 0")
         );
         assert!(
             timeout
@@ -3008,7 +3006,7 @@ mod tests {
         assert!(
             timeout
                 .detail
-                .contains("inactivity timeout is configured as 0")
+                .contains("configuration sets Oracle inactivity timeout to 0")
         );
         assert!(
             timeout
@@ -3030,7 +3028,11 @@ mod tests {
         let report = doctor(&ctx);
         let timeout = report.checks.iter().find(|c| c.id == 12).unwrap();
         assert_eq!(timeout.status, CheckStatus::Pass, "{}", timeout.detail);
-        assert!(timeout.detail.contains("inactivity timeout is 300s"));
+        assert!(
+            timeout
+                .detail
+                .contains("configuration sets Oracle inactivity timeout to 300s")
+        );
     }
 
     #[test]
@@ -3047,7 +3049,7 @@ mod tests {
         assert!(
             timeout
                 .detail
-                .contains("keepalive (EXPIRE_TIME) is configured as 0")
+                .contains("configuration sets Oracle keepalive (EXPIRE_TIME) to 0")
         );
         assert!(
             timeout
@@ -3072,8 +3074,9 @@ mod tests {
         assert!(
             timeout
                 .detail
-                .contains("keepalive (EXPIRE_TIME) probes every 10m")
+                .contains("configuration requests Oracle keepalive (EXPIRE_TIME) every 10m")
         );
+        assert!(timeout.detail.contains("runtime application is not probed"));
     }
 
     #[test]
@@ -3102,12 +3105,12 @@ mod tests {
             "trio-stack must report the server db version: {}",
             trio.detail
         );
-        // Upstream issue URL(s) for the known-open driver issues.
-        assert!(trio.detail.contains("rust-oracledb#14"));
+        assert!(trio.detail.starts_with("build metadata observation:"));
         assert!(
             trio.detail
-                .contains("https://github.com/MuhDur/rust-oracledb/issues/14")
+                .contains("does not probe live connection options or runtime timeout behavior")
         );
+        assert!(!trio.detail.contains("rust-oracledb#14"));
         // plsql-intelligence status line (default build / library caller: absent).
         assert!(trio.detail.contains("plsql-intelligence not detected"));
     }
@@ -3202,6 +3205,7 @@ mod tests {
         let tns = report.checks.iter().find(|c| c.id == 2).unwrap();
         assert_eq!(tns.status, CheckStatus::Fail);
         assert!(tns.fix.is_some());
+        assert!(tns.detail.contains("filesystem metadata observation"));
         let rendered = report.to_json().to_string();
         assert!(!rendered.contains("/nonexistent/tns/dir/xyz"));
         assert_eq!(report.exit_code(), 1, "a failed check exits non-zero");
@@ -3218,7 +3222,9 @@ mod tests {
         assert!(!rendered.contains("/home/operator/private-wallet"));
         let tns = report.checks.iter().find(|c| c.id == 2).unwrap();
         assert_eq!(tns.status, CheckStatus::Fail);
-        assert!(tns.detail.contains("wallet directory is configured"));
+        assert!(tns.detail.contains(
+            "filesystem metadata observation: configured wallet path is not a directory"
+        ));
     }
 
     #[test]
@@ -3564,7 +3570,7 @@ mod tests {
         assert!(text.contains("oraclemcp doctor"));
         assert!(text.contains("Classifier self-test"));
         let j = report.to_json();
-        assert_eq!(j["checks"].as_array().unwrap().len(), 15);
+        assert_eq!(j["checks"].as_array().unwrap().len(), 16);
         assert_eq!(j["exit_code"], json!(0));
     }
 
@@ -4318,7 +4324,7 @@ mod tests {
         assert_eq!(check.status, CheckStatus::Skip);
         assert_eq!(
             check.detail,
-            "audit: DISABLED (no signing key configured; profile is read-only everywhere reachable); current XDG service-state layout is in use"
+            "audit configuration observation: disabled (no signing key configured; profile is read-only everywhere reachable); filesystem observation: legacy default audit JSONL is absent; no default-path migration is needed"
         );
         assert!(!check.detail.contains("audit default"));
 
@@ -4334,9 +4340,14 @@ mod tests {
         assert!(
             check
                 .detail
-                .contains("audit: SIGNING KEY CONFIGURED (server startup validates the key"),
+                .contains("audit configuration observation: signing-key source configured"),
             "{}",
             check.detail
+        );
+        assert!(
+            check
+                .detail
+                .contains("does not resolve the key or construct an auditor")
         );
 
         let refused = doctor(&DoctorContext {
@@ -4349,6 +4360,37 @@ mod tests {
         let check = check_by_id(&refused, 13);
         assert_eq!(check.status, CheckStatus::Fail);
         assert!(check.detail.contains("ORACLEMCP_AUDIT_KEY_REQUIRED"));
+        assert!(check.detail.starts_with("audit configuration observation:"));
+    }
+
+    #[test]
+    fn observation_only_checks_name_their_evidence_source() {
+        let report = doctor(&DoctorContext::default());
+
+        let driver = check_by_id(&report, 1);
+        assert!(driver.detail.starts_with("build-feature observation:"));
+        assert!(driver.detail.contains("no connection was attempted"));
+
+        let tns = check_by_id(&report, 2);
+        assert!(tns.detail.starts_with("configuration observation:"));
+
+        let timeout = check_by_id(&report, 12);
+        assert!(
+            timeout
+                .detail
+                .starts_with("configuration observation unavailable:")
+        );
+
+        let audit = check_by_id(&report, 13);
+        assert!(audit.detail.starts_with("audit configuration observation"));
+
+        let provenance = check_by_id(&report, 15);
+        assert!(provenance.detail.starts_with("build metadata observation:"));
+        assert!(
+            provenance
+                .detail
+                .contains("does not probe live connection options or runtime timeout behavior")
+        );
     }
 
     #[test]
