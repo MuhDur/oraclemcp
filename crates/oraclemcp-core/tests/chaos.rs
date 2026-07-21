@@ -55,13 +55,14 @@ fn cancel_mid_dml_never_double_executes() {
 }
 
 #[test]
-fn listener_drop_and_timeout_are_classified_transient() {
-    // The reconnect classifier recognizes the listener/network failure modes.
+fn driver_connection_loss_and_package_reset_are_classified_retryable() {
+    // The retry classifier follows the driver: these are either lost sessions
+    // that need a fresh connection or package state reset that retries in place.
     for msg in [
         "ORA-03113: end-of-file on communication channel", // listener/conn drop
-        "ORA-12541: TNS:no listener",
-        "ORA-12170: TNS:Connect timeout occurred",
-        "ORA-12514: TNS:listener does not currently know of service",
+        "ORA-00028: your session has been killed",
+        "ORA-02396: exceeded maximum idle time",
+        "ORA-04068: existing state of packages has been discarded",
     ] {
         assert!(
             is_transient_error(msg),
@@ -73,6 +74,7 @@ fn listener_drop_and_timeout_are_classified_transient() {
         "ORA-00942: table or view does not exist"
     ));
     assert!(!is_transient_error("ORA-01031: insufficient privileges"));
+    assert!(!is_transient_error("ORA-12541: TNS:no listener"));
 }
 
 #[test]

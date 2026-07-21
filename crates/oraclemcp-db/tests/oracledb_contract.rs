@@ -287,13 +287,22 @@ fn contract_error_connection_lost_is_transient_and_retryable() {
 }
 
 #[test]
-fn contract_error_transient_network_is_retryable() {
-    // is_transient: TNS/network conditions (no-listener, timeout) are Transient
-    // and retryable.
-    for code in [12541, 12170, 12537] {
+fn contract_error_driver_network_taxonomy_preserves_retry_boundary() {
+    // A dropped active connection (ORA-12537) is retryable after reconnect.
+    // No-listener and connect-timeout errors occur before a usable session
+    // exists, so the driver does not classify them as an in-session retry.
+    let class = classify_ora_code(12537);
+    assert_eq!(class, ErrorClass::Transient, "ORA-12537 is connection-lost");
+    assert!(class.is_retryable());
+
+    for code in [12541, 12170] {
         let class = classify_ora_code(code);
-        assert_eq!(class, ErrorClass::Transient, "ORA-{code} is transient");
-        assert!(class.is_retryable());
+        assert_eq!(
+            class,
+            ErrorClass::ConnectionFailed,
+            "ORA-{code} requires listener/connectivity repair"
+        );
+        assert!(!class.is_retryable());
     }
 }
 

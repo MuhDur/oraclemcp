@@ -4,11 +4,97 @@
 //! (the one-way boundary, §0). [`DbError::into_envelope`] renders the
 //! agent-facing [`ErrorEnvelope`] via the shared `oraclemcp-error` classifier.
 
-use oraclemcp_error::{ErrorClass, ErrorEnvelope, envelope_from_oracle_message, parse_ora_code};
+use std::time::Duration;
+
+use oraclemcp_error::{
+    ErrorClass, ErrorEnvelope, OracleRetryAction, envelope_from_oracle_message,
+    oracle_retry_action_from_message, parse_ora_code,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::types::OracleBackend;
+
+/// Whether an Oracle error message has a driver-aligned retry action.
+///
+/// This compatibility helper keeps the core retry API stable while routing its
+/// decision through the one shared taxonomy rather than a second code list.
+#[must_use]
+pub fn is_transient_error(message: &str) -> bool {
+    !matches!(
+        oracle_retry_action_from_message(message),
+        OracleRetryAction::Never
+    )
+}
+
+/// Retry policy for idempotent read operations.
+///
+/// The policy chooses whether another attempt is permitted; the caller still
+/// owns the connection action from [`OracleRetryAction`] and must never replay
+/// a mutation automatically.
+#[derive(Clone, Copy, Debug)]
+pub struct RetryPolicy {
+    /// Maximum attempts, including the initial call.
+    pub max_attempts: u32,
+    /// Base backoff; attempt `n` waits `base * 2^(n-1)`.
+    pub base_delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(100),
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// One immediate retry after the initial failed read.
+    ///
+    /// The stateless pool runs on a timer-less cooperative runtime, so this
+    /// purpose-built policy yields once instead of waiting on a timer that
+    /// could never wake. It is intentionally distinct from [`Self::default`]
+    /// so callers that need exponential backoff retain that option.
+    #[must_use]
+    pub const fn one_immediate_retry() -> Self {
+        Self {
+            max_attempts: 2,
+            base_delay: Duration::ZERO,
+        }
+    }
+
+    /// The delay before the next attempt, or `None` when the request must not
+    /// be retried.
+    #[must_use]
+    pub fn next_delay(
+        &self,
+        attempt: u32,
+        mutating: bool,
+        error_message: &str,
+    ) -> Option<Duration> {
+        self.next_delay_for_action(
+            attempt,
+            mutating,
+            oracle_retry_action_from_message(error_message),
+        )
+    }
+
+    /// The action-aware form used at the driver seam, where raw I/O failures
+    /// have no `ORA-` code but the driver still proves a lost connection.
+    #[must_use]
+    pub fn next_delay_for_action(
+        &self,
+        attempt: u32,
+        mutating: bool,
+        action: OracleRetryAction,
+    ) -> Option<Duration> {
+        if mutating || attempt >= self.max_attempts || action == OracleRetryAction::Never {
+            return None;
+        }
+        Some(self.base_delay * 2u32.pow(attempt.saturating_sub(1)))
+    }
+}
 
 /// The known outcome class when a DB session is deliberately quarantined.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +391,10 @@ pub enum DbError {
     /// A query failed.
     #[error("oracle query failed: {0}")]
     Query(String),
+    /// The driver proved that the Oracle session/socket was lost. The pool must
+    /// discard this connection before an idempotent read can be retried.
+    #[error("Oracle connection lost: {0}")]
+    ConnectionLost(String),
     /// The first row of a query page cannot fit within the configured compact
     /// row-payload byte budget. The row is not returned or skipped; callers may
     /// retry the same query/cursor after narrowing the selected payload.
@@ -376,12 +466,37 @@ impl DbError {
             DbError::Cancelled(_)
             | DbError::Connect(_)
             | DbError::ConnectHandshake { .. }
+            | DbError::ConnectionLost(_)
             | DbError::Pool(_)
             | DbError::Quarantined { .. } => true,
             DbError::Query(message) | DbError::Execute(message) => {
                 message_is_uncertain_connection_state(message)
             }
             _ => false,
+        }
+    }
+
+    /// Whether this error requires a fresh Oracle connection before an
+    /// idempotent read can be retried.
+    #[must_use]
+    pub fn is_connection_lost(&self) -> bool {
+        self.retry_action() == OracleRetryAction::ReconnectThenRetry
+    }
+
+    /// The retry action the caller may consider for an idempotent read.
+    #[must_use]
+    pub fn retry_action(&self) -> OracleRetryAction {
+        match self {
+            DbError::ConnectionLost(_) => OracleRetryAction::ReconnectThenRetry,
+            DbError::Query(message) | DbError::Execute(message) => {
+                let action = oracle_retry_action_from_message(message);
+                if action == OracleRetryAction::Never && raw_connection_lost_marker(message) {
+                    OracleRetryAction::ReconnectThenRetry
+                } else {
+                    action
+                }
+            }
+            _ => OracleRetryAction::Never,
         }
     }
 
@@ -392,7 +507,7 @@ impl DbError {
         match self {
             DbError::Connect(msg) => {
                 // Classify via the embedded ORA- code where present.
-                let env = envelope_from_oracle_message(&msg);
+                let env = oracle_error_envelope(&msg);
                 if env.error_class == ErrorClass::Internal {
                     // No ORA- code recognised: keep it as a connection-class
                     // failure rather than a bare Internal — and never surface
@@ -412,7 +527,7 @@ impl DbError {
             }
             DbError::Query(msg) | DbError::Execute(msg) => {
                 // Classify via the embedded ORA- code where present.
-                let env = envelope_from_oracle_message(&msg);
+                let env = oracle_error_envelope(&msg);
                 if env.error_class == ErrorClass::Internal {
                     // An absent or as-yet-unclassified ORA code remains a
                     // connection-class failure rather than a bare Internal.
@@ -427,6 +542,15 @@ impl DbError {
                 } else {
                     env
                 }
+            }
+            DbError::ConnectionLost(msg) => {
+                let mut env = ErrorEnvelope::new(ErrorClass::Transient, msg.clone()).with_next_step(
+                    "the Oracle connection was lost; discard it and retry this idempotent read once on a fresh connection",
+                );
+                if let Some(code) = parse_ora_code(&msg) {
+                    env = env.with_ora_code(code);
+                }
+                env
             }
             DbError::FlashbackRefusal {
                 kind,
@@ -624,6 +748,23 @@ fn connect_handshake_envelope(kind: &ConnectFailureKind, detail: &str) -> ErrorE
     }
 }
 
+/// Render a parsed Oracle error and attach the retry remedy that follows from
+/// the shared driver-aligned taxonomy. `ErrorClass::Transient` deliberately
+/// does not distinguish reconnect from retry-in-place on the wire, so the
+/// ordered operator steps make that safety-relevant distinction explicit.
+fn oracle_error_envelope(message: &str) -> ErrorEnvelope {
+    let env = envelope_from_oracle_message(message);
+    match oracle_retry_action_from_message(message) {
+        OracleRetryAction::Never => env,
+        OracleRetryAction::RetrySameConnection => env.with_next_step(
+            "the Oracle session remains usable; retry this idempotent read once on the same connection",
+        ),
+        OracleRetryAction::ReconnectThenRetry => env.with_next_step(
+            "the Oracle connection was lost; discard it and retry this idempotent read once on a fresh connection",
+        ),
+    }
+}
+
 /// Defense-in-depth fallback for **driver-originated** `Query`/`Execute` errors
 /// whose only signal is an `ORA-`/`DPY-` code (a stable structural identifier)
 /// or a driver connection-state phrase we do not model as a typed variant.
@@ -634,20 +775,29 @@ fn connect_handshake_envelope(kind: &ConnectFailureKind, detail: &str) -> ErrorE
 /// [`DbError::is_uncertain_session_state`] flags from the kind. This list only
 /// catches strings we cannot restructure because they arrive from the driver.
 fn message_is_uncertain_connection_state(message: &str) -> bool {
-    const MARKERS: &[&str] = &[
+    const MARKERS: &[&str] = &["dpy-4011", "call timeout", "ora-01013"];
+    let message = message.to_ascii_lowercase();
+    matches!(
+        oracle_retry_action_from_message(&message),
+        OracleRetryAction::ReconnectThenRetry
+    ) || raw_connection_lost_marker(&message)
+        || MARKERS.iter().any(|marker| message.contains(marker))
+}
+
+/// Raw I/O errors do not carry an ORA code. The driver adapter preserves them
+/// as [`DbError::ConnectionLost`], while these markers keep mocks and legacy
+/// string-only call sites fail-closed until they reach that seam.
+fn raw_connection_lost_marker(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
         "dpy-4011",
-        "call timeout",
-        "ora-01013",
-        "ora-01012",
-        "ora-03113",
-        "ora-03114",
-        "ora-03135",
-        "ora-12170",
         "connection closed",
         "connection is closed",
-    ];
-    let message = message.to_ascii_lowercase();
-    MARKERS.iter().any(|marker| message.contains(marker))
+        "broken pipe",
+        "connection reset",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
 }
 
 #[cfg(test)]
@@ -1150,13 +1300,10 @@ mod tests {
             "DPY-4011: no more data to read from socket",
             "call timeout exceeded",
             "ORA-01013: user requested cancel of current operation",
-            "ORA-01012: not logged on",
-            "ORA-03113: end-of-file on communication channel",
-            "ORA-03114: not connected to ORACLE",
-            "ORA-03135: connection lost contact",
-            "ORA-12170: TNS:Connect timeout occurred",
             "connection closed by peer",
             "the connection is closed",
+            "Broken pipe (os error 32)",
+            "connection reset by peer",
         ];
         for marker in MARKERS {
             assert!(
@@ -1168,6 +1315,46 @@ mod tests {
                 "Execute variant must flag as uncertain for marker: {marker}"
             );
         }
+
+        for code in oraclemcp_error::CONNECTION_LOST_ORA_CODES {
+            let marker = format!("ORA-{code:05}: connection lost");
+            assert!(
+                DbError::Query(marker.clone()).is_uncertain_session_state(),
+                "Query must quarantine every driver connection-lost ORA code: {marker}"
+            );
+            assert!(
+                DbError::Execute(marker.clone()).is_connection_lost(),
+                "Execute must reconnect before retrying every connection-lost ORA code: {marker}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_envelopes_distinguish_fresh_connection_from_same_session() {
+        let lost = DbError::ConnectionLost("ORA-02396: exceeded maximum idle time".to_owned());
+        assert!(lost.is_connection_lost());
+        let lost_envelope = lost.into_envelope();
+        assert_eq!(lost_envelope.error_class, ErrorClass::Transient);
+        assert_eq!(lost_envelope.ora_code, Some(2396));
+        assert!(
+            lost_envelope
+                .next_steps
+                .iter()
+                .any(|step| step.contains("fresh connection"))
+        );
+
+        let reset =
+            DbError::Query("ORA-04068: existing state of packages has been discarded".to_owned());
+        assert!(!reset.is_uncertain_session_state());
+        assert!(!reset.is_connection_lost());
+        let reset_envelope = reset.into_envelope();
+        assert_eq!(reset_envelope.error_class, ErrorClass::Transient);
+        assert!(
+            reset_envelope
+                .next_steps
+                .iter()
+                .any(|step| step.contains("same connection"))
+        );
     }
 
     #[test]

@@ -1,68 +1,25 @@
 //! Resilience primitives (plan §10; bead P2-RESIL): a circuit breaker, a
 //! transient-only retry policy, and a call-timeout helper.
 //!
-//! Retry law: only **transient** connection errors (ORA-03113/03114/12170/
-//! 12541/12537) are retryable, and **DML is never auto-retried** (double-execute
-//! risk, §5.7). A misclassification here is fail-safe — when in doubt, do not
-//! retry.
+//! Retry law: only the DB adapter's driver-aligned transient taxonomy is
+//! retryable, and **DML is never auto-retried** (double-execute risk, §5.7).
+//! A misclassification here is fail-safe — when in doubt, do not retry.
 
 use std::time::{Duration, Instant};
 
 use asupersync::time::{timeout as asupersync_timeout, wall_now};
 use parking_lot::Mutex;
 
-/// Transient, retryable Oracle/network error codes (§10). Anything else
-/// (ORA-00942 object-not-found, ORA-01403 no-data, syntax, privilege) is NOT
-/// retried.
-const TRANSIENT_ORA_CODES: &[i32] = &[3113, 3114, 12170, 12541, 12537, 12543, 12514];
+/// Driver-aligned retry policy re-exported from the DB boundary.
+pub use oraclemcp_db::RetryPolicy;
 
 /// Per-round-trip call timeout (§10).
 pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Whether an Oracle error message names a transient, retryable condition.
-#[must_use]
-pub fn is_transient_error(message: &str) -> bool {
-    oraclemcp_error::parse_ora_code(message).is_some_and(|c| TRANSIENT_ORA_CODES.contains(&c))
-}
-
-/// The retry policy for read operations.
-#[derive(Clone, Copy, Debug)]
-pub struct RetryPolicy {
-    /// Maximum attempts (including the first).
-    pub max_attempts: u32,
-    /// Base backoff; attempt `n` waits `base * 2^(n-1)`.
-    pub base_delay: Duration,
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        RetryPolicy {
-            max_attempts: 3,
-            base_delay: Duration::from_millis(100),
-        }
-    }
-}
-
-impl RetryPolicy {
-    /// The delay before the next attempt, or `None` if the call must not be
-    /// retried: a mutating op is never retried; only a transient error on a
-    /// non-final attempt is.
-    #[must_use]
-    pub fn next_delay(
-        &self,
-        attempt: u32,
-        mutating: bool,
-        error_message: &str,
-    ) -> Option<Duration> {
-        if mutating || attempt >= self.max_attempts {
-            return None;
-        }
-        if !is_transient_error(error_message) {
-            return None;
-        }
-        Some(self.base_delay * 2u32.pow(attempt.saturating_sub(1)))
-    }
-}
+/// Whether an Oracle error message is retryable by the driver-aligned DB
+/// taxonomy. The reconnect-vs-same-session distinction remains inside the DB
+/// layer, which retains the driver's structural signal for raw I/O failures.
+pub use oraclemcp_db::is_transient_error;
 
 /// Circuit-breaker state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,10 +194,19 @@ mod tests {
         assert!(is_transient_error(
             "ORA-03113: end-of-file on communication channel"
         ));
-        assert!(is_transient_error("ORA-12541: TNS:no listener"));
+        assert!(is_transient_error(
+            "ORA-00028: your session has been killed"
+        ));
+        assert!(is_transient_error(
+            "ORA-04068: existing state of packages has been discarded"
+        ));
         assert!(!is_transient_error(
             "ORA-00942: table or view does not exist"
         ));
+        assert!(
+            !is_transient_error("ORA-12541: TNS:no listener"),
+            "listener reachability is not a lost in-session connection"
+        );
         assert!(!is_transient_error("ORA-01403: no data found"));
         assert!(!is_transient_error("not an oracle error"));
     }

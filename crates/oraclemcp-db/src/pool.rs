@@ -3,9 +3,10 @@
 //! `Cx`-first and `async` (B1): callers get bounded session reuse without a
 //! Tokio/r2d2 boundary, and cancellation is observed through explicit
 //! `&asupersync::Cx` checkpoints around checkout and through the native-async
-//! DB calls themselves. A cancelled or failed call discards the checked-out
-//! connection DIRTY (it never returns to the idle set) so a torn round trip
-//! can never be reused.
+//! DB calls themselves. A cancelled call or a driver-proven connection loss
+//! discards the checked-out connection DIRTY (it never returns to the idle
+//! set) so a torn round trip can never be reused. A known safe, idempotent
+//! read failure may be retried once under the shared driver taxonomy.
 //!
 //! ## Sizing and failover posture (B4)
 //!
@@ -27,7 +28,7 @@ use asupersync::{Cx, RegionId, TaskId, Time};
 use async_trait::async_trait;
 
 use crate::connection::{DbRequestQuota, OracleConnection, RustOracleConnection, db_checkpoint};
-use crate::error::DbError;
+use crate::error::{DbError, RetryPolicy};
 use crate::types::{
     OracleBackend, OracleBind, OracleConnectOptions, OracleConnectionInfo, OracleRow,
 };
@@ -325,6 +326,8 @@ impl OraclePool {
     ) -> Result<Vec<OracleRow>, DbError> {
         let sql = sql.into();
         self.with_conn(cx, |cx, conn| {
+            let sql = sql.clone();
+            let binds = binds.clone();
             Box::pin(async move { conn.query_rows(cx, &sql, &binds).await })
         })
         .await
@@ -343,6 +346,9 @@ impl OraclePool {
     ) -> Result<crate::query::QueryResponse, DbError> {
         let sql = sql.into();
         self.with_conn(cx, |cx, conn| {
+            let sql = sql.clone();
+            let binds = binds.clone();
+            let serialize_opts = serialize_opts.clone();
             Box::pin(async move {
                 crate::query::read_query(cx, conn, &sql, &binds, caps, offset, &serialize_opts)
                     .await
@@ -368,67 +374,104 @@ impl OraclePool {
 
     async fn with_conn<'c, T, F>(&self, cx: &'c Cx, f: F) -> Result<T, DbError>
     where
-        F: for<'a> FnOnce(
+        F: for<'a> Fn(
             &'a Cx,
             &'a RustOracleConnection,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<T, DbError>> + 'a>,
         >,
     {
-        db_checkpoint(cx, "oracle_pool.checkout.before")?;
-        let conn = self.checkout(cx).await?;
-        self.on_checked_out()?;
-        // From this point, future drop is an unconditional dirty discard. The
-        // guard owns both the physical session and the accounting edge, so a
-        // lane hard timeout cannot leak `in_use`/`open_count`.
-        let checkout = CheckedOutConnection::new(conn, Arc::clone(&self.state));
-        let limits = self.request_limits_for(cx)?;
-        let previous_deadline = checkout.connection().request_deadline(cx)?;
-        let previous_quota = checkout.connection().request_quota(cx)?;
-        if let Err(error) = checkout
-            .connection()
-            .set_request_deadline(cx, limits.deadline)
-        {
-            checkout.finish(true)?;
-            return Err(error);
-        }
-        if let Err(error) = checkout
-            .connection()
-            .set_request_quota(cx, limits.quota.clone())
-        {
-            let _ = checkout
+        let retry_policy = RetryPolicy::one_immediate_retry();
+        // Count every execution of `f`, regardless of whether it occurs on the
+        // same session or after a reconnect. The retry budget is per request,
+        // not per error category: a package reset followed by a connection
+        // loss must not turn one permitted replay into two.
+        let mut attempt = 1;
+        loop {
+            db_checkpoint(cx, "oracle_pool.checkout.before")?;
+            let conn = self.checkout(cx).await?;
+            self.on_checked_out()?;
+            // From this point, future drop is an unconditional dirty discard.
+            // The guard owns both the physical session and the accounting edge,
+            // so a lane hard timeout cannot leak `in_use`/`open_count`.
+            let checkout = CheckedOutConnection::new(conn, Arc::clone(&self.state));
+            let limits = self.request_limits_for(cx)?;
+            let previous_deadline = checkout.connection().request_deadline(cx)?;
+            let previous_quota = checkout.connection().request_quota(cx)?;
+            if let Err(error) = checkout
+                .connection()
+                .set_request_deadline(cx, limits.deadline)
+            {
+                checkout.finish(true)?;
+                return Err(error);
+            }
+            if let Err(error) = checkout
+                .connection()
+                .set_request_quota(cx, limits.quota.clone())
+            {
+                let _ = checkout
+                    .connection()
+                    .set_request_deadline(cx, previous_deadline);
+                checkout.finish(true)?;
+                return Err(error);
+            }
+
+            let first_result = f(cx, checkout.connection()).await;
+            let result = match &first_result {
+                Err(error)
+                    if retry_now(
+                        retry_policy,
+                        1,
+                        error.retry_action(),
+                        oraclemcp_error::OracleRetryAction::RetrySameConnection,
+                    ) =>
+                {
+                    // ORA-04068 and driver retry-in-place conditions leave the
+                    // session usable. Yield once before the one safe replay;
+                    // this runtime deliberately has no timer dependency.
+                    attempt += 1;
+                    asupersync::runtime::yield_now().await;
+                    f(cx, checkout.connection()).await
+                }
+                _ => first_result,
+            };
+
+            // A known connection loss/cancellation may have crossed an Oracle
+            // boundary and must be discarded. Ordinary SQL errors and an
+            // exhausted retry-in-place error leave the session reusable; a
+            // successful call is additionally pinged before check-in.
+            let broken = match &result {
+                Err(error) => error.is_uncertain_session_state(),
+                Ok(_) => self.manager.has_broken(cx, checkout.connection()).await,
+            };
+            let retry_fresh = matches!(
+                &result,
+                Err(error)
+                    if retry_now(
+                        retry_policy,
+                        attempt,
+                        error.retry_action(),
+                        oraclemcp_error::OracleRetryAction::ReconnectThenRetry,
+                    )
+            );
+            let quota_restore = checkout.connection().set_request_quota(cx, previous_quota);
+            let deadline_restore = checkout
                 .connection()
                 .set_request_deadline(cx, previous_deadline);
-            checkout.finish(true)?;
-            return Err(error);
-        }
-
-        let result = f(cx, checkout.connection()).await;
-        // A cancelled or errored call may have crossed an Oracle boundary
-        // (torn round trip); discard the connection DIRTY rather than returning
-        // it to the idle set. A clean call still re-validates with a ping.
-        let broken = should_discard_after_call(&result, || {
-            // Only ping when the call itself succeeded; a failed/cancelled call
-            // is already discarded and a ping might block on a dirty socket.
-            false
-        });
-        let broken = if broken {
-            true
-        } else {
-            self.manager.has_broken(cx, checkout.connection()).await
-        };
-        let quota_restore = checkout.connection().set_request_quota(cx, previous_quota);
-        let deadline_restore = checkout
-            .connection()
-            .set_request_deadline(cx, previous_deadline);
-        let restore_error = quota_restore.err().or_else(|| deadline_restore.err());
-        checkout.finish(broken || restore_error.is_some())?;
-        match result {
-            Err(primary) => Err(primary),
-            Ok(value) => match restore_error {
-                Some(error) => Err(error),
-                None => Ok(value),
-            },
+            let restore_error = quota_restore.err().or_else(|| deadline_restore.err());
+            checkout.finish(broken || restore_error.is_some())?;
+            if retry_fresh && restore_error.is_none() {
+                attempt += 1;
+                asupersync::runtime::yield_now().await;
+                continue;
+            }
+            return match result {
+                Err(primary) => Err(primary),
+                Ok(value) => match restore_error {
+                    Some(error) => Err(error),
+                    None => Ok(value),
+                },
+            };
         }
     }
 
@@ -743,11 +786,28 @@ impl OracleConnection for OraclePool {
     }
 }
 
+fn retry_now(
+    retry_policy: RetryPolicy,
+    attempt: u32,
+    actual_action: oraclemcp_error::OracleRetryAction,
+    expected_action: oraclemcp_error::OracleRetryAction,
+) -> bool {
+    actual_action == expected_action
+        && retry_policy
+            .next_delay_for_action(attempt, false, actual_action)
+            .is_some_and(|delay| delay.is_zero())
+}
+
+#[cfg(test)]
 fn should_discard_after_call<T>(
     result: &Result<T, DbError>,
     manager_broken: impl FnOnce() -> bool,
 ) -> bool {
-    result.is_err() || manager_broken()
+    result
+        .as_ref()
+        .err()
+        .is_some_and(DbError::is_uncertain_session_state)
+        || manager_broken()
 }
 
 #[cfg(test)]
@@ -918,16 +978,47 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_call_discards_checked_out_connection() {
+    fn only_uncertain_error_calls_discard_checked_out_connection() {
         let cancelled: Result<(), DbError> =
             Err(DbError::Cancelled("test cancellation".to_owned()));
         assert!(
             should_discard_after_call(&cancelled, || false),
             "a cancelled DB call may have crossed an Oracle boundary and must not return clean"
         );
+        let package_reset: Result<(), DbError> = Err(DbError::Query(
+            "ORA-04068: existing state of packages has been discarded".to_owned(),
+        ));
+        assert!(
+            !should_discard_after_call(&package_reset, || false),
+            "ORA-04068 keeps the session usable for its one safe retry"
+        );
         let ok: Result<(), DbError> = Ok(());
         assert!(!should_discard_after_call(&ok, || false));
         assert!(should_discard_after_call(&ok, || true));
+    }
+
+    #[test]
+    fn retry_policy_allows_exactly_one_immediate_retry_per_request() {
+        let policy = RetryPolicy::one_immediate_retry();
+        for action in [
+            oraclemcp_error::OracleRetryAction::RetrySameConnection,
+            oraclemcp_error::OracleRetryAction::ReconnectThenRetry,
+        ] {
+            assert!(
+                retry_now(policy, 1, action, action),
+                "first {action:?} failure gets one immediate replay"
+            );
+            assert!(
+                !retry_now(policy, 2, action, action),
+                "the retry budget is exhausted after the first replay"
+            );
+        }
+        assert!(!retry_now(
+            policy,
+            1,
+            oraclemcp_error::OracleRetryAction::Never,
+            oraclemcp_error::OracleRetryAction::ReconnectThenRetry,
+        ));
     }
 
     fn seeded_state(open_count: u32) -> PoolState {

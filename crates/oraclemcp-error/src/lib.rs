@@ -68,7 +68,8 @@ pub enum ErrorClass {
     PolicyDenied,
     /// The call exceeded its deadline (call timeout / cancellation).
     Timeout,
-    /// A transient, retryable Oracle/network condition (ORA-03113, ORA-12170…).
+    /// A transient, retryable driver-classified Oracle condition (for example,
+    /// a lost session or an idempotent-read-safe package-state reset).
     Transient,
     /// A flashback/AS-OF read targeted an SCN or timestamp outside the
     /// available undo/flashback retention window.
@@ -429,6 +430,7 @@ impl ErrorEnvelope {
 /// `"ORA-00942: table or view does not exist"` → `Some(942)`.
 #[must_use]
 pub fn parse_ora_code(message: &str) -> Option<i32> {
+    let message = message.to_ascii_uppercase();
     let idx = message.find("ORA-")?;
     let digits: String = message[idx + 4..]
         .chars()
@@ -439,6 +441,64 @@ pub fn parse_ora_code(message: &str) -> Option<i32> {
     } else {
         digits.parse::<i32>().ok()
     }
+}
+
+/// Recovery action for an Oracle error whose code has a stable retry meaning.
+///
+/// The connection-lost set is deliberately kept in this leaf crate so the DB
+/// adapter, core retry policy, and envelope renderer cannot drift into separate
+/// hand-maintained lists. It mirrors the pinned `oracledb` driver's public
+/// `Error::is_connection_lost()` taxonomy; the DB adapter has a driver-seam
+/// regression test that proves the two remain aligned at each driver bump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OracleRetryAction {
+    /// The error is deterministic or the connection state is not suitable for
+    /// an automatic replay.
+    Never,
+    /// The connection remains usable; an idempotent read may run again on the
+    /// same session.
+    RetrySameConnection,
+    /// The underlying session/socket is gone; discard it and reconnect before
+    /// replaying an idempotent read.
+    ReconnectThenRetry,
+}
+
+/// The pinned driver's connection-lost Oracle-code set.
+///
+/// This is the `oracledb 0.8.4` `Error::is_connection_lost()` set for server
+/// errors. Raw I/O and driver `ConnectionClosed` errors are classified by the
+/// DB adapter directly, because they have no Oracle code.
+pub const CONNECTION_LOST_ORA_CODES: &[i32] = &[
+    28, 1012, 1041, 1089, 2396, 3113, 3114, 3135, 12537, 12547, 12570, 28511,
+];
+
+/// Driver transient codes that are safe to retry on the same connection for an
+/// idempotent read.
+const RETRY_SAME_CONNECTION_ORA_CODES: &[i32] =
+    &[54, 60, 104, 257, 12516, 12520, 12526, 12528, 30006, 51535];
+
+/// Oracle package-state reset: the session remains connected, and a plain
+/// re-call may succeed after Oracle discards package state.
+const PACKAGE_STATE_RESET_ORA_CODE: i32 = 4068;
+
+/// Return the safe retry action for a parsed Oracle error code.
+#[must_use]
+pub fn oracle_retry_action(code: i32) -> OracleRetryAction {
+    if CONNECTION_LOST_ORA_CODES.contains(&code) {
+        OracleRetryAction::ReconnectThenRetry
+    } else if RETRY_SAME_CONNECTION_ORA_CODES.contains(&code)
+        || code == PACKAGE_STATE_RESET_ORA_CODE
+    {
+        OracleRetryAction::RetrySameConnection
+    } else {
+        OracleRetryAction::Never
+    }
+}
+
+/// Return the retry action encoded in an Oracle error message, if present.
+#[must_use]
+pub fn oracle_retry_action_from_message(message: &str) -> OracleRetryAction {
+    parse_ora_code(message).map_or(OracleRetryAction::Never, oracle_retry_action)
 }
 
 /// Map a numeric Oracle error code to its [`ErrorClass`].
@@ -453,8 +513,8 @@ pub fn classify_ora_code(code: i32) -> ErrorClass {
         // ORA-00942 classifies as a missing object, not a syntax error).
         942 | 4043 | 31603 => ErrorClass::ObjectNotFound,
         // Privilege / authentication — all TERMINAL (never auto-retried; not in
-        // resilience.rs TRANSIENT_ORA_CODES), so a wrong password or a locked
-        // account can never drive a reconnect loop that locks the account harder.
+        // the shared retry taxonomy), so a wrong password or a locked account
+        // can never drive a reconnect loop that locks the account harder.
         //   1031 insufficient privileges · 1017 invalid credential · 1045 no
         //   CREATE SESSION · 28009 must connect AS SYSDBA/SYSOPER.
         // Account/password lifecycle (multi-pass 2026-07): these previously fell
@@ -473,8 +533,17 @@ pub fn classify_ora_code(code: i32) -> ErrorClass {
         }
         // Read-only transaction violation (SET TRANSACTION READ ONLY, §6.3).
         1456 | 16000 => ErrorClass::ForbiddenStatement,
-        // Connection / network — transient & retryable.
-        3113 | 3114 | 12170 | 12541 | 12514 | 12537 | 12543 => ErrorClass::Transient,
+        // Driver-classified connection loss, retry-in-place conditions, and an
+        // Oracle package-state reset are transient for idempotent reads. The
+        // retry action (fresh connection vs same connection) is carried by
+        // `oracle_retry_action`, not inferred from this envelope class alone.
+        code if !matches!(oracle_retry_action(code), OracleRetryAction::Never) => {
+            ErrorClass::Transient
+        }
+        // Listener/session failures detected before a usable session exists.
+        // These need an operator/configuration correction; they are not safe
+        // in-session retries under the driver's taxonomy.
+        12514 | 12541 | 12543 | 12170 => ErrorClass::ConnectionFailed,
         // Listener / session limits — admission backpressure.
         12519 | 18 | 20 => ErrorClass::Busy,
         // Syntax / parse family (942 already matched above).
@@ -615,6 +684,10 @@ mod tests {
             parse_ora_code("foo ORA-1031: insufficient privileges"),
             Some(1031)
         );
+        assert_eq!(
+            parse_ora_code("ora-03113: end-of-file on communication channel"),
+            Some(3113)
+        );
         assert_eq!(parse_ora_code("no oracle code here"), None);
         assert_eq!(parse_ora_code("ORA-: malformed"), None);
     }
@@ -630,6 +703,29 @@ mod tests {
         assert_eq!(classify_ora_code(12519), ErrorClass::Busy);
         assert_eq!(classify_ora_code(923), ErrorClass::SyntaxError);
         assert_eq!(classify_ora_code(7777), ErrorClass::Internal);
+    }
+
+    #[test]
+    fn retry_actions_keep_connection_loss_and_package_reset_distinct() {
+        for code in CONNECTION_LOST_ORA_CODES {
+            assert_eq!(
+                oracle_retry_action(*code),
+                OracleRetryAction::ReconnectThenRetry,
+                "ORA-{code:05} must discard and reconnect before retry"
+            );
+            assert_eq!(classify_ora_code(*code), ErrorClass::Transient);
+        }
+        assert_eq!(
+            oracle_retry_action(4068),
+            OracleRetryAction::RetrySameConnection,
+            "ORA-04068 resets package state but does not kill the session"
+        );
+        assert_eq!(classify_ora_code(4068), ErrorClass::Transient);
+        for code in [12514, 12541, 12543, 12170] {
+            assert_eq!(oracle_retry_action(code), OracleRetryAction::Never);
+            assert_eq!(classify_ora_code(code), ErrorClass::ConnectionFailed);
+        }
+        assert_eq!(oracle_retry_action(942), OracleRetryAction::Never);
     }
 
     #[test]

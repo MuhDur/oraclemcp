@@ -1554,7 +1554,7 @@ mod driver {
                     Duration::from_secs(1),
                 )
                 .await
-                .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?
+                .map_err(|err| driver_query_error(err, &self.opts, None))?
             {
                 // Deliberately discard every decoded record field: QUERY CQN
                 // may contain table names, rowids, or query metadata, none of
@@ -1624,7 +1624,7 @@ mod driver {
         connection
             .notify_register(cx, &client_id)
             .await
-            .map_err(|err| DbError::Query(sanitize_driver_error(err, &adapter.opts)))?;
+            .map_err(|err| driver_query_error(err, &adapter.opts, None))?;
         Ok(Box::new(DriverCqnNotificationReceiver {
             registration_id: registration.registration_id(),
             opts: adapter.opts.clone(),
@@ -1991,9 +1991,7 @@ mod driver {
                 timeout_ms,
             )
             .await
-            .map_err(|err| {
-                DbError::Execute(format!("{context}: {}", sanitize_driver_error(err, opts)))
-            })
+            .map_err(|err| driver_execute_error(err, opts, context))
     }
 
     /// Convert a trusted, profile-owned session statement failure into the
@@ -2053,9 +2051,7 @@ mod driver {
                 timeout_ms,
             )
             .await
-            .map_err(|err| {
-                DbError::Query(format!("{context}: {}", sanitize_driver_error(err, opts)))
-            })
+            .map_err(|err| driver_query_error(err, opts, Some(context)))
     }
 
     pub(super) fn prefetch_rows_for_statement(sql: &str) -> u32 {
@@ -2605,9 +2601,7 @@ mod driver {
     ) -> Result<T, DbError> {
         match result {
             Ok(value) => Ok(value),
-            Err(FetchBatchError::Driver(err)) => {
-                Err(DbError::Query(sanitize_driver_error(err, opts)))
-            }
+            Err(FetchBatchError::Driver(err)) => Err(driver_query_error(err, opts, None)),
             Err(FetchBatchError::Timeout(timeout_ms)) => {
                 match bounded_recovery_cancel(cx, inner, opts, "fetch loop").await {
                     Ok(()) => Err(fetch_batch_call_timeout(timeout_ms)),
@@ -2631,10 +2625,7 @@ mod driver {
     ) -> Result<T, DbError> {
         match result {
             Ok(value) => Ok(value),
-            Err(FetchBatchError::Driver(err)) => Err(DbError::Execute(format!(
-                "{context}: {}",
-                sanitize_driver_error(err, opts)
-            ))),
+            Err(FetchBatchError::Driver(err)) => Err(driver_execute_error(err, opts, context)),
             Err(FetchBatchError::Timeout(timeout_ms)) => {
                 match bounded_recovery_cancel(cx, inner, opts, context).await {
                     Ok(()) => Err(DbError::Cancelled(format!(
@@ -2751,7 +2742,7 @@ mod driver {
                 super::db_checkpoint(cx, "oracle_db.query_row_stream.next.eof")?;
                 return Ok(None);
             };
-            let row = row.map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?;
+            let row = row.map_err(|err| driver_query_error(err, &self.opts, None))?;
             let row = owned_row_to_oracle_row(&self.metadata, row, &self.serialize_opts)?;
             super::db_checkpoint(cx, "oracle_db.query_row_stream.next.after")?;
             Ok(Some(row))
@@ -3149,10 +3140,7 @@ mod driver {
                                 .await
                                 .map(|result| result.data.unwrap_or_default())
                                 .map_err(|err| {
-                                    DbError::Query(format!(
-                                        "LOB locator read failed: {}",
-                                        sanitize_driver_error(err, opts)
-                                    ))
+                                    driver_query_error(err, opts, Some("LOB locator read failed"))
                                 })?
                         }
                         None => Vec::new(),
@@ -5127,6 +5115,43 @@ mod driver {
         message
     }
 
+    /// Convert a driver execution error without erasing its connection-lost
+    /// disposition. The driver's public predicate covers both its curated ORA
+    /// set and raw I/O / `ConnectionClosed` failures, which cannot be recovered
+    /// from a sanitized display string alone.
+    pub(super) fn driver_query_error(
+        err: oracledb::Error,
+        opts: &OracleConnectOptions,
+        context: Option<&str>,
+    ) -> DbError {
+        let lost = err.is_connection_lost();
+        let detail = sanitize_driver_error(err, opts);
+        let message = match context {
+            Some(context) => format!("{context}: {detail}"),
+            None => detail,
+        };
+        if lost {
+            DbError::ConnectionLost(message)
+        } else {
+            DbError::Query(message)
+        }
+    }
+
+    /// Execute-path counterpart to [`driver_query_error`]. Non-lost errors
+    /// retain the execute context; a structurally lost connection remains a
+    /// `ConnectionLost` so pool/lease cleanup cannot mistake it for ordinary
+    /// statement failure.
+    pub(super) fn driver_execute_error(
+        err: oracledb::Error,
+        opts: &OracleConnectOptions,
+        context: &str,
+    ) -> DbError {
+        match driver_query_error(err, opts, Some(context)) {
+            DbError::Query(message) => DbError::Execute(message),
+            other => other,
+        }
+    }
+
     /// Extract the `ERR=` code from a TNS listener refuse payload, e.g.
     /// `(DESCRIPTION=(TMP=)(VSNNUM=...)(ERR=12514)(ERROR_STACK=...))`.
     pub(super) fn parse_listener_refuse_code(payload: &str) -> Option<u32> {
@@ -5226,7 +5251,7 @@ mod driver {
                 Some(timeout) => inner.ping_with_timeout(cx, timeout).await,
                 None => inner.ping(cx).await,
             }
-            .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)));
+            .map_err(|err| driver_query_error(err, &self.opts, None));
             drop(inner);
             super::db_checkpoint(cx, "oracle_db.ping.after")?;
             result
@@ -5714,7 +5739,7 @@ mod driver {
                     0,
                 )
                 .await
-                .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?;
+                .map_err(|err| driver_query_error(err, &self.opts, None))?;
             let Some(client_id) = subscription.client_id else {
                 // QUERY CQN must return the EMON callback identity; without it
                 // the adapter cannot open or later cleanly tear down the
@@ -5731,7 +5756,7 @@ mod driver {
                     oracledb::Registration::new(sql, registration_id).bind(binds.as_slice()),
                 )
                 .await
-                .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)));
+                .map_err(|err| driver_query_error(err, &self.opts, None));
             let query_id = match registered {
                 Ok(registered) => registered.query_id().ok_or_else(|| {
                     DbError::UnsupportedFeature(
@@ -5814,7 +5839,7 @@ mod driver {
                     0,
                 )
                 .await
-                .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?;
+                .map_err(|err| driver_query_error(err, &self.opts, None))?;
             drop(inner);
             super::db_checkpoint(cx, "oracle_db.cqn_unregister_query.after")?;
             self.cqn_client_ids
@@ -5977,7 +6002,10 @@ mod driver {
                         timeout,
                     )
                     .await
-                    .map_err(|err| DbError::Execute(sanitize_driver_error(err, &self.opts)))?;
+                    .map_err(|err| match driver_query_error(err, &self.opts, None) {
+                        DbError::Query(message) => DbError::Execute(message),
+                        other => other,
+                    })?;
                 let status = output_value(&result, 1)
                     .and_then(QueryValue::as_i64)
                     .ok_or_else(|| {
@@ -7552,6 +7580,44 @@ mod tests {
         let err = driver::fetch_batch_call_timeout(25);
         assert!(matches!(err, DbError::Cancelled(_)), "{err:?}");
         assert!(err.is_uncertain_session_state(), "{err}");
+    }
+
+    #[test]
+    fn driver_connection_lost_taxonomy_reaches_the_db_error_boundary() {
+        let opts = ezconnect_opts();
+        for code in oraclemcp_error::CONNECTION_LOST_ORA_CODES {
+            let err = oracledb::Error::Protocol(oracledb::protocol::ProtocolError::ServerError(
+                format!("ORA-{code:05}: synthetic connection loss"),
+            ));
+            assert!(
+                err.is_connection_lost(),
+                "pinned driver must classify ORA-{code:05} as connection-lost"
+            );
+            let mapped = driver::driver_query_error(err, &opts, None);
+            assert!(
+                matches!(mapped, DbError::ConnectionLost(_)),
+                "adapter must retain the driver's connection-lost disposition for ORA-{code:05}"
+            );
+        }
+
+        let io = oracledb::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "synthetic broken pipe",
+        ));
+        assert!(io.is_connection_lost());
+        assert!(matches!(
+            driver::driver_query_error(io, &opts, None),
+            DbError::ConnectionLost(_)
+        ));
+
+        let execute_io = oracledb::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "synthetic broken pipe",
+        ));
+        assert!(matches!(
+            driver::driver_execute_error(execute_io, &opts, "synthetic execute"),
+            DbError::ConnectionLost(_)
+        ));
     }
 
     // --- connect/handshake failure classification (bead bhw6.2) -----------
