@@ -98,6 +98,18 @@ else:
     raise SystemExit("unexpected br show JSON shape")
 if len(rows) != 1 or not isinstance(rows[0], dict):
     raise SystemExit(f"expected exactly one issue, got {len(rows)}")
+# Edges that do NOT sequence work, so an open one cannot gate a close:
+#   parent-child   an epic stays open until its children land, by design
+#   discovered-from  provenance — where a bead was FOUND, not what must
+#                  finish first. Gating on it inverted the common case: a
+#                  follow-up discovered inside a long-running epic is exactly
+#                  the work that should land while the epic stays open, and
+#                  the 2026-07-21 swarm decomposed every cluster with this
+#                  edge, so the close rate collapsed until the edges were
+#                  rewritten by hand (bead oraclemcp-r3sti).
+# Every other type — `blocks`, and anything a future br version adds — still
+# refuses. Unknown means blocking: this list is an allowlist on purpose.
+NON_SEQUENCING = {"parent-child", "discovered-from"}
 open_dependencies = [
     dependency
     for dependency in rows[0].get("dependencies", [])
@@ -106,7 +118,7 @@ open_dependencies = [
 real_blockers = [
     dependency
     for dependency in open_dependencies
-    if dependency.get("dependency_type") != "parent-child"
+    if dependency.get("dependency_type") not in NON_SEQUENCING
 ]
 if real_blockers:
     details = ", ".join(
@@ -117,9 +129,13 @@ if real_blockers:
         )
         for dependency in real_blockers
     )
-    print(f"refusing open non-parent dependencies: {details}", file=sys.stderr)
+    print(f"refusing open blocking dependencies: {details}", file=sys.stderr)
     raise SystemExit(65)
-print("force-parent-only" if open_dependencies else "normal")
+# `br close` applies its own dependency check and does not share this
+# distinction, so a non-sequencing edge still needs --force to get past it.
+# The guard has already proven there is no real blocker, which is what makes
+# that force narrow rather than a bypass.
+print("force-non-sequencing" if open_dependencies else "normal")
 '
 }
 
@@ -218,7 +234,7 @@ perform_close() {
   close_mode="$(tracker_close_mode "$bead_id")"
   case "$close_mode" in
     normal) ;;
-    force-parent-only) close_args+=(--force) ;;
+    force-non-sequencing) close_args+=(--force) ;;
     *) die "unexpected dependency close mode: $close_mode" ;;
   esac
   "$BR_BIN" close "${close_args[@]}"
@@ -308,15 +324,39 @@ selftest() {
   status="$(printf '%s' \
     '[{"id":"child","dependencies":[{"id":"parent","status":"open","dependency_type":"parent-child"}]}]' \
     | dependency_close_mode)"
-  [[ "$status" == force-parent-only ]] \
+  [[ "$status" == force-non-sequencing ]] \
     || die "selftest: open parent-child dependency was not narrowly forceable"
   printf 'PASS selftest: open parent epic is narrowly forceable\n'
+  status="$(printf '%s' \
+    '[{"id":"child","dependencies":[{"id":"epic","status":"in_progress","dependency_type":"discovered-from"}]}]' \
+    | dependency_close_mode)"
+  [[ "$status" == force-non-sequencing ]] \
+    || die "selftest: open discovered-from dependency blocked the close (bead r3sti)"
+  printf 'PASS selftest: open discovered-from provenance edge does not gate a close\n'
   if printf '%s' \
     '[{"id":"child","dependencies":[{"id":"blocker","status":"open","dependency_type":"blocks"}]}]' \
     | dependency_close_mode >/dev/null 2>&1; then
     die "selftest: real open blocker was accepted"
   fi
   printf 'PASS selftest: real open blocker is refused\n'
+  if printf '%s' \
+    '[{"id":"child","dependencies":[{"id":"epic","status":"in_progress","dependency_type":"discovered-from"},{"id":"blocker","status":"open","dependency_type":"blocks"}]}]' \
+    | dependency_close_mode >/dev/null 2>&1; then
+    die "selftest: a real blocker was excused by a sibling provenance edge"
+  fi
+  printf 'PASS selftest: a provenance edge never excuses a real blocker\n'
+  if printf '%s' \
+    '[{"id":"child","dependencies":[{"id":"other","status":"open","dependency_type":"sequenced-after"}]}]' \
+    | dependency_close_mode >/dev/null 2>&1; then
+    die "selftest: an unknown dependency type was treated as non-blocking"
+  fi
+  printf 'PASS selftest: an unknown dependency type still refuses (allowlist, not denylist)\n'
+  status="$(printf '%s' \
+    '[{"id":"child","dependencies":[{"id":"epic","status":"closed","dependency_type":"discovered-from"}]}]' \
+    | dependency_close_mode)"
+  [[ "$status" == normal ]] \
+    || die "selftest: a closed dependency should need no force"
+  printf 'PASS selftest: a closed dependency closes normally\n'
 }
 
 command_name="${1:-}"
