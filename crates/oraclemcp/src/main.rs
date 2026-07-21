@@ -158,8 +158,10 @@ enum Command {
         /// --allow-no-auth; mTLS identities require registered leaf fingerprints.
         #[arg(long)]
         listen: Option<String>,
-        /// Run stdio without an init token (development only). Without this and
-        /// without $ORACLEMCP_STDIO_TOKEN, stdio serve refuses to start.
+        /// Permit unauthenticated development: disables stdio's init-token
+        /// requirement only when no token is configured, and permits HTTP to
+        /// start without configured auth. A non-loopback HTTP bind still needs
+        /// explicit remote opt-in; never use this for remote exposure.
         #[arg(long)]
         allow_no_auth: bool,
         /// The expected stdio init token (overrides $ORACLEMCP_STDIO_TOKEN).
@@ -413,7 +415,8 @@ struct ServiceInstallCliArgs {
     /// Connect using this named profile from the loaded config.
     #[arg(long)]
     profile: Option<String>,
-    /// Start HTTP without OAuth or registered mTLS (local development only).
+    /// Permit HTTP without configured auth (local development only). A
+    /// non-loopback bind still needs explicit remote opt-in.
     #[arg(long)]
     allow_no_auth: bool,
     /// Enable service-owned per-client bearer credentials for HTTP.
@@ -1074,8 +1077,8 @@ fn runtime_connection_strategy(
     connections: &RuntimeConnections,
 ) -> &'static str {
     match (pool_configured, connections.stateless.is_some()) {
-        (true, true) => "hybrid_pool",
-        (true, false) => "hybrid_pool_degraded",
+        (true, true) => "pinned_plus_stateless",
+        (true, false) => "pinned_plus_stateless_degraded",
         (false, _) => "single_session",
     }
 }
@@ -6394,7 +6397,7 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
             && level.max_level() > OperatingLevel::ReadOnly,
         connection_strategy: Some(
             if chosen.pool.is_some() {
-                "hybrid_pool"
+                "pinned_plus_stateless_configured"
             } else {
                 "single_session"
             }
@@ -6587,7 +6590,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
     let pool_configured = resolved.pool_settings.is_some();
     let configured_connection_strategy = Some(
         if pool_configured {
-            "hybrid_pool"
+            "pinned_plus_stateless_configured"
         } else {
             "single_session"
         }

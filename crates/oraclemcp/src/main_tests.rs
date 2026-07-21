@@ -270,7 +270,7 @@ fn optional_pool_failure_retains_the_authoritative_primary_session() {
     assert!(connections.stateless.is_none());
     assert_eq!(
         runtime_connection_strategy(true, &connections),
-        "hybrid_pool_degraded"
+        "pinned_plus_stateless_degraded"
     );
     let error = block_on_connect(|cx| async move {
         connections
@@ -305,7 +305,7 @@ fn healthy_optional_pool_is_installed_and_reported() {
     assert!(connections.stateless.is_some());
     assert_eq!(
         runtime_connection_strategy(true, &connections),
-        "hybrid_pool"
+        "pinned_plus_stateless"
     );
 }
 
@@ -3491,6 +3491,21 @@ fn agent_ergonomics_drift_guard_pins_help_footer() {
         assert!(help.contains("oraclemcp --json service install --dry-run"));
         assert!(help.contains("service mutations require --yes"));
     }
+}
+
+#[test]
+fn allow_no_auth_help_names_stdio_and_http_behavior() {
+    let mut command = cli_command("oraclemcp");
+    let serve = command
+        .find_subcommand_mut("serve")
+        .expect("serve subcommand exists");
+    let mut help = Vec::new();
+    serve.write_long_help(&mut help).expect("render serve help");
+    let help = String::from_utf8(help).expect("help utf8");
+
+    assert!(help.contains("stdio's init-token"));
+    assert!(help.contains("HTTP to start without configured auth"));
+    assert!(help.contains("non-loopback HTTP bind still needs"));
 }
 
 #[test]
