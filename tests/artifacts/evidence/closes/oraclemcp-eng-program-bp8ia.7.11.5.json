@@ -1,0 +1,49 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T22:20:55Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.5",
+  "scope": {
+    "summary": "F-LOW DK2 is satisfied upstream: the driver no longer spawns an OS thread per TIMEDWAIT acquire, and oraclemcp consumes the release that carries the fix.",
+    "in_scope": [
+      "Cargo.toml"
+    ],
+    "out_of_scope": [
+      "No oraclemcp source changed. This closes a mirror bead by VERIFYING upstream work, not by implementing anything here.",
+      "The driver-side fix is not re-tested here; the driver's own bead (rust-oracledb-f-driver-dk1-dk2-pool-lifecycle-rbte) owns its tests.",
+      "DC5 (bead .7.11.1), the sibling driver-side finding, is NOT covered and remains open and unfixed."
+    ]
+  },
+  "source": {
+    "sha": "c1e96933501ec2e6b95fda2490f38807d3fa5ab3",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracledb pool acquire deadline (Cargo.toml:53 pin)",
+        "kind": "api",
+        "trace": "VERIFIED BY INSPECTION OF THE PINNED UPSTREAM, bound to specific commits rather than asserted. (1) The mechanism named in the finding is GONE: `TimedAcquireDeadline` no longer appears anywhere under rust-oracledb crates/, and `crates/oracledb/src/pool/` contains ZERO `thread::spawn` calls, so no OS thread is created per timed acquire. (2) The replacement matches the narrow fix this bead asked for -- acquire.rs now documents 'asupersync's timer wheel -- no per-waiter OS threads' and wraps the wait in `time::timeout` on the ambient Cx timer driver, explicitly cancel-safe, which is the 'one shared bounded timer facility while retaining wake/cancel semantics' the bead specified. (3) The change is commit 19124558676422f3bcc5c7031576d3657df2a025, 'fix(pool): last-handle AtomicUsize + TIMEDWAIT without per-waiter threads', dated 2026-07-21T15:06:22+02:00, which closes the driver's own DK1/DK2 bead and IS an ancestor of rust-oracledb origin/main. (4) THE VERSION CHAIN, which is what makes this true for oraclemcp and not merely true upstream: 1912455 is an ancestor of driver tag v0.9.0 and is NOT in v0.8.4, and oraclemcp pins `oracledb = { version = \"=0.9.0\" }` at Cargo.toml:53. So the release this repo builds against is the first one containing the fix."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is a cross-repository verification close. `source.sha` names the oraclemcp commit at which the verification was performed; the work itself lives in rust-oracledb at 1912455, which does not resolve in this repository and will read as an unresolvable citation to a same-repo auditor.",
+    "The bead's negative acceptance (N simultaneous blocked TIMEDWAIT acquires do not increase OS thread count linearly) was NOT re-measured here. The driver's own test suite deliberately asserts this by signal rather than by OS-thread counts, which its pool_reaper_async.rs states outright as an anti-flake choice; I did not run it.",
+    "No oraclemcp-side test pins this property, so a future driver regression would be caught by the driver's suite rather than by this repository."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "DC5 (bead oraclemcp-eng-program-bp8ia.7.11.1) remains open and is confirmed still unfixed upstream: sql_convert.rs still computes `offset_minutes: offset_seconds.div_euclid(60)`."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
