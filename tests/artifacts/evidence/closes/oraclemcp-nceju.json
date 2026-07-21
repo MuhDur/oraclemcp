@@ -1,0 +1,53 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T17:55:00Z",
+  "bead_id": "oraclemcp-nceju",
+  "scope": {
+    "summary": "Plan \u00a730.4 item 11, both halves: the OAuth reject reasons are now bound to the TokenError enum by an exhaustive match plus a single table, and the verifier tamper matrix covers every payload leaf at every depth instead of one field.",
+    "in_scope": [
+      "crates/oraclemcp-auth/src/oauth_rs.rs",
+      "crates/oraclemcp-verifier/tests/test_attestation.rs"
+    ],
+    "out_of_scope": [
+      "The ten pre-existing per-reason OAuth tests, which are kept: they carry ordering assertions (type rejected before claim validation) the table does not, and AGENTS.md RULE 1 forbids deleting them.",
+      "crates/oraclemcp-auth/src/http_guard.rs, another agent's mid-edit throughout. TokenError::Missing is produced by extract_bearer in oauth_rs.rs, so the matrix covers it without touching that file.",
+      "Signature-scheme coverage beyond HS256: the asymmetric verifier is a fail-closed seam with no implementation, so there is nothing to tamper-test there yet."
+    ]
+  },
+  "source": {
+    "sha": "ded89de8a41b04253be133acd046d08be5071377",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "cargo test -p oraclemcp-auth (oauth_reject_matrix_covers_every_reason_and_the_accept)",
+        "kind": "cli",
+        "trace": "58 tests pass. The audit the item asked for: all ten reject reasons already had individual tests, so the gap was not coverage but the absence of any link between the #[non_exhaustive] enum and the test list. all_token_errors() carries an in-crate exhaustive match (a new variant stops the crate compiling), and the table requires a row that provokes each reason through the real validator, compared by std::mem::discriminant so UnsupportedAlg/UntrustedIssuer count only when actually produced. MUTATION-CHECKED: deleting the nbf row fails with 'no row in the reject matrix provokes NotYetValid'."
+      },
+      {
+        "name": "cargo test -p oraclemcp-verifier --test test_attestation (every_payload_leaf_at_every_depth_is_covered_by_the_signature)",
+        "kind": "cli",
+        "trace": "11 tests pass. The matrix walks every scalar leaf of the signed payload (>=12 leaves, at least one at depth >=3) and asserts each tamper is rejected, then asserts separately that a SCHEMA-VALID tamper at depth 3 is caught by the payload digest specifically. Writing it surfaced that /artifacts/0/sha256 is rejected by InvalidArtifactDigest before the digest check runs \u2014 the field is covered, but by an earlier gate, which is why the specificity rows use schema-valid replacements. MUTATION-CHECKED: inverting the totality assertion fails on /artifacts/0/path."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The tamper matrix's control assertion (an untampered re-serialization still verifies) is what keeps it honest; if the payload encoding ever stops round-tripping byte-identically, that control fails first and the matrix must be rewritten to tamper raw bytes rather than re-serialized JSON.",
+    "Only the payload line is walked. The signature line's own fields are covered by the existing wrong-key, unknown-key-id, and recomputed-digest-forgery tests, not by this matrix.",
+    "Scoped verification: cargo test/clippy for -p oraclemcp-auth and -p oraclemcp-verifier. No workspace-wide run; rustfmt applied to the two touched files only."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
