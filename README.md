@@ -611,6 +611,10 @@ hs256_secret_ref = "env:ORACLEMCP_OAUTH_HS256_SECRET"
 # preauth_workers = 4
 # operator_workers = 1
 # doctor_workers = 1
+# The authenticated control probe bounds each request header and body to one
+# second to limit slowloris exposure. A slow request is closed and emits a
+# warn-level `reason=ingress_timeout` event; an unregistered certificate emits
+# a separate warn with its computed `mtls:sha256:...` fingerprint.
 #
 # [http.operator]
 # allow_loopback_owner = true

@@ -65,6 +65,17 @@ pub(super) fn control_auth_drop(
     std::io::Error::new(std::io::ErrorKind::PermissionDenied, error_message)
 }
 
+/// Preserve the bounded control-probe timeout while making a slow ingress
+/// distinguishable from an authentication drop in operator logs.
+pub(super) fn control_ingress_timeout(error: std::io::Error) -> std::io::Error {
+    tracing::warn!(
+        reason = "ingress_timeout",
+        error = %error,
+        "dedicated control ingress dropped slow request"
+    );
+    error
+}
+
 /// Serve the MCP server over plaintext Streamable HTTP on `listener`.
 ///
 /// # Errors
@@ -721,6 +732,11 @@ fn handle_stream(
                 ],
                 body: e.to_string().into_bytes(),
             })
+        }
+        Err(e)
+            if transport_permit.is_control_probe() && e.kind() == std::io::ErrorKind::TimedOut =>
+        {
+            return Err(control_ingress_timeout(e));
         }
         Err(e) => return Err(e),
     };

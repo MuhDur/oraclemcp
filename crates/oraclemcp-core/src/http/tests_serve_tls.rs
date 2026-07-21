@@ -311,6 +311,24 @@ fn dedicated_control_authorization_drop_warns_with_computed_principal_and_reason
 }
 
 #[test]
+fn dedicated_control_ingress_timeout_warn_is_distinguishable() {
+    let subscriber = CapturingControlDropSubscriber::default();
+    tracing::subscriber::with_default(subscriber.clone(), || {
+        let error = super::serve::control_ingress_timeout(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "header deadline exceeded",
+        ));
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    });
+    let events = subscriber.0.lock().expect("control-drop event lock is not poisoned");
+    assert_eq!(events.len(), 1, "expected one timeout warning");
+    let event = &events[0];
+    assert_eq!(event.level, tracing::Level::WARN);
+    assert!(event.fields.get("reason").is_some_and(|reason| reason.contains("ingress_timeout")));
+    assert!(event.fields.get("message").is_some_and(|message| message.contains("dropped slow request")));
+}
+
+#[test]
 fn serve_https_accepts_tls_handshake() {
     let (cert, key) = self_signed_cert();
     let tls = crate::tls::build_server_config(&crate::tls::TlsMaterial {
