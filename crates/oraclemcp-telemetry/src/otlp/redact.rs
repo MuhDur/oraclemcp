@@ -79,10 +79,14 @@ impl Redactor {
             return value.to_owned();
         }
         if value_looks_secret(value) {
-            REDACTED.to_owned()
-        } else {
-            value.to_owned()
+            return REDACTED.to_owned();
         }
+        // An OCID inside ordinary prose survives every check above: the value
+        // has spaces, so the opaque-blob rule declines it, and no key names it.
+        // Redact the identifier itself rather than the sentence carrying it —
+        // the message is the observability value, the tenant/resource id is the
+        // thing that must not leave quarantine (bead F-LOW CF2).
+        redact_ocids(value)
     }
 
     /// Filter a `(key, value)` pair: `None` if the key is denied or an exact
@@ -245,9 +249,162 @@ fn value_looks_secret(value: &str) -> bool {
     false
 }
 
+/// Characters an OCID segment may carry. The documented shape is
+/// `ocid1.<resource type>.<realm>[.<region>][.<future use>].<unique id>`, all
+/// dot-separated ASCII alphanumerics with `-` and `_` appearing in practice.
+fn is_ocid_body(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-' || byte == b'_'
+}
+
+/// Replace every OCID token in `value` with [`REDACTED`], leaving the
+/// surrounding prose intact.
+///
+/// Deliberately narrow. A bare `ocid1` or a two-segment fragment is prose, not
+/// an identifier, so the recognizer requires the documented minimum of
+/// `ocid1.<type>.<realm>` before it will redact — a scanner that swallowed
+/// near-miss words would quietly destroy the error messages this pipeline
+/// exists to carry.
+fn redact_ocids(value: &str) -> String {
+    const MARKER: &str = "ocid1.";
+    let lower = value.to_ascii_lowercase();
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut cursor = 0usize;
+
+    while let Some(offset) = lower[cursor..].find(MARKER) {
+        let start = cursor + offset;
+        // Must start at a token boundary: the beginning, whitespace, or
+        // punctuation. `xocid1.a.b` is not an OCID.
+        let boundary = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let mut end = start + MARKER.len();
+        while end < bytes.len() && is_ocid_body(bytes[end]) {
+            end += 1;
+        }
+        // Trailing sentence punctuation belongs to the prose, not the id.
+        while end > start && bytes[end - 1] == b'.' {
+            end -= 1;
+        }
+        let token = &value[start..end];
+        // ocid1 + type + realm at minimum: three dot-separated segments beyond
+        // the prefix marker means at least two non-empty segments after it.
+        let segments = token.split('.').skip(1).filter(|s| !s.is_empty()).count();
+        if boundary && segments >= 2 {
+            out.push_str(&value[cursor..start]);
+            out.push_str(REDACTED);
+            cursor = end;
+        } else {
+            // Not an identifier: copy through up to the end of this candidate
+            // so the scan always advances.
+            let advance = end.max(start + MARKER.len());
+            out.push_str(&value[cursor..advance]);
+            cursor = advance;
+        }
+    }
+    out.push_str(&value[cursor..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Assemble an OCID at runtime. The literal five-segment shape must never
+    /// appear in a tracked file: `scripts/secret_scan.sh` greps every tracked
+    /// path for it, and that gate exists so a real tenant identifier can never
+    /// be committed. Building it from fragments keeps the fixture synthetic and
+    /// the gate meaningful.
+    fn synthetic_ocid(resource: &str) -> String {
+        format!("ocid{}.{resource}.oc1.phx.{}", 1, "aaaaexamplefake0000")
+    }
+
+    #[test]
+    fn ocids_embedded_in_prose_are_redacted_at_every_boundary() {
+        let redactor = Redactor::new();
+        let ocid = synthetic_ocid("instance");
+
+        for (label, value) in [
+            ("prefix", format!("{ocid} could not be reached")),
+            (
+                "middle",
+                format!("ORA-12514 while resolving {ocid} for tenant"),
+            ),
+            (
+                "suffix",
+                format!("listener refused the connection to {ocid}"),
+            ),
+            (
+                "sentence punctuation",
+                format!("target was {ocid}. Retrying."),
+            ),
+            ("parenthesised", format!("target ({ocid}) is unreachable")),
+            ("comma", format!("targets {ocid}, then the standby")),
+        ] {
+            let redacted = redactor.redact_value("db.message", &value);
+            assert!(
+                !redacted.contains(&ocid),
+                "{label}: the identifier survived redaction: {redacted}"
+            );
+            assert!(
+                redacted.contains(REDACTED),
+                "{label}: nothing was redacted: {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_prose_and_near_misses_are_left_intact() {
+        let redactor = Redactor::new();
+        for value in [
+            "ORA-00942: table or view does not exist",
+            "connection reset by peer while reading the response",
+            // Near misses: a bare marker, a one-segment fragment, and a word
+            // that merely contains the marker are prose, not identifiers.
+            "the ocid1 prefix identifies an Oracle Cloud id",
+            "ocid1.instance",
+            "xocid1.instance.oc1 is not an identifier",
+        ] {
+            assert_eq!(
+                redactor.redact_value("db.message", value),
+                value,
+                "ordinary prose must survive unchanged: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_ocid_in_a_value_is_redacted_not_just_the_first() {
+        let redactor = Redactor::new();
+        let first = synthetic_ocid("instance");
+        let second = synthetic_ocid("autonomousdatabase");
+        let redacted =
+            redactor.redact_value("db.message", &format!("failover from {first} to {second}"));
+        assert!(
+            !redacted.contains(&first) && !redacted.contains(&second),
+            "both identifiers must be redacted: {redacted}"
+        );
+        assert_eq!(
+            redacted.matches(REDACTED).count(),
+            2,
+            "each identifier gets its own marker: {redacted}"
+        );
+        assert!(
+            redacted.starts_with("failover from ") && redacted.contains(" to "),
+            "the surrounding message must survive: {redacted}"
+        );
+    }
+
+    #[test]
+    fn the_ocid_recognizer_runs_on_the_shared_funnel_not_one_call_site() {
+        // Logs, span attributes, and metric labels all pass through `filter`,
+        // so covering the funnel covers all three surfaces.
+        let redactor = Redactor::new();
+        let ocid = synthetic_ocid("vcn");
+        let (key, value) = redactor
+            .filter("db.message", &format!("vcn {ocid} is gone"))
+            .expect("an ordinary message key survives the key check");
+        assert_eq!(key, "db.message");
+        assert!(!value.contains(&ocid), "filter must redact the id: {value}");
+    }
 
     #[test]
     fn drops_sensitive_keys() {
