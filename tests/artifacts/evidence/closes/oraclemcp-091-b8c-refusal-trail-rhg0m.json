@@ -1,0 +1,62 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T15:05:43Z",
+  "bead_id": "oraclemcp-091-b8c-refusal-trail-rhg0m",
+  "scope": {
+    "summary": "Provide the default-on, separately stored, redacted unsigned refusal trail without weakening the signed audit tier or the original guard refusal.",
+    "in_scope": [
+      "crates/oraclemcp-config/src/lib.rs",
+      "crates/oraclemcp-guard/src/corpus.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs",
+      "crates/oraclemcp-core/src/doctor.rs"
+    ],
+    "out_of_scope": [
+      "The B12c custom-tool signature-verification producer, which will consume this trail when it lands.",
+      "Live Oracle execution or externally shipped audit records."
+    ]
+  },
+  "source": {
+    "sha": "13a7e6fe4848b84efd9c6ab38eb25a52ba798f20",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "default-on and opt-out dispatcher wiring",
+        "kind": "config-gate",
+        "trace": "cargo test -p oraclemcp-config audit_config_loads_and_defaults_empty plus scripts/swarm_discipline.sh bounded-run --timeout 120 -- env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp-target/ws-b-b8c-evidence cargo test -p oraclemcp explicit_refusal_trail_opt_out_keeps_the_guard_refusal_without_a_record: 1 passed each in the dedicated clean worktree at 13a7e6fe4848b84efd9c6ab38eb25a52ba798f20. The config defaults the observer on, and the opt-out removes only that observer while preserving the guard refusal."
+      },
+      {
+        "name": "redacted refusal corpus append and export surface",
+        "kind": "cli",
+        "trace": "scripts/swarm_discipline.sh bounded-run --timeout 120 -- env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp-target/ws-b-b8c-evidence cargo test -p oraclemcp refusal_corpus: 7 focused tests passed in the clean worktree at 13a7e6fe4848b84efd9c6ab38eb25a52ba798f20, including a refused statement append, no-secret persistence, tamper refusal, and registered dry-run harness."
+      },
+      {
+        "name": "doctor audit postures",
+        "kind": "cli",
+        "trace": "scripts/swarm_discipline.sh bounded-run --timeout 120 -- env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp-target/ws-b-b8c-evidence cargo test -p oraclemcp-core audit_posture_is_not_inferred_from_the_default_audit_path and cargo test -p oraclemcp doctor_audit_posture_matches_startup_audit_policy_without_opening_a_log: 1 passed each in the clean worktree at 13a7e6fe4848b84efd9c6ab38eb25a52ba798f20. They cover active unsigned keyless-read-only, disabled-by-config, inactive signed tier, and writable no-key startup refusal."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No live Oracle statement or external SIEM/WORM destination was exercised."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-b12c-skip-and-warn-38yf3"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
