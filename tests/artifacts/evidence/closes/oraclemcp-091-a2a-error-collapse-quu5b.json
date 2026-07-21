@@ -1,7 +1,7 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-07-21T15:38:47Z",
+  "generated_at": "2026-07-21T16:10:07Z",
   "bead_id": "oraclemcp-091-a2a-error-collapse-quu5b",
   "scope": {
     "summary": "Preserves actionable state-store, setup-preview, incident, and client-credential causes instead of collapsing them into generic failure responses.",
@@ -18,7 +18,7 @@
     ]
   },
   "source": {
-    "sha": "780422b55d15ced8fa43d3c4432698d183d004ea",
+    "sha": "42e2f7af5dd280718e65ce7456e12ffdb9756afd",
     "tree_clean": true,
     "branch": "main"
   },
