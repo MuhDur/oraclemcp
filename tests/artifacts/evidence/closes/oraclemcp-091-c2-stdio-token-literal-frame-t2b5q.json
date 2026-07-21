@@ -1,0 +1,56 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T13:05:00Z",
+  "bead_id": "oraclemcp-091-c2-stdio-token-literal-frame-t2b5q",
+  "scope": {
+    "summary": "Commits the C2 wire-contract fixture: hand-written literal MCP initialize frames carrying the stdio init token at params._meta[\"oraclemcp/initToken\"], driven through the real serve_stdio_with_io loop, pinning Mismatch-vs-Missing and the three ways a client silently lands on Missing, with the discoverability half committed red for bead oraclemcp-091-b3-stdio-token-nzmiv.",
+    "in_scope": [
+      "crates/oraclemcp-core/tests/c2_stdio_init_token_literal_frame.rs",
+      "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c2-stdio-token-literal-frame-t2b5q.json"
+    ],
+    "out_of_scope": [
+      "Documenting the init-token path, and naming it in the Missing error text — B3 (oraclemcp-091-b3-stdio-token-nzmiv) owns both; this bead owns only the fixture.",
+      "The S13 half of B3 (whether mainstream MCP clients can inject params._meta at all, and whether the secure_stdio snippet should keep advertising the flow); C9 covers the snippet.",
+      "Any change to StdioAuthPolicy, the extraction path, or the constant-time comparison."
+    ]
+  },
+  "source": {
+    "sha": "2e08a368a4f77d31fc62450d8d45728ae30e664e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "stdio transport initialize handshake under StdioAuthPolicy::Required",
+        "kind": "route",
+        "trace": "c2_literal_frame_authenticates_against_the_matching_token feeds a committed literal frame through serve_stdio_with_io and asserts a JSON-RPC result rather than an error; c2_literal_frame_is_a_mismatch_not_a_miss_against_a_different_token asserts the same frame against a different expected token reports mismatch, proving the literal path still resolves"
+      },
+      {
+        "name": "init-token extraction from params._meta on initialize",
+        "kind": "config-gate",
+        "trace": "c2_absent_and_misplaced_tokens_all_read_as_missing drives five frames (no _meta, three plausibly guessed keys, a non-string value at the right path) and asserts every one reports the token as missing"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped test only: cargo test -p oraclemcp-core --test c2_stdio_init_token_literal_frame (3 passed, 2 expected-failure) plus the deliberate red run of those two. The full workspace gate was not run for this commit.",
+    "The two discoverability assertions are committed red by design and do not execute in the default run; they are not cited as proof of anything here. Their recorded red output is the deliverable, and B3 flips them green by deleting the #[ignore]s with the assertions unchanged.",
+    "The documentation assertion scans README.md, oraclemcp.example.toml, robot_docs.rs, and docs/**/*.md excluding docs/plan/. It proves the string is present somewhere an integrator would look; it cannot prove the surrounding prose is correct or usable.",
+    "This fixture proves the server accepts a correctly shaped frame. It says nothing about whether any real MCP client can be configured to emit params._meta — that is the open S13 question inside B3."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-b3-stdio-token-nzmiv must delete both #[ignore] attributes in crates/oraclemcp-core/tests/c2_stdio_init_token_literal_frame.rs as part of its acceptance."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
