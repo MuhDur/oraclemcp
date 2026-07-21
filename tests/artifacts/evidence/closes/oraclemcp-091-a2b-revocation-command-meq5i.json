@@ -1,0 +1,56 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T16:30:52Z",
+  "bead_id": "oraclemcp-091-a2b-revocation-command-meq5i",
+  "scope": {
+    "summary": "Distinguishes offline credential-store mutations from the authenticated running-service revocation path and advertises both command shapes honestly.",
+    "in_scope": [
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs"
+    ],
+    "out_of_scope": [
+      "Implementing the existing control-listener revoke route or its session teardown behavior.",
+      "Provisioning a live HTTPS control listener, mTLS certificates, or a live Oracle database."
+    ]
+  },
+  "source": {
+    "sha": "ef9c33a8582d8b39877c4c61c2f076fb7e29821b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oraclemcp --json clients issue",
+        "kind": "cli",
+        "trace": "client_credential_commands_distinguish_offline_and_live_revocation proves issue output includes the client command, explicit offline-mutation notice, and a POST /operator/v1/client-credentials/revoke mTLS request template with the issued client ID."
+      },
+      {
+        "name": "oraclemcp --json clients revoke <client-id>",
+        "kind": "cli",
+        "trace": "The same focused test proves a lock-open failure selects the online revocation template, preserving a no-downtime path instead of suggesting an unsafe offline write."
+      },
+      {
+        "name": "C6 state-store collision fixture",
+        "kind": "cli",
+        "trace": "c6_cli_vs_running_server starts a separate process owning the real file-store flock and confirms mutating CLI verbs receive the actionable collision result."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped offline verification passed: cargo fmt -p oraclemcp -- --check; cargo test -p oraclemcp --bin oraclemcp client_credential_commands_distinguish_offline_and_live_revocation -- --nocapture; cargo test -p oraclemcp --test c6_cli_vs_running_server -- --nocapture (2 passed).",
+    "No live HTTPS control listener, mTLS identity, live session teardown, or live Oracle environment is claimed; the focused test proves the exact emitted online request contract and C6 proves the real cross-process file-store lock behavior."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
