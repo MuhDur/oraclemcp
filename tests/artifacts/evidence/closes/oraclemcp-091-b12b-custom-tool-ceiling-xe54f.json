@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T21:07:28Z",
+  "bead_id": "oraclemcp-091-b12b-custom-tool-ceiling-xe54f",
+  "scope": {
+    "summary": "Load custom tools against the selected profile's actual operating-level ceiling, preserving refusal below that ceiling.",
+    "in_scope": [
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs"
+    ],
+    "out_of_scope": [
+      "Changing statement classification, a profile's configured maximum, or any operator authority over the fail-closed classifier."
+    ]
+  },
+  "source": {
+    "sha": "667c0ec0e4fbd0a5292aae879e277429a910c3a9",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "custom-tool catalog loading for an accepted profile snapshot",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp --bin oraclemcp custom_tool_loader_uses_each_profiles_real_ceiling: 1 passed in clean worktree at 419ff160; git diff 419ff160..667c0ec0 -- main.rs main_tests.rs was empty. The test proves READ_ONLY refuses static DML, READ_WRITE/DDL/ADMIN load it, and signed DDL refusal names the real READ_WRITE ceiling."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No live Oracle session is claimed; the behavior is deterministic loader and profile-ceiling coverage."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

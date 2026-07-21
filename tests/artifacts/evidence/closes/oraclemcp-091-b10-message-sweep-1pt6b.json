@@ -1,7 +1,7 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-07-21T12:36:31Z",
+  "generated_at": "2026-07-21T20:58:40Z",
   "bead_id": "oraclemcp-091-b10-message-sweep-1pt6b",
   "scope": {
     "summary": "Classify semantic catalog misses and ORA-31603 as object-not-found, while keeping unprovable reads refused and directing operators to sanctioned discovery tools.",
@@ -17,7 +17,7 @@
     ]
   },
   "source": {
-    "sha": "ec0d4ab5a8c59124cd5a5d9ee156c3570edf51ab",
+    "sha": "5d258599e1aa32ccb44424b0b0d13e1e4a40bd96",
     "tree_clean": true,
     "branch": "main"
   },
@@ -37,7 +37,7 @@
       {
         "name": "driver error envelope classification",
         "kind": "api",
-        "trace": "cargo test -p oraclemcp-error --lib -- --nocapture: 20 passed; cargo test -p oraclemcp-db dbms_metadata_missing_object_does_not_fall_back_to_connection_failed -- --nocapture: 1 passed."
+        "trace": "cargo test -p oraclemcp-error --lib: 21 passed; cargo test -p oraclemcp-db dbms_metadata_missing_object_does_not_fall_back_to_connection_failed: 1 passed."
       }
     ]
   },

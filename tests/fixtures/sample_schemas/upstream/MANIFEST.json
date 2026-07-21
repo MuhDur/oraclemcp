@@ -1,0 +1,33 @@
+{
+  "schema": "vendored-sample-schemas/v1",
+  "upstream": {
+    "repository": "https://github.com/oracle-samples/db-sample-schemas",
+    "tag": "v23.3",
+    "commit": "e3325a83e56c516815844025418a96ecaf219751",
+    "license": "MIT",
+    "license_file": "LICENSE.txt"
+  },
+  "retrieved_utc": "2026-07-21",
+  "hash_algorithm": "git-blob-sha1",
+  "files": {
+    "LICENSE.txt": "1563809c2f1ebe15feaee7371e5cea55ea04e66f",
+    "README.md": "7d1c4be287ebba0c6994b4156dac02e8e6c2db65",
+    "SECURITY.md": "2ca81027ff29784959f680c03b609f4930858470",
+    "customer_orders/README.md": "c44824a53b61986c25132d173372a98c8fa0fa3e",
+    "customer_orders/co_create.sql": "875390a73e08bad71c1e061a7377e1795b28e123",
+    "customer_orders/co_install.sql": "710a22740449a69803c3d9f28cdab712235ee991",
+    "customer_orders/co_populate.sql": "65477e4518c6ace4b912a259dc3ee688ff928f4f",
+    "customer_orders/co_uninstall.sql": "7d4c1b645826cdf9d0258889f36ba70ae5bc36a4",
+    "human_resources/README.md": "6948da978aac4a5af790022dc3ecc018123ef215",
+    "human_resources/hr_code.sql": "daf7abf7d7fd902b99c86df8aa4e37dc3952d9d9",
+    "human_resources/hr_create.sql": "6aa525335bb39c7181c820f590723a00b2659671",
+    "human_resources/hr_install.sql": "59f22cf2c4b25c0b311586d1fd09c3cee0de73e2",
+    "human_resources/hr_populate.sql": "17c4bcd3307af43ae0f77a5e7ceac6153b3fe9e7",
+    "human_resources/hr_uninstall.sql": "95d61090c24fc049e330f50685d6e5ecd603fb01",
+    "sales_history/README.md": "b250218fc9adead0554897cab9f4b86d578efa1b",
+    "sales_history/sh_create.sql": "ccd0590d9961ac583cc03c044abe900cd055f6ab",
+    "sales_history/sh_install.sql": "3b31005c41a0985bef5ededf63ec35c48405d301",
+    "sales_history/sh_populate.sql": "4f1bbfc75a093fbd39aa885d485633aad24930f7",
+    "sales_history/sh_uninstall.sql": "193f5977b0e83f6b7f47b7fc64bc584cf854c234"
+  }
+}
