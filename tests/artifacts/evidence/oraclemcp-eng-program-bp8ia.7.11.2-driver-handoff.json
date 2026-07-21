@@ -1,0 +1,25 @@
+{
+  "schema": "wave1-cross-repo-handoff/v1",
+  "generated_at": "2026-07-21T20:15:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.2",
+  "summary": "F-LOW DC6 verified already satisfied in the driver: parse_number_i64/u64 reject every exponent form before prefix integer parsing, so the Oracle max-negative NUMBER sentinel -1e126 fails closed instead of collapsing to -1. No driver change was needed; this artifact binds the exact commit verified.",
+  "driver": {
+    "repo": "rust-oracledb",
+    "commit_sha": "5ed87b09ef39bb70ab7dd7bd838871b936285c52",
+    "files": [
+      {
+        "path": "crates/oracledb/src/arrow/builders.rs",
+        "sha256": "58a8391c454573a7a8ffd2f49451701f59a2d02aece02d721ae4c53d88e2d565"
+      },
+      {
+        "path": "crates/oracledb/src/arrow/mod.rs",
+        "sha256": "7a509dbe616071885d398298bcfe474c0131e6c798b53711b9b4c2bb35c6c5b2"
+      }
+    ],
+    "verification": [
+      "builders.rs:107-109 and 131-133 reject b'e'/b'E' before the prefix scan; all 5 parse_number_i64 call sites inherit the guard, so both integer-builder paths are covered by construction",
+      "cargo test -p oracledb --features arrow --lib number_sentinel -> 1 passed (decoder-produced [0x00] sentinel; Float64 keeps -1e126, Int64 fails closed, -1 and 12 still map, 1e3 refused)",
+      "cargo test -p oracledb --lib -> 347 passed"
+    ]
+  }
+}
