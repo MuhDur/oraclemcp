@@ -64,8 +64,9 @@ use oraclemcp_db::{
     StructuredDecodeCaps, compile_errors, compile_object_statements, describe_columns,
     describe_constraints, describe_index, describe_trigger, describe_view, diff_query_responses,
     execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
-    get_sources_by_name, incomparable_masked_columns, list_objects, list_schemas, orient_fks,
-    orient_hot_objects, orient_recent_ddl, orient_schema, paginated_sql, plan_cost_estimate,
+    get_sources_by_name, incomparable_masked_columns, list_objects, list_objects_page,
+    list_schema_projection_page, list_schemas, orient_fks_page, orient_hot_objects_page,
+    orient_recent_ddl_page, orient_schema_page, paginated_sql, plan_cost_estimate,
     plscope_identifiers, plscope_statements, primary_key_columns, probe_dependents, read_lob,
     read_query, read_query_as_of, read_query_named, resolved_relations_read_purity, sample_rows,
     search_objects, search_source, semantic_search_query, semantic_search_query_with_filter,
@@ -90,8 +91,19 @@ use serde_json::{Value, json};
 const DEFAULT_SEARCH_MAX_ROWS: usize = 200;
 /// Hard cap on `oracle_search_source` for a single call.
 const MAX_SEARCH_MAX_ROWS: usize = 5_000;
+/// Default cap on each `oracle_search_source` source line.
+const DEFAULT_SEARCH_MAX_LINE_CHARS: usize = 500;
+/// Smallest cap that still leaves an explicit truncation marker in the result.
+const MIN_SEARCH_MAX_LINE_CHARS: usize = 16;
+/// Oracle source text rows are at most 4,000 characters in the dictionary.
+const MAX_SEARCH_MAX_LINE_CHARS: usize = 4_000;
+const SOURCE_SEARCH_LINE_TRUNCATION_MARKER: &str = "… [truncated]";
 /// Default cap on `oracle_get_source` source text when the caller omits it.
 const DEFAULT_SOURCE_MAX_CHARS: usize = 1_000_000;
+/// Default cap for dictionary metadata arrays that are not cursor-paginated.
+const DEFAULT_METADATA_MAX_ROWS: usize = 200;
+/// Hard cap for dictionary metadata arrays that are not cursor-paginated.
+const MAX_METADATA_MAX_ROWS: usize = 5_000;
 /// Cap on before/after snippets in `oracle_patch_source` previews.
 const DEFAULT_PATCH_PREVIEW_CHARS: usize = 1_000;
 /// Cap on direct dependents listed in a DDL preview's blast-radius block. The
@@ -101,6 +113,13 @@ const DEFAULT_DEPENDENTS_PREVIEW_MAX: usize = 200;
 const DEFAULT_SCHEMA_INSPECT_MAX_ROWS: usize = 500;
 /// Hard cap on `oracle_schema_inspect` for a single call.
 const MAX_SCHEMA_INSPECT_MAX_ROWS: usize = 5_000;
+/// Compact default for the `get_schema` orientation alias.
+const DEFAULT_GET_SCHEMA_MAX_ROWS: usize = 100;
+/// Hard ceiling for a `get_schema` page. Client arguments can only lower this.
+const MAX_GET_SCHEMA_MAX_ROWS: usize = 250;
+/// Bound cursor depth so a continuation cannot turn one dictionary read into an
+/// arbitrarily expensive offset scan.
+const MAX_GET_SCHEMA_CURSOR_OFFSET: usize = 10_000;
 /// Default cap on `oracle_search_objects` result rows when the caller omits it.
 /// Lower than schema_inspect because each result is enriched per detail level.
 const DEFAULT_SEARCH_OBJECTS_MAX_ROWS: usize = 100;
@@ -243,7 +262,10 @@ const MAX_PATCH_PREVIEWS: usize = 128;
 const MAX_ORIENT_SNAPSHOT_CACHE_ENTRIES: usize = 32;
 /// Each component of an orient snapshot is independently bounded in the DB
 /// layer. This fixed tool-level cap makes a cache entry stable across callers.
-const ORIENT_SNAPSHOT_MAX_ROWS: usize = 500;
+const DEFAULT_ORIENT_MAX_ROWS: usize = 100;
+const MAX_ORIENT_MAX_ROWS: usize = 250;
+/// Bound cursor depth for each independently capped orient component.
+const MAX_ORIENT_CURSOR_OFFSET: usize = 10_000;
 /// Hard cap on per-call Oracle round-trip timeout overrides.
 const MAX_CALL_TIMEOUT_SECONDS: u64 = 3_600;
 
@@ -570,6 +592,8 @@ struct OrientSnapshotCacheKey {
     profile: Option<String>,
     catalog_revision: u64,
     owner: Option<String>,
+    max_rows: usize,
+    offset: usize,
 }
 
 /// The complete internal orientation snapshot. Selectors project this single
@@ -583,6 +607,10 @@ struct OrientSnapshot {
     hot_objects: Vec<OrientHotObject>,
     freshness: OrientFreshness,
     recent_ddl: Vec<OrientRecentDdlObject>,
+    schema_truncated: bool,
+    fks_truncated: bool,
+    hot_truncated: bool,
+    ddl_truncated: bool,
 }
 
 /// One profile's result while assembling a federated orientation snapshot.
@@ -695,6 +723,14 @@ impl OrientInclude {
         }
         Ok(selected)
     }
+
+    /// Stable, non-secret selector material for an opaque orient cursor.
+    fn cursor_selector(self, fleet: bool) -> String {
+        format!(
+            "schema={};fks={};hot={};freshness={};ddl={};fleet={fleet}",
+            self.schema, self.fks, self.hot, self.freshness, self.ddl
+        )
+    }
 }
 
 fn orient_owner_arg(owner: Option<String>) -> Result<Option<String>, ErrorEnvelope> {
@@ -709,11 +745,20 @@ async fn load_orient_snapshot(
     conn: &dyn OracleConnection,
     owner: Option<&str>,
     catalog_revision: u64,
+    offset: usize,
+    max_rows: usize,
 ) -> Result<OrientSnapshot, DbError> {
-    let schema = orient_schema(cx, conn, owner, ORIENT_SNAPSHOT_MAX_ROWS).await?;
-    let fks = orient_fks(cx, conn, owner, ORIENT_SNAPSHOT_MAX_ROWS).await?;
-    let hot_objects = orient_hot_objects(cx, conn, owner, ORIENT_SNAPSHOT_MAX_ROWS).await?;
-    let recent_ddl = orient_recent_ddl(cx, conn, owner, ORIENT_SNAPSHOT_MAX_ROWS).await?;
+    // Fetch one sentinel row per component. That proves a following page exists
+    // before we mint a cursor, avoiding a silent or speculative continuation.
+    let fetch_rows = max_rows.saturating_add(1);
+    let mut schema = orient_schema_page(cx, conn, owner, offset, fetch_rows).await?;
+    let mut fks = orient_fks_page(cx, conn, owner, offset, fetch_rows).await?;
+    let mut hot_objects = orient_hot_objects_page(cx, conn, owner, offset, fetch_rows).await?;
+    let mut recent_ddl = orient_recent_ddl_page(cx, conn, owner, offset, fetch_rows).await?;
+    let schema_truncated = truncate_orient_page(&mut schema, max_rows);
+    let fks_truncated = truncate_orient_page(&mut fks, max_rows);
+    let hot_truncated = truncate_orient_page(&mut hot_objects, max_rows);
+    let ddl_truncated = truncate_orient_page(&mut recent_ddl, max_rows);
     let freshness = OrientFreshness {
         catalog_revision,
         latest_dml_time: hot_objects
@@ -734,10 +779,24 @@ async fn load_orient_snapshot(
         hot_objects,
         freshness,
         recent_ddl,
+        schema_truncated,
+        fks_truncated,
+        hot_truncated,
+        ddl_truncated,
     })
 }
 
-fn orient_snapshot_response(snapshot: &OrientSnapshot, include: &OrientInclude) -> Value {
+fn truncate_orient_page<T>(rows: &mut Vec<T>, max_rows: usize) -> bool {
+    let truncated = rows.len() > max_rows;
+    rows.truncate(max_rows);
+    truncated
+}
+
+fn orient_snapshot_response(
+    snapshot: &OrientSnapshot,
+    include: &OrientInclude,
+    max_rows: usize,
+) -> Value {
     let mut response = serde_json::Map::from_iter([
         (
             "owner".to_owned(),
@@ -763,6 +822,24 @@ fn orient_snapshot_response(snapshot: &OrientSnapshot, include: &OrientInclude) 
     if include.ddl {
         response.insert("recent_ddl".to_owned(), json!(&snapshot.recent_ddl));
     }
+    response.insert("max_rows".to_owned(), json!(max_rows));
+    let schema_truncated = include.schema && snapshot.schema_truncated;
+    let fks_truncated = include.fks && snapshot.fks_truncated;
+    let hot_truncated = include.hot && snapshot.hot_truncated;
+    let ddl_truncated = include.ddl && snapshot.ddl_truncated;
+    response.insert(
+        "truncation".to_owned(),
+        json!({
+            "schema": schema_truncated,
+            "fks": fks_truncated,
+            "hot": hot_truncated,
+            "ddl": ddl_truncated,
+        }),
+    );
+    response.insert(
+        "truncated".to_owned(),
+        json!(schema_truncated || fks_truncated || hot_truncated || ddl_truncated),
+    );
     Value::Object(response)
 }
 
@@ -797,11 +874,16 @@ fn fleet_orient_drift(
     })
 }
 
-fn fleet_orient_response(lanes: Vec<FleetOrientLane>, include: &OrientInclude) -> Value {
+fn fleet_orient_response(
+    lanes: Vec<FleetOrientLane>,
+    include: &OrientInclude,
+    max_rows: usize,
+) -> Value {
     let total_profiles = lanes.len();
     let mut reachable = 0_usize;
     let mut unreachable = 0_usize;
     let mut fail_closed = 0_usize;
+    let mut truncated = false;
     let mut baseline: Option<(String, OrientSnapshot, OracleConnectionInfo)> = None;
     let mut profiles = Vec::with_capacity(total_profiles);
 
@@ -824,11 +906,16 @@ fn fleet_orient_response(lanes: Vec<FleetOrientLane>, include: &OrientInclude) -
                     baseline = Some((profile.clone(), snapshot.clone(), connection.clone()));
                 }
                 reachable = reachable.saturating_add(1);
+                let orient = orient_snapshot_response(&snapshot, include, max_rows);
+                truncated |= orient
+                    .get("truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 profiles.push(json!({
                     "profile": profile,
                     "status": "REACHABLE",
                     "connection": connection.redacted(),
-                    "orient": orient_snapshot_response(&snapshot, include),
+                    "orient": orient,
                     "drift": drift,
                 }));
             }
@@ -859,6 +946,7 @@ fn fleet_orient_response(lanes: Vec<FleetOrientLane>, include: &OrientInclude) -
 
     json!({
         "profiles": profiles,
+        "truncated": truncated,
         "summary": {
             "profile_count": total_profiles,
             "reachable_count": reachable,
@@ -1293,6 +1381,15 @@ impl OracleDispatcher {
         self
     }
 
+    /// Disable the optional unsigned refusal trail for an operator who has
+    /// explicitly opted out. This never changes the guard result or the signed
+    /// audit chain; it only removes the observer.
+    #[must_use]
+    pub fn without_refusal_corpus(mut self) -> Self {
+        self.refusal_corpus = None;
+        self
+    }
+
     /// Attach the shared export registry (E3/E3b; builder). When set, oversized
     /// `oracle_query` results are materialized as an `oracle-export://{id}`
     /// resource and returned as a `resource_link` instead of being inlined.
@@ -1492,6 +1589,8 @@ impl OracleDispatcher {
         cx: &Cx,
         profile: String,
         owner: Option<&str>,
+        offset: usize,
+        max_rows: usize,
         request_budget: &RequestBudget,
     ) -> FleetOrientLane {
         let lease = match self
@@ -1550,7 +1649,9 @@ impl OracleDispatcher {
             };
             let connection = describe_conn(cx, &observed).await?;
             let catalog_revision = OracleCatalogResolverCache::new().generation().0;
-            let snapshot = load_orient_snapshot(cx, &observed, owner, catalog_revision).await?;
+            let snapshot =
+                load_orient_snapshot(cx, &observed, owner, catalog_revision, offset, max_rows)
+                    .await?;
             Ok::<_, DbError>((connection, snapshot))
         }
         .await;
@@ -1941,6 +2042,44 @@ impl SideEffectOracle for GeneratedReadPurityOracle {
 fn rows_to_json(rows: &[oraclemcp_db::OracleRow]) -> Value {
     let opts = SerializeOptions::default();
     Value::Array(rows.iter().map(|r| serialize_row(r, &opts)).collect())
+}
+
+/// Serialize source-search rows with a per-line cap before they enter an MCP
+/// response. `ALL_SOURCE.TEXT` is normally short, but generated source can use
+/// multi-thousand-character lines; preserving the line number while bounding
+/// its text lets callers fetch an exact range with `oracle_get_source`.
+fn source_search_rows_to_json(
+    rows: &[oraclemcp_db::OracleRow],
+    max_line_chars: usize,
+) -> (Value, usize) {
+    let Value::Array(mut matches) = rows_to_json(rows) else {
+        unreachable!("rows_to_json always produces an array")
+    };
+    let marker_chars = SOURCE_SEARCH_LINE_TRUNCATION_MARKER.chars().count();
+    let content_cap = max_line_chars.saturating_sub(marker_chars);
+    let mut truncated_lines = 0_usize;
+
+    for matched in &mut matches {
+        let Some(object) = matched.as_object_mut() else {
+            continue;
+        };
+        let Some(text) = object.get("TEXT").and_then(Value::as_str) else {
+            continue;
+        };
+        let char_count = text.chars().count();
+        if char_count <= max_line_chars {
+            continue;
+        }
+
+        let mut truncated = text.chars().take(content_cap).collect::<String>();
+        truncated.push_str(SOURCE_SEARCH_LINE_TRUNCATION_MARKER);
+        object.insert("TEXT".to_owned(), Value::String(truncated));
+        object.insert("TEXT_TRUNCATED".to_owned(), Value::Bool(true));
+        object.insert("TEXT_CHAR_COUNT".to_owned(), json!(char_count));
+        truncated_lines = truncated_lines.saturating_add(1);
+    }
+
+    (Value::Array(matches), truncated_lines)
 }
 
 async fn send_stream_frame(cx: &Cx, frames: &ToolStreamSender, frame: ToolStreamFrame) -> bool {
@@ -3951,6 +4090,8 @@ fn query_structured_decode_caps_from_args(args: &QueryArgs) -> StructuredDecodeC
 
 /// Tamper-token scope for `oracle_query` pagination cursors (E2).
 const QUERY_CURSOR_SCOPE: &str = "cursor:query";
+const ORIENT_CURSOR_SCOPE: &str = "cursor:orient";
+const GET_SCHEMA_CURSOR_SCOPE: &str = "cursor:get-schema";
 
 /// Stable per-query binding for an `oracle_query` pagination cursor: the SHA-256
 /// of the EXACT executed SQL plus the active profile. A cursor minted for one
@@ -4013,6 +4154,104 @@ fn reseal_query_cursor(mut response: Value, sql: &str, active_profile: Option<&s
     let sealed = seal_raw_query_cursor(&offset, sql, active_profile);
     if let Value::Object(map) = &mut response {
         map.insert("next_cursor".to_owned(), Value::String(sealed));
+    }
+    response
+}
+
+/// Decode a cursor emitted by a bounded generated-metadata tool. The token is
+/// tied to the exact non-secret selector tuple; a forged cursor never becomes a
+/// raw offset, and a valid cursor cannot make the server scan beyond its own
+/// fixed continuation ceiling.
+fn decode_metadata_cursor(
+    cursor: Option<&str>,
+    scope: &str,
+    binding: &str,
+    max_offset: usize,
+    tool_name: &str,
+) -> Result<usize, ErrorEnvelope> {
+    let Some(cursor) = non_empty_arg(cursor.map(str::to_owned)) else {
+        return Ok(0);
+    };
+    let payload = verify_token(scope, &cursor, &[binding]).ok_or_else(|| {
+        invalid_args(format!("invalid or tampered {tool_name} pagination cursor")).with_next_step(
+            format!("re-run {tool_name} without a cursor to restart from the first bounded page"),
+        )
+    })?;
+    let offset = payload
+        .parse::<usize>()
+        .map_err(|_| invalid_args(format!("invalid {tool_name} pagination cursor payload")))?;
+    if offset > max_offset {
+        return Err(invalid_args(format!(
+            "{tool_name} pagination cursor exceeds the server continuation ceiling"
+        )));
+    }
+    Ok(offset)
+}
+
+fn metadata_next_cursor(
+    scope: &str,
+    binding: &str,
+    offset: usize,
+    max_rows: usize,
+    max_offset: usize,
+) -> (Option<String>, bool) {
+    let Some(next_offset) = offset.checked_add(max_rows) else {
+        return (None, true);
+    };
+    if next_offset > max_offset {
+        return (None, true);
+    }
+    (
+        Some(sign_token(scope, &next_offset.to_string(), &[binding])),
+        false,
+    )
+}
+
+fn metadata_cursor_binding(
+    kind: &str,
+    active_profile: Option<&str>,
+    owner: Option<&str>,
+    selector: &str,
+) -> String {
+    format!(
+        "{kind}|{}|{}|{selector}",
+        active_profile.unwrap_or(""),
+        owner.unwrap_or("*")
+    )
+}
+
+fn add_metadata_cursor(
+    mut response: Value,
+    scope: &str,
+    binding: &str,
+    offset: usize,
+    max_rows: usize,
+    max_offset: usize,
+) -> Value {
+    let truncated = response
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let (next_cursor, cursor_limit_reached) = if truncated {
+        metadata_next_cursor(scope, binding, offset, max_rows, max_offset)
+    } else {
+        (None, false)
+    };
+    if let Some(map) = response.as_object_mut() {
+        map.insert(
+            "next_cursor".to_owned(),
+            next_cursor.map_or(Value::Null, Value::String),
+        );
+        if cursor_limit_reached {
+            map.insert("cursor_limit_reached".to_owned(), Value::Bool(true));
+            map.insert(
+                "next_step".to_owned(),
+                Value::String(
+                    "narrow owner, object type, name filter, or orient include before continuing"
+                        .to_owned(),
+                ),
+            );
+        }
     }
     response
 }
@@ -4635,6 +4874,18 @@ async fn describe_conn(
     conn.describe(cx).await
 }
 
+/// Establish that a connection is live before reporting its best-effort
+/// metadata. `describe` intentionally degrades individual metadata probes when
+/// their views are unavailable, so a successful describe alone is not evidence
+/// that the session can still make a current Oracle round trip.
+async fn observe_connection_info(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+) -> Result<OracleConnectionInfo, DbError> {
+    conn.ping(cx).await?;
+    describe_conn(cx, conn).await
+}
+
 async fn execute_conn(
     cx: &Cx,
     conn: &dyn OracleConnection,
@@ -4683,6 +4934,31 @@ where
 async fn rollback_conn_cleanup(cx: &Cx, conn: &dyn OracleConnection) -> Result<(), DbError> {
     let cleanup_budget = RequestBudget::fresh_cleanup(cx.now());
     run_cleanup_with_budget(cx, &cleanup_budget, conn.rollback(cx)).await
+}
+
+/// Finish a retired physical session after its lifecycle rollback. This must
+/// use a fresh bounded cleanup allowance: a profile switch or lane shutdown is
+/// already committed by the time it retires the old connection, so a request's
+/// expired budget must not turn the remaining logical logoff into a bare drop.
+async fn close_conn_cleanup(cx: &Cx, conn: &dyn OracleConnection) -> Result<(), DbError> {
+    let cleanup_budget = RequestBudget::fresh_cleanup(cx.now());
+    run_cleanup_with_budget(cx, &cleanup_budget, conn.close(cx)).await
+}
+
+async fn close_retired_connections(
+    cx: &Cx,
+    primary: &dyn OracleConnection,
+    stateless: Option<&dyn OracleConnection>,
+    lifecycle: &'static str,
+) {
+    if let Err(error) = close_conn_cleanup(cx, primary).await {
+        tracing::warn!(error = %error, lifecycle, "primary Oracle logical close failed after retirement");
+    }
+    if let Some(stateless) = stateless
+        && let Err(error) = close_conn_cleanup(cx, stateless).await
+    {
+        tracing::warn!(error = %error, lifecycle, "stateless Oracle logical close failed after retirement");
+    }
 }
 
 async fn recover_row_stream_cleanup(cx: &Cx, stream: QueryRowStream) -> Result<(), DbError> {
@@ -4794,6 +5070,27 @@ fn json_to_bind(v: &Value) -> Result<OracleBind, ErrorEnvelope> {
 /// Build an `InvalidArguments` envelope (malformed args / unknown tool).
 fn invalid_args(message: impl Into<String>) -> ErrorEnvelope {
     ErrorEnvelope::new(ErrorClass::InvalidArguments, message)
+}
+
+/// Validate the inclusive line range accepted by `oracle_get_source` before
+/// it reaches the bound `ALL_SOURCE` query.
+fn source_line_range(
+    from_line: Option<usize>,
+    to_line: Option<usize>,
+) -> Result<(Option<usize>, Option<usize>), ErrorEnvelope> {
+    if from_line == Some(0) || to_line == Some(0) {
+        return Err(invalid_args(
+            "invalid arguments for oracle_get_source: from_line and to_line must be at least 1",
+        ));
+    }
+    if let (Some(from_line), Some(to_line)) = (from_line, to_line)
+        && from_line > to_line
+    {
+        return Err(invalid_args(
+            "invalid arguments for oracle_get_source: from_line must not exceed to_line",
+        ));
+    }
+    Ok((from_line, to_line))
 }
 
 /// Deserialize a tool's args struct, mapping a serde error to a structured
@@ -9672,18 +9969,20 @@ async fn compile_object_inner(
     // response instead of turning a successful DDL into a retryable timeout.
     let diagnostics = async {
         dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.before")?;
-        let errors = match compile_errors(cx, conn, &owner, Some(&object_name)).await {
-            Ok(errors) => errors,
-            Err(err) => {
-                quarantine_uncertain_optional_diagnostic(
-                    ctx.quarantine,
-                    "compile diagnostics",
-                    AuditOutcome::Succeeded,
-                    &err,
-                );
-                return Err(DbError::into_envelope(err));
-            }
-        };
+        let errors =
+            match compile_errors(cx, conn, &owner, Some(&object_name), MAX_METADATA_MAX_ROWS).await
+            {
+                Ok(errors) => errors,
+                Err(err) => {
+                    quarantine_uncertain_optional_diagnostic(
+                        ctx.quarantine,
+                        "compile diagnostics",
+                        AuditOutcome::Succeeded,
+                        &err,
+                    );
+                    return Err(DbError::into_envelope(err));
+                }
+            };
         dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.after")?;
         Ok::<_, ErrorEnvelope>(errors)
     }
@@ -10062,16 +10361,24 @@ async fn fetch_patch_source_document(
                 .with_suggested_tool("oracle_get_ddl")
             })?;
         dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.get_ddl.after")?;
+        if ddl.truncated {
+            return Err(invalid_args(format!(
+                "DDL for VIEW {owner}.{name} is truncated at {} of {} characters; refusing to patch partial DDL",
+                ddl.text.chars().count(),
+                ddl.char_count,
+            ))
+            .with_suggested_tool("oracle_get_ddl"));
+        }
         return Ok(PatchSourceDocument {
-            char_count: ddl.chars().count(),
-            text: ddl,
+            char_count: ddl.char_count,
+            text: ddl.text,
             source_kind: "dbms_metadata",
             line_count: None,
         });
     }
 
     dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.get_source.before")?;
-    let source = get_source(cx, conn, owner, name, object_type, max_chars)
+    let source = get_source(cx, conn, owner, name, object_type, None, None, max_chars)
         .await
         .map_err(DbError::into_envelope)?;
     dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.get_source.after")?;
@@ -10628,18 +10935,21 @@ async fn patch_source_inner(
     let diagnostics = if include_errors {
         async {
             dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.compile_errors.before")?;
-            let rows = match compile_errors(cx, conn, &owner, Some(&object_name)).await {
-                Ok(rows) => rows,
-                Err(err) => {
-                    quarantine_uncertain_optional_diagnostic(
-                        ctx.quarantine,
-                        "patch compile diagnostics",
-                        AuditOutcome::Succeeded,
-                        &err,
-                    );
-                    return Err(DbError::into_envelope(err));
-                }
-            };
+            let rows =
+                match compile_errors(cx, conn, &owner, Some(&object_name), MAX_METADATA_MAX_ROWS)
+                    .await
+                {
+                    Ok(rows) => rows,
+                    Err(err) => {
+                        quarantine_uncertain_optional_diagnostic(
+                            ctx.quarantine,
+                            "patch compile diagnostics",
+                            AuditOutcome::Succeeded,
+                            &err,
+                        );
+                        return Err(DbError::into_envelope(err));
+                    }
+                };
             dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.compile_errors.after")?;
             Ok::<_, ErrorEnvelope>(rows)
         }
@@ -10825,7 +11135,14 @@ async fn create_or_replace_inner(
                         cx,
                         "oraclemcp.dispatch.create_or_replace.compile_errors.before",
                     )?;
-                    let errors = match compile_errors(cx, conn, &hint.owner, Some(&hint.name)).await
+                    let errors = match compile_errors(
+                        cx,
+                        conn,
+                        &hint.owner,
+                        Some(&hint.name),
+                        MAX_METADATA_MAX_ROWS,
+                    )
+                    .await
                     {
                         Ok(errors) => errors,
                         Err(err) => {
@@ -11257,7 +11574,7 @@ fn connection_info_for_transport(info: &OracleConnectionInfo, local_transport: b
 }
 
 async fn connection_strategy_json(cx: &Cx, conn: &dyn OracleConnection) -> Value {
-    match describe_conn(cx, conn).await {
+    match observe_connection_info(cx, conn).await {
         Ok(info) => json!({
             "connected": true,
             "strategy": info.connection_strategy,
@@ -11643,6 +11960,13 @@ impl OracleDispatcher {
                 }
             }
             audit_result?;
+            close_retired_connections(
+                cx,
+                state.conn.as_ref(),
+                state.stateless_conn.as_deref(),
+                "request_finalization_timeout",
+            )
+            .await;
             return Ok(());
         }
 
@@ -11674,6 +11998,14 @@ impl OracleDispatcher {
             reason,
             outcome,
         )?;
+
+        close_retired_connections(
+            cx,
+            state.conn.as_ref(),
+            state.stateless_conn.as_deref(),
+            reason.as_str(),
+        )
+        .await;
 
         tracing::info!(
             close_reason = reason.as_str(),
@@ -11707,7 +12039,7 @@ impl OracleDispatcher {
                 inner: state.conn.as_ref(),
                 quarantine: Some(&self.quarantine),
             };
-            match describe_conn(cx, &observed_conn).await {
+            match observe_connection_info(cx, &observed_conn).await {
                 Ok(info) => {
                     connection.connected = true;
                     connection.read_only_standby = info.is_read_only_standby();
@@ -11907,6 +12239,7 @@ impl OracleDispatcher {
             // generation reference.
             let mut pending_profile_generation = Some(profile_generation);
             let mut retired_generation = None;
+            let mut retired_connections = None;
             let mut response = self
                 .profile_drain
                 .commit_generation(&profile, generation, || {
@@ -11958,8 +12291,10 @@ impl OracleDispatcher {
                                 "prepared profile generation was already consumed",
                             )
                         })?;
-                    state.conn = conn;
-                    state.stateless_conn = stateless_conn;
+                    let previous_conn = std::mem::replace(&mut state.conn, conn);
+                    let previous_stateless =
+                        std::mem::replace(&mut state.stateless_conn, stateless_conn);
+                    retired_connections = Some((previous_conn, previous_stateless));
                     state.active_profile = Some(profile.clone());
                     // The new physical session has its own CURRENT_SCHEMA; the old
                     // one must never qualify a policy target on it.
@@ -11997,6 +12332,15 @@ impl OracleDispatcher {
                 .map_err(|()| profile_draining_error(&profile))??;
             drop(retired_generation);
             drop(state);
+            if let Some((previous_conn, previous_stateless)) = retired_connections {
+                close_retired_connections(
+                    cx,
+                    previous_conn.as_ref(),
+                    previous_stateless.as_deref(),
+                    "profile_switch",
+                )
+                .await;
+            }
             if let Err(error) = request_budget.enforce(cx) {
                 response.annotate_deadline_after_effect();
                 tracing::warn!(
@@ -12800,16 +13144,11 @@ impl OracleDispatcher {
             }
             "oracle_connection_info" => {
                 ensure_no_args(name, args)?;
-                let mut value = match describe_conn(cx, &observed_conn).await {
-                    Err(err) if err.is_uncertain_session_state() => {
-                        return Err(DbError::into_envelope(err));
-                    }
-                    result => connection_info_json(
-                        state.active_profile.clone(),
-                        result,
-                        context.is_local_transport(),
-                    ),
-                };
+                let mut value = connection_info_json(
+                    state.active_profile.clone(),
+                    observe_connection_info(cx, &observed_conn).await,
+                    context.is_local_transport(),
+                );
                 if let Value::Object(map) = &mut value {
                     if let Some(generation) = state.profile_generation.as_ref() {
                         map.insert("profile_generation_active".to_owned(), json!(true));
@@ -12829,6 +13168,14 @@ impl OracleDispatcher {
                             "stateless_read_connection".to_owned(),
                             connection_strategy_json(cx, stateless_conn.as_ref()).await,
                         );
+                        if let Some(connection) =
+                            map.get_mut("connection").and_then(Value::as_object_mut)
+                        {
+                            connection.insert(
+                                "connection_strategy".to_owned(),
+                                json!("pinned_plus_stateless"),
+                            );
+                        }
                     }
                 }
                 Ok(value)
@@ -13077,13 +13424,19 @@ impl OracleDispatcher {
             }
             "oracle_schema_inspect" => {
                 let a: SchemaInspectArgs = parse_args(name, args)?;
+                let compact_alias = name == "get_schema";
                 let owner_arg = non_empty_arg(a.owner);
                 let object_type = non_empty_arg(a.object_type);
                 let name_like = non_empty_arg(a.name_like);
-                let max_rows = a
-                    .max_rows
-                    .unwrap_or(DEFAULT_SCHEMA_INSPECT_MAX_ROWS)
-                    .clamp(1, MAX_SCHEMA_INSPECT_MAX_ROWS);
+                let max_rows = if compact_alias {
+                    a.max_rows
+                        .unwrap_or(DEFAULT_GET_SCHEMA_MAX_ROWS)
+                        .clamp(1, MAX_GET_SCHEMA_MAX_ROWS)
+                } else {
+                    a.max_rows
+                        .unwrap_or(DEFAULT_SCHEMA_INSPECT_MAX_ROWS)
+                        .clamp(1, MAX_SCHEMA_INSPECT_MAX_ROWS)
+                };
                 let owner_filter: Option<String> = match owner_arg.as_deref() {
                     Some("*") => None,
                     Some(owner) => Some(owner.to_owned()),
@@ -13103,26 +13456,104 @@ impl OracleDispatcher {
                         )
                     }
                 };
-                dispatch_checkpoint(cx, "oraclemcp.dispatch.schema_inspect.before")?;
-                let rows = list_objects(
-                    cx,
-                    &guarded_metadata_conn,
+                let compact_default_projection = compact_alias && object_type.is_none();
+                let cursor_binding = metadata_cursor_binding(
+                    "get-schema",
+                    state.active_profile.as_deref(),
                     owner_filter.as_deref(),
-                    object_type.as_deref(),
-                    name_like.as_deref(),
-                    max_rows,
-                )
-                .await
+                    &format!(
+                        "projection={};object_type={};name_like={}",
+                        if compact_default_projection {
+                            "TABLE,VIEW,PACKAGE"
+                        } else {
+                            "explicit"
+                        },
+                        object_type.as_deref().unwrap_or(""),
+                        name_like.as_deref().unwrap_or(""),
+                    ),
+                );
+                let offset = if compact_alias {
+                    decode_metadata_cursor(
+                        a.cursor.as_deref(),
+                        GET_SCHEMA_CURSOR_SCOPE,
+                        &cursor_binding,
+                        MAX_GET_SCHEMA_CURSOR_OFFSET,
+                        "get_schema",
+                    )?
+                } else {
+                    if a.cursor.is_some() {
+                        return Err(invalid_args(
+                            "oracle_schema_inspect does not accept a cursor; use the get_schema alias for bounded continuation",
+                        ));
+                    }
+                    0
+                };
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.schema_inspect.before")?;
+                let mut rows = if compact_alias {
+                    let fetch_rows = max_rows.saturating_add(1);
+                    if compact_default_projection {
+                        list_schema_projection_page(
+                            cx,
+                            &guarded_metadata_conn,
+                            owner_filter.as_deref(),
+                            name_like.as_deref(),
+                            offset,
+                            fetch_rows,
+                        )
+                        .await
+                    } else {
+                        list_objects_page(
+                            cx,
+                            &guarded_metadata_conn,
+                            owner_filter.as_deref(),
+                            object_type.as_deref(),
+                            name_like.as_deref(),
+                            offset,
+                            fetch_rows,
+                        )
+                        .await
+                    }
+                } else {
+                    list_objects(
+                        cx,
+                        &guarded_metadata_conn,
+                        owner_filter.as_deref(),
+                        object_type.as_deref(),
+                        name_like.as_deref(),
+                        max_rows,
+                    )
+                    .await
+                }
                 .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.schema_inspect.after")?;
-                Ok(json!({
+                let truncated = if compact_alias {
+                    let more = rows.len() > max_rows;
+                    rows.truncate(max_rows);
+                    more
+                } else {
+                    rows.len() == max_rows
+                };
+                let response = json!({
                     "objects": rows_to_json(&rows),
                     "owner": owner_filter.as_deref().unwrap_or("*"),
                     "object_type": object_type,
                     "name_like": name_like,
                     "max_rows": max_rows,
-                    "truncated": rows.len() == max_rows,
-                }))
+                    "projection": if compact_default_projection { json!(["TABLE", "VIEW", "PACKAGE"]) } else { Value::Null },
+                    "truncated": truncated,
+                });
+                if compact_alias {
+                    Ok(add_metadata_cursor(
+                        response,
+                        GET_SCHEMA_CURSOR_SCOPE,
+                        &cursor_binding,
+                        offset,
+                        max_rows,
+                        MAX_GET_SCHEMA_CURSOR_OFFSET,
+                    ))
+                } else {
+                    Ok(response)
+                }
             }
             "oracle_search_objects" => {
                 // E4: unified read-only object search/inspection. Read-only
@@ -13264,7 +13695,25 @@ impl OracleDispatcher {
                 let a: OrientArgs = parse_args(name, args)?;
                 let owner = orient_owner_arg(a.owner)?;
                 let include = OrientInclude::parse(&a.include)?;
-                if a.fleet {
+                let fleet = a.fleet;
+                let max_rows = a
+                    .max_rows
+                    .unwrap_or(DEFAULT_ORIENT_MAX_ROWS)
+                    .clamp(1, MAX_ORIENT_MAX_ROWS);
+                let cursor_binding = metadata_cursor_binding(
+                    "orient",
+                    state.active_profile.as_deref(),
+                    owner.as_deref(),
+                    &include.cursor_selector(fleet),
+                );
+                let offset = decode_metadata_cursor(
+                    a.cursor.as_deref(),
+                    ORIENT_CURSOR_SCOPE,
+                    &cursor_binding,
+                    MAX_ORIENT_CURSOR_OFFSET,
+                    "oracle_orient",
+                )?;
+                if fleet {
                     let profiles = self
                         .profile_drain
                         .mcp_fleet_profiles_snapshot(&self.mcp_exposure)
@@ -13281,18 +13730,29 @@ impl OracleDispatcher {
                                 cx,
                                 profile.name,
                                 owner.as_deref(),
+                                offset,
+                                max_rows,
                                 &request_budget,
                             )
                             .await,
                         );
                     }
-                    return Ok(fleet_orient_response(lanes, &include));
+                    return Ok(add_metadata_cursor(
+                        fleet_orient_response(lanes, &include, max_rows),
+                        ORIENT_CURSOR_SCOPE,
+                        &cursor_binding,
+                        offset,
+                        max_rows,
+                        MAX_ORIENT_CURSOR_OFFSET,
+                    ));
                 }
                 let catalog_revision = state.catalog_cache.generation().0;
                 let cache_key = OrientSnapshotCacheKey {
                     profile: state.active_profile.clone(),
                     catalog_revision,
                     owner: owner.clone(),
+                    max_rows,
+                    offset,
                 };
                 let cached_snapshot = state
                     .orient_snapshots
@@ -13314,6 +13774,8 @@ impl OracleDispatcher {
                         &guarded_metadata_conn,
                         owner.as_deref(),
                         catalog_revision,
+                        offset,
+                        max_rows,
                     )
                     .await
                     .map_err(DbError::into_envelope)?;
@@ -13330,7 +13792,14 @@ impl OracleDispatcher {
                     snapshots.insert(cache_key, snapshot.clone());
                     snapshot
                 };
-                Ok(orient_snapshot_response(&snapshot, &include))
+                Ok(add_metadata_cursor(
+                    orient_snapshot_response(&snapshot, &include, max_rows),
+                    ORIENT_CURSOR_SCOPE,
+                    &cursor_binding,
+                    offset,
+                    max_rows,
+                    MAX_ORIENT_CURSOR_OFFSET,
+                ))
             }
             "oracle_list_schemas" => {
                 let a: ListSchemasArgs = parse_args(name, args)?;
@@ -13353,6 +13822,10 @@ impl OracleDispatcher {
             }
             "oracle_describe" => {
                 let a: DescribeArgs = parse_args(name, args)?;
+                let constraints_max_rows = a
+                    .max_rows
+                    .unwrap_or(DEFAULT_METADATA_MAX_ROWS)
+                    .clamp(1, MAX_METADATA_MAX_ROWS);
                 let table = required_non_empty_arg(name, "table", a.table)?;
                 let (owner, table) =
                     owner_and_name_arg(cx, &observed_metadata_conn, a.owner, table, "table")
@@ -13375,15 +13848,25 @@ impl OracleDispatcher {
                     ));
                 }
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_constraints.before")?;
-                let constraints = describe_constraints(cx, &guarded_metadata_conn, &owner, &table)
-                    .await
-                    .map_err(DbError::into_envelope)?;
+                let mut constraints = describe_constraints(
+                    cx,
+                    &guarded_metadata_conn,
+                    &owner,
+                    &table,
+                    constraints_max_rows.saturating_add(1),
+                )
+                .await
+                .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_constraints.after")?;
+                let constraints_truncated = constraints.len() > constraints_max_rows;
+                constraints.truncate(constraints_max_rows);
                 Ok(json!({
                     "owner": owner,
                     "table": table,
                     "columns": rows_to_json(&columns),
                     "constraints": rows_to_json(&constraints),
+                    "constraints_max_rows": constraints_max_rows,
+                    "constraints_truncated": constraints_truncated,
                 }))
             }
             "oracle_describe_index" => {
@@ -13453,11 +13936,32 @@ impl OracleDispatcher {
                 .await
                 .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.get_ddl.after")?;
-                Ok(json!({ "owner": owner, "name": object_name, "ddl": ddl }))
+                let truncated = ddl.as_ref().is_some_and(|ddl| ddl.truncated);
+                let ddl_char_count = ddl.as_ref().map(|ddl| ddl.char_count);
+                let returned_ddl_char_count = ddl.as_ref().map(|ddl| ddl.text.chars().count());
+                let ddl = ddl.map(|ddl| ddl.text);
+                Ok(json!({
+                    "owner": owner,
+                    "name": object_name,
+                    "ddl": ddl,
+                    "ddl_char_count": ddl_char_count,
+                    "returned_ddl_char_count": returned_ddl_char_count,
+                    "truncated": truncated,
+                    "truncation": {
+                        "ddl_prefix": truncated,
+                        "kind": if truncated { "DBMS_METADATA prefix" } else { "complete" },
+                    },
+                    "next_step": if truncated {
+                        "DDL exceeds the fixed 4000-character server prefix; this response is explicitly partial and must not be executed as a complete document"
+                    } else {
+                        "DDL is complete"
+                    },
+                }))
             }
             "oracle_get_source" => {
                 let a: GetSourceArgs = parse_args(name, args)?;
                 let max_chars = a.max_chars.unwrap_or(DEFAULT_SOURCE_MAX_CHARS);
+                let (from_line, to_line) = source_line_range(a.from_line, a.to_line)?;
                 let (owner, object_name) =
                     owner_and_name_arg(cx, &observed_metadata_conn, a.owner, a.name, "name")
                         .await?;
@@ -13470,12 +13974,20 @@ impl OracleDispatcher {
                             &owner,
                             &object_name,
                             object_type,
+                            from_line,
+                            to_line,
                             max_chars,
                         )
                         .await
                         .map_err(DbError::into_envelope)?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.get_source.after")?;
-                        Ok(json!({ "source": source }))
+                        Ok(json!({
+                            "source": source,
+                            "range": {
+                                "from_line": from_line,
+                                "to_line": to_line,
+                            },
+                        }))
                     }
                     None => {
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.get_sources_by_name.before")?;
@@ -13484,6 +13996,8 @@ impl OracleDispatcher {
                             &guarded_metadata_conn,
                             &owner,
                             &object_name,
+                            from_line,
+                            to_line,
                             max_chars,
                         )
                         .await
@@ -13493,6 +14007,10 @@ impl OracleDispatcher {
                             "owner": owner,
                             "name": object_name,
                             "source_count": sources.len(),
+                            "range": {
+                                "from_line": from_line,
+                                "to_line": to_line,
+                            },
                             "sources": sources,
                         }))
                     }
@@ -13683,6 +14201,10 @@ impl OracleDispatcher {
             }
             "oracle_compile_errors" => {
                 let a: CompileErrorsArgs = parse_args(name, args)?;
+                let max_rows = a
+                    .max_rows
+                    .unwrap_or(DEFAULT_METADATA_MAX_ROWS)
+                    .clamp(1, MAX_METADATA_MAX_ROWS);
                 let object_name = non_empty_arg(a.name);
                 match object_name {
                     Some(object_name) => {
@@ -13696,25 +14218,49 @@ impl OracleDispatcher {
                             )
                                 .await?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.before")?;
-                        let rows =
-                            compile_errors(cx, &guarded_metadata_conn, &owner, Some(&object_name))
-                                .await
-                                .map_err(DbError::into_envelope)?;
-                        dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.after")?;
-                        Ok(
-                            json!({ "owner": owner, "name": object_name, "errors": rows_to_json(&rows) }),
+                        let mut rows = compile_errors(
+                            cx,
+                            &guarded_metadata_conn,
+                            &owner,
+                            Some(&object_name),
+                            max_rows.saturating_add(1),
                         )
+                        .await
+                        .map_err(DbError::into_envelope)?;
+                        dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.after")?;
+                        let truncated = rows.len() > max_rows;
+                        rows.truncate(max_rows);
+                        Ok(json!({
+                            "owner": owner,
+                            "name": object_name,
+                            "errors": rows_to_json(&rows),
+                            "max_rows": max_rows,
+                            "truncated": truncated,
+                        }))
                     }
                     None => {
                         let owner = owner_or_current_cx(cx, &observed_metadata_conn, a.owner)
                             .await
                             .map_err(DbError::into_envelope)?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.before")?;
-                        let rows = compile_errors(cx, &guarded_metadata_conn, &owner, None)
-                            .await
-                            .map_err(DbError::into_envelope)?;
+                        let mut rows = compile_errors(
+                            cx,
+                            &guarded_metadata_conn,
+                            &owner,
+                            None,
+                            max_rows.saturating_add(1),
+                        )
+                        .await
+                        .map_err(DbError::into_envelope)?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.after")?;
-                        Ok(json!({ "owner": owner, "errors": rows_to_json(&rows) }))
+                        let truncated = rows.len() > max_rows;
+                        rows.truncate(max_rows);
+                        Ok(json!({
+                            "owner": owner,
+                            "errors": rows_to_json(&rows),
+                            "max_rows": max_rows,
+                            "truncated": truncated,
+                        }))
                     }
                 }
             }
@@ -13724,6 +14270,10 @@ impl OracleDispatcher {
                     .max_rows
                     .unwrap_or(DEFAULT_SEARCH_MAX_ROWS)
                     .clamp(1, MAX_SEARCH_MAX_ROWS);
+                let max_line_chars = a
+                    .max_line_chars
+                    .unwrap_or(DEFAULT_SEARCH_MAX_LINE_CHARS)
+                    .clamp(MIN_SEARCH_MAX_LINE_CHARS, MAX_SEARCH_MAX_LINE_CHARS);
                 let requested_owner = non_empty_arg(a.owner);
                 let owner = match requested_owner.as_deref() {
                     Some("*") => None,
@@ -13749,16 +14299,23 @@ impl OracleDispatcher {
                 .await
                 .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.search_source.after")?;
+                let (matches, truncated_lines) = source_search_rows_to_json(&rows, max_line_chars);
                 Ok(json!({
                     "owner": owner.as_deref().unwrap_or("*"),
                     "object_type": object_type,
                     "name_like": name_like,
                     "max_rows": max_rows,
-                    "matches": rows_to_json(&rows),
+                    "max_line_chars": max_line_chars,
+                    "truncated_lines": truncated_lines,
+                    "matches": matches,
                 }))
             }
             "oracle_plscope_inspect" => {
                 let a: PlscopeInspectArgs = parse_args(name, args)?;
+                let max_rows = a
+                    .max_rows
+                    .unwrap_or(DEFAULT_METADATA_MAX_ROWS)
+                    .clamp(1, MAX_METADATA_MAX_ROWS);
                 let object_name = required_non_empty_arg(name, "name", a.name)?;
                 let (owner, object_name) =
                     owner_and_name_arg(
@@ -13770,24 +14327,50 @@ impl OracleDispatcher {
                     )
                     .await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_identifiers.before")?;
-                let identifiers =
-                    plscope_identifiers(cx, &guarded_metadata_conn, &owner, &object_name)
-                        .await
-                        .map_err(DbError::into_envelope)?;
+                let mut identifiers = plscope_identifiers(
+                    cx,
+                    &guarded_metadata_conn,
+                    &owner,
+                    &object_name,
+                    max_rows.saturating_add(1),
+                )
+                .await
+                .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_identifiers.after")?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_statements.before")?;
-                let statements =
-                    plscope_statements(cx, &guarded_metadata_conn, &owner, &object_name)
-                        .await
-                        .map_err(DbError::into_envelope)?;
+                let mut statements = plscope_statements(
+                    cx,
+                    &guarded_metadata_conn,
+                    &owner,
+                    &object_name,
+                    max_rows.saturating_add(1),
+                )
+                .await
+                .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_statements.after")?;
-                let unused_declarations = find_unused_declarations(&identifiers);
+                let identifiers_truncated = identifiers.len() > max_rows;
+                identifiers.truncate(max_rows);
+                let statements_truncated = statements.len() > max_rows;
+                statements.truncate(max_rows);
+                // A declaration can only be called unused after the complete
+                // identifier graph was inspected; emitting a partial-list
+                // verdict would be a silent false positive.
+                let unused_declarations = if identifiers_truncated {
+                    Vec::new()
+                } else {
+                    find_unused_declarations(&identifiers)
+                };
                 let dynamic_sql_lines = execute_immediate_audit(&statements);
                 Ok(json!({
                     "owner": owner,
                     "name": object_name,
                     "identifier_count": identifiers.len(),
                     "statement_count": statements.len(),
+                    "max_rows": max_rows,
+                    "identifiers_truncated": identifiers_truncated,
+                    "statements_truncated": statements_truncated,
+                    "truncated": identifiers_truncated || statements_truncated,
+                    "unused_declarations_complete": !identifiers_truncated,
                     "unused_declarations": unused_declarations,
                     "dynamic_sql_lines": dynamic_sql_lines,
                     "identifiers": identifiers,

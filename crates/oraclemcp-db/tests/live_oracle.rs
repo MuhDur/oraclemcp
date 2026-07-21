@@ -1631,13 +1631,13 @@ fn live_tier1_intelligence_dictionary_tools() {
             .expect("ddl");
         let ddl = ddl.expect("some ddl");
         assert!(
-            ddl.to_uppercase().contains("PACKAGE"),
+            ddl.text.to_uppercase().contains("PACKAGE"),
             "DDL: {}",
-            &ddl[..ddl.len().min(60)]
+            &ddl.text[..ddl.text.len().min(60)]
         );
 
         // compile_errors runs (valid package -> empty is fine).
-        let _ = oraclemcp_db::compile_errors(&cx, &conn, "demo", Some("PKG_AUTONOMOUS"))
+        let _ = oraclemcp_db::compile_errors(&cx, &conn, "demo", Some("PKG_AUTONOMOUS"), 200)
             .await
             .expect("errors query runs");
 

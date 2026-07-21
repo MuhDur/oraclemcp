@@ -3405,6 +3405,62 @@ pub type oraclemcp_db::DbmsOutput::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DbmsOutput where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DbmsOutput where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::DbmsOutput::vzip(self) -> V
+pub struct oraclemcp_db::DdlText
+pub oraclemcp_db::DdlText::char_count: usize
+pub oraclemcp_db::DdlText::text: alloc::string::String
+pub oraclemcp_db::DdlText::truncated: bool
+impl core::clone::Clone for oraclemcp_db::DdlText
+pub fn oraclemcp_db::DdlText::clone(&self) -> oraclemcp_db::DdlText
+impl core::cmp::Eq for oraclemcp_db::DdlText
+impl core::cmp::PartialEq for oraclemcp_db::DdlText
+pub fn oraclemcp_db::DdlText::eq(&self, &oraclemcp_db::DdlText) -> bool
+impl core::fmt::Debug for oraclemcp_db::DdlText
+pub fn oraclemcp_db::DdlText::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::DdlText
+impl core::marker::Freeze for oraclemcp_db::DdlText
+impl core::marker::Send for oraclemcp_db::DdlText
+impl core::marker::Sync for oraclemcp_db::DdlText
+impl core::marker::Unpin for oraclemcp_db::DdlText
+impl core::marker::UnsafeUnpin for oraclemcp_db::DdlText
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::DdlText
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::DdlText
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::DdlText where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::DdlText where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::DdlText where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::DdlText::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::DdlText where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::DdlText where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::DdlText where U: core::convert::From<T>
+pub fn oraclemcp_db::DdlText::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::DdlText where U: core::convert::Into<T>
+pub type oraclemcp_db::DdlText::Error = core::convert::Infallible
+pub fn oraclemcp_db::DdlText::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::DdlText where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::DdlText::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::DdlText::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::DdlText where T: core::clone::Clone
+pub type oraclemcp_db::DdlText::Owned = T
+pub fn oraclemcp_db::DdlText::clone_into(&self, &mut T)
+pub fn oraclemcp_db::DdlText::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::DdlText
+impl<T> core::any::Any for oraclemcp_db::DdlText where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::DdlText::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::DdlText where T: ?core::marker::Sized
+pub fn oraclemcp_db::DdlText::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::DdlText where T: ?core::marker::Sized
+pub fn oraclemcp_db::DdlText::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::DdlText where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::DdlText::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::DdlText
+pub fn oraclemcp_db::DdlText::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DdlText
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DdlText
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DdlText
+impl<T> typenum::type_operators::Same for oraclemcp_db::DdlText
+pub type oraclemcp_db::DdlText::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DdlText where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DdlText where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::DdlText::vzip(self) -> V
 pub struct oraclemcp_db::DependentObject
 pub oraclemcp_db::DependentObject::name: alloc::string::String
 pub oraclemcp_db::DependentObject::object_type: alloc::string::String
@@ -8909,13 +8965,13 @@ pub fn oraclemcp_db::catalog_extract_rowsets(bool) -> alloc::vec::Vec<oraclemcp_
 pub fn oraclemcp_db::classify_type(&str) -> oraclemcp_db::TypeRepr
 pub fn oraclemcp_db::classify_wallet(&std::path::Path, &[alloc::string::String], core::option::Option<&str>) -> core::result::Result<oraclemcp_db::WalletContents, oraclemcp_db::OciError>
 pub fn oraclemcp_db::compare_schemas(&oraclemcp_db::SchemaSnapshot, &oraclemcp_db::SchemaSnapshot) -> core::result::Result<oraclemcp_db::SchemaDiff, oraclemcp_db::SchemaDiffError>
-pub async fn oraclemcp_db::compile_errors(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, core::option::Option<&str>) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::compile_errors(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::compile_object_statements(&str, &str, &str, bool, bool) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::cursor_to_offset(core::option::Option<&str>) -> usize
 pub fn oraclemcp_db::dependent_from_row(&oraclemcp_db::OracleRow) -> core::option::Option<oraclemcp_db::DependentObject>
 pub fn oraclemcp_db::derive_version_capabilities(u8) -> oraclemcp_db::DerivedVersionCapabilities
 pub async fn oraclemcp_db::describe_columns(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
-pub async fn oraclemcp_db::describe_constraints(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::describe_constraints(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::describe_index(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<oraclemcp_db::IndexDescription, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::describe_trigger(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<oraclemcp_db::TriggerDescription, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::describe_view(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<oraclemcp_db::ViewDescription, oraclemcp_db::DbError>
@@ -8934,31 +8990,37 @@ pub async fn oraclemcp_db::extract_catalog_rowsets<C: oraclemcp_db::OracleConnec
 pub fn oraclemcp_db::extract_hints(&str) -> oraclemcp_db::TnsDescriptorHints
 pub fn oraclemcp_db::find_unused_declarations(&[oraclemcp_db::PlscopeIdentifier]) -> alloc::vec::Vec<alloc::string::String>
 pub const fn oraclemcp_db::gate_native_redaction(bool, bool, oraclemcp_db::NativeRedactionAvailability) -> oraclemcp_db::NativeRedactionGate
-pub async fn oraclemcp_db::get_ddl(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, &str) -> core::result::Result<core::option::Option<alloc::string::String>, oraclemcp_db::DbError>
-pub async fn oraclemcp_db::get_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, &str, usize) -> core::result::Result<oraclemcp_db::SourceText, oraclemcp_db::DbError>
-pub async fn oraclemcp_db::get_sources_by_name(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::SourceText>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::get_ddl(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, &str) -> core::result::Result<core::option::Option<oraclemcp_db::DdlText>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::get_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, &str, core::option::Option<usize>, core::option::Option<usize>, usize) -> core::result::Result<oraclemcp_db::SourceText, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::get_sources_by_name(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, core::option::Option<usize>, core::option::Option<usize>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::SourceText>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::incomparable_masked_columns(&[alloc::string::String], core::option::Option<&oraclemcp_db::ResultMaskingCertificate>, core::option::Option<&oraclemcp_db::ResultMaskingCertificate>) -> alloc::vec::Vec<oraclemcp_db::IncomparableMaskedColumn>
 pub fn oraclemcp_db::invalid_objects_sql(oraclemcp_db::ViewTier) -> (&'static str, alloc::string::String)
 pub fn oraclemcp_db::is_ddl_object_type(&str) -> bool
 pub fn oraclemcp_db::is_simple_identifier(&str) -> bool
 pub fn oraclemcp_db::is_transient_error(&str) -> bool
 pub async fn oraclemcp_db::list_objects(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, core::option::Option<&str>, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::list_objects_page(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, core::option::Option<&str>, core::option::Option<&str>, usize, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::list_schema_projection_page(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, core::option::Option<&str>, usize, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::list_schemas(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::list_source_types(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::migration_plan(&oraclemcp_db::SchemaDiff) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::MigrationStep>, oraclemcp_db::SchemaDiffError>
 pub fn oraclemcp_db::normalize_source_object_type(&str) -> core::option::Option<&'static str>
 pub fn oraclemcp_db::oracle_driver_compiled() -> bool
 pub async fn oraclemcp_db::orient_fks(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OrientForeignKey>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::orient_fks_page(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OrientForeignKey>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::orient_hot_objects(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OrientHotObject>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::orient_hot_objects_page(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OrientHotObject>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::orient_recent_ddl(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OrientRecentDdlObject>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::orient_recent_ddl_page(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OrientRecentDdlObject>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::orient_schema(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OrientSchemaObject>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::orient_schema_page(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OrientSchemaObject>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::paginated_sql(&str, usize, usize) -> alloc::string::String
 pub fn oraclemcp_db::parse_health_request(&str) -> oraclemcp_db::ParsedHealthRequest
 pub fn oraclemcp_db::parse_tnsnames_dir(&std::path::Path) -> core::result::Result<oraclemcp_db::TnsParseResult, oraclemcp_db::TnsParseError>
 pub async fn oraclemcp_db::plan_cost_estimate(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<core::option::Option<oraclemcp_db::PlanCostEstimate>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::plan_cost_timeline(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, u32) -> core::result::Result<oraclemcp_db::PlanCostTimeline, oraclemcp_error::ErrorEnvelope>
-pub async fn oraclemcp_db::plscope_identifiers(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::PlscopeIdentifier>, oraclemcp_db::DbError>
-pub async fn oraclemcp_db::plscope_statements(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::PlscopeStatement>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::plscope_identifiers(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::PlscopeIdentifier>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::plscope_statements(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::PlscopeStatement>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::preflight(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<oraclemcp_db::PreflightReport, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::primary_key_columns(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::probe_dependents(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> oraclemcp_db::DependentsProbe

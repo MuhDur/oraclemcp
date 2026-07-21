@@ -388,6 +388,8 @@ pub(super) struct SchemaInspectArgs {
     pub(super) name_like: Option<String>,
     #[serde(default, alias = "limit")]
     pub(super) max_rows: Option<usize>,
+    #[serde(default)]
+    pub(super) cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -419,6 +421,10 @@ pub(super) struct OrientArgs {
     pub(super) include: Vec<String>,
     #[serde(default)]
     pub(super) fleet: bool,
+    #[serde(default, alias = "limit")]
+    pub(super) max_rows: Option<usize>,
+    #[serde(default)]
+    pub(super) cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -435,6 +441,8 @@ pub(super) struct DescribeArgs {
     pub(super) owner: Option<String>,
     #[serde(default, alias = "table_name", alias = "name")]
     pub(super) table: Option<String>,
+    #[serde(default, alias = "limit")]
+    pub(super) max_rows: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -480,6 +488,10 @@ pub(super) struct GetSourceArgs {
     pub(super) object_type: Option<String>,
     #[serde(default)]
     pub(super) max_chars: Option<usize>,
+    #[serde(default)]
+    pub(super) from_line: Option<usize>,
+    #[serde(default)]
+    pub(super) to_line: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -561,6 +573,8 @@ pub(super) struct CompileErrorsArgs {
     pub(super) owner: Option<String>,
     #[serde(default, alias = "object_name")]
     pub(super) name: Option<String>,
+    #[serde(default, alias = "limit")]
+    pub(super) max_rows: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -574,6 +588,8 @@ pub(super) struct SearchSourceArgs {
     pub(super) name_like: Option<String>,
     #[serde(default, alias = "limit")]
     pub(super) max_rows: Option<usize>,
+    #[serde(default)]
+    pub(super) max_line_chars: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -583,6 +599,8 @@ pub(super) struct PlscopeInspectArgs {
     #[serde(default)]
     #[serde(alias = "object_name")]
     pub(super) name: Option<String>,
+    #[serde(default, alias = "limit")]
+    pub(super) max_rows: Option<usize>,
 }
 
 #[derive(Deserialize)]
