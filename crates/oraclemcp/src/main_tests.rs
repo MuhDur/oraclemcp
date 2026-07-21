@@ -3995,10 +3995,10 @@ fn custom_tool_loader_uses_each_profiles_real_ceiling() {
         profile_ceiling("READ_WRITE"),
     )
     .expect_err("signed DDL-pinned tool must not load above the profile ceiling");
-    assert!(error.message.contains("requires DDL"), "{error}");
+    assert!(error.message.contains("requires DDL"), "{error:?}");
     assert!(
         error.message.contains("profile ceiling is READ_WRITE"),
-        "signed-tool refusal must name the real profile ceiling: {error}"
+        "signed-tool refusal must name the real profile ceiling: {error:?}"
     );
     assert_eq!(
         load_custom_catalog_from_sources(
