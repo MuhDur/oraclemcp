@@ -1,0 +1,68 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T13:43:29Z",
+  "bead_id": "oraclemcp-091-a4b-retry-unify-c6whb",
+  "scope": {
+    "summary": "Unifies retry classification on the pinned driver's connection-loss taxonomy, preserves a structurally lost session through the DB adapter, and permits exactly one safe replay of an idempotent stateless read.",
+    "in_scope": [
+      "crates/oraclemcp-error/src/lib.rs",
+      "crates/oraclemcp-db/src/error.rs",
+      "crates/oraclemcp-db/src/connection.rs",
+      "crates/oraclemcp-db/src/pool.rs",
+      "crates/oraclemcp-db/src/lib.rs",
+      "crates/oraclemcp-db/tests/oracledb_contract.rs",
+      "crates/oraclemcp-core/src/resilience.rs",
+      "crates/oraclemcp-core/tests/chaos.rs"
+    ],
+    "out_of_scope": [
+      "Pinned-session reconnect recovery; A4e owns that path.",
+      "The D5 live idle-kill lane and its Oracle-container evidence.",
+      "Changing the fail-closed SQL classifier or retrying mutations."
+    ]
+  },
+  "source": {
+    "sha": "6419d7e4e8b3189ed5cfaa30c7721807207a15fc",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "stateless OraclePool read checkout",
+        "kind": "api",
+        "trace": "connection::tests::driver_connection_lost_taxonomy_reaches_the_db_error_boundary proves the real driver seam maps every pinned connection-loss ORA code and raw BrokenPipe to DbError::ConnectionLost; pool::tests::retry_policy_allows_exactly_one_immediate_retry_per_request proves a retry budget cannot exceed one replay."
+      },
+      {
+        "name": "structured Oracle error response",
+        "kind": "api",
+        "trace": "error::tests::retry_envelopes_distinguish_fresh_connection_from_same_session and the full oracledb_contract integration test prove fresh-connection versus same-session remediation and the retained ORA code."
+      },
+      {
+        "name": "core resilience classification",
+        "kind": "api",
+        "trace": "cargo test -p oraclemcp-core resilience::tests:: and cargo test -p oraclemcp-core --test chaos passed; chaos::driver_connection_loss_and_package_reset_are_classified_retryable exercises the core re-export against lost-session and package-reset cases."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped offline tests passed: cargo test -p oraclemcp-error retry_actions_keep_connection_loss_and_package_reset_distinct; cargo test -p oraclemcp-db driver_connection_lost_taxonomy_reaches_the_db_error_boundary; cargo test -p oraclemcp-db --test oracledb_contract; cargo test -p oraclemcp-core resilience::tests::; cargo test -p oraclemcp-core --test chaos.",
+    "No Oracle live D5 idle-kill observation is claimed. D5 depends on the container harness and validates the pooled plus pinned recovery paths separately.",
+    "The full workspace gate was not a source-SHA proof for this close; this shared checkout still has unrelated in-flight panes."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-d5-idle-kill-lane-83utt",
+    "oraclemcp-091-b13b-ttc129-server-aqllj",
+    "oraclemcp-091-a4d-typed-envelopes-wr0o4"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
