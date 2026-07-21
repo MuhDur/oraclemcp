@@ -3249,6 +3249,20 @@ fn schema_inspect_can_default_to_current_schema() {
     assert!(out["objects"].is_array());
 }
 
+#[test]
+fn get_schema_uses_compact_projection_and_a_server_owned_ceiling() {
+    let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+    let out = dispatcher
+        .dispatch("get_schema", json!({ "max_rows": usize::MAX }))
+        .expect("compact get_schema alias succeeds");
+
+    assert_eq!(out["owner"], json!("APP"));
+    assert_eq!(out["max_rows"], json!(MAX_GET_SCHEMA_MAX_ROWS));
+    assert_eq!(out["projection"], json!(["TABLE", "VIEW", "PACKAGE"]));
+    assert_eq!(out["truncated"], json!(false));
+    assert!(out["next_cursor"].is_null());
+}
+
 /// E4: a scripted mock that drives `oracle_search_objects` through dispatch,
 /// returning SQL-shape-dependent rows so the detail levels and the
 /// ALL_TABLES.NUM_ROWS path are exercised end-to-end.
@@ -3589,6 +3603,25 @@ fn orient_assembles_selector_stable_snapshot_and_reloads_on_catalog_revision() {
         "one cache miss invokes each bounded dictionary reader once"
     );
 
+    let capped = dispatcher
+        .dispatch("oracle_orient", json!({ "owner": "APP", "max_rows": 1 }))
+        .expect("explicit orient cap is accepted");
+    assert_eq!(capped["max_rows"], json!(1));
+    assert_eq!(
+        capped["truncated"],
+        json!(false),
+        "one returned row does not prove an omitted row exists"
+    );
+    assert!(capped["next_cursor"].is_null());
+
+    let client_max = dispatcher
+        .dispatch(
+            "oracle_orient",
+            json!({ "owner": "APP", "max_rows": usize::MAX }),
+        )
+        .expect("a client maximum is clamped to the server ceiling");
+    assert_eq!(client_max["max_rows"], json!(MAX_ORIENT_MAX_ROWS));
+
     let selected = dispatcher
         .dispatch(
             "oracle_orient",
@@ -3602,7 +3635,7 @@ fn orient_assembles_selector_stable_snapshot_and_reloads_on_catalog_revision() {
     assert!(selected["freshness"].is_object());
     assert_eq!(
         state.dictionary_reads.load(Ordering::SeqCst),
-        4,
+        8,
         "include selectors must not create stale independent cache fragments"
     );
 
@@ -3610,7 +3643,7 @@ fn orient_assembles_selector_stable_snapshot_and_reloads_on_catalog_revision() {
         .dispatch("oracle_orient", json!({ "include": ["unknown"] }))
         .expect_err("unknown orient section is refused before dictionary I/O");
     assert_eq!(invalid.error_class, ErrorClass::InvalidArguments);
-    assert_eq!(state.dictionary_reads.load(Ordering::SeqCst), 4);
+    assert_eq!(state.dictionary_reads.load(Ordering::SeqCst), 8);
 
     invalidate_orient_catalog(&dispatcher);
     let refreshed = dispatcher
@@ -3622,7 +3655,7 @@ fn orient_assembles_selector_stable_snapshot_and_reloads_on_catalog_revision() {
     assert_eq!(refreshed["catalog_revision"], json!(2));
     assert_eq!(
         state.dictionary_reads.load(Ordering::SeqCst),
-        8,
+        12,
         "the new catalog generation never reuses prior snapshot evidence"
     );
 }
