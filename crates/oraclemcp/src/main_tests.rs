@@ -418,6 +418,7 @@ fn fresh_stateful_lane_uses_reloaded_profile_ceiling_and_timeout() {
         auditor: None,
         write_intents: None,
         exports: Arc::new(ExportRegistry::new()),
+        unsigned_refusal_log: true,
     };
 
     apply_selected_profile_to_wiring(&mut wiring, selected);
@@ -624,10 +625,25 @@ fn doctor_audit_posture_matches_startup_audit_policy_without_opening_a_log() {
     )
     .expect("read-only config parses");
     let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+    assert!(unsigned_refusal_trail_enabled(false, true));
+    assert!(!unsigned_refusal_trail_enabled(false, false));
+    assert!(!unsigned_refusal_trail_enabled(true, true));
     assert_eq!(
         doctor_audit_posture_from_config(&read_only, &active, false),
-        DoctorAuditPosture::DisabledReadOnly,
+        DoctorAuditPosture::DisabledReadOnly {
+            unsigned_refusal_trail_path: Some(default_unsigned_refusal_trail_path()),
+        },
         "a keyless read-only server intentionally has no auditor"
+    );
+
+    let mut opted_out = read_only.clone();
+    opted_out.audit.unsigned_refusal_log = false;
+    assert_eq!(
+        doctor_audit_posture_from_config(&opted_out, &active, false),
+        DoctorAuditPosture::DisabledReadOnly {
+            unsigned_refusal_trail_path: None,
+        },
+        "an explicit opt-out disables only the unsigned refusal trail"
     );
 
     let writable = OracleMcpConfig::from_toml_str(
@@ -3883,6 +3899,7 @@ fn build_server_advertises_the_active_custom_catalog_plus_capabilities() {
             sql_policy: None,
             metrics: None,
             profile_drain: ProfileDrainState::default(),
+            unsigned_refusal_log: true,
         },
     );
     // The capabilities report carries the registry's tools.

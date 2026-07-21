@@ -419,8 +419,13 @@ pub enum DoctorAuditPosture {
         path: PathBuf,
     },
     /// No signing key is configured and every reachable profile is read-only,
-    /// so startup intentionally constructs no auditor.
-    DisabledReadOnly,
+    /// so startup intentionally constructs no auditor. The optional path names
+    /// the separately configured unsigned refusal trail; it is never a signed
+    /// audit path and is not tamper-evident.
+    DisabledReadOnly {
+        /// Configured unsigned-refusal trail path, absent when opted out.
+        unsigned_refusal_trail_path: Option<PathBuf>,
+    },
     /// No signing key is configured even though a reachable profile can write;
     /// startup refuses before serving.
     StartupRefused {
@@ -2344,19 +2349,30 @@ fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
         Some(DoctorAuditPosture::SigningKeyConfigured { path }) => (
             CheckStatus::Pass,
             format!(
-                "audit configuration observation: signing-key source configured at {}; this offline check does not resolve the key or construct an auditor",
+                "audit configuration observation: signing-key source configured at {}; unsigned refusal trail: INACTIVE (signed audit is the configured tier); this offline check does not resolve the key or construct an auditor",
                 path.display()
             ),
         ),
-        Some(DoctorAuditPosture::DisabledReadOnly) => (
+        Some(DoctorAuditPosture::DisabledReadOnly {
+            unsigned_refusal_trail_path: Some(path),
+        }) => (
             CheckStatus::Skip,
-            "audit configuration observation: disabled (no signing key configured; profile is read-only everywhere reachable)"
+            format!(
+                "audit configuration observation: disabled (no signing key configured; profile is read-only everywhere reachable); unsigned refusal trail: ACTIVE BY CONFIGURATION at {} (UNSIGNED, NOT TAMPER-EVIDENT; this offline check does not open it)",
+                path.display()
+            ),
+        ),
+        Some(DoctorAuditPosture::DisabledReadOnly {
+            unsigned_refusal_trail_path: None,
+        }) => (
+            CheckStatus::Skip,
+            "audit configuration observation: disabled (no signing key configured; profile is read-only everywhere reachable); unsigned refusal trail: DISABLED BY CONFIGURATION"
                 .to_owned(),
         ),
         Some(DoctorAuditPosture::StartupRefused { reachable_ceiling }) => (
             CheckStatus::Fail,
             format!(
-                "audit configuration observation: startup would be refused (no signing key configured; a reachable profile can reach {} and startup policy requires ORACLEMCP_AUDIT_KEY_REQUIRED)",
+                "audit configuration observation: startup would be refused (no signing key configured; a reachable profile can reach {} and startup policy requires ORACLEMCP_AUDIT_KEY_REQUIRED); unsigned refusal trail: UNAVAILABLE (the server does not start)",
                 reachable_ceiling.as_str()
             ),
         ),
@@ -4317,15 +4333,23 @@ mod tests {
 
         let disabled = doctor(&DoctorContext {
             state_layout: Some(layout.clone()),
-            audit_posture: Some(DoctorAuditPosture::DisabledReadOnly),
+            audit_posture: Some(DoctorAuditPosture::DisabledReadOnly {
+                unsigned_refusal_trail_path: Some(root.join("state").join("corpus/refusals.jsonl")),
+            }),
             ..DoctorContext::default()
         });
         let check = check_by_id(&disabled, 13);
         assert_eq!(check.status, CheckStatus::Skip);
-        assert_eq!(
-            check.detail,
-            "audit configuration observation: disabled (no signing key configured; profile is read-only everywhere reachable); filesystem observation: legacy default audit JSONL is absent; no default-path migration is needed"
+        assert!(check.detail.contains(
+            "audit configuration observation: disabled (no signing key configured; profile is read-only everywhere reachable)"
+        ));
+        assert!(
+            check
+                .detail
+                .contains("unsigned refusal trail: ACTIVE BY CONFIGURATION")
         );
+        assert!(check.detail.contains("UNSIGNED, NOT TAMPER-EVIDENT"));
+        assert!(check.detail.contains("this offline check does not open it"));
         assert!(!check.detail.contains("audit default"));
 
         let configured = doctor(&DoctorContext {
@@ -4349,6 +4373,26 @@ mod tests {
                 .detail
                 .contains("does not resolve the key or construct an auditor")
         );
+        assert!(
+            check
+                .detail
+                .contains("unsigned refusal trail: INACTIVE (signed audit is the configured tier)")
+        );
+
+        let opted_out = doctor(&DoctorContext {
+            state_layout: Some(layout.clone()),
+            audit_posture: Some(DoctorAuditPosture::DisabledReadOnly {
+                unsigned_refusal_trail_path: None,
+            }),
+            ..DoctorContext::default()
+        });
+        let check = check_by_id(&opted_out, 13);
+        assert_eq!(check.status, CheckStatus::Skip);
+        assert!(
+            check
+                .detail
+                .contains("unsigned refusal trail: DISABLED BY CONFIGURATION")
+        );
 
         let refused = doctor(&DoctorContext {
             state_layout: Some(layout),
@@ -4361,6 +4405,11 @@ mod tests {
         assert_eq!(check.status, CheckStatus::Fail);
         assert!(check.detail.contains("ORACLEMCP_AUDIT_KEY_REQUIRED"));
         assert!(check.detail.starts_with("audit configuration observation:"));
+        assert!(
+            check
+                .detail
+                .contains("unsigned refusal trail: UNAVAILABLE (the server does not start)")
+        );
     }
 
     #[test]

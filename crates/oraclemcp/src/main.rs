@@ -2156,6 +2156,7 @@ struct DispatcherWiring {
     auditor: Option<Arc<Auditor>>,
     write_intents: Option<Arc<WriteIntentLog>>,
     exports: Arc<ExportRegistry>,
+    unsigned_refusal_log: bool,
 }
 
 fn whole_request_timeout(call_timeout_seconds: Option<u64>) -> std::time::Duration {
@@ -2212,6 +2213,9 @@ fn build_oracle_dispatcher(
     }
     if let Some(write_intents) = &wiring.write_intents {
         dispatcher = dispatcher.with_write_intent_log(Arc::clone(write_intents));
+    }
+    if !wiring.unsigned_refusal_log {
+        dispatcher = dispatcher.without_refusal_corpus();
     }
     dispatcher
 }
@@ -2962,6 +2966,7 @@ struct ServerBuildOptions {
     sql_policy: Option<SqlPolicyConfig>,
     metrics: Option<Arc<Metrics>>,
     profile_drain: ProfileDrainState,
+    unsigned_refusal_log: bool,
 }
 
 struct BuiltServer {
@@ -3033,6 +3038,7 @@ fn build_server_with_lifecycle(
         auditor: options.auditor,
         write_intents: options.write_intents,
         exports: Arc::clone(&exports),
+        unsigned_refusal_log: options.unsigned_refusal_log,
     };
     let mut session_lifecycle: Option<Arc<dyn HttpSessionLifecycle>> = None;
     let dispatcher: Arc<dyn ToolDispatch> = if options.transport.is_http() {
@@ -3554,6 +3560,10 @@ fn run_serve(
             return ExitCode::from(2);
         }
     };
+    // The redacted refusal trail is the unsigned floor only when no signed
+    // chain is active. An operator may disable that floor explicitly.
+    let unsigned_refusal_log =
+        unsigned_refusal_trail_enabled(auditor.is_some(), full_config.audit.unsigned_refusal_log);
     let query_cost_budget_enabled = has_cumulative_query_cost_budget(&full_config);
     let service_owner = match build_service_owner(
         listen.is_some()
@@ -3620,6 +3630,7 @@ fn run_serve(
                     sql_policy: sql_policy.clone(),
                     metrics: None,
                     profile_drain: ProfileDrainState::from_config(full_config.clone()),
+                    unsigned_refusal_log,
                 },
             );
             emit_serve_status(robot_json, "stdio", None, &advertised_tools);
@@ -3777,6 +3788,7 @@ fn run_serve(
                     sql_policy: sql_policy.clone(),
                     metrics: Some(Arc::clone(&metrics)),
                     profile_drain: profile_drain.clone(),
+                    unsigned_refusal_log,
                 },
             );
             let server = built.server;
@@ -6488,6 +6500,27 @@ fn doctor_audit_path_configured() -> bool {
         .unwrap_or(false)
 }
 
+/// Default location of the unsigned refusal/security-event trail. It is kept
+/// separate from `audit.jsonl` because it has neither signatures nor an anchor.
+fn default_unsigned_refusal_trail_path() -> PathBuf {
+    if let Ok(state_dir) = FileStore::default_state_dir() {
+        return state_dir.join("corpus").join("refusals.jsonl");
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".local/state/oraclemcp/corpus/refusals.jsonl"))
+        .unwrap_or_else(|| PathBuf::from("oraclemcp-refusal-corpus.jsonl"))
+}
+
+/// The unsigned trail is a floor for keyless read-only serving, never a second
+/// audit tier alongside the signed hash chain.
+const fn unsigned_refusal_trail_enabled(
+    signed_audit_active: bool,
+    configured_enabled: bool,
+) -> bool {
+    !signed_audit_active && configured_enabled
+}
+
 /// Derive the same no-key/reachable-write decision that startup uses without
 /// resolving an audit secret or opening the audit file. Offline doctor must not
 /// turn a diagnostic into a secret read or a filesystem mutation.
@@ -6529,7 +6562,12 @@ fn doctor_audit_posture_from_config(
     if reachable_ceiling > OperatingLevel::ReadOnly {
         return DoctorAuditPosture::StartupRefused { reachable_ceiling };
     }
-    DoctorAuditPosture::DisabledReadOnly
+    DoctorAuditPosture::DisabledReadOnly {
+        unsigned_refusal_trail_path: config
+            .audit
+            .unsigned_refusal_log
+            .then(default_unsigned_refusal_trail_path),
+    }
 }
 
 fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileContext {
