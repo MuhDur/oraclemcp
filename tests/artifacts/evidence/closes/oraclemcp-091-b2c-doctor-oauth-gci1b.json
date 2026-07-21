@@ -1,0 +1,53 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T22:51:07Z",
+  "bead_id": "oraclemcp-091-b2c-doctor-oauth-gci1b",
+  "scope": {
+    "summary": "Add the local-only doctor OAuth diagnostic, including verified expiry time, without changing opaque HTTP authentication responses.",
+    "in_scope": [
+      "crates/oraclemcp-auth/src/oauth_rs.rs",
+      "crates/oraclemcp-core/src/http/mod.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs"
+    ],
+    "out_of_scope": [
+      "Live OAuth issuer or Oracle connectivity.",
+      "Changing HTTP authentication response detail."
+    ]
+  },
+  "source": {
+    "sha": "0e488ca3b1419e002998505c10121ec7795399dc",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Local oraclemcp doctor oauth --token CLI diagnostic",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp doctor_oauth -- --nocapture passed the command parser and local diagnostic tests. The diagnostic uses the resolved local OAuth verifier without starting an HTTP listener; its tested output distinguishes malformed, bad signature, verified expiry epoch, missing claim, unsupported algorithm, type, nbf, issuer, audience, and scope refusals while redacting token material."
+      },
+      {
+        "name": "HTTP OAuth rejection challenge",
+        "kind": "route",
+        "trace": "target/sageraven-b2c/debug/deps/c1_oauth_literal_jwt-c1adf14f58878d22 c1_negative_tokens_share_one_opaque_challenge --nocapture passed after the scoped core test build. The TokenError::Expired match remains token-free audit classification only; rejected bearer responses retain the uniform invalid_token challenge."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped tests only; the repository-wide Required gate was not run because main was already red for unrelated golden snapshots.",
+    "No live OAuth issuer, HTTP listener, or Oracle instance was exercised."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
