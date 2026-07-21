@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T12:51:09Z",
+  "bead_id": "oraclemcp-091-p2-11-requires-23ai-pt3t0",
+  "scope": {
+    "summary": "Verify the existing semantic query_text capability probe returns the documented typed requires_23ai refusal before the generic read resolver can classify server-owned VECTOR_EMBEDDING SQL.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp/src/registry.rs",
+      "scripts/e2e/oracle_ladder_session.py"
+    ],
+    "out_of_scope": [
+      "Changing query_vector semantics or Oracle server capability requirements.",
+      "Claiming a live XE18, XE21, or FREE23 matrix run without the required lane credentials."
+    ]
+  },
+  "source": {
+    "sha": "7dce02683cd6e7785aa060e6001e9866425a525c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_semantic_search query_text",
+        "kind": "tool",
+        "trace": "semantic_search_as_query_args calls semantic_search_text_model before the constructed query enters DEFAULT_CLASSIFIER; the pre-23.4 probe returns RuntimeStateRequired with structured_reason.offending_construct=requires_23ai. The registry documents that exact token, and the served version-matrix ladder asserts it on XE18/XE21 while accepting no_in_db_model on FREE23."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped test only: CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp semantic_text_search_requires_both_capabilities_before_a_read_can_escape -- --nocapture (1 passed). The test proves a 23.4-compatible profile with one model reaches the generated read, then a 21.0-compatible profile returns requires_23ai before another caller-visible read.",
+    "The local xe18, xe21, and free23 containers were running, but this session had no ORACLEMCP_LIVE_XE or ORACLE_MATRIX_* lane credentials, so scripts/e2e/oracle_version_matrix.sh was not run. The full workspace gate was not run for this close."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
