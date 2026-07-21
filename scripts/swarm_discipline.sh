@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Swarm discipline mechanisms — AGENTS.md constitution rules 13-17.
+# Swarm discipline mechanisms — AGENTS.md constitution rules 13-18.
 #
 # Five agents share one checkout. Each subcommand here answers, from git or from
 # an exit status, a question that a 2026-07-21 incident showed an agent answering
@@ -342,6 +342,11 @@ paths = sys.argv[2:]
 
 FOLLOW = re.compile(r"\btail\s+(-[a-zA-Z]*f|--follow)\b")
 LOOP = re.compile(r"^\s*while\s+(true|:)\s*;?\s*do\b")
+# A lint that cannot describe its own subject is useless: this file, and any
+# fixture or message that must name the idiom, marks the line explicitly.
+ALLOW = "swarm-discipline: allow-unbounded"
+# swarm-discipline: allow-unbounded (the message must name the idiom)
+FOLLOW_MESSAGE = "tail --follow never returns; wrap it in a deadline or read a snapshot"
 # A loop is bounded when its body can decide to stop: a deadline, an explicit
 # timeout, or a bounded attempt counter.
 BOUND = re.compile(r"deadline|timeout|SECONDS|attempt|tries|retries|max_|remaining")
@@ -355,10 +360,12 @@ for name in paths:
     for index, line in enumerate(lines, start=1):
         if line.lstrip().startswith("#"):
             continue
+        previous = lines[index - 2] if index >= 2 else ""
+        if ALLOW in line or ALLOW in previous:
+            continue
         if FOLLOW.search(line) and "timeout" not in line:
-            findings.append(
-                (name, index, "tail --follow never returns; wrap it in a deadline or read a snapshot")
-            )
+            # swarm-discipline: allow-unbounded (the message must name the idiom)
+            findings.append((name, index, FOLLOW_MESSAGE))
         if LOOP.search(line):
             depth = 0
             bounded = False
@@ -686,12 +693,11 @@ RS
   printf 'PASS selftest: a command inside its deadline is untouched\n'
 
   mkdir -p "$work/waits"
-  cat >"$work/waits/unbounded.sh" <<'SH'
-#!/usr/bin/env bash
-tail -f /var/log/build.log
-SH
+  # swarm-discipline: allow-unbounded (fixture text the lint must still refuse)
+  printf '#!/usr/bin/env bash\ntail -f /var/log/build.log\n' >"$work/waits/unbounded.sh"
   status=0
   bash "$SELF" unbounded-wait-lint "$work/waits/unbounded.sh" >/dev/null 2>&1 || status=$?
+  # swarm-discipline: allow-unbounded (the assertion must name the idiom)
   (( status == 65 )) || die "selftest: tail --follow was not linted (exit $status)"
   printf 'PASS selftest: an unbounded wait in committed shell is refused\n'
 

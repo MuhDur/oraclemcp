@@ -570,7 +570,7 @@ jobs:
       # Constitution rules 13-17: the swarm-discipline mechanisms must keep
       # refusing what they were built to refuse, and committed shell must not
       # reintroduce a wait that cannot end (rule 16).
-      - name: swarm discipline (constitution rules 13-17)
+      - name: swarm discipline (constitution rules 13-18)
         run: |
           bash scripts/swarm_discipline.sh --selftest
           bash scripts/swarm_discipline.sh unbounded-wait-lint
