@@ -881,6 +881,66 @@ impl OracleConnection for OneRowMock {
     }
 }
 
+#[derive(Default)]
+struct DescribeCatalogState {
+    calls: Mutex<Vec<(String, Vec<OracleBind>)>>,
+}
+
+/// A dictionary-only mock for `oracle_describe` contract tests. It returns the
+/// configured column rows and records the bound identifier values exactly.
+struct DescribeCatalogMock {
+    state: Arc<DescribeCatalogState>,
+    columns: Vec<OracleRow>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for DescribeCatalogMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        self.state
+            .calls
+            .lock()
+            .expect("describe catalog call mutex")
+            .push((sql.to_owned(), binds.to_vec()));
+        if sql.to_ascii_lowercase().contains("from all_tab_columns") {
+            Ok(self.columns.clone())
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        Ok(0)
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
 fn catalog_extract_empty_rowset(sql_lower: &str) -> bool {
     [
         "from all_tab_cols",
@@ -2267,6 +2327,15 @@ fn connection_info_degrades_when_describe_fails() {
         assert_eq!(
             out["connection_error"]["suggested_tool"],
             json!("oracle_list_profiles")
+        );
+        assert!(
+            out["connection_error"]["next_steps"]
+                .as_array()
+                .is_some_and(|steps| steps.iter().any(|step| {
+                    step.as_str()
+                        .is_some_and(|step| step.contains("oracle_list_profiles"))
+                })),
+            "connection metadata failures retain an envelope with direct next steps: {out}"
         );
         assert_eq!(
             out["next_actions"][0]["tool"],

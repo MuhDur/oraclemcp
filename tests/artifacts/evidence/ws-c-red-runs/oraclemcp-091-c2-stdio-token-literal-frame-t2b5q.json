@@ -1,0 +1,48 @@
+{
+  "schema": "ws-c-red-run/v1",
+  "repo": "oraclemcp",
+  "bead_id": "oraclemcp-091-c2-stdio-token-literal-frame-t2b5q",
+  "purpose": "Workstream C fixtures are a two-sided proof: the fixture must be demonstrably RED against pre-fix main, then flipped to enforced-green by the fix bead. This file records the red half so the flip is auditable rather than asserted.",
+  "expected_failure": {
+    "tests": [
+      "c2_init_token_path_is_documented_somewhere_a_client_author_would_look",
+      "c2_missing_token_error_names_the_exact_json_path"
+    ],
+    "file": "crates/oraclemcp-core/tests/c2_stdio_init_token_literal_frame.rs",
+    "marker": "#[ignore] citing oraclemcp-091-b3-stdio-token-nzmiv",
+    "flipped_green_by": "oraclemcp-091-b3-stdio-token-nzmiv",
+    "flip_action": "delete both #[ignore] attributes; no assertion change is permitted"
+  },
+  "red_run": {
+    "command": "cargo test -p oraclemcp-core --test c2_stdio_init_token_literal_frame -- --ignored --nocapture",
+    "toolchain": "nightly-2026-05-11",
+    "result": "FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 3 filtered out",
+    "failures": [
+      {
+        "test": "c2_missing_token_error_names_the_exact_json_path",
+        "panic_message": "the `missing token` error is the one place a stuck integrator is guaranteed to look, so it must spell out params._meta[\"oraclemcp/initToken\"]; got: stdio init token missing from initialize request",
+        "root_cause": "InitTokenError::Missing (crates/oraclemcp-core/src/init_token.rs) names neither the _meta key nor the JSON path it read."
+      },
+      {
+        "test": "c2_init_token_path_is_documented_somewhere_a_client_author_would_look",
+        "panic_message": "the literal key `oraclemcp/initToken` must appear in at least one client-facing source.",
+        "root_cause": "Zero hits for the string oraclemcp/initToken across README.md, oraclemcp.example.toml, robot_docs.rs, and docs/ outside docs/plan/. The key exists only in Rust source, and it contains a slash, so it cannot be guessed."
+      }
+    ]
+  },
+  "green_half": {
+    "command": "cargo test -p oraclemcp-core --test c2_stdio_init_token_literal_frame",
+    "result": "ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out",
+    "tests": [
+      "c2_literal_frame_authenticates_against_the_matching_token",
+      "c2_literal_frame_is_a_mismatch_not_a_miss_against_a_different_token",
+      "c2_absent_and_misplaced_tokens_all_read_as_missing"
+    ],
+    "note": "The extraction contract itself works and is now pinned against a hand-written frame. c2_literal_frame_is_a_mismatch_not_a_miss_against_a_different_token is the load-bearing assertion: Mismatch (not Missing) proves the committed literal path still matches the server's key, which is exactly what a frame built from INIT_TOKEN_META_KEY can never prove."
+  },
+  "external_mint": {
+    "tool": "hand-written JSON string constants",
+    "in_repo_code_used": false,
+    "note": "Frames are committed as opaque one-line JSON. The file never imports INIT_TOKEN_META_KEY; renaming that constant must turn the green half red."
+  }
+}

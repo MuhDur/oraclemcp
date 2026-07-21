@@ -4878,16 +4878,85 @@ fn split_qualified_name(
     if value.is_empty() {
         return Err(invalid_args(format!("{label} must not be empty")));
     }
-    let parts: Vec<&str> = value.split('.').collect();
-    match parts.as_slice() {
-        [name] if !name.trim().is_empty() => Ok((None, name.trim().to_owned())),
-        [owner, name] if !owner.trim().is_empty() && !name.trim().is_empty() => {
-            Ok((Some(owner.trim().to_owned()), name.trim().to_owned()))
+
+    let mut parts = Vec::new();
+    let mut in_quotes = false;
+    let mut part_start = 0;
+    let mut chars = value.char_indices().peekable();
+    while let Some((index, character)) = chars.next() {
+        if character == '"' {
+            if in_quotes && chars.peek().is_some_and(|(_, next)| *next == '"') {
+                chars.next();
+            } else {
+                in_quotes = !in_quotes;
+            }
+        } else if character == '.' && !in_quotes {
+            parts.push(&value[part_start..index]);
+            part_start = index + character.len_utf8();
         }
+    }
+    if in_quotes {
+        return Err(invalid_args(format!(
+            "{label} has an unterminated quoted identifier"
+        )));
+    }
+    parts.push(&value[part_start..]);
+
+    match parts.as_slice() {
+        [name] if !name.trim().is_empty() => {
+            Ok((None, normalize_dictionary_identifier(name, label)?))
+        }
+        [owner, name] if !owner.trim().is_empty() && !name.trim().is_empty() => Ok((
+            Some(normalize_dictionary_identifier(owner, "owner")?),
+            normalize_dictionary_identifier(name, label)?,
+        )),
         _ => Err(invalid_args(format!(
-            "{label} must be an unquoted name or OWNER.NAME"
+            "{label} must be a name or OWNER.NAME, with each identifier optionally double-quoted"
         ))),
     }
+}
+
+/// Normalize a dictionary identifier while preserving a double-quoted Oracle
+/// identifier's case. These values are always bound in dictionary queries, so
+/// this parser exists for exact identifier semantics rather than SQL escaping.
+fn normalize_dictionary_identifier(value: &str, label: &str) -> Result<String, ErrorEnvelope> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(invalid_args(format!("{label} must not be empty")));
+    }
+    if !value.starts_with('"') {
+        if value.contains('"') {
+            return Err(invalid_args(format!(
+                "{label} has an invalid quoted identifier"
+            )));
+        }
+        return Ok(value.to_ascii_uppercase());
+    }
+    if !value.ends_with('"') || value.len() < 2 {
+        return Err(invalid_args(format!(
+            "{label} has an unterminated quoted identifier"
+        )));
+    }
+
+    let mut identifier = String::new();
+    let mut chars = value[1..value.len() - 1].chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '"' {
+            if chars.next_if_eq(&'"').is_some() {
+                identifier.push('"');
+            } else {
+                return Err(invalid_args(format!(
+                    "{label} has an invalid quoted identifier"
+                )));
+            }
+        } else {
+            identifier.push(character);
+        }
+    }
+    if identifier.is_empty() {
+        return Err(invalid_args(format!("{label} must not be empty")));
+    }
+    Ok(identifier)
 }
 
 async fn owner_and_name_arg(
@@ -4897,7 +4966,9 @@ async fn owner_and_name_arg(
     name: String,
     label: &str,
 ) -> Result<(String, String), ErrorEnvelope> {
-    let explicit_owner = non_empty_arg(owner);
+    let explicit_owner = non_empty_arg(owner)
+        .map(|owner| normalize_dictionary_identifier(&owner, "owner"))
+        .transpose()?;
     let (qualified_owner, object_name) = split_qualified_name(&name, label)?;
     let owner = match (explicit_owner, qualified_owner) {
         (Some(explicit), Some(qualified)) if !explicit.eq_ignore_ascii_case(&qualified) => {
@@ -4911,7 +4982,7 @@ async fn owner_and_name_arg(
             .await
             .map_err(DbError::into_envelope)?,
     };
-    Ok((owner.to_ascii_uppercase(), object_name.to_ascii_uppercase()))
+    Ok((owner, object_name))
 }
 
 /// The fail-closed read-only gate for tools that accept a raw caller SQL
@@ -13198,6 +13269,19 @@ impl OracleDispatcher {
                 let columns = describe_columns(cx, &guarded_metadata_conn, &owner, &table)
                     .await
                     .map_err(DbError::into_envelope)?;
+                if columns.is_empty() {
+                    return Err(ErrorEnvelope::new(
+                        ErrorClass::ObjectNotFound,
+                        format!("table or view {owner}.{table} was not found or is not visible to this session"),
+                    )
+                    .with_suggested_tool("oracle_schema_inspect")
+                    .with_next_step(
+                        "call oracle_schema_inspect to list the tables and views visible to this session",
+                    )
+                    .with_next_step(
+                        "verify the owner, object name, and exact case for any double-quoted identifier",
+                    ));
+                }
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_constraints.before")?;
                 let constraints = describe_constraints(cx, &guarded_metadata_conn, &owner, &table)
                     .await

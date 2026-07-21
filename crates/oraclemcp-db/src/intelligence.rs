@@ -1345,7 +1345,8 @@ pub async fn describe_view(
     Ok(ViewDescription { metadata, columns })
 }
 
-/// Columns of a table/view (owner + name bound).
+/// Columns of a table/view (owner + name bound exactly as resolved by the
+/// caller, so double-quoted Oracle identifiers retain their case).
 pub async fn describe_columns(
     cx: &Cx,
     conn: &dyn OracleConnection,
@@ -1355,18 +1356,12 @@ pub async fn describe_columns(
     let sql = "SELECT column_name, data_type, data_length, nullable, data_default \
                FROM all_tab_columns WHERE owner = :1 AND table_name = :2 \
                ORDER BY column_id";
-    conn.query_rows(
-        cx,
-        sql,
-        &[
-            OracleBind::from(owner.to_ascii_uppercase()),
-            OracleBind::from(table.to_ascii_uppercase()),
-        ],
-    )
-    .await
+    conn.query_rows(cx, sql, &[OracleBind::from(owner), OracleBind::from(table)])
+        .await
 }
 
-/// Constraint metadata for a table/view (owner + name bound).
+/// Constraint metadata for a table/view (owner + name bound exactly as
+/// resolved by the caller, so double-quoted Oracle identifiers retain case).
 pub async fn describe_constraints(
     cx: &Cx,
     conn: &dyn OracleConnection,
@@ -1383,15 +1378,8 @@ pub async fn describe_constraints(
                 AND cc.table_name = c.table_name \
                WHERE c.owner = :1 AND c.table_name = :2 \
                ORDER BY c.constraint_name, cc.position";
-    conn.query_rows(
-        cx,
-        sql,
-        &[
-            OracleBind::from(owner.to_ascii_uppercase()),
-            OracleBind::from(table.to_ascii_uppercase()),
-        ],
-    )
-    .await
+    conn.query_rows(cx, sql, &[OracleBind::from(owner), OracleBind::from(table)])
+        .await
 }
 
 /// `get_ddl`: `DBMS_METADATA.GET_DDL` for an object. `object_type` is validated
@@ -2894,8 +2882,8 @@ mod tests {
         assert_eq!(
             calls[0].1,
             vec![
-                OracleBind::String("HR".to_owned()),
-                OracleBind::String("EMPLOYEES".to_owned()),
+                OracleBind::String("hr".to_owned()),
+                OracleBind::String("employees".to_owned()),
             ]
         );
     }
