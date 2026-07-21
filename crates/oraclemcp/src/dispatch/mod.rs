@@ -1293,6 +1293,15 @@ impl OracleDispatcher {
         self
     }
 
+    /// Disable the optional unsigned refusal trail for an operator who has
+    /// explicitly opted out. This never changes the guard result or the signed
+    /// audit chain; it only removes the observer.
+    #[must_use]
+    pub fn without_refusal_corpus(mut self) -> Self {
+        self.refusal_corpus = None;
+        self
+    }
+
     /// Attach the shared export registry (E3/E3b; builder). When set, oversized
     /// `oracle_query` results are materialized as an `oracle-export://{id}`
     /// resource and returned as a `resource_link` instead of being inlined.

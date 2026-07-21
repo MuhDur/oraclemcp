@@ -135,7 +135,7 @@ impl Default for OracleMcpConfig {
 /// `literal:`) for the keyed MAC; `key_id` labels the active key for rotation.
 /// When unset, the binary picks a safe default path and fails closed at startup
 /// if an operating level above ReadOnly is reachable without a configured key.
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuditConfig {
     /// Append-only audit log file path. When `None`, the binary chooses a safe
@@ -156,6 +156,23 @@ pub struct AuditConfig {
     /// destination (bead D2). **Off by default** — when `None`, nothing is
     /// forwarded and the auditor uses the local file sink alone.
     pub shipping: Option<AuditShippingConfig>,
+    /// Persist redacted guard refusals to the local, unsigned security-event
+    /// trail while the signed audit chain is unavailable. Defaults to `true`;
+    /// set `false` only to opt out of this non-tamper-evident diagnostic floor.
+    pub unsigned_refusal_log: bool,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            path: None,
+            key_ref: None,
+            key_id: None,
+            verification_keys: Vec::new(),
+            shipping: None,
+            unsigned_refusal_log: true,
+        }
+    }
 }
 
 impl AuditConfig {
@@ -219,6 +236,7 @@ impl std::fmt::Debug for AuditConfig {
             .field("key_id", &self.key_id)
             .field("verification_keys", &self.verification_keys)
             .field("shipping", &self.shipping)
+            .field("unsigned_refusal_log", &self.unsigned_refusal_log)
             .finish()
     }
 }
@@ -2474,6 +2492,7 @@ mod tests {
         assert_eq!(cfg.audit, AuditConfig::default());
         assert!(cfg.audit.path.is_none());
         assert_eq!(cfg.audit.key_id_or_default(), "default");
+        assert!(cfg.audit.unsigned_refusal_log);
 
         let cfg = OracleMcpConfig::from_toml_str(
             r#"
@@ -2481,6 +2500,7 @@ mod tests {
             path = "/var/log/oraclemcp/audit.jsonl"
             key_ref = "env:ORACLEMCP_AUDIT_KEY"
             key_id = "2026-q2"
+            unsigned_refusal_log = false
             "#,
         )
         .expect("audit config loads");
@@ -2493,6 +2513,7 @@ mod tests {
             Some("env:ORACLEMCP_AUDIT_KEY")
         );
         assert_eq!(cfg.audit.key_id_or_default(), "2026-q2");
+        assert!(!cfg.audit.unsigned_refusal_log);
     }
 
     #[test]
