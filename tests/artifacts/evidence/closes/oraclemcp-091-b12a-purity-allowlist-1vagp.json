@@ -1,0 +1,46 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T23:13:52Z",
+  "bead_id": "oraclemcp-091-b12a-purity-allowlist-1vagp",
+  "scope": {
+    "summary": "The operator pure-function allowlist is an exact-identity restriction over an independent SideEffectOracle proof and cannot promote an unproven routine.",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/purity.rs",
+      "crates/oraclemcp-guard/src/lib.rs",
+      "crates/oraclemcp-guard/tests/purity_core_conformance.rs",
+      "crates/oraclemcp-guard/api/oraclemcp-guard.txt"
+    ],
+    "out_of_scope": [
+      "Binding an engine-derived SideEffectOracle to the served DEFAULT_CLASSIFIER",
+      "Treating operator configuration as independent evidence of routine purity",
+      "Live Oracle validation of user-defined routine purity"
+    ]
+  },
+  "source": {
+    "sha": "3eae78153771bd96cb08ac1add7c92b4fa443340",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This close records scoped guard conformance evidence only; it does not claim a whole Required graph or live Oracle proof.",
+    "The restriction is deliberately not bound to the served DEFAULT_CLASSIFIER without an independent engine proof."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-b12d-purity-metadata-2vynq"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
