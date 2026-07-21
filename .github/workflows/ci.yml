@@ -221,6 +221,19 @@ jobs:
           tests: ${{ steps.legs.outputs.tests }}
           artifacts: target/test-attestation-evidence/coverage-ratchet.log
           output-name: coverage-ratchet.jsonl
+      # E6: consume what the signer produced. An attestation nobody verifies is
+      # decoration, and until now nothing in CI read one back. This needs no
+      # signing secret: the signature envelope records payload_sha256, which
+      # binds the payload, so a tampered attestation is rejected even where the
+      # HMAC cannot be recomputed. It also refuses silence — a lane must emit
+      # either a signed attestation or a typed SKIP naming a known reason — and
+      # says out loud when every lane skipped, so an inert signer can never read
+      # as "we have signed evidence".
+      - name: Verify the attestation this lane produced (E6)
+        if: always()
+        run: |
+          python3 scripts/check_test_attestations.py --selftest
+          python3 scripts/check_test_attestations.py target/test-attestations
       - uses: actions/upload-artifact@v7
         if: always()
         with:

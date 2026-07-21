@@ -76,6 +76,11 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/check_test_attestations.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/ci_heartbeat.sh",
       "kind": "helper",
       "excluded_reason": "scheduled-heartbeat"
