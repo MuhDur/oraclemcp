@@ -54,8 +54,14 @@ jobs:
           tool: cargo-fuzz
       - name: Run bounded corpus campaign
         working-directory: crates/${{ matrix.crate }}/fuzz
+        # The prebuilt cargo-fuzz binary is musl-linked, and cargo-fuzz
+        # defaults --target to the triple IT was built for — which selects
+        # x86_64-unknown-linux-musl here, where ASan is incompatible with
+        # statically linked libc ("sanitizer is incompatible with statically
+        # linked libc"). Pin the gnu host triple explicitly.
         run: >-
-          cargo +${{ env.RUST_TOOLCHAIN }} fuzz run ${{ matrix.target }} --
+          cargo +${{ env.RUST_TOOLCHAIN }} fuzz run
+          --target x86_64-unknown-linux-gnu ${{ matrix.target }} --
           -max_total_time=${{ env.FUZZ_SECONDS }}
           -rss_limit_mb=2048
           -timeout=10
