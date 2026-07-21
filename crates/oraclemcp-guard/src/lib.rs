@@ -60,7 +60,10 @@ pub use policy_gate::{
     PolicyGate, PolicyGateAdmission, PolicyGateDenial, PolicyGateDenialReason, PolicyGateRequest,
     StatementPolicyFacts, enforce_sql_policy,
 };
-pub use purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
+pub use purity::{
+    ObjectRef, OperatorPureFunction, OperatorPureFunctionError, OperatorPureFunctionOracle, Purity,
+    SideEffectOracle, UnknownOracle,
+};
 pub use resolver::{
     CatalogGeneration, CatalogObjectKind, CatalogResolver, QuoteSemantics, RawName, RawNamePart,
     Resolution, ResolveCtx, ResolvedContainer, ResolvedIdentity, ResolvedObject, ResolvedOverload,

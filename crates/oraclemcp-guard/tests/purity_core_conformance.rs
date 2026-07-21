@@ -8,7 +8,8 @@
 use std::sync::Arc;
 
 use oraclemcp_guard::{
-    Classifier, DangerLevel, ObjectRef, OperatingLevel, Purity, SideEffectOracle,
+    Classifier, DangerLevel, ObjectRef, OperatingLevel, OperatorPureFunction,
+    OperatorPureFunctionOracle, Purity, SideEffectOracle,
 };
 
 #[derive(Clone, Copy)]
@@ -72,4 +73,43 @@ fn no_user_defined_routine_is_the_vacuous_safe_case_of_the_purity_core() {
     let decision = Classifier::default().classify("SELECT 1 FROM dual");
     assert_eq!(decision.danger, DangerLevel::Safe);
     assert_eq!(decision.required_level, Some(OperatingLevel::ReadOnly));
+}
+
+#[test]
+fn operator_pure_function_allowlist_only_clears_the_exact_declared_select_call() {
+    let allowlisted = OperatorPureFunction::parse("app_read.lookup")
+        .expect("an operator declares one exact schema-qualified function");
+    let classifier =
+        Classifier::default().with_oracle(Arc::new(OperatorPureFunctionOracle::new([allowlisted])));
+
+    let admitted = classifier.classify("SELECT app_read.lookup(:id) FROM dual");
+    assert_eq!(admitted.danger, DangerLevel::Safe);
+    assert_eq!(admitted.required_level, Some(OperatingLevel::ReadOnly));
+
+    for sql in [
+        "SELECT lookup(:id) FROM dual",
+        "SELECT app_read.other_lookup(:id) FROM dual",
+        "SELECT another_schema.lookup(:id) FROM dual",
+    ] {
+        let refused = classifier.classify(sql);
+        assert_eq!(refused.danger, DangerLevel::Guarded, "{sql:?}");
+        assert_eq!(
+            refused.required_level,
+            Some(OperatingLevel::ReadWrite),
+            "{sql:?}"
+        );
+    }
+
+    for sql in [
+        "SELECT owner.app_read.lookup(:id) FROM dual",
+        "SELECT app_read.lookup@remote(:id) FROM dual",
+        "SELECT \"app_read\".\"lookup\"(:id) FROM dual",
+    ] {
+        let ambiguous = classifier.classify(sql);
+        assert_ne!(
+            ambiguous.danger,
+            DangerLevel::Safe,
+            "an exact two-part operator declaration must not launder {sql:?}"
+        );
+    }
 }
