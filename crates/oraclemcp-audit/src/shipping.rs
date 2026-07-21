@@ -515,13 +515,30 @@ fn syslog_severity(record: &AuditRecord) -> u8 {
 }
 
 /// Escape a CEF *header* field: only `\` and `|` are special.
+/// Characters a downstream collector may treat as the end of a CEF record.
+///
+/// CR and LF are the obvious two. The rest are the remaining Unicode mandatory
+/// line breaks (UAX #14): NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR, plus the
+/// VT/FF controls. A collector that splits on any of them would see one audit
+/// record as two — the local hash chain stays intact while the SIEM's view of
+/// it does not, which is the whole risk (bead F-LOW AU2).
+const fn is_record_separator(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r' | '\u{0b}' | '\u{0c}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
 fn cef_escape_header(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
             '\\' => out.push_str("\\\\"),
             '|' => out.push_str("\\|"),
-            '\n' | '\r' => out.push(' '),
+            // The header has no escape form for a separator; the existing
+            // behaviour folds it to a space, and every separator now folds the
+            // same way rather than only CR and LF.
+            c if is_record_separator(c) => out.push(' '),
             _ => out.push(c),
         }
     }
@@ -537,8 +554,14 @@ fn push_cef_kv(ext: &mut String, key: &str, value: &str) {
         match c {
             '\\' => ext.push_str("\\\\"),
             '=' => ext.push_str("\\="),
+            // `\n` and `\r` keep their spec escapes, byte-for-byte as before.
             '\n' => ext.push_str("\\n"),
             '\r' => ext.push_str("\\r"),
+            // The other separators have no CEF escape form, so encode them in a
+            // shape that survives transport and cannot terminate a record.
+            c if is_record_separator(c) => {
+                ext.push_str(&format!("\\u{:04x}", c as u32));
+            }
             _ => ext.push(c),
         }
     }
@@ -1665,6 +1688,69 @@ mod tests {
             line.starts_with("<131>1 "),
             "local0 facility 16 * 8 + error severity 3: {line}"
         );
+    }
+
+    /// Negative acceptance for bead F-LOW AU2: no character a collector may
+    /// read as end-of-record survives into any CEF field, header or extension.
+    ///
+    /// The risk is not local corruption — the hash chain is unaffected — it is
+    /// that a SIEM sees one signed audit record as two, so a forged tail can be
+    /// attributed to a genuine chain.
+    #[test]
+    fn no_record_separator_survives_into_a_cef_field() {
+        const SEPARATORS: [char; 7] = [
+            '\n', '\r', '\u{0b}', '\u{0c}', '\u{85}', '\u{2028}', '\u{2029}',
+        ];
+
+        for separator in SEPARATORS {
+            let mut rec = AuditRecord::chained_signed(
+                &draft("SELECT 1 FROM dual", "READ_ONLY"),
+                11,
+                crate::record::GENESIS_HASH,
+                "2026-06-20T00:00:00Z".to_owned(),
+                &key(),
+            );
+            // Inject into a header field and an extension field at once: the
+            // two escape paths are separate code and both must hold.
+            rec.tool = format!("oracle{separator}query");
+            rec.agent_identity = format!("agent{separator}two");
+            rec.sql_preview = format!("SELECT{separator}1");
+
+            let line = cef_line(&rec);
+            assert!(
+                !line.contains(separator),
+                "U+{:04X} survived into the CEF line: {line:?}",
+                separator as u32
+            );
+            assert_eq!(
+                line.lines().count(),
+                1,
+                "the CEF record must stay one physical line for U+{:04X}",
+                separator as u32
+            );
+        }
+    }
+
+    /// Positive acceptance: ordinary Unicode is not collateral damage, and the
+    /// spec escapes that already existed are byte-identical.
+    #[test]
+    fn cef_escaping_keeps_ordinary_unicode_and_existing_escapes_byte_stable() {
+        assert_eq!(cef_escape_header("é工具 ✅"), "é工具 ✅");
+
+        let mut ext = String::new();
+        push_cef_kv(&mut ext, "msg", "é工具 ✅");
+        assert_eq!(ext, "msg=é工具 ✅ ");
+
+        // The pre-existing delimiter escapes must not have shifted.
+        let mut ext = String::new();
+        push_cef_kv(&mut ext, "msg", "a\\b=c\nr\rd");
+        assert_eq!(ext, r#"msg=a\\b\=c\nr\rd "#);
+
+        // ...and the separators without a CEF escape form get an encoded one
+        // rather than passing through raw.
+        let mut ext = String::new();
+        push_cef_kv(&mut ext, "msg", "a\u{2028}b\u{85}c");
+        assert_eq!(ext, r"msg=a\u2028b\u0085c ");
     }
 
     #[test]
