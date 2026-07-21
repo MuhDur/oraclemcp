@@ -1616,6 +1616,11 @@ pub enum DoctorWalletErrorKind {
     /// password, but none was supplied. Surfaced by the offline active probe
     /// (B2.1).
     PasswordRequired,
+    /// The wallet image exceeded the driver's fail-closed size limit before any
+    /// parser ran (`MAX_WALLET_FILE_BYTES`, 16 MiB in the pinned `=0.8.4`
+    /// driver). Distinct from `Pem`: the bytes were never parsed, so telling an
+    /// operator their PEM is malformed sends them to debug a well-formed file.
+    TooLarge,
 }
 
 /// Secret-free wallet diagnostic attached to the connectivity check.
@@ -1704,7 +1709,10 @@ fn wallet_error_kind(error: &oracledb_protocol::tls::wallet::WalletError) -> Doc
         WalletError::KeyDecrypt(_) => DoctorWalletErrorKind::KeyDecrypt,
         WalletError::PasswordRequired { .. } => DoctorWalletErrorKind::PasswordRequired,
         WalletError::UnsupportedFormat { .. } => DoctorWalletErrorKind::UnsupportedFormat,
-        // Forward-compat: the pinned =0.8.4 driver produces no other variant.
+        WalletError::TooLarge { .. } => DoctorWalletErrorKind::TooLarge,
+        // Forward-compat only. A future driver variant lands on Pem, which is
+        // wrong-but-safe; `wallet_error_kind_maps_every_pinned_driver_variant`
+        // is what keeps this arm from quietly absorbing a real one again.
         _ => DoctorWalletErrorKind::Pem,
     }
 }
@@ -1738,6 +1746,7 @@ fn wallet_error_label(kind: DoctorWalletErrorKind) -> &'static str {
         DoctorWalletErrorKind::KeyDecrypt => "KeyDecrypt",
         DoctorWalletErrorKind::Pkcs12 => "Pkcs12",
         DoctorWalletErrorKind::PasswordRequired => "PasswordRequired",
+        DoctorWalletErrorKind::TooLarge => "TooLarge",
     }
 }
 
@@ -2006,6 +2015,9 @@ fn wallet_connectivity_fix(wallet: &DoctorWalletDiagnostic) -> &'static str {
         DoctorWalletErrorKind::NoCertificates => {
             "regenerate ewallet.pem with at least one trust-anchor certificate"
         }
+        DoctorWalletErrorKind::TooLarge => {
+            "the wallet image exceeds the driver's 16 MiB fail-closed limit and was never parsed; export a wallet containing only the certificates and key this profile needs"
+        }
         DoctorWalletErrorKind::KeyDecrypt => {
             "supply the correct wallet_password_ref for the encrypted ewallet key, or re-export it as an unencrypted PKCS#8 ewallet.pem; a valid auto-login cwallet.sso would also let the loader fall through"
         }
@@ -2134,7 +2146,8 @@ fn connectivity_failure_class(error: &str) -> ErrorClass {
             | DoctorWalletErrorKind::SsoNotEnabled
             | DoctorWalletErrorKind::KeyDecrypt
             | DoctorWalletErrorKind::Pkcs12
-            | DoctorWalletErrorKind::PasswordRequired => ErrorClass::InvalidArguments,
+            | DoctorWalletErrorKind::PasswordRequired
+            | DoctorWalletErrorKind::TooLarge => ErrorClass::InvalidArguments,
             DoctorWalletErrorKind::FileMissing
             | DoctorWalletErrorKind::Io
             | DoctorWalletErrorKind::Pem
@@ -3888,6 +3901,78 @@ mod tests {
         assert!(
             !serialized.contains(SENTINEL),
             "report leaked: {serialized}"
+        );
+    }
+
+    /// The comment above `wallet_error_kind` used to assert that every variant
+    /// the pinned driver can produce is mapped explicitly. It was not true:
+    /// `WalletError::TooLarge` fell into the `_` arm and was reported to the
+    /// operator as `Pem` — "regenerate ewallet.pem with valid PEM material" for
+    /// a wallet whose bytes were never parsed, because the image exceeded the
+    /// driver's 16 MiB fail-closed limit.
+    ///
+    /// This exhausts the driver enum instead of restating a list: the match is
+    /// written without a wildcard, so a variant added by a future pinned driver
+    /// fails to compile here rather than silently landing on `Pem` again.
+    #[test]
+    fn wallet_error_kind_maps_every_pinned_driver_variant() {
+        use oracledb_protocol::tls::wallet::WalletError;
+
+        fn expected(error: &WalletError) -> DoctorWalletErrorKind {
+            match error {
+                WalletError::FileMissing(_) => DoctorWalletErrorKind::FileMissing,
+                WalletError::Io { .. } => DoctorWalletErrorKind::Io,
+                WalletError::TooLarge { .. } => DoctorWalletErrorKind::TooLarge,
+                WalletError::Pem(_) => DoctorWalletErrorKind::Pem,
+                WalletError::NoCertificates => DoctorWalletErrorKind::NoCertificates,
+                WalletError::Sso(_) => DoctorWalletErrorKind::Sso,
+                WalletError::SsoNotEnabled => DoctorWalletErrorKind::SsoNotEnabled,
+                WalletError::Pkcs12(_) => DoctorWalletErrorKind::Pkcs12,
+                WalletError::KeyDecrypt(_) => DoctorWalletErrorKind::KeyDecrypt,
+                WalletError::PasswordRequired { .. } => DoctorWalletErrorKind::PasswordRequired,
+                WalletError::UnsupportedFormat { .. } => DoctorWalletErrorKind::UnsupportedFormat,
+                // Deliberately NO wildcard: see the doc comment.
+                other => panic!("unmapped pinned-driver wallet variant: {other}"),
+            }
+        }
+
+        let cases = [
+            WalletError::FileMissing("/w".to_owned()),
+            WalletError::TooLarge {
+                maximum_bytes: 16 * 1024 * 1024,
+            },
+            WalletError::Pem("bad".to_owned()),
+            WalletError::NoCertificates,
+            WalletError::Sso("bad".to_owned()),
+            WalletError::SsoNotEnabled,
+            WalletError::Pkcs12("bad".to_owned()),
+            WalletError::KeyDecrypt("bad".to_owned()),
+            WalletError::PasswordRequired { format: "p12" },
+            WalletError::UnsupportedFormat { format: "p12" },
+        ];
+        for error in &cases {
+            assert_eq!(
+                wallet_error_kind(error),
+                expected(error),
+                "mapping drifted for {error}"
+            );
+        }
+
+        // The specific regression: an oversized image must not be reported as a
+        // malformed PEM, and it must not be fallthrough-eligible (the driver's
+        // falls_through_to_autologin does not list TooLarge either).
+        let too_large = WalletError::TooLarge {
+            maximum_bytes: 16 * 1024 * 1024,
+        };
+        assert_eq!(
+            wallet_error_kind(&too_large),
+            DoctorWalletErrorKind::TooLarge
+        );
+        assert_ne!(wallet_error_kind(&too_large), DoctorWalletErrorKind::Pem);
+        assert!(!wallet_error_falls_through(DoctorWalletErrorKind::TooLarge));
+        assert_eq!(
+            wallet_error_label(DoctorWalletErrorKind::TooLarge),
+            "TooLarge"
         );
     }
 
