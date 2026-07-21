@@ -1495,12 +1495,30 @@ class Ladder:
                 expect={"committed": True},
             )
             self.table_dropped = True
-            description = structured(
-                self.session.call("oracle_describe", {"table": table})
+            # A1d (oraclemcp-091-a1d-describe-notfound-q9e4v) removed the empty
+            # success this step used to assert. `columns == []` had to carry two
+            # incompatible meanings — "the object is gone" and "the computed
+            # (owner, table) was never visible to this session" — and the field
+            # read it as the wrong one. Describe is catalog-based, so an empty
+            # ALL_TAB_COLUMNS never meant VPD filtering; it meant not-visible.
+            # Asserting the structured refusal instead is strictly stronger: it
+            # proves the object is absent AND that the refusal is actionable.
+            describe_result = self.session.call("oracle_describe", {"table": table})
+            description = structured(describe_result)
+            require(
+                describe_result.get("isError") is True,
+                "describing a dropped table is a structured refusal, not an empty success",
+                description,
             )
             require(
-                description.get("columns") == [],
-                "table is absent through the bounded describe tool",
+                description.get("error_class") == "OBJECT_NOT_FOUND",
+                "the dropped table is absent through the bounded describe tool with "
+                f"error_class OBJECT_NOT_FOUND (got {description.get('error_class')!r})",
+                description,
+            )
+            require(
+                bool(description.get("next_steps")),
+                "the not-found refusal carries next steps the agent can act on",
                 description,
             )
             return result
