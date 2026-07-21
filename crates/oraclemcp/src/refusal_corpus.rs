@@ -14,9 +14,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use oraclemcp_guard::corpus::{
-    CorpusRecord, CorpusRedactionError, ReasonCategory, classifier_proves_rewrite, dedup_by_content,
+    CorpusAuthenticity, CorpusRecord, CorpusRedactionError, ReasonCategory,
+    classifier_proves_rewrite,
 };
 use oraclemcp_guard::{Classifier, suggest_parameterized_form};
+use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 #[cfg(test)]
@@ -31,6 +33,120 @@ use oraclemcp_guard::corpus::reclassify_rewrite_at_apply;
 pub(crate) struct RefusalCorpusWriter {
     path: Arc<PathBuf>,
     append_lock: Arc<Mutex<()>>,
+}
+
+/// The small, closed vocabulary of custom-tool signature failures that must be
+/// visible in the unsigned B8c trail.  It deliberately carries no parser,
+/// filesystem, or secret details.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomToolSignatureFailure {
+    Required,
+    Invalid,
+    UnsupportedVersion,
+    VerificationKeyMissing,
+}
+
+/// A non-SQL security event in the B8c refusal/security-event trail.
+///
+/// This remains separate from [`CorpusRecord`]: inventing a fake SQL refusal
+/// for a tampered custom-tool definition would corrupt the classifier corpus
+/// and mislead an operator about what actually happened.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecurityEventRecord {
+    id: String,
+    event: SecurityEventKind,
+    tool: String,
+    reason: CustomToolSignatureFailure,
+    #[serde(default)]
+    authenticity: CorpusAuthenticity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SecurityEventKind {
+    CustomToolSignatureRejected,
+}
+
+impl SecurityEventRecord {
+    fn custom_tool_signature_rejected(tool: &str, reason: CustomToolSignatureFailure) -> Self {
+        let tool = safe_tool_name(tool)
+            .unwrap_or("invalid-tool-name")
+            .to_owned();
+        let event = SecurityEventKind::CustomToolSignatureRejected;
+        let id = oraclemcp_audit::sha256_hex(
+            format!("security-event-v1|{event:?}|{tool}|{reason:?}").as_bytes(),
+        );
+        Self {
+            id,
+            event,
+            tool,
+            reason,
+            authenticity: CorpusAuthenticity::UnsignedNotTamperEvident,
+        }
+    }
+
+    fn from_jsonl_line(line: &str) -> Result<Self, CorpusRedactionError> {
+        let record: Self =
+            serde_json::from_str(line).map_err(|_| CorpusRedactionError::Malformed)?;
+        if safe_tool_name(&record.tool).is_none() {
+            return Err(CorpusRedactionError::Malformed);
+        }
+        let expected = oraclemcp_audit::sha256_hex(
+            format!(
+                "security-event-v1|{:?}|{}|{:?}",
+                record.event, record.tool, record.reason
+            )
+            .as_bytes(),
+        );
+        if expected != record.id {
+            return Err(CorpusRedactionError::IdMismatch);
+        }
+        Ok(record)
+    }
+}
+
+fn safe_tool_name(name: &str) -> Option<&str> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return None;
+    }
+    Some(name)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TrailRecord {
+    Refusal(CorpusRecord),
+    SecurityEvent(SecurityEventRecord),
+}
+
+impl TrailRecord {
+    fn to_jsonl_line(&self) -> String {
+        match self {
+            Self::Refusal(record) => record.to_jsonl_line(),
+            Self::SecurityEvent(record) => {
+                serde_json::to_string(record).expect("a validated security event always serializes")
+            }
+        }
+    }
+
+    fn from_jsonl_line(line: &str) -> Result<Self, CorpusRedactionError> {
+        CorpusRecord::from_jsonl_line(line)
+            .map(Self::Refusal)
+            .or_else(|_| SecurityEventRecord::from_jsonl_line(line).map(Self::SecurityEvent))
+    }
+
+    fn id(&self) -> &str {
+        match self {
+            Self::Refusal(record) => &record.id,
+            Self::SecurityEvent(record) => &record.id,
+        }
+    }
 }
 
 impl RefusalCorpusWriter {
@@ -84,7 +200,24 @@ impl RefusalCorpusWriter {
         Ok(record)
     }
 
+    /// Record a custom-tool signature rejection without pretending it was a
+    /// SQL classifier refusal. The B8c trail is intentionally unsigned, but
+    /// this event is durable and content-addressed so tamper evidence is never
+    /// silently lost when the signed audit chain is unavailable.
+    pub(crate) fn append_custom_tool_signature_rejection(
+        &self,
+        tool: &str,
+        reason: CustomToolSignatureFailure,
+    ) -> Result<(), RefusalCorpusError> {
+        let event = SecurityEventRecord::custom_tool_signature_rejected(tool, reason);
+        self.append_trail_record(&TrailRecord::SecurityEvent(event))
+    }
+
     fn append_record(&self, record: &CorpusRecord) -> Result<(), RefusalCorpusError> {
+        self.append_trail_record(&TrailRecord::Refusal(record.clone()))
+    }
+
+    fn append_trail_record(&self, record: &TrailRecord) -> Result<(), RefusalCorpusError> {
         let _guard = self
             .append_lock
             .lock()
@@ -120,8 +253,8 @@ impl RefusalCorpusWriter {
             .lock()
             .map_err(|_| RefusalCorpusError::LockPoisoned)?;
         let mut records = read_validated_records(&self.path)?;
-        records = dedup_by_content(records);
-        records.sort_by(|left, right| left.id.cmp(&right.id));
+        records.sort_by(|left, right| left.id().cmp(right.id()));
+        records.dedup_by(|left, right| left.id() == right.id());
 
         let mut rendered = String::new();
         for record in &records {
@@ -296,7 +429,7 @@ fn paths_resolve_to_same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn read_validated_records(path: &Path) -> Result<Vec<CorpusRecord>, RefusalCorpusError> {
+fn read_validated_records(path: &Path) -> Result<Vec<TrailRecord>, RefusalCorpusError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             return Err(io::Error::other("refusal corpus state is not a regular file").into());
@@ -308,7 +441,7 @@ fn read_validated_records(path: &Path) -> Result<Vec<CorpusRecord>, RefusalCorpu
     let state = fs::read_to_string(path)?;
     state
         .lines()
-        .map(CorpusRecord::from_jsonl_line)
+        .map(TrailRecord::from_jsonl_line)
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
@@ -419,6 +552,75 @@ mod tests {
             "a classifier-proven rewrite is retained as redacted evidence"
         );
         assert_no_secret(&fs::read_to_string(writer.path()).expect("read corpus"));
+    }
+
+    #[test]
+    fn signature_rejection_is_a_typed_security_event_not_a_fake_sql_refusal() {
+        let (_dir, writer) = writer();
+
+        writer
+            .append_custom_tool_signature_rejection(
+                "report_sales",
+                CustomToolSignatureFailure::Invalid,
+            )
+            .expect("security event is appended");
+
+        let line = fs::read_to_string(writer.path()).expect("read B8c trail");
+        let event = SecurityEventRecord::from_jsonl_line(line.trim())
+            .expect("security event is validated on read");
+        assert_eq!(event.event, SecurityEventKind::CustomToolSignatureRejected);
+        assert_eq!(event.tool, "report_sales");
+        assert_eq!(event.reason, CustomToolSignatureFailure::Invalid);
+        assert_eq!(
+            event.authenticity,
+            CorpusAuthenticity::UnsignedNotTamperEvident,
+            "the B8c floor must not masquerade as a signed audit chain"
+        );
+        assert!(
+            CorpusRecord::from_jsonl_line(line.trim()).is_err(),
+            "a custom-tool signature failure must never be rendered as invented SQL"
+        );
+    }
+
+    #[test]
+    fn invalid_security_event_tool_name_is_redacted_to_a_fixed_identifier() {
+        let (_dir, writer) = writer();
+        let malicious_name = "tool\\nsecret-token";
+
+        writer
+            .append_custom_tool_signature_rejection(
+                malicious_name,
+                CustomToolSignatureFailure::Required,
+            )
+            .expect("security event is appended without retaining an unsafe name");
+
+        let line = fs::read_to_string(writer.path()).expect("read B8c trail");
+        let event = SecurityEventRecord::from_jsonl_line(line.trim())
+            .expect("security event is validated on read");
+        assert_eq!(event.tool, "invalid-tool-name");
+        assert!(!line.contains("secret-token"));
+    }
+
+    #[test]
+    fn security_event_survives_validated_export() {
+        let (dir, writer) = writer();
+        writer
+            .append_custom_tool_signature_rejection(
+                "report_sales",
+                CustomToolSignatureFailure::UnsupportedVersion,
+            )
+            .expect("security event is appended");
+        let destination = dir.path().join("release/trail.jsonl");
+
+        let export = writer
+            .export_dataset(&destination)
+            .expect("a validated security event is exportable");
+        assert_eq!(export.record_count, 1);
+        let line = fs::read_to_string(destination).expect("read exported trail");
+        assert!(matches!(
+            TrailRecord::from_jsonl_line(line.trim()),
+            Ok(TrailRecord::SecurityEvent(_))
+        ));
     }
 
     #[test]

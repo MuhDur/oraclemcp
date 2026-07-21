@@ -33,6 +33,7 @@ use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::capabilities::SkippedCustomTool;
 use crate::service_app::ServiceAppDoctorSnapshot;
 
 #[cfg(unix)]
@@ -587,6 +588,11 @@ pub struct DoctorContext<'a> {
     /// bead `.14`). `None` when the credential is already set or not an `env:`
     /// ref. Never a secret value; only the variable NAME.
     pub credential_env_hint: Option<String>,
+    /// Custom-tool definitions skipped during startup because they were invalid
+    /// or exceeded the selected profile ceiling. A skipped tool is never
+    /// advertised or executable; signature failures are not represented here
+    /// because they still fail startup.
+    pub skipped_custom_tools: Vec<SkippedCustomTool>,
 }
 
 /// The full diagnostic report.
@@ -1347,7 +1353,7 @@ pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
         check_privilege_tier(cx, ctx).await,
         check_snapshot_freshness(),
         check_classifier_selftest(),
-        check_virtual_tools(),
+        check_virtual_tools(ctx),
         check_dba_suite_preflight(cx, ctx).await,
         check_write_posture(cx, ctx).await,
         check_call_timeout(ctx),
@@ -2493,12 +2499,29 @@ fn check_classifier_selftest() -> CheckResult {
     }
 }
 
-fn check_virtual_tools() -> CheckResult {
+fn check_virtual_tools(ctx: &DoctorContext<'_>) -> CheckResult {
+    if ctx.skipped_custom_tools.is_empty() {
+        return CheckResult::new(
+            9,
+            "Virtual tools",
+            CheckStatus::Pass,
+            "custom tool descriptors and signing policy are available; the binary loads tools.d at startup",
+        );
+    }
+    let detail = ctx
+        .skipped_custom_tools
+        .iter()
+        .map(|skipped| format!("{}: {}", skipped.name, skipped.reason))
+        .collect::<Vec<_>>()
+        .join("; ");
     CheckResult::new(
         9,
         "Virtual tools",
-        CheckStatus::Pass,
-        "custom tool descriptors and signing policy are available; the binary loads tools.d at startup",
+        CheckStatus::Warn,
+        format!(
+            "{} custom tool definition(s) were skipped and are not available: {detail}",
+            ctx.skipped_custom_tools.len()
+        ),
     )
 }
 
@@ -3354,6 +3377,25 @@ mod tests {
                 .unwrap_or_default()
                 .contains("call_timeout_seconds")
         );
+    }
+
+    #[test]
+    fn skipped_custom_tools_are_reported_as_a_warning() {
+        let report = doctor(&DoctorContext {
+            skipped_custom_tools: vec![SkippedCustomTool {
+                name: "broken.toml".to_owned(),
+                reason: "file is malformed".to_owned(),
+            }],
+            ..DoctorContext::default()
+        });
+        let virtual_tools = check_by_id(&report, 9);
+        assert_eq!(virtual_tools.status, CheckStatus::Warn);
+        assert!(
+            virtual_tools
+                .detail
+                .contains("broken.toml: file is malformed")
+        );
+        assert!(virtual_tools.detail.contains("not available"));
     }
 
     #[test]

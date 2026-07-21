@@ -47,14 +47,16 @@ use asupersync::Cx;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use oraclemcp::cost_budget::QueryCostBudgetStore;
 use oraclemcp::dispatch::{
-    McpExposurePolicy, OracleDispatcher, ProfileConnectionBundle, ProfileConnector,
-    ProfileDrainState, ProfileGenerationAdmission, StatelessReadStrategy, profile_draining_error,
-    profile_not_available, result_masking_policy_from_profile, stateless_read_worker_tool,
+    CustomToolSignatureFailure, McpExposurePolicy, OracleDispatcher, ProfileConnectionBundle,
+    ProfileConnector, ProfileDrainState, ProfileGenerationAdmission, StatelessReadStrategy,
+    append_custom_tool_signature_rejection_to_trail, profile_draining_error, profile_not_available,
+    result_masking_policy_from_profile, stateless_read_worker_tool,
 };
 use oraclemcp::registry;
 use oraclemcp_audit::{
-    AuditError, AuditKeyring, AuditSink, AuditSubject, Auditor, FileAuditSink, HmacSha256Key,
-    ShippingAuditSink, ShippingForwarder, SigningKey, WormFileForwarder,
+    AuditCancel, AuditDecision, AuditEntryDraft, AuditError, AuditKeyring, AuditOutcome, AuditSink,
+    AuditSubject, Auditor, FileAuditSink, HmacSha256Key, ShippingAuditSink, ShippingForwarder,
+    SigningKey, WormFileForwarder,
 };
 use oraclemcp_auth::{
     Hs256Verifier, ResourceServerConfig, SecretError, SecretResolver, SystemSecretResolver,
@@ -83,10 +85,10 @@ use oraclemcp_core::{
     LaneDispatchFactoryBuilder, LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture,
     MtlsClientRegistry, OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy,
     OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, PreparedLaneDispatch, ServiceOwner,
-    ServiceTransport, ShutdownCoordinator, SiemFormat, SiemHttpForwarder, SourceHistoryStore,
-    StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig, ToolDispatch,
-    ToolStreamSender, WriteIntentLog, apply_legacy_state_migration, build_server_config,
-    default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
+    ServiceTransport, ShutdownCoordinator, SiemFormat, SiemHttpForwarder, SkippedCustomTool,
+    SourceHistoryStore, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig,
+    ToolDispatch, ToolStreamSender, WriteIntentLog, apply_legacy_state_migration,
+    build_server_config, classify_at_load, default_dashboard_ticket_dir, enforce_signature,
     mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file,
     prepare_dashboard_pairing, probe_dashboard_http_service, requires_mtls, run_doctor,
     service_app_doctor_snapshot, sign, start_oraclemcp_service_app_with_transport,
@@ -172,6 +174,10 @@ enum Command {
         /// Connect using this named profile from the loaded config.
         #[arg(long)]
         profile: Option<String>,
+        /// Refuse startup when any custom-tool definition is invalid instead of
+        /// skipping configuration-quality failures with a warning.
+        #[arg(long)]
+        strict_custom_tools: bool,
         /// Streamable HTTP transport options.
         #[command(flatten)]
         http: HttpServeArgs,
@@ -641,12 +647,14 @@ fn main() -> ExitCode {
             allow_no_auth,
             stdio_token,
             profile,
+            strict_custom_tools,
             http,
         } => run_serve(
             listen,
             allow_no_auth,
             stdio_token,
             profile,
+            strict_custom_tools,
             http,
             robot_json,
         ),
@@ -774,6 +782,18 @@ struct SelectedRuntimeProfile {
     require_signed_tools: bool,
 }
 
+#[derive(Debug, Default)]
+struct CustomToolCatalogLoad {
+    catalog: CustomToolCatalog,
+    skipped: Vec<SkippedCustomTool>,
+}
+
+#[derive(Debug, Default)]
+struct CustomToolDefinitions {
+    defs: Vec<CustomToolDef>,
+    skipped: Vec<SkippedCustomTool>,
+}
+
 #[derive(Clone)]
 struct ResolvedProfile {
     name: String,
@@ -878,13 +898,19 @@ fn resolve_profile_options_from_config_with(
     )?;
 
     let mut ctx = oraclemcp_core::build_session_context(chosen, password, wallet_password, false)?;
-    // B2.2a: resolve the server-side OCI IAM database token (env/file source) at
-    // connect time and inject it into `options.iam_token`, so the B2 adapter
-    // wires it through `with_access_token` (TCPS-enforced). A no-op unless the
-    // profile enables `use_iam_token`; fail-closed on a non-TCPS transport or an
-    // empty/missing token. The token is never persisted, rendered, or logged.
-    oraclemcp_core::inject_iam_token(chosen, &mut ctx.options)
-        .map_err(|e| DbError::UnsupportedAuth(e.to_string()))?;
+    // B16a: configure the server-side OCI IAM source without pre-fetching a
+    // token. The adapter passes this source and its bound PKCS#8 key to the
+    // driver, which fetches on every physical TCPS connection. Setup failures
+    // fail closed: operators receive the redacted typed reason in the log while
+    // callers receive only the uniform connection failure envelope below.
+    oraclemcp_core::configure_iam_token_source(chosen, &mut ctx.options).map_err(|error| {
+        tracing::warn!(
+            profile = %chosen.name,
+            reason = %error,
+            "OCI IAM token source configuration failed closed"
+        );
+        DbError::Connect("OCI IAM authentication setup failed".to_owned())
+    })?;
     let doctor_caps = doctor_profile_caps(chosen, &ctx.level_state);
     Ok(Some(ResolvedProfile {
         name: chosen.name.clone(),
@@ -979,11 +1005,20 @@ fn profile_connector(secret_resolver: Arc<dyn SecretResolver>) -> Arc<ProfileCon
 fn load_custom_catalog_for_generation(
     generation: &oraclemcp::dispatch::ProfileGenerationLease,
     level: &SessionLevelState,
+    strict: bool,
+    auditor: Option<&Arc<Auditor>>,
+    unsigned_refusal_log: bool,
 ) -> Result<CustomToolCatalog, ErrorEnvelope> {
     let config = generation
         .config()
         .ok_or_else(|| custom_tool_error("profile generation has no accepted config snapshot"))?;
-    load_custom_catalog_for_snapshot(config, Some(generation.profile()), level)
+    let loaded =
+        load_custom_catalog_for_snapshot(config, Some(generation.profile()), level, strict)
+            .map_err(|error| {
+                record_runtime_custom_tool_signature_rejection(error, auditor, unsigned_refusal_log)
+            })?;
+    emit_skipped_custom_tool_warnings(&loaded.skipped);
+    Ok(loaded.catalog)
 }
 
 async fn try_open_connection(
@@ -1215,9 +1250,26 @@ fn custom_tool_error(message: impl Into<String>) -> ErrorEnvelope {
     ErrorEnvelope::new(ErrorClass::InvalidArguments, message)
 }
 
-fn read_custom_tool_defs(dir: &Path) -> Result<Vec<CustomToolDef>, ErrorEnvelope> {
+fn custom_tool_skip(name: impl Into<String>, reason: impl Into<String>) -> SkippedCustomTool {
+    SkippedCustomTool {
+        name: name.into(),
+        reason: reason.into(),
+    }
+}
+
+fn custom_tool_file_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("tools.d entry")
+        .to_owned()
+}
+
+fn read_custom_tool_defs_with_policy(
+    dir: &Path,
+    strict: bool,
+) -> Result<CustomToolDefinitions, ErrorEnvelope> {
     if !dir.exists() {
-        return Ok(Vec::new());
+        return Ok(CustomToolDefinitions::default());
     }
     if !dir.is_dir() {
         return Err(custom_tool_error(format!(
@@ -1239,23 +1291,75 @@ fn read_custom_tool_defs(dir: &Path) -> Result<Vec<CustomToolDef>, ErrorEnvelope
     }
     paths.sort();
 
-    let mut defs = Vec::new();
+    let mut loaded = CustomToolDefinitions::default();
     for path in paths {
-        let src = std::fs::read_to_string(&path).map_err(|e| {
-            custom_tool_error(format!(
-                "failed to read custom tool file {}: {e}",
-                path.display()
-            ))
-        })?;
-        let mut file_defs = parse_tools_file(&src).map_err(|e| {
-            custom_tool_error(format!(
-                "failed to parse custom tool file {}: {e}",
-                path.display()
-            ))
-        })?;
-        defs.append(&mut file_defs);
+        let label = custom_tool_file_label(&path);
+        let source = match std::fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) if !strict => {
+                loaded.skipped.push(custom_tool_skip(
+                    label,
+                    format!("file could not be read: {error}"),
+                ));
+                continue;
+            }
+            Err(error) => {
+                return Err(custom_tool_error(format!(
+                    "failed to read custom tool file {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        match parse_tools_file(&source) {
+            Ok(mut file_defs) => loaded.defs.append(&mut file_defs),
+            Err(error) if !strict => loaded.skipped.push(custom_tool_skip(
+                label,
+                format!("file is malformed: {error}"),
+            )),
+            Err(error) => {
+                return Err(custom_tool_error(format!(
+                    "failed to parse custom tool file {}: {error}",
+                    path.display()
+                )));
+            }
+        }
     }
-    Ok(defs)
+    Ok(loaded)
+}
+
+fn doctor_skipped_custom_tools(profile: Option<&str>) -> Vec<SkippedCustomTool> {
+    let Some(dir) = custom_tools_dir() else {
+        return Vec::new();
+    };
+    let mut loaded = match read_custom_tool_defs_with_policy(&dir, false) {
+        Ok(loaded) => loaded,
+        Err(error) => return vec![custom_tool_skip("tools.d", error.message)],
+    };
+    let max_level = OracleMcpConfig::load(None)
+        .ok()
+        .and_then(|config| {
+            selected_config_profile(&config, profile)
+                .ok()
+                .flatten()
+                .map(|selected| oraclemcp_core::session_level_state(selected, false).max_level())
+        })
+        .unwrap_or(OperatingLevel::ReadOnly);
+    if let Err(error) = validate_custom_tool_names(&loaded.defs) {
+        loaded.skipped.push(custom_tool_skip(
+            "tools.d",
+            format!("catalog rejected: {}", error.message),
+        ));
+        return loaded.skipped;
+    }
+    let classifier = Classifier::new(ClassifierConfig::new());
+    for definition in loaded.defs {
+        if let Err(error) = classify_at_load(&definition, &classifier, max_level) {
+            loaded
+                .skipped
+                .push(custom_tool_skip(definition.name, error.to_string()));
+        }
+    }
+    loaded.skipped
 }
 
 fn validate_custom_tool_names(defs: &[CustomToolDef]) -> Result<(), ErrorEnvelope> {
@@ -1310,39 +1414,69 @@ fn load_custom_catalog_for_snapshot(
     config: &OracleMcpConfig,
     active_profile: Option<&str>,
     level: &SessionLevelState,
-) -> Result<CustomToolCatalog, ErrorEnvelope> {
+    strict: bool,
+) -> Result<CustomToolCatalogLoad, ErrorEnvelope> {
     let require_signed_tools = custom_tools_require_signatures(config, active_profile, level)?;
-    load_custom_catalog_with_requirement(require_signed_tools, level.max_level())
+    load_custom_catalog_with_requirement(require_signed_tools, level.max_level(), strict)
 }
 
 fn load_custom_catalog_with_requirement(
     require_signed_tools: bool,
     max_level: OperatingLevel,
-) -> Result<CustomToolCatalog, ErrorEnvelope> {
+    strict: bool,
+) -> Result<CustomToolCatalogLoad, ErrorEnvelope> {
     let dir = custom_tools_dir();
     let key = std::env::var(CUSTOM_TOOLS_HMAC_KEY_ENV).ok();
-    load_custom_catalog_from_sources(
+    load_custom_catalog_from_sources_with_policy(
         dir.as_deref(),
         key.as_deref(),
         require_signed_tools,
         max_level,
+        strict,
     )
 }
 
+#[cfg(test)]
 fn load_custom_catalog_from_sources(
     dir: Option<&Path>,
     key: Option<&str>,
     require_signed_tools: bool,
     max_level: OperatingLevel,
 ) -> Result<CustomToolCatalog, ErrorEnvelope> {
+    load_custom_catalog_from_sources_with_policy(dir, key, require_signed_tools, max_level, true)
+        .map(|loaded| loaded.catalog)
+}
+
+fn load_custom_catalog_from_sources_with_policy(
+    dir: Option<&Path>,
+    key: Option<&str>,
+    require_signed_tools: bool,
+    max_level: OperatingLevel,
+    strict: bool,
+) -> Result<CustomToolCatalogLoad, ErrorEnvelope> {
     let Some(dir) = dir else {
-        return Ok(CustomToolCatalog::default());
+        return Ok(CustomToolCatalogLoad::default());
     };
-    let defs = read_custom_tool_defs(dir)?;
-    if defs.is_empty() {
-        return Ok(CustomToolCatalog::default());
+    let mut definitions = read_custom_tool_defs_with_policy(dir, strict)?;
+    if definitions.defs.is_empty() {
+        return Ok(CustomToolCatalogLoad {
+            catalog: CustomToolCatalog::default(),
+            skipped: definitions.skipped,
+        });
     }
-    validate_custom_tool_names(&defs)?;
+    if let Err(error) = validate_custom_tool_names(&definitions.defs) {
+        if strict {
+            return Err(error);
+        }
+        definitions.skipped.push(custom_tool_skip(
+            "tools.d",
+            format!("catalog rejected: {}", error.message),
+        ));
+        return Ok(CustomToolCatalogLoad {
+            catalog: CustomToolCatalog::default(),
+            skipped: definitions.skipped,
+        });
+    }
 
     let key = key
         .map(|key| {
@@ -1353,38 +1487,208 @@ fn load_custom_catalog_from_sources(
         .transpose()?;
 
     let classifier = Classifier::new(ClassifierConfig::new());
-    let signed_defs_present = defs.iter().any(|def| def.signature.is_some());
-    let loaded = if require_signed_tools {
-        let key = key.as_ref().ok_or_else(|| {
-            custom_tool_error(format!(
-                "{CUSTOM_TOOLS_HMAC_KEY_ENV} is required when this profile requires signed custom tools"
-            ))
-        })?;
-        load_tools_for_profile(
-            &defs,
-            &classifier,
-            max_level,
-            key,
-            true,
-        )
-    } else if let Some(key) = key.as_ref() {
-        load_tools_for_profile(
-            &defs,
-            &classifier,
-            max_level,
-            key,
-            false,
-        )
-    } else if signed_defs_present {
+    let signed_defs_present = definitions.defs.iter().any(|def| def.signature.is_some());
+    if !require_signed_tools && key.is_none() && signed_defs_present {
         return Err(custom_tool_error(format!(
             "custom tool signatures are present but {CUSTOM_TOOLS_HMAC_KEY_ENV} is not set"
         )));
-    } else {
-        load_tools(&defs, &classifier, max_level)
     }
-    .map_err(|e| custom_tool_error(format!("failed to load custom tools: {e}")))?;
 
-    Ok(CustomToolCatalog::new(loaded))
+    let mut loaded = Vec::with_capacity(definitions.defs.len());
+    for def in definitions.defs {
+        let classified = if require_signed_tools {
+            let key = key.as_ref().ok_or_else(|| {
+                custom_tool_error(format!(
+                    "{CUSTOM_TOOLS_HMAC_KEY_ENV} is required when this profile requires signed custom tools"
+                ))
+            })?;
+            enforce_signature(&def, key, true)
+                .and_then(|()| classify_at_load(&def, &classifier, max_level))
+        } else if let Some(key) = key.as_ref() {
+            enforce_signature(&def, key, false)
+                .and_then(|()| classify_at_load(&def, &classifier, max_level))
+        } else {
+            classify_at_load(&def, &classifier, max_level)
+        };
+        match classified {
+            Ok(tool) => loaded.push(tool),
+            Err(error) if custom_tool_load_error_is_security_invariant(&error) => {
+                return Err(custom_tool_error(format!(
+                    "failed to load custom tools: {error}"
+                )));
+            }
+            Err(error) if strict => {
+                return Err(custom_tool_error(format!(
+                    "failed to load custom tools: {error}"
+                )));
+            }
+            Err(error) => definitions
+                .skipped
+                .push(custom_tool_skip(def.name, error.to_string())),
+        }
+    }
+
+    Ok(CustomToolCatalogLoad {
+        catalog: CustomToolCatalog::new(loaded),
+        skipped: definitions.skipped,
+    })
+}
+
+fn custom_tool_load_error_is_security_invariant(error: &oraclemcp_core::LoadError) -> bool {
+    matches!(
+        error,
+        oraclemcp_core::LoadError::SignatureRequired { .. }
+            | oraclemcp_core::LoadError::SignatureInvalid { .. }
+            | oraclemcp_core::LoadError::SignatureVersionUnsupported { .. }
+    )
+}
+
+fn custom_tool_signature_failure(
+    error: &ErrorEnvelope,
+) -> Option<(String, CustomToolSignatureFailure)> {
+    let reason = if error
+        .message
+        .contains("is unsigned; protected profiles require an HMAC signature")
+    {
+        CustomToolSignatureFailure::Required
+    } else if error.message.contains("has an invalid HMAC signature") {
+        CustomToolSignatureFailure::Invalid
+    } else if error
+        .message
+        .contains("uses an unsupported legacy custom-tool signature")
+    {
+        CustomToolSignatureFailure::UnsupportedVersion
+    } else if error
+        .message
+        .contains("custom tool signatures are present but")
+        || error
+            .message
+            .contains("is required when this profile requires signed custom tools")
+    {
+        CustomToolSignatureFailure::VerificationKeyMissing
+    } else {
+        return None;
+    };
+    let tool = error
+        .message
+        .split_once("tool '")
+        .and_then(|(_, tail)| tail.split_once('\''))
+        .map_or_else(|| "tools.d".to_owned(), |(tool, _)| tool.to_owned());
+    Some((tool, reason))
+}
+
+fn custom_tool_signature_reason(reason: CustomToolSignatureFailure) -> &'static str {
+    match reason {
+        CustomToolSignatureFailure::Required => "custom_tool_signature_required",
+        CustomToolSignatureFailure::Invalid => "custom_tool_signature_invalid",
+        CustomToolSignatureFailure::UnsupportedVersion => {
+            "custom_tool_signature_unsupported_version"
+        }
+        CustomToolSignatureFailure::VerificationKeyMissing => {
+            "custom_tool_signature_verification_key_missing"
+        }
+    }
+}
+
+fn custom_tool_security_event_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!("unix:{secs}")
+}
+
+fn record_custom_tool_signature_rejection(
+    auditor: Option<&Arc<Auditor>>,
+    unsigned_refusal_log: bool,
+    tool: &str,
+    reason: CustomToolSignatureFailure,
+) -> Result<(), String> {
+    let path = default_unsigned_refusal_trail_path();
+    record_custom_tool_signature_rejection_at(auditor, unsigned_refusal_log, &path, tool, reason)
+}
+
+fn record_custom_tool_signature_rejection_at(
+    auditor: Option<&Arc<Auditor>>,
+    unsigned_refusal_log: bool,
+    unsigned_trail_path: &Path,
+    tool: &str,
+    reason: CustomToolSignatureFailure,
+) -> Result<(), String> {
+    if let Some(auditor) = auditor {
+        let draft = AuditEntryDraft {
+            subject: AuditSubject::new("server", "custom-tool-loader")
+                .with_authn_method("local-config"),
+            db_evidence: None,
+            cancel: Some(AuditCancel::new(
+                "Security",
+                custom_tool_signature_reason(reason),
+            )),
+            result_masking: None,
+            tool: "custom_tool_load".to_owned(),
+            sql: "CUSTOM TOOL SIGNATURE REJECTED".to_owned(),
+            danger_level: "CONFIGURATION".to_owned(),
+            decision: AuditDecision::Blocked,
+            rows_affected: None,
+            outcome: AuditOutcome::Failed,
+        };
+        auditor
+            .append(&draft, custom_tool_security_event_timestamp(), true)
+            .map_err(|error| format!("could not append signed security event: {error}"))?;
+        return Ok(());
+    }
+    if unsigned_refusal_log {
+        append_custom_tool_signature_rejection_to_trail(
+            unsigned_trail_path.to_path_buf(),
+            tool,
+            reason,
+        )
+        .map_err(|error| format!("could not append unsigned B8c security event: {error}"))?;
+    }
+    Ok(())
+}
+
+fn record_startup_custom_tool_signature_rejection(
+    config: &OracleMcpConfig,
+    level: &SessionLevelState,
+    secret_resolver: &dyn SecretResolver,
+    tool: &str,
+    reason: CustomToolSignatureFailure,
+) -> Result<(), String> {
+    let reachable_ceiling = max_reachable_write_ceiling(config, level);
+    let auditor = build_auditor(&config.audit, level, reachable_ceiling, secret_resolver)
+        .map_err(|(code, message)| format!("{code}: {message}"))?;
+    let unsigned_refusal_log =
+        unsigned_refusal_trail_enabled(auditor.is_some(), config.audit.unsigned_refusal_log);
+    record_custom_tool_signature_rejection(auditor.as_ref(), unsigned_refusal_log, tool, reason)
+}
+
+fn record_runtime_custom_tool_signature_rejection(
+    error: ErrorEnvelope,
+    auditor: Option<&Arc<Auditor>>,
+    unsigned_refusal_log: bool,
+) -> ErrorEnvelope {
+    let Some((tool, reason)) = custom_tool_signature_failure(&error) else {
+        return error;
+    };
+    match record_custom_tool_signature_rejection(auditor, unsigned_refusal_log, &tool, reason) {
+        Ok(()) => error,
+        Err(record_error) => custom_tool_error(format!(
+            "custom-tool signature rejection was refused, but its required security event could not be recorded: {record_error}; original rejection: {}",
+            error.message
+        )),
+    }
+}
+
+fn emit_skipped_custom_tool_warnings(skipped: &[SkippedCustomTool]) {
+    for skipped in skipped {
+        eprintln!(
+            "[oraclemcp] WARNING: skipped custom tool {}: {}",
+            skipped.name, skipped.reason
+        );
+    }
 }
 
 /// The current safe default audit-log path under the XDG state home, used when
@@ -2163,6 +2467,7 @@ struct DispatcherWiring {
     sql_policy: Option<SqlPolicyConfig>,
     secret_resolver: Arc<dyn SecretResolver>,
     custom_catalog: CustomToolCatalog,
+    strict_custom_tools: bool,
     exposure: McpExposurePolicy,
     profile_drain: ProfileDrainState,
     auditor: Option<Arc<Auditor>>,
@@ -2203,7 +2508,20 @@ fn build_oracle_dispatcher(
         profile_connector(Arc::clone(&wiring.secret_resolver)),
         StatelessReadStrategy::new(stateless_conn),
         wiring.custom_catalog.clone(),
-        Some(Arc::new(load_custom_catalog_for_generation)),
+        Some(Arc::new({
+            let strict = wiring.strict_custom_tools;
+            let auditor = wiring.auditor.clone();
+            let unsigned_refusal_log = wiring.unsigned_refusal_log;
+            move |generation, level| {
+                load_custom_catalog_for_generation(
+                    generation,
+                    level,
+                    strict,
+                    auditor.as_ref(),
+                    unsigned_refusal_log,
+                )
+            }
+        })),
     )
     .with_request_timeout(wiring.request_timeout)
     .with_max_query_cost(wiring.max_query_cost)
@@ -2569,10 +2887,20 @@ fn stateful_lane_factory_builder(
                     ));
                 }
                 if let Some(selected) = opened.selected_profile {
-                    wiring.custom_catalog = load_custom_catalog_with_requirement(
+                    let custom_tools = load_custom_catalog_with_requirement(
                         selected.require_signed_tools,
                         selected.level.max_level(),
-                    )?;
+                        wiring.strict_custom_tools,
+                    )
+                    .map_err(|error| {
+                        record_runtime_custom_tool_signature_rejection(
+                            error,
+                            wiring.auditor.as_ref(),
+                            wiring.unsigned_refusal_log,
+                        )
+                    })?;
+                    emit_skipped_custom_tool_warnings(&custom_tools.skipped);
+                    wiring.custom_catalog = custom_tools.catalog;
                     apply_selected_profile_to_wiring(&mut wiring, selected);
                 }
                 let dispatcher = build_oracle_dispatcher(
@@ -2936,8 +3264,20 @@ fn stateless_read_worker_factory_builder(
                     wiring.active_profile = Some(profile);
                     wiring.level = level;
                     wiring.request_timeout = request_timeout;
-                    wiring.custom_catalog =
-                        load_custom_catalog_with_requirement(require_signed_tools, max_level)?;
+                    let custom_tools = load_custom_catalog_with_requirement(
+                        require_signed_tools,
+                        max_level,
+                        wiring.strict_custom_tools,
+                    )
+                    .map_err(|error| {
+                        record_runtime_custom_tool_signature_rejection(
+                            error,
+                            wiring.auditor.as_ref(),
+                            wiring.unsigned_refusal_log,
+                        )
+                    })?;
+                    emit_skipped_custom_tool_warnings(&custom_tools.skipped);
+                    wiring.custom_catalog = custom_tools.catalog;
                     let dispatcher = build_oracle_dispatcher(conn, None, &wiring)
                         .with_profile_generation_lease(
                             wiring.profile_drain.clone(),
@@ -2970,6 +3310,8 @@ impl ServerTransportMode {
 struct ServerBuildOptions {
     transport: ServerTransportMode,
     custom_catalog: CustomToolCatalog,
+    skipped_custom_tools: Vec<SkippedCustomTool>,
+    strict_custom_tools: bool,
     auditor: Option<Arc<Auditor>>,
     write_intents: Option<Arc<WriteIntentLog>>,
     secret_resolver: Arc<dyn SecretResolver>,
@@ -3021,7 +3363,8 @@ fn build_server_with_lifecycle(
             engine: cfg!(feature = "plsql-intelligence"),
             http_transport: options.transport.is_http(),
         },
-    );
+    )
+    .with_skipped_custom_tools(options.skipped_custom_tools.clone());
     // E5 connection-scope isolation: derive the immutable startup policy from
     // the same accepted snapshot used for generation admission. Missing or
     // poisoned lifecycle state fails closed; serving paths never re-read disk.
@@ -3048,6 +3391,7 @@ fn build_server_with_lifecycle(
         sql_policy: options.sql_policy,
         secret_resolver: options.secret_resolver,
         custom_catalog: options.custom_catalog,
+        strict_custom_tools: options.strict_custom_tools,
         exposure,
         profile_drain: options.profile_drain,
         auditor: options.auditor,
@@ -3450,6 +3794,7 @@ fn run_serve(
     allow_no_auth: bool,
     stdio_token: Option<String>,
     profile: Option<String>,
+    strict_custom_tools: bool,
     http: HttpServeArgs,
     robot_json: bool,
 ) -> ExitCode {
@@ -3538,14 +3883,40 @@ fn run_serve(
         }
     };
 
-    let custom_catalog =
-        match load_custom_catalog_for_snapshot(&full_config, active_profile.as_deref(), &level) {
-            Ok(catalog) => catalog,
-            Err(e) => {
-                emit_status_error(robot_json, "ORACLEMCP_CUSTOM_TOOLS_INVALID", &e.message);
+    let custom_tool_load = match load_custom_catalog_for_snapshot(
+        &full_config,
+        active_profile.as_deref(),
+        &level,
+        strict_custom_tools,
+    ) {
+        Ok(catalog) => catalog,
+        Err(e) => {
+            if let Some((tool, reason)) = custom_tool_signature_failure(&e)
+                && let Err(record_error) = record_startup_custom_tool_signature_rejection(
+                    &full_config,
+                    &level,
+                    secret_resolver.as_ref(),
+                    &tool,
+                    reason,
+                )
+            {
+                emit_status_error(
+                    robot_json,
+                    "ORACLEMCP_CUSTOM_TOOLS_SECURITY_EVENT_UNRECORDED",
+                    &format!(
+                        "custom-tool signature rejection was refused, but its required security event could not be recorded: {record_error}; original rejection: {}",
+                        e.message
+                    ),
+                );
                 return ExitCode::from(2);
             }
-        };
+            emit_status_error(robot_json, "ORACLEMCP_CUSTOM_TOOLS_INVALID", &e.message);
+            return ExitCode::from(2);
+        }
+    };
+    emit_skipped_custom_tool_warnings(&custom_tool_load.skipped);
+    let skipped_custom_tools = custom_tool_load.skipped.clone();
+    let custom_catalog = custom_tool_load.catalog;
     let mut advertised_registry = registry::tool_registry();
     custom_catalog.register_first_class(&mut advertised_registry);
     let advertised_tools: Vec<String> = advertised_registry
@@ -3634,6 +4005,8 @@ fn run_serve(
                 ServerBuildOptions {
                     transport: ServerTransportMode::Stdio,
                     custom_catalog,
+                    skipped_custom_tools,
+                    strict_custom_tools,
                     auditor,
                     write_intents,
                     secret_resolver: Arc::clone(&secret_resolver),
@@ -3792,6 +4165,8 @@ fn run_serve(
                         ServerTransportMode::HttpStateless
                     },
                     custom_catalog,
+                    skipped_custom_tools,
+                    strict_custom_tools,
                     auditor: auditor.clone(),
                     write_intents,
                     secret_resolver: Arc::clone(&secret_resolver),
@@ -6759,9 +7134,11 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
     );
     let profile_caps = Some(resolved.doctor_caps.clone());
     let auth_capabilities = Some(DoctorAuthCapabilities::from_connect_options(&resolved.opts));
-    // Capture the resolved IAM token BEFORE `resolved` is moved into the connect
-    // attempt, so the near-expiry diagnostic works even when the connect fails.
-    let iam_token = resolved.opts.iam_token.clone();
+    // A profile carries only a refreshable source, never a resolved IAM token.
+    // Doctor intentionally receives no token value: source diagnostics stay in
+    // the operator log and client-facing doctor output cannot become an auth
+    // oracle or secret-rendering surface.
+    let iam_token = None;
     let wallet_password = resolved.opts.wallet_password.clone();
     match block_on_connect(|cx| async move { try_open_runtime_connections(&cx, resolved).await }) {
         Ok(connections) => {
@@ -6822,6 +7199,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
     // or open Oracle. --online is the explicit live-connect boundary.
     let audit_posture = doctor_audit_posture(profile.as_deref());
     let profile_ctx = doctor_profile_context(profile.as_deref(), online);
+    let skipped_custom_tools = doctor_skipped_custom_tools(profile.as_deref());
     let state_layout = doctor_state_layout(doctor_audit_path_configured());
     let mut fix_mutations = Vec::new();
     if fix {
@@ -6870,6 +7248,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
         audit_posture: Some(audit_posture),
         sensitive_values: profile_ctx.sensitive_values,
         credential_env_hint: profile_ctx.credential_env_hint,
+        skipped_custom_tools,
     };
     let mut report = block_on_connect(|cx| async move { run_doctor(&cx, &ctx).await });
     if fix {

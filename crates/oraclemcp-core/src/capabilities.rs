@@ -132,6 +132,18 @@ pub struct FeatureTiers {
     pub http_transport: bool,
 }
 
+/// One custom-tool definition the server deliberately did not load.
+///
+/// A skipped definition is never registered or executable. This is an
+/// operator-facing availability observation, not an override for the guard.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedCustomTool {
+    /// Stable tool name when the definition parsed, or a file label otherwise.
+    pub name: String,
+    /// Redacted, actionable reason the definition was not loaded.
+    pub reason: String,
+}
+
 /// The full, standalone capability document.
 // `Eq` dropped with `ToolDescriptor::input_schema: Option<serde_json::Value>`
 // (Value is not Eq); structural `PartialEq` is all this report needs.
@@ -166,6 +178,11 @@ pub struct CapabilitiesReport {
     /// bead P1-11). `None` when not a cloud target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud: Option<CloudStatus>,
+    /// Operator-defined custom tools skipped during startup. Each listed entry
+    /// is absent from discovery and execution; an empty list means no
+    /// configuration-quality definition was skipped.
+    #[serde(default)]
+    pub skipped_custom_tools: Vec<SkippedCustomTool>,
 }
 
 impl CapabilitiesReport {
@@ -205,6 +222,7 @@ impl CapabilitiesReport {
             features,
             privileges: None,
             cloud: None,
+            skipped_custom_tools: Vec::new(),
         }
     }
 
@@ -219,6 +237,13 @@ impl CapabilitiesReport {
     #[must_use]
     pub fn with_cloud(mut self, cloud: CloudStatus) -> Self {
         self.cloud = Some(cloud);
+        self
+    }
+
+    /// Attach the custom-tool definitions skipped during startup.
+    #[must_use]
+    pub fn with_skipped_custom_tools(mut self, skipped: Vec<SkippedCustomTool>) -> Self {
+        self.skipped_custom_tools = skipped;
         self
     }
 }
@@ -272,6 +297,36 @@ mod tests {
         assert_eq!(
             json["tools"][0]["name"],
             serde_json::json!("oracle_capabilities")
+        );
+        assert_eq!(json["skipped_custom_tools"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn skipped_custom_tools_are_visible_without_changing_the_tool_surface() {
+        let report = CapabilitiesReport::new(
+            "0.1.0",
+            sample_tools(),
+            OperatingLevel::ReadOnly,
+            FeatureTiers {
+                live_db: true,
+                engine: true,
+                http_transport: false,
+            },
+        )
+        .with_skipped_custom_tools(vec![SkippedCustomTool {
+            name: "broken.toml".to_owned(),
+            reason: "file is malformed".to_owned(),
+        }]);
+        assert_eq!(
+            report.tools,
+            sample_tools(),
+            "a skip never changes built-ins"
+        );
+        let json = serde_json::to_value(report).expect("serialize");
+        assert_eq!(json["skipped_custom_tools"][0]["name"], "broken.toml");
+        assert_eq!(
+            json["skipped_custom_tools"][0]["reason"],
+            "file is malformed"
         );
     }
 

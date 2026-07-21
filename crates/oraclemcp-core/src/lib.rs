@@ -98,7 +98,7 @@ pub use admission::{AdmissionController, AdmissionPermit};
 pub use audit_shipping::{SiemFormat, SiemHttpForwarder};
 pub use capabilities::{
     CapabilitiesReport, ConnectionStatus, FeatureTiers, OperatingLevelReport, PROTOCOL_VERSION,
-    SUPPORTED_PROTOCOL_VERSIONS, ToolSurfaceFeatures,
+    SUPPORTED_PROTOCOL_VERSIONS, SkippedCustomTool, ToolSurfaceFeatures,
 };
 pub use capability::{
     LaneCaps, PrivilegedEffect, ReadPathCaps, narrow_to_lane, narrow_to_read_path,
@@ -163,7 +163,8 @@ pub use http::{
     serve_http, serve_http_until, serve_https, serve_https_until,
 };
 pub use iam_token::{
-    IAM_TOKEN_ENV, IamTokenError, ServerIamTokenSource, inject_iam_token, jwt_exp_unix,
+    IAM_TOKEN_ENV, IamTokenError, ServerIamTokenSource, configure_iam_token_source,
+    inject_iam_token, jwt_exp_unix,
 };
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
 pub use lane::{

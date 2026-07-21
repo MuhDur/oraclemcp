@@ -28,6 +28,7 @@ use crate::cost_budget::{
     QueryCostBudgetAdmission, QueryCostBudgetStore, QueryCostBudgetStoreError,
 };
 use crate::masking_salts::{MaskingSaltLoadError, load_active_profile_masking_salt};
+pub use refusal_corpus::CustomToolSignatureFailure;
 use refusal_corpus::RefusalCorpusWriter;
 
 use asupersync::combinator::try_commit_section;
@@ -251,6 +252,20 @@ pub fn export_refusal_corpus(
     RefusalCorpusWriter::new(source_path)
         .export_dataset(destination)
         .map(|export| export.record_count)
+        .map_err(|error| error.to_string())
+}
+
+/// Append a typed custom-tool signature rejection to the B8c unsigned trail.
+///
+/// The raw writer stays private so startup code cannot manufacture SQL refusal
+/// records or bypass the corpus validation boundary.
+pub fn append_custom_tool_signature_rejection_to_trail(
+    path: PathBuf,
+    tool: &str,
+    reason: CustomToolSignatureFailure,
+) -> Result<(), String> {
+    RefusalCorpusWriter::new(path)
+        .append_custom_tool_signature_rejection(tool, reason)
         .map_err(|error| error.to_string())
 }
 
@@ -8772,6 +8787,19 @@ async fn undo_to_checkpoint(ctx: DbToolCtx<'_>, args: UndoToArgs) -> Result<Valu
     }))
 }
 
+/// DI2: the witness page size for `oracle_preview_dml`, clamped to the same
+/// ceiling every other read obeys.
+///
+/// A pure seam so the boundary values are testable without a database: the
+/// interesting inputs are the ones that never occur in a well-behaved call —
+/// `usize::MAX`, a value far above the ceiling, and 0, which the schema forbids
+/// but which a non-conforming client can still put on the wire.
+fn preview_witness_max_rows(requested: Option<usize>) -> usize {
+    requested
+        .unwrap_or(QueryCaps::default().max_rows)
+        .clamp(1, MAX_QUERY_MAX_ROWS)
+}
+
 /// `oracle_preview_dml` — the dry run (Arc I / bead `.11.2`).
 ///
 /// The sandbox is a savepoint the *server* owns: `SAVEPOINT OMCP_PREVIEW_DML` →
@@ -8894,8 +8922,14 @@ async fn preview_dml_inner(
             "audit marker changed the classifier verdict; refusing to execute",
         ));
     }
+    // DI2: the witness is an ordinary read and gets the ordinary read's ceiling.
+    // Copying `args.max_rows` in raw let a caller ask for a usize-scale witness
+    // page — unbounded Oracle work and an unbounded materialization, from a tool
+    // whose entire purpose is to show a SAMPLE of what a statement touches.
+    let requested_max_rows = args.max_rows;
+    let witness_max_rows = preview_witness_max_rows(requested_max_rows);
     let caps = QueryCaps {
-        max_rows: args.max_rows.unwrap_or(QueryCaps::default().max_rows),
+        max_rows: witness_max_rows,
         ..QueryCaps::default()
     };
 
@@ -9052,6 +9086,35 @@ async fn preview_dml_inner(
         "next_step": "nothing was committed. To apply this exact change: oracle_preview_sql for its confirmation, then oracle_execute with commit=true — which re-classifies and re-gates the statement rather than trusting this preview",
         "caveat": "a trigger or an autonomous transaction fired by the target objects can commit independently of this rollback; the classifier flags only what it can prove from the statement text",
     });
+    // DI2: a clamp nobody can see is worse than no clamp. Someone approves a DML
+    // on the strength of the witness rows in front of them, so a preview that
+    // quietly shows fewer rows than the statement touches is how a change gets
+    // approved on a partial view of its blast radius. Both facts — that the
+    // requested page was cut down, and that the rows shown are not all of them —
+    // are stated at the TOP level of the response, not buried inside `before`
+    // and `after` where an approver has to go looking.
+    let witness_truncated = before.as_ref().is_some_and(|page| page.truncated)
+        || after.as_ref().is_some_and(|page| page.truncated);
+    if witness.is_some() {
+        response["witness_max_rows"] = json!(witness_max_rows);
+        if let Some(requested) = requested_max_rows
+            && requested > witness_max_rows
+        {
+            response["witness_max_rows_clamped"] = json!({
+                "requested": requested,
+                "applied": witness_max_rows,
+                "ceiling": MAX_QUERY_MAX_ROWS,
+            });
+        }
+        if witness_truncated {
+            response["witness_truncated"] = json!(true);
+            response["witness_caveat"] = json!(format!(
+                "the witness rows shown are NOT the complete set: the read hit the {witness_max_rows}-row cap. \
+                 rows_affected is the authoritative count of what this statement touched — do not approve \
+                 this change on the assumption that the rows below are all of it"
+            ));
+        }
+    }
     if let Some(before) = before {
         response["before"] = serde_json::to_value(&before).unwrap_or(Value::Null);
     }

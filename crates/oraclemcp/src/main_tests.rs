@@ -413,6 +413,7 @@ fn fresh_stateful_lane_uses_reloaded_profile_ceiling_and_timeout() {
         sql_policy: None,
         secret_resolver: Arc::new(SystemSecretResolver),
         custom_catalog: CustomToolCatalog::default(),
+        strict_custom_tools: false,
         exposure: McpExposurePolicy::AllowAll,
         profile_drain: ProfileDrainState::new(),
         auditor: None,
@@ -4000,6 +4001,121 @@ fn custom_tool_loader_uses_each_profiles_real_ceiling() {
 }
 
 #[test]
+fn custom_tool_loader_skips_malformed_files_but_strict_mode_refuses_startup() {
+    let tools_dir = target_tmp_file("b12c-skip-malformed");
+    fs::create_dir_all(&tools_dir).expect("create tools dir");
+    fs::write(
+        tools_dir.join("good.toml"),
+        r#"
+        [[tool]]
+        name = "app_lookup"
+        description = "Lookup one row"
+        sql = "SELECT 1 FROM dual"
+        output_mode = "rows"
+        "#,
+    )
+    .expect("write valid tool");
+    fs::write(tools_dir.join("broken.toml"), "[[tool]\nname = ").expect("write malformed tool");
+
+    let permissive = load_custom_catalog_from_sources_with_policy(
+        Some(&tools_dir),
+        None,
+        false,
+        OperatingLevel::ReadOnly,
+        false,
+    )
+    .expect("malformed file is skipped by default");
+    assert_eq!(permissive.catalog.len(), 1, "valid tool still serves");
+    assert_eq!(permissive.skipped.len(), 1);
+    assert_eq!(permissive.skipped[0].name, "broken.toml");
+    assert!(permissive.skipped[0].reason.contains("malformed"));
+
+    let strict = load_custom_catalog_from_sources_with_policy(
+        Some(&tools_dir),
+        None,
+        false,
+        OperatingLevel::ReadOnly,
+        true,
+    )
+    .expect_err("strict mode restores fail-fast startup");
+    assert!(strict.message.contains("failed to parse custom tool file"));
+}
+
+#[test]
+fn custom_tool_loader_never_skips_a_tampered_signature() {
+    let tools_dir = target_tmp_file("b12c-tampered-signature");
+    fs::create_dir_all(&tools_dir).expect("create tools dir");
+    fs::write(
+        tools_dir.join("tampered.toml"),
+        r#"
+        [[tool]]
+        name = "app_lookup"
+        description = "Lookup one row"
+        sql = "SELECT 1 FROM dual"
+        output_mode = "rows"
+        signature = "oraclemcp-custom-tool:v2:hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        "#,
+    )
+    .expect("write tampered signed tool");
+
+    let error = load_custom_catalog_from_sources_with_policy(
+        Some(&tools_dir),
+        Some("0123456789abcdef0123456789abcdef"),
+        false,
+        OperatingLevel::ReadOnly,
+        false,
+    )
+    .expect_err("tamper evidence must still stop startup");
+    assert!(error.message.contains("invalid HMAC signature"));
+}
+
+#[test]
+fn tampered_custom_tool_signature_is_recorded_on_the_unsigned_b8c_trail() {
+    let tools_dir = target_tmp_file("b12c-tampered-signature-trail");
+    fs::create_dir_all(&tools_dir).expect("create tools dir");
+    fs::write(
+        tools_dir.join("tampered.toml"),
+        r#"
+        [[tool]]
+        name = "app_lookup"
+        description = "Lookup one row"
+        sql = "SELECT 1 FROM dual"
+        output_mode = "rows"
+        signature = "oraclemcp-custom-tool:v2:hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        "#,
+    )
+    .expect("write tampered signed tool");
+    let error = load_custom_catalog_from_sources_with_policy(
+        Some(&tools_dir),
+        Some("0123456789abcdef0123456789abcdef"),
+        false,
+        OperatingLevel::ReadOnly,
+        false,
+    )
+    .expect_err("tamper evidence must stop startup");
+    let (tool, reason) =
+        custom_tool_signature_failure(&error).expect("the rejection has a typed security reason");
+    let trail = tools_dir.join("corpus/refusals.jsonl");
+    record_custom_tool_signature_rejection_at(None, true, &trail, &tool, reason)
+        .expect("default B8c trail records tamper evidence");
+
+    let event: serde_json::Value = serde_json::from_str(
+        fs::read_to_string(&trail)
+            .expect("read unsigned B8c trail")
+            .trim(),
+    )
+    .expect("security event is JSON");
+    assert_eq!(event["event"], "custom_tool_signature_rejected");
+    assert_eq!(event["tool"], "app_lookup");
+    assert_eq!(event["reason"], "invalid");
+    assert_eq!(event["authenticity"], "unsigned_not_tamper_evident");
+    assert!(
+        serde_json::from_value::<oraclemcp_guard::corpus::CorpusRecord>(event).is_err(),
+        "the B8c event must not masquerade as a SQL classifier refusal"
+    );
+}
+
+#[test]
 fn reloaded_generation_enforces_its_own_custom_tool_signature_policy() {
     let tools_dir = target_tmp_file("generation-tools");
     fs::create_dir_all(&tools_dir).expect("create tools dir");
@@ -4113,6 +4229,8 @@ fn build_server_advertises_the_active_custom_catalog_plus_capabilities() {
         ServerBuildOptions {
             transport: ServerTransportMode::Stdio,
             custom_catalog,
+            skipped_custom_tools: Vec::new(),
+            strict_custom_tools: false,
             auditor: None,
             write_intents: None,
             secret_resolver: Arc::new(SystemSecretResolver),
