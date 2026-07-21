@@ -970,6 +970,33 @@ def selftest() -> int:
 
     def mutate_label_with_dot(doc: dict[str, Any]) -> None:
         doc["tasks"][0]["tracking_label"] = "train.alpha"
+
+    # Rules that existed but had never been OBSERVED failing. 39 codes were
+    # defined and 8 were exercised; a code that has only ever been read is not
+    # evidence of anything, which is the same standard applied to this file's
+    # first ten cases.
+    def mutate_native_dependency(doc: dict[str, Any]) -> None:
+        # Both spellings at once: the record no longer says which edge set is
+        # authoritative.
+        doc["tasks"][0]["dependencies"] = ["beta"]
+        doc["tasks"][0]["blockers"] = ["beta"]
+
+    def mutate_same_repo_handoff(doc: dict[str, Any]) -> None:
+        # A handoff is the CROSS-repository mechanism. Using one inside a single
+        # repository hides an ordinary dependency from the graph, which is
+        # exactly what this manifest exists to make visible.
+        # `beta` lives in the same repository as `alpha`, so this handoff is a
+        # native edge wearing a cross-repo costume.
+        doc["tasks"][0]["handoffs"] = [
+            {"to": "beta", "artifact": "checksum-handoff.json", "sha256": "0" * 64}
+        ]
+
+    def mutate_promoted_depends_deferred(doc: dict[str, Any]) -> None:
+        # Promotion order: activating a task whose dependency is not promoted
+        # schedules work that cannot start.
+        doc["tasks"][0]["promotion"] = "activate"
+        doc["tasks"][0]["dependencies"] = ["beta"]
+        doc["tasks"][1]["promotion"] = "defer"
         doc["tasks"][0]["labels"] = ["train.alpha", "plan:alpha"]
 
     cases: list[tuple[str, str, Any]] = [
@@ -983,6 +1010,9 @@ def selftest() -> int:
         ("missing acceptance text", "E_TASK_ACCEPTANCE", mutate_missing_acceptance),
         ("release target disagreement", "E_SEMVER_ASSERTION", mutate_release_target),
         ("Beads-rejected '.' in a label", "E_TASK_LABEL", mutate_label_with_dot),
+        ("both dependencies and blockers", "E_NATIVE_DEPENDENCY", mutate_native_dependency),
+        ("same-repository handoff", "E_HANDOFF_NATIVE", mutate_same_repo_handoff),
+        ("activated task depending on a deferred one", "E_PROMOTED_DEPENDS_NONPROMOTED", mutate_promoted_depends_deferred),
     ]
 
     checks = 0
@@ -1010,6 +1040,37 @@ def selftest() -> int:
                 return 1
             print(f"PASS selftest: {label} is rejected ({code})")
             checks += 1
+
+        # THE LIVE-GRAPH PATH. E_LIVE_REFERENCE guards the exported tracker
+        # state rather than the manifest, so no manifest mutation can reach it —
+        # which is precisely why it had never been observed failing. It needs a
+        # tracker whose issue depends on an id that is not in that tracker.
+        tracker = base / "server" / ".beads" / "issues.jsonl"
+        original = tracker.read_text(encoding="utf-8")
+        tracker.write_text(
+            json.dumps(
+                {
+                    "id": "server-1",
+                    "status": "open",
+                    "dependencies": [
+                        {"issue_id": "server-1", "depends_on_id": "server-missing", "type": "blocks"}
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        hard = run(good, base)
+        tracker.write_text(original, encoding="utf-8")
+        if not any(line.startswith("E_LIVE_REFERENCE") for line in hard):
+            print(
+                "plan-bead-graph selftest: a dangling edge in the LIVE tracker was NOT rejected with "
+                f"E_LIVE_REFERENCE; got {hard or 'no findings'}",
+                file=sys.stderr,
+            )
+            return 1
+        print("PASS selftest: a dangling edge in the live tracker is rejected (E_LIVE_REFERENCE)")
+        checks += 1
 
     print(f"plan-bead-graph selftest: OK ({checks} checks; the validator rejects every mutated graph)")
     return 0
