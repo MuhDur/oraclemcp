@@ -1,0 +1,50 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T20:06:46Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.10",
+  "scope": {
+    "summary": "G1 tokenizes the parser-only VECTOR_EMBEDDING bridge so only the bare, unqualified builtin with the exact model-USING-positional-bind grammar is normalized.",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/classifier.rs"
+    ],
+    "out_of_scope": [
+      "The original SQL bytes and verdict-certificate digest remain authoritative; only a parser copy changes.",
+      "Raw caller SQL remains unable to invoke the verified-local vector embedding classification path."
+    ]
+  },
+  "source": {
+    "sha": "8ea5cfcd6373cfb052b15e285f4d4385f5115e0f",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Classifier verified local vector embedding batch path",
+        "kind": "api",
+        "trace": "vector_embedding_batch_normalizes_only_for_parser_splitting proves a benign two-SELECT server-verified batch remains Safe with its certificate bound to the original bytes, while qualified, quoted, malformed, and DML-containing batches remain forbidden or destructive."
+      },
+      {
+        "name": "Parser-only normalization boundary",
+        "kind": "api",
+        "trace": "vector_embedding_parser_normalization_rejects_lookalike_spelling proves the bridge rewrites the bare builtin but leaves qualified, comment-qualified, quoted, literal, and comment-spelled lookalikes byte-for-byte unchanged."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped verification only: 317 oraclemcp-guard library tests in a clean detached worktree; no live Oracle run.",
+    "A full workspace gate is not claimed or run for this close."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
