@@ -5307,7 +5307,12 @@ mod driver {
         opts: &OracleConnectOptions,
         context: Option<&str>,
     ) -> DbError {
-        let lost = err.is_connection_lost();
+        // TTC message type 129 is a transient protocol desynchronization in
+        // the metadata/direct-path response family. The pinned driver raises
+        // it as `ProtocolError::UnknownMessageType` but deliberately reports
+        // that variant as reusable; the server must discard this session so
+        // the pool can perform its single fresh-connection retry.
+        let lost = err.is_connection_lost() || is_transient_ttc_129(&err);
         let detail = sanitize_driver_error(err, opts);
         let message = match context {
             Some(context) => format!("{context}: {detail}"),
@@ -5318,6 +5323,16 @@ mod driver {
         } else {
             DbError::Query(message)
         }
+    }
+
+    fn is_transient_ttc_129(error: &oracledb::Error) -> bool {
+        matches!(
+            error,
+            oracledb::Error::Protocol(oracledb::protocol::ProtocolError::UnknownMessageType {
+                message_type: 129,
+                ..
+            })
+        )
     }
 
     /// Execute-path counterpart to [`driver_query_error`]. Non-lost errors
@@ -7895,6 +7910,28 @@ mod tests {
             driver::driver_execute_error(execute_io, &opts, "synthetic execute"),
             DbError::ConnectionLost(_)
         ));
+    }
+
+    #[test]
+    fn ttc_129_is_promoted_to_fresh_connection_retry() {
+        let opts = ezconnect_opts();
+        let err =
+            oracledb::Error::Protocol(oracledb::protocol::ProtocolError::UnknownMessageType {
+                message_type: 129,
+                position: 35,
+            });
+        assert!(
+            !err.is_connection_lost(),
+            "driver exposes TTC-129 as reusable"
+        );
+        let mapped = driver::driver_query_error(err, &opts, Some("metadata probe"));
+        assert!(matches!(mapped, DbError::ConnectionLost(_)));
+        assert!(mapped.is_uncertain_session_state());
+        let envelope = mapped.into_envelope();
+        assert_eq!(envelope.error_class, oraclemcp_error::ErrorClass::Transient);
+        assert!(envelope.error_class.is_retryable());
+        assert!(envelope.message.contains("detail suppressed"));
+        assert!(!envelope.message.contains("TTC"));
     }
 
     // --- connect/handshake failure classification (bead bhw6.2) -----------
