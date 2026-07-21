@@ -23,7 +23,7 @@
           {
             "error": {
               "code": -32600,
-              "message": "stdio init token missing from initialize request"
+              "message": "stdio init token missing from initialize request at params._meta[\"oraclemcp/initToken\"] (the value must be a JSON string)"
             },
             "id": 1,
             "jsonrpc": "2.0"

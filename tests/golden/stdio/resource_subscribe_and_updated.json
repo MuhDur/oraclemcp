@@ -51,8 +51,19 @@
               "openWorldHint": false,
               "readOnlyHint": true
             },
-            "description": "Zero-arg entry point: tools, operating level + gates, connection/standby status, feature tiers, version.",
+            "description": "Compact discovery entry point: tools, operating level + gates, connection/standby status, feature tiers, version. Pass detail_level=full for the complete pre-0.9.1 descriptor report.",
             "inputSchema": {
+              "additionalProperties": false,
+              "properties": {
+                "detail_level": {
+                  "description": "compact (default) omits tool summaries and schemas; full returns the complete descriptor report.",
+                  "enum": [
+                    "compact",
+                    "full"
+                  ],
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             "name": "oracle_capabilities",
@@ -1195,10 +1206,14 @@
               "openWorldHint": false,
               "readOnlyHint": true
             },
-            "description": "Return bounded orientation evidence: by default one cacheable snapshot for the active profile; fleet=true maps every MCP-visible profile independently with schema, version, freshness, drift, and typed UNREACHABLE/FAIL_CLOSED lane status. Dictionary reads are parameterized and read-only; include selects schema, fks, hot, freshness, and/or ddl (all by default).",
+            "description": "Return bounded orientation evidence: by default one cacheable snapshot for the active profile; fleet=true maps every MCP-visible profile independently with schema, version, freshness, drift, and typed UNREACHABLE/FAIL_CLOSED lane status. Dictionary reads are parameterized and read-only; include selects schema, fks, hot, freshness, and/or ddl (all by default). Every selected row list is capped and the response makes truncation explicit.",
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
+                "cursor": {
+                  "description": "Opaque continuation cursor returned by a truncated orient response. It is bound to this owner, include selection, fleet flag, and profile.",
+                  "type": "string"
+                },
                 "fleet": {
                   "description": "When true, orient every MCP-visible configured profile independently. Each profile is returned with REACHABLE, UNREACHABLE, or FAIL_CLOSED status; one unavailable lane never omits or fails the other lanes.",
                   "type": "boolean"
@@ -1216,6 +1231,18 @@
                     "type": "string"
                   },
                   "type": "array"
+                },
+                "limit": {
+                  "description": "Alias for max_rows.",
+                  "maximum": 250,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_rows": {
+                  "description": "Maximum rows for each selected orientation list (default 100). The response sets truncated=true and returns next_cursor when another bounded page may exist.",
+                  "maximum": 250,
+                  "minimum": 1,
+                  "type": "integer"
                 },
                 "owner": {
                   "description": "Optional schema owner (case-insensitive). Omit or use * for all visible schemas.",
@@ -1239,6 +1266,18 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
+                "limit": {
+                  "description": "Alias for max_rows. Prefer max_rows.",
+                  "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_rows": {
+                  "description": "Maximum constraint rows to return (default 200, hard cap 5000).",
+                  "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
                 "name": {
                   "description": "Alias for table. Prefer table.",
                   "type": "string"
@@ -1359,7 +1398,7 @@
               "openWorldHint": false,
               "readOnlyHint": true
             },
-            "description": "Fetch an object's DDL via DBMS_METADATA.GET_DDL (allowlisted object types).",
+            "description": "Fetch an object's DDL via DBMS_METADATA.GET_DDL (allowlisted object types). Responses include full and returned character counts plus an explicit truncated flag; a long DDL prefix is never presented as a complete document.",
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
@@ -1395,10 +1434,15 @@
               "openWorldHint": false,
               "readOnlyHint": true
             },
-            "description": "Fetch an object's full source text from ALL_SOURCE with a character cap. Omit object_type to return every visible source variant for the object name.",
+            "description": "Fetch an object's full source text or inclusive line range from ALL_SOURCE with a character cap. Omit object_type to return every visible source variant for the object name.",
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
+                "from_line": {
+                  "description": "Optional first ALL_SOURCE line to return, inclusive. Pair with oracle_search_source's LINE result.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
                 "max_chars": {
                   "description": "Maximum source characters to return (default 1000000).",
                   "minimum": 1,
@@ -1419,6 +1463,11 @@
                 "owner": {
                   "description": "Optional schema owner (case-insensitive). Defaults to current schema when available.",
                   "type": "string"
+                },
+                "to_line": {
+                  "description": "Optional last ALL_SOURCE line to return, inclusive. Must not be lower than from_line.",
+                  "minimum": 1,
+                  "type": "integer"
                 }
               },
               "required": [],
@@ -1539,6 +1588,18 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
+                "limit": {
+                  "description": "Alias for max_rows. Prefer max_rows.",
+                  "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_rows": {
+                  "description": "Maximum compile errors to return (default 200, hard cap 5000).",
+                  "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
                 "name": {
                   "description": "Optional object name. May be OWNER.NAME. Omit to list all compile errors for the owner/current schema.",
                   "type": "string"
@@ -1565,7 +1626,7 @@
               "openWorldHint": false,
               "readOnlyHint": true
             },
-            "description": "Full-text search across ALL_SOURCE for a needle (row-capped).",
+            "description": "Full-text search across ALL_SOURCE for a needle (row- and line-capped).",
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
@@ -1573,6 +1634,12 @@
                   "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows.",
                   "maximum": 5000,
                   "minimum": 1,
+                  "type": "integer"
+                },
+                "max_line_chars": {
+                  "description": "Maximum characters retained from each matching source line (default 500). Longer lines end with an explicit truncation marker; use oracle_get_source with from_line/to_line for the exact source range.",
+                  "maximum": 4000,
+                  "minimum": 16,
                   "type": "integer"
                 },
                 "max_rows": {
@@ -1617,6 +1684,18 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
+                "limit": {
+                  "description": "Alias for max_rows. Prefer max_rows.",
+                  "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_rows": {
+                  "description": "Maximum identifiers and SQL statements per array (default 200, hard cap 5000).",
+                  "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
                 "name": {
                   "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied.",
                   "type": "string"
@@ -2164,19 +2243,23 @@
               "openWorldHint": false,
               "readOnlyHint": true
             },
-            "description": "Compatibility alias for oracle_schema_inspect; omit arguments to inspect the current schema.",
+            "description": "Compact schema orientation alias. With no object_type it lists TABLE, VIEW, and PACKAGE objects only; a bounded truncated page carries an opaque cursor.",
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
+                "cursor": {
+                  "description": "Opaque continuation cursor returned by a truncated get_schema page.",
+                  "type": "string"
+                },
                 "limit": {
-                  "description": "Maximum objects to return.",
-                  "maximum": 5000,
+                  "description": "Maximum objects to return (default 100, hard cap 250).",
+                  "maximum": 250,
                   "minimum": 1,
                   "type": "integer"
                 },
                 "max_rows": {
                   "description": "Alias for limit.",
-                  "maximum": 5000,
+                  "maximum": 250,
                   "minimum": 1,
                   "type": "integer"
                 },
@@ -2185,7 +2268,7 @@
                   "type": "string"
                 },
                 "object_type": {
-                  "description": "Optional object type filter.",
+                  "description": "Optional object type filter. Supplying it overrides the compact TABLE/VIEW/PACKAGE default projection.",
                   "type": "string"
                 },
                 "owner": {
@@ -2210,6 +2293,16 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
+                "limit": {
+                  "description": "Alias for max_rows.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_rows": {
+                  "description": "Maximum columns and constraints returned.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
                 "name": {
                   "description": "Alias for table_name.",
                   "type": "string"
@@ -2330,7 +2423,7 @@
               "openWorldHint": false,
               "readOnlyHint": true
             },
-            "description": "Compatibility alias for oracle_get_ddl.",
+            "description": "Compatibility alias for oracle_get_ddl; long DDL is explicitly marked partial rather than silently truncated.",
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
@@ -2409,6 +2502,16 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
+                "limit": {
+                  "description": "Alias for max_rows.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_rows": {
+                  "description": "Maximum compiler diagnostics returned.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
                 "name": {
                   "description": "Alias for object_name.",
                   "type": "string"
