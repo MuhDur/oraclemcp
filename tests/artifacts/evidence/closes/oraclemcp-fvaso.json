@@ -1,0 +1,47 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T18:10:00Z",
+  "bead_id": "oraclemcp-fvaso",
+  "scope": {
+    "summary": "Plan \u00a730.4 item 7 (CC1): the single-principal admission guard had no test at all; a panic taken while it is held must leave the rightful principal's retry admitted and must not hand the binding to anyone else.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/http/tests_auth.rs"
+    ],
+    "out_of_scope": [
+      "Any production change. The shipped design already satisfies both directions (parking_lot::Mutex over a sticky binding); this close adds the regression that pins it, and deliberately changes no behaviour.",
+      "The other 409 sources in crates/oraclemcp-core/src/http/operator.rs (change-proposal store locks etc.), which were another agent's mid-edit throughout and are a different conflict class.",
+      "An end-to-end HTTP-level panic injection. The guard is the unit that decides admit-vs-409; driving a real panic through a live listener would test the framework, not this decision."
+    ]
+  },
+  "source": {
+    "sha": "f55547007d88a926de461d819cc945643441fe15",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "cargo test -p oraclemcp-core --lib a_panic_holding_the_admission_guard",
+        "kind": "cli",
+        "trace": "2 tests pass. The regression admits principal-a, panics inside catch_unwind while holding active_principal_key, then asserts (1) principal-a's retry is Ok \u2014 not stranded behind 409 \u2014 and (2) principal-b is still Err. The companion test pins that the refusal really is HTTP 409 with error=single_principal_active, so a status change cannot silently redefine what 'admitted' means. MUTATION-CHECKED: changing admit to hand the binding to any later principal fails with 'a panic must not release the binding to another principal'."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Unit-level panic injection at the guard, not a panic driven through a live HTTP request; the item's 'framework panic' is simulated by unwinding while the guard's lock is held, which is the state a handler panic leaves behind.",
+    "cargo clippy -p oraclemcp-core --lib --tests could not be run with -D warnings: crates/oraclemcp-db/src/intelligence.rs is another agent's mid-edit whose in-flight get_source trips clippy::too_many_arguments (8/7), failing the dependency build. Verified instead by scanning the clippy output for findings in the touched file (none). That mid-edit will red CI when pushed; reported to the swarm, not fixed here.",
+    "Scoped verification only: no workspace-wide run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
