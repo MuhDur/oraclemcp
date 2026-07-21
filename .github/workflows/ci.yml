@@ -588,6 +588,11 @@ jobs:
       # D4 (plan §25.7.3): the fuzz lane's nightly wall clock is one shard, not
       # the sum, and only while every shard stays sharded, timeout-bounded, and
       # carries -max_total_time. Asserted here so it cannot quietly regress.
+      # P6: the manifest validator is a gate, so it must be able to FAIL. The
+      # selftest feeds it a known-good graph and then one targeted mutation per
+      # rule, requiring the matching error code each time.
+      - name: plan-bead-graph lint selftest (P6)
+        run: python3 scripts/plan_bead_graph_lint.py --selftest
       - name: fuzz lane budget (D4)
         run: |
           python3 scripts/ci_lane_budget.py --selftest
