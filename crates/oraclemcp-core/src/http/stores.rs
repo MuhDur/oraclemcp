@@ -344,7 +344,6 @@ const MAX_BUFFERED_MCP_BYTES_GLOBAL: usize = 64 * 1024 * 1024;
 #[derive(Debug, Default)]
 pub struct HttpResultStore {
     state: Mutex<HttpResultStoreState>,
-    changed: Condvar,
     limits: HttpResultStoreLimits,
 }
 
@@ -381,6 +380,14 @@ struct HttpResultSession {
     next_sequence: u64,
     dropped_through_sequence: u64,
     cursor_binding: String,
+    /// Waiters for one SSE replay session share a notifier. Keeping it on the
+    /// session avoids waking every other session when this session receives an
+    /// event, while removals and shutdown can still wake the affected set.
+    changed: Arc<Condvar>,
+    #[cfg(test)]
+    waiting_waiters: usize,
+    #[cfg(test)]
+    wait_rechecks: usize,
 }
 
 #[derive(Debug)]
@@ -398,6 +405,11 @@ impl HttpResultSession {
             next_sequence: 0,
             dropped_through_sequence: 0,
             cursor_binding: sha256_hex(session_id.as_bytes())[..32].to_owned(),
+            changed: Arc::new(Condvar::new()),
+            #[cfg(test)]
+            waiting_waiters: 0,
+            #[cfg(test)]
+            wait_rechecks: 0,
         }
     }
 
@@ -496,7 +508,6 @@ impl HttpResultStore {
     pub(super) fn with_limits_for_test(limits: HttpResultStoreLimits) -> Self {
         Self {
             state: Mutex::new(HttpResultStoreState::default()),
-            changed: Condvar::new(),
             limits,
         }
     }
@@ -527,13 +538,17 @@ impl HttpResultStore {
         }
         let completion_ordinal = state.next_completion_ordinal;
         state.next_completion_ordinal = state.next_completion_ordinal.saturating_add(1);
-        let (next_seq, cursor_binding) = {
+        let (next_seq, cursor_binding, changed) = {
             let session = state
                 .sessions
                 .get_mut(session_id)
                 .expect("session presence was checked under the same store lock");
             session.next_sequence = session.next_sequence.saturating_add(1);
-            (session.next_sequence, session.cursor_binding.clone())
+            (
+                session.next_sequence,
+                session.cursor_binding.clone(),
+                Arc::clone(&session.changed),
+            )
         };
         let id = format!("{next_seq}/{cursor_binding}");
         let event = match event_name {
@@ -599,7 +614,7 @@ impl HttpResultStore {
             state.retained_bytes = state.retained_bytes.saturating_sub(evicted_bytes);
         }
         drop(state);
-        self.changed.notify_all();
+        changed.notify_all();
         Some(id)
     }
 
@@ -648,28 +663,51 @@ impl HttpResultStore {
         timeout: Duration,
     ) -> HttpResultWait {
         let mut state = self.state.lock();
+        let mut rechecking = false;
         loop {
-            let Some(session) = state.sessions.get(session_id) else {
-                return HttpResultWait::Closed;
+            let (events, dropped_through_sequence, cursor_binding, changed) = {
+                let Some(session) = state.sessions.get_mut(session_id) else {
+                    return HttpResultWait::Closed;
+                };
+                #[cfg(test)]
+                if rechecking {
+                    session.wait_rechecks = session.wait_rechecks.saturating_add(1);
+                }
+                #[cfg(not(test))]
+                let _ = rechecking;
+                (
+                    session.buffered_events(),
+                    session.dropped_through_sequence,
+                    session.cursor_binding.clone(),
+                    Arc::clone(&session.changed),
+                )
             };
-            let events = session.buffered_events();
             let cursor = format!("{after_seq}/0");
             match events_after_sequence(
                 &events,
-                session.dropped_through_sequence,
+                dropped_through_sequence,
                 after_seq,
                 Some(&cursor),
                 true,
-                &session.cursor_binding,
+                &cursor_binding,
             ) {
                 Ok(events) if !events.is_empty() => return HttpResultWait::Events(events),
                 Ok(_) => {}
                 Err(_) => return HttpResultWait::Closed,
             }
-            let wait = self.changed.wait_for(&mut state, timeout);
+            #[cfg(test)]
+            if let Some(session) = state.sessions.get_mut(session_id) {
+                session.waiting_waiters = session.waiting_waiters.saturating_add(1);
+            }
+            let wait = changed.wait_for(&mut state, timeout);
+            #[cfg(test)]
+            if let Some(session) = state.sessions.get_mut(session_id) {
+                session.waiting_waiters = session.waiting_waiters.saturating_sub(1);
+            }
             if wait.timed_out() {
                 return HttpResultWait::Timeout;
             }
+            rechecking = true;
         }
     }
 
@@ -680,19 +718,44 @@ impl HttpResultStore {
             state.retained_bytes = state.retained_bytes.saturating_sub(session.retained_bytes);
         }
         drop(state);
-        if removed.is_some() {
-            self.changed.notify_all();
+        if let Some(session) = removed {
+            session.changed.notify_all();
         }
     }
 
     pub(super) fn close_all(&self) {
         let mut state = self.state.lock();
         if !state.sessions.is_empty() {
+            let changed = state
+                .sessions
+                .values()
+                .map(|session| Arc::clone(&session.changed))
+                .collect::<Vec<_>>();
             state.sessions.clear();
             state.retained_bytes = 0;
             drop(state);
-            self.changed.notify_all();
+            for changed in changed {
+                changed.notify_all();
+            }
         }
+    }
+
+    #[cfg(test)]
+    fn waiter_stats_for_test(&self, session_id: &str) -> Option<(usize, usize)> {
+        self.state
+            .lock()
+            .sessions
+            .get(session_id)
+            .map(|session| (session.waiting_waiters, session.wait_rechecks))
+    }
+
+    #[cfg(test)]
+    fn waiter_notification_identity_for_test(&self, session_id: &str) -> Option<usize> {
+        self.state
+            .lock()
+            .sessions
+            .get(session_id)
+            .map(|session| Arc::as_ptr(&session.changed) as usize)
     }
 
     #[cfg(test)]
@@ -712,4 +775,107 @@ pub(super) enum HttpResultWait {
     Events(Vec<HttpBufferedEvent>),
     Closed,
     Timeout,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn wait_for_waiter(store: &HttpResultStore, session_id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if store
+                .waiter_stats_for_test(session_id)
+                .is_some_and(|(waiting_waiters, _)| waiting_waiters == 1)
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "waiter for {session_id} did not enter its bounded wait"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn result_store_wakes_only_affected_session_waiters() {
+        let store = Arc::new(HttpResultStore::new());
+        let target = "target";
+        let unrelated = ["unrelated-a", "unrelated-b", "unrelated-c"];
+        store.ensure_session(target);
+        for session_id in unrelated {
+            store.ensure_session(session_id);
+            assert_ne!(
+                store.waiter_notification_identity_for_test(target),
+                store.waiter_notification_identity_for_test(session_id),
+                "each session must use a distinct wait channel"
+            );
+        }
+
+        let (target_tx, target_rx) = mpsc::channel();
+        let target_store = Arc::clone(&store);
+        let target_session = target.to_owned();
+        let target_waiter = std::thread::spawn(move || {
+            target_tx
+                .send(target_store.wait_events_after(&target_session, 0, Duration::from_secs(2)))
+                .expect("target result receiver stays open");
+        });
+
+        let mut unrelated_waiters = Vec::new();
+        for session_id in unrelated {
+            let (tx, rx) = mpsc::channel();
+            let waiting_store = Arc::clone(&store);
+            let session = session_id.to_owned();
+            let waiter = std::thread::spawn(move || {
+                tx.send(waiting_store.wait_events_after(&session, 0, Duration::from_secs(2)))
+                    .expect("unrelated result receiver stays open");
+            });
+            unrelated_waiters.push((session_id, rx, waiter));
+        }
+
+        wait_for_waiter(&store, target);
+        for (session_id, _, _) in &unrelated_waiters {
+            wait_for_waiter(&store, session_id);
+        }
+
+        store.append_response(target, serde_json::json!({ "target": true }));
+        let target_result = target_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("target event wakes its own waiter promptly");
+        assert!(matches!(target_result, HttpResultWait::Events(events) if events.len() == 1));
+        target_waiter.join().expect("target waiter joins");
+
+        // A previous shared Condvar woke and rechecked every unrelated waiter.
+        // Their distinct notification channels leave each counter unchanged.
+        std::thread::sleep(Duration::from_millis(25));
+        for (session_id, _, _) in &unrelated_waiters {
+            assert_eq!(
+                store.waiter_stats_for_test(session_id),
+                Some((1, 0)),
+                "event for {target} must not wake/recheck {session_id}"
+            );
+        }
+
+        store.remove_session(unrelated[0]);
+        let (_, removed_rx, removed_waiter) = unrelated_waiters.remove(0);
+        assert!(matches!(
+            removed_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("removed session wakes its waiter"),
+            HttpResultWait::Closed
+        ));
+        removed_waiter.join().expect("removed waiter joins");
+
+        store.close_all();
+        for (_, rx, waiter) in unrelated_waiters {
+            assert!(matches!(
+                rx.recv_timeout(Duration::from_secs(1))
+                    .expect("shutdown wakes every remaining waiter"),
+                HttpResultWait::Closed
+            ));
+            waiter.join().expect("shutdown waiter joins");
+        }
+    }
 }
