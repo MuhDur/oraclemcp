@@ -1,0 +1,30 @@
+{
+  "schema": "oraclemcp-live-session-footprint/v1",
+  "generated_at": "2026-07-21T23:16:24Z",
+  "run_id": "local-20260721T231624Z-p2-footprint",
+  "lane": "local-xe21-lab",
+  "source_sha": "2106de73bd2dfe581dde6005de2e49eb0dc0a11b",
+  "lane_detail": {
+    "kind": "local-xe21-lab",
+    "database_identity": "redacted"
+  },
+  "profile": {
+    "role": "ephemeral-read-only-footprint-probe",
+    "pool_max_size": 3,
+    "pool_min_idle": 2
+  },
+  "probe": {
+    "session_tag": "synthetic-redacted",
+    "observer": "independent-local-sysdba-session"
+  },
+  "observations": {
+    "sessions_before_start": 0,
+    "connection_strategy": "pinned_plus_stateless",
+    "stateless_strategy": "stateless_metadata_pool",
+    "reported_pool_open_connections": 2,
+    "observed_tagged_vsession_count": 3,
+    "sessions_after_clean_stdio_shutdown": 0
+  },
+  "verdict": "pass",
+  "interpretation": "The reported pool count covers the two stateless pool sessions; the independent V$SESSION observer counted those plus the separate pinned main session. No connection endpoint, credential, database name, SID, serial number, or real client identity is recorded."
+}
