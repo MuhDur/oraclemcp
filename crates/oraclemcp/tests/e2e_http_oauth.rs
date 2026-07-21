@@ -790,6 +790,101 @@ fn stateful_http_lanes_keep_operating_level_isolated_per_session_and_subject() {
 }
 
 #[test]
+fn streamable_http_ladder_steps_up_all_rungs_then_expires_and_scope_lowers() {
+    let mut config = oauth_config(Vec::new());
+    config.stateful = true;
+    config.single_principal_guard = None;
+    let harness = spawn_http_with_server(config, per_lane_dispatcher_server(OperatingLevel::Admin));
+    let admin = jwt_with_scope_and_subject("oracle:admin", Some("ladder-agent"));
+    let read = jwt_with_scope_and_subject("oracle:read", Some("ladder-agent"));
+    let session = stateful_initialize(harness.addr, &admin, "e1-http-ladder");
+
+    let initial = stateful_tool_call(
+        harness.addr,
+        &admin,
+        &session,
+        "oracle_set_session_level",
+        json!({ "action": "status" }),
+    );
+    assert_eq!(
+        initial["result"]["structuredContent"]["session"]["current_level"],
+        json!("READ_ONLY"),
+        "a new Streamable HTTP lane starts at READ_ONLY"
+    );
+
+    for (level, ttl_seconds) in [("READ_WRITE", 60), ("DDL", 60), ("ADMIN", 1)] {
+        let preview = stateful_tool_call(
+            harness.addr,
+            &admin,
+            &session,
+            "oracle_set_session_level",
+            json!({ "level": level, "ttl_seconds": ttl_seconds }),
+        );
+        let confirm = preview["result"]["structuredContent"]["confirmation"]["confirm"]
+            .as_str()
+            .expect("each upward rung mints a single-use confirmation")
+            .to_owned();
+        let applied = stateful_tool_call(
+            harness.addr,
+            &admin,
+            &session,
+            "oracle_set_session_level",
+            json!({
+                "level": level,
+                "ttl_seconds": ttl_seconds,
+                "execute": true,
+                "confirm": confirm,
+            }),
+        );
+        assert_eq!(
+            applied["result"]["structuredContent"]["session"]["current_level"],
+            json!(level),
+            "confirmed Streamable HTTP elevation reaches {level}"
+        );
+    }
+
+    let read_scoped = stateful_tool_call(
+        harness.addr,
+        &read,
+        &session,
+        "oracle_set_session_level",
+        json!({ "action": "status" }),
+    );
+    assert_eq!(
+        read_scoped["result"]["structuredContent"]["session"]["current_level"],
+        json!("READ_ONLY"),
+        "a read-scoped request can only lower the live ADMIN session"
+    );
+
+    let restored = stateful_tool_call(
+        harness.addr,
+        &admin,
+        &session,
+        "oracle_set_session_level",
+        json!({ "action": "status" }),
+    );
+    assert_eq!(
+        restored["result"]["structuredContent"]["session"]["current_level"],
+        json!("ADMIN"),
+        "scope narrowing is request-local and cannot persistently mutate the lane"
+    );
+
+    thread::sleep(Duration::from_millis(1_100));
+    let expired = stateful_tool_call(
+        harness.addr,
+        &admin,
+        &session,
+        "oracle_set_session_level",
+        json!({ "action": "status" }),
+    );
+    assert_eq!(
+        expired["result"]["structuredContent"]["session"]["current_level"],
+        json!("READ_ONLY"),
+        "the TTL-bounded ADMIN elevation expires on the live Streamable HTTP lane"
+    );
+}
+
+#[test]
 fn stateful_http_lanes_keep_profile_switches_and_connections_isolated() {
     let mut config = oauth_config(Vec::new());
     config.stateful = true;
