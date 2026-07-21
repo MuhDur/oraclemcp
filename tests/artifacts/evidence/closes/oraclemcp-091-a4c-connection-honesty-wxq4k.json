@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T15:28:55Z",
+  "bead_id": "oraclemcp-091-a4c-connection-honesty-wxq4k",
+  "scope": {
+    "summary": "Makes connection reporting depend on observed liveness probes, labels build capability honestly, and makes doctor report the observed state of each configured connection.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/capabilities.rs",
+      "crates/oraclemcp-core/src/doctor.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs",
+      "crates/oraclemcp/src/registry.rs"
+    ],
+    "out_of_scope": [
+      "Live Oracle availability, credentials, and profile configuration.",
+      "Changing the SQL guard, session-level policy, or stateless read routing."
+    ]
+  },
+  "source": {
+    "sha": "ea6fd1f0186b82170e0797e7c5885ddf5f6cbd46",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_connection_info",
+        "kind": "tool",
+        "trace": "connection_info_reports_disconnected_when_the_liveness_round_trip_fails proves a failed ping produces connected:false, a null connection payload, and structured recovery guidance without describe()."
+      },
+      {
+        "name": "oracle_capabilities dynamic connection surface",
+        "kind": "tool",
+        "trace": "capability_surface_liveness_ping_quarantines_an_uncertain_retained_session proves the capability surface performs a liveness probe and retains the dispatcher quarantine on an uncertain primary-session failure."
+      },
+      {
+        "name": "oraclemcp doctor --online",
+        "kind": "cli",
+        "trace": "doctor::tests covers a configured-but-unopened stateless pool as a warning and a stateless pool ping failure as a failing connectivity check after primary success."
+      },
+      {
+        "name": "startup banner and capability payload",
+        "kind": "cli",
+        "trace": "build_capability_payloads_do_not_claim_live_connectivity proves the emitted field is built_with_live_db, describing compilation support rather than a current database connection."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped offline verification passed: cargo fmt -p oraclemcp -p oraclemcp-core -- --check; cargo test -p oraclemcp --lib connection_info_reports_disconnected_when_the_liveness_round_trip_fails -- --nocapture; cargo test -p oraclemcp --lib capability_surface_liveness_ping_quarantines_an_uncertain_retained_session -- --nocapture; cargo test -p oraclemcp --lib qa107_describe_uncertainty -- --nocapture; cargo test -p oraclemcp-core --lib doctor::tests:: -- --nocapture; cargo test -p oraclemcp --bin oraclemcp build_capability_payloads_do_not_claim_live_connectivity -- --nocapture.",
+    "No live Oracle outage is claimed; failure behavior is proved with deterministic connection mocks and doctor unit tests."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
