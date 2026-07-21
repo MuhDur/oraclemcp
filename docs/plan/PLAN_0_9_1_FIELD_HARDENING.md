@@ -2,6 +2,9 @@
 
 **Version:** v5 (v2: review round 1 — CI-red ground truth → Workstream Z, P2 tail → Workstream P, P1-2 grounded, 17/17 Appendix-A claims re-verified. v3: inferred-sibling sweep S1–S15 → §A.10, new B14/B15/B16. v4: **Workstream R — the Local Integrator Rig**. v5: **operator rulings recorded on every open decision** (marked "OPERATOR RULING (2026-07-20)" inline), Z1 RESOLVED in-session — root cause was CI shallow checkout, `codex/d2-completion` landed as `5a52bf6`+`3f057e2`, `ci.yml` fetch-depth fixed — and the driver bug-bead un-deferral ruling folded as G12). **Date:** 2026-07-20.
 **Owner:** lead orchestrator. **Release is operator-gated** — agents never tag or publish.
+**v7 delta (2026-07-21):** the Z2 fresh mutation campaign is **DEFERRED OUT of 0.9.1** (operator
+ruling) — a seal binds to a SHA and would re-stale on every safety-crate fix, so it is produced once
+on the release candidate; the three `E_STALE_SEAL` CI reds are an accepted deferred state (§Z2, §9.2).
 
 **How to use this document.** It is written to be self-contained: an agent that has never seen this
 project should be able to pick any task here and implement it without asking a human. Every task names
@@ -186,15 +189,19 @@ base. Nothing else in this plan can show honest green until Z lands (constitutio
   **Rule (stays; goes into AGENTS.md alongside §A.8):** close evidence must cite commits **reachable
   from `origin/main`** at close time — the shallow-checkout episode proves the reachability check
   must also run against a full-history view.
-- **Z2 [P0] — fresh mutation campaign (the `E_STALE_SEAL` red). OPERATOR RULING (2026-07-20):
-  authorized, in-plan, and MUST be executed by Codex ("Spark") so it does not consume Claude
-  usage.** The committed mutation marker (sealed at `4dca0b2`, scopes guard+audit, 27 files, 1889
-  mutants, 3/3 shards) carries `status=stale`; the gate fails **both** the coverage-ratchet and
-  release-preflight jobs on it. Post-Z1 note: `3f057e2` landed D2's `check-floor-report`, so the
-  fresh campaign must produce **independent per-crate seals for guard, audit, AND db** (complete
-  exact-SHA shards, OOM-honest), using the new disk-backed scratch + wrapper hygiene from `fecfa06`'s
-  gate-script half. Memory-cap every run, take the build lease, dedicated target dir. This also
-  closes out G2/bead `5.2`'s enforcement leg.
+- **Z2 [DEFERRED OUT OF 0.9.1 — OPERATOR RULING (2026-07-21)]. The fresh five-surface mutation
+  campaign is removed from this plan's scope entirely.** Rationale (recorded): a mutation seal binds
+  to an exact source SHA, and this plan's A/B workstreams change the safety crates (guard, audit, db,
+  dispatch) repeatedly — so a seal produced now would be re-staled by the first safety-crate fix and
+  re-run at the release candidate anyway. Producing a ~12-hour throwaway seal ahead of the fixes is
+  effort in the wrong order. **The mutation seal is a release-gate concern, produced once on the RC
+  after the safety-crate changes land — that work is out of THIS train** (like Cluster J). A partial
+  attempt on 2026-07-21 (guard + audit shards computed via Codex Spark) is abandoned; its scattered
+  artifacts and the `oraclemcp-z2-mutation` worktree are throwaway.
+  **Consequence for green-main (see §9.2 item 7):** the `E_STALE_SEAL` marker persists, so the
+  **coverage-ratchet**, **release-preflight**, and the **heartbeat that aggregates them** stay red —
+  a **known, operator-accepted deferred state**. Every other required lane is green (Z1 fixed the
+  real red). Resolving those three is coupled to the deferred seal and is not a 0.9.1 obligation.
 - **Z3 [P1→P0-disposition] — the Windows workspace lane. OPERATOR RULING (2026-07-20): MUST be
   fixed — re-deferral is off the table.** "Rust workspace (Windows) → cargo test workspace on
   Windows" went red on the `6519a57` run (previous run green; only docs commits in between ⇒ flake or
@@ -207,9 +214,11 @@ base. Nothing else in this plan can show honest green until Z lands (constitutio
   content is already merged to `main` (§A.9). Commit the evidence through the guarded close flow once
   B5 / §A.6.11 verification passes. Do not delete branches without explicit operator approval.
 
-**Acceptance:** both repos' front pages fully green measured as *every check-run on HEAD* (see
-`frontpage-green-mechanics`), bead-evidence audit **0 hard findings in CI**, mutation gate green on a
-fresh seal.
+**Acceptance:** every **required** lane on both repos' front pages green measured as *every
+check-run on HEAD* (see `frontpage-green-mechanics`), bead-evidence audit **0 hard findings in CI**.
+The three `E_STALE_SEAL`-derived checks (coverage-ratchet, release-preflight, aggregating heartbeat)
+are the **known deferred-seal red** (Z2 deferred) — excluded from this acceptance and resolved at the
+release candidate, not in 0.9.1.
 
 ### Workstream A — P0 adoption blockers
 
@@ -1051,7 +1060,7 @@ scrubbed by the existing secret/sensitive-data lints.
   committed baseline — a category change or a newly-ALLOWED construct is itself a finding.
 - **R5 [P1, in-train as R5-LITE]. OPERATOR RULING (2026-07-20): option 2 — R5-lite via Codex Spark
   on the release candidate, baked into the train.** One operator-gated
-  `codex exec -m gpt-5.3-codex-spark` session (the proven Z2 launch shape — near-zero Claude usage)
+  `codex exec -m gpt-5.3-codex-spark` session (a proven headless-Codex launch shape — near-zero Claude usage)
   drives the INSTALLED release-candidate server over stdio AND Streamable HTTP from a literal
   hand-authored config, through a fixed prompt list covering orientation → schema exploration →
   governed read → refusal → error-recovery; the full transcript feeds R4's round-N report. This is
@@ -1157,10 +1166,11 @@ authoritative AVAILABLE=0 check before and after every run.
 ### Workstream G — Remaining beads
 
 - **G1 [P1] `8.1` IAM subject-mapping config** (`he7t` residual) — last product gap from the OCI/IAM work.
-- **G2 [P1] `5.2` D2 coverage ratchet** — changed-line coverage + per-crate mutation floor on
-  guard/audit/db (TRI-1: changed-line coverage on modified `src/*.rs` lines gated at the crate floor,
-  AND a per-crate mutation kill-rate floor on the three safety crates — the D2 `check-floor-report`
-  seal Z2 produces). Deliberately **not** a naive never-decrease total. Builds on the
+- **G2 [P1] `5.2` D2 coverage ratchet — changed-line leg only in 0.9.1; mutation-floor leg DEFERRED
+  with Z2.** The changed-line-coverage leg (coverage on modified `src/*.rs` lines gated at the crate
+  floor) stays in scope. The per-crate **mutation kill-rate floor** leg depends on the
+  `check-floor-report` seal, which requires the fresh campaign now deferred (§Z2) — so it defers to
+  the release-candidate seal work. Deliberately **not** a naive never-decrease total. Builds on the
   D1 baselines already landed (server 88.68% lines, driver 80.08%).
 - **G3 [P2] F-LOW children `7.11.1..20`** — 20 grounded defects with `file:line`. **Triage, don't
   bulk-fix.** Prioritise those that intersect this plan's themes:
@@ -1232,8 +1242,8 @@ done. §10's conversion requirements enforce this structurally.
 ## 5. Sequencing and dependencies
 
 ```
-Z (restore main to green: Z1 branches, Z2 mutation seal, Z3 Windows, Z4 driver bookkeeping)
-        │  ← precedes everything below; Z1 DONE (§Z1), Z2 runs while C is being written
+Z (restore main to green: Z1 branches ✅, Z2 mutation seal DEFERRED, Z3 Windows, Z4 driver bookkeeping)
+        │  ← precedes everything below; Z1 DONE (§Z1), Z2 deferred out (§Z2)
         ┌─ C (wire-contract fixtures) ──────────────┐  offline, start immediately
         │                                            │
 F0 (operator: OCI auth) ─────────────┐               ▼
@@ -1249,7 +1259,8 @@ F0 (operator: OCI auth) ─────────────┐              
 ```
 
 **Critical path:** `D → E/R → H`. **Z (CI green) precedes everything** — a red `main` makes every later
-green claim dishonest (constitution #2); Z1 is DONE (§Z1) and Z2 (mechanical) runs while C is being written.
+green claim dishonest (constitution #2); Z1 is DONE (§Z1); Z2 (the mutation seal) is DEFERRED out of
+0.9.1 (§Z2) — its three `E_STALE_SEAL` reds are an accepted deferred state, not a blocker for A/B.
 **C is off the critical path and should start first among the build work** — it is offline, cheap,
 and its failures define "done" for A/B. **F is parallel** and gated only on F0 (done).
 
@@ -1330,7 +1341,7 @@ stage-aware TLS work already on `main`. Added public API is *minor*-compatible, 
 | **Scope is large for one release** | P0/P1 gate the cut; P2/P3 ship if clean. Land complete, not sliced (constitution #11) |
 | **cosign/attest v4 majors** (from Dependabot #19) live on tag-only paths CI cannot exercise | The first release run is the only proof — watch it deliberately |
 | **B6 broadens trust** (system roots trusted alongside a private-CA wallet) | It restores reference parity, the wallet stays included, and no accept-all mode exists or is added; record the B6c knob decision either way |
-| **Z2's fresh mutation campaign is heavy** (1889 mutants, guard+audit) | Memory-cap every run + build lease + dedicated target dir (the standing OOM lesson); reuse the 3-shard shape the stale seal records |
+| **The deferred mutation seal (§Z2) leaves 3 CI checks red through 0.9.1** | Operator-accepted (2026-07-21): the seal binds to a SHA and would re-stale on every safety-crate fix; produced once on the RC. Documented in §9.2 item 7 so the red is never mistaken for an escape |
 
 ---
 
@@ -1344,10 +1355,10 @@ Learned twice this week the hard way (a ci.yml comment broke `release_surface_sy
 (+ the two `dashboard-bundle` invocations) · `cargo test --workspace` · `cargo deny check` ·
 `check_entry_trace_contract.sh` · `ci_taxonomy.py --check` (+ crate-copy sync) ·
 `release_surface_sync_check.sh` · honesty/provenance/concurrency lints ·
-`check_bead_close_evidence.sh` · **`mutation_safety_gate.sh` seal-freshness** (the `E_STALE_SEAL`
-class must fail locally, not first in CI — learned in §A.9) · **evidence-SHA reachability from
-`origin/main`** (Z1's rule; plain local resolution is exactly how §A.9's red slipped past the local
-gate).
+`check_bead_close_evidence.sh` · **evidence-SHA reachability from `origin/main`** (Z1's rule; plain
+local resolution is exactly how §A.9's red slipped past the local gate). *(The `mutation_safety_gate.sh`
+seal-freshness check is intentionally NOT in this gate — Z2 is deferred, so the stale seal is an
+accepted state until the release candidate; re-adding this check is part of the deferred RC seal work.)*
 **driver:** fmt · clippy · tests · **`scripts/gen_baseline.sh --check`** · `verify_required_local.py`.
 Heavy builds go through `scripts/build_lease.sh` with a dedicated `CARGO_TARGET_DIR` (the build-lease
 guard enforces this via `scripts/check_build_lease.sh` / the repo-local Cargo compiler wrapper — which
@@ -1361,13 +1372,16 @@ blocked the orchestrator's own build tonight, correctly).
 5. **F** green, or explicitly deferred if F0 does not happen.
 6. Every bead closed carries **landed evidence** passing `check_bead_close_evidence.sh` with **0 hard
    findings** (the guard already rejected six different evidence defects this week — respect it).
-7. **Both repos' front pages green** — measured as *every check-run on the HEAD commit*, not run
-   conclusions (see `frontpage-green-mechanics`).
+7. **Both repos' front pages green on every REQUIRED lane** — measured as *every check-run on the
+   HEAD commit*, not run conclusions (see `frontpage-green-mechanics`) — **except** the three
+   `E_STALE_SEAL`-derived checks (coverage-ratchet, release-preflight, aggregating heartbeat), which
+   are the operator-accepted **deferred-seal red** (Z2 deferred out of 0.9.1) and are resolved at the
+   release candidate. The driver front page is fully green; the server is green minus those three.
 8. `cargo-semver-checks` result recorded and the version decision (§7) made on its evidence.
 9. **The operator pushes the tag.** Agents never tag or publish.
-10. **Workstream Z landed first and stayed landed** — oraclemcp `main` green (bead-evidence audit 0
-    hard **in CI**, fresh mutation seal, Windows lane resolved) before any A/B fix is claimed done,
-    and kept green at every subsequent push.
+10. **Workstream Z landed first and stayed landed** — oraclemcp `main` green on required lanes
+    (bead-evidence audit 0 hard **in CI**, Windows lane resolved; the mutation seal is **deferred**,
+    §Z2) before any A/B fix is claimed done, and kept green at every subsequent push.
 11. **The rig ran on the release candidate** — R1–R4 executed against the RC build, **plus the
     R5-lite Codex-Spark agent session** (operator-gated, per the 2026-07-20 ruling); the round-N
     report contains no untriaged P0/P1 finding (findings either fixed in-train or operator-deferred
@@ -2276,7 +2290,9 @@ checks.
 **Mechanism ②③** — both jobs run the mutation gate, which reads the committed marker:
 `marker v=2 source=4dca0b2… scopes=guard,audit files=27 mutants=1889 shards=3/3 status=stale` →
 `E_STALE_SEAL: committed mutation marker status=stale; a fresh complete five-surface campaign is
-required` (`scripts/mutation_safety_gate.sh`). Fix = run the campaign fresh (Z2), not gate surgery.
+required` (`scripts/mutation_safety_gate.sh`). **Disposition: DEFERRED (§Z2, operator ruling
+2026-07-21)** — the fresh seal is produced once on the release candidate, not in 0.9.1; these two
+jobs (and the heartbeat) stay red as an accepted deferred state, never resolved by gate surgery.
 
 **Driver working tree** — untracked `tests/artifacts/evidence/closes/rust-oracledb-4sfc.json` and
 `…-s0se.json`; local agent branches `agent-d4-completion`, `agent-d5-recovery`,
