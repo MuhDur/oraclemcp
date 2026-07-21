@@ -254,6 +254,9 @@ fn alter_session_params(rest: &str) -> Option<Vec<String>> {
                     word.push(w);
                     chars.next();
                 }
+                if word.is_empty() {
+                    return None;
+                }
                 toks.push(Tok::Word(word));
             }
         }
@@ -420,6 +423,13 @@ mod tests {
         assert!(!is_allowed_alter_session(
             "/* audit */ ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY"
         ));
+    }
+
+    #[test]
+    fn alter_session_params_rejects_no_progress_tokenization() {
+        assert_eq!(alter_session_params(" = HR"), None);
+        assert_eq!(alter_session_params(" ="), None);
+        assert_eq!(alter_session_params(" 'abc' = HR"), None);
     }
 
     #[test]
