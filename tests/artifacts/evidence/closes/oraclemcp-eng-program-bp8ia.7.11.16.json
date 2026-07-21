@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T18:40:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.16",
+  "scope": {
+    "summary": "F-LOW AU2: CEF escaping let NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR and the VT/FF controls through raw, so a collector could read one signed audit record as two; every record separator is now escaped in both the header and the extension.",
+    "in_scope": [
+      "crates/oraclemcp-audit/src/shipping.rs"
+    ],
+    "out_of_scope": [
+      "The syslog path, which already had a stronger physical-line backstop and is unchanged.",
+      "The JSON shipping format, which carries no line-delimited record framing of this kind.",
+      "The signed preimage and hash chain: this is a transport-encoding fix and changes no hashed bytes."
+    ]
+  },
+  "source": {
+    "sha": "bdb641d94c468eee94dd13604393dbcdf15db9c3",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "cef_line / cef_escape_header / push_cef_kv",
+        "kind": "api",
+        "trace": "241 oraclemcp-audit tests pass. Negative acceptance (no_record_separator_survives_into_a_cef_field): for each of LF, CR, VT, FF, U+0085, U+2028, U+2029 injected into a header field AND an extension field of a real signed record, the rendered CEF line contains no raw separator and stays exactly one physical line. Positive acceptance: '\u00e9\u5de5\u5177 \u2705' round-trips unchanged through both escape paths, and the pre-existing delimiter escapes are asserted byte-identical, including the untouched cef_and_syslog_escaping_is_spec_specific test."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Discriminating, verified by mutation: restoring the CR/LF-only separator set fails both new tests.",
+    "The bead named five separators; VT (U+000B) and FF (U+000C) were included as well because they are the remaining Unicode mandatory line breaks and leaving them raw would reproduce the same defect under a different character. This is broader than the literal ask, and it changes the output only for values that already contained a control character.",
+    "Verified against synthetic records in-crate. No live SIEM ingestion was exercised.",
+    "Scoped verification: cargo test/clippy -p oraclemcp-audit. No workspace-wide run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

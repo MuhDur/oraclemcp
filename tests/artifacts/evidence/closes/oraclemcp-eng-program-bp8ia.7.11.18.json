@@ -1,0 +1,51 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T18:40:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.18",
+  "scope": {
+    "summary": "F-LOW CF2: an OCID embedded in ordinary prose left quarantine through OTLP log bodies, span attributes, and metric labels; the shared redaction funnel now removes the identifier while keeping the message.",
+    "in_scope": [
+      "crates/oraclemcp-telemetry/src/otlp/redact.rs"
+    ],
+    "out_of_scope": [
+      "Other identifier families (tenancy names, compartment paths, region slugs). The bead scopes this to the documented ocid1 shape; widening the recognizer to prose-shaped values would start destroying the error text this pipeline exists to carry.",
+      "The key-denylist and secret-shape heuristics, unchanged: this is a third, narrower rule that runs only after both decline."
+    ]
+  },
+  "source": {
+    "sha": "bdb641d94c468eee94dd13604393dbcdf15db9c3",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Redactor::redact_value / Redactor::filter",
+        "kind": "api",
+        "trace": "52 oraclemcp-telemetry tests pass. Negative acceptance: an OCID at prefix, middle, suffix, before sentence punctuation, parenthesised, and comma-separated is redacted (ocids_embedded_in_prose_are_redacted_at_every_boundary); every OCID in a value is redacted, not just the first, and the surrounding message survives. Positive acceptance: 'ORA-00942: table or view does not exist', a bare 'ocid1' in prose, 'ocid1.instance', and 'xocid1.instance.oc1' are returned byte-identical. The funnel test pins that the rule lives in redact_value, which logs, span attributes, and metric labels all pass through."
+      },
+      {
+        "name": "bash scripts/secret_scan.sh",
+        "kind": "cli",
+        "trace": "OK (tracked tree + rendered surfaces). The test fixtures assemble the five-segment OCID at runtime from fragments precisely so the literal shape never appears in a tracked file \u2014 that gate greps every tracked path for it, and weakening it to accommodate a test would defeat the control that stops a real tenant id being committed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Discriminating, verified by mutation: reverting the funnel to its previous behaviour fails all three OCID tests while the near-miss test keeps passing.",
+    "The recognizer is a bounded lexical scan, not an OCI-authoritative parser: a malformed identifier that does not reach three dot-separated segments is treated as prose by design.",
+    "Scoped verification: cargo test/clippy -p oraclemcp-telemetry. No workspace-wide run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
