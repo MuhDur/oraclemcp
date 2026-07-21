@@ -1,0 +1,11 @@
+eng-program graph: 1265 beads from .beads/issues.jsonl
+
+E_CLOSED_PARENT_OPEN_CHILD: 6
+  parent oraclemcp-eng-program-bp8ia.7.11 is closed but child oraclemcp-eng-program-bp8ia.7.11.1 is open — parent's stated reason: 'Normalized all 29 named Low and Very-Low findings: 20 implementation-ready child beads, 6 already resolved or non-beadab'
+  parent oraclemcp-eng-program-bp8ia.7.11 is closed but child oraclemcp-eng-program-bp8ia.7.11.14 is open — parent's stated reason: 'Normalized all 29 named Low and Very-Low findings: 20 implementation-ready child beads, 6 already resolved or non-beadab'
+  parent oraclemcp-eng-program-bp8ia.7.11 is closed but child oraclemcp-eng-program-bp8ia.7.11.5 is open — parent's stated reason: 'Normalized all 29 named Low and Very-Low findings: 20 implementation-ready child beads, 6 already resolved or non-beadab'
+  parent oraclemcp-eng-program-bp8ia.7.11 is closed but child oraclemcp-eng-program-bp8ia.7.11.6 is in_progress — parent's stated reason: 'Normalized all 29 named Low and Very-Low findings: 20 implementation-ready child beads, 6 already resolved or non-beadab'
+  parent oraclemcp-eng-program-bp8ia.7.11 is closed but child oraclemcp-eng-program-bp8ia.7.11.9 is in_progress — parent's stated reason: 'Normalized all 29 named Low and Very-Low findings: 20 implementation-ready child beads, 6 already resolved or non-beadab'
+  parent oraclemcp-eng-program-bp8ia.6 is closed but child oraclemcp-m02vm is open — parent's stated reason: 'Cluster E oraclemcp side complete: Charter v2 is eighteen rules and rules 13-18 each ship a mechanism wired into the CI '
+
+FAIL eng_program_graph_lint: 6 structural violation(s)
