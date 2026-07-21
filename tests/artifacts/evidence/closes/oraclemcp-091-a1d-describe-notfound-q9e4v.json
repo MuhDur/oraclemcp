@@ -1,0 +1,52 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T12:34:00Z",
+  "bead_id": "oraclemcp-091-a1d-describe-notfound-q9e4v",
+  "scope": {
+    "summary": "Makes oracle_describe return a structured not-found or not-visible error for an empty catalog result and preserves the exact case of double-quoted owner and table identifiers.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/intelligence.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs"
+    ],
+    "out_of_scope": [
+      "The specialized oracle_describe_index, oracle_describe_trigger, and oracle_describe_view tool contracts.",
+      "Live Oracle catalog verification; this change is covered by offline dispatcher and bound-argument tests."
+    ]
+  },
+  "source": {
+    "sha": "cf54f10a277acf11f1027b9b09189a177a37376a",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_describe MCP tool dispatch",
+        "kind": "tool",
+        "trace": "oracle_describe_not_visible_returns_structured_not_found_with_next_actions and oracle_describe_unresolved_synonym_returns_structured_not_found dispatch the tool through its production branch and assert OBJECT_NOT_FOUND, oracle_schema_inspect guidance, and no constraints query after a catalog miss."
+      },
+      {
+        "name": "dictionary metadata lookup binding",
+        "kind": "api",
+        "trace": "oracle_describe_preserves_double_quoted_identifier_case proves the dispatcher sends AppOwner and camelCase unchanged to ALL_TAB_COLUMNS, while describe_constraints_binds_owner_and_table pins the exact bound column/constraint lookup contract."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped offline tests only: cargo test -p oraclemcp oracle_describe -- --nocapture passed 3 tests. The full workspace gate was not run for this source commit.",
+    "An empty ALL_TAB_COLUMNS result cannot distinguish a nonexistent object from an object hidden by catalog visibility, so the envelope intentionally reports not found or not visible and directs the caller to visible-object discovery."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
