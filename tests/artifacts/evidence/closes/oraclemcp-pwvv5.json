@@ -1,0 +1,49 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T17:05:00Z",
+  "bead_id": "oraclemcp-pwvv5",
+  "scope": {
+    "summary": "Constitution rule 18 plus `swarm_discipline.sh stale-delete-check`: a change that deletes a path still present in the worktree is refused as a stale index snapshot, which is how ebac68f committed away five just-landed close-evidence documents.",
+    "in_scope": [
+      "AGENTS.md",
+      "scripts/swarm_discipline.sh"
+    ],
+    "out_of_scope": [
+      "The five incidents from before the session, carried by the sibling beads under oraclemcp-eng-program-bp8ia.6.",
+      "The rust-oracledb half: its AGENTS.md still carries the twelve-rule constitution and none of these mechanisms (oraclemcp-m02vm).",
+      "Recovering ebac68f itself: 3bd7988 and d88b929 restored the six paths forward, with no history rewritten."
+    ]
+  },
+  "source": {
+    "sha": "a08f3d599d4d226b0f7be6b4e6245a53d52d652c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/swarm_discipline.sh stale-delete-check",
+        "kind": "cli",
+        "trace": "Replayed against the real incident commit, `stale-delete-check --commit ebac68f` names all five deleted-but-present evidence documents and exits 65. `--selftest` asserts both directions in a throwaway repo: an ordinary commit that deletes nothing exits 0, and a path staged as deleted while it still exists on disk exits 65. Rule 18 and rule 17 were both run against this change's own staged set before it was committed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "It cannot distinguish a deliberate delete of a file you then recreated from a stale snapshot; both look identical to git, and the repo's RULE 1 already makes a deliberate delete an operator-approved event.",
+    "It reads a staged set or one commit, and it is a refusal an agent must run: CI runs the selftest, not the per-commit query."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-m02vm"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
