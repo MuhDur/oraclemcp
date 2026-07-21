@@ -1,0 +1,37 @@
+{
+  "schema": "ws-c-red-run/v1",
+  "repo": "oraclemcp",
+  "bead_id": "oraclemcp-091-c8-blind-catalog-refuse-w9iie",
+  "purpose": "Workstream C fixtures are a two-sided proof: the fixture must be demonstrably RED against pre-fix main, then flipped to enforced-green by the fix bead. This file records the red half so the flip is auditable rather than asserted.",
+  "expected_failure": {
+    "test": "catalog_resolver::tests::c8_a_catalog_blind_principal_must_not_yield_a_read_only_proof",
+    "file": "crates/oraclemcp-db/src/catalog_resolver.rs",
+    "marker": "#[ignore] citing oraclemcp-091-c8-blind-catalog-refuse-w9iie",
+    "flipped_green_by": "A1a (require positive catalog visibility before proving relation purity)",
+    "flip_action": "delete the #[ignore]; the assertion must not change"
+  },
+  "red_run": {
+    "command": "cargo test -p oraclemcp-db --lib c8_ -- --ignored --nocapture",
+    "toolchain": "nightly-2026-05-11",
+    "result": "FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 454 filtered out",
+    "panic_message": "assertion `left == right` failed: a principal that cannot read ALL_POLICIES or ALL_TAB_COLS has proven nothing; treating its empty probe as absence certifies a VPD-protected table as side-effect-free and hands back silently filtered rows with exit-success  /  left: ProvenReadOnly  right: Unknown",
+    "root_cause": "crates/oraclemcp-db/src/catalog_resolver.rs resolved_relations_read_purity decides both gates on !rows.is_empty(): `if !policies.is_empty() { return Unknown }` and `if !virtual_columns.is_empty() { return Unknown }`. An empty probe therefore falls through to ProvenReadOnly. Empty is produced both by a genuinely clean table and by a principal with no privilege on ALL_POLICIES / ALL_TAB_COLS, and the two are indistinguishable through those queries alone.",
+    "severity_note": "This is a fail-OPEN inside a fail-closed system, the class AGENTS.md forbids outright. It is worse than a missing proof: the catalog-blind principal reads a VPD-protected table, receives rows silently filtered by a policy the server just certified as absent, and exits success with no diagnostic anywhere."
+  },
+  "green_half": {
+    "command": "cargo test -p oraclemcp-db --lib",
+    "result": "ok. 453 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out",
+    "tests": ["catalog_resolver::tests::c8_a_sighted_principal_on_a_clean_table_still_proves_read_only"],
+    "note": "The green half must STAY green and is load-bearing. Without it the fix has a trivial wrong answer available: return Purity::Unknown unconditionally, which would 'close' the fail-open by refusing every ordinary table on every profile. It also asserts both probe SQLs were actually issued, so the red case covers both gates rather than the first one short-circuiting."
+  },
+  "external_mint": {
+    "tool": "hand-written mock connection (CatalogVisibility)",
+    "in_repo_code_used": false,
+    "note": "Dictionary visibility is modelled as a property of the PRINCIPAL rather than of the object. Both probes return empty for blind and sighted alike — identical bytes on the wire — and only a third read, answered according to dictionary_readable, separates them. This deliberately does not model A1a's chosen control mechanism, so the fixture stays flippable by attribute removal alone."
+  },
+  "fix_side_watch": {
+    "test": "catalog_resolver::tests::relation_purity_requires_plain_policy_free_non_virtual_tables",
+    "issue": "asserts queries.len() == 2 and pins queries[0]/queries[1] to SELECT_POLICY_SQL / VIRTUAL_COLUMN_SQL",
+    "action": "A1a adds a visibility probe and must update this count deliberately rather than by reflex"
+  }
+}
