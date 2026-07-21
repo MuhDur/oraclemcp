@@ -1,0 +1,53 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T17:35:00Z",
+  "bead_id": "oraclemcp-qp5mx",
+  "scope": {
+    "summary": "Plan \u00a730.4 item 9's property half: a proptest over random profile-merge graphs pinning the invariants the config loader actually guarantees, with the plan's own stated invariant corrected rather than asserted.",
+    "in_scope": [
+      "crates/oraclemcp-config/tests/profile_merge_property.rs",
+      "crates/oraclemcp-config/Cargo.toml"
+    ],
+    "out_of_scope": [
+      "The config-TOML fuzz half of item 9, which shipped separately as bead oraclemcp-eng-program-bp8ia.9.10.",
+      "Downstream enforcement of read_only_standby. The config layer records the flag; the ceiling is applied by the guard/dispatcher, so it is not a config-load invariant and is deliberately not asserted here.",
+      "crates/oraclemcp-config/src/lib.rs, which was another agent's mid-edit throughout (B9a proxy-bracket work). The test uses only the public API and touches no source file."
+    ]
+  },
+  "source": {
+    "sha": "c378dcab0a5e0e687cb1ade879840d50b13cc264",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "cargo test -p oraclemcp-config --test profile_merge_property",
+        "kind": "cli",
+        "trace": "5 tests pass. The proptest (256 cases) generates 1-4 profiles with random max_level/default_level/protected/base, including self-references, forward references and cycles, and asserts for every profile a successful load returns: protected implies max_level == READ_ONLY, and default_level <= max_level. MUTATION-CHECKED: inverting the second assertion to `>` fails the property immediately ('profile p0 loaded with default_level ReadOnly above max_level ReadOnly'), so the test can fail for the bug it guards."
+      },
+      {
+        "name": "the_generated_space_reaches_the_states_the_property_asserts_over",
+        "kind": "cli",
+        "trace": "Plan \u00a730.5 anti-vacuity guard: deterministically enumerates the generator's space and asserts at least 16 configs load and that loaded profiles include both a protected profile and one that inherited via base. Without it, a loader that rejected nearly everything would leave the property quietly green."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The plan's stated invariant 'merged.max_level <= min(source max_levels)' is NOT implemented and was not asserted: `base` is configuration reuse, not a fleet safety ceiling, and a child may raise max_level above its base (README 'Connection profiles', docs/threat-model.md). Rather than silently drop that item, the suite pins the documented direction in base_cannot_be_used_as_a_safety_ceiling so a future silent change to it fails. If the operator wants base to become a ceiling, that is a behaviour change and a separate bead, not a test.",
+    "Property depth is bounded at 4 profiles and 256 cases to stay inside Tier 1 cost.",
+    "Scoped verification: cargo test -p oraclemcp-config and cargo clippy -p oraclemcp-config --tests. No workspace-wide run; rustfmt was applied to this file only because oraclemcp-config/src/lib.rs was another agent's mid-edit."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

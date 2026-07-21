@@ -1,0 +1,52 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T17:35:00Z",
+  "bead_id": "oraclemcp-i8vlq",
+  "scope": {
+    "summary": "Plan \u00a730.4 item 8's second half, plus a real gap it exposed: the pinned canonical-tag list named 7 AuditOutcome variants while the enum has 8, so HeldUncommitted (Arc I, tag 7) was never pinned.",
+    "in_scope": [
+      "crates/oraclemcp-audit/src/record.rs"
+    ],
+    "out_of_scope": [
+      "The preimage KAT half of item 8, already covered by the v5/v7/v8/v9 canonical-preimage assertions in the same file.",
+      "The DI1 held-execute regression itself (\u00a730.4 item 2, exactly-one-audit-entry under a late deadline). This close pins the audit ENCODING of the HeldUncommitted outcome, not the dispatcher behaviour that produces it.",
+      "A literal compile-time assertion. Rust has no variant reflection, so the compile-time half is an in-crate exhaustive match that fails to build when a variant is added, and the prefix comparison itself runs as a unit test."
+    ]
+  },
+  "source": {
+    "sha": "c378dcab0a5e0e687cb1ade879840d50b13cc264",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "cargo test -p oraclemcp-audit",
+        "kind": "cli",
+        "trace": "239 lib tests pass, including the three tag tests. v5_enum_tags_are_stable_and_unique now pins all 8 outcome tags (it listed 7; HeldUncommitted=7 was absent). canonical_tags_are_injective_across_every_variant walks the exhaustive const variant lists and asserts no two variants share a canonical tag. no_variant_name_prefixes_another asserts no Debug or serde name is a prefix of another, for both enums."
+      },
+      {
+        "name": "in-crate exhaustive match (all_decisions / all_outcomes)",
+        "kind": "cli",
+        "trace": "Both const fns carry an exhaustive match over their enum. #[non_exhaustive] does not apply inside the defining crate, so adding a variant stops the crate compiling until the list is extended \u2014 which is the property the hand-written list lacked when HeldUncommitted was added."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "MUTATION-CHECKED for injectivity only: remapping HeldUncommitted onto RolledBack's tag 3 fails canonical_tags_are_injective_across_every_variant with '[0,1,2,3,4,5,6,3]'. The prefix assertion was not mutation-checked by renaming a public variant, because that cascades through every match in the workspace; its logic is a direct starts_with comparison over the same exhaustive lists.",
+    "The v5+ preimage hashes these enums as numeric tags and length-frames variable-length fields, so the prefix property is defence-in-depth for unframed surfaces (serde output, logs, refusal corpus, CEF export), not a live preimage hazard today.",
+    "Scoped verification: cargo test -p oraclemcp-audit and cargo clippy -p oraclemcp-audit --all-targets. No workspace-wide run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
