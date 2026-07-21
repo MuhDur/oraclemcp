@@ -1,0 +1,23 @@
+{
+  "schema": "wave1-cross-repo-handoff/v1",
+  "generated_at": "2026-07-21T19:55:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.3",
+  "summary": "F-LOW DC7: parse_session_u16 wrapped an out-of-range AUTH_SERIAL_NUM with `as u16`; it now rejects through the existing typed session-field error. The fix and its tests are driver-side; this artifact binds the exact driver commit into the oraclemcp tracker.",
+  "driver": {
+    "repo": "rust-oracledb",
+    "commit_sha": "5ed87b09ef39bb70ab7dd7bd838871b936285c52",
+    "tree_sha": "56abe55ced918ed6a810f22081fedd0baad8438f",
+    "files": [
+      {
+        "path": "crates/oracledb/src/lib.rs",
+        "sha256": "b6e908d833a9e545d0692212e0ce206ab5c9ace826fbf26233df86b6e954ef65"
+      }
+    ],
+    "verification": [
+      "cargo test -p oracledb --lib auth_serial_num -> 2 passed",
+      "cargo test -p oracledb --lib -> 347 passed, 0 failed",
+      "cargo clippy -p oracledb --lib --tests -> no findings",
+      "mutation: restoring the `as u16` cast fails auth_serial_num_out_of_u16_range_is_rejected_not_wrapped"
+    ]
+  }
+}
