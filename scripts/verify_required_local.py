@@ -15,6 +15,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -86,6 +87,18 @@ def parse_quality_steps(text: str) -> list[Step]:
     collecting_run = False
     run_lines: list[str] = []
     in_steps = False
+
+    # A workflow- or job-level `env:` is invisible to the per-step scan below,
+    # yet it applies to every step GitHub runs. A replay that cannot see it
+    # reproduces the command with the variable simply absent -- an install step
+    # pinned to `--version "$TOOL_VERSION"` replays as `--version ""`. Refuse the
+    # shape rather than replay a command that only resembles the CI one.
+    for raw in text.splitlines():
+        if raw in ("env:", "    env:"):
+            raise ContractError(
+                "workflow- or job-level env: applies to every CI step but not to this "
+                "local replay; move the value into the step or teach the runner to bind it"
+            )
 
     def finish_current() -> None:
         nonlocal current, collecting_run, run_lines
@@ -194,6 +207,13 @@ def effective_plan(workflow: Path = QUALITY_WORKFLOW) -> list[dict[str, object]]
             )
         elif step.has_environment:
             raise ContractError(f"{step.name}: active environment block is not yet replayable")
+        elif "${{" in step.run:
+            # bash has no GitHub expression evaluator: the replay would either run
+            # the literal text or, once quoted, an empty argument.
+            raise ContractError(
+                f"{step.name}: run carries the GitHub expression "
+                f"{step.run[step.run.index('${{'):][:40]!r}, which the local replay cannot resolve"
+            )
         else:
             record["classification"] = "required-command"
             record["argv"] = ["bash", "-lc", step.run]
@@ -327,6 +347,33 @@ def self_test() -> None:
         pass
     else:
         raise AssertionError("unknown setup actions must fail closed")
+    # The sibling driver repo widened its replay to cover tool-INSTALL steps and
+    # inherited their environment: the pinned versions lived in a workflow-level
+    # `env:` the replay never applied, so they ran as `--version "" --locked` and
+    # clap rejected them. Neither shape may reach a replayed command here.
+    job_env = (
+        "jobs:\n  quality:\n    env:\n      TOOL_VERSION: 1.2.3\n"
+        '    steps:\n      - name: Install\n        run: cargo install tool --version "$TOOL_VERSION"\n'
+    )
+    try:
+        parse_quality_steps(job_env)
+    except ContractError:
+        pass
+    else:
+        raise AssertionError("a job-level env: must fail closed")
+    expression = (
+        "jobs:\n  quality:\n    steps:\n      - name: Install\n"
+        '        run: cargo install tool --version "${{ env.TOOL_VERSION }}"\n'
+    )
+    with tempfile.TemporaryDirectory() as scratch:
+        projection = Path(scratch) / "_quality.yml"
+        projection.write_text(expression, encoding="utf-8")
+        try:
+            effective_plan(projection)
+        except ContractError:
+            pass
+        else:
+            raise AssertionError("a GitHub expression in run: must fail closed")
     print("verify-required-local: self-test OK")
 
 
