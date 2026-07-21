@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T22:55:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.7",
+  "scope": {
+    "summary": "F-LOW DI4: the compatibility-grant store evicted by arbitrary HashMap order once at capacity, and did so silently. Eviction is now oldest-first and observable.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs"
+    ],
+    "out_of_scope": [
+      "The 128-grant capacity itself and single-use redemption, both unchanged.",
+      "The canonical oracle_execute grant path; this is the compatibility execute_approved token store only.",
+      "Persisting grants across restart: they remain process-local by design."
+    ]
+  },
+  "source": {
+    "sha": "5dfe1637599475fcf7f9cf655704d60481eafbda",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "prune_execute_approved_tokens / oldest_execute_approved_key",
+        "kind": "api",
+        "trace": "Eviction selects the earliest-expiring grant (uniform TTL, so earliest expiry is earliest issuance) instead of keys().next(). Expired grants are still pruned first. A live eviction now emits a warn carrying evicted count, capacity, retained count and the remediation (re-run preview_sql); counts only, because these are credential-adjacent deposits and the token text must never reach a log line. 346 oraclemcp lib tests pass. MUTATION CONTROL, which taught something: restoring keys().next() yields eviction order [k15,k05,k03,k06,k12,k02,...] \u2014 its FIRST pick happened to be the oldest, so the single-pick assertion PASSED BY LUCK; what kills the mutation is the drain-order assertion that repeated eviction proceeds strictly oldest-first. Test keys are assigned so age runs opposite to lexical order."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The selection is unit-tested through a pure seam (oldest_execute_approved_key) rather than by driving a live dispatcher: DispatcherState owns a boxed Oracle connection. The capacity loop and expiry pruning around it are covered by inspection, not by a test that fills the store to 128.",
+    "Ties are broken arbitrarily among grants sharing an expires_at instant; grants issued in the same instant are the same age, so no ordering guarantee is claimed there.",
+    "Implemented in a worktree at HEAD because another pane held ~1081 uncommitted lines in dispatch/ at the time; the commit therefore contains only these two files."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

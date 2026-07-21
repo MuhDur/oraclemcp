@@ -1,0 +1,47 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T19:40:45Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.20",
+  "scope": {
+    "summary": "F-LOW G2: an empty base-object set no longer proves a FROM-bearing SELECT read-only on its own; the shortcut now also requires the parsed AST to carry no FROM/JOIN at any depth, and the proof is pinned by a test that fails when the new condition is deleted.",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/classifier.rs"
+    ],
+    "out_of_scope": [
+      "No demonstrated fail-open was found: this is hardening of a proof the SideEffectOracle's trigger/VPD walk leans on, not a fix for an observed escape.",
+      "The default UnknownOracle baseline is unchanged; only a consumer that opted into with_statement_unknown_guarded observes the tightening.",
+      "Base-object collection itself is untouched; the change is to what an empty result is allowed to prove."
+    ]
+  },
+  "source": {
+    "sha": "df361b0bfa4ea9d69474f2c1fa71938ae98583d5",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "classify SELECT arm / query_has_from_source",
+        "kind": "api",
+        "trace": "HOW A FAILURE WOULD BE DETECTED, decided before the test was written: `SELECT * FROM (SELECT 1 AS x) d` is a derived table with a real FROM source that resolves to ZERO base objects. Bound to a strict oracle it must be Guarded; if the shortcut ever fires for it again the assertion flips to Safe and the test dies. The test asserts BOTH detector preconditions explicitly (the query really has a FROM source, and really yields no base objects), so it cannot pass for the wrong reason if either half stops holding. MUTATION CONTROL: deleting `!query_has_from_source(query)` fails it with `left: Safe, right: Guarded`. query_has_from_source is separately unit-tested across eight shapes including CTEs, set operations and scalar subqueries."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "313 guard tests pass. The one failure, vector_embedding_batch_normalizes_only_for_parser_splitting, is PRE-EXISTING and unrelated: it fails identically in a pristine worktree at HEAD with none of these changes, having arrived with 6fa88203.",
+    "The tightening is proven at the classifier seam, not end to end through a live oracle: no engine-backed SideEffectOracle run is claimed.",
+    "Implemented and closed from a worktree because another pane holds uncommitted user_defined_calls work in classifier.rs in the shared checkout; that work was never touched and is unrelated to this function."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

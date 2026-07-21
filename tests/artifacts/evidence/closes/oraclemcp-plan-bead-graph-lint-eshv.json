@@ -1,0 +1,54 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T19:40:45Z",
+  "bead_id": "oraclemcp-plan-bead-graph-lint-eshv",
+  "scope": {
+    "summary": "P6: the plan-to-Beads graph validator carried 38 error codes and had never been observed rejecting anything OR accepting anything; --selftest now proves it can fail, by feeding it a graph known to be malformed one rule at a time and requiring the matching code, plus a good graph that must be accepted.",
+    "in_scope": [
+      "scripts/plan_bead_graph_lint.py",
+      ".github/workflows/ci.yml"
+    ],
+    "out_of_scope": [
+      "Only 10 of the 38 error codes are exercised; the remaining codes are still unobserved and the selftest does not claim otherwise.",
+      "No committed v2 manifest is introduced: the selftest builds its manifest on disk at run time, so this does not promote or validate any real plan graph.",
+      "The promotion path (apply_promotion) is not exercised; this covers validation only."
+    ]
+  },
+  "source": {
+    "sha": "ad8c11ddf3992dbee103b3aee03392cd099dbdfe",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/plan_bead_graph_lint.py --selftest",
+        "kind": "cli",
+        "trace": "Builds a minimal manifest on disk (real plan file, real per-repo JSONL trackers, matching source_document checksum), requires it to be ACCEPTED, then applies one targeted mutation per rule and requires the matching code: duplicate task slug -> E_TASK_SLUG; duplicate tracking label -> E_TASK_LABEL; dependency on an unknown task -> E_REFERENCE_UNKNOWN; unsupported schema -> E_SCHEMA; missing acceptance text -> E_TASK_ACCEPTANCE; release target disagreement -> E_SEMVER_ASSERTION; '.' in a label (Beads rejects it) -> E_TASK_LABEL. The accept case is the anti-vacuity guard in the other direction: a validator that rejected everything would fail it, so neither 'always true' nor 'always false' survives. MUTATION CONTROL at the validator itself, not just at the fixtures: making Findings.error a no-op -- precisely the unconditional-true lint this is meant to rule out -- produces 'duplicate task slug was NOT rejected with E_TASK_SLUG; got no findings' and exit 1. Clean run exits 0."
+      },
+      {
+        "name": "CI lint job",
+        "kind": "config-gate",
+        "trace": "The selftest is wired into the lint job, so the gate is checked on every push rather than trusted."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The selftest proves the validator discriminates on the 10 rules it mutates; a rule outside that set could still be unconditionally true and this would not catch it.",
+    "This is the same defect shape as the 17 zero-match cargo test gates fixed in 401090be: a gate only ever observed passing is indistinguishable from one that returns true unconditionally. The fix rules that out for the covered rules only."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "Extend the mutation set toward the remaining 28 error codes as real manifests are promoted."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
