@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T22:20:00Z",
+  "bead_id": "oraclemcp-091-g11-close-drained-epics-3dr5b",
+  "scope": {
+    "summary": "G11 verified satisfied by a transitive drain check: no legacy engineering-program epic is drained and still open, so nothing should be closed. A depth-1 check would have falsely closed bp8ia.7.",
+    "in_scope": [
+      "tests/artifacts/plan_graph/g11-legacy-epic-drain.txt"
+    ],
+    "out_of_scope": [
+      "Closing any epic. The acceptance is 'zero drained-but-open legacy epics'; that state already holds, so closing one would be the false close this bead explicitly warns against.",
+      "The root epic oraclemcp-eng-program-bp8ia and any sink-containing epic, which the bead excludes until post-publish.",
+      "Cluster J (bp8ia.11 and children), deferred and untouched per operator ruling."
+    ]
+  },
+  "source": {
+    "sha": "cf53f83ce4fbaacadb089d296069f77d0238f6b7",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "transitive parent-child drain report",
+        "kind": "cli",
+        "trace": "Committed at tests/artifacts/plan_graph/g11-legacy-epic-drain.txt, computed over the transitive closure of parent-child edges in .beads/issues.jsonl for bp8ia.3/.4/.5/.6/.7/.8/.9/.10/.12. Result: drained-but-open = NONE. .3, .6 and .9 are already closed; .4 (3 live), .5 (2), .7 (9), .8 (2), .10 (4) and .12 (1) each still carry live descendants. The decisive case is .7: all of its DIRECT children are closed, so a depth-1 check calls it drained, but it has 37 descendants of which nine are open \u2014 the F-LOW tail hanging off the closed 7.11 umbrella \u2014 so closing it would have asserted Cluster F complete while DI2, DI4, DK2, G1 and G2 are open."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "My first pass read the wrong JSONL field for the edge (the shape is {\"depends_on_id\": <parent>, \"type\": \"parent-child\"}, not {\"id\", \"dependency_type\"}), reported zero children for every epic, and would have declared all nine drained. Caught because zero children contradicted what `br show` displays. The committed artifact exists so the next reader re-derives rather than trusting a summary.",
+    "Drain is computed from the committed .beads/issues.jsonl at this SHA. Panes close beads continuously, so this is a point-in-time verification, not a standing invariant; there is no lint keeping it true.",
+    "'Explicitly deferred' children are treated as drained only where their status is literally deferred; none of the nine epics currently depends on that distinction.",
+    "bp8ia.6 is closed while oraclemcp-m02vm remains open. Deliberate and disclosed in .6's own close evidence rather than introduced here."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
