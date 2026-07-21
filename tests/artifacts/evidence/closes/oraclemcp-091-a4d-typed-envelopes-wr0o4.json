@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T14:52:00Z",
+  "bead_id": "oraclemcp-091-a4d-typed-envelopes-wr0o4",
+  "scope": {
+    "summary": "Routes raw transport displays through one DbError envelope mapping: generic connection failures are typed CONNECTION_FAILED, proven lost connections and transport markers are typed TRANSIENT, all retain recovery steps, and raw socket text is suppressed.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/error.rs"
+    ],
+    "out_of_scope": [
+      "A live D5 killed-session recovery run; this close validates the in-process driver-to-tool-envelope mapping.",
+      "Changing A4b retry policy or connection quarantine behavior, which remains owned by the already closed A4b work.",
+      "Rendering non-transport Oracle error text; existing typed ORA error envelopes remain unchanged."
+    ]
+  },
+  "source": {
+    "sha": "13a7e6fe4848b84efd9c6ab38eb25a52ba798f20",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "DbError into_envelope tool boundary",
+        "kind": "api",
+        "trace": "error::tests::raw_transport_display_never_reaches_an_agent_envelope drives Connect, ConnectionLost, Query, and Execute raw transport inputs through DbError::into_envelope and asserts a typed class, next steps, and absence of each raw display string in serialized envelope JSON."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No live Oracle killed-session lane is claimed; D5 remains the external recovery proof.",
+    "The regression protects raw transport markers at the shared envelope seam, not arbitrary server-side log messages, which are not MCP tool responses."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-d5-idle-kill-lane-83utt"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
