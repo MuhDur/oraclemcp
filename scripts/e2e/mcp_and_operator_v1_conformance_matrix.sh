@@ -93,11 +93,11 @@ e2e_run_command "assert" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/targe
   cargo test -p oraclemcp --test e2e_http_oauth
 e2e_run_command "assert" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
   cargo test -p oraclemcp-db --test structured_schema_golden
-e2e_run_command "assert" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+e2e_cargo_test_filter "assert" "resolved intent survives reopen and rejects same" 1 -- env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
   cargo test -p oraclemcp-core resolved_intent_survives_reopen_and_rejects_same_grant_sql_replay
-e2e_run_command "assert" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+e2e_cargo_test_filter "assert" "build write intent log fails closed on unresolve" 1 -- env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
   cargo test -p oraclemcp build_write_intent_log_fails_closed_on_unresolved_restart_intent
-e2e_run_command "assert" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+e2e_cargo_test_filter "assert" "execute commit in doubt leaves durable intent un" 1 -- env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
   cargo test -p oraclemcp execute_commit_in_doubt_leaves_durable_intent_unresolved
 
 e2e_log_event "coverage_summary" "assert" "pass" 0 "B.6 + dashboard + WP-N/WP-S/WP-G MUST coverage 75/75 score=1.00"

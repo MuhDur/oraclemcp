@@ -121,35 +121,45 @@ run_gate() {
   fi
 }
 
+# For NAME-FILTERED cargo runs. `cargo test <filter>` exits 0 when the filter
+# matches nothing, so run_gate alone would keep these gates green while they
+# assert nothing (see e2e_cargo_test_filter in lib.sh).
+run_test_gate() {
+  local label="$1"
+  shift
+  e2e_cargo_test_filter "assert" "$label" 1 -- \
+    env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" "$@"
+}
+
 run_gate "honesty grep including server.json" bash scripts/oraclemcp_honesty_grep.sh
 run_gate "sensitive data lint" bash scripts/sensitive_data_lint.sh
 run_gate "conformance coverage accounting" bash scripts/e2e/conformance_coverage.sh --log
 run_gate "MCP/operator conformance matrix" bash scripts/e2e/mcp_and_operator_v1_conformance_matrix.sh --log
 run_gate "installer lint and offline smoke" bash scripts/installer_lint_and_offline_smoke.sh
 
-run_gate "surface inventory auth/no-leak" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+run_test_gate "surface inventory auth/no-leak" \\
   cargo test -p oraclemcp-core surface_inventory_authn_no_leak
-run_gate "uniform auth errors" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+run_test_gate "uniform auth errors" \\
   cargo test -p oraclemcp-core uniform_auth_errors_no_enumeration_oracle
-run_gate "doctor self-heal down never up" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+run_test_gate "doctor self-heal down never up" \\
   cargo test -p oraclemcp-core self_heal_down_never_up_refuses_protected_profile_repair
 
-run_gate "recovery CP apply reclassification" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+run_test_gate "recovery CP apply reclassification" \\
   cargo test -p oraclemcp-core cp_apply_reclassifies_never_trusts_stored_verdict
-run_gate "recovery config rollback audit" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+run_test_gate "recovery config rollback audit" \\
   cargo test -p oraclemcp-core operator_config_draft_apply_and_rollback_are_redacted_and_audited
-run_gate "recovery legacy audit migration" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+run_test_gate "recovery legacy audit migration" \\
   cargo test -p oraclemcp-core legacy_state_layout_detects_and_migrates_audit_jsonl_once
-run_gate "recovery backup restore audit verify" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+run_test_gate "recovery backup restore audit verify" \\
   cargo test -p oraclemcp backup_restore_verifies_audit_chain
-run_gate "recovery drained profile active refusal" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+run_test_gate "recovery drained profile active refusal" \\
   cargo test -p oraclemcp s5_active_drained_profile_refuses_non_diagnostic_work
-run_gate "recovery draining profile switch refusal" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+run_test_gate "recovery draining profile switch refusal" \\
   cargo test -p oraclemcp s5_draining_profiles_are_not_listed_or_switchable
 
-run_gate "audit verify DB evidence parser" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+run_test_gate "audit verify DB evidence parser" \\
   cargo test -p oraclemcp audit_verify_with_db_evidence_command_parses
-run_gate "audit DB evidence summary" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+run_test_gate "audit DB evidence summary" \\
   cargo test -p oraclemcp audit_db_evidence_summary
 
 run_gate "HTTP OAuth lane e2e" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \

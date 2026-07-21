@@ -48,14 +48,14 @@ if [ "$missing" -ne 0 ]; then
 fi
 
 mkdir -p "$ROOT/target/tmp"
-if ! e2e_run_command "assert" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
-  cargo test -p oraclemcp-core doctor_fix_fixture_gate_current_repairs_are_fixture_accounted; then
-  e2e_finish_fail "doctor --fix fixture/accounting gate failed"
-fi
-if ! e2e_run_command "assert" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
-  cargo test -p oraclemcp doctor_process_exit_code_matches_cli_contract; then
-  e2e_finish_fail "doctor CLI exit-code contract failed"
-fi
+# Name filters, so they go through the guard: a renamed target would otherwise
+# make cargo exit 0 on zero matches and this gate would pass testing nothing.
+e2e_cargo_test_filter "assert" "doctor --fix fixture/accounting gate" 1 -- \
+  env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+  cargo test -p oraclemcp-core doctor_fix_fixture_gate_current_repairs_are_fixture_accounted
+e2e_cargo_test_filter "assert" "doctor CLI exit-code contract" 1 -- \
+  env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
+  cargo test -p oraclemcp doctor_process_exit_code_matches_cli_contract
 
 e2e_log_event "fixture_summary" "assert" "pass" 0 "current doctor repairs are no-op/refusal accounted; future mutations require round-trip fixtures"
 e2e_finish_pass
