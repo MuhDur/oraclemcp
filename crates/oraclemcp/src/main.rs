@@ -898,19 +898,13 @@ fn resolve_profile_options_from_config_with(
     )?;
 
     let mut ctx = oraclemcp_core::build_session_context(chosen, password, wallet_password, false)?;
-    // B16a: configure the server-side OCI IAM source without pre-fetching a
-    // token. The adapter passes this source and its bound PKCS#8 key to the
-    // driver, which fetches on every physical TCPS connection. Setup failures
-    // fail closed: operators receive the redacted typed reason in the log while
-    // callers receive only the uniform connection failure envelope below.
-    oraclemcp_core::configure_iam_token_source(chosen, &mut ctx.options).map_err(|error| {
-        tracing::warn!(
-            profile = %chosen.name,
-            reason = %error,
-            "OCI IAM token source configuration failed closed"
-        );
-        DbError::Connect("OCI IAM authentication setup failed".to_owned())
-    })?;
+    // B2.2a: resolve the server-side OCI IAM database token (env/file source) at
+    // connect time and inject it into `options.iam_token`, so the B2 adapter
+    // wires it through `with_access_token` (TCPS-enforced). A no-op unless the
+    // profile enables `use_iam_token`; fail-closed on a non-TCPS transport or an
+    // empty/missing token. The token is never persisted, rendered, or logged.
+    oraclemcp_core::inject_iam_token(chosen, &mut ctx.options)
+        .map_err(|e| DbError::UnsupportedAuth(e.to_string()))?;
     let doctor_caps = doctor_profile_caps(chosen, &ctx.level_state);
     Ok(Some(ResolvedProfile {
         name: chosen.name.clone(),
