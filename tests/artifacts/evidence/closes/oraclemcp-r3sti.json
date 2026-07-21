@@ -1,0 +1,52 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T19:05:00Z",
+  "bead_id": "oraclemcp-r3sti",
+  "scope": {
+    "summary": "bead_tracker_guard treated every non-parent-child dependency as a blocker, so a discovered-from provenance edge refused the close; the predicate is now an allowlist of non-sequencing edge types.",
+    "in_scope": [
+      "scripts/bead_tracker_guard.sh"
+    ],
+    "out_of_scope": [
+      "`related` and any other br dependency type: deliberately still blocking. The allowlist is exactly the two edges proven non-sequencing (parent-child, discovered-from); anything else refuses, so a future br type cannot silently widen the exemption.",
+      "br's own dependency check, which is unchanged. The guard still passes --force for a non-sequencing edge because br does not share the distinction.",
+      "The beads already converted to parent-child by hand on 2026-07-21; they remain correct and were not rewritten back."
+    ]
+  },
+  "source": {
+    "sha": "aa056e7c99dcc8017818961261f6902ee57499be",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/bead_tracker_guard.sh --selftest",
+        "kind": "cli",
+        "trace": "10 assertions pass, 4 of them new: an open discovered-from edge yields force-non-sequencing instead of refusing (the reported bug); a provenance edge never excuses a sibling `blocks` edge; an unknown type (sequenced-after) still refuses, proving the exemption is an allowlist; and a closed dependency needs no force at all. The pre-existing parent-child and real-blocker assertions still hold."
+      },
+      {
+        "name": "scripts/bead_tracker_guard.sh close",
+        "kind": "cli",
+        "trace": "This bead was closed through the fixed guard itself at the commit recorded in close_reason, so the close path was exercised end to end rather than only unit-tested."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Discriminating, verified by mutation: removing discovered-from from the allowlist fails the new assertion with 'refusing open blocking dependencies: epic(discovered-from:in_progress)'.",
+    "No live bead currently carries an OPEN discovered-from dependency \u2014 the one the report named (oraclemcp-yi5bu) is already closed and its parent bp8ia.3 has since closed \u2014 so the end-to-end proof is the selftest plus this bead's own guarded close, not a replay of the original refusal.",
+    "shellcheck -S warning is clean; there is no Rust surface in this change."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
