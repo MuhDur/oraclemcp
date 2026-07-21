@@ -1,0 +1,39 @@
+{
+  "schema": "ws-c-red-run/v1",
+  "repo": "oraclemcp",
+  "bead_id": "oraclemcp-091-c5-setup-ordering-postures-02d0i",
+  "purpose": "Workstream C fixtures are a two-sided proof: the fixture must be demonstrably RED against pre-fix main, then flipped to enforced-green by the fix bead. This file records the red half so the flip is auditable rather than asserted.",
+  "expected_failure": {
+    "test": "connect::tests::c5_a_protected_posture_runs_trusted_setup_before_the_read_only_backstop",
+    "file": "crates/oraclemcp-core/src/connect.rs",
+    "marker": "#[ignore] citing oraclemcp-091-c5-setup-ordering-postures-02d0i",
+    "flipped_green_by": "A1b (trusted setup first, read-only backstop re-asserted after)",
+    "flip_action": "delete the #[ignore]; the assertion must not change"
+  },
+  "red_run": {
+    "command": "cargo test -p oraclemcp-core --lib c5_ -- --ignored --nocapture",
+    "toolchain": "nightly-2026-05-11",
+    "result": "FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 679 filtered out",
+    "panic_message": "trusted session setup must run before the read-only transaction opens, or a table-backed application context cannot be established at all (ORA-01456); got backstop at 0 and trusted setup at 2",
+    "observed_statement_list": [
+      "SET TRANSACTION READ ONLY",
+      "ALTER SESSION SET NLS_LANGUAGE=english",
+      "BEGIN DBMS_SESSION.SET_CONTEXT('APP_CTX','TENANT','acme'); END;"
+    ],
+    "root_cause": "crates/oraclemcp-core/src/connect.rs profile_session_statements extends with read_only_setup_statements FIRST when level_state.effective_ceiling() == ReadOnly, then login_statements, then login_script, then trusted_session_statements. On a protected profile the backstop opens a read-only transaction before any trusted setup runs.",
+    "consequence": "Trusted session setup that writes -- notably table-backed application context, the standard mechanism for driving VPD -- fails with ORA-01456 on exactly the posture the README recommends. The capability is unavailable by construction rather than by policy, and the profile owner has no way to express it."
+  },
+  "green_half": {
+    "command": "cargo test -p oraclemcp-core --lib connect::",
+    "result": "ok. 25 passed; 0 failed; 1 ignored; 0 measured; 654 filtered out",
+    "tests": [
+      "connect::tests::c5_a_writable_posture_takes_no_read_only_backstop",
+      "connect::tests::c5_a_protected_posture_still_gets_the_read_only_backstop"
+    ],
+    "note": "Both postures are pinned so the fix cannot drift sideways. A writable profile must take NO backstop (the fix must not start emitting it where it was never wanted) and a protected profile must KEEP one (the fix must not remove it to satisfy the ordering assertion). The defect is where the backstop sits, not whether it exists."
+  },
+  "why_no_existing_test_caught_it": {
+    "test": "connect::tests::trusted_session_statements_are_carried_after_guarded_login_statements",
+    "reason": "It builds a single profile with no protected flag and no max_level, so the ceiling is not READ_ONLY and the backstop is never emitted at all. The ordering defect is structurally unexercised rather than merely unasserted. Test-shape rule A.8-5: setup ordering is part of the contract and must be asserted per posture."
+  }
+}
