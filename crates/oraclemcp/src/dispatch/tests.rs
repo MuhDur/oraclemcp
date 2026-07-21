@@ -2081,10 +2081,33 @@ fn connection_info_reports_the_active_profile() {
         "workstation",
         "oraclemcp-driver",
         "ORCL23A",
-        "freepdb1",
-        "APP",
     ] {
         assert!(!serialized.contains(forbidden), "{forbidden} leaked: {out}");
+    }
+}
+
+#[test]
+fn connection_info_keeps_schema_and_service_redacted_for_remote_transport() {
+    let dispatcher =
+        OracleDispatcher::new_with_profile(Box::new(OneRowMock), Some("dev".to_owned()));
+    let out = dispatcher
+        .dispatch_with_context(
+            "oracle_connection_info",
+            json!({}),
+            DispatchContext::default().with_local_transport(false),
+        )
+        .expect("remote connection info");
+
+    assert!(out["connection"].get("current_schema").is_none());
+    assert!(out["connection"].get("service_name").is_none());
+    let redacted_fields = out["connection"]["redacted_fields"]
+        .as_array()
+        .expect("remote redacted fields array");
+    for field in ["current_schema", "service_name"] {
+        assert!(
+            redacted_fields.contains(&json!(field)),
+            "{field} must remain redacted for remote HTTP: {out}"
+        );
     }
 }
 
