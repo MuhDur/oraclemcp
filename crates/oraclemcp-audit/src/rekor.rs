@@ -80,7 +80,9 @@ pub struct RekorInclusionProof {
     pub integrated_time: u64,
     /// Exact decoded Rekor entry body used as the Merkle-tree leaf payload.
     /// It may contain public signature metadata and the head manifest digest,
-    /// but never raw SQL because the manifest is hash-only.
+    /// but never raw SQL because the manifest is hash-only. Offline verification
+    /// accepts only a supported Rekor v1 entry schema and its authoritative
+    /// artifact-hash field.
     pub entry_body: Vec<u8>,
     /// Root hash (lowercase hex) for this inclusion proof.
     pub root_hash: String,
@@ -115,11 +117,11 @@ pub trait RekorCheckpointVerifier: Send + Sync {
 impl RekorAnchorReceipt {
     /// Verify the proof offline and confirm it binds this exact audit head.
     ///
-    /// The method verifies the RFC-6962-style Merkle path locally, checks that
-    /// the published Rekor entry body carries the exact redacted head-manifest
-    /// digest, then delegates signature validation to an independently trusted
-    /// checkpoint verifier. It makes no network request and never trusts a
-    /// server-side "anchored" flag.
+    /// The method verifies the RFC-6962-style Merkle path locally, structurally
+    /// checks that a supported Rekor entry's authoritative artifact-hash field
+    /// equals the redacted head-manifest digest, then delegates signature
+    /// validation to an independently trusted checkpoint verifier. It makes no
+    /// network request and never trusts a server-side "anchored" flag.
     pub fn verify_offline(
         &self,
         checkpoint_verifier: &dyn RekorCheckpointVerifier,
@@ -129,9 +131,7 @@ impl RekorAnchorReceipt {
         let manifest_hex = manifest_sha256
             .strip_prefix("sha256:")
             .expect("manifest_sha256 is constructed locally with a sha256 prefix");
-        if !contains_ascii(&self.proof.entry_body, manifest_hex) {
-            return Err(RekorProofError::HeadNotBoundToEntry);
-        }
+        verify_entry_binds_manifest(&self.proof.entry_body, manifest_hex)?;
 
         let leaf_hash = rekor_leaf_hash(&self.proof.entry_body);
         let actual_root = inclusion_root(
@@ -146,6 +146,105 @@ impl RekorAnchorReceipt {
             return Err(RekorProofError::MerkleRootMismatch);
         }
         checkpoint_verifier.verify_checkpoint(&self.proof)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RekorHashedRekordEntry {
+    #[serde(rename = "apiVersion")]
+    api_version: String,
+    kind: String,
+    spec: RekorHashedRekordSpec,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RekorHashedRekordSpec {
+    data: RekorHashData,
+    // Signature contents are covered by Rekor's canonical entry and SET. This
+    // binding check only needs to identify the unambiguous signed artifact hash.
+    #[serde(rename = "signature")]
+    _signature: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RekorDsseEntry {
+    #[serde(rename = "apiVersion")]
+    api_version: String,
+    kind: String,
+    spec: RekorDsseSpec,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RekorDsseSpec {
+    #[serde(rename = "envelopeHash")]
+    _envelope_hash: RekorArtifactHash,
+    #[serde(rename = "payloadHash")]
+    payload_hash: RekorArtifactHash,
+    #[serde(rename = "signatures")]
+    _signatures: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RekorHashData {
+    hash: RekorArtifactHash,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RekorArtifactHash {
+    algorithm: String,
+    value: String,
+}
+
+/// Require the manifest digest in the one schema-defined field that Rekor
+/// canonicalizes into the entry body. A substring anywhere else is evidence of
+/// nothing, and is deliberately rejected.
+fn verify_entry_binds_manifest(
+    entry_body: &[u8],
+    expected_manifest_sha256: &str,
+) -> Result<(), RekorProofError> {
+    let entry: serde_json::Value =
+        serde_json::from_slice(entry_body).map_err(|_| RekorProofError::MalformedProof)?;
+    let Some(kind) = entry.get("kind").and_then(serde_json::Value::as_str) else {
+        return Err(RekorProofError::HeadNotBoundToEntry);
+    };
+
+    let artifact_hash = match kind {
+        // Rekor v1 serializes this type as `rekord`; accept the explicit
+        // `hashedrekord` spelling too so both supported submitter encodings
+        // bind the same authoritative `spec.data.hash` field.
+        "rekord" | "hashedrekord" => {
+            let entry: RekorHashedRekordEntry =
+                serde_json::from_slice(entry_body).map_err(|_| RekorProofError::MalformedProof)?;
+            if entry.api_version != "0.0.1"
+                || !matches!(entry.kind.as_str(), "rekord" | "hashedrekord")
+            {
+                return Err(RekorProofError::HeadNotBoundToEntry);
+            }
+            entry.spec.data.hash
+        }
+        "dsse" => {
+            let entry: RekorDsseEntry =
+                serde_json::from_slice(entry_body).map_err(|_| RekorProofError::MalformedProof)?;
+            if entry.api_version != "0.0.1" || entry.kind != "dsse" {
+                return Err(RekorProofError::HeadNotBoundToEntry);
+            }
+            // The DSSE payload is the submitted artifact; `envelopeHash` binds
+            // its signed container and cannot substitute for this manifest hash.
+            entry.spec.payload_hash
+        }
+        _ => return Err(RekorProofError::HeadNotBoundToEntry),
+    };
+
+    if artifact_hash.algorithm == "sha256" && artifact_hash.value == expected_manifest_sha256 {
+        Ok(())
+    } else {
+        Err(RekorProofError::HeadNotBoundToEntry)
     }
 }
 
@@ -402,6 +501,7 @@ fn parse_sha256_hex(value: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
+#[cfg(test)]
 fn contains_ascii(haystack: &[u8], needle: &str) -> bool {
     haystack
         .windows(needle.len())
@@ -437,7 +537,11 @@ mod tests {
 
     fn receipt_for(head: AuditChainHead) -> RekorAnchorReceipt {
         let manifest = head.manifest_sha256();
-        let body = format!("{{\"artifact_hash\":\"{}\"}}", &manifest[7..]).into_bytes();
+        let body = hashedrekord_body(&manifest[7..]);
+        receipt_with_body(head, body)
+    }
+
+    fn receipt_with_body(head: AuditChainHead, body: Vec<u8>) -> RekorAnchorReceipt {
         RekorAnchorReceipt {
             head,
             proof: RekorInclusionProof {
@@ -454,6 +558,42 @@ mod tests {
                 entry_body: body,
             },
         }
+    }
+
+    fn hashedrekord_body(manifest_sha256: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "apiVersion": "0.0.1",
+            "kind": "hashedrekord",
+            "spec": {
+                "data": {
+                    "hash": {
+                        "algorithm": "sha256",
+                        "value": manifest_sha256,
+                    },
+                },
+                "signature": { "content": "signature" },
+            },
+        }))
+        .expect("supported hashedrekord fixture serializes")
+    }
+
+    fn dsse_body(manifest_sha256: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "apiVersion": "0.0.1",
+            "kind": "dsse",
+            "spec": {
+                "envelopeHash": {
+                    "algorithm": "sha256",
+                    "value": "11".repeat(32),
+                },
+                "payloadHash": {
+                    "algorithm": "sha256",
+                    "value": manifest_sha256,
+                },
+                "signatures": [{ "signature": "signature", "verifier": "verifier" }],
+            },
+        }))
+        .expect("supported DSSE fixture serializes")
     }
 
     #[test]
@@ -485,11 +625,77 @@ mod tests {
     #[test]
     fn receipt_rejects_an_entry_body_that_does_not_name_the_head_manifest() {
         let mut receipt = receipt_for(head());
-        receipt.proof.entry_body = b"{\"artifact_hash\":\"different\"}".to_vec();
+        receipt.proof.entry_body = hashedrekord_body(&"00".repeat(32));
         receipt.proof.root_hash = hex_of(rekor_leaf_hash(&receipt.proof.entry_body));
         assert_eq!(
             receipt.verify_offline(&TestCheckpointVerifier),
             Err(RekorProofError::HeadNotBoundToEntry)
+        );
+    }
+
+    #[test]
+    fn receipt_offline_verification_accepts_exact_dsse_payload_hash() {
+        let expected = head();
+        let body = dsse_body(&expected.manifest_sha256()[7..]);
+        let receipt = receipt_with_body(expected, body);
+        assert_eq!(receipt.verify_offline(&TestCheckpointVerifier), Ok(()));
+    }
+
+    #[test]
+    fn receipt_rejects_digest_outside_authoritative_rekor_hash_field() {
+        let expected = head();
+        let manifest = expected.manifest_sha256();
+        let mut body: serde_json::Value =
+            serde_json::from_slice(&hashedrekord_body(&"00".repeat(32)))
+                .expect("fixture is valid JSON");
+        body["spec"]["signature"]["artifact_hash"] = serde_json::json!(&manifest[7..]);
+        let receipt = receipt_with_body(
+            expected,
+            serde_json::to_vec(&body).expect("fixture serializes"),
+        );
+        assert_eq!(
+            receipt.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::HeadNotBoundToEntry),
+            "a digest in signature metadata cannot bind the submitted artifact"
+        );
+    }
+
+    #[test]
+    fn receipt_rejects_superstring_and_ambiguous_or_malformed_entry_bodies() {
+        let expected = head();
+        let manifest = expected.manifest_sha256();
+
+        let superstring = receipt_with_body(
+            expected.clone(),
+            hashedrekord_body(&format!("{}00", &manifest[7..])),
+        );
+        assert_eq!(
+            superstring.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::HeadNotBoundToEntry),
+            "a hash superstring is not an exact artifact binding"
+        );
+
+        let conflicting_hash = "00".repeat(32);
+        let duplicate_hash = [
+            r#"{"apiVersion":"0.0.1","kind":"hashedrekord","spec":{"data":{"hash":{"algorithm":"sha256","value":""#,
+            &manifest[7..],
+            r#"","value":""#,
+            &conflicting_hash,
+            r#""}},"signature":{}}}"#,
+        ]
+        .concat()
+        .into_bytes();
+        let duplicate_hash = receipt_with_body(expected.clone(), duplicate_hash);
+        assert_eq!(
+            duplicate_hash.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MalformedProof),
+            "duplicate authoritative hash fields are ambiguous"
+        );
+
+        let malformed = receipt_with_body(expected, b"not JSON".to_vec());
+        assert_eq!(
+            malformed.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MalformedProof)
         );
     }
 
