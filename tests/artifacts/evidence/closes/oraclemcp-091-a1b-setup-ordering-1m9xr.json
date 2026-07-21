@@ -1,0 +1,50 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T15:31:43Z",
+  "bead_id": "oraclemcp-091-a1b-setup-ordering-1m9xr",
+  "scope": {
+    "summary": "Runs profile login and trusted session setup before opening the READ_ONLY transaction backstop, while retaining the backstop immediately afterwards.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/connect.rs"
+    ],
+    "out_of_scope": [
+      "The per-request rollback and READ_ONLY backstop.",
+      "Live VPD fixtures, credential configuration, and proxy authentication."
+    ]
+  },
+  "source": {
+    "sha": "c499310c7f0e6ef88d90ec033251c86d10cd9289",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "profile connection setup",
+        "kind": "config-gate",
+        "trace": "profile_session_statements validates login statements, login scripts, and trusted setup before appending SET TRANSACTION READ ONLY for READ_ONLY profiles."
+      },
+      {
+        "name": "C5 protected-profile setup ordering fixture",
+        "kind": "api",
+        "trace": "connect::tests::c5_a_protected_posture_runs_trusted_setup_before_the_read_only_backstop proves trusted DBMS_SESSION setup precedes the retained read-only backstop; the writable and protected posture companion checks also pass."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped offline verification passed: cargo fmt -p oraclemcp-core -- --check; cargo test -p oraclemcp-core --lib connect::tests::c5_a_protected_posture_runs_trusted_setup_before_the_read_only_backstop -- --nocapture; cargo test -p oraclemcp-core --lib connect::tests:: -- --nocapture (27 passed).",
+    "No live table-backed VPD setup is claimed; the deterministic C5 fixture verifies the connection-time statement ordering required for it."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
