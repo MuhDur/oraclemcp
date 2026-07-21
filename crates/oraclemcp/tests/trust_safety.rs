@@ -254,9 +254,7 @@ mod live {
     use asupersync::{Cx, Outcome};
     use oraclemcp::dispatch::OracleDispatcher;
     use oraclemcp_core::{DispatchContext, DoctorContext, ToolDispatch, run_doctor};
-    use oraclemcp_db::{
-        LeaseManager, OracleBind, OracleConnectOptions, OracleConnection, RustOracleConnection,
-    };
+    use oraclemcp_db::{OracleBind, OracleConnectOptions, OracleConnection, RustOracleConnection};
     use std::time::Duration;
 
     fn run_with_cx<F, Fut, T>(body: F) -> T
@@ -570,47 +568,13 @@ mod live {
         });
     }
 
-    /// A4 (live): the V$SESSION MODULE/ACTION/CLIENT_INFO tagging mechanism the
-    /// lease uses round-trips against a REAL session. We exercise it two ways:
-    /// (1) a lease acquire (which runs A4's real tagging sequence on a live
-    /// session) succeeds and reports the agent identity; and (2) on a separate
-    /// probe connection we run the same DBMS_APPLICATION_INFO tagging the lease
-    /// does and read it back via `describe()` (SYS_CONTEXT), proving the engine
-    /// actually persists MODULE/ACTION/CLIENT_INFO. (The lease's exact
-    /// value-shaping/clear-first binds are unit-tested in `lease.rs`.)
+    /// A4 (live): DBMS_APPLICATION_INFO tags round-trip through a real session.
     #[test]
-    fn a4_live_lease_tags_v_session_module_action_client_info() {
+    fn a4_live_session_tags_v_session_module_action_client_info() {
         run_with_cx(|cx| async move {
-            let Some(conn) = connect_or_skip(
-                &cx,
-                "a4_live_lease_tags_v_session_module_action_client_info",
-            )
-            .await
-            else {
-                return;
-            };
-            // (1) The lease acquire runs A4's tagging on a real session.
-            let mgr = LeaseManager::new();
-            let lease = mgr
-                .acquire(
-                    &cx,
-                    "live-profile",
-                    "agent-a7",
-                    Duration::from_secs(900),
-                    &[],
-                    Box::new(conn),
-                )
-                .await
-                .expect("acquire stamps the session identity on a live session");
-            let info = mgr.info(&cx, "agent-a7", &lease).await.expect("lease info");
-            assert_eq!(info.agent_identity, "agent-a7");
-            mgr.release(&cx, "agent-a7", &lease).await.expect("release");
-
-            // (2) Prove the engine persists the tags: tag a probe session with
-            // the same DBMS calls and read them back via describe()/SYS_CONTEXT.
             let Some(probe) = connect_or_skip(
                 &cx,
-                "a4_live_lease_tags_v_session_module_action_client_info/probe",
+                "a4_live_session_tags_v_session_module_action_client_info",
             )
             .await
             else {

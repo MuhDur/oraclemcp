@@ -791,7 +791,7 @@ pub struct ConnectionProfile {
     /// `protected = true`; never surfaced in `list_profiles` metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_ref: Option<String>,
-    /// Path to a login script (`ALTER SESSION …`) run on lease acquire (§6.5).
+    /// Path to a login script (`ALTER SESSION …`) run during connection setup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_script: Option<PathBuf>,
     /// Inline login statements (allowlist-validated; §6.5).

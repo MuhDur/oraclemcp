@@ -42,9 +42,9 @@ connect_string = "SALES_RO"
 # Oracle username; set only when a least-privilege convention is known, else commented (none for wallet / OS-auth / OCI-IAM).
 # username = "APP_READONLY"
 credential_ref = "env:ORACLE_SALES_RO_PASSWORD"
-# Path to an allowlisted `ALTER SESSION …` login script run on lease acquire.
+# Path to an allowlisted `ALTER SESSION …` login script run during connection setup.
 # login_script = "/home/operator/login.sql"
-# Inline allowlist-validated `ALTER SESSION SET …` statements run on lease acquire.
+# Inline allowlist-validated `ALTER SESSION SET …` statements run during connection setup.
 # login_statements = ["ALTER SESSION SET NLS_LANGUAGE = english"]
 # Trusted local session setup, authored by the profile owner, never accepted from agent tool calls.
 # trusted_session_statements = ["BEGIN DBMS_OUTPUT.ENABLE(500000); END;"]
@@ -135,9 +135,9 @@ connect_string = "PRIMARY_TCPS"
 # Oracle username; set only when a least-privilege convention is known, else commented (none for wallet / OS-auth / OCI-IAM).
 # username = "APP_READONLY"
 credential_ref = "env:ORACLE_PRIMARY_TCPS_PASSWORD"
-# Path to an allowlisted `ALTER SESSION …` login script run on lease acquire.
+# Path to an allowlisted `ALTER SESSION …` login script run during connection setup.
 # login_script = "/home/operator/login.sql"
-# Inline allowlist-validated `ALTER SESSION SET …` statements run on lease acquire.
+# Inline allowlist-validated `ALTER SESSION SET …` statements run during connection setup.
 # login_statements = ["ALTER SESSION SET NLS_LANGUAGE = english"]
 # Trusted local session setup, authored by the profile owner, never accepted from agent tool calls.
 # trusted_session_statements = ["BEGIN DBMS_OUTPUT.ENABLE(500000); END;"]

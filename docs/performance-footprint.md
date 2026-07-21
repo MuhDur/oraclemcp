@@ -130,10 +130,6 @@ reproducible and never schedule-accidental.
 
 ### Metrics recorded
 
-* checkout accounting ledger — `acquired`, `released`, `discarded`, live count,
-  and the live high-water mark;
-* `LeaseManager::active_count()` after the shutdown drain;
-* commits observed on drained sessions (must be zero);
 * (live only) per-operation latency samples → p50/p95/p99, plus the real
   `OraclePool` `PoolMetrics` snapshot (`is_balanced` / `is_bounded`).
 
@@ -141,11 +137,8 @@ reproducible and never schedule-accidental.
 
 | Invariant | Assertion |
 |---|---|
-| ZERO leaked sessions | `acquired == released + discarded` AND live count returns to 0 |
-| No orphan session | `LeaseManager::active_count() == 0` after `release_all` |
-| Clean drain | shutdown stops new acquires; every open txn is force-rolled-back; readiness flips to draining |
-| No torn commit | commits on drained/preview sessions == 0 |
-| Bounded | live high-water mark ≤ N (the per-DB ceiling); open pool connections ≤ `max_size` |
+| Pool accounting | `OraclePool::metrics()` remains balanced and bounded |
+| Bounded | open pool connections stay within `max_size` |
 
 ### How to run
 

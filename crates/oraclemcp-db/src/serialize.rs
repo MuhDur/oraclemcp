@@ -80,7 +80,7 @@ pub(crate) fn checked_byte_budget_add(
 const NESTED_CURSOR_ERROR_SENTINEL_MAX_BYTES: usize = 512;
 
 /// `ALTER SESSION` statements that pin canonical, NLS-decoupled output. Applied
-/// once per physical session (at connect / lease acquire).
+/// once per physical session during connection setup.
 #[must_use]
 pub fn canonical_nls_statements() -> Vec<&'static str> {
     vec![

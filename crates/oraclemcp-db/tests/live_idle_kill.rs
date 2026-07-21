@@ -57,10 +57,9 @@
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
-    DbError, LeaseManager, OracleBind, OracleConnectOptions, OracleConnection, OraclePool,
-    PoolSettings, RustOracleConnection,
+    DbError, OracleBind, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings,
+    RustOracleConnection,
 };
-use std::time::Duration;
 
 /// Run an async body on a fresh current-thread runtime with a reactor, handing
 /// it the installed request `Cx`. The only `block_on` in this file.
@@ -219,99 +218,5 @@ fn a_killed_pooled_session_is_replaced_without_the_caller_seeing_it() {
             "pooled: the post-kill session is the pre-kill session, so the kill never took \
              effect and this lane is not exercising recovery at all"
         );
-    });
-}
-
-/// PINNED SURFACE (A4e). The lease owns ONE physical session for its lifetime.
-/// A caller mid-transaction must never be moved to a different session without
-/// being told: its uncommitted work is gone, and a later COMMIT would commit
-/// something it never wrote.
-///
-/// This is the half a pooled-only test cannot reach: the pool passes by
-/// replacing the connection, which is exactly what must NOT happen here.
-#[test]
-fn a_killed_pinned_session_never_silently_rebinds_a_caller_mid_transaction() {
-    run_with_cx(|cx| async move {
-        let admin = RustOracleConnection::connect(&cx, test_opts())
-            .await
-            .expect("admin connection for the kill");
-        let conn = RustOracleConnection::connect(&cx, test_opts())
-            .await
-            .expect("pinned connection");
-
-        // A per-run identity so the lookup cannot collide with another lane's
-        // session (or a leftover from a previous run).
-        let agent_identity = format!("d5-pinned-{}", std::process::id());
-        let leases = LeaseManager::new();
-        let lease_id = leases
-            .acquire(
-                &cx,
-                "d5-idle-kill",
-                agent_identity.clone(),
-                Duration::from_secs(120),
-                &[],
-                Box::new(conn),
-            )
-            .await
-            .expect("acquire the pinned lease");
-
-        let before = leases
-            .info(&cx, &agent_identity, &lease_id)
-            .await
-            .expect("lease info before the kill");
-
-        let victim = session_by_identifier(&cx, &admin, &agent_identity)
-            .await
-            .expect(
-                "the lease must stamp CLIENT_IDENTIFIER on its pinned session; without that \
-                 stamp this lane cannot find the session to kill and proves nothing",
-            );
-
-        // Put real state on the session: this is what a silent rebind destroys.
-        leases
-            .begin_transaction(&cx, &agent_identity, &lease_id)
-            .await
-            .expect("begin transaction on the pinned lease");
-
-        eprintln!("D5 pinned: victim={victim:?}");
-        if std::env::var("ORACLEMCP_D5_SKIP_KILL").is_err() {
-            kill_session(&cx, &admin, &victim).await;
-        }
-
-        let outcome = leases.commit(&cx, &agent_identity, &lease_id).await;
-
-        match outcome {
-            Err(err) => {
-                eprintln!("D5 pinned: commit refused with {err:?}");
-                // Required behaviour. Post-fix this is a typed envelope (A4d);
-                // pre-fix it is the raw driver error, which is the failing half
-                // this lane exists to record.
-                let typed = matches!(
-                    err,
-                    DbError::Quarantined { .. } | DbError::ConnectionLost(_)
-                );
-                assert!(
-                    typed,
-                    "pinned: the caller is correctly refused, but with a raw driver error \
-                     rather than a typed envelope (A4d): {err:?}"
-                );
-            }
-            Ok(()) => {
-                // The commit reported success on a session that was killed. The
-                // ONLY way that happens is a reconnect underneath the caller.
-                let after = leases
-                    .info(&cx, &agent_identity, &lease_id)
-                    .await
-                    .expect("lease info after the commit");
-                let now = session_by_identifier(&cx, &admin, &agent_identity).await;
-                panic!(
-                    "pinned: COMMIT reported success after the session was killed \
-                     mid-transaction. generation {} -> {} (unchanged generation means the \
-                     rebind was silent), session {:?} -> {:?}. A lease that reconnects here \
-                     commits nothing the caller wrote and reports success for it.",
-                    before.generation, after.generation, victim, now
-                );
-            }
-        }
     });
 }

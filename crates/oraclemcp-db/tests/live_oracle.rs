@@ -38,7 +38,7 @@ use oraclemcp_db::{
     orient_hot_objects, orient_recent_ddl, orient_schema, plan_cost_estimate, probe_dependents,
     search_objects,
 };
-use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
+use oraclemcp_db::{OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use serde_json::json;
 use std::time::{Duration, Instant};
 
@@ -1491,59 +1491,6 @@ fn live_cursor_expression_serializes_ref_cursor_with_caps() {
 }
 
 #[test]
-fn live_lease_lifecycle_on_a_pinned_session() {
-    run_with_cx(|cx| async move {
-        let conn = match RustOracleConnection::connect(&cx, test_opts()).await {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[live-xe] SKIP live_lease_lifecycle: {e}");
-                return;
-            }
-        };
-        let mgr = LeaseManager::new();
-        // acquire applies the (empty) login script + stamps DBMS_APPLICATION_INFO.
-        let id = mgr
-            .acquire(
-                &cx,
-                "live",
-                "agent-live",
-                Duration::from_secs(900),
-                &[],
-                Box::new(conn),
-            )
-            .await
-            .expect("acquire lease");
-        assert_eq!(mgr.active_count(), 1);
-        let info = mgr.info(&cx, "agent-live", &id).await.expect("info");
-        assert_eq!(info.agent_identity, "agent-live");
-        assert!(info.expires_in_ms > 0);
-
-        // Side-effect-free transaction lifecycle on the pinned session.
-        mgr.begin_transaction(&cx, "agent-live", &id)
-            .await
-            .expect("begin");
-        mgr.savepoint(&cx, "agent-live", &id, "oraclemcp_sp1")
-            .await
-            .expect("savepoint");
-        mgr.rollback(&cx, "agent-live", &id)
-            .await
-            .expect("rollback");
-        mgr.commit(&cx, "agent-live", &id)
-            .await
-            .expect("commit (no-op)");
-        let renewed = mgr.renew(&cx, "agent-live", &id).await.expect("renew");
-        assert!(renewed.expires_in_ms > 0);
-
-        mgr.release(&cx, "agent-live", &id).await.expect("release");
-        assert_eq!(mgr.active_count(), 0);
-        assert!(
-            mgr.info(&cx, "agent-live", &id).await.is_err(),
-            "released lease is gone"
-        );
-    });
-}
-
-#[test]
 fn live_query_pagination_caps_and_cursor() {
     run_with_cx(|cx| async move {
         let pool = match OraclePool::connect(&cx, test_opts(), PoolSettings::default()).await {
@@ -1645,78 +1592,6 @@ fn live_bounded_page_streams_wide_rows_and_preserves_named_binds() {
             named.rows[0]["VALUE"],
             serde_json::Value::String("42".to_owned())
         );
-    });
-}
-
-#[test]
-fn live_savepoint_preview_is_ground_truth_and_rolls_back() {
-    run_with_cx(|cx| async move {
-        let setup = match RustOracleConnection::connect(&cx, test_opts()).await {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[live-xe] SKIP live_savepoint_preview: {e}");
-                return;
-            }
-        };
-        let table = "ORACLEMCP_PREVIEW_T";
-        // Best-effort clean slate, then create + seed 3 rows + commit.
-        let _ = setup
-            .execute(&cx, &format!("DROP TABLE {table}"), &[])
-            .await;
-        setup
-            .execute(&cx, &format!("CREATE TABLE {table} (id NUMBER)"), &[])
-            .await
-            .expect("create");
-        for i in 1..=3 {
-            setup
-                .execute(&cx, &format!("INSERT INTO {table} VALUES ({i})"), &[])
-                .await
-                .expect("insert");
-        }
-        setup.commit(&cx).await.expect("commit");
-
-        // Preview a whole-table DELETE on a leased session.
-        let conn = RustOracleConnection::connect(&cx, test_opts())
-            .await
-            .expect("lease conn");
-        let mgr = LeaseManager::new();
-        let id = mgr
-            .acquire(
-                &cx,
-                "live",
-                "agent",
-                Duration::from_secs(300),
-                &[],
-                Box::new(conn),
-            )
-            .await
-            .expect("lease");
-        let impact = mgr
-            .preview_dml(&cx, "agent", &id, &format!("DELETE FROM {table}"), &[])
-            .await
-            .expect("preview");
-        assert_eq!(
-            impact.rows_affected, 3,
-            "ground-truth blast radius, not an estimate"
-        );
-        assert!(impact.rolled_back);
-        mgr.release(&cx, "agent", &id).await.expect("release");
-
-        // The DB is unchanged — all 3 rows still present.
-        let rows = setup
-            .query_rows(&cx, &format!("SELECT COUNT(*) AS n FROM {table}"), &[])
-            .await
-            .expect("count");
-        assert_eq!(
-            rows[0].parse_i64("N"),
-            Some(3),
-            "preview rolled back; DB unchanged"
-        );
-        setup
-            .execute(&cx, &format!("DROP TABLE {table}"), &[])
-            .await
-            .expect("drop");
-        setup.commit(&cx).await.ok();
     });
 }
 

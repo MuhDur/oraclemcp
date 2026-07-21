@@ -447,13 +447,6 @@ pub enum DbError {
     /// satisfy yet.
     #[error("unsupported database feature: {0}")]
     UnsupportedFeature(String),
-    /// A stateful operation (transaction / savepoint) was attempted without a
-    /// session lease (§5.1) — never a silent best-effort.
-    #[error("session lease required: {0}")]
-    LeaseRequired(String),
-    /// The referenced lease does not exist or has expired.
-    #[error("lease not found or expired: {0}")]
-    LeaseNotFound(String),
     /// A session reached an uncertain lifecycle boundary and was quarantined.
     #[error("database session quarantined ({outcome}): {message}")]
     Quarantined {
@@ -620,10 +613,6 @@ impl DbError {
             DbError::UnsupportedAuth(msg) | DbError::UnsupportedFeature(msg) => {
                 ErrorEnvelope::new(ErrorClass::InvalidArguments, msg)
             }
-            DbError::LeaseRequired(msg) => ErrorEnvelope::new(ErrorClass::LeaseRequired, msg)
-                .with_next_step("call oracle_session(acquire_lease) and pass the lease_id"),
-            DbError::LeaseNotFound(msg) => ErrorEnvelope::new(ErrorClass::LeaseRequired, msg)
-                .with_next_step("acquire a fresh lease via oracle_session(acquire_lease)"),
             DbError::Quarantined { outcome, message } => ErrorEnvelope::new(
                 ErrorClass::ConnectionFailed,
                 format!("database session quarantined ({outcome}): {message}"),
@@ -1229,33 +1218,6 @@ mod tests {
         let env = DbError::UnsupportedFeature("CQN registration".to_owned()).into_envelope();
         assert_eq!(env.error_class, ErrorClass::InvalidArguments);
         assert!(env.message.contains("CQN registration"));
-    }
-
-    #[test]
-    fn lease_required_points_at_acquire_lease() {
-        let env =
-            DbError::LeaseRequired("transaction needs a session lease".to_owned()).into_envelope();
-        assert_eq!(env.error_class, ErrorClass::LeaseRequired);
-        assert!(
-            env.next_steps
-                .iter()
-                .any(|step| step.contains("acquire_lease"))
-        );
-    }
-
-    #[test]
-    fn lease_not_found_is_distinct_from_lease_required_next_step() {
-        let env = DbError::LeaseNotFound("lease `abc123` does not exist or expired".to_owned())
-            .into_envelope();
-        assert_eq!(env.error_class, ErrorClass::LeaseRequired);
-        assert!(env.message.contains("abc123"));
-        assert!(
-            env.next_steps
-                .iter()
-                .any(|step| step.contains("fresh lease")),
-            "a not-found lease must point at acquiring a NEW lease, not reusing the stale id: {:?}",
-            env.next_steps
-        );
     }
 
     #[test]

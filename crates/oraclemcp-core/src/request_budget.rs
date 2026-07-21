@@ -53,7 +53,7 @@ pub const DEFAULT_REQUEST_POLL_QUOTA: u32 = 1_000_000;
 
 /// The cooperative-checkpoint quota a bounded cleanup/finalize section gets.
 /// Matches [`Budget::MINIMAL`]'s 100-poll allowance — enough to roll back,
-/// close cursors, and release a lease, but not enough to run away.
+/// close cursors and finish bounded cleanup, but not enough to run away.
 pub const CLEANUP_POLL_QUOTA: u32 = 100;
 
 /// Wall-clock ceiling for a fresh cleanup/finalizer attempt.
@@ -179,7 +179,7 @@ impl RequestBudget {
     }
 
     /// A fresh, independent SHORT budget for finalizers (rollback, cursor
-    /// close, lease release).
+    /// close).
     ///
     /// It intentionally does not inherit the request deadline, cancellation,
     /// or spent quota: those may be the reason cleanup is running. The caller
