@@ -7628,6 +7628,88 @@ fn query_timeout_override_cannot_widen_profile_timeout() {
     );
 }
 
+#[test]
+fn zero_timeout_is_rejected_before_normal_dispatch_reaches_oracle() {
+    for (tool, args) in [
+        (
+            "oracle_query",
+            json!({ "sql": "SELECT 1 FROM dual", "timeout_seconds": 0 }),
+        ),
+        (
+            "oracle_preview_sql",
+            json!({ "sql": "SELECT 1 FROM dual", "timeout_seconds": 0 }),
+        ),
+        (
+            "oracle_execute",
+            json!({ "sql": "UPDATE employees SET name = name", "timeout_seconds": 0 }),
+        ),
+    ] {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+
+        let error = dispatcher
+            .dispatch(tool, args)
+            .expect_err("an explicit zero timeout is rejected before tool dispatch");
+        assert_eq!(error.error_class, ErrorClass::InvalidArguments, "{tool}");
+        assert_eq!(
+            error.message, "timeout_seconds must be at least 1 when provided",
+            "{tool}"
+        );
+        assert!(
+            state.queried.lock().expect("query mutex").is_empty(),
+            "{tool} must reject before query I/O"
+        );
+        assert!(
+            state.executed.lock().expect("exec mutex").is_empty(),
+            "{tool} must reject before execute I/O"
+        );
+    }
+}
+
+#[test]
+fn zero_timeout_is_rejected_before_streaming_query_reaches_oracle() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        default_read_only_level(),
+    );
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds");
+    let outcome = runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs a current Cx");
+        let (frames, _receiver) = mpsc::channel(1);
+        dispatcher
+            .dispatch_stream(
+                &cx,
+                DispatchContext::default(),
+                "oracle_query",
+                json!({
+                    "sql": "SELECT 1 FROM dual",
+                    "streaming": true,
+                    "timeout_seconds": 0,
+                }),
+                frames,
+            )
+            .await
+    });
+    let Outcome::Err(error) = outcome else {
+        panic!("streaming query with zero timeout must be rejected");
+    };
+    assert_eq!(error.error_class, ErrorClass::InvalidArguments);
+    assert_eq!(
+        error.message,
+        "timeout_seconds must be at least 1 when provided"
+    );
+    assert!(state.queried.lock().expect("query mutex").is_empty());
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
+}
+
 #[derive(Default)]
 struct QueryCostQuotaState {
     request_quota: Mutex<Option<DbRequestQuota>>,
