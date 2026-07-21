@@ -1,0 +1,50 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T20:12:34Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.19",
+  "scope": {
+    "summary": "CF3 migrates legacy audit state through verified capability directory handles, no-follow operations, identity checks, and an atomic create-new hard-link install that refuses destination replacement.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/doctor.rs"
+    ],
+    "out_of_scope": [
+      "The migration's layout policy and legacy/current conflict handling are unchanged.",
+      "No general filesystem sandbox or unrelated doctor repair behavior is claimed."
+    ]
+  },
+  "source": {
+    "sha": "f3650548bdfd7c970ec4d4c17797984b6d963796",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "apply_legacy_state_migration",
+        "kind": "cli",
+        "trace": "The final migration fix f3650548 preserves the CF3 capability-handle design: apply_legacy_state_migration traverses parents with no-follow directory handles, writes 0600 create-new files, validates identities, and uses a hard link for the verified atomic install. legacy_migration_refuses_symlink_swaps_at_atomic_install deterministically replaces both the destination parent and final destination with symlinks; each case is refused without writing through the attacker-controlled replacement, while the legacy source remains unchanged."
+      },
+      {
+        "name": "scoped core test-target compile",
+        "kind": "cli",
+        "trace": "After proving doctor.rs unchanged from f3650548, CARGO_TARGET_DIR=/var/tmp/oraclemcp-p0-close-evidence-target cargo check -p oraclemcp-core --tests --locked completed successfully."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This close correction makes no live-service claim; the deterministic filesystem race regression is Unix-only, matching the behavior it asserts.",
+    "The original evidence artifact was later deleted by an unrelated stale-index commit; this document restores the original bead's committed proof record and binding."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
