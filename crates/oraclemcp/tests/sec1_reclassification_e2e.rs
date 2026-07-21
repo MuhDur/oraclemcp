@@ -7,13 +7,16 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use asupersync::{Cx, Outcome};
 use async_trait::async_trait;
-use oraclemcp::dispatch::OracleDispatcher;
+use oraclemcp::dispatch::{OracleDispatcher, ProfileConnectionBundle};
 use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, Auditor, MemoryAuditSink, SigningKey};
 use oraclemcp_core::capabilities::{CapabilitiesReport, FeatureTiers};
+use oraclemcp_core::error::ErrorClass;
 use oraclemcp_core::http::{HttpRequest, HttpResponse, HttpTransportConfig, handle_http_request};
 use oraclemcp_core::server::{DispatchContext, DispatchFuture, OracleMcpServer, ToolDispatch};
 use oraclemcp_core::{
@@ -134,6 +137,12 @@ fn recovery_harness(case: &str) -> RecoveryHarness {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/sec1-reclassification-e2e")
         .join(format!("{}-{}-{case}", std::process::id(), nanos));
+    recovery_harness_at(root)
+}
+
+/// Re-open the durable records through a fresh service owner, which is the
+/// process-restart seam for the operator recovery tests below.
+fn recovery_harness_at(root: PathBuf) -> RecoveryHarness {
     let service_store = FileStore::open(&root).expect("open isolated service store");
     let owner = service_store
         .acquire_service_owner("sec1-reclassification-e2e")
@@ -315,12 +324,156 @@ fn inject_forged_stored_allow(root: &std::path::Path, proposal_id: &str) {
     .expect("persist tampered stored verdict");
 }
 
+fn elevate_to_ddl(dispatcher: &OracleDispatcher, ttl_seconds: u64) {
+    let preview = dispatcher
+        .dispatch(
+            "oracle_set_session_level",
+            json!({ "level": "DDL", "ttl_seconds": ttl_seconds }),
+        )
+        .expect("DDL elevation preview");
+    let confirm = preview["confirmation"]["confirm"]
+        .as_str()
+        .expect("DDL elevation preview mints its one-use grant");
+    let applied = dispatcher
+        .dispatch(
+            "oracle_set_session_level",
+            json!({
+                "level": "DDL",
+                "ttl_seconds": ttl_seconds,
+                "execute": true,
+                "confirm": confirm,
+            }),
+        )
+        .expect("apply DDL elevation");
+    assert_eq!(applied["changed"], json!(true));
+}
+
+fn stored_ddl_confirmation(dispatcher: &OracleDispatcher) -> String {
+    let preview = dispatcher
+        .dispatch("oracle_preview_sql", json!({ "sql": SYNTHETIC_DDL }))
+        .expect("live DDL elevation can issue a confirmation");
+    assert_eq!(preview["required_level"], json!("DDL"));
+    preview["execute_confirmation"]["confirm"]
+        .as_str()
+        .expect("preview stores an allowed DDL confirmation")
+        .to_owned()
+}
+
+fn assert_live_ddl_refusal_after_recovery(
+    dispatcher: &OracleDispatcher,
+    stored_confirmation: &str,
+    execute_calls: &AtomicUsize,
+) {
+    let err = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({
+                "sql": SYNTHETIC_DDL,
+                "confirm": stored_confirmation,
+                "commit": true,
+            }),
+        )
+        .expect_err("the current guard must refuse the formerly authorized DDL");
+    assert_eq!(
+        err.error_class,
+        ErrorClass::OperatingLevelTooLow,
+        "the live classifier and current READ_ONLY level reject before consuming a stored approval: {err:?}"
+    );
+    assert_eq!(
+        execute_calls.load(Ordering::SeqCst),
+        0,
+        "live refusal must prevent all database execute calls"
+    );
+}
+
 #[test]
 fn change_proposal_apply_ignores_forged_persisted_read_only_verdict_for_live_ddl() {
     let harness = recovery_harness("change-proposal");
     let proposal_id = draft_proposal(&harness.server, &harness.config, SYNTHETIC_DDL);
 
     apply_and_assert_live_refusal(&harness, &proposal_id, SYNTHETIC_DDL);
+}
+
+#[test]
+fn failed_change_proposal_apply_reclassifies_again_on_recovery_retry() {
+    let harness = recovery_harness("failed-apply-retry");
+    let proposal_id = draft_proposal(&harness.server, &harness.config, SYNTHETIC_DDL);
+
+    apply_and_assert_live_refusal(&harness, &proposal_id, SYNTHETIC_DDL);
+    apply_and_assert_live_refusal(&harness, &proposal_id, SYNTHETIC_DDL);
+}
+
+#[test]
+fn restart_recovery_reopens_a_forged_proposal_but_reclassifies_before_apply() {
+    let initial = recovery_harness("restart");
+    let proposal_id = draft_proposal(&initial.server, &initial.config, SYNTHETIC_DDL);
+    let root = initial.root.clone();
+
+    // Drop every first-process owner before opening the same durable state as a
+    // fresh server. The proposal's stored verdict survives this boundary, but
+    // no prior dispatcher decision does.
+    drop(initial);
+    let recovered = recovery_harness_at(root);
+
+    apply_and_assert_live_refusal(&recovered, &proposal_id, SYNTHETIC_DDL);
+}
+
+#[test]
+fn expired_elevation_reclassifies_before_using_a_stored_ddl_confirmation() {
+    let execute_calls = Arc::new(AtomicUsize::new(0));
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(RecordingConnection {
+            execute_calls: Arc::clone(&execute_calls),
+        }),
+        Some("sec1-expiry".to_owned()),
+        SessionLevelState::new(OperatingLevel::Ddl, false),
+    );
+
+    elevate_to_ddl(&dispatcher, 1);
+    let stored_confirmation = stored_ddl_confirmation(&dispatcher);
+    thread::sleep(Duration::from_millis(1_100));
+
+    // TTL expiry is passive: no lifecycle callback clears the confirmation.
+    // The only safe outcome is for `oracle_execute` to freshly classify and
+    // gate the DDL at its now-READ_ONLY live level before that stored grant can
+    // be consumed.
+    assert_live_ddl_refusal_after_recovery(&dispatcher, &stored_confirmation, &execute_calls);
+}
+
+#[test]
+fn profile_switch_reentry_reclassifies_before_using_a_stored_ddl_confirmation() {
+    let execute_calls = Arc::new(AtomicUsize::new(0));
+    let replacement_execute_calls = Arc::clone(&execute_calls);
+    let dispatcher = OracleDispatcher::new_switchable(
+        Box::new(RecordingConnection {
+            execute_calls: Arc::clone(&execute_calls),
+        }),
+        Some("sec1-before-switch".to_owned()),
+        SessionLevelState::new(OperatingLevel::Ddl, false),
+        Arc::new(move |_cx, _profile| {
+            let execute_calls = Arc::clone(&replacement_execute_calls);
+            Box::pin(async move {
+                Ok(ProfileConnectionBundle::new(
+                    Box::new(RecordingConnection { execute_calls }),
+                    None,
+                ))
+            })
+        }),
+    );
+
+    elevate_to_ddl(&dispatcher, 60);
+    let stored_confirmation = stored_ddl_confirmation(&dispatcher);
+    dispatcher
+        .dispatch(
+            "oracle_switch_profile",
+            json!({ "profile": "sec1-after-switch" }),
+        )
+        .expect("profile switch reconnects into the standalone READ_ONLY policy");
+
+    // A switch both replaces the connection and lowers the live policy. The
+    // execute path must classify the original DDL against that new state before
+    // it considers the pre-switch confirmation.
+    assert_live_ddl_refusal_after_recovery(&dispatcher, &stored_confirmation, &execute_calls);
 }
 
 #[test]
