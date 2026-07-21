@@ -1,0 +1,34 @@
+{
+  "schema": "ws-c-red-run/v1",
+  "repo": "oraclemcp",
+  "bead_id": "oraclemcp-091-c7-zero-rows-columns-v6zdw",
+  "purpose": "Workstream C fixtures are a two-sided proof: the fixture must be demonstrably RED against pre-fix main, then flipped to enforced-green by the fix bead. This file records the red half so the flip is auditable rather than asserted.",
+  "expected_failure": {
+    "test": "query::tests::c7_a_zero_row_page_still_reports_its_columns",
+    "file": "crates/oraclemcp-db/src/query.rs",
+    "marker": "#[ignore] citing oraclemcp-091-c7-zero-rows-columns-v6zdw",
+    "flipped_green_by": "A1c (populate QueryPageBuilder columns from statement describe metadata)",
+    "flip_action": "delete the #[ignore] AND pass describe metadata into QueryPageBuilder::new; the assertion must not change",
+    "flip_action_caveat": "Unlike C1-C3 this flip is not attribute-only. QueryPageBuilder::new currently has no metadata parameter, so a fixture that compiles today cannot call the post-fix constructor. A1c changes the construction line; the assertion is the invariant and stays byte-identical."
+  },
+  "red_run": {
+    "command": "cargo test -p oraclemcp-db --lib c7_ -- --ignored --nocapture",
+    "toolchain": "nightly-2026-05-11",
+    "result": "FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 452 filtered out",
+    "panic_site": "crates/oraclemcp-db/src/query.rs:2267",
+    "panic_message": "a zero-row page must still carry its select-list columns; without them an agent cannot distinguish 'nothing matched' from 'wrong object' or 'no access'",
+    "root_cause": "QueryPageBuilder::new sets columns: Vec::new(); the field is filled only inside push_with_options, gated on the first row installing the column cache. A page that kept no rows therefore finishes with columns: []. The statement describe metadata is available at the call site (crates/oraclemcp-db/src/connection.rs clones result.columns immediately before QueryPageBuilder::new) and is simply not passed in."
+  },
+  "green_half": {
+    "command": "cargo test -p oraclemcp-db --lib",
+    "result": "ok. 452 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out",
+    "tests": ["query::tests::c7_a_page_with_rows_reports_its_columns"],
+    "note": "The green companion is what makes the defect legible rather than abstract: the identical query shape reports CUSTOMER_ID/REGION when one row survives and reports nothing when none does. Presence of data, not presence of the object, decides whether the agent can see the schema."
+  },
+  "golden_impact": {
+    "checked": true,
+    "command": "grep -rln '\"columns\": []' tests/golden crates/*/tests",
+    "result": "no matches",
+    "note": "Plan sec.4-C7 warns that golden/snapshot tests may pin columns: [] and would need deliberate updating. None do, so A1c breaks no fixture."
+  }
+}
