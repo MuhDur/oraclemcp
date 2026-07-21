@@ -1,0 +1,47 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T17:31:00Z",
+  "bead_id": "oraclemcp-091-b1b-drop-log-warn-aijat",
+  "scope": {
+    "summary": "Control-listener authorization drops are warn-level and include the computed public mTLS fingerprint and actionable reason.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/http/serve.rs",
+      "crates/oraclemcp-core/src/http/tests_serve_tls.rs"
+    ],
+    "out_of_scope": [
+      "Changing TLS authentication policy or exposing certificate bytes.",
+      "Claiming a live R1 control-listener run."
+    ]
+  },
+  "source": {
+    "sha": "cd501a7c217f02b76cc3b942501f4b987483e7ea",
+    "tree_clean": false,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "dedicated control authorization drop",
+        "kind": "unit",
+        "trace": "The authorization rejection helper emits warn-level tracing with computed_principal_key and reason before returning PermissionDenied."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "cargo fmt -p oraclemcp-core -- --check passed.",
+    "cargo test -p oraclemcp-core dedicated_control_authorization_drop_warns_with_computed_principal_and_reason -- --nocapture passed (1 test).",
+    "The shared index contained unrelated staged work when the source commit was created; those concurrent paths are outside this bead's scope and are recorded rather than claimed as B1b changes."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "scoped-test",
+    "basis": "unit-test"
+  }
+}
