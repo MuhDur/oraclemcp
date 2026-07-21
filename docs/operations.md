@@ -891,11 +891,25 @@ still the write-intent/audit path, not this HTTP-edge cache.
 - **Per-client HTTP access credential:** service-owned client credentials live
   in `$XDG_STATE_HOME/oraclemcp/clients.json` (or
   `$HOME/.local/state/oraclemcp/clients.json`) as salted hashes only. Issued
-  bearer values are shown once:
-  `oraclemcp --json clients rotate <client_id>` prints the replacement bearer
-  once, and `oraclemcp --json clients revoke <client_id>` revokes that client.
-  Close that client's active lanes or restart the service so in-memory grants
-  are revoked.
+  bearer values are shown once. For an already running listener, use the
+  authorized operator endpoints instead of restarting the service:
+
+  | Operation | Endpoint | Body |
+  | --- | --- | --- |
+  | List redacted client metadata | `GET /operator/v1/client-credentials` | none |
+  | Rotate one bearer | `POST /operator/v1/client-credentials/rotate` | `{"client_id":"..."}` |
+  | Revoke one bearer | `POST /operator/v1/client-credentials/revoke` | `{"client_id":"..."}` |
+
+  The dashboard supplies its normal pairing, CSRF, and route-action tickets;
+  non-browser calls require ordinary `/operator/v1` authority. Rotation first
+  makes the new credential generation authoritative, returns the replacement
+  bearer once, and then closes only that client's HTTP sessions, buffered SSE
+  results, and stateful lanes. Revocation follows the same close path without
+  returning a bearer. The resulting generation floor rejects both subsequent
+  old-bearer requests and an old bearer that was authenticated but is still
+  mid-lane creation, so it cannot acquire a new live session after the
+  operation completes. Reconnect with the replacement bearer after rotation;
+  other clients remain unaffected.
 - **Audit signing key:** move the current `key_id`/`key_ref` pair into
   `[[audit.verification_keys]]`, configure a new randomly generated active key
   of at least 32 bytes, then restart. Startup authenticates the old chain and

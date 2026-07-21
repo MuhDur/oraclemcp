@@ -489,6 +489,27 @@ oraclemcp --json clients rotate <client_id>
 oraclemcp --json clients revoke <client_id>
 ```
 
+### Online client-credential lifecycle
+
+For a running HTTP service, use the dashboard's Client Credentials control or
+the authorized operator routes: `GET /operator/v1/client-credentials`,
+`POST /operator/v1/client-credentials/rotate`, and
+`POST /operator/v1/client-credentials/revoke`. The two mutation routes accept
+`{"client_id":"..."}`. Browser calls use the normal dashboard pairing, CSRF,
+and route-action tickets; non-browser calls need the normal `/operator/v1`
+authority. Do not expose these controls to ordinary MCP clients.
+
+A rotate or revoke is a per-client online lifecycle operation, not a service
+restart procedure. After its credential-store mutation is authoritative, the
+server removes that client's HTTP sessions and buffered SSE results, closes its
+stateful lanes, and installs the new credential generation as the admission
+floor. A request that authenticated with the old bearer but is still creating a
+lane is refused rather than gaining a fresh lane; subsequent requests with the
+old bearer fail authentication. On rotation, retain the one-time replacement
+bearer and reconnect with it to establish a fresh session. Other clients keep
+their sessions and bearers. Database credentials and OAuth/audit signing keys
+have separate restart lifecycles; see the operations guide.
+
 OAuth configuration can come from `profiles.toml` or CLI flags. The resolved
 HS256 secret must be at least 32 bytes (256 bits); use randomly generated key
 material rather than a password or memorable phrase:

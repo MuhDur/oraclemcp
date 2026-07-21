@@ -434,7 +434,7 @@ fn client_credentials_are_scoped_principals_and_rotate_independently() {
 fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak() {
     #[derive(Debug, Default)]
     struct RecordingLifecycle {
-        closed: std::sync::Mutex<Vec<(String, DispatchCloseReason)>>,
+        closed: std::sync::Mutex<Vec<(String, DispatchCloseReason, Option<u64>)>>,
     }
 
     impl HttpSessionLifecycle for RecordingLifecycle {
@@ -446,12 +446,12 @@ fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak()
             &self,
             principal_key: &str,
             reason: DispatchCloseReason,
-            _min_generation: Option<u64>,
+            min_generation: Option<u64>,
         ) -> usize {
             self.closed
                 .lock()
                 .expect("test lifecycle mutex")
-                .push((principal_key.to_owned(), reason));
+                .push((principal_key.to_owned(), reason, min_generation));
             1
         }
     }
@@ -649,6 +649,21 @@ fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak()
             .expect("rotated principal buffer removed")
             .is_empty()
     );
+    assert!(
+        matches!(
+            store.authenticate_bearer(&read_bearer, None),
+            Err(crate::client_credentials::ClientCredentialError::AuthenticationFailed)
+        ),
+        "the old bearer must fail after the online rotation commits"
+    );
+    assert_eq!(
+        store
+            .authenticate_bearer(rotated_bearer, None)
+            .expect("the replacement bearer authenticates")
+            .generation,
+        2,
+        "the replacement bearer authenticates at the generation installed in the lane lifecycle"
+    );
 
     let revoke = handle_http_request(
         &test_server(),
@@ -681,10 +696,18 @@ fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak()
             .closed
             .lock()
             .expect("test lifecycle mutex")
-            .as_slice(),
+        .as_slice(),
         &[
-            (read_principal, DispatchCloseReason::SessionDelete),
-            (execute_principal, DispatchCloseReason::SessionDelete),
+            (
+                read_principal,
+                DispatchCloseReason::SessionDelete,
+                Some(2),
+            ),
+            (
+                execute_principal,
+                DispatchCloseReason::SessionDelete,
+                Some(2),
+            ),
         ]
     );
 }
