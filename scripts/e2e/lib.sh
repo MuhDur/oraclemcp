@@ -191,6 +191,36 @@ e2e_run_cargo_capped() {
     -- env -u CARGO_BUILD_JOBS "CARGO_TARGET_DIR=$target_dir" cargo "$@"
 }
 
+# Run a NAME-FILTERED cargo test and refuse a run that matched nothing.
+#
+# `cargo test -p pkg some_filter` exits 0 when the filter matches zero tests —
+# libtest prints "test result: ok. 0 passed" and reports success. Every gate
+# that trusts the exit status of a hard-coded filter therefore passes while
+# asserting nothing the moment the test is renamed or deleted. A driver-side
+# audit found exactly this shape on 2026-07-21; this repo had 17 instances of it
+# across four scripts, none of which checked that a test ran.
+#
+# Usage: e2e_cargo_test_filter <phase> <label> <min_tests> -- <cargo args...>
+e2e_cargo_test_filter() {
+  local phase="$1" label="$2" min_tests="$3"
+  shift 3
+  [ "$1" = "--" ] && shift
+  local output status=0 ran
+  output="$("$@" 2>&1)" || status=$?
+  printf '%s\n' "$output"
+  if [ "$status" -ne 0 ]; then
+    e2e_finish_fail "$label: cargo test failed (exit $status)"
+  fi
+  # Sum every "N passed" across the binaries this invocation ran.
+  ran="$(printf '%s\n' "$output" \
+    | sed -n 's/^test result: [a-zA-Z]*\. \([0-9][0-9]*\) passed.*/\1/p' \
+    | awk '{total += $1} END {print total + 0}')"
+  if [ "$ran" -lt "$min_tests" ]; then
+    e2e_finish_fail "$label: filter matched $ran test(s), expected at least $min_tests — the gate would have passed while testing nothing (rename/delete of the target test?)"
+  fi
+  e2e_log_event "filtered_test_ran" "$phase" "pass" 0 "$label: $ran test(s) matched"
+}
+
 e2e_finish_pass() {
   e2e_log_event "scenario_complete" "teardown" "pass" 0 "$E2E_SCENARIO passed"
 }
