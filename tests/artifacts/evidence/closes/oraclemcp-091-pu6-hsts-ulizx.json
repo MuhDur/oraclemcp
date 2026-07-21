@@ -1,0 +1,47 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T14:14:33Z",
+  "bead_id": "oraclemcp-091-pu6-hsts-ulizx",
+  "scope": {
+    "summary": "Emit Strict-Transport-Security only from native TLS listeners bound beyond loopback, including streamed SSE responses.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/http/serve.rs",
+      "crates/oraclemcp-core/src/http/sse.rs",
+      "crates/oraclemcp-core/src/http/sse_writer.rs",
+      "crates/oraclemcp-core/src/http/tests_serve_tls.rs"
+    ],
+    "out_of_scope": [
+      "TLS termination performed by an upstream reverse proxy.",
+      "HTTP listeners without native TLS."
+    ]
+  },
+  "source": {
+    "sha": "6afbd1a57505dfa6b3a313aced698c81cfa9c137",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "native HTTPS listener",
+        "kind": "route",
+        "trace": "http::tests::non_loopback_native_https_sets_hsts proves the header is present for a 0.0.0.0 native TLS listener and the existing loopback handshake test proves it is absent on loopback. http::sse_writer::tests::streaming_headers_emit_hsts_only_when_requested covers streamed SSE headers."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The focused tests use self-signed local TLS and do not exercise a production reverse proxy."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
