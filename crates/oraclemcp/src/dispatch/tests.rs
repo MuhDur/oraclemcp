@@ -2572,6 +2572,47 @@ fn connection_info_reports_disconnected_when_the_liveness_round_trip_fails() {
 }
 
 #[test]
+fn capability_surface_liveness_ping_quarantines_an_uncertain_retained_session() {
+    let pings = Arc::new(AtomicUsize::new(0));
+    let describes = Arc::new(AtomicUsize::new(0));
+    let dispatcher = OracleDispatcher::new_with_profile(
+        Box::new(PingFailingMock {
+            pings: Arc::clone(&pings),
+            describes: Arc::clone(&describes),
+        }),
+        Some("dev".to_owned()),
+    );
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds");
+    let outcome = runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs a current Cx");
+        dispatcher
+            .mcp_surface_state(
+                &cx,
+                DispatchContext::default(),
+                McpSurfaceDetail::Connection,
+            )
+            .await
+    });
+
+    match outcome {
+        Outcome::Err(error) => assert_eq!(error.error_class, ErrorClass::Transient),
+        other => panic!("uncertain liveness failure must not produce a healthy surface: {other:?}"),
+    }
+    assert_eq!(pings.load(Ordering::SeqCst), 1);
+    assert_eq!(describes.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        dispatcher
+            .connection_quarantine()
+            .expect("quarantine lock")
+            .expect("uncertain liveness ping quarantines retained session")
+            .outcome,
+        AuditOutcome::UnknownDiscarded
+    );
+}
+
+#[test]
 fn profile_response_omits_connection_and_secret_material() {
     let cfg = OracleMcpConfig::from_toml_str(
         r#"

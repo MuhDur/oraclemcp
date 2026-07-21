@@ -11830,7 +11830,11 @@ impl OracleDispatcher {
             server_features: None,
         };
         if detail == McpSurfaceDetail::Connection {
-            match observe_connection_info(cx, state.conn.as_ref()).await {
+            let observed_conn = ReadUncertaintyConn {
+                inner: state.conn.as_ref(),
+                quarantine: Some(&self.quarantine),
+            };
+            match observe_connection_info(cx, &observed_conn).await {
                 Ok(info) => {
                     connection.connected = true;
                     connection.read_only_standby = info.is_read_only_standby();
