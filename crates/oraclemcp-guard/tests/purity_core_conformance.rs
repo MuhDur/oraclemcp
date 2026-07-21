@@ -133,3 +133,69 @@ fn operator_pure_function_allowlist_never_promotes_default_unknown_oracle() {
         );
     }
 }
+
+/// An oracle that returns one fixed verdict, so the restriction wrapper can be
+/// driven across every input it will ever see.
+struct FixedOracle(Purity);
+
+impl SideEffectOracle for FixedOracle {
+    fn routine_purity(&self, _routine: &ObjectRef) -> Purity {
+        self.0
+    }
+}
+
+/// B12d — THE INVARIANT ANY "ADVISORY EVIDENCE" MUST PRESERVE, checked
+/// exhaustively rather than on the one case that happened to be written.
+///
+/// B12d proposes feeding Oracle's own purity metadata (`DETERMINISTIC`,
+/// `ALL_PROCEDURES`) into the purity oracle as evidence. Whatever such a channel
+/// looked like, this is the property it could not be allowed to break: the
+/// restriction layer may only ever NARROW what the independent oracle proved. It
+/// must never permit `Safe` where the independent oracle did not.
+///
+/// Every (independent verdict x allowlist state) pair is enumerated, because the
+/// dangerous direction is the one nobody writes a test for: the wrapper turning
+/// an `Unknown` or `ProvenSideEffecting` routine into a proof on its own
+/// authority. B12a's first attempt (1365e0d1) asserted exactly that promotion
+/// before 535 lines were deleted (c5f1b85c) and it was redesigned as 3eae7815.
+#[test]
+fn no_allowlist_state_can_promote_a_verdict_the_independent_oracle_refused() {
+    let routine = ObjectRef::new(Some("app_read".to_owned()), "lookup".to_owned());
+    let other = ObjectRef::new(Some("app_read".to_owned()), "not_listed".to_owned());
+
+    for independent in [
+        Purity::ProvenReadOnly,
+        Purity::ProvenSideEffecting,
+        Purity::Unknown,
+    ] {
+        for (label, probe) in [("allowlisted", &routine), ("not allowlisted", &other)] {
+            let allowlist = OperatorPureFunctionAllowlist::new([OperatorPureFunction::parse(
+                "app_read.lookup",
+            )
+            .expect("exact declaration")]);
+            let restriction =
+                OperatorPureFunctionRestriction::new(Arc::new(FixedOracle(independent)), allowlist);
+            let verdict = restriction.routine_purity(probe);
+
+            // The whole safety property in one line: permitting Safe after the
+            // wrapper requires the independent oracle to have permitted it
+            // before.
+            assert!(
+                !verdict.permits_safe() || independent.permits_safe(),
+                "restriction promoted {independent:?} to {verdict:?} for a {label} routine; \
+                 an advisory layer may narrow a proof, never manufacture one"
+            );
+
+            // And the specific shape B12d must never introduce: metadata (or any
+            // other advisory input) turning a non-proof into a proof.
+            if !independent.permits_safe() {
+                assert_eq!(
+                    verdict, independent,
+                    "a non-proof must pass through unchanged for a {label} routine; \
+                     Oracle's DETERMINISTIC flag is a developer assertion about repeatability, \
+                     not a verified statement about side effects, and must not upgrade it"
+                );
+            }
+        }
+    }
+}
