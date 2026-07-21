@@ -1,0 +1,52 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T22:22:26Z",
+  "bead_id": "oraclemcp-091-e1-ladder-e2e-jel20",
+  "scope": {
+    "summary": "The real-MCP operating-level ladder is covered across stdio and Streamable HTTP without duplicating overlapping HTTP tests.",
+    "in_scope": [
+      "crates/oraclemcp/tests/e2e_http_oauth.rs",
+      "scripts/e2e/oracle_ladder_session.py",
+      "scripts/e2e/oracle_version_matrix.sh"
+    ],
+    "out_of_scope": [
+      "A new live Oracle matrix run at this exact source SHA",
+      "The repository-wide Required gate"
+    ]
+  },
+  "source": {
+    "sha": "ddcdbc7c45acf7f1f317496262e5d9e696e02f07",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Stateful Streamable HTTP MCP operating-level ladder",
+        "kind": "route",
+        "trace": "cargo test -p oraclemcp --test e2e_http_oauth streamable_http_e1_ladder passed both distinct HTTP ladder tests: preview-confirmed READ_ONLY through ADMIN, scope lowering, protected ceilings, and elapsed TTL expiry."
+      },
+      {
+        "name": "Oracle version-matrix stdio and Streamable HTTP ladder sessions",
+        "kind": "cli",
+        "trace": "scripts/e2e/oracle_version_matrix.sh invokes scripts/e2e/oracle_ladder_session.py once over stdio and once over Streamable HTTP, each writing JSON-line evidence; the shared driver proves commit=false rolls back and its real table remains empty."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This close does not claim a fresh live Oracle matrix run at ddcdbc7c45acf7f1f317496262e5d9e696e02f07.",
+    "This close does not claim the repository-wide Required gate because it was not run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
