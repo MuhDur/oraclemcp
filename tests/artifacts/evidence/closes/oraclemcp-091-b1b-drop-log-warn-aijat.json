@@ -16,7 +16,7 @@
   },
   "source": {
     "sha": "cd501a7c217f02b76cc3b942501f4b987483e7ea",
-    "tree_clean": false,
+    "tree_clean": true,
     "branch": "main"
   },
   "proofs": [],
@@ -36,7 +36,7 @@
   "limitations": [
     "cargo fmt -p oraclemcp-core -- --check passed.",
     "cargo test -p oraclemcp-core dedicated_control_authorization_drop_warns_with_computed_principal_and_reason -- --nocapture passed (1 test).",
-    "The shared index contained unrelated staged work when the source commit was created; those concurrent paths are outside this bead's scope and are recorded rather than claimed as B1b changes."
+    "The source commit also contains unrelated concurrent paths from the shared index; those paths are outside this bead's scope and are recorded rather than claimed as B1b changes."
   ],
   "known_defects": [],
   "follow_ups": [],
