@@ -15841,3 +15841,82 @@ fn preview_dml_schema_publishes_the_enforced_row_ceiling() {
         .expect("max_rows keeps its minimum");
     assert_eq!(minimum, 1);
 }
+
+/// DI6 — a checkpoint or undo that Oracle already accepted is a TERMINAL effect,
+/// so a deadline expiring after the database answered must not report a
+/// retryable cancellation for work that is done. A caller who retries after
+/// `Cancelled` would re-establish a savepoint, or re-roll-back a workspace that
+/// has already moved.
+#[test]
+fn successful_checkpoint_and_undo_are_terminal_effects() {
+    let checkpoint = json!({
+        "checkpoint": "cp1",
+        "statement": "SAVEPOINT cp1",
+        "workspace": {"checkpoints": ["cp1"]},
+        "next_step": "…",
+    });
+    assert!(
+        response_reports_terminal_effect("oracle_checkpoint", &checkpoint),
+        "an established SAVEPOINT has already changed transaction state"
+    );
+
+    let undo_named = json!({
+        "undone_to": "cp1",
+        "statement": "ROLLBACK TO SAVEPOINT cp1",
+        "discarded_statements": [],
+        "released_checkpoints": [],
+        "workspace": {"checkpoints": []},
+    });
+    assert!(
+        response_reports_terminal_effect("oracle_undo_to", &undo_named),
+        "a taken ROLLBACK TO SAVEPOINT has already changed transaction state"
+    );
+
+    // The subtle one: a FULL rollback names no checkpoint, so `undone_to` is
+    // null. It is also the call that discarded the most state, so an
+    // implementation keying on `undone_to` being non-null would wave through
+    // precisely the largest effect.
+    let undo_all = json!({
+        "undone_to": Value::Null,
+        "statement": "ROLLBACK",
+        "discarded_statements": ["UPDATE t SET c = 1"],
+        "released_checkpoints": ["cp1"],
+        "workspace": {"checkpoints": []},
+        "next_step": "…",
+    });
+    assert!(
+        response_reports_terminal_effect("oracle_undo_to", &undo_all),
+        "a full ROLLBACK discards the whole workspace; null undone_to means \
+         'no named target', not 'nothing happened'"
+    );
+}
+
+/// The other half of DI6: widening the terminal set must not swallow calls that
+/// are still safely cancellable. A preview rolls itself back and leaves nothing
+/// behind, and a body that never reached the database has no effect to preserve.
+#[test]
+fn previews_and_effectless_bodies_stay_cancellable() {
+    let preview = json!({
+        "previewed": true,
+        "rolled_back": true,
+        "committed": false,
+        "rows_affected": 3,
+    });
+    assert!(
+        !response_reports_terminal_effect("oracle_preview_dml", &preview),
+        "a preview undoes itself; it must remain cancellable"
+    );
+
+    // A checkpoint body without the field the handler sets on success is not a
+    // success, so it must not be preserved as though Oracle had accepted it.
+    let not_a_checkpoint = json!({ "workspace": {"checkpoints": []} });
+    assert!(
+        !response_reports_terminal_effect("oracle_checkpoint", &not_a_checkpoint),
+        "only a response carrying the established checkpoint counts as terminal"
+    );
+    let not_an_undo = json!({ "workspace": {"checkpoints": []} });
+    assert!(
+        !response_reports_terminal_effect("oracle_undo_to", &not_an_undo),
+        "only a response carrying the executed statement counts as terminal"
+    );
+}

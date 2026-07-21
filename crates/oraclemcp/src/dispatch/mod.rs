@@ -11752,6 +11752,20 @@ fn response_reports_terminal_effect(name: &str, value: &Value) -> bool {
         "oracle_set_session_level" => bool_field("changed"),
         "oracle_compile_object" => bool_field("compiled"),
         "oracle_patch_source" | "oracle_create_or_replace" | "deploy_ddl" => bool_field("applied"),
+        // F-DI6: a checkpoint or an undo that returned Ok has ALREADY changed
+        // transaction state on the pinned session — the SAVEPOINT exists, or the
+        // ROLLBACK has been taken. Judging it non-terminal lets a deadline that
+        // expires after Oracle answered report a retryable `Cancelled` for work
+        // that is done, and a caller who reasonably retries then re-establishes a
+        // savepoint or re-rolls-back a workspace that has already moved,
+        // duplicating or mis-sequencing transaction operations.
+        //
+        // Both undo shapes count. A full rollback reports `undone_to: null`
+        // because it targets no named checkpoint, and it is the case that
+        // discarded the MOST state — keying on `undone_to` being non-null would
+        // wave through exactly the largest effect.
+        "oracle_checkpoint" => value.get("checkpoint").is_some_and(Value::is_string),
+        "oracle_undo_to" => value.get("statement").is_some_and(Value::is_string),
         "oracle_execute" | "execute_approved" => {
             // F-DI1: a held statement (Arc I) already ran inside the open
             // workspace transaction and its effect persists there — pending,
