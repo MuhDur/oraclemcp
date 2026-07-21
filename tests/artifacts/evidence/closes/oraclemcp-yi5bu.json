@@ -1,0 +1,62 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T15:35:00Z",
+  "bead_id": "oraclemcp-yi5bu",
+  "scope": {
+    "summary": "ALREADY IMPLEMENTED, verified rather than re-built. Both halves of this bead already ship in .github/workflows/release.yml: the plan \u00a729.3 pre-tag release rehearsal (workflow_dispatch with every publishing job tag-gated) and the \u00a727.2 C10 ratcheted binary-size budget (warn-then-fail with headroom instead of a hard cliff). This close records the verification; no code change was needed.",
+    "in_scope": [
+      ".github/workflows/release.yml"
+    ],
+    "out_of_scope": [
+      "Any modification of .github/workflows/release.yml: this close VERIFIES that file, it does not change it. It is listed in_scope because it is the artifact the claim is about.",
+      "Any change to .github/workflows/release.yml \u2014 none was required.",
+      "The driver-side half of Cluster B (\u00a725.2 P0.1-P0.4 in rust-oracledb).",
+      "Actually dispatching a rehearsal run: triggering a workflow consumes CI resources and is an outward-facing action I did not have authorization to take. Verification here is static."
+    ]
+  },
+  "source": {
+    "sha": "e0266e391341221219705f71c7b1d630b58170de",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "release.yml workflow_dispatch \u2014 the pre-tag rehearsal path",
+        "kind": "cli",
+        "trace": "`on:` resolves to ['push', 'workflow_dispatch'] under a YAML parse of the committed workflow (10 jobs). The header comment at release.yml:9-20 names this the PRE-TAG RELEASE REHEARSAL and cites plan \u00a729.3 plus the three release-mechanics gates that cost the 0.9.0 tag its re-tag loop."
+      },
+      {
+        "name": "publish-job tag gating \u2014 nothing ships from a rehearsal",
+        "kind": "config-gate",
+        "trace": "release, publish-crates, docker and publish-mcp-registry each carry `startsWith(github.ref, 'refs/tags/')`, verified by parsing each job body rather than reading the header comment. verify-mcp-registry carries no guard of its own but `needs: publish-mcp-registry`, so GitHub skips it transitively when its dependency is skipped. The gating jobs a rehearsal DOES run \u2014 checks, pinned-nightly, release-acceptance and the full 7-target build matrix including the binary-size check \u2014 carry no `if:` and therefore run on both triggers."
+      },
+      {
+        "name": "ratcheted binary-size budget \u2014 warn band before the hard cap",
+        "kind": "config-gate",
+        "trace": "release.yml:324-350 `Check binary size and musl static linkage` compares against two bounds: it exits 1 above matrix.binary_limit_bytes and emits `::warning::` above matrix.binary_warn_bytes. Six targets are 43000000 warn / 48000000 hard; the seventh is 36000000 / 40000000. Growth toward the cliff is visible run over run instead of surfacing as a tag-time failure."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Static verification only. I parsed the committed workflow and read the job bodies; I did NOT dispatch a rehearsal run, because triggering a workflow spends CI resources and is outward-facing. The claim proven here is that the rehearsal path exists and that no publishing job is reachable from it \u2014 not that a full rehearsal completes green today.",
+    "actionlint is not installed on this host, so the bead's 'actionlint clean' acceptance criterion was not executed. YAML well-formedness was confirmed with a PyYAML parse (10 jobs) instead, which is weaker: it catches malformed YAML but not GitHub-Actions-specific expression or context errors.",
+    "The `binary_warn_bytes` values are a point-in-time ratchet. Nothing here proves they are currently below actual binary sizes \u2014 if the binaries have already grown past the warn line, every release run is emitting a warning that nobody is acting on.",
+    "This close asserts prior work is correct; it adds no test. If the tag gating regresses, nothing in this repository fails \u2014 the guarantee rests on four `if:` expressions and one transitive skip."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "Consider a cheap guard test asserting that every publishing job in release.yml carries the refs/tags guard, so the rehearsal's safety property cannot silently regress. Today it is convention, not an enforced contract.",
+    "Install actionlint in CI (plan \u00a725.4 already proposes adding it to the cheap contracts job) so workflow edits get expression-level linting."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
