@@ -239,7 +239,18 @@ gate_verdict() {
 }
 
 verified_push() {
-  local repo gate="${ORACLEMCP_GATE_CMD:-}" path head after started finished code=0
+  local repo gate="${SWARM_GATE_CMD:-${ORACLEMCP_GATE_CMD:-}}" path head after started finished code=0
+  # THE GATE RUNNER MUST NOT LEAK ITS OWN CONFIGURATION INTO THE GATE.
+  # oraclemcp's config loader claims the ENTIRE `ORACLEMCP_*` environment
+  # namespace and refuses to start on an unrecognised key, so a gate that runs
+  # `cargo test` inherits ORACLEMCP_GATE_CMD and every test that spawns the
+  # binary dies with:
+  #   unknown field: found `gate_cmd` ... for key "GATE_CMD"
+  # That produced 9 phantom failures in `--test cli` and refused a push whose
+  # HEAD was in fact clean (27/27 pass without the variable). The variable is
+  # read above and removed here, so the gate subprocess never sees it.
+  # SWARM_GATE_CMD is the non-colliding spelling; ORACLEMCP_GATE_CMD still works.
+  unset ORACLEMCP_GATE_CMD SWARM_GATE_CMD
   local -a push_args=()
   while (( $# )); do
     case "$1" in
@@ -257,7 +268,7 @@ verified_push() {
     esac
   done
   [[ -n "$gate" ]] \
-    || die "--gate-cmd (or ORACLEMCP_GATE_CMD) is required: name the gate whose verdict authorizes this push"
+    || die "--gate-cmd (or SWARM_GATE_CMD) is required: name the gate whose verdict authorizes this push"
   repo="$(repo_root)"
   path="$(verdict_path "$repo")"
   head="$(git -C "$repo" rev-parse HEAD)"
@@ -751,6 +762,26 @@ PY
     >/dev/null 2>&1 || status=$?
   (( status == 65 )) || die "selftest: a delete of a live file was accepted (exit $status)"
   printf 'PASS selftest: deleting a path that still exists is refused\n'
+
+  # The gate runner must not leak its own configuration into the gate it runs.
+  # oraclemcp's config loader owns the whole ORACLEMCP_* namespace and refuses to
+  # start on an unknown key, so a leaked ORACLEMCP_GATE_CMD makes every test that
+  # spawns the binary fail: 9 phantom failures in --test cli against a HEAD that
+  # passes 27/27 without it.
+  #
+  # The gate below RECORDS what it can see and then FAILS, so verified-push
+  # refuses and never reaches its push. An earlier version of this case set only
+  # SWARM_GATE_CMD and asked the gate whether ORACLEMCP_GATE_CMD was set -- it
+  # read "unset" whether or not the runner leaked, and passed against a
+  # deliberately re-broken runner. The variable must actually be SET for the
+  # question to mean anything.
+  local observed="$work/gate-env-observed"
+  ORACLEMCP_GATE_CMD="printf %s \"\${ORACLEMCP_GATE_CMD-ABSENT}\" >'$observed'; false" \
+    bash "$ROOT/scripts/swarm_discipline.sh" verified-push -- origin HEAD >/dev/null 2>&1 || true
+  [[ -f "$observed" ]] || die "selftest: the gate never ran, so its environment proves nothing"
+  [[ "$(cat "$observed")" == "ABSENT" ]] \
+    || die "selftest: the gate saw ORACLEMCP_GATE_CMD=$(cat "$observed"); the runner leaks its own config into the gate"
+  printf 'PASS selftest: the gate subprocess cannot see the runner own config variable\n'
 }
 
 command_name="${1:-}"
