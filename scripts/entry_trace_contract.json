@@ -11,11 +11,6 @@
   },
   "script_inventory": [
     {
-      "path": "scripts/check_evidence_contract.sh",
-      "kind": "entry_point",
-      "trace": "required-quality"
-    },
-    {
       "path": "scripts/audit_bead_closes.py",
       "kind": "entry_point",
       "trace": "required-quality"
@@ -26,19 +21,9 @@
       "trace": "required-quality"
     },
     {
-      "path": "scripts/check_bead_close_evidence.sh",
-      "kind": "entry_point",
-      "trace": "required-quality"
-    },
-    {
       "path": "scripts/build_lease.sh",
       "kind": "helper",
       "excluded_reason": "interactive-build-wrapper"
-    },
-    {
-      "path": "scripts/check_build_lease.sh",
-      "kind": "entry_point",
-      "trace": "required-quality"
     },
     {
       "path": "scripts/cargo_build_guard.sh",
@@ -51,7 +36,22 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/check_bead_close_evidence.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/check_build_lease.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/check_entry_trace_contract.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/check_evidence_contract.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },
@@ -81,6 +81,11 @@
       "excluded_reason": "scheduled-heartbeat"
     },
     {
+      "path": "scripts/ci_taxonomy.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/coverage_baseline.py",
       "kind": "entry_point",
       "trace": "required-quality"
@@ -101,17 +106,17 @@
       "trace": "required-quality"
     },
     {
-      "path": "scripts/ci_taxonomy.py",
-      "kind": "entry_point",
-      "trace": "required-quality"
-    },
-    {
       "path": "scripts/dashboard_bundle_check.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },
     {
       "path": "scripts/dashboard_skin_lint.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/feature_powerset_disk_preflight.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },
@@ -146,12 +151,12 @@
       "trace": "required-quality"
     },
     {
-      "path": "scripts/migrate_mutation_result.py",
+      "path": "scripts/merge_release_sbom.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },
     {
-      "path": "scripts/merge_release_sbom.sh",
+      "path": "scripts/migrate_mutation_result.py",
       "kind": "entry_point",
       "trace": "required-quality"
     },
@@ -201,7 +206,7 @@
       "trace": "required-quality"
     },
     {
-      "path": "scripts/feature_powerset_disk_preflight.sh",
+      "path": "scripts/oraclemcp_fixture_lint.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },
@@ -211,9 +216,9 @@
       "trace": "required-quality"
     },
     {
-      "path": "scripts/oraclemcp_fixture_lint.sh",
-      "kind": "entry_point",
-      "trace": "required-quality"
+      "path": "scripts/plan_bead_graph_lint.py",
+      "kind": "helper",
+      "excluded_reason": "tracker-graph-lint"
     },
     {
       "path": "scripts/plsql_feature_lane_check.sh",
@@ -281,17 +286,17 @@
       "trace": "required-quality"
     },
     {
-      "path": "scripts/swarm_spawn_preflight.sh",
-      "kind": "entry_point",
-      "trace": "required-quality"
-    },
-    {
       "path": "scripts/secret_scan.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },
     {
       "path": "scripts/sensitive_data_lint.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/swarm_spawn_preflight.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },
