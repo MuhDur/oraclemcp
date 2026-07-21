@@ -1,0 +1,56 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T12:45:00Z",
+  "bead_id": "oraclemcp-091-c1-oauth-literal-jwt-v9m9z",
+  "scope": {
+    "summary": "Commits the C1 wire-contract fixture: an OAuth bearer JWT and HS256 secret minted once out of tree with PyJWT, asserted through the real Hs256Verifier and the real HTTP OAuth gate, with four negatives and a committed-red diagnostics test that bead oraclemcp-091-b2-oauth-contract-g5xmr flips green.",
+    "in_scope": [
+      "crates/oraclemcp-core/tests/c1_oauth_literal_jwt.rs",
+      "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c1-oauth-literal-jwt-v9m9z.json"
+    ],
+    "out_of_scope": [
+      "Any change to the OAuth verifier, the HTTP challenge builder, or documentation — B2a/B2b (oraclemcp-091-b2-oauth-contract-g5xmr) owns the fix, this bead owns only the fixture.",
+      "Making the four negative rejection classes distinguishable; that assertion is committed in an explicitly-marked expected-failure state.",
+      "Asymmetric (RS256/ES256/JWKS) token verification, which remains a fail-closed seam with no shipped verifier."
+    ]
+  },
+  "source": {
+    "sha": "67933d6564bb340c3760b5168b62c3cc21a092a9",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "POST /mcp with an Authorization: Bearer header, OAuth enforcement configured",
+        "kind": "route",
+        "trace": "c1_externally_minted_token_authorizes_a_real_mcp_request drives handle_http_request end to end and asserts 200 plus a JSON-RPC initialize result; c1_negatives_are_refused_with_an_rfc6750_challenge asserts 401, the RFC 6750 error code, and that no token material is echoed back"
+      },
+      {
+        "name": "ResourceServerConfig::validate under the production Hs256Verifier",
+        "kind": "api",
+        "trace": "c1_externally_minted_token_is_accepted_by_the_production_verifier and c1_hmac_key_is_the_raw_utf8_secret_not_its_base64_decoding pin acceptance and the raw-UTF-8 key contract in both directions"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped test only: cargo test -p oraclemcp-core --test c1_oauth_literal_jwt (5 passed, 1 expected-failure) plus the deliberate red run of that expected failure. The full workspace gate was not run for this commit.",
+    "The pairwise-distinct-diagnostics assertion is committed red by design and does not execute in the default run. It is not cited as proof of anything here; its recorded red output is the deliverable, and oraclemcp-091-b2-oauth-contract-g5xmr flips it green by deleting the #[ignore] with the assertions unchanged.",
+    "The fixture covers HS256 only. RS256/ES256 tokens route through the SignatureVerifier seam, which ships no implementation, so no external mint could be exercised for them.",
+    "The token and secret constants cannot be regenerated in-repo without recreating the self-reference the fixture removes; changing the claims means minting again with an external tool."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-b2-oauth-contract-g5xmr must delete the #[ignore] on c1_negative_tokens_are_pairwise_distinguishable_on_the_wire as part of its acceptance."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
