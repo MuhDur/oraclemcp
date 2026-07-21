@@ -29,8 +29,8 @@ pub struct SessionContext {
     pub level_state: SessionLevelState,
     /// Optional local stateless-read pool settings from `[profiles.pool]`.
     pub pool_settings: Option<PoolSettings>,
-    /// Ordered login statements: canonical NLS, the read-only backstop (if the
-    /// level is `READ_ONLY`), then the operator's profile login statements.
+    /// Ordered login statements: canonical NLS, operator login statements and
+    /// trusted setup, then the read-only backstop (if the level is `READ_ONLY`).
     pub login_statements: Vec<String>,
 }
 
@@ -308,14 +308,6 @@ fn profile_session_statements(
     level_state: &SessionLevelState,
 ) -> Result<Vec<String>, DbError> {
     let mut out = Vec::new();
-    // Read-only backstop when the session starts (and stays capped at) READ_ONLY.
-    if level_state.effective_ceiling() == OperatingLevel::ReadOnly {
-        out.extend(
-            read_only_setup_statements(OperatingLevel::ReadOnly)
-                .into_iter()
-                .map(str::to_owned),
-        );
-    }
     if let Some(extra) = &profile.login_statements {
         for stmt in extra {
             out.push(validate_login_statement(&profile.name, stmt)?);
@@ -330,6 +322,16 @@ fn profile_session_statements(
         for stmt in extra {
             out.push(validate_trusted_session_statement(&profile.name, stmt)?);
         }
+    }
+    // Trusted setup may establish table-backed application context. Re-assert
+    // the read-only transaction only after it has run, so protected profiles
+    // retain their backstop without making that setup impossible.
+    if level_state.effective_ceiling() == OperatingLevel::ReadOnly {
+        out.extend(
+            read_only_setup_statements(OperatingLevel::ReadOnly)
+                .into_iter()
+                .map(str::to_owned),
+        );
     }
     Ok(out)
 }
@@ -854,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn trusted_session_statements_are_carried_after_guarded_login_statements() {
+    fn trusted_session_statements_run_before_the_read_only_backstop() {
         let p = profile(
             r#"
             [[profiles]]
@@ -869,15 +871,13 @@ mod tests {
             "#,
         );
         let ctx = build_session_context(&p, None, None, false).expect("context");
+        let statements = ctx.options.session_statements;
+        let login = position_of(&statements, "ALTER SESSION SET NLS_LANGUAGE=english");
+        let trusted = position_of(&statements, "BEGIN DBMS_OUTPUT.ENABLE(500000); END;");
+        let backstop = position_of(&statements, SET_TRANSACTION_READ_ONLY);
         assert!(
-            ctx.options
-                .session_statements
-                .iter()
-                .any(|s| s == "ALTER SESSION SET NLS_LANGUAGE=english")
-        );
-        assert_eq!(
-            ctx.options.session_statements.last().map(String::as_str),
-            Some("BEGIN DBMS_OUTPUT.ENABLE(500000); END;")
+            login < trusted && trusted < backstop,
+            "trusted setup follows guarded login and precedes the read-only backstop: {statements:?}"
         );
     }
 
@@ -958,24 +958,10 @@ mod tests {
 
     /// The failing half of C5.
     ///
-    /// `profile_session_statements` pushes the backstop first whenever the
-    /// ceiling is `READ_ONLY`, then login statements, then trusted setup. On a
-    /// protected profile — the posture the README actively recommends — every
-    /// trusted session statement therefore runs inside an already-open read-only
-    /// transaction. Anything that writes fails with ORA-01456, which makes
-    /// table-backed application context, and so the standard way of driving VPD,
-    /// impossible by construction rather than by policy.
-    ///
-    /// The existing `trusted_session_statements_are_carried_after_guarded_login_statements`
-    /// cannot catch this: it uses one unprotected profile, so the posture where
-    /// the backstop appears at all is never built. Test-shape rule §A.8-5 —
-    /// setup ordering is part of the contract, so assert it per posture.
-    ///
-    /// Bead `oraclemcp-091-a1b-*` (A1b) reorders: trusted setup first, backstop
-    /// re-asserted after. Flipping this green means removing the `#[ignore]`;
-    /// the assertion must not change.
+    /// A protected profile must establish trusted setup before opening its
+    /// read-only transaction. This pins the ordering contract without weakening
+    /// the backstop or changing the per-request enforcement path.
     #[test]
-    #[ignore = "expected failure until A1b re-asserts the read-only backstop after trusted setup (bead oraclemcp-091-c5-setup-ordering-postures-02d0i)"]
     fn c5_a_protected_posture_runs_trusted_setup_before_the_read_only_backstop() {
         let statements = c5_statements("protected = true");
         let backstop = position_of(&statements, SET_TRANSACTION_READ_ONLY);
