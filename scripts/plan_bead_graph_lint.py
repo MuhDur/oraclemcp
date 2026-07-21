@@ -867,6 +867,154 @@ def apply_promotion(state: ManifestState, include_gcp: bool) -> tuple[int, int, 
     return staged, wired, activated
 
 
+def _selftest_manifest(base: Path) -> dict[str, Any]:
+    """A minimal manifest that MUST pass, built on disk under `base`."""
+    plan = base / "PLAN.md"
+    plan.write_text("# plan\n", encoding="utf-8")
+    for repo in ("server", "driver"):
+        (base / repo / ".beads").mkdir(parents=True, exist_ok=True)
+        (base / repo / ".beads" / "issues.jsonl").write_text("", encoding="utf-8")
+
+    def task(slug: str, repository: str, **overrides: Any) -> dict[str, Any]:
+        record = {
+            "slug": slug,
+            "repository": repository,
+            "tracker": repository,
+            "title": f"task {slug}",
+            "type": "task",
+            "priority": 1,
+            "tier": "tier-1",
+            "labels": [f"train-{slug}", f"plan:{slug}"],
+            "tracking_label": f"train-{slug}",
+            "plan": {"section": "§33", "label": f"plan:{slug}"},
+            "scope": ["scripts/plan_bead_graph_lint.py"],
+            "acceptance": ["the lint rejects a malformed graph"],
+            "evidence": ["selftest output"],
+            "dependencies": [],
+            "parent": None,
+            "handoffs": [],
+            "operator_gate": "none",
+            "promotion": "activate",
+            "lineage": {"kind": "new"},
+            "reuse": {"action": "create"},
+        }
+        record.update(overrides)
+        return record
+
+    return {
+        "schema": SCHEMA,
+        "program": {"slug": "selftest-program"},
+        "source_document": {
+            "path": "PLAN.md",
+            "sha256": hashlib.sha256(plan.read_bytes()).hexdigest(),
+        },
+        "repositories": [
+            {"slug": "server", "path": "server", "source_repo": "oraclemcp"},
+            {"slug": "driver", "path": "driver", "source_repo": "rust-oracledb"},
+        ],
+        "trackers": [
+            {"repository": "server", "path": "server/.beads/issues.jsonl", "source_repo": "oraclemcp"},
+            {"repository": "driver", "path": "driver/.beads/issues.jsonl", "source_repo": "rust-oracledb"},
+        ],
+        "release_targets": [
+            {"repository": "server", "version": "0.9.1", "assertion": "patch"},
+            {"repository": "driver", "version": "0.9.0", "assertion": "minor"},
+        ],
+        "tasks": [task("alpha", "server"), task("beta", "server"), task("gamma", "driver")],
+    }
+
+
+def selftest() -> int:
+    """Prove the manifest validator can FAIL, rule by rule.
+
+    A graph lint that has only ever been observed passing is indistinguishable
+    from one that returns true unconditionally. This builds a manifest that must
+    pass, then applies one targeted mutation per rule and requires the matching
+    error code — so every rule below is evidenced as reachable, not assumed.
+    """
+    import tempfile
+
+    def run(document: dict[str, Any], base: Path) -> list[str]:
+        target = base / "manifest.json"
+        target.write_text(json.dumps(document), encoding="utf-8")
+        return validate_manifest(target).findings.hard
+
+    def mutate_dup_slug(doc: dict[str, Any]) -> None:
+        doc["tasks"][1]["slug"] = doc["tasks"][0]["slug"]
+
+    def mutate_dup_tracking_label(doc: dict[str, Any]) -> None:
+        doc["tasks"][1]["tracking_label"] = doc["tasks"][0]["tracking_label"]
+        doc["tasks"][1]["labels"] = [doc["tasks"][0]["tracking_label"], "plan:beta"]
+
+    def mutate_unknown_reference(doc: dict[str, Any]) -> None:
+        doc["tasks"][0]["dependencies"] = ["no-such-task"]
+
+    def mutate_cycle(doc: dict[str, Any]) -> None:
+        doc["tasks"][0]["dependencies"] = ["beta"]
+        doc["tasks"][1]["dependencies"] = ["alpha"]
+
+    def mutate_cross_repo_native_edge(doc: dict[str, Any]) -> None:
+        doc["tasks"][0]["dependencies"] = ["gamma"]
+
+    def mutate_source_checksum(doc: dict[str, Any]) -> None:
+        doc["source_document"]["sha256"] = "0" * 64
+
+    def mutate_schema(doc: dict[str, Any]) -> None:
+        doc["schema"] = "plan-bead-graph/v1"
+
+    def mutate_missing_acceptance(doc: dict[str, Any]) -> None:
+        doc["tasks"][0]["acceptance"] = []
+
+    def mutate_release_target(doc: dict[str, Any]) -> None:
+        doc["tasks"][0]["release_target"] = "9.9.9"
+
+    def mutate_label_with_dot(doc: dict[str, Any]) -> None:
+        doc["tasks"][0]["tracking_label"] = "train.alpha"
+        doc["tasks"][0]["labels"] = ["train.alpha", "plan:alpha"]
+
+    cases: list[tuple[str, str, Any]] = [
+        ("duplicate task slug", "E_TASK_SLUG", mutate_dup_slug),
+        ("duplicate tracking label", "E_TASK_LABEL", mutate_dup_tracking_label),
+        ("dependency on an unknown task", "E_REFERENCE_UNKNOWN", mutate_unknown_reference),
+        ("dependency cycle", "E_GRAPH_CYCLE", mutate_cycle),
+        ("cross-repo native edge", "E_CROSS_REPO_NATIVE_EDGE", mutate_cross_repo_native_edge),
+        ("plan checksum drift", "E_SOURCE_SHA256", mutate_source_checksum),
+        ("unsupported schema", "E_SCHEMA", mutate_schema),
+        ("missing acceptance text", "E_TASK_ACCEPTANCE", mutate_missing_acceptance),
+        ("release target disagreement", "E_SEMVER_ASSERTION", mutate_release_target),
+        ("Beads-rejected '.' in a label", "E_TASK_LABEL", mutate_label_with_dot),
+    ]
+
+    checks = 0
+    with tempfile.TemporaryDirectory() as raw_base:
+        base = Path(raw_base)
+        good = _selftest_manifest(base)
+        hard = run(good, base)
+        if hard:
+            print("plan-bead-graph selftest: the known-good manifest was REJECTED:", file=sys.stderr)
+            for line in hard:
+                print(f"  {line}", file=sys.stderr)
+            return 1
+        print("PASS selftest: a well-formed manifest is accepted")
+        checks += 1
+
+        for label, code, mutate in cases:
+            document = json.loads(json.dumps(good))
+            mutate(document)
+            hard = run(document, base)
+            if not any(line.startswith(code) for line in hard):
+                print(
+                    f"plan-bead-graph selftest: {label} was NOT rejected with {code}; got {hard or 'no findings'}",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"PASS selftest: {label} is rejected ({code})")
+            checks += 1
+
+    print(f"plan-bead-graph selftest: OK ({checks} checks; the validator rejects every mutated graph)")
+    return 0
+
+
 def report_manifest(state: ManifestState) -> None:
     for line in sorted(state.findings.warn):
         print(f"lint: WARN {line}")
@@ -1020,8 +1168,16 @@ def main() -> int:
     parser.add_argument("--train-label", help="legacy live-train label")
     parser.add_argument("--sink", help="legacy terminal sink issue id")
     parser.add_argument("--marker", help="legacy conversion-authored id marker")
+    parser.add_argument(
+        "--selftest",
+        action="store_true",
+        help="prove the manifest validator rejects a malformed graph, rule by rule",
+    )
     parser.add_argument("--input", default=None, help="legacy saved br list JSON")
     args = parser.parse_args()
+
+    if args.selftest:
+        return selftest()
     if args.manifest:
         if any((args.train_label, args.sink, args.marker, args.input)):
             parser.error("--manifest cannot be combined with legacy --train-label/--sink/--marker/--input")
