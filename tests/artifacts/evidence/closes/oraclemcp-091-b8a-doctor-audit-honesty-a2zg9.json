@@ -31,7 +31,7 @@
       },
       {
         "name": "binary startup-policy mapping",
-        "kind": "unit",
+        "kind": "config-gate",
         "trace": "crates/oraclemcp/src/main_tests.rs adds doctor_audit_posture_matches_startup_audit_policy_without_opening_a_log for read-only DISABLED, writable no-key refusal, and configured signing source. Its cargo target was blocked before this test could run by pre-existing crate oraclemcp-db error E0425: oracle_error_envelope not found at crates/oraclemcp-db/src/error.rs:420 and :440."
       }
     ]
@@ -45,13 +45,16 @@
     "The binary-target unit test remains unrun because an unrelated dirty-tree oraclemcp-db compile error blocks the package."
   ],
   "known_defects": [
-    "oraclemcp-db currently fails to compile because oracle_error_envelope is undefined at error.rs:420 and error.rs:440."
+    {
+      "description": "oraclemcp-db currently fails to compile because oracle_error_envelope is undefined at error.rs:420 and error.rs:440.",
+      "bead_id": "oraclemcp-091-ws-b-p1-fixes-71da0"
+    }
   ],
   "follow_ups": [
     "oraclemcp-091-b8c-refusal-trail-rhg0m remains open; doctor must add the explicitly labeled unsigned refusal-trail status only when that feature lands."
   ],
   "readiness": {
     "claim": "not-ready",
-    "basis": "scoped-core-test; binary-target compilation blocked by unrelated existing error"
+    "basis": "scoped-test"
   }
 }
