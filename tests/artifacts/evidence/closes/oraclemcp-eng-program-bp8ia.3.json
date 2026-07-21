@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T16:10:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.3",
+  "scope": {
+    "summary": "Cluster B (CI velocity tranche 1) is decomposed into six tracked children rather than landed whole. Its server-side scope is verified complete in the tree; its driver-side scope is carried forward explicitly so it is not silently dropped when the cluster closes.",
+    "in_scope": [
+      "tests/artifacts/evidence/closes/oraclemcp-ysu24.json",
+      "tests/artifacts/evidence/closes/oraclemcp-ircfv.json",
+      "tests/artifacts/evidence/closes/oraclemcp-r6agn.json"
+    ],
+    "out_of_scope": [
+      "The driver-side tranche (plan §25.2 P0.1-P0.4 in rust-oracledb) — carried forward as oraclemcp-dapll, NOT done.",
+      "Cluster B tranches beyond tranche 1.",
+      "Any code change: every tranche-1 item was already satisfied in this repo."
+    ]
+  },
+  "source": { "sha": "23a4bc2a647ac1f76b3cea9ac7950a807b696d16", "tree_clean": true, "branch": "main" },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Cluster B tranche-1 decomposition into tracked children",
+        "kind": "cli",
+        "trace": "Six children filed with --deps discovered-from on this cluster: oraclemcp-ysu24 (_quality.yml relocation, verified), oraclemcp-ircfv (powerset disk preflight, verified), oraclemcp-r6agn (release.yml job-graph parallelization, verified), oraclemcp-yi5bu (pre-tag release rehearsal, verified), oraclemcp-m4kua (tag-gating guard test, open), oraclemcp-dapll (driver-side tranche, open). Each verified child carries its own evidence document naming the files and commands checked."
+      }
+    ]
+  },
+  "live_evidence": { "claimed": false, "artifacts": [] },
+  "limitations": [
+    "This close reports that the cluster is DECOMPOSED and that its server-side items were already satisfied — not that Cluster B's full 'both repos' scope is delivered. oraclemcp-dapll remains open and untouched.",
+    "Two children are open by design: oraclemcp-m4kua (a guard test I wrote, mutation-tested, and deleted because it did not fail when I removed a tag guard) and oraclemcp-dapll (driver repo).",
+    "Verification of pre-existing state, not new implementation. Static and local only; no CI run was dispatched and the full workspace gate was not run for this close.",
+    "The children could not be closed before this cluster: scripts/bead_tracker_guard.sh treats an open 'discovered-from' parent as a blocking dependency, so the parent had to close first. That ordering is a tooling constraint, not a statement that the cluster finished before its children — see oraclemcp-r3sti."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-dapll: the driver-side CI velocity tranche is unstarted and belongs to whoever owns rust-oracledb.",
+    "oraclemcp-m4kua: the release.yml tag-gating guard test still needs a version that demonstrably fails under mutation.",
+    "oraclemcp-r3sti: bead_tracker_guard treats discovered-from as blocking, which forces parents to close before their follow-ups."
+  ],
+  "readiness": { "claim": "not-ready", "basis": "manual-review" }
+}
