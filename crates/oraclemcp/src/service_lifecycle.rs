@@ -395,7 +395,8 @@ pub(crate) fn doctor_service_unit_caps() -> Option<DoctorServiceUnitCaps> {
 pub(crate) fn acquire_service_instance_guard(
     listen: &str,
 ) -> Result<ServiceInstanceGuard, ServiceError> {
-    acquire_service_instance_guard_at(&default_service_instance_lock_path(), listen)
+    let lock_path = default_service_instance_lock_path()?;
+    acquire_service_instance_guard_at(&lock_path, listen)
 }
 
 fn require_confirmed(action: &str, dry_run: bool, yes: bool) -> Result<(), ServiceError> {
@@ -698,7 +699,7 @@ fn run_status(manager: ServiceManager, name: &str) -> Result<ServiceResult, Serv
     let output = run_capture(&program, &args, false)?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    let runtime_instance = discover_service_instance();
+    let runtime_instance = discover_service_instance()?;
     let active = match manager {
         ServiceManager::SystemdUser => stdout == "active",
         ServiceManager::LaunchdUser => output.status.success(),
@@ -3485,7 +3486,7 @@ fn acquire_service_instance_guard_at(
             ServiceError::new(
                 "ORACLEMCP_SERVICE_LOCK_UNAVAILABLE",
                 format!(
-                    "failed to prepare service runtime directory {}: {e}",
+                    "failed to prepare service state directory {}: {e}",
                     parent.display()
                 ),
                 3,
@@ -3526,22 +3527,19 @@ fn acquire_service_instance_guard_at(
     })
 }
 
-fn default_service_instance_lock_path() -> PathBuf {
-    default_service_runtime_dir().join(SERVICE_INSTANCE_LOCK_FILE)
+fn default_service_instance_lock_path() -> Result<PathBuf, ServiceError> {
+    FileStore::default_state_dir()
+        .map(|state_dir| service_instance_lock_path_for_state_dir(&state_dir))
+        .map_err(service_store_error)
 }
 
-fn default_service_runtime_dir() -> PathBuf {
-    if let Some(runtime) = env::var_os("XDG_RUNTIME_DIR") {
-        return PathBuf::from(runtime).join("oraclemcp");
-    }
-    let user = env::var("USER")
-        .or_else(|_| env::var("USERNAME"))
-        .unwrap_or_else(|_| "unknown".to_owned());
-    env::temp_dir().join(format!("oraclemcp-service-{user}"))
+fn service_instance_lock_path_for_state_dir(state_dir: &Path) -> PathBuf {
+    state_dir.join(SERVICE_INSTANCE_LOCK_FILE)
 }
 
-fn discover_service_instance() -> ServiceInstanceDiscovery {
-    discover_service_instance_at(&default_service_instance_lock_path())
+fn discover_service_instance() -> Result<ServiceInstanceDiscovery, ServiceError> {
+    let lock_path = default_service_instance_lock_path()?;
+    Ok(discover_service_instance_at(&lock_path))
 }
 
 fn discover_service_instance_at(path: &Path) -> ServiceInstanceDiscovery {
@@ -5094,6 +5092,32 @@ mod tests {
             discover_service_instance_at(&path),
             ServiceInstanceDiscovery::Missing { .. }
         ));
+    }
+
+    #[test]
+    fn service_instance_locks_are_scoped_to_each_state_root() {
+        let root = test_root("service-instance-state-roots");
+        let first_path = service_instance_lock_path_for_state_dir(&root.join("state-a"));
+        let second_path = service_instance_lock_path_for_state_dir(&root.join("state-b"));
+        assert_ne!(first_path, second_path);
+        assert!(first_path.ends_with(SERVICE_INSTANCE_LOCK_FILE));
+        assert!(second_path.ends_with(SERVICE_INSTANCE_LOCK_FILE));
+
+        let first = acquire_service_instance_guard_at(&first_path, "127.0.0.1:7070")
+            .expect("first state root guard");
+        let second = acquire_service_instance_guard_at(&second_path, "127.0.0.1:7071")
+            .expect("second state root guard");
+
+        assert!(matches!(
+            discover_service_instance_at(&first_path),
+            ServiceInstanceDiscovery::Present { .. }
+        ));
+        assert!(matches!(
+            discover_service_instance_at(&second_path),
+            ServiceInstanceDiscovery::Present { .. }
+        ));
+        drop(second);
+        drop(first);
     }
 
     #[test]
