@@ -10,6 +10,10 @@
 #
 # Install oraclemcp from a verified release archive, or from source when
 # explicitly requested. Service-manager mutation is opt-in only.
+if [ -z "${BASH_VERSION:-}" ]; then
+  printf 'oraclemcp installer: this script requires bash; run with bash install.sh [options]\n' >&2
+  exit 2
+fi
 set -euo pipefail
 shopt -s lastpipe 2>/dev/null || true
 umask 022
@@ -605,7 +609,7 @@ print_next_steps() {
   local cmd
   cmd="$(installed_command)"
   printf 'oraclemcp installer: next steps\n' >&2
-  printf '  * Fastest path: discover databases from tnsnames.ora: %s setup --discover\n' "$cmd" >&2
+  printf '  * Fastest path: discover databases from tnsnames.ora: %s setup --discover (non-interactive: add --discover-tns or --yes)\n' "$cmd" >&2
   printf '  1. Run diagnostics: %s --json doctor\n' "$cmd" >&2
   printf '  2. Write a starter profile: %s --json setup --write --profile db_ro\n' "$cmd" >&2
   printf '  3. Generate MCP client snippets: %s --json setup --profile db_ro\n' "$cmd" >&2

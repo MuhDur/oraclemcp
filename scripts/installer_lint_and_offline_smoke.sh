@@ -242,6 +242,19 @@ fi
 bash -n install.sh
 bash -n scripts/installer_lint_and_offline_smoke.sh
 
+if command -v dash >/dev/null 2>&1; then
+  set +e
+  dash_output="$(env -u BASH_VERSION dash install.sh --dry-run 2>&1)"
+  dash_status=$?
+  set -e
+  [ "$dash_status" -eq 2 ] || fail "dash install.sh must exit 2 before any installer work: $dash_output"
+  contains "$dash_output" "run with bash"
+  not_contains "$dash_output" "Illegal option -o pipefail"
+  log_pass "non-bash interpreter diagnostic"
+else
+  log_skip "dash unavailable; non-bash installer diagnostic not exercised"
+fi
+
 ps_text="$(tr -d '\r' < install.ps1)"
 contains "$ps_text" "certutil.exe -hashfile"
 contains "$ps_text" "cosign verify-blob"
