@@ -1,0 +1,51 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T14:45:00Z",
+  "bead_id": "oraclemcp-091-c5-setup-ordering-postures-02d0i",
+  "scope": {
+    "summary": "Commits the C5 fixture: the built session-setup statement list asserted for BOTH profile postures, with two green posture pins (writable takes no read-only backstop; protected keeps one) and a committed-red ordering assertion that trusted setup must precede the backstop on a protected profile.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/connect.rs",
+      "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c5-setup-ordering-postures-02d0i.json"
+    ],
+    "out_of_scope": [
+      "Reordering profile_session_statements — A1b owns the fix; this bead owns only the fixture.",
+      "Whether the backstop should be re-asserted after trusted setup, or expressed some other way; the fixture asserts only that trusted setup runs first, leaving A1b free to choose the mechanism.",
+      "Any change to read_only_setup_statements, SET_TRANSACTION_READ_ONLY, or the trusted-statement validator."
+    ]
+  },
+  "source": {
+    "sha": "642730f5fb36d47b0524e3bcb082b0ce3e594b45",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "build_session_context — the profile-to-login-statements path used by every connect",
+        "kind": "config-gate",
+        "trace": "c5_a_writable_posture_takes_no_read_only_backstop and c5_a_protected_posture_still_gets_the_read_only_backstop build the real session context from a parsed profile under both postures and assert the presence/absence of the backstop plus the trusted statement"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped test only: cargo test -p oraclemcp-core --lib connect:: (25 passed, 1 expected-failure) plus the deliberate red run. The full workspace gate was not run for this commit.",
+    "The ordering assertion is committed red by design and does not execute in the default run; it is not cited as proof of anything here.",
+    "The fixture asserts the BUILT statement list, not the Oracle outcome. ORA-01456 is the documented consequence of issuing DML inside a read-only transaction and is reasoned from the ordering, not observed — no live database was involved. A live proof needs the D1 harness with a table-backed application context on a protected profile.",
+    "Only trusted_session_statements are exercised as the writing case. login_statements and login_script are ALTER SESSION only and are unaffected by an open read-only transaction, so the ordering matters solely for the trusted list."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "A1b must delete the #[ignore] on c5_a_protected_posture_runs_trusted_setup_before_the_read_only_backstop, leaving the assertion unchanged, and must keep both posture pins green — it may neither drop the backstop on protected profiles nor introduce one on writable profiles."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
