@@ -224,13 +224,21 @@ fn c3_an_unrelated_registered_fingerprint_does_not_authorize() {
 }
 
 fn operator_policy(allowed_subject: &str) -> OperatorAuthorityPolicy {
+    let config = OracleMcpConfig::from_toml_str(&format!(
+        r#"
+        [http.operator]
+        allow_loopback_owner = false
+        allowed_subjects = ["{allowed_subject}"]
+        "#,
+    ))
+    .expect("C3 operator subject must pass configuration load");
     OperatorAuthorityPolicy {
         // Loopback-owner fallback off: this test is about the authenticated
         // principal path, and leaving it on would mask the failure.
         allow_loopback_owner: false,
         local_owner_stable_id: "c3-fixture-owner".to_owned(),
-        // Exactly what main.rs stores today: the operator's string, trimmed.
-        allowed_subjects: vec![allowed_subject.trim().to_owned()],
+        // Exactly what main.rs stores: configuration-normalized principal keys.
+        allowed_subjects: config.http.operator.allowed_subjects,
     }
 }
 
@@ -258,15 +266,15 @@ fn c3_config_load_accepts_every_operator_subject_spelling() {
         );
         let config = OracleMcpConfig::from_toml_str(&toml)
             .unwrap_or_else(|error| panic!("config with {label} must load: {error}"));
-        assert_eq!(config.http.operator.allowed_subjects, vec![subject]);
+        assert_eq!(
+            config.http.operator.allowed_subjects,
+            vec![CANONICAL_PRINCIPAL_KEY],
+            "{label} must be stored as the runtime principal key"
+        );
     }
 }
 
-/// The failing half. Bead `oraclemcp-091-b1a-mtls-normalize-eg2il` (B1a)
-/// normalizes `allowed_subjects` at load; deleting the `#[ignore]` is part of
-/// its acceptance.
 #[test]
-#[ignore = "expected failure until oraclemcp-091-b1a-mtls-normalize-eg2il (B1a) normalizes allowed_subjects at load"]
 fn c3_operator_allowed_subjects_authorize_in_every_accepted_spelling() {
     for (label, spelling) in ACCEPTED_SPELLINGS {
         let policy = operator_policy(&format!("mtls:{spelling}"));

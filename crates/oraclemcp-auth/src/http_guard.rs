@@ -87,12 +87,92 @@ pub fn authority_is_loopback(authority: &str) -> bool {
     )
 }
 
-/// Extract the host authority from an `Origin` value (`https://h:port` → `h:port`).
-fn origin_authority(origin: &str) -> &str {
-    origin
-        .trim()
-        .split_once("://")
-        .map_or(origin.trim(), |(_, rest)| rest.trim_end_matches('/'))
+/// Canonicalize a browser origin without accepting a path, query, fragment, or
+/// credentials. A configuration entry may carry one cosmetic trailing slash;
+/// an inbound Origin must already use the browser's serialized no-slash form.
+///
+/// This is deliberately a comparison normalization, not a permissive parser:
+/// normalizing an operator spelling must not turn a malformed request origin
+/// into an allowlisted one.
+fn normalized_origin(value: &str, config_entry: bool) -> Option<String> {
+    let value = value.trim();
+    let (scheme, authority) = value.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https") {
+        return None;
+    }
+    let authority = if config_entry {
+        authority.strip_suffix('/').unwrap_or(authority)
+    } else {
+        authority
+    };
+    if authority.is_empty()
+        || authority.contains(['/', '?', '#', '@'])
+        || (config_entry && authority.ends_with('/'))
+    {
+        return None;
+    }
+    let authority = normalized_authority(authority)?;
+    let authority = match (scheme.as_str(), authority.as_str()) {
+        ("http", authority) if authority.ends_with(":80") => &authority[..authority.len() - 3],
+        ("https", authority) if authority.ends_with(":443") => &authority[..authority.len() - 4],
+        _ => authority.as_str(),
+    };
+    if authority.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{authority}"))
+}
+
+/// Canonicalize one complete HTTP authority. This is intentionally stricter
+/// than [`host_only`]: the latter preserves legacy loopback checking, while an
+/// allowlist match must never turn a path, credential, malformed bracket, or
+/// invalid port into a trusted host.
+fn normalized_authority(authority: &str) -> Option<String> {
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (literal, suffix) = bracketed.split_once(']')?;
+        if literal.parse::<std::net::Ipv6Addr>().is_err() {
+            return None;
+        }
+        let port = match suffix {
+            "" => None,
+            _ => Some(suffix.strip_prefix(':')?),
+        };
+        (format!("[{}]", literal.to_ascii_lowercase()), port)
+    } else {
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) if !host.contains(':') => (host, Some(port)),
+            Some(_) => return None,
+            None => (authority, None),
+        };
+        if host.is_empty()
+            || host.starts_with('.')
+            || host.ends_with('.')
+            || host.split('.').any(|label| {
+                label.is_empty()
+                    || label.starts_with('-')
+                    || label.ends_with('-')
+                    || !label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+        {
+            return None;
+        }
+        (host.to_ascii_lowercase(), port)
+    };
+    let port = match port {
+        Some(port)
+            if !port.is_empty()
+                && port.bytes().all(|byte| byte.is_ascii_digit())
+                && port.parse::<u16>().is_ok() =>
+        {
+            format!(":{port}")
+        }
+        Some(_) => return None,
+        None => String::new(),
+    };
+    Some(format!("{host}{port}"))
 }
 
 impl HttpGuardPolicy {
@@ -120,9 +200,18 @@ impl HttpGuardPolicy {
 
         // 3) Origin (when present) must be loopback or allowlisted.
         if let Some(origin) = origin {
-            let auth = origin_authority(origin);
-            let origin_ok = authority_is_loopback(auth)
-                || self.allowed_origins.iter().any(|o| o == origin.trim());
+            let normalized = normalized_origin(origin, false);
+            let origin_ok = normalized.as_deref().is_some_and(|origin| {
+                authority_is_loopback(
+                    origin
+                        .strip_prefix("http://")
+                        .or_else(|| origin.strip_prefix("https://"))
+                        .unwrap_or(origin),
+                ) || self
+                    .allowed_origins
+                    .iter()
+                    .any(|allowed| normalized_origin(allowed, true).as_deref() == Some(origin))
+            });
             if !origin_ok {
                 return Err(HttpGuardError::ForbiddenOrigin(origin.to_owned()));
             }
@@ -131,10 +220,15 @@ impl HttpGuardPolicy {
     }
 
     fn host_allowed(&self, host: &str) -> bool {
-        let host = host.trim();
+        let Some(host) = normalized_authority(host.trim()) else {
+            return false;
+        };
         self.allowed_hosts.iter().any(|h| {
+            let Some(h) = normalized_authority(h.trim()) else {
+                return false;
+            };
             // Match either the full authority or the host portion.
-            h == host || host_only(h) == host_only(host)
+            h == host || host_only(&h) == host_only(&host)
         })
     }
 }
@@ -236,6 +330,83 @@ mod tests {
         assert!(
             p.check("https", Some("mcp.internal"), Some("https://app.example"))
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn normalization_is_tightening_only_for_inbound_guard_grammar() {
+        let p = HttpGuardPolicy {
+            // These are common operator spellings; browsers serialize the same
+            // authorities lowercase, without the default port or slash.
+            allowed_origins: vec!["HTTPS://APP.EXAMPLE:443/".to_owned()],
+            allowed_hosts: vec!["MCP.INTERNAL:443".to_owned()],
+            ..Default::default()
+        };
+        assert!(
+            p.check("https", Some("mcp.internal"), Some("https://app.example"),)
+                .is_ok(),
+            "canonical operator entries match the browser's canonical wire spelling"
+        );
+        assert!(
+            p.check(
+                "https",
+                Some("mcp.internal:443"),
+                Some("https://app.example"),
+            )
+            .is_ok(),
+            "Host is case-insensitive and retains the existing host-only match"
+        );
+
+        for malformed in [
+            "https://app.example/",
+            "https://app.example/path",
+            "https://app.example?query",
+            "https://user@app.example",
+        ] {
+            assert_eq!(
+                p.check("https", Some("mcp.internal"), Some(malformed)),
+                Err(HttpGuardError::ForbiddenOrigin(malformed.to_owned())),
+                "comparison normalization must not broaden inbound Origin grammar: {malformed}"
+            );
+        }
+
+        for malformed in [
+            "mcp.internal/path",
+            "mcp.internal@evil.example",
+            "mcp.internal:443:1",
+        ] {
+            assert_eq!(
+                p.check("https", Some(malformed), Some("https://app.example")),
+                Err(HttpGuardError::UntrustedHost(malformed.to_owned())),
+                "a normalized allowlist entry must still reject every malformed Host grammar: {malformed}"
+            );
+        }
+
+        let malformed_config = HttpGuardPolicy {
+            allowed_origins: vec!["https://app.example/path".to_owned()],
+            allowed_hosts: vec!["mcp.internal/path".to_owned()],
+            ..Default::default()
+        };
+        assert_eq!(
+            malformed_config.check("https", Some("mcp.internal"), None),
+            Err(HttpGuardError::UntrustedHost("mcp.internal".to_owned())),
+            "an unproven configured host stays inert rather than gaining a canonical match"
+        );
+        let malformed_origin_config = HttpGuardPolicy {
+            allowed_origins: vec!["https://app.example/path".to_owned()],
+            allowed_hosts: vec!["mcp.internal".to_owned()],
+            ..Default::default()
+        };
+        assert_eq!(
+            malformed_origin_config.check(
+                "https",
+                Some("mcp.internal"),
+                Some("https://app.example"),
+            ),
+            Err(HttpGuardError::ForbiddenOrigin(
+                "https://app.example".to_owned()
+            )),
+            "an unproven configured origin stays inert rather than gaining a canonical match"
         );
     }
 

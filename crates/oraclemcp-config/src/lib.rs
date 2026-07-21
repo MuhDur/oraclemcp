@@ -135,7 +135,7 @@ impl Default for OracleMcpConfig {
 /// `literal:`) for the keyed MAC; `key_id` labels the active key for rotation.
 /// When unset, the binary picks a safe default path and fails closed at startup
 /// if an operating level above ReadOnly is reachable without a configured key.
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuditConfig {
     /// Append-only audit log file path. When `None`, the binary chooses a safe
@@ -156,6 +156,23 @@ pub struct AuditConfig {
     /// destination (bead D2). **Off by default** — when `None`, nothing is
     /// forwarded and the auditor uses the local file sink alone.
     pub shipping: Option<AuditShippingConfig>,
+    /// Persist redacted guard refusals to the local, unsigned security-event
+    /// trail while the signed audit chain is unavailable. Defaults to `true`;
+    /// set `false` only to opt out of this non-tamper-evident diagnostic floor.
+    pub unsigned_refusal_log: bool,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            path: None,
+            key_ref: None,
+            key_id: None,
+            verification_keys: Vec::new(),
+            shipping: None,
+            unsigned_refusal_log: true,
+        }
+    }
 }
 
 impl AuditConfig {
@@ -219,6 +236,7 @@ impl std::fmt::Debug for AuditConfig {
             .field("key_id", &self.key_id)
             .field("verification_keys", &self.verification_keys)
             .field("shipping", &self.shipping)
+            .field("unsigned_refusal_log", &self.unsigned_refusal_log)
             .finish()
     }
 }
@@ -614,6 +632,27 @@ impl Default for HttpConfig {
 }
 
 impl HttpConfig {
+    /// Trim every HTTP string field whose validator already treats surrounding
+    /// whitespace as insignificant. Keeping the validated spelling in memory
+    /// would make later exact-match enforcement disagree with configuration
+    /// validation.
+    fn trim_validated_strings(&mut self) {
+        normalize_http_guard_allowlists(&mut self.allowed_hosts, &mut self.allowed_origins);
+        trim_strings(&mut self.mtls.client_fingerprints);
+        normalize_mtls_operator_subjects(&mut self.operator.allowed_subjects);
+        if let Some(oauth) = &mut self.oauth {
+            oauth.resource = trim_option(oauth.resource.take());
+            trim_strings(&mut oauth.allowed_issuers);
+            trim_strings(&mut oauth.authorization_servers);
+            trim_strings(&mut oauth.required_scopes);
+            oauth.hs256_secret_ref = trim_option(oauth.hs256_secret_ref.take());
+            oauth.metadata_url = trim_option(oauth.metadata_url.take());
+        }
+        if let Some(control) = &mut self.control {
+            control.listen = control.listen.trim().to_owned();
+        }
+    }
+
     /// Validate the HTTP transport config in isolation.
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_non_empty_list("http.allowed_hosts", &self.allowed_hosts)?;
@@ -668,6 +707,118 @@ impl HttpConfig {
         self.operator.validate()?;
         Ok(())
     }
+}
+
+fn trim_strings(values: &mut [String]) {
+    for value in values {
+        *value = value.trim().to_owned();
+    }
+}
+
+/// Canonicalize HTTP guard configuration only when the entry proves to be one
+/// complete authority or browser origin. Unknown grammar remains trim-only: a
+/// configuration spelling that the guard previously rejected must never gain a
+/// match merely because configuration loading tried to tidy it.
+fn normalize_http_guard_allowlists(hosts: &mut [String], origins: &mut [String]) {
+    for host in hosts {
+        let trimmed = host.trim();
+        *host = normalize_http_authority(trimmed).unwrap_or_else(|| trimmed.to_owned());
+    }
+    for origin in origins {
+        let trimmed = origin.trim();
+        *origin = normalize_http_origin(trimmed).unwrap_or_else(|| trimmed.to_owned());
+    }
+}
+
+/// Return a case-canonical HTTP authority when its complete grammar is proven.
+/// The original spelling is deliberately retained for unsupported host forms.
+fn normalize_http_authority(authority: &str) -> Option<String> {
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (literal, suffix) = bracketed.split_once(']')?;
+        if literal.parse::<std::net::Ipv6Addr>().is_err() {
+            return None;
+        }
+        let port = match suffix {
+            "" => None,
+            _ => Some(suffix.strip_prefix(':')?),
+        };
+        (format!("[{}]", literal.to_ascii_lowercase()), port)
+    } else {
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) if !host.contains(':') => (host, Some(port)),
+            Some(_) => return None,
+            None => (authority, None),
+        };
+        if host.is_empty()
+            || host.starts_with('.')
+            || host.ends_with('.')
+            || host.split('.').any(|label| {
+                label.is_empty()
+                    || label.starts_with('-')
+                    || label.ends_with('-')
+                    || !label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+        {
+            return None;
+        }
+        (host.to_ascii_lowercase(), port)
+    };
+    let port = match port {
+        Some(port)
+            if !port.is_empty()
+                && port.bytes().all(|byte| byte.is_ascii_digit())
+                && port.parse::<u16>().is_ok() =>
+        {
+            format!(":{port}")
+        }
+        Some(_) => return None,
+        None => String::new(),
+    };
+    Some(format!("{host}{port}"))
+}
+
+/// Canonicalize a browser origin only when it has no path, query, fragment, or
+/// credentials. Exactly one trailing slash is cosmetic in operator config;
+/// any remaining slash keeps the original value unchanged.
+fn normalize_http_origin(origin: &str) -> Option<String> {
+    let (scheme, authority) = origin.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https") {
+        return None;
+    }
+    let authority = authority.strip_suffix('/').unwrap_or(authority);
+    if authority.is_empty() || authority.contains(['/', '?', '#', '@']) {
+        return None;
+    }
+    let authority = normalize_http_authority(authority)?;
+    let authority = match (scheme.as_str(), authority.as_str()) {
+        ("http", authority) if authority.ends_with(":80") => &authority[..authority.len() - 3],
+        ("https", authority) if authority.ends_with(":443") => &authority[..authority.len() - 4],
+        _ => authority.as_str(),
+    };
+    Some(format!("{scheme}://{authority}"))
+}
+
+/// Canonicalize only the mTLS subjects that already prove to name a SHA-256
+/// certificate fingerprint. This preserves the identity exactly while making
+/// the configured value identical to the runtime `mtls:sha256:<lowercase-hex>`
+/// principal key. Other subject kinds, malformed mTLS entries, and differently
+/// cased kinds remain trim-only so load-time normalization never widens a match.
+fn normalize_mtls_operator_subjects(subjects: &mut [String]) {
+    for subject in subjects {
+        let trimmed = subject.trim();
+        *subject = trimmed
+            .strip_prefix("mtls:")
+            .and_then(normalize_sha256_fingerprint)
+            .map(|fingerprint| format!("mtls:{fingerprint}"))
+            .unwrap_or_else(|| trimmed.to_owned());
+    }
+}
+
+fn trim_option(value: Option<String>) -> Option<String> {
+    value.map(|value| value.trim().to_owned())
 }
 
 /// Dedicated remote control-listener configuration.
@@ -1059,12 +1210,16 @@ impl OracleMcpConfig {
                 supported: SUPPORTED_SCHEMA_VERSION,
             });
         }
+        self.http.trim_validated_strings();
         self.http.validate()?;
         self.audit.validate()?;
         if let Some(shipping) = self.audit.shipping.as_ref() {
             shipping.validate()?;
         }
         resolve_inheritance(&mut self.profiles)?;
+        for profile in &mut self.profiles {
+            profile.desugar_proxy_bracket_username()?;
+        }
         if let Some(default_profile) = self.default_profile.as_deref()
             && !self.profiles.iter().any(|p| p.name == default_profile)
         {
@@ -1484,6 +1639,16 @@ pub enum ConfigError {
     /// Top-level username conflicts with `proxy_auth.proxy_user`.
     #[error("connection profile `{0}` proxy_auth.proxy_user must match username when both are set")]
     ProxyUsernameMismatch(String),
+    /// Bracket proxy syntax was incomplete or mixed with ordinary username text.
+    #[error(
+        "connection profile `{0}` has malformed proxy username syntax; use username = \"proxy_user[target_schema]\" or an explicit [profiles.proxy_auth] block"
+    )]
+    MalformedProxyBracketUsername(String),
+    /// Both supported proxy-auth configuration shapes were specified together.
+    #[error(
+        "connection profile `{0}` configures both username = \"proxy_user[target_schema]\" and [profiles.proxy_auth]; choose one form"
+    )]
+    DuplicateProxyAuthSyntax(String),
     /// A profile declared an SDU outside the thin driver's supported range.
     #[error("connection profile `{profile}` has invalid sdu {sdu}; expected {min}..={max}")]
     InvalidSdu {
@@ -1738,6 +1903,90 @@ mod tests {
     }
 
     #[test]
+    fn validated_http_strings_are_trimmed_before_storage() {
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [http]
+            allowed_hosts = [" mcp.example.com "]
+            allowed_origins = [" https://app.example.com "]
+
+            [http.oauth]
+            resource = " https://mcp.example.com/mcp "
+            allowed_issuers = [" https://issuer.example.com "]
+            authorization_servers = [" https://issuer.example.com "]
+            required_scopes = [" oracle:read "]
+            hs256_secret_ref = " env:AUTH_KEY "
+            metadata_url = " https://issuer.example.com/metadata "
+
+            [http.mtls]
+            client_fingerprints = [" sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff "]
+
+            [http.operator]
+            allowed_subjects = [" oauth:stable-subject "]
+            "#,
+        )
+        .expect("whitespace-bearing HTTP config validates");
+
+        assert_eq!(cfg.http.allowed_hosts, ["mcp.example.com"]);
+        assert_eq!(cfg.http.allowed_origins, ["https://app.example.com"]);
+        assert_eq!(
+            cfg.http.mtls.client_fingerprints,
+            ["sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"]
+        );
+        assert_eq!(cfg.http.operator.allowed_subjects, ["oauth:stable-subject"]);
+        let oauth = cfg.http.oauth.expect("OAuth config");
+        assert_eq!(
+            oauth.resource.as_deref(),
+            Some("https://mcp.example.com/mcp")
+        );
+        assert_eq!(oauth.allowed_issuers, ["https://issuer.example.com"]);
+        assert_eq!(oauth.authorization_servers, ["https://issuer.example.com"]);
+        assert_eq!(oauth.required_scopes, ["oracle:read"]);
+        assert_eq!(oauth.hs256_secret_ref.as_deref(), Some("env:AUTH_KEY"));
+        assert_eq!(
+            oauth.metadata_url.as_deref(),
+            Some("https://issuer.example.com/metadata")
+        );
+    }
+
+    #[test]
+    fn http_guard_allowlists_canonicalize_only_proven_authorities() {
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [http]
+            allowed_hosts = [
+              " MCP.INTERNAL:443 ",
+              "mcp.internal/path",
+              "MCP INTERNAL"
+            ]
+            allowed_origins = [
+              " HTTPS://APP.EXAMPLE:443/ ",
+              "https://app.example/path",
+              "https://app.example//",
+              "ftp://app.example"
+            ]
+            "#,
+        )
+        .expect("non-empty guard entries load");
+
+        assert_eq!(
+            cfg.http.allowed_hosts,
+            ["mcp.internal:443", "mcp.internal/path", "MCP INTERNAL"],
+            "only a complete HTTP authority is case-normalized"
+        );
+        assert_eq!(
+            cfg.http.allowed_origins,
+            [
+                "https://app.example",
+                "https://app.example/path",
+                "https://app.example//",
+                "ftp://app.example",
+            ],
+            "path, repeated slash, and unsupported schemes remain exact-match entries"
+        );
+    }
+
+    #[test]
     fn http_operator_config_loads_and_validates() {
         let cfg = OracleMcpConfig::from_toml_str(
             r#"
@@ -1752,6 +2001,34 @@ mod tests {
         assert_eq!(
             cfg.http.operator.allowed_subjects,
             vec!["oauth:subject-hash", "mtls:cert-fingerprint"]
+        );
+    }
+
+    #[test]
+    fn mtls_operator_subjects_normalize_only_proven_fingerprints() {
+        const UPPER_HEX: &str = "FFEEDDCCBBAA99887766554433221100FFEEDDCCBBAA99887766554433221100";
+        let cfg = OracleMcpConfig::from_toml_str(&format!(
+            r#"
+            [http.operator]
+            allowed_subjects = [
+              " oauth:Stable-Id ",
+              " mtls:SHA256:{UPPER_HEX} ",
+              " MTLS:SHA256:{UPPER_HEX} ",
+              " mtls:sha256:not-a-fingerprint "
+            ]
+            "#,
+        ))
+        .expect("operator subjects parse");
+
+        assert_eq!(
+            cfg.http.operator.allowed_subjects,
+            vec![
+                "oauth:Stable-Id",
+                "mtls:sha256:ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100",
+                "MTLS:SHA256:FFEEDDCCBBAA99887766554433221100FFEEDDCCBBAA99887766554433221100",
+                "mtls:sha256:not-a-fingerprint",
+            ],
+            "only a proven, exact-kind mTLS fingerprint becomes the runtime principal key"
         );
     }
 
@@ -2474,6 +2751,7 @@ mod tests {
         assert_eq!(cfg.audit, AuditConfig::default());
         assert!(cfg.audit.path.is_none());
         assert_eq!(cfg.audit.key_id_or_default(), "default");
+        assert!(cfg.audit.unsigned_refusal_log);
 
         let cfg = OracleMcpConfig::from_toml_str(
             r#"
@@ -2481,6 +2759,7 @@ mod tests {
             path = "/var/log/oraclemcp/audit.jsonl"
             key_ref = "env:ORACLEMCP_AUDIT_KEY"
             key_id = "2026-q2"
+            unsigned_refusal_log = false
             "#,
         )
         .expect("audit config loads");
@@ -2493,6 +2772,7 @@ mod tests {
             Some("env:ORACLEMCP_AUDIT_KEY")
         );
         assert_eq!(cfg.audit.key_id_or_default(), "2026-q2");
+        assert!(!cfg.audit.unsigned_refusal_log);
     }
 
     #[test]
