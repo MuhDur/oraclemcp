@@ -2801,6 +2801,46 @@ fn query_base_objects(query: &sqlparser::ast::Query) -> Vec<ObjectRef> {
     collector.objects
 }
 
+/// Whether the query carries ANY `FROM`/`JOIN` source at any depth.
+///
+/// Guards the empty-base-object shortcut below (finding G2). An empty
+/// `query_base_objects` set is treated as `ProvenReadOnly`, which is correct for
+/// a genuine source-free scalar read (`SELECT 1`) but indistinguishable, on the
+/// empty set alone, from a collector that failed to resolve the sources of a
+/// query that plainly HAS them. This is hardening, not a demonstrated
+/// fail-open: it makes the shortcut depend on a property of the parsed AST
+/// rather than on the collector's own completeness, so a future omission in the
+/// collector degrades to the configured statement-purity policy instead of
+/// silently proving read-only.
+///
+/// A derived table with no base table (`SELECT * FROM (SELECT 1) d`) reaches
+/// this: it has a FROM source and no base objects, so it defers to the oracle.
+/// Under the default `UnknownOracle` that remains `Safe`; only a consumer that
+/// opted into `with_statement_unknown_guarded` tightens it.
+fn query_has_from_source(query: &sqlparser::ast::Query) -> bool {
+    #[derive(Default)]
+    struct FromSourceProbe {
+        found: bool,
+    }
+    impl Visitor for FromSourceProbe {
+        type Break = ();
+
+        fn pre_visit_table_factor(
+            &mut self,
+            _factor: &TableFactor,
+        ) -> ControlFlow<Self::Break> {
+            // Every FROM/JOIN item is a TableFactor, including derived
+            // subqueries, TABLE(...) collections and pivots, so presence of any
+            // factor at any depth means the query names a source.
+            self.found = true;
+            ControlFlow::Break(())
+        }
+    }
+    let mut probe = FromSourceProbe::default();
+    let _ = query.visit(&mut probe);
+    probe.found
+}
+
 /// Whether a `SELECT`/`WITH` query body carries a DML `SetExpr` at any depth —
 /// recursing through parenthesized subquery bodies, set operations, CTE bodies,
 /// **and the derived (FROM/JOIN) subqueries of a `SELECT`**.
@@ -3057,7 +3097,11 @@ fn classify_statement(
             // that binds a real oracle can opt into fail-closed `Unknown`
             // handling with `Classifier::with_statement_unknown_guarded`.
             let base_objects = query_base_objects(query);
-            let stmt_purity = if base_objects.is_empty() {
+            // G2: the empty set alone cannot distinguish a genuine source-free
+            // scalar read from a collector that missed the sources of a query
+            // that has them. Grant the shortcut only when the AST itself shows
+            // no FROM/JOIN anywhere; otherwise defer to the configured policy.
+            let stmt_purity = if base_objects.is_empty() && !query_has_from_source(query) {
                 Purity::ProvenReadOnly
             } else {
                 oracle.statement_purity(&base_objects)
@@ -4754,6 +4798,93 @@ mod tests {
                 classify(sql).danger,
                 DangerLevel::Safe,
                 "default oracle must keep {sql:?} Safe"
+            );
+        }
+    }
+
+    /// G2. The property is NEGATIVE — "an empty base-object set must not, by
+    /// itself, prove a FROM-bearing query read-only" — so the first question is
+    /// how a failure would be DETECTED. Answer: `SELECT * FROM (SELECT 1) d`
+    /// has a FROM source and yields NO base objects, so it is the one shape
+    /// where the shortcut and the oracle disagree. Bound to a strict oracle it
+    /// must be Guarded; if the shortcut ever fires for it again the assertion
+    /// flips to Safe and this test dies. That is the detector, and the mutation
+    /// control is deleting `!query_has_from_source(query)` from the decision.
+    #[test]
+    fn empty_base_objects_do_not_prove_a_from_bearing_query_read_only() {
+        struct UnknownStatementOracle;
+        impl SideEffectOracle for UnknownStatementOracle {
+            fn statement_purity(&self, _base_objects: &[ObjectRef]) -> Purity {
+                Purity::Unknown
+            }
+        }
+
+        // The detector itself must be sound: this query really does have a FROM
+        // source and really does resolve to zero base objects. If either half
+        // stopped holding, the test below would pass for the wrong reason.
+        let parsed = Parser::parse_sql(&OracleDialect {}, "SELECT * FROM (SELECT 1 AS x) d")
+            .expect("parses");
+        let sqlparser::ast::Statement::Query(query) = &parsed[0] else {
+            panic!("expected a query statement");
+        };
+        assert!(
+            query_has_from_source(query),
+            "detector precondition: the query must carry a FROM source"
+        );
+        assert!(
+            query_base_objects(query).is_empty(),
+            "detector precondition: a derived table with no base table must resolve to no base objects"
+        );
+
+        let strict = Classifier::default()
+            .with_oracle(Arc::new(UnknownStatementOracle))
+            .with_statement_unknown_guarded();
+        assert_eq!(
+            strict.classify("SELECT * FROM (SELECT 1 AS x) d").danger,
+            DangerLevel::Guarded,
+            "an empty base-object set must not clear a FROM-bearing query under a strict oracle"
+        );
+
+        // Positive acceptance: a genuine source-free scalar read keeps the
+        // shortcut, even under the same strict oracle.
+        for sql in ["SELECT 1", "SELECT 1 + 1", "SELECT sysdate"] {
+            assert_eq!(
+                strict.classify(sql).danger,
+                DangerLevel::Safe,
+                "source-free scalar read {sql:?} must stay Safe"
+            );
+        }
+
+        // And the engine-free baseline is untouched: without opting into strict
+        // statement handling, the same FROM-bearing query stays Safe.
+        let permissive = Classifier::default().with_oracle(Arc::new(UnknownStatementOracle));
+        assert_eq!(
+            permissive.classify("SELECT * FROM (SELECT 1 AS x) d").danger,
+            DangerLevel::Safe,
+            "the default Unknown policy must remain permissive for the no-engine baseline"
+        );
+    }
+
+    #[test]
+    fn query_has_from_source_sees_every_depth() {
+        for (sql, expected) in [
+            ("SELECT 1", false),
+            ("SELECT 1 + 1", false),
+            ("SELECT * FROM orders", true),
+            ("SELECT * FROM (SELECT 1) d", true),
+            ("WITH c AS (SELECT 1) SELECT * FROM c", true),
+            ("SELECT (SELECT max(id) FROM orders) FROM dual", true),
+            ("SELECT 1 UNION ALL SELECT 2", false),
+            ("SELECT 1 UNION ALL SELECT id FROM orders", true),
+        ] {
+            let parsed = Parser::parse_sql(&OracleDialect {}, sql).expect("parses");
+            let sqlparser::ast::Statement::Query(query) = &parsed[0] else {
+                panic!("expected a query statement for {sql:?}");
+            };
+            assert_eq!(
+                query_has_from_source(query),
+                expected,
+                "FROM-source detection wrong for {sql:?}"
             );
         }
     }
