@@ -1,0 +1,53 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T21:05:00Z",
+  "bead_id": "oraclemcp-7f4o9",
+  "scope": {
+    "summary": "HEAD was red in oraclemcp-core doctor tests after ee1b23ad. Two defects: the test helper handed production a path containing '..', and underneath it set_private_dir_permissions used fchmod on a cap-std directory handle and always returned EBADF.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/doctor.rs"
+    ],
+    "out_of_scope": [
+      "The parent-traversal refusal itself, which is deliberately unchanged. It is the security property ee1b23ad added and is tighten-only; the fix removes the '..' from the caller instead of relaxing the check.",
+      "The two remaining oraclemcp-core failures (http::tests::oauth_enabled_rejects_bad_token_but_keeps_metadata_open and server::tests::init_token_gate_rejects_missing_and_wrong_under_required), which come from another pane's uncommitted init-token work in server.rs/init_token.rs and are untouched by this change.",
+      "F-LOW CF3 (7.11.19), the bead that produced ee1b23ad. It is closed and this does not reopen it; this is the follow-on repair."
+    ]
+  },
+  "source": {
+    "sha": "f3650548bdfd7c970ec4d4c17797984b6d963796",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "cargo test -p oraclemcp-core --lib doctor::",
+        "kind": "cli",
+        "trace": "57 of 57 pass, up from 55 of 57. The two that were failing \u2014 legacy_state_layout_detects_and_migrates_audit_jsonl_once and legacy_migration_refuses_symlink_swaps_at_atomic_install \u2014 now pass. Before the fix they failed with 'is not a safe directory: parent traversal is refused'; after fixing only the helper path they failed with a DIFFERENT error, 'failed to set private permissions on .../doctor-migrations/backups: Bad file descriptor (os error 9)', which is what exposed the second defect."
+      },
+      {
+        "name": "set_private_dir_permissions",
+        "kind": "api",
+        "trace": "Was dir.try_clone().into_std_file().set_permissions(from_mode(0o700)) \u2014 fchmod against a cap-std Dir descriptor, which is not opened with the access mode fchmod requires, so it returned EBADF on every call and apply_legacy_state_migration could never create its private backup directory. Now cap_std::fs::Dir::set_permissions(Component::CurDir, Permissions::from_std(..)), which is *at-relative and preserves the no-follow guarantee. The refusal strings at doctor.rs:1005/1021 are unchanged."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The EBADF defect was reachable in production (any doctor --fix legacy audit migration that had to create the private backup directory) but was unreachable through the test suite until the helper's '..' was removed \u2014 the traversal refusal fired first and masked it. So this close fixes a production bug that no test previously exercised end to end.",
+    "Not mutation-checked as a pair: the two existing tests ARE the regression, and each defect was demonstrated by the distinct error it produced before and after the first fix, which is stronger evidence than an injected fault.",
+    "Verified on Linux only. The permissions path is #[cfg(unix)]; the non-unix arm is a no-op and unchanged.",
+    "cargo test -p oraclemcp-core --lib is not fully green in this working tree, for reasons outside this change: see out_of_scope."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
