@@ -900,14 +900,43 @@ TEMPLATE = {
 }
 
 
-def template(bead_id: str) -> int:
+def template(bead_id: str, scopes: list[str] | None = None) -> int:
     doc = json.loads(json.dumps(TEMPLATE))
     doc["bead_id"] = bead_id
     head = _git("rev-parse", "HEAD").stdout.strip()
     if head:
         doc["source"]["sha"] = head
-    doc["source"]["tree_clean"] = not _git("status", "--porcelain").stdout.strip()
+
+    # Constitution rule 14. A repo-wide `git status` is never clean in a
+    # five-agent checkout, so stamping tree_clean from it made every scaffolded
+    # close carry tree_clean:false and inherit another agent's mid-edit as its
+    # own finding (2026-07-21). tree_clean describes THIS bead's claimed paths —
+    # the same scope the pre-close check enforces — and other agents' dirty
+    # paths are reported separately rather than folded into the boolean.
+    scope_args = ["--", *scopes] if scopes else []
+    if scopes:
+        doc["scope"]["in_scope"] = list(scopes)
+    scope_dirty = _git(
+        "status", "--porcelain=v1", "--untracked-files=all", *scope_args
+    ).stdout.strip()
+    doc["source"]["tree_clean"] = not scope_dirty
     print(json.dumps(doc, indent=2))
+    if scope_dirty:
+        print(
+            "\n# Claimed paths are uncommitted; commit them before closing:\n"
+            + "\n".join(f"#   {line}" for line in scope_dirty.splitlines()),
+            file=sys.stderr,
+        )
+    elif scopes:
+        foreign = _git(
+            "status", "--porcelain=v1", "--untracked-files=all"
+        ).stdout.strip()
+        if foreign:
+            print(
+                f"\n# Note: {len(foreign.splitlines())} path(s) dirty outside this "
+                "scope (other agents mid-edit); excluded from tree_clean by design.",
+                file=sys.stderr,
+            )
     print(
         f"\n# Write to tests/artifacts/evidence/closes/{bead_id}.json, then:\n"
         f"#   scripts/check_bead_close_evidence.sh",
@@ -1003,6 +1032,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only audit of bead close evidence.")
     parser.add_argument("--template", metavar="BEAD_ID", help="print a close-evidence skeleton")
     parser.add_argument(
+        "--scope",
+        metavar="PATH",
+        action="append",
+        help="claimed path for --template; tree_clean is computed over these "
+        "paths only, so another agent's mid-edit cannot poison it (repeatable)",
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
         help="exercise enforcement boundaries without tracker or filesystem mutation",
@@ -1032,7 +1068,9 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.template:
-        return template(args.template)
+        return template(args.template, args.scope)
+    if args.scope:
+        parser.error("--scope is only meaningful with --template")
     if bool(args.pre_close) != bool(args.evidence):
         parser.error("--pre-close and --evidence must be supplied together")
     if _check_tracker_policy() != 0:

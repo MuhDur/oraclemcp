@@ -26,11 +26,12 @@ deliberate step.
 
 ## Swarm operating constitution
 
-Twelve rules mined from the 2026-07 multi-repo swarm retrospective
-(`docs/plan/RETRO_SWARM_CAMPAIGN_2026-07.md` §3G,
-`docs/plan/PLAN_ENGINEERING_PROGRAM.md` §27.3). Binding on every agent in this
-repo, solo or swarmed — most are new; a few name-and-link existing rules above
-so the constitution stays the one place to check:
+Seventeen rules. Rules 1-12 were mined from the 2026-07 multi-repo swarm
+retrospective (`docs/plan/RETRO_SWARM_CAMPAIGN_2026-07.md` §3G,
+`docs/plan/PLAN_ENGINEERING_PROGRAM.md` §27.3); rules 13-17 were mined from the
+2026-07-21 five-agent session, one per incident it produced. Binding on every
+agent in this repo, solo or swarmed — most are new; a few name-and-link existing
+rules above so the constitution stays the one place to check:
 
 1. Never defer planned work on your own initiative — deferral is the
    operator's call, not an agent's judgment call.
@@ -58,6 +59,44 @@ so the constitution stays the one place to check:
 12. Escalate blockers to the operator; delegate unforeseen work to the
     tracker (`br create`), don't quietly derail the authoritative prompt's
     scope.
+13. **A modified file that is not yours is another agent mid-edit, not a
+    defect.** Check `git status` on a file before declaring it broken, and
+    judge the committed truth (`git show HEAD:<path>`) before filing a build
+    blocker or going idle on one.
+14. **Close evidence comes from a tree verified clean of other agents' work.**
+    Derive the evidence `source` block from git rather than asserting it;
+    commit your in-scope work first, and generate a whole-tree reproducibility
+    proof from a dedicated clean worktree at HEAD.
+15. **Read the gate verdict yourself; never infer a pass from a successful
+    push.** `git push` reports what the remote accepted, not what the gate
+    decided. A gate that printed a failure is a failure no matter how the push
+    went.
+16. **Never block a turn on an unbounded wait.** Check once, report, move on.
+    Every wait carries a deadline, and reaching the deadline is a result to
+    report — not a reason to wait again. A blocked turn queues every dispatch
+    behind it.
+17. **A struct field and its initializers are ONE logical change, landed in ONE
+    commit by ONE agent.** The same holds for any edit whose halves do not
+    compile apart: a `git mv` and its references, a trait method and its impls,
+    an enum variant and its exhaustive matches. Split it across panes and you
+    break the build for everyone in the shared checkout.
+
+Rules 13-17 are mechanized, one subcommand per rule, so the question each one
+answers is settled by git or an exit status rather than by a buffer or a hope:
+
+```bash
+scripts/swarm_discipline.sh foreign-edit <path>...          # 13
+scripts/swarm_discipline.sh evidence-source --kind close --from <evidence.json>  # 14
+scripts/swarm_discipline.sh verified-push \
+  --gate-cmd 'cargo fmt --all -- --check && scripts/build_lease.sh -- cargo clippy --workspace --all-targets -- -D warnings && scripts/build_lease.sh -- cargo test --workspace' \
+  -- origin main                                            # 15
+scripts/swarm_discipline.sh bounded-run --timeout 120 -- <cmd>                   # 16
+scripts/swarm_discipline.sh unbounded-wait-lint                                  # 16
+scripts/swarm_discipline.sh struct-atomicity --staged                            # 17
+```
+
+Exit 65 from any of them is a refusal, not advice. `--selftest` proves each
+refusal and each acceptance; CI runs it alongside the other lints.
 
 ## Rust toolchain & gates
 
@@ -195,6 +234,7 @@ repo root with `br`:
 ```bash
 br ready --json                      # unblocked work
 br update <id> --status in_progress  # claim
+python3 scripts/audit_bead_closes.py --template <id> --scope <path>  # scaffold evidence
 scripts/bead_tracker_guard.sh close <id> --evidence \
   tests/artifacts/evidence/closes/<id>.json --summary "…"
 br create "Title" -t bug|feature|task -p 0-4 --deps discovered-from:<id>
