@@ -1093,18 +1093,23 @@ idempotent fixture bootstrap, smoke-queries `SELECT 1 FROM dual` on each PDB,
 and tears down only lanes that this invocation started:
 
 ```bash
-ORACLEMCP_RIG_L1_XE18_ADMIN_PASSWORD='<XE18 SYS password>' \
-ORACLEMCP_RIG_L1_XE21_ADMIN_PASSWORD='<XE21 SYS password>' \
-ORACLEMCP_RIG_L1_FREE23_ADMIN_PASSWORD='<Free23 SYS password>' \
-  bash scripts/rig/oracle_l1.sh run --log
+bash scripts/rig/oracle_l1.sh run --log
 ```
 
 It never creates or removes a container, and it leaves pre-existing running
-lanes untouched. A single `ORACLEMCP_RIG_L1_ADMIN_PASSWORD` is accepted only
-when every local lane intentionally shares a password. Use `--dry-run` to
-validate wiring and emit the same structured JSON-line plan without touching
-Docker. When R0 adds `scripts/rig/rig.sh`, it is the single operator entry point
-and must invoke this L1 helper; do not add a second container harness.
+lanes untouched. The command reads the existing local containers' configured
+`ORACLE_PASSWORD` values without logging or persisting them, so it needs no
+credential setup for the standard lab. If a password was rotated after its
+container was created (or the container config does not retain it), override
+only that lane with `ORACLEMCP_RIG_L1_<LANE>_ADMIN_PASSWORD`; the shared
+`ORACLEMCP_RIG_L1_ADMIN_PASSWORD` remains an optional fallback when all lanes
+intentionally share one password. Use `--dry-run` to validate wiring and emit
+the same structured JSON-line plan without touching Docker. This L1 helper
+does not cover remote databases, OCI Autonomous DB, or a lab whose SYS
+credential is operator-only and absent from container config: it fails before
+bootstrap or SQL rather than silently skipping those lanes. When R0 adds
+`scripts/rig/rig.sh`, it is the single operator entry point and must invoke
+this L1 helper; do not add a second container harness.
 
 Per lane, against the real binary with a lane-scoped `max_level = "DDL"` lab
 profile and an isolated `XDG_STATE_HOME`:

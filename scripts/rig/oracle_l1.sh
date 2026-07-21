@@ -72,12 +72,27 @@ lane_pdb() {
 }
 
 lane_admin_password() {
+  local explicit_password container configured_password
   case "$1" in
-    xe18) printf '%s\n' "${ORACLEMCP_RIG_L1_XE18_ADMIN_PASSWORD:-$COMMON_ADMIN_PASSWORD}" ;;
-    xe21) printf '%s\n' "${ORACLEMCP_RIG_L1_XE21_ADMIN_PASSWORD:-$COMMON_ADMIN_PASSWORD}" ;;
-    free23) printf '%s\n' "${ORACLEMCP_RIG_L1_FREE23_ADMIN_PASSWORD:-$COMMON_ADMIN_PASSWORD}" ;;
+    xe18) explicit_password="${ORACLEMCP_RIG_L1_XE18_ADMIN_PASSWORD:-$COMMON_ADMIN_PASSWORD}" ;;
+    xe21) explicit_password="${ORACLEMCP_RIG_L1_XE21_ADMIN_PASSWORD:-$COMMON_ADMIN_PASSWORD}" ;;
+    free23) explicit_password="${ORACLEMCP_RIG_L1_FREE23_ADMIN_PASSWORD:-$COMMON_ADMIN_PASSWORD}" ;;
     *) return 1 ;;
   esac
+  if [ -n "$explicit_password" ]; then
+    printf '%s\n' "$explicit_password"
+    return 0
+  fi
+
+  # The local lab containers were created with gvenzl's ORACLE_PASSWORD
+  # contract. Reading that Docker config makes the ordinary L1 invocation a
+  # single command without printing or persisting the credential. An explicit
+  # lane value above still wins when an operator rotated the database password
+  # after container creation.
+  container="$(lane_container "$1")"
+  configured_password="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null \
+    | awk -F= '$1 == "ORACLE_PASSWORD" { print substr($0, index($0, "=") + 1); exit }')"
+  printf '%s\n' "$configured_password"
 }
 
 require_runtime_tools() {
@@ -91,7 +106,7 @@ require_runtime_tools() {
 
 require_lane_admin_password() {
   local lane="$1"
-  [ -n "$(lane_admin_password "$lane")" ] || e2e_finish_fail "set ORACLEMCP_RIG_L1_$(printf '%s' "$lane" | tr '[:lower:]' '[:upper:]')_ADMIN_PASSWORD (or the shared ORACLEMCP_RIG_L1_ADMIN_PASSWORD) for fixture bootstrap or SQL smoke"
+  [ -n "$(lane_admin_password "$lane")" ] || e2e_finish_fail "lane=$lane has no Docker-configured ORACLE_PASSWORD; set ORACLEMCP_RIG_L1_$(printf '%s' "$lane" | tr '[:lower:]' '[:upper:]')_ADMIN_PASSWORD (or ORACLEMCP_RIG_L1_ADMIN_PASSWORD) for fixture bootstrap or SQL smoke"
 }
 
 container_exists() {
@@ -151,7 +166,10 @@ wait_lane() {
   started="$(e2e_epoch_ms)"
   deadline=$((SECONDS + READY_TIMEOUT_SECS))
   e2e_log_event 'container_ready' 'act' 'running' 0 "lane=$lane sentinel=DATABASE IS READY TO USE"
-  while ! docker logs "$container" 2>&1 | grep -Fq 'DATABASE IS READY TO USE'; do
+  # Do not use grep -q here: with pipefail it closes Docker's log stream early,
+  # turning a successful sentinel match into Docker's SIGPIPE status. Consume
+  # the bounded log output before deciding whether the sentinel was present.
+  while ! docker logs "$container" 2>&1 | grep -F 'DATABASE IS READY TO USE' >/dev/null; do
     if [ "$SECONDS" -ge "$deadline" ]; then
       e2e_log_event 'container_ready' 'assert' 'fail' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane readiness timed out after ${READY_TIMEOUT_SECS}s"
       e2e_finish_fail "lane=$lane readiness timed out after ${READY_TIMEOUT_SECS}s"

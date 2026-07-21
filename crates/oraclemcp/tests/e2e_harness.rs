@@ -193,6 +193,76 @@ fn e2e_scripts_emit_required_json_line_fields() {
 }
 
 #[test]
+fn rig_l1_dry_run_is_a_single_command_with_complete_lane_plan() {
+    let root = repo_root();
+    let driver_root = root
+        .parent()
+        .expect("oraclemcp has a parent")
+        .join("rust-oracledb");
+    if !std::process::Command::new("docker")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+        || !driver_root.join("scripts/container.sh").is_file()
+        || !driver_root
+            .join("scripts/bootstrap_live_schema.sh")
+            .is_file()
+    {
+        eprintln!("skipping Rig L1 dry-run: Docker or sibling driver helpers are unavailable");
+        return;
+    }
+
+    let output = run_script("scripts/rig/oracle_l1.sh", &["run", "--log", "--dry-run"]);
+    assert!(
+        output.status.success(),
+        "Rig L1 dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = json_lines(&output.stderr);
+    for lane in ["xe18", "xe21", "free23"] {
+        for event in [
+            "container_start",
+            "container_ready",
+            "fixture_bootstrap",
+            "smoke_query",
+        ] {
+            assert!(
+                events.iter().any(|entry| {
+                    entry["event"] == event
+                        && entry["message"]
+                            .as_str()
+                            .is_some_and(|message| message.contains(&format!("lane={lane}")))
+                }),
+                "Rig L1 dry-run omitted {event} for {lane}: {events:?}"
+            );
+        }
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| { event["event"] == "scenario_complete" && event["outcome"] == "pass" }),
+        "Rig L1 dry-run did not complete: {events:?}"
+    );
+
+    let source =
+        std::fs::read_to_string(root.join("scripts/rig/oracle_l1.sh")).expect("read Rig L1 helper");
+    assert!(
+        source.contains("docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}'"),
+        "Rig L1 must discover the standard local lab credential without an env setup"
+    );
+    assert!(
+        source.contains("grep -F 'DATABASE IS READY TO USE' >/dev/null"),
+        "Rig L1 readiness must consume Docker logs under pipefail rather than false-time out"
+    );
+    let operations =
+        std::fs::read_to_string(root.join("docs/operations.md")).expect("read operations guide");
+    assert!(
+        operations.contains("bash scripts/rig/oracle_l1.sh run --log"),
+        "operations must document the one-command L1 invocation"
+    );
+}
+
+#[test]
 fn e2e_orchestrator_aggregates_dry_run_scenarios() {
     if !omcpb_available() {
         eprintln!("skipping: omcpb (swarm build wrapper) is not on PATH (CI env)");
