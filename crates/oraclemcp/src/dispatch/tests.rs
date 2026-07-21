@@ -1330,6 +1330,51 @@ impl OracleConnection for DescribeFailingMock {
     }
 }
 
+struct PingFailingMock {
+    pings: Arc<AtomicUsize>,
+    describes: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for PingFailingMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.pings.fetch_add(1, Ordering::SeqCst);
+        Err(DbError::ConnectionLost(
+            "ORA-03135: connection lost contact".to_owned(),
+        ))
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        self.describes.fetch_add(1, Ordering::SeqCst);
+        panic!("connection_info must not describe after its liveness round trip failed")
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        Ok(Vec::new())
+    }
+
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        Ok(0)
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct ExecState {
     executed: Mutex<Vec<(String, Vec<OracleBind>)>>,
@@ -2186,6 +2231,16 @@ fn connection_info_reports_stateless_read_strategy_when_configured() {
     );
     assert_eq!(session_counts.describe.load(Ordering::SeqCst), 1);
     assert_eq!(stateless_counts.describe.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        session_counts.ping.load(Ordering::SeqCst),
+        1,
+        "the primary connection status must come from a current round trip"
+    );
+    assert_eq!(
+        stateless_counts.ping.load(Ordering::SeqCst),
+        1,
+        "the stateless connection status must come from a current round trip"
+    );
 }
 
 #[test]
@@ -2484,6 +2539,36 @@ fn connection_info_degrades_when_describe_fails() {
             json!(["--json", "doctor", "--online", "--profile", "dev"])
         );
     }
+}
+
+#[test]
+fn connection_info_reports_disconnected_when_the_liveness_round_trip_fails() {
+    let pings = Arc::new(AtomicUsize::new(0));
+    let describes = Arc::new(AtomicUsize::new(0));
+    let dispatcher = OracleDispatcher::new_with_profile(
+        Box::new(PingFailingMock {
+            pings: Arc::clone(&pings),
+            describes: Arc::clone(&describes),
+        }),
+        Some("dev".to_owned()),
+    );
+
+    let out = dispatcher
+        .dispatch("oracle_connection_info", json!({}))
+        .expect("connection diagnostics report an in-band liveness failure");
+
+    assert_eq!(out["active_profile"], json!("dev"));
+    assert_eq!(out["connected"], json!(false));
+    assert_eq!(out["connection"], Value::Null);
+    assert_eq!(out["connection_error"]["error_class"], json!("TRANSIENT"));
+    assert!(
+        out["connection_error"]["next_steps"]
+            .as_array()
+            .is_some_and(|steps| !steps.is_empty()),
+        "a failed connection probe must retain actionable envelope guidance: {out}"
+    );
+    assert_eq!(pings.load(Ordering::SeqCst), 1);
+    assert_eq!(describes.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -13436,7 +13521,9 @@ mod qa106_uncertain_read_ownership {
 
 /// QA107: best-effort connection metadata may degrade ordinary adapter or
 /// privilege failures, but it must never hide cancellation/connection loss on
-/// a retained session or install an uncertain switch candidate.
+/// a retained session. Connection diagnostics report that uncertainty in-band
+/// and quarantine the retained session; uncertain switch candidates are never
+/// installed.
 mod qa107_describe_uncertainty {
     use super::*;
     use std::sync::Arc;
@@ -13497,7 +13584,7 @@ mod qa107_describe_uncertainty {
     }
 
     #[test]
-    fn uncertain_connection_info_quarantines_retained_primary_before_reuse() {
+    fn uncertain_connection_info_reports_disconnected_and_quarantines_before_reuse() {
         let describe_calls = Arc::new(AtomicUsize::new(0));
         let query_calls = Arc::new(AtomicUsize::new(0));
         let dispatcher = OracleDispatcher::new_with_profile(
@@ -13510,8 +13597,16 @@ mod qa107_describe_uncertainty {
 
         let first = dispatcher
             .dispatch("oracle_connection_info", json!({}))
-            .expect_err("uncertain describe must not become disconnected metadata");
-        assert_eq!(first.error_class, ErrorClass::Timeout);
+            .expect("connection diagnostics render uncertain metadata as an in-band report");
+        assert_eq!(first["connected"], json!(false));
+        assert_eq!(first["connection"], Value::Null);
+        assert_eq!(first["connection_error"]["error_class"], json!("TIMEOUT"));
+        assert!(
+            first["connection_error"]["next_steps"]
+                .as_array()
+                .is_some_and(|steps| !steps.is_empty()),
+            "uncertain metadata must retain structured recovery guidance: {first}"
+        );
         assert_eq!(describe_calls.load(Ordering::SeqCst), 1);
         let quarantine = dispatcher
             .connection_quarantine()

@@ -117,10 +117,13 @@ pub struct ToolSurfaceFeatures {
     pub streaming: bool,
 }
 
-/// Which capability tiers are available (live-DB / engine intelligence).
+/// Which build capability tiers are available (Oracle driver / engine intelligence).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeatureTiers {
-    /// Whether the Oracle driver is compiled in (live-DB capable).
+    /// Whether this binary was built with the Oracle driver. This is a build
+    /// capability, not a claim that any configured database is currently live;
+    /// inspect [`CapabilitiesReport::connection`] for observed connection state.
+    #[serde(rename = "built_with_live_db")]
     pub live_db: bool,
     /// Whether the PL/SQL intelligence engine is available (always true for the
     /// product binary).
@@ -261,6 +264,11 @@ mod tests {
             serde_json::json!(true)
         );
         assert_eq!(json["transports"], serde_json::json!(["stdio"]));
+        assert_eq!(
+            json["features"]["built_with_live_db"],
+            serde_json::json!(true)
+        );
+        assert!(json["features"].get("live_db").is_none());
         assert_eq!(
             json["tools"][0]["name"],
             serde_json::json!("oracle_capabilities")

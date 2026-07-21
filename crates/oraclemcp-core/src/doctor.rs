@@ -494,6 +494,14 @@ impl DoctorFixReport {
 pub struct DoctorContext<'a> {
     /// A live connection, if one could be opened (enables the live checks).
     pub conn: Option<&'a dyn OracleConnection>,
+    /// The optional stateless-read pool connection opened for this profile.
+    /// When present, online doctor must observe it separately from the pinned
+    /// session before declaring the configured hybrid wiring healthy.
+    pub stateless_conn: Option<&'a dyn OracleConnection>,
+    /// Whether the selected profile configured a stateless-read pool. A `true`
+    /// value with no [`Self::stateless_conn`] means pool bootstrap was not
+    /// observed to succeed, even if the pinned session is usable.
+    pub stateless_pool_configured: bool,
     /// Configuration-load error observed before a profile could be resolved.
     ///
     /// Kept distinct from [`Self::connection_error`] so a malformed
@@ -1942,13 +1950,58 @@ async fn check_connectivity(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
             CheckResult::new(3, "Connectivity", CheckStatus::Skip, detail)
         }
         Some(conn) => match conn.ping(cx).await {
-            Ok(()) => {
-                let detail = ctx.connection_strategy.as_deref().map_or_else(
-                    || "connected + authenticated".to_owned(),
-                    |strategy| format!("connected + authenticated (strategy: {strategy})"),
-                );
-                CheckResult::new(3, "Connectivity", CheckStatus::Pass, detail)
-            }
+            Ok(()) => match ctx.stateless_conn {
+                Some(stateless) => match stateless.ping(cx).await {
+                    Ok(()) => {
+                        let detail = ctx.connection_strategy.as_deref().map_or_else(
+                            || "Oracle ping round trips succeeded for every opened connection; connection authenticated".to_owned(),
+                            |strategy| format!(
+                                "Oracle ping round trips succeeded for every opened connection; \
+                                 connection authenticated (runtime wiring: {strategy})"
+                            ),
+                        );
+                        CheckResult::new(3, "Connectivity", CheckStatus::Pass, detail)
+                    }
+                    Err(e) => {
+                        let raw = e.to_string();
+                        CheckResult::new(
+                            3,
+                            "Connectivity",
+                            CheckStatus::Fail,
+                            sanitized_detail(
+                                ctx,
+                                format!(
+                                    "pinned-session ping succeeded, but stateless-pool ping failed: {raw}"
+                                ),
+                            ),
+                        )
+                        .with_fix(connectivity_fix(&sanitized_detail(ctx, &raw)))
+                        .with_failure_class(connectivity_failure_class(&raw))
+                        .with_auth_mode(classify_auth_mode(&raw))
+                        .with_wallet_error(classify_wallet_error(&raw))
+                        .with_oracle_error(&sanitized_detail(ctx, &raw))
+                    }
+                },
+                None if ctx.stateless_pool_configured => CheckResult::new(
+                    3,
+                    "Connectivity",
+                    CheckStatus::Warn,
+                    "pinned-session Oracle ping round trip succeeded, but the configured stateless pool did not open; no pool round trip was observed",
+                )
+                .with_fix(
+                    "inspect the stateless pool configuration and rerun doctor --online before relying on pooled reads",
+                ),
+                None => {
+                    let detail = ctx.connection_strategy.as_deref().map_or_else(
+                        || "Oracle ping round trip succeeded; connection authenticated".to_owned(),
+                        |strategy| format!(
+                            "Oracle ping round trip succeeded; connection authenticated \
+                             (runtime wiring: {strategy})"
+                        ),
+                    );
+                    CheckResult::new(3, "Connectivity", CheckStatus::Pass, detail)
+                }
+            },
             Err(e) => {
                 let raw = e.to_string();
                 CheckResult::new(
@@ -2764,6 +2817,44 @@ mod tests {
         }
     }
 
+    struct PoolPingFailMock;
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for PoolPingFailMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Err(DbError::ConnectionLost("pool socket reset".to_owned()))
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            Ok(Vec::new())
+        }
+
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
     struct CancelledPreflightMock;
 
     #[async_trait::async_trait(?Send)]
@@ -3186,8 +3277,11 @@ mod tests {
     #[test]
     fn live_connectivity_detail_reports_connection_strategy() {
         let conn = LiveMock;
+        let stateless = LiveMock;
         let ctx = DoctorContext {
             conn: Some(&conn),
+            stateless_conn: Some(&stateless),
+            stateless_pool_configured: true,
             connection_strategy: Some("hybrid_pool".to_owned()),
             ..DoctorContext::default()
         };
@@ -3197,7 +3291,52 @@ mod tests {
         assert_eq!(connectivity.status, CheckStatus::Pass);
         assert_eq!(
             connectivity.detail,
-            "connected + authenticated (strategy: hybrid_pool)"
+            "Oracle ping round trips succeeded for every opened connection; \
+             connection authenticated (runtime wiring: hybrid_pool)"
+        );
+    }
+
+    #[test]
+    fn configured_stateless_pool_that_did_not_open_is_not_reported_healthy() {
+        let conn = LiveMock;
+        let ctx = DoctorContext {
+            conn: Some(&conn),
+            stateless_pool_configured: true,
+            connection_strategy: Some("pinned_plus_stateless_degraded".to_owned()),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
+
+        assert_eq!(connectivity.status, CheckStatus::Warn);
+        assert!(connectivity.detail.contains("stateless pool did not open"));
+        assert!(connectivity.fix.is_some());
+    }
+
+    #[test]
+    fn stateless_pool_ping_failure_fails_connectivity_after_pinned_success() {
+        let conn = LiveMock;
+        let stateless = PoolPingFailMock;
+        let ctx = DoctorContext {
+            conn: Some(&conn),
+            stateless_conn: Some(&stateless),
+            stateless_pool_configured: true,
+            connection_strategy: Some("pinned_plus_stateless".to_owned()),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
+
+        assert_eq!(connectivity.status, CheckStatus::Fail);
+        assert!(
+            connectivity
+                .detail
+                .contains("pinned-session ping succeeded")
+        );
+        assert!(connectivity.detail.contains("stateless-pool ping failed"));
+        assert_eq!(
+            connectivity.failure_class,
+            Some(ErrorClass::ConnectionFailed)
         );
     }
 

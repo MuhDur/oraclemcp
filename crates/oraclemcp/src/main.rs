@@ -106,8 +106,9 @@ use service_lifecycle::{
     acquire_service_instance_guard,
 };
 
-/// Whether this build includes live Oracle connectivity.
-const LIVE_DB: bool = true;
+/// Whether this binary was built with Oracle connectivity support. This is a
+/// build capability, not a claim about a currently reachable database.
+const BUILT_WITH_LIVE_DB: bool = true;
 const CUSTOM_TOOLS_DIR_ENV: &str = "ORACLEMCP_TOOLS_DIR";
 const CUSTOM_TOOLS_HMAC_KEY_ENV: &str = "ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY";
 const DEFAULT_SETUP_CONFIG_PATH: &str = "~/.config/oraclemcp/profiles.toml";
@@ -3005,7 +3006,7 @@ fn build_server_with_lifecycle(
         registry.tools.clone(),
         level.max_level(),
         FeatureTiers {
-            live_db: LIVE_DB,
+            live_db: BUILT_WITH_LIVE_DB,
             engine: cfg!(feature = "plsql-intelligence"),
             http_transport: options.transport.is_http(),
         },
@@ -4119,28 +4120,35 @@ fn install_shutdown_signal_bridge(
 /// Emit a serve startup status line on stderr (stdout stays JSON-RPC data).
 fn emit_serve_status(robot_json: bool, transport: &str, addr: Option<&str>, tools: &[String]) {
     if robot_json {
-        eprintln!(
-            "{}",
-            serde_json::json!({
-                "kind": "status",
-                "transport": transport,
-                "listen": addr,
-                "live_db": LIVE_DB,
-                "tools": tools,
-            })
-        );
+        eprintln!("{}", serve_status_payload(transport, addr, tools));
     } else {
         match addr {
             Some(a) => eprintln!(
-                "oraclemcp serve: http transport listening on {a} ({} tools, live-db: {LIVE_DB})",
+                "oraclemcp serve: http transport listening on {a} ({} tools, built-with-live-db: {BUILT_WITH_LIVE_DB})",
                 tools.len()
             ),
             None => eprintln!(
-                "oraclemcp serve: stdio transport ready ({} tools, live-db: {LIVE_DB})",
+                "oraclemcp serve: stdio transport ready ({} tools, built-with-live-db: {BUILT_WITH_LIVE_DB})",
                 tools.len()
             ),
         }
     }
+}
+
+/// Startup status contains build facts only. Runtime connectivity is observed
+/// through `oracle_connection_info`, `oracle_capabilities`, or `doctor --online`.
+fn serve_status_payload(
+    transport: &str,
+    addr: Option<&str>,
+    tools: &[String],
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "status",
+        "transport": transport,
+        "listen": addr,
+        "built_with_live_db": BUILT_WITH_LIVE_DB,
+        "tools": tools,
+    })
 }
 
 /// Decide whether a `--listen` HTTP(S) server may start.
@@ -4357,16 +4365,20 @@ fn setup_display_path(path: &str) -> String {
     }
 }
 
-fn run_info(robot_json: bool) -> ExitCode {
-    let info = serde_json::json!({
+fn info_payload() -> serde_json::Value {
+    serde_json::json!({
         "binary": "oraclemcp",
         "version": env!("CARGO_PKG_VERSION"),
         "engine": cfg!(feature = "plsql-intelligence"),
-        "live_db": LIVE_DB,
+        "built_with_live_db": BUILT_WITH_LIVE_DB,
         "transports": ["stdio", "http"],
         "tools": registry::tool_names(),
         "mcp_protocol_version": oraclemcp_core::PROTOCOL_VERSION,
-    });
+    })
+}
+
+fn run_info(robot_json: bool) -> ExitCode {
+    let info = info_payload();
     let output = if robot_json {
         serde_json::to_string(&info).unwrap()
     } else {
@@ -5511,13 +5523,9 @@ fn run_incident_capture(robot_json: bool, args: IncidentCaptureCliArgs) -> ExitC
 fn run_incident_replay(robot_json: bool, args: IncidentReplayCliArgs) -> ExitCode {
     let report = match replay_bundle(&args.bundle) {
         Ok(report) => report,
-        Err(_) => {
-            emit_command_error(
-                robot_json,
-                "incident replay",
-                "ORACLEMCP_INCIDENT_REPLAY_REFUSED",
-                "incident replay refused an invalid or unsafe bundle",
-            );
+        Err(error) => {
+            let (code, message) = incident_replay_error_status(&error);
+            emit_command_error(robot_json, "incident replay", code, &message);
             return ExitCode::from(2);
         }
     };
@@ -6099,6 +6107,15 @@ fn client_credential_error_message(error: &ClientCredentialError) -> String {
     }
 }
 
+fn client_credential_error_code(error: &ClientCredentialError) -> &'static str {
+    match error {
+        ClientCredentialError::Store(oraclemcp_core::file_store::FileStoreError::Locked) => {
+            "ORACLEMCP_STATE_STORE_LOCKED"
+        }
+        _ => "ORACLEMCP_CLIENT_CREDENTIAL_STORE_UNAVAILABLE",
+    }
+}
+
 fn run_robot_docs_guide(robot_json: bool) -> ExitCode {
     if robot_json {
         let output = serde_json::to_string(&robot_docs::robot_docs_guide_json()).unwrap();
@@ -6222,6 +6239,8 @@ fn doctor_process_exit_code(report: &oraclemcp_core::DoctorReport) -> u8 {
 
 struct DoctorProfileContext {
     conn: Option<Box<dyn OracleConnection>>,
+    stateless_conn: Option<Box<dyn OracleConnection>>,
+    stateless_pool_configured: bool,
     configuration_error: Option<String>,
     connection_error: Option<String>,
     wallet_location: Option<String>,
@@ -6249,6 +6268,8 @@ impl DoctorProfileContext {
     fn offline() -> Self {
         DoctorProfileContext {
             conn: None,
+            stateless_conn: None,
+            stateless_pool_configured: false,
             configuration_error: None,
             connection_error: None,
             wallet_location: None,
@@ -6386,6 +6407,8 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
     let level = oraclemcp_core::session_level_state(chosen, false);
     DoctorProfileContext {
         conn: None,
+        stateless_conn: None,
+        stateless_pool_configured: chosen.pool.is_some(),
         configuration_error: None,
         connection_error: None,
         wallet_location: chosen
@@ -6475,6 +6498,8 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
         Ok(Some(resolved)) => doctor_open_resolved_profile(resolved),
         Ok(None) => DoctorProfileContext {
             conn: None,
+            stateless_conn: None,
+            stateless_pool_configured: false,
             configuration_error: None,
             connection_error: Some(format!("connection profile `{profile}` not found")),
             wallet_location: None,
@@ -6608,6 +6633,8 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
                 Some(runtime_connection_strategy(pool_configured, &connections).to_owned());
             DoctorProfileContext {
                 conn: Some(connections.session),
+                stateless_conn: connections.stateless,
+                stateless_pool_configured: pool_configured,
                 configuration_error: None,
                 connection_error: None,
                 wallet_location,
@@ -6631,6 +6658,8 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
         }
         Err(e) => DoctorProfileContext {
             conn: None,
+            stateless_conn: None,
+            stateless_pool_configured: pool_configured,
             configuration_error: None,
             connection_error: Some(doctor_connection_error(e)),
             wallet_location,

@@ -3919,7 +3919,7 @@ fn build_server_advertises_the_active_custom_catalog_plus_capabilities() {
         },
     );
     // The capabilities report carries the registry's tools.
-    let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), LIVE_DB, false);
+    let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), BUILT_WITH_LIVE_DB, false);
     assert_eq!(caps.tools.len(), registry::tool_names().len());
     let listed = server
         .handle_jsonrpc_request(
@@ -3944,6 +3944,24 @@ fn build_server_advertises_the_active_custom_catalog_plus_capabilities() {
     );
     // Smoke: the server clones (it is Clone) — proves it is fully built.
     let _ = server.clone();
+}
+
+#[test]
+fn build_capability_payloads_do_not_claim_live_connectivity() {
+    let status = serve_status_payload("stdio", None, &[]);
+    assert_eq!(status["built_with_live_db"], serde_json::json!(true));
+    assert!(status.get("live_db").is_none());
+
+    let info = info_payload();
+    assert_eq!(info["built_with_live_db"], serde_json::json!(true));
+    assert!(info.get("live_db").is_none());
+
+    let capabilities = capabilities_payload();
+    assert_eq!(
+        capabilities["features"]["built_with_live_db"],
+        serde_json::json!(true)
+    );
+    assert!(capabilities["features"].get("live_db").is_none());
 }
 
 // ---- K4: bounded reason_class + operating_level labels on the blocked counter ----

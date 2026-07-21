@@ -4689,6 +4689,18 @@ async fn describe_conn(
     conn.describe(cx).await
 }
 
+/// Establish that a connection is live before reporting its best-effort
+/// metadata. `describe` intentionally degrades individual metadata probes when
+/// their views are unavailable, so a successful describe alone is not evidence
+/// that the session can still make a current Oracle round trip.
+async fn observe_connection_info(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+) -> Result<OracleConnectionInfo, DbError> {
+    conn.ping(cx).await?;
+    describe_conn(cx, conn).await
+}
+
 async fn execute_conn(
     cx: &Cx,
     conn: &dyn OracleConnection,
@@ -11357,7 +11369,7 @@ fn connection_info_for_transport(info: &OracleConnectionInfo, local_transport: b
 }
 
 async fn connection_strategy_json(cx: &Cx, conn: &dyn OracleConnection) -> Value {
-    match describe_conn(cx, conn).await {
+    match observe_connection_info(cx, conn).await {
         Ok(info) => json!({
             "connected": true,
             "strategy": info.connection_strategy,
@@ -11818,11 +11830,7 @@ impl OracleDispatcher {
             server_features: None,
         };
         if detail == McpSurfaceDetail::Connection {
-            let observed_conn = ReadUncertaintyConn {
-                inner: state.conn.as_ref(),
-                quarantine: Some(&self.quarantine),
-            };
-            match describe_conn(cx, &observed_conn).await {
+            match observe_connection_info(cx, state.conn.as_ref()).await {
                 Ok(info) => {
                     connection.connected = true;
                     connection.read_only_standby = info.is_read_only_standby();
@@ -12927,16 +12935,11 @@ impl OracleDispatcher {
             }
             "oracle_connection_info" => {
                 ensure_no_args(name, args)?;
-                let mut value = match describe_conn(cx, &observed_conn).await {
-                    Err(err) if err.is_uncertain_session_state() => {
-                        return Err(DbError::into_envelope(err));
-                    }
-                    result => connection_info_json(
-                        state.active_profile.clone(),
-                        result,
-                        context.is_local_transport(),
-                    ),
-                };
+                let mut value = connection_info_json(
+                    state.active_profile.clone(),
+                    observe_connection_info(cx, &observed_conn).await,
+                    context.is_local_transport(),
+                );
                 if let Value::Object(map) = &mut value {
                     if let Some(generation) = state.profile_generation.as_ref() {
                         map.insert("profile_generation_active".to_owned(), json!(true));

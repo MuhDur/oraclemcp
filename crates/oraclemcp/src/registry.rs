@@ -1699,18 +1699,23 @@ pub fn tool_registry() -> ToolRegistry {
     registry
 }
 
-/// Assemble the `oracle_capabilities` report for this build. `live_db` reflects
-/// whether the Oracle driver is compiled in; `http` reflects whether the
+/// Assemble the `oracle_capabilities` report for this build. `built_with_live_db`
+/// reflects whether the Oracle driver is compiled in, not whether a database is
+/// currently reachable; `http` reflects whether the
 /// Streamable HTTP transport is exposed by `serve`. The engine tier reflects the
 /// optional `plsql-intelligence` feature; default builds stay engine-free.
-pub fn capabilities(version: impl Into<String>, live_db: bool, http: bool) -> CapabilitiesReport {
+pub fn capabilities(
+    version: impl Into<String>,
+    built_with_live_db: bool,
+    http: bool,
+) -> CapabilitiesReport {
     let registry = tool_registry();
     CapabilitiesReport::new(
         version,
         registry.tools,
         OperatingLevel::ReadOnly,
         FeatureTiers {
-            live_db,
+            live_db: built_with_live_db,
             engine: cfg!(feature = "plsql-intelligence"),
             http_transport: http,
         },
