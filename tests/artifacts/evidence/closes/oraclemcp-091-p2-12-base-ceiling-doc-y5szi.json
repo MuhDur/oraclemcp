@@ -24,7 +24,7 @@
     "entry_points": [
       {
         "name": "profile base inheritance",
-        "kind": "config",
+        "kind": "config-gate",
         "trace": "child_can_raise_max_level_above_base resolves a READ_ONLY base plus a DDL child and asserts the effective child ceiling is DDL. README and configuration docs state that base is field reuse, not a fleet ceiling, and show protected=true as the immutable READ_ONLY control."
       }
     ]
