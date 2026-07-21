@@ -1,0 +1,45 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T15:06:06Z",
+  "bead_id": "oraclemcp-091-p2-7-instance-lock-doc-6j0ac",
+  "scope": {
+    "summary": "Scope the served HTTP instance lock to the service state root and document the one-serve-per-state-root contract with an isolated-state recipe.",
+    "in_scope": [
+      "crates/oraclemcp/src/service_lifecycle.rs",
+      "README.md",
+      "docs/operations.md"
+    ],
+    "out_of_scope": [
+      "Changing listener authentication, transport policy, or the separate state-root follow-up bead."
+    ]
+  },
+  "source": {
+    "sha": "5259fba508886109837c2094c25d6f6b2183596c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "serve --listen instance guard",
+        "kind": "cli",
+        "trace": "acquire_service_instance_guard derives service-instance.json from FileStore::default_state_dir; service_instance_locks_are_scoped_to_each_state_root proves two distinct state roots acquire independent guards. README and operations document the same-state refusal and distinct-XDG_STATE_HOME listener recipe."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Manual review of committed source and its dedicated unit-test assertion. No source-exact clean-worktree test run was produced in this shared checkout; readiness therefore remains not-ready."
+  ],
+  "known_defects": [],
+  "follow_ups": ["oraclemcp-tlo0b"],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
