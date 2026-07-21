@@ -1,0 +1,51 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T19:15:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.17",
+  "scope": {
+    "summary": "F-LOW AU3 verified already satisfied: RekorAnchorReceipt::verify_offline parses the supported entry schema and requires exact equality in the authoritative artifact-hash field. This close records verification, not new work.",
+    "in_scope": [
+      "crates/oraclemcp-audit/src/rekor.rs"
+    ],
+    "out_of_scope": [
+      "Any code change. The finding describes a substring match that no longer exists on the trust path; re-implementing it would have been duplicate work.",
+      "The checkpoint/SET signature verification, which is delegated to the independently trusted RekorCheckpointVerifier and is outside this finding."
+    ]
+  },
+  "source": {
+    "sha": "c8d2b431796f86b979e099533a3b07bd21ac26c2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "RekorAnchorReceipt::verify_offline",
+        "kind": "api",
+        "trace": "verify_entry_binds_manifest (rekor.rs:207-249) dispatches on `kind`, deserializes the rekord/hashedrekord or dsse schema with #[serde(deny_unknown_fields)], pins apiVersion 0.0.1, and admits only `artifact_hash.algorithm == \"sha256\" && artifact_hash.value == expected_manifest_sha256`; every other kind returns HeadNotBoundToEntry. The DSSE arm deliberately uses payloadHash rather than envelopeHash. 32 rekor tests pass, covering all four negative-acceptance cases the bead names: digest outside the authoritative field, a hash superstring, duplicate conflicting hash fields (MalformedProof), and non-JSON (MalformedProof), plus the positive exact-hashedrekord and exact-DSSE paths."
+      },
+      {
+        "name": "grep for the substring path",
+        "kind": "cli",
+        "trace": "The only remaining ASCII-substring helper, contains_ascii (rekor.rs:505), is #[cfg(test)] and is referenced solely by its own unit test at line 1201 \u2014 it cannot participate in trust evaluation."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verification of pre-existing state. I read the cited code and ran the suite; I did not re-derive when or in which commit the substring match was replaced.",
+    "Duplicate JSON keys are rejected as MalformedProof by the existing test's expectation; I did not separately audit serde_json's duplicate-key behaviour beyond confirming that assertion passes.",
+    "Scoped verification: cargo test -p oraclemcp-audit --lib rekor. No workspace-wide run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
