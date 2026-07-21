@@ -1,0 +1,47 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T18:05:00Z",
+  "bead_id": "oraclemcp-091-b13b-ttc129-server-aqllj",
+  "scope": {
+    "summary": "TTC message type 129 is treated as a transient protocol desynchronization: the session is discarded, the pool performs its one fresh-connection retry, and the agent sees a typed retryable envelope without TTC wire text.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/connection.rs"
+    ],
+    "out_of_scope": [
+      "Changing the pinned driver or protocol decoder.",
+      "Claiming a live Oracle/R1 fault-injection run."
+    ]
+  },
+  "source": {
+    "sha": "67c7eb51ed43fb50e404c476b55627707b3afe1c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "driver query-error seam",
+        "kind": "api",
+        "trace": "A synthetic oracledb::Error::Protocol(ProtocolError::UnknownMessageType { message_type: 129, position: 35 }) is promoted to DbError::ConnectionLost, which activates the pool's fresh-connection retry path and DbError::into_envelope emits ErrorClass::Transient with suppressed driver detail."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Pinned-driver source citation: rust-oracledb/crates/oracledb-protocol/src/dpl.rs:196 and :350 raise ProtocolError::UnknownMessageType; rust-oracledb/crates/oracledb/src/lib.rs:1636-1648 currently treats that protocol variant as reusable/not connection-lost, so the server-side override is deliberate.",
+    "cargo fmt -p oraclemcp-db -- --check passed.",
+    "CARGO_TARGET_DIR=.../target/b13b-check cargo test -p oraclemcp-db ttc_129_is_promoted_to_fresh_connection_retry -- --nocapture passed (1 test).",
+    "No live Oracle or external fault-injection evidence was run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
