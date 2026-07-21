@@ -2825,10 +2825,7 @@ fn query_has_from_source(query: &sqlparser::ast::Query) -> bool {
     impl Visitor for FromSourceProbe {
         type Break = ();
 
-        fn pre_visit_table_factor(
-            &mut self,
-            _factor: &TableFactor,
-        ) -> ControlFlow<Self::Break> {
+        fn pre_visit_table_factor(&mut self, _factor: &TableFactor) -> ControlFlow<Self::Break> {
             // Every FROM/JOIN item is a TableFactor, including derived
             // subqueries, TABLE(...) collections and pivots, so presence of any
             // factor at any depth means the query names a source.
@@ -4859,7 +4856,9 @@ mod tests {
         // statement handling, the same FROM-bearing query stays Safe.
         let permissive = Classifier::default().with_oracle(Arc::new(UnknownStatementOracle));
         assert_eq!(
-            permissive.classify("SELECT * FROM (SELECT 1 AS x) d").danger,
+            permissive
+                .classify("SELECT * FROM (SELECT 1 AS x) d")
+                .danger,
             DangerLevel::Safe,
             "the default Unknown policy must remain permissive for the no-engine baseline"
         );
