@@ -1,0 +1,52 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T13:02:35Z",
+  "bead_id": "oraclemcp-091-p2-13-sign-tool-write-s5hq4",
+  "scope": {
+    "summary": "Add sign-tool --write (alias --in-place) to atomically place generated HMAC signatures in their matching top-level [[tool]] TOML blocks.",
+    "in_scope": [
+      "Cargo.lock",
+      "README.md",
+      "crates/oraclemcp/Cargo.toml",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs"
+    ],
+    "out_of_scope": [
+      "Changing custom-tool signature semantics, validation, or the protected-profile requirement."
+    ]
+  },
+  "source": {
+    "sha": "b1767892ac614b03407109a16ad33d8218f9d501",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oraclemcp sign-tool --write",
+        "kind": "cli",
+        "trace": "The command parses --write and --in-place, computes the existing versioned signatures, edits the TOML array of [[tool]] tables, syncs a same-directory temporary file, and atomically replaces the requested file. README documents both modes."
+      },
+      {
+        "name": "multi-tool TOML with trailing [[tool.params]]",
+        "kind": "config-gate",
+        "trace": "sign_tool_write_places_signatures_inside_tool_blocks_before_trailing_params signs two tools with a final nested params table, asserts both signature lines precede their params tables, reparses the written file, and verifies both envelopes through the production verifier."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped checks only: cargo test -p oraclemcp setup_and_sign_tool_commands_parse -- --nocapture (1 passed); cargo test -p oraclemcp sign_tool_write_places_signatures_inside_tool_blocks_before_trailing_params -- --nocapture (1 passed); cargo run -p oraclemcp -- sign-tool --help (shows --write); rustfmt --check; and git diff --check. The full workspace gate was not run for this close."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
