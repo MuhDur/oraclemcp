@@ -19,8 +19,11 @@
 //!   ORACLEMCP_TEST_APP_CONTEXT='namespace:key:value;namespace:key2:value2'
 //! The database must have matching application context namespaces available.
 //! Optional edition check: ORACLEMCP_TEST_EDITION must name a valid edition.
-//! Optional DRCP check: ORACLEMCP_TEST_DRCP=1 and optionally
-//! ORACLEMCP_TEST_DRCP_CLASS.
+//! Optional DRCP routing check: ORACLEMCP_TEST_DRCP=1 and optionally
+//! ORACLEMCP_TEST_DRCP_CLASS. The D2 profile-isolation fixture additionally
+//! requires ORACLEMCP_TEST_DRCP_IDENTITY=1; unlike the optional routing probe,
+//! it fails if its requested DRCP prerequisite cannot establish a reused server
+//! session.
 #![cfg(feature = "live-xe")]
 #![forbid(unsafe_code)]
 
@@ -459,6 +462,122 @@ fn live_profile_config_drcp_routing_when_configured() {
             return;
         };
         conn.ping(&cx).await.expect("DRCP ping");
+    });
+}
+
+/// Regression fixture for B14a: a `purity=reuse` DRCP checkout must not expose
+/// identity written by a prior profile on the same server session.
+///
+/// This is deliberately opt-in because CI does not provision DRCP. Once the
+/// D2 rig sets `ORACLEMCP_TEST_DRCP_IDENTITY=1`, however, it has no skip path:
+/// lack of reuse is a fixture setup failure, and a reused session carrying the
+/// first profile's `MODULE`, `ACTION`, `CLIENT_IDENTIFIER`, or `CLIENT_INFO`
+/// is the security regression this test exists to catch.
+#[test]
+fn live_drcp_reuse_clears_prior_profile_identity() {
+    run_with_cx(|cx| async move {
+        if !env_bool("ORACLEMCP_TEST_DRCP_IDENTITY").unwrap_or(false) {
+            eprintln!(
+                "[live-xe] SKIP live_drcp_reuse_clears_prior_profile_identity: \
+                 set ORACLEMCP_TEST_DRCP_IDENTITY=1 on a DRCP-enabled lane"
+            );
+            return;
+        }
+
+        let class = std::env::var("ORACLEMCP_TEST_DRCP_CLASS")
+            .unwrap_or_else(|_| "oraclemcp-d2-identity".to_owned());
+        let drcp = DrcpConfig {
+            pooled: true,
+            connection_class: Some(class),
+            purity: SessionPurity::Reuse,
+        };
+        let profile_a_identity = OracleSessionIdentity {
+            module: Some("oraclemcp-d2-profile-a".to_owned()),
+            action: Some("identity-fixture".to_owned()),
+            client_identifier: Some("oraclemcp-d2-client-a".to_owned()),
+            client_info: Some("oraclemcp-d2-info-a".to_owned()),
+            ..Default::default()
+        };
+
+        let mut reused_server_session = false;
+        for attempt in 1..=12 {
+            let mut profile_a = test_opts();
+            profile_a.connect_string = drcp.apply_to_connect_string(&profile_a.connect_string);
+            profile_a.session_identity = Some(profile_a_identity.clone());
+            let first = RustOracleConnection::connect(&cx, profile_a)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "DRCP identity fixture could not connect profile A; \
+                         ORACLEMCP_TEST_DRCP_IDENTITY requires a working DRCP lane: {error}"
+                    )
+                });
+            let first_info = first
+                .describe(&cx)
+                .await
+                .expect("describe profile A DRCP session");
+            let first_sid = first_info
+                .sid
+                .clone()
+                .expect("DRCP fixture needs USERENV SID to prove physical-session reuse");
+            assert_eq!(
+                first_info.module.as_deref(),
+                Some("oraclemcp-d2-profile-a"),
+                "profile A identity did not reach its DRCP session"
+            );
+            assert_eq!(
+                first_info.client_identifier.as_deref(),
+                Some("oraclemcp-d2-client-a"),
+                "profile A client identifier did not reach its DRCP session"
+            );
+            drop(first);
+
+            // Profile B intentionally supplies no identity. The only safe
+            // result after reusing A's server session is a cleared identity,
+            // not A's values and not an untested fresh physical session.
+            let mut profile_b = test_opts();
+            profile_b.connect_string = drcp.apply_to_connect_string(&profile_b.connect_string);
+            profile_b.session_identity = None;
+            let second = RustOracleConnection::connect(&cx, profile_b)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "DRCP identity fixture could not connect profile B on attempt {attempt}: {error}"
+                    )
+                });
+            let second_info = second
+                .describe(&cx)
+                .await
+                .expect("describe profile B DRCP session");
+            if second_info.sid.as_deref() != Some(first_sid.as_str()) {
+                drop(second);
+                continue;
+            }
+            reused_server_session = true;
+
+            for (field, value) in [
+                ("module", second_info.module.as_deref()),
+                ("action", second_info.action.as_deref()),
+                (
+                    "client_identifier",
+                    second_info.client_identifier.as_deref(),
+                ),
+                ("client_info", second_info.client_info.as_deref()),
+            ] {
+                assert!(
+                    value.is_none_or(str::is_empty),
+                    "DRCP reused server session {first_sid} leaked profile A {field}: {value:?}"
+                );
+            }
+            drop(second);
+            break;
+        }
+
+        assert!(
+            reused_server_session,
+            "DRCP identity fixture never observed profile B reuse profile A's server session in 12 attempts; \
+             the fixture would otherwise be unable to catch cross-profile bleed"
+        );
     });
 }
 
