@@ -2218,6 +2218,7 @@ dependencies = [
  "figment",
  "oraclemcp-error",
  "oraclemcp-guard",
+ "proptest",
  "serde",
  "serde_json",
  "tempfile",
