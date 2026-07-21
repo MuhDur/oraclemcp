@@ -5824,9 +5824,9 @@ fn run_audit_verify(
 }
 
 fn capabilities_payload() -> serde_json::Value {
-    // HTTP is advertised as available (the binary can serve it); live_db tracks
-    // the compiled driver feature.
-    let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), LIVE_DB, true);
+    // HTTP and Oracle-driver availability are build capabilities; the
+    // `connection` block is the separate runtime observation surface.
+    let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), BUILT_WITH_LIVE_DB, true);
     let mut value = serde_json::to_value(&caps).unwrap_or(serde_json::Value::Null);
     if let serde_json::Value::Object(obj) = &mut value {
         obj.insert("cli_contract".to_owned(), robot_docs::cli_contract_json());
@@ -6747,6 +6747,8 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
     }
     let ctx = DoctorContext {
         conn: profile_ctx.conn.as_deref(),
+        stateless_conn: profile_ctx.stateless_conn.as_deref(),
+        stateless_pool_configured: profile_ctx.stateless_pool_configured,
         configuration_error: profile_ctx.configuration_error,
         connection_error: profile_ctx.connection_error,
         tns_admin: std::env::var("TNS_ADMIN").ok(),
