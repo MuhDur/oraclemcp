@@ -3967,6 +3967,35 @@ fn source_search_line_cap_keeps_line_metadata_and_marks_truncation() {
 }
 
 #[test]
+fn source_search_default_line_cap_bounds_and_marks_an_overlong_line() {
+    let original = "x".repeat(DEFAULT_SEARCH_MAX_LINE_CHARS.saturating_add(1));
+    let rows = [OracleRow {
+        columns: vec![
+            (
+                "LINE".to_owned(),
+                OracleCell::new("NUMBER", Some("73".to_owned())),
+            ),
+            (
+                "TEXT".to_owned(),
+                OracleCell::new("VARCHAR2", Some(original.clone())),
+            ),
+        ],
+    }];
+
+    let (matches, truncated_lines) =
+        source_search_rows_to_json(&rows, DEFAULT_SEARCH_MAX_LINE_CHARS);
+    let text = matches[0]["TEXT"].as_str().expect("text is retained");
+    assert_eq!(truncated_lines, 1);
+    assert_eq!(text.chars().count(), DEFAULT_SEARCH_MAX_LINE_CHARS);
+    assert!(text.ends_with(SOURCE_SEARCH_LINE_TRUNCATION_MARKER));
+    assert_eq!(matches[0]["TEXT_TRUNCATED"], json!(true));
+    assert_eq!(
+        matches[0]["TEXT_CHAR_COUNT"],
+        json!(original.chars().count())
+    );
+}
+
+#[test]
 fn patch_source_preview_requires_unique_match_and_returns_confirmation() {
     let dispatcher = OracleDispatcher::new_switchable(
         Box::new(SourceLookupMock),
