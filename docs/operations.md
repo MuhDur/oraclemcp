@@ -26,9 +26,9 @@ incapable of writing.
 `rust-toolchain.toml`). This checkout resolves **asupersync 0.3.9**. The line
 has no stable MSRV because its
 `nightly-outcome-try` feature (`try_trait_v2` + `try_trait_v2_residual`) is
-opt-in but on by default and reaches the build through the `oracledb` 0.8.4
+opt-in but on by default and reaches the build through the `oracledb` 0.9.0
 dependency, and on Windows `oraclemcp-core` also needs
-`windows_by_handle`. The `oracledb` 0.8.4 driver's own source is stable-clean —
+`windows_by_handle`. The `oracledb` 0.9.0 driver's own source is stable-clean —
 it is its asupersync dependency declaration that pulls the nightly feature in.
 [`TOOLCHAIN.md`](TOOLCHAIN.md) §1 has the exact mechanism.
 
@@ -612,8 +612,8 @@ own reactor and Oracle connection. The local pool's operating posture:
   string; on a dead connection the pool discards dirty and the next checkout
   opens a fresh session against the (failed-over) listener. A read-only standby
   forces the session ceiling to `READ_ONLY` (§3.5, §5.8).
-- **Upstream `EXPIRE_TIME` status.** The pinned `oracledb` 0.8.4 stack parses
-  `EXPIRE_TIME` today; the target `oracledb` 0.8.4 stack is expected to retain
+- **Upstream `EXPIRE_TIME` status.** The pinned `oracledb` 0.9.0 stack parses
+  `EXPIRE_TIME` today; the target `oracledb` 0.9.0 stack is expected to retain
   `EXPIRE_TIME` into `Description::expire_time`, and `TRANSPORT_CONNECT_TIMEOUT`
   is honored for bounded connect handshakes, but rust-oracledb#14 still tracks
   applying `EXPIRE_TIME` as TCP keepalive on established sockets. `oraclemcp`

@@ -205,14 +205,21 @@ e2e_cargo_test_filter() {
   local phase="$1" label="$2" min_tests="$3"
   shift 3
   [ "$1" = "--" ] && shift
-  # A dry run verifies that the exact filtered command is scheduled, but must
-  # not start nested Cargo while its caller is itself a test process. The
-  # regular path below additionally verifies that the filter matched a test.
+  local output status=0 ran start end
+  start="$(e2e_epoch_ms)"
+  # Announce the command the same way e2e_run does. Scheduling assertions read
+  # `command_start` messages to prove a gate is wired at all, so a helper that
+  # stays silent makes its gates invisible to them.
+  e2e_log_event "command_start" "$phase" "running" 0 "$*"
+
+  # Honour --dry-run like e2e_run does. Without this a wiring check ("are the
+  # gates scheduled?") silently turns into a full cargo test run, which is both
+  # slow and a different question from the one being asked.
   if [ "$E2E_DRY_RUN" = "1" ]; then
-    e2e_run_command "$phase" "$@"
+    end="$(e2e_epoch_ms)"
+    e2e_log_event "command_dry_run" "$phase" "skipped" "$((end - start))" "$*"
     return 0
   fi
-  local output status=0 ran
   output="$("$@" 2>&1)" || status=$?
   printf '%s\n' "$output"
   if [ "$status" -ne 0 ]; then
