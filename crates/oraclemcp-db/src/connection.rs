@@ -2762,6 +2762,94 @@ mod driver {
         limits: super::WireLimits,
     }
 
+    /// One leading sign, absolute components — the canonical Oracle text form for
+    /// an INTERVAL DAY TO SECOND value (bead F-LOW DB4).
+    ///
+    /// Every component the driver hands us is `i32`, and a negative interval
+    /// arrives with its components individually signed. Interpolating them
+    /// directly produced embedded minus signs — `-1 -2:00:00.000000000`, and
+    /// `{fseconds:09}` on a negative value renders `-00000001` — which no Oracle
+    /// client can read back.
+    ///
+    /// An Oracle interval is wholly negative or wholly positive, so mixed signs
+    /// are not a formatting question, they are an invalid value. `None` says
+    /// exactly that and callers surface a typed marker instead of inventing text.
+    pub(crate) fn interval_ds_parts(
+        days: i32,
+        hours: i32,
+        minutes: i32,
+        seconds: i32,
+        fseconds: i32,
+    ) -> Option<(&'static str, u32, u32, u32, u32, u32)> {
+        let components = [days, hours, minutes, seconds, fseconds];
+        let negative = components.iter().any(|component| *component < 0);
+        let positive = components.iter().any(|component| *component > 0);
+        if negative && positive {
+            return None;
+        }
+        Some((
+            if negative { "-" } else { "" },
+            days.unsigned_abs(),
+            hours.unsigned_abs(),
+            minutes.unsigned_abs(),
+            seconds.unsigned_abs(),
+            fseconds.unsigned_abs(),
+        ))
+    }
+
+    /// `[-]D HH:MM:SS.FFFFFFFFF`. A positive or zero interval renders exactly as
+    /// it always did, so existing output is unchanged.
+    pub(crate) fn format_interval_ds(
+        days: i32,
+        hours: i32,
+        minutes: i32,
+        seconds: i32,
+        fseconds: i32,
+    ) -> Option<String> {
+        let (sign, days, hours, minutes, seconds, fseconds) =
+            interval_ds_parts(days, hours, minutes, seconds, fseconds)?;
+        Some(format!(
+            "{sign}{days} {hours:02}:{minutes:02}:{seconds:02}.{fseconds:09}"
+        ))
+    }
+
+    /// ISO-8601 duration form used by the OSON path: the sign leads the whole
+    /// duration (`-P1DT2H3M4.000000000S`), never an individual component.
+    pub(crate) fn format_interval_ds_iso(
+        days: i32,
+        hours: i32,
+        minutes: i32,
+        seconds: i32,
+        fseconds: i32,
+    ) -> Option<String> {
+        let (sign, days, hours, minutes, seconds, fseconds) =
+            interval_ds_parts(days, hours, minutes, seconds, fseconds)?;
+        Some(format!(
+            "{sign}P{days}DT{hours}H{minutes}M{seconds}.{fseconds:09}S"
+        ))
+    }
+
+    /// The typed refusal for an interval whose components disagree in sign.
+    pub(crate) fn interval_ds_mixed_sign_marker(
+        days: i32,
+        hours: i32,
+        minutes: i32,
+        seconds: i32,
+        fseconds: i32,
+    ) -> Value {
+        json!({
+            "kind": "unsupported",
+            "unsupported": "oracle_value",
+            "oracle_value_kind": "IntervalDS",
+            "value": null,
+            "days": days,
+            "hours": hours,
+            "minutes": minutes,
+            "seconds": seconds,
+            "fseconds": fseconds,
+            "warning": "INTERVAL DAY TO SECOND components disagree in sign; an Oracle interval is wholly positive or wholly negative, so no canonical text exists"
+        })
+    }
     impl RustOracleRowStream {
         #[must_use]
         pub(super) fn columns(&self) -> &[String] {
@@ -2911,9 +2999,7 @@ mod driver {
                 fseconds,
             }) => OracleCell::new(
                 oracle_type,
-                Some(format!(
-                    "{days} {hours:02}:{minutes:02}:{seconds:02}.{fseconds:09}"
-                )),
+                format_interval_ds(days, hours, minutes, seconds, fseconds),
             ),
             Some(QueryValue::IntervalYM { years, months }) => {
                 OracleCell::new(oracle_type, Some(format!("{years}-{months}")))
@@ -3149,9 +3235,7 @@ mod driver {
                     fseconds,
                 }) => OracleCell::new(
                     oracle_type,
-                    Some(format!(
-                        "{days} {hours:02}:{minutes:02}:{seconds:02}.{fseconds:09}"
-                    )),
+                    format_interval_ds(days, hours, minutes, seconds, fseconds),
                 ),
                 Some(QueryValue::IntervalYM { years, months }) => {
                     OracleCell::new(oracle_type, Some(format!("{years}-{months}")))
@@ -3439,11 +3523,17 @@ mod driver {
                 if let Err(marker) = budget.enter("IntervalDS", depth) {
                     return marker;
                 }
+                let Some(text) = format_interval_ds(*days, *hours, *minutes, *seconds, *fseconds)
+                else {
+                    return interval_ds_mixed_sign_marker(
+                        *days, *hours, *minutes, *seconds, *fseconds,
+                    );
+                };
                 budget.check_bytes(
                     "IntervalDS",
                     json!({
                         "kind": "interval_ds",
-                        "value": format!("{days} {hours:02}:{minutes:02}:{seconds:02}.{fseconds:09}"),
+                        "value": text,
                         "days": days,
                         "hours": hours,
                         "minutes": minutes,
@@ -3726,11 +3816,18 @@ mod driver {
                 if let Err(marker) = budget.enter("IntervalDS", depth) {
                     return marker;
                 }
+                let Some(text) =
+                    format_interval_ds_iso(*days, *hours, *minutes, *seconds, *fseconds)
+                else {
+                    return interval_ds_mixed_sign_marker(
+                        *days, *hours, *minutes, *seconds, *fseconds,
+                    );
+                };
                 budget.check_bytes(
                     "IntervalDS",
                     json!({
                         "kind": "interval_ds",
-                        "value": format!("P{days}DT{hours}H{minutes}M{seconds}.{fseconds:09}S"),
+                        "value": text,
                         "days": days,
                         "hours": hours,
                         "minutes": minutes,
@@ -8265,5 +8362,80 @@ mod driver_seam {
              on the ambient runtime via `.await`. Offending sites:\n{}",
             violations.join("\n"),
         );
+    }
+}
+
+#[cfg(test)]
+mod interval_ds_canonical_tests {
+    use super::driver::{
+        format_interval_ds, format_interval_ds_iso, interval_ds_mixed_sign_marker,
+    };
+
+    /// Negative acceptance for bead F-LOW DB4: a minus sign may lead the value,
+    /// and may appear nowhere else. Before the canonical formatter each
+    /// component was interpolated independently, so a negative interval
+    /// rendered `-1 -2:-3:-4.-00000005` — text no Oracle client can read back.
+    #[test]
+    fn a_negative_interval_carries_exactly_one_leading_sign() {
+        let text = format_interval_ds(-1, -2, -3, -4, -5).expect("wholly negative is valid");
+        assert_eq!(text, "-1 02:03:04.000000005");
+        assert_eq!(text.matches('-').count(), 1, "one sign only: {text}");
+
+        let iso = format_interval_ds_iso(-1, -2, -3, -4, -5).expect("wholly negative is valid");
+        assert_eq!(iso, "-P1DT2H3M4.000000005S");
+        assert_eq!(iso.matches('-').count(), 1, "one sign only: {iso}");
+    }
+
+    /// The sub-day-only case the finding names: days is zero, the rest negative.
+    #[test]
+    fn a_negative_sub_day_interval_has_no_embedded_sign() {
+        let text = format_interval_ds(0, 0, 0, 0, -1).expect("wholly negative is valid");
+        assert_eq!(text, "-0 00:00:00.000000001");
+        assert!(
+            !text[1..].contains('-'),
+            "the fseconds field must not carry its own sign: {text}"
+        );
+    }
+
+    /// Positive acceptance: positive and zero intervals render exactly as they
+    /// did before, so no existing output moved.
+    #[test]
+    fn positive_and_zero_intervals_are_byte_identical_to_the_previous_format() {
+        assert_eq!(
+            format_interval_ds(1, 2, 3, 4, 5).expect("positive is valid"),
+            format!("{} {:02}:{:02}:{:02}.{:09}", 1, 2, 3, 4, 5)
+        );
+        assert_eq!(
+            format_interval_ds(0, 0, 0, 0, 0).expect("zero is valid"),
+            format!("{} {:02}:{:02}:{:02}.{:09}", 0, 0, 0, 0, 0)
+        );
+        assert_eq!(
+            format_interval_ds_iso(1, 2, 3, 4, 5).expect("positive is valid"),
+            format!("P{}DT{}H{}M{}.{:09}S", 1, 2, 3, 4, 5)
+        );
+    }
+
+    /// Mixed signs are an invalid Oracle value, not a formatting choice: the
+    /// serializers must fail typed rather than emit text that reads as a
+    /// different interval than the one the database holds.
+    #[test]
+    fn mixed_sign_components_fail_typed_instead_of_rendering_text() {
+        assert!(format_interval_ds(1, -2, 0, 0, 0).is_none());
+        assert!(format_interval_ds_iso(-1, 2, 0, 0, 0).is_none());
+
+        let marker = interval_ds_mixed_sign_marker(1, -2, 0, 0, 0);
+        assert_eq!(marker["kind"], "unsupported");
+        assert_eq!(marker["oracle_value_kind"], "IntervalDS");
+        assert!(marker["value"].is_null(), "no invented text: {marker}");
+        assert_eq!(marker["days"], 1, "the typed numeric fields are preserved");
+        assert_eq!(marker["hours"], -2, "including their original signs");
+    }
+
+    /// i32::MIN has no positive counterpart; `unsigned_abs` is why this does not
+    /// panic in a release build or wrap in a debug one.
+    #[test]
+    fn the_most_negative_component_does_not_overflow() {
+        let text = format_interval_ds(i32::MIN, 0, 0, 0, 0).expect("wholly negative is valid");
+        assert_eq!(text, "-2147483648 00:00:00.000000000");
     }
 }
