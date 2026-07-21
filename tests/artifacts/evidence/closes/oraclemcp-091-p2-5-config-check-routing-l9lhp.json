@@ -1,0 +1,45 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T13:38:00Z",
+  "bead_id": "oraclemcp-091-p2-5-config-check-routing-l9lhp",
+  "scope": {
+    "summary": "Route profile/configuration load failures to the dedicated doctor Configuration check and skip the connectivity probe for that distinct failure class.",
+    "in_scope": [
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp-core/src/doctor.rs"
+    ],
+    "out_of_scope": [
+      "Changing profile parsing or validation semantics.",
+      "Changing database connectivity, authentication, or network diagnostics."
+    ]
+  },
+  "source": {
+    "sha": "03ce97c171334b62486106ce073b5e858be46aee",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oraclemcp doctor",
+        "kind": "cli",
+        "trace": "DoctorProfileContext routes config-load failures into DoctorContext.configuration_error. run_doctor adds the Configuration check, which reports the named configuration failure and fix guidance, while Connectivity is skipped rather than reporting a database or network failure."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The close relies on code-path review and the scoped plsql-intelligence compile gate; no live Oracle connection or malformed on-disk profiles fixture was used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
