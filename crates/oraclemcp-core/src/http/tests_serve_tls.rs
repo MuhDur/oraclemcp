@@ -70,8 +70,26 @@ fn spawn_https_with(
     Arc<AtomicBool>,
     std::thread::JoinHandle<()>,
 ) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback HTTPS listener");
-    let addr = listener.local_addr().expect("listener has local addr");
+    spawn_https_on("127.0.0.1:0", tls, server, config)
+}
+
+fn spawn_https_on(
+    bind: &str,
+    tls: Arc<TlsServerConfig>,
+    server: OracleMcpServer,
+    config: HttpTransportConfig,
+) -> (
+    std::net::SocketAddr,
+    Arc<AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind(bind).expect("bind HTTPS listener");
+    let listener_addr = listener.local_addr().expect("listener has local addr");
+    let addr = if listener_addr.ip().is_unspecified() {
+        std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), listener_addr.port())
+    } else {
+        listener_addr
+    };
     let shutdown = Arc::new(AtomicBool::new(false));
     let server_shutdown = Arc::clone(&shutdown);
     let handle = std::thread::spawn(move || {
@@ -207,6 +225,45 @@ fn serve_https_accepts_tls_handshake() {
 
     let response = https_get(addr, tls_client_config(&cert, None)).expect("HTTPS request");
     assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed"));
+    assert!(
+        !response
+            .to_ascii_lowercase()
+            .contains("strict-transport-security:"),
+        "loopback HTTPS must not set HSTS: {response}"
+    );
+
+    shutdown.store(true, Ordering::SeqCst);
+    handle.join().expect("HTTPS server thread joins");
+}
+
+#[test]
+fn non_loopback_native_https_sets_hsts() {
+    let (cert, key) = self_signed_cert();
+    let tls = crate::tls::build_server_config(&crate::tls::TlsMaterial {
+        cert_chain_pem: cert.clone(),
+        private_key_pem: key,
+        client_ca_pem: None,
+    })
+    .expect("server-only TLS config builds");
+    let (addr, shutdown, handle) = spawn_https_on(
+        "0.0.0.0:0",
+        tls,
+        test_server(),
+        HttpTransportConfig {
+            json_response: true,
+            stateful: false,
+            ..Default::default()
+        },
+    );
+
+    let response = https_get(addr, tls_client_config(&cert, None)).expect("HTTPS request");
+    assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed"));
+    assert!(
+        response
+            .to_ascii_lowercase()
+            .contains("strict-transport-security: max-age=31536000; includesubdomains"),
+        "non-loopback native HTTPS must set HSTS: {response}"
+    );
 
     shutdown.store(true, Ordering::SeqCst);
     handle.join().expect("HTTPS server thread joins");

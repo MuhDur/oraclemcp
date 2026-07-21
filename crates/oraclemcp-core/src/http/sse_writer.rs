@@ -11,6 +11,8 @@ use serde_json::Value;
 
 use super::reason_phrase;
 
+pub(super) const HSTS_HEADER_VALUE: &str = "max-age=31536000; includeSubDomains";
+
 pub(super) fn write_sse_event(
     body: &mut Vec<u8>,
     event: Option<&str>,
@@ -51,12 +53,19 @@ pub(super) fn write_query_stream_chunks(body: &mut Vec<u8>, chunks: &[Value]) ->
     chunks.len()
 }
 
-pub(super) fn write_streaming_sse_headers(stream: &mut impl Write) -> std::io::Result<()> {
+pub(super) fn write_streaming_sse_headers(
+    stream: &mut impl Write,
+    include_hsts: bool,
+) -> std::io::Result<()> {
     write!(
         stream,
-        "HTTP/1.1 200 {}\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ntransfer-encoding: chunked\r\nconnection: close\r\nx-accel-buffering: no\r\n\r\n",
+        "HTTP/1.1 200 {}\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ntransfer-encoding: chunked\r\nconnection: close\r\nx-accel-buffering: no\r\n",
         reason_phrase(200)
     )?;
+    if include_hsts {
+        write!(stream, "strict-transport-security: {HSTS_HEADER_VALUE}\r\n")?;
+    }
+    stream.write_all(b"\r\n")?;
     stream.flush()
 }
 
@@ -93,4 +102,29 @@ fn write_chunked_bytes(stream: &mut impl Write, bytes: &[u8]) -> std::io::Result
 pub(super) fn write_final_chunk(stream: &mut impl Write) -> std::io::Result<()> {
     stream.write_all(b"0\r\n\r\n")?;
     stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_headers_emit_hsts_only_when_requested() {
+        let mut non_loopback = Vec::new();
+        write_streaming_sse_headers(&mut non_loopback, true).expect("write HSTS headers");
+        assert!(
+            String::from_utf8(non_loopback)
+                .expect("headers are UTF-8")
+                .contains("strict-transport-security: max-age=31536000; includeSubDomains\r\n")
+        );
+
+        let mut loopback = Vec::new();
+        write_streaming_sse_headers(&mut loopback, false).expect("write loopback headers");
+        assert!(
+            !String::from_utf8(loopback)
+                .expect("headers are UTF-8")
+                .to_ascii_lowercase()
+                .contains("strict-transport-security:")
+        );
+    }
 }

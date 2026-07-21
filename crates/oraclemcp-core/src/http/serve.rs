@@ -31,6 +31,7 @@ use crate::admission::{AdmissionController, AdmissionPermit};
 use crate::server::{DispatchCloseReason, OracleMcpServer};
 use crate::tls::TlsServerConfig;
 
+use super::sse_writer::HSTS_HEADER_VALUE;
 use super::wire::{DeadlineRead, parse_error_status, read_http_request, write_http_response};
 use super::{
     EffectiveHttpScheme, HttpExchange, HttpResponse, HttpResultStore, HttpSessionStore,
@@ -156,6 +157,7 @@ pub fn serve_https_until(
     tls: Arc<TlsServerConfig>,
     shutdown: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
+    let emit_hsts = listener_emits_hsts(&listener)?;
     listener.set_nonblocking(true)?;
     let config = Arc::new(listener_config(config, EffectiveHttpScheme::Https));
     let _ci_lane_poller = start_ci_lane_poller(&config);
@@ -187,9 +189,14 @@ pub fn serve_https_until(
                 let config = Arc::clone(&config);
                 let tls = Arc::clone(&tls);
                 workers.push(std::thread::spawn(move || {
-                    if let Err(e) =
-                        handle_tls_connection(stream, &server, &config, tls, transport_permit)
-                    {
+                    if let Err(e) = handle_tls_connection(
+                        stream,
+                        &server,
+                        &config,
+                        tls,
+                        emit_hsts,
+                        transport_permit,
+                    ) {
                         tracing::debug!(error = %e, "native HTTPS connection failed");
                     }
                 }));
@@ -227,6 +234,7 @@ pub fn serve_control_https_until(
     preauth_admission: Arc<AdmissionController>,
     shutdown: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
+    let emit_hsts = listener_emits_hsts(&listener)?;
     listener.set_nonblocking(true)?;
     let config = Arc::new(listener_config(config, EffectiveHttpScheme::Https));
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
@@ -253,9 +261,14 @@ pub fn serve_control_https_until(
                 let config = Arc::clone(&config);
                 let tls = Arc::clone(&tls);
                 workers.push(std::thread::spawn(move || {
-                    if let Err(e) =
-                        handle_control_tls_connection(stream, &server, &config, tls, preauth_permit)
-                    {
+                    if let Err(e) = handle_control_tls_connection(
+                        stream,
+                        &server,
+                        &config,
+                        tls,
+                        emit_hsts,
+                        preauth_permit,
+                    ) {
                         tracing::debug!(error = %e, "dedicated control HTTPS connection failed");
                     }
                 }));
@@ -397,6 +410,13 @@ fn restore_accepted_socket_blocking(stream: &TcpStream) -> std::io::Result<()> {
     stream.set_nonblocking(false)
 }
 
+/// HSTS is emitted only when this native TLS listener is addressable beyond
+/// localhost. Loopback HTTPS deliberately omits it so browser HSTS pinning
+/// never interferes with local HTTP development.
+fn listener_emits_hsts(listener: &TcpListener) -> std::io::Result<bool> {
+    Ok(!listener.local_addr()?.ip().is_loopback())
+}
+
 fn handle_connection(
     mut stream: TcpStream,
     server: &OracleMcpServer,
@@ -414,6 +434,7 @@ fn handle_connection(
         peer_is_loopback,
         peer_addr.map(|addr| addr.to_string()),
         None,
+        false,
         &mut transport_permit,
     )
 }
@@ -435,6 +456,7 @@ fn handle_tls_connection(
     server: &OracleMcpServer,
     config: &HttpTransportConfig,
     tls: Arc<TlsServerConfig>,
+    emit_hsts: bool,
     mut transport_permit: AdmissionPermit,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT))?;
@@ -464,6 +486,7 @@ fn handle_tls_connection(
         peer_is_loopback,
         peer_addr.map(|addr| addr.to_string()),
         peer_cert_fingerprint_sha256,
+        emit_hsts,
         &mut transport_permit,
     );
     stream.conn.send_close_notify();
@@ -476,6 +499,7 @@ fn handle_control_tls_connection(
     server: &OracleMcpServer,
     config: &HttpTransportConfig,
     tls: Arc<TlsServerConfig>,
+    emit_hsts: bool,
     preauth_permit: AdmissionPermit,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT))?;
@@ -544,6 +568,7 @@ fn handle_control_tls_connection(
         peer_is_loopback,
         peer_addr.map(|addr| addr.to_string()),
         Some(fingerprint),
+        emit_hsts,
         &mut control_permit,
     );
     stream.conn.send_close_notify();
@@ -644,6 +669,7 @@ fn handle_stream(
     peer_is_loopback: bool,
     peer_addr: Option<String>,
     peer_cert_fingerprint_sha256: Option<String>,
+    emit_hsts: bool,
     transport_permit: &mut AdmissionPermit,
 ) -> std::io::Result<()> {
     let (header_timeout, body_timeout) = if transport_permit.is_control_probe() {
@@ -680,8 +706,16 @@ fn handle_stream(
         Err(e) => return Err(e),
     };
     match exchange {
-        HttpExchange::Buffered(response) => write_http_response(stream, &response),
-        HttpExchange::SseStream(response) => response.write_to(stream),
-        HttpExchange::ToolStream(response) => (*response).write_to(stream),
+        HttpExchange::Buffered(mut response) => {
+            if emit_hsts {
+                response.headers.push((
+                    "strict-transport-security".to_owned(),
+                    HSTS_HEADER_VALUE.to_owned(),
+                ));
+            }
+            write_http_response(stream, &response)
+        }
+        HttpExchange::SseStream(response) => response.write_to(stream, emit_hsts),
+        HttpExchange::ToolStream(response) => (*response).write_to(stream, emit_hsts),
     }
 }

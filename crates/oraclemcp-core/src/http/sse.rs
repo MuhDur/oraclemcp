@@ -151,8 +151,12 @@ impl HttpSseStream {
         buffered_sse_response(&self.initial_events)
     }
 
-    pub(super) fn write_to(mut self, stream: &mut impl Write) -> std::io::Result<()> {
-        write_streaming_sse_headers(stream)?;
+    pub(super) fn write_to(
+        mut self,
+        stream: &mut impl Write,
+        include_hsts: bool,
+    ) -> std::io::Result<()> {
+        write_streaming_sse_headers(stream, include_hsts)?;
         write_chunked_sse_event(stream, None, Some("0/0"), Some(3000), Some(&Value::Null))?;
         let initial_events = std::mem::take(&mut self.initial_events);
         for event in initial_events {
@@ -278,8 +282,12 @@ impl HttpToolStream {
         }
     }
 
-    pub(super) fn write_to(mut self, stream: &mut impl Write) -> std::io::Result<()> {
-        write_streaming_sse_headers(stream)?;
+    pub(super) fn write_to(
+        mut self,
+        stream: &mut impl Write,
+        include_hsts: bool,
+    ) -> std::io::Result<()> {
+        write_streaming_sse_headers(stream, include_hsts)?;
         write_chunked_sse_event(stream, None, Some("0/0"), Some(3000), Some(&Value::Null))?;
         for notification in &self.initial_notifications {
             write_tool_stream_event_chunked(stream, notification)?;
