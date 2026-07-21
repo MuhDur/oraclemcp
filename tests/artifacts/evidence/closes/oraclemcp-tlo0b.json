@@ -1,0 +1,45 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T15:08:24Z",
+  "bead_id": "oraclemcp-tlo0b",
+  "scope": {
+    "summary": "Make the served HTTP instance lock follow the XDG service state root and prove the accompanying isolated-state documentation describes that actual key.",
+    "in_scope": [
+      "crates/oraclemcp/src/service_lifecycle.rs",
+      "README.md",
+      "docs/operations.md"
+    ],
+    "out_of_scope": [
+      "Live multi-listener execution against operator-managed service state."
+    ]
+  },
+  "source": {
+    "sha": "5259fba508886109837c2094c25d6f6b2183596c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "serve --listen state-root instance guard",
+        "kind": "cli",
+        "trace": "default_service_instance_lock_path maps FileStore::default_state_dir to service-instance.json; the committed service_instance_locks_are_scoped_to_each_state_root test acquires independent guards for two roots, and README plus operations give matching distinct-XDG_STATE_HOME listener commands."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Manual review of committed source and its dedicated unit-test assertion. No clean source-exact two-process live run was produced, so this close does not claim the operator-run listener proof."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
