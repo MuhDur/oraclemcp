@@ -1,0 +1,39 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T07:44:06Z",
+  "bead_id": "oraclemcp-f-server-cf3-doctor-atomic-replace-g99c",
+  "scope": {
+    "summary": "Dedup: duplicate of oraclemcp-eng-program-bp8ia.7.11.19 (CF3 doctor atomic-install rename race).",
+    "in_scope": [
+      "the duplicate-close record for oraclemcp-f-server-cf3-doctor-atomic-replace-g99c"
+    ],
+    "out_of_scope": [
+      "The defect fix itself: it is tracked and will be evidence-closed on the canonical bead oraclemcp-eng-program-bp8ia.7.11.19."
+    ]
+  },
+  "source": {
+    "sha": "9feffe195ee3e929b635e9e2b0dc129096e6c062",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "duplicate-close-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is a tracker dedup (plan v8 sec.10 / G13 operator ruling 2026-07-20: one bead per defect, ever), not a claim the underlying defect is fixed.",
+    "The canonical open bead oraclemcp-eng-program-bp8ia.7.11.19 carries the fix and its own landed evidence at close time."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

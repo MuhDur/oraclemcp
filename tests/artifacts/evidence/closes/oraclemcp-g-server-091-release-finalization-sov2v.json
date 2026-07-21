@@ -1,0 +1,39 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T07:44:06Z",
+  "bead_id": "oraclemcp-g-server-091-release-finalization-sov2v",
+  "scope": {
+    "summary": "Dedup: duplicate of oraclemcp-eng-program-bp8ia.13 (retitled: Publish oraclemcp 0.9.1, the 091 train terminal sink); its operator-stop-before-tag and no-qualification-inside-the-gated-step rules are absorbed into that bead body.",
+    "in_scope": [
+      "the duplicate-close record for oraclemcp-g-server-091-release-finalization-sov2v"
+    ],
+    "out_of_scope": [
+      "The defect fix itself: it is tracked and will be evidence-closed on the canonical bead oraclemcp-eng-program-bp8ia.13."
+    ]
+  },
+  "source": {
+    "sha": "9feffe195ee3e929b635e9e2b0dc129096e6c062",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "duplicate-close-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is a tracker dedup (plan v8 sec.10 / G13 operator ruling 2026-07-20: one bead per defect, ever), not a claim the underlying defect is fixed.",
+    "The canonical open bead oraclemcp-eng-program-bp8ia.13 carries the fix and its own landed evidence at close time."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
