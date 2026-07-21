@@ -1085,8 +1085,8 @@ It never creates or removes a container, and it leaves pre-existing running
 lanes untouched. A single `ORACLEMCP_RIG_L1_ADMIN_PASSWORD` is accepted only
 when every local lane intentionally shares a password. Use `--dry-run` to
 validate wiring and emit the same structured JSON-line plan without touching
-Docker. R0's `scripts/rig/rig.sh` is the single operator entry point and
-invokes this L1 helper; do not add a second container harness.
+Docker. When R0 adds `scripts/rig/rig.sh`, it is the single operator entry point
+and must invoke this L1 helper; do not add a second container harness.
 
 Per lane, against the real binary with a lane-scoped `max_level = "DDL"` lab
 profile and an isolated `XDG_STATE_HOME`:
