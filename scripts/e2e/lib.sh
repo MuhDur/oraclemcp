@@ -205,6 +205,13 @@ e2e_cargo_test_filter() {
   local phase="$1" label="$2" min_tests="$3"
   shift 3
   [ "$1" = "--" ] && shift
+  # A dry run verifies that the exact filtered command is scheduled, but must
+  # not start nested Cargo while its caller is itself a test process. The
+  # regular path below additionally verifies that the filter matched a test.
+  if [ "$E2E_DRY_RUN" = "1" ]; then
+    e2e_run_command "$phase" "$@"
+    return 0
+  fi
   local output status=0 ran
   output="$("$@" 2>&1)" || status=$?
   printf '%s\n' "$output"

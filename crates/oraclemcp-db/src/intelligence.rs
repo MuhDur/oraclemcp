@@ -260,6 +260,22 @@ pub struct SourceText {
     pub truncated: bool,
 }
 
+/// Server-owned bounds for one `ALL_SOURCE` read.
+///
+/// Keeping the optional inclusive line range and the character ceiling together
+/// makes the bounded-read contract explicit at every caller. The database layer
+/// does not accept an unbounded form: `max_chars` remains mandatory and is
+/// clamped to at least one character by [`get_source`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceReadOptions {
+    /// First inclusive `ALL_SOURCE.LINE`, if the caller requests a range.
+    pub from_line: Option<usize>,
+    /// Last inclusive `ALL_SOURCE.LINE`, if the caller requests a range.
+    pub to_line: Option<usize>,
+    /// Maximum returned source characters before explicit truncation.
+    pub max_chars: usize,
+}
+
 /// DDL text returned by `DBMS_METADATA.GET_DDL`, with the full CLOB length.
 ///
 /// The thin driver path reads a bounded prefix rather than materializing an
@@ -1738,9 +1754,7 @@ pub async fn get_source(
     owner: &str,
     name: &str,
     object_type: &str,
-    from_line: Option<usize>,
-    to_line: Option<usize>,
-    max_chars: usize,
+    options: SourceReadOptions,
 ) -> Result<SourceText, DbError> {
     let Some(source_type) = normalize_source_object_type(object_type) else {
         return Err(DbError::Query(format!(
@@ -1760,13 +1774,17 @@ pub async fn get_source(
                 OracleBind::from(owner.to_ascii_uppercase()),
                 OracleBind::from(name.to_ascii_uppercase()),
                 OracleBind::from(source_type),
-                from_line.map_or(OracleBind::Null, |line| OracleBind::from(line as i64)),
-                to_line.map_or(OracleBind::Null, |line| OracleBind::from(line as i64)),
+                options
+                    .from_line
+                    .map_or(OracleBind::Null, |line| OracleBind::from(line as i64)),
+                options
+                    .to_line
+                    .map_or(OracleBind::Null, |line| OracleBind::from(line as i64)),
             ],
         )
         .await?;
 
-    let cap = max_chars.max(1);
+    let cap = options.max_chars.max(1);
     let mut source = String::new();
     let mut char_count = 0usize;
     let mut truncated = false;
@@ -1858,9 +1876,11 @@ pub async fn get_sources_by_name(
                 owner,
                 name,
                 &source_type,
-                from_line,
-                to_line,
-                max_chars,
+                SourceReadOptions {
+                    from_line,
+                    to_line,
+                    max_chars,
+                },
             )
             .await?,
         );
@@ -3242,9 +3262,11 @@ mod tests {
                 "hr",
                 "emp_api",
                 "package_body",
-                None,
-                None,
-                8,
+                SourceReadOptions {
+                    from_line: None,
+                    to_line: None,
+                    max_chars: 8,
+                },
             )
             .await
             .unwrap()
@@ -3269,9 +3291,11 @@ mod tests {
                 "hr",
                 "emp_api",
                 "package_body",
-                Some(37),
-                Some(42),
-                1_000,
+                SourceReadOptions {
+                    from_line: Some(37),
+                    to_line: Some(42),
+                    max_chars: 1_000,
+                },
             )
             .await
             .expect("range lookup succeeds")

@@ -61,10 +61,10 @@ use oraclemcp_db::{
     QueryResponse, QueryRowStream, QueryRowStreamStart, ResultColumnMatch, ResultMaskingAction,
     ResultMaskingCertificate, ResultMaskingDecisionAction, ResultMaskingDecisionSource,
     ResultMaskingPolicy, ResultMaskingRule, SearchObject, SemanticSearchMetric, SerializeOptions,
-    StructuredDecodeCaps, compile_errors, compile_object_statements, describe_columns,
-    describe_constraints, describe_index, describe_trigger, describe_view, diff_query_responses,
-    execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
-    get_sources_by_name, incomparable_masked_columns, list_objects, list_objects_page,
+    SourceReadOptions, StructuredDecodeCaps, compile_errors, compile_object_statements,
+    describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
+    diff_query_responses, execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl,
+    get_source, get_sources_by_name, incomparable_masked_columns, list_objects, list_objects_page,
     list_schema_projection_page, list_schemas, orient_fks_page, orient_hot_objects_page,
     orient_recent_ddl_page, orient_schema_page, paginated_sql, plan_cost_estimate,
     plscope_identifiers, plscope_statements, primary_key_columns, probe_dependents, read_lob,
@@ -10433,9 +10433,20 @@ async fn fetch_patch_source_document(
     }
 
     dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.get_source.before")?;
-    let source = get_source(cx, conn, owner, name, object_type, None, None, max_chars)
-        .await
-        .map_err(DbError::into_envelope)?;
+    let source = get_source(
+        cx,
+        conn,
+        owner,
+        name,
+        object_type,
+        SourceReadOptions {
+            from_line: None,
+            to_line: None,
+            max_chars,
+        },
+    )
+    .await
+    .map_err(DbError::into_envelope)?;
     dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.get_source.after")?;
     if source.line_count == 0 {
         return Err(ErrorEnvelope::new(
@@ -14023,9 +14034,11 @@ impl OracleDispatcher {
                             &owner,
                             &object_name,
                             object_type,
-                            from_line,
-                            to_line,
-                            max_chars,
+                            SourceReadOptions {
+                                from_line,
+                                to_line,
+                                max_chars,
+                            },
                         )
                         .await
                         .map_err(DbError::into_envelope)?;

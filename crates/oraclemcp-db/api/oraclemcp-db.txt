@@ -7950,6 +7950,63 @@ pub type oraclemcp_db::ServerVersion::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ServerVersion where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ServerVersion where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::ServerVersion::vzip(self) -> V
+pub struct oraclemcp_db::SourceReadOptions
+pub oraclemcp_db::SourceReadOptions::from_line: core::option::Option<usize>
+pub oraclemcp_db::SourceReadOptions::max_chars: usize
+pub oraclemcp_db::SourceReadOptions::to_line: core::option::Option<usize>
+impl core::clone::Clone for oraclemcp_db::SourceReadOptions
+pub fn oraclemcp_db::SourceReadOptions::clone(&self) -> oraclemcp_db::SourceReadOptions
+impl core::cmp::Eq for oraclemcp_db::SourceReadOptions
+impl core::cmp::PartialEq for oraclemcp_db::SourceReadOptions
+pub fn oraclemcp_db::SourceReadOptions::eq(&self, &oraclemcp_db::SourceReadOptions) -> bool
+impl core::fmt::Debug for oraclemcp_db::SourceReadOptions
+pub fn oraclemcp_db::SourceReadOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::SourceReadOptions
+impl core::marker::StructuralPartialEq for oraclemcp_db::SourceReadOptions
+impl core::marker::Freeze for oraclemcp_db::SourceReadOptions
+impl core::marker::Send for oraclemcp_db::SourceReadOptions
+impl core::marker::Sync for oraclemcp_db::SourceReadOptions
+impl core::marker::Unpin for oraclemcp_db::SourceReadOptions
+impl core::marker::UnsafeUnpin for oraclemcp_db::SourceReadOptions
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::SourceReadOptions
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::SourceReadOptions
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::SourceReadOptions where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::SourceReadOptions where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::SourceReadOptions where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::SourceReadOptions::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::SourceReadOptions where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::SourceReadOptions where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::SourceReadOptions where U: core::convert::From<T>
+pub fn oraclemcp_db::SourceReadOptions::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::SourceReadOptions where U: core::convert::Into<T>
+pub type oraclemcp_db::SourceReadOptions::Error = core::convert::Infallible
+pub fn oraclemcp_db::SourceReadOptions::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::SourceReadOptions where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::SourceReadOptions::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::SourceReadOptions::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::SourceReadOptions where T: core::clone::Clone
+pub type oraclemcp_db::SourceReadOptions::Owned = T
+pub fn oraclemcp_db::SourceReadOptions::clone_into(&self, &mut T)
+pub fn oraclemcp_db::SourceReadOptions::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::SourceReadOptions
+impl<T> core::any::Any for oraclemcp_db::SourceReadOptions where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::SourceReadOptions::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::SourceReadOptions where T: ?core::marker::Sized
+pub fn oraclemcp_db::SourceReadOptions::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::SourceReadOptions where T: ?core::marker::Sized
+pub fn oraclemcp_db::SourceReadOptions::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::SourceReadOptions where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::SourceReadOptions::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::SourceReadOptions
+pub fn oraclemcp_db::SourceReadOptions::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::SourceReadOptions
+impl<T> tracing::instrument::Instrument for oraclemcp_db::SourceReadOptions
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::SourceReadOptions
+impl<T> typenum::type_operators::Same for oraclemcp_db::SourceReadOptions
+pub type oraclemcp_db::SourceReadOptions::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SourceReadOptions where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::SourceReadOptions where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::SourceReadOptions::vzip(self) -> V
 pub struct oraclemcp_db::SourceText
 pub oraclemcp_db::SourceText::char_count: usize
 pub oraclemcp_db::SourceText::line_count: usize
@@ -8991,7 +9048,7 @@ pub fn oraclemcp_db::extract_hints(&str) -> oraclemcp_db::TnsDescriptorHints
 pub fn oraclemcp_db::find_unused_declarations(&[oraclemcp_db::PlscopeIdentifier]) -> alloc::vec::Vec<alloc::string::String>
 pub const fn oraclemcp_db::gate_native_redaction(bool, bool, oraclemcp_db::NativeRedactionAvailability) -> oraclemcp_db::NativeRedactionGate
 pub async fn oraclemcp_db::get_ddl(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, &str) -> core::result::Result<core::option::Option<oraclemcp_db::DdlText>, oraclemcp_db::DbError>
-pub async fn oraclemcp_db::get_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, &str, core::option::Option<usize>, core::option::Option<usize>, usize) -> core::result::Result<oraclemcp_db::SourceText, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::get_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, &str, oraclemcp_db::SourceReadOptions) -> core::result::Result<oraclemcp_db::SourceText, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::get_sources_by_name(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, core::option::Option<usize>, core::option::Option<usize>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::SourceText>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::incomparable_masked_columns(&[alloc::string::String], core::option::Option<&oraclemcp_db::ResultMaskingCertificate>, core::option::Option<&oraclemcp_db::ResultMaskingCertificate>) -> alloc::vec::Vec<oraclemcp_db::IncomparableMaskedColumn>
 pub fn oraclemcp_db::invalid_objects_sql(oraclemcp_db::ViewTier) -> (&'static str, alloc::string::String)

@@ -298,20 +298,24 @@ TOOLS
   export ORACLEMCP_TOOLS_DIR="$tools_dir"
   export E2E_LANE="$lane" E2E_PROFILE="$lane"
 
-  # Fail-closed custom-tool load: a write/DDL custom tool must be REFUSED at
-  # LOAD (the server exits non-zero with ORACLEMCP_CUSTOM_TOOLS_INVALID and
-  # never serves it). Asserted per lane; the behavior must be identical.
+  # Fail-closed custom-tool load: this write tool is explicitly pinned at ADMIN,
+  # above the lane's DDL ceiling, so it must be refused at LOAD (the server exits
+  # non-zero with ORACLEMCP_CUSTOM_TOOLS_INVALID and never serves it). Ordinary
+  # READ_WRITE tools are intentionally permitted below a writable profile's
+  # ceiling and remain guarded at execution; this probe covers the actual
+  # over-ceiling refusal invariant instead of claiming otherwise.
   local bad_tools_dir="$lane_dir/tools.d.bad"
   mkdir -p "$bad_tools_dir"
   cat >"$bad_tools_dir/writer.toml" <<'BADTOOL'
 [[tool]]
-name = "matrix_writer_refused"
-description = "write custom tool: must be refused at load (fail closed)"
+name = "matrix_over_ceiling_writer_refused"
+description = "ADMIN-pinned write custom tool: must be refused above the DDL profile ceiling"
 sql = "UPDATE matrix_probe_target SET x = 1"
 output_mode = "rows"
+declared_level = "ADMIN"
 BADTOOL
   local bad_load_stderr="$lane_dir/custom_tool_write_refused.stderr"
-  e2e_log_event "custom_tool_write_refused" "act" "running" 0 "lane $lane: a write custom tool must refuse to load"
+  e2e_log_event "custom_tool_write_refused" "act" "running" 0 "lane $lane: an ADMIN-pinned write custom tool must refuse above the DDL ceiling"
   set +e
   ORACLEMCP_TOOLS_DIR="$bad_tools_dir" timeout -k 5 30 \
     "$BINARY" --json serve --profile "$lane" --allow-no-auth </dev/null \
@@ -319,15 +323,15 @@ BADTOOL
   local bad_load_status=$?
   set -e
   if [ "$bad_load_status" -eq 0 ]; then
-    e2e_log_event "custom_tool_write_refused" "assert" "fail" 0 "lane $lane: server did NOT refuse a write custom tool (exit 0) — fail-open load"
+    e2e_log_event "custom_tool_write_refused" "assert" "fail" 0 "lane $lane: server did NOT refuse an over-ceiling write custom tool (exit 0) — fail-open load"
     return 1
   fi
   if ! grep -q "ORACLEMCP_CUSTOM_TOOLS_INVALID" "$bad_load_stderr" \
      || ! grep -q "refuses to load" "$bad_load_stderr"; then
-    e2e_log_event "custom_tool_write_refused" "assert" "fail" 0 "lane $lane: write custom tool refused for the wrong reason (see $bad_load_stderr)"
+    e2e_log_event "custom_tool_write_refused" "assert" "fail" 0 "lane $lane: over-ceiling write custom tool refused for the wrong reason (see $bad_load_stderr)"
     return 1
   fi
-  e2e_log_event "custom_tool_write_refused" "assert" "pass" 0 "lane $lane: write custom tool refused at load (exit $bad_load_status, ORACLEMCP_CUSTOM_TOOLS_INVALID)"
+  e2e_log_event "custom_tool_write_refused" "assert" "pass" 0 "lane $lane: over-ceiling write custom tool refused at load (exit $bad_load_status, ORACLEMCP_CUSTOM_TOOLS_INVALID)"
 
   # Step 1: doctor --online connectivity gate.
   e2e_log_event "doctor_online" "act" "running" 0 "lane $lane: --json doctor --online --profile $lane"
