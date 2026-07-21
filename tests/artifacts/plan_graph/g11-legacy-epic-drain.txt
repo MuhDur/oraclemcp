@@ -1,0 +1,21 @@
+G11 legacy-epic drain report (TRANSITIVE closure over parent-child edges)
+A one-level check is not sufficient: bp8ia.7's direct children are all
+closed while nine of its GRANDchildren are open, so a depth-1 check would
+have produced a false close.
+
+EPIC                               STATUS        DESC  LIVE  live descendants
+oraclemcp-eng-program-bp8ia.3      closed           4     0  -- fully drained
+oraclemcp-eng-program-bp8ia.4      open             6     3  oraclemcp-eng-program-bp8ia.4.3, oraclemcp-eng-program-bp8ia.4.5, oraclemcp-eng-program-bp8ia.4.6
+oraclemcp-eng-program-bp8ia.5      open             6     2  oraclemcp-eng-program-bp8ia.5.4, oraclemcp-f7572
+oraclemcp-eng-program-bp8ia.6      closed          15     1  oraclemcp-m02vm
+oraclemcp-eng-program-bp8ia.7      in_progress     37     9  oraclemcp-eng-program-bp8ia.7.11.1, oraclemcp-eng-program-bp8ia.7.11.10, oraclemcp-eng-program-bp8ia.7.11.14, oraclemcp-eng-program-bp8ia.7.11.20, oraclemcp-eng-program-bp8ia.7.11.5, oraclemcp-eng-program-bp8ia.7.11.6, oraclemcp-eng-program-bp8ia.7.11.7, oraclemcp-eng-program-bp8ia.7.11.8, oraclemcp-eng-program-bp8ia.7.11.9
+oraclemcp-eng-program-bp8ia.8      open             5     2  oraclemcp-eng-program-bp8ia.8.1, oraclemcp-eng-program-bp8ia.8.2
+oraclemcp-eng-program-bp8ia.9      closed          14     0  -- fully drained
+oraclemcp-eng-program-bp8ia.10     open             4     4  oraclemcp-eng-program-bp8ia.10.1, oraclemcp-eng-program-bp8ia.10.2, oraclemcp-eng-program-bp8ia.10.3, oraclemcp-eng-program-bp8ia.10.4
+oraclemcp-eng-program-bp8ia.12     open             3     1  oraclemcp-eng-program-bp8ia.12.3
+
+drained-but-open legacy epics: NONE — G11 acceptance already satisfied
+
+NOTE: bp8ia.6 is closed while oraclemcp-m02vm (rust-oracledb charter parity)
+remains open. That was deliberate and disclosed in .6's close evidence, which
+names m02vm in out_of_scope; recorded here so it is not mistaken for drift.
