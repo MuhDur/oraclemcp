@@ -2194,4 +2194,80 @@ mod tests {
             other => panic!("expected structural quarantine, got {other:?}"),
         }
     }
+
+    // ---------------------------------------------------------------------
+    // C7 wire-contract fixture — a zero-row page must still describe itself.
+    // Plan §4-C7 / §A.2.4, bead oraclemcp-091-c7-zero-rows-columns-v6zdw.
+    // ---------------------------------------------------------------------
+
+    /// The observable contrast, and the reason the next test matters: the same
+    /// query shape reports its schema when a row survives and forgets it when
+    /// none does. Column names reach the page only through
+    /// `push_with_options` (gated on the first row), never from statement
+    /// describe metadata — so an emptied result loses its schema.
+    ///
+    /// This passes today and pins the working half.
+    #[test]
+    fn c7_a_page_with_rows_reports_its_columns() {
+        let caps = QueryCaps {
+            max_rows: 10,
+            max_result_bytes: 64 * 1024,
+        };
+        let row = OracleRow {
+            columns: vec![
+                (
+                    "CUSTOMER_ID".to_owned(),
+                    OracleCell::new("NUMBER", Some("1".to_owned())),
+                ),
+                (
+                    "REGION".to_owned(),
+                    OracleCell::new("VARCHAR2", Some("EMEA".to_owned())),
+                ),
+            ],
+        };
+        let response = query_response_from_rows(vec![row], caps, 0, &SerializeOptions::default());
+
+        assert_eq!(response.row_count, 1);
+        assert_eq!(
+            response.columns,
+            vec!["CUSTOMER_ID".to_owned(), "REGION".to_owned()],
+            "a page that kept a row reports the select-list columns"
+        );
+    }
+
+    /// The failing half of C7.
+    ///
+    /// A row-level security policy, a `WHERE` that matches nothing, or an
+    /// offset past the end all produce the same page: zero rows and, today,
+    /// zero columns. An agent cannot tell "this object exists, you may read it,
+    /// and nothing matched" from "wrong object" or "no access" — three
+    /// situations with three different next actions, collapsed into one
+    /// response. Statement describe metadata is available at the call site that
+    /// builds this page (`connection.rs` clones `result.columns` immediately
+    /// before `QueryPageBuilder::new`), it is simply not handed over.
+    ///
+    /// Bead `oraclemcp-091-a1c-*` (A1c) populates the columns from that
+    /// describe metadata at construction. Flipping this green means removing
+    /// the `#[ignore]` and passing the metadata into the constructor; the
+    /// assertion below must not change.
+    #[test]
+    #[ignore = "expected failure until A1c populates QueryPageBuilder columns from describe metadata (bead oraclemcp-091-c7-zero-rows-columns-v6zdw)"]
+    fn c7_a_zero_row_page_still_reports_its_columns() {
+        let caps = QueryCaps {
+            max_rows: 10,
+            max_result_bytes: 64 * 1024,
+        };
+        let response = run_with_cx(|cx| async move {
+            QueryPageBuilder::new(caps, 0)
+                .finish(&cx, false)
+                .expect("an empty page finishes")
+        });
+
+        assert_eq!(response.row_count, 0, "the fixture is about an empty page");
+        assert!(
+            !response.columns.is_empty(),
+            "a zero-row page must still carry its select-list columns; without them an agent \
+             cannot distinguish 'nothing matched' from 'wrong object' or 'no access'"
+        );
+    }
 }
