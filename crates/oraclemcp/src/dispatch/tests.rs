@@ -15,7 +15,7 @@ use oraclemcp_config::CumulativeQueryCostBudgetConfig;
 use oraclemcp_core::{DispatchCloseReason, DispatchContext, FileStore, ScopeGrant};
 use oraclemcp_db::{OracleBackend, OracleCell, OracleRow, QueryRowStream, QueryRowStreamStart};
 use oraclemcp_guard::SET_TRANSACTION_READ_ONLY;
-use oraclemcp_guard::corpus::{CorpusRecord, ReasonCategory};
+use oraclemcp_guard::corpus::{CorpusAuthenticity, CorpusRecord, ReasonCategory};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -598,6 +598,10 @@ fn guard_refusal_appends_only_a_redacted_classifier_proven_corpus_record() {
     let line = fs::read_to_string(corpus_path).expect("the refusal corpus was appended");
     let record = CorpusRecord::from_jsonl_line(line.trim()).expect("stored corpus record is valid");
     assert_eq!(record.refusal_class, ReasonCategory::RequiresHigherLevel);
+    assert_eq!(
+        record.authenticity,
+        CorpusAuthenticity::UnsignedNotTamperEvident
+    );
     assert!(
         record.suggested_rewrite_redacted.is_some(),
         "only the independently classifier-proven rewrite is retained"
@@ -608,6 +612,30 @@ fn guard_refusal_appends_only_a_redacted_classifier_proven_corpus_record() {
             "the public corpus must not persist raw secret, bind, or identifier {secret:?}: {line}"
         );
     }
+}
+
+#[test]
+fn explicit_refusal_trail_opt_out_keeps_the_guard_refusal_without_a_record() {
+    let temp = tempfile::tempdir().expect("temporary corpus directory");
+    let corpus_path = temp.path().join("corpus/refusals.jsonl");
+    let (dispatcher, state) = semantic_dispatcher();
+    let dispatcher = dispatcher
+        .with_refusal_corpus_path(corpus_path.clone())
+        .without_refusal_corpus();
+
+    let error = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({"sql": "UPDATE app.orders SET state = 'closed'"}),
+        )
+        .expect_err("the guard refusal remains fail-closed when the observer is disabled");
+
+    assert_eq!(error.error_class, ErrorClass::OperatingLevelTooLow);
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0);
+    assert!(
+        !corpus_path.exists(),
+        "operator opt-out must prevent unsigned refusal-trail writes"
+    );
 }
 
 #[test]
