@@ -1,0 +1,24 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T20:05:00Z",
+  "bead_id": "oraclemcp-091-h2-repin-driver-090-ytv3h",
+  "scope": {
+    "summary": "Repinned workspace oracledb and oracledb-protocol dependencies exactly to 0.9.0 and synchronized provenance and release surfaces without adopting new driver APIs.",
+    "in_scope": ["Cargo.toml", "Cargo.lock", "crates/oraclemcp-db/src/connection.rs", "crates/oraclemcp-db/src/tns.rs", "README.md", "AGENTS.md", "docs/TOOLCHAIN.md", "docs/operations.md", ".github/workflows/ci.yml"],
+    "out_of_scope": ["No ConnectOptions token-source API adoption was included."]
+  },
+  "source": {"sha": "11e95e341b4fd35c1a7eb012af9c9966d43136ab", "tree_clean": true, "branch": "main"},
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {"name": "release surface sync", "kind": "cli", "trace": "bash scripts/release_surface_sync_check.sh passed with version=0.9.0 and 26 surfaces."},
+      {"name": "driver seam compilation", "kind": "cli", "trace": "CARGO_TARGET_DIR=target cargo test -p oraclemcp-db pin_is_0_9_0_and_seam_intact --lib -- --exact compiled oracledb 0.9.0 and completed."}
+    ]
+  },
+  "live_evidence": {"claimed": false, "artifacts": []},
+  "limitations": ["The seam test is feature-gated in this default invocation and reported zero runtime tests; release-surface sync and crate compilation passed."],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {"claim": "not-ready", "basis": "scoped-test"}
+}
