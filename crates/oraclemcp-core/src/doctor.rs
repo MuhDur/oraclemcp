@@ -3054,7 +3054,7 @@ mod tests {
             .as_nanos();
         path.push(format!("{}-{}-{name}", std::process::id(), nanos));
         std::fs::create_dir_all(&path).expect("test temp dir exists");
-        path
+        std::fs::canonicalize(path).expect("test temp dir canonicalizes")
     }
 
     fn check_by_id(report: &DoctorReport, id: u8) -> &CheckResult {
