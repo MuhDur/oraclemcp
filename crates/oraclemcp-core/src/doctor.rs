@@ -1062,17 +1062,23 @@ fn open_or_create_private_dir_nofollow(path: &Path) -> Result<CapDir, String> {
 fn set_private_dir_permissions(dir: &CapDir, display_path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
-        dir.try_clone()
-            .and_then(|dir| {
-                dir.into_std_file()
-                    .set_permissions(fs::Permissions::from_mode(0o700))
-            })
-            .map_err(|e| {
-                format!(
-                    "failed to set private permissions on {}: {e}",
-                    display_path.display()
-                )
-            })?;
+        // `chmod` the directory THROUGH its own capability handle rather than
+        // turning that handle into a std File and calling fchmod on it: cap-std
+        // opens a Dir without the access mode fchmod requires, so the old
+        // `into_std_file().set_permissions(..)` returned EBADF and every
+        // migration that had to create a private directory failed
+        // (bead oraclemcp-7f4o9). `set_permissions` is *at-relative, so this
+        // keeps the no-follow property the surrounding code exists to provide.
+        dir.set_permissions(
+            std::path::Component::CurDir.as_os_str(),
+            cap_std::fs::Permissions::from_std(fs::Permissions::from_mode(0o700)),
+        )
+        .map_err(|e| {
+            format!(
+                "failed to set private permissions on {}: {e}",
+                display_path.display()
+            )
+        })?;
     }
     #[cfg(not(unix))]
     let _ = (dir, display_path);
@@ -3046,8 +3052,19 @@ mod tests {
     }
 
     fn doctor_tmp_dir(name: &str) -> std::path::PathBuf {
-        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.push("../../target/tmp/oraclemcp-core-doctor-tests");
+        // Walk up with `parent()` rather than pushing "../..". The migration
+        // path this helper feeds refuses parent traversal (a deliberate
+        // security property, ee1b23ad), and `create_dir_all` does not
+        // normalise, so a pushed ".." survived into the PathBuf and every
+        // legacy-migration test was refused before it could run. Resolving the
+        // workspace root here keeps the refusal strict and hands production
+        // code a path with no ".." component (bead oraclemcp-7f4o9).
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("crates/<crate> lives two levels below the workspace root");
+        let mut path = workspace.join("target/tmp/oraclemcp-core-doctor-tests");
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock after epoch")
