@@ -1,0 +1,53 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T16:45:00Z",
+  "bead_id": "oraclemcp-6vvqj",
+  "scope": {
+    "summary": "Constitution rule 14 plus the root cause of the E_TREE_DIRTY close: the evidence scaffold stamped tree_clean from a repo-wide `git status`, which is never clean in a five-agent checkout, so every scaffolded close inherited other agents' mid-edits.",
+    "in_scope": [
+      "AGENTS.md",
+      "scripts/swarm_discipline.sh",
+      "scripts/audit_bead_closes.py"
+    ],
+    "out_of_scope": [
+      "The four earlier incidents in the same session, carried by the sibling beads under oraclemcp-eng-program-bp8ia.6.",
+      "The rust-oracledb half: its AGENTS.md still carries the twelve-rule constitution and none of these mechanisms.",
+      "The validator: scripts/validate_evidence.py is unchanged. E_TREE_DIRTY is a correct HARD finding and stays one; what changed is that the boolean it reads is now derived over the bead's claimed paths instead of the whole shared tree."
+    ]
+  },
+  "source": {
+    "sha": "32122cb9857684ace414e03ef4a3ca6771dc0183",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "python3 scripts/audit_bead_closes.py --template <id> --scope <path>",
+        "kind": "cli",
+        "trace": "Against this live tree (35-39 foreign dirty paths): unscoped emits tree_clean:false, --scope scripts/build_lease.sh emits tree_clean:true plus a stderr note counting the out-of-scope dirty paths, and --scope on an uncommitted path emits tree_clean:false plus the 'commit them before closing' list. `python3 scripts/audit_bead_closes.py --self-test` PASS and `bash scripts/check_bead_close_evidence.sh` reports 0 hard findings after the change."
+      },
+      {
+        "name": "scripts/swarm_discipline.sh evidence-source",
+        "kind": "cli",
+        "trace": "This document's own source block was produced by `evidence-source --kind close --scope AGENTS.md --scope scripts/swarm_discipline.sh --scope scripts/audit_bead_closes.py --scope .github/workflows/ci.yml`, which printed the note about 35 foreign dirty paths and then {\"sha\": \"32122cb9857684ace414e03ef4a3ca6771dc0183\", \"tree_clean\": true, \"branch\": \"main\"}. The selftest asserts that --kind proof refuses a dirty tree (exit 65) while --kind close accepts a clean scope."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The scoped boolean is honest for a close, whose auditor already checks in-scope paths only. A whole-tree reproducibility proof still needs a genuinely clean tree; evidence-source --kind proof refuses instead of relaxing that, and points at a clean worktree at HEAD.",
+    "Existing close documents were not rewritten; the fix is at the generator."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
