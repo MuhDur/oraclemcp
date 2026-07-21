@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T15:32:30Z",
+  "bead_id": "oraclemcp-091-b8d-doctor-observe-sweep-a05ww",
+  "scope": {
+    "summary": "Make doctor checks 1, 2, 12, 13, and 15 state precisely whether their result is a configuration, filesystem, compile-time, or provenance observation.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/doctor.rs"
+    ],
+    "out_of_scope": [
+      "Live Oracle socket-option probing, which offline doctor deliberately does not perform.",
+      "Changing doctor checks already verified as live observations."
+    ]
+  },
+  "source": {
+    "sha": "c378dcab0a5e0e687cb1ade879840d50b13cc264",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "offline doctor evidence-source report",
+        "kind": "cli",
+        "trace": "scripts/swarm_discipline.sh bounded-run --timeout 600 -- env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp-target/ws-b-b8d-evidence cargo test -p oraclemcp-core doctor::tests: 55 focused doctor tests passed in the dedicated clean worktree at c378dcab0a5e0e687cb1ade879840d50b13cc264, including observation_only_checks_name_their_evidence_source, positive_call_timeout_passes, positive_keepalive_minutes_passes, and audit_posture_is_not_inferred_from_the_default_audit_path."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The offline doctor explicitly labels configuration-derived timeout and keepalive settings; it does not prove a live socket option or Oracle connection round trip."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
