@@ -1,0 +1,51 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-21T15:20:30Z",
+  "bead_id": "oraclemcp-091-a1c-columns-describe-rvg64",
+  "scope": {
+    "summary": "Seeds each bounded driver query page with statement describe metadata so an empty result retains its select-list column names.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/connection.rs",
+      "crates/oraclemcp-db/src/query.rs"
+    ],
+    "out_of_scope": [
+      "Oracle live-database fixtures and VPD policy configuration.",
+      "Changing result rows, pagination semantics, or SQL guard behavior."
+    ]
+  },
+  "source": {
+    "sha": "3bbb549e279c3a41c9f51262b1aa2fc99feb5767",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "OracleConnection bounded query page",
+        "kind": "api",
+        "trace": "collect_bounded_query_page converts QueryResult.columns describe metadata to the QueryPageBuilder constructor before rows are consumed."
+      },
+      {
+        "name": "C7 zero-row columns fixture",
+        "kind": "api",
+        "trace": "query::tests::c7_a_zero_row_page_still_reports_its_columns now enforces CUSTOMER_ID and REGION on a page with zero rows."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped offline verification passed: cargo fmt -p oraclemcp-db -- --check; cargo test -p oraclemcp-db --lib c7_a_zero_row_page_still_reports_its_columns -- --nocapture; cargo test -p oraclemcp-db --lib -- --nocapture (458 passed, one unrelated expected-failure skipped).",
+    "No live Oracle or VPD fixture is claimed; the covered seam is deterministic and uses the driver result metadata before row fetch."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
