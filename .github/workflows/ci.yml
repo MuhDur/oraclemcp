@@ -593,6 +593,14 @@ jobs:
       # rule, requiring the matching error code each time.
       - name: plan-bead-graph lint selftest (P6)
         run: python3 scripts/plan_bead_graph_lint.py --selftest
+      # D8: a preflight that reports healthy and is then followed by a rig
+      # failure is worse than none, because it points suspicion at the wrong
+      # component. The selftest proves every check can refuse AND that the check
+      # inventory still covers what scripts/rig/oracle_l1.sh actually enforces —
+      # add a `command -v` or a lane to the rig without a check here and this
+      # fails. Needs no Docker: it only aims checks at broken environments.
+      - name: rig doctor selftest (D8)
+        run: bash scripts/rig/rig_doctor.sh --selftest
       - name: fuzz lane budget (D4)
         run: |
           python3 scripts/ci_lane_budget.py --selftest
