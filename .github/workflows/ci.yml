@@ -585,6 +585,13 @@ jobs:
         run: |
           bash scripts/swarm_discipline.sh --selftest
           bash scripts/swarm_discipline.sh unbounded-wait-lint
+      # D4 (plan §25.7.3): the fuzz lane's nightly wall clock is one shard, not
+      # the sum, and only while every shard stays sharded, timeout-bounded, and
+      # carries -max_total_time. Asserted here so it cannot quietly regress.
+      - name: fuzz lane budget (D4)
+        run: |
+          python3 scripts/ci_lane_budget.py --selftest
+          python3 scripts/ci_lane_budget.py fuzz-bound
       - name: bead close evidence (native policy + post-close binding)
         run: bash scripts/check_bead_close_evidence.sh
       - name: entry-trace contract (required SKIP=FAIL)
