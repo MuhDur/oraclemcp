@@ -1,49 +1,38 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-07-20T11:18:54Z",
+  "generated_at": "2026-07-22T12:05:00Z",
   "bead_id": "oraclemcp-eng-program-bp8ia.5.4",
   "scope": {
-    "summary": "Bound server and driver fuzz work across explicit shards and make driver release-qualification prep execute and aggregate the same quality graph as strict mode.",
+    "summary": "D4 has two halves. FUZZ-SHARD half is COMPLETE on oraclemcp at abe65e48 (guard differential target sharded + fuzz-bound budget gate). RQ-PREP half is BLOCKED: the honest rq-prep verifier is landed but the required hosted prep->strict cold-start measurement does not exist yet. This bead is NOT complete and must not close.",
     "in_scope": [
       ".github/workflows/fuzz.yml",
-      "crates/oraclemcp-core/ci_taxonomy.json",
-      "docs/ci_taxonomy.json",
-      "docs/test-tiers.md",
-      "tests/artifacts/evidence/oraclemcp-eng-program-bp8ia.5.4-driver-handoff.json"
+      "scripts/ci_lane_budget.py"
     ],
     "out_of_scope": [
-      "Changing individual fuzz-target semantics or reducing their configured target-time budgets.",
-      "Claiming that an external GitHub Actions fuzz or release-qualification run executed at this source SHA."
+      "Changing any fuzz-target .rs source or the classifier target's semantics (it is the C6-split isomorphism proof) — abe65e48 touched no .rs source",
+      "Reducing configured per-shard target-time budgets",
+      "Dispatching the hosted Release Qualification prep->strict pair (operator's call; outward-facing, consumes CI minutes; routable to the dedicated rust-oracledb pane)",
+      "Removing the ALLOW_STALE_MUTATION_SEAL flags (next train's decision)"
     ]
   },
   "source": {
-    "sha": "d05c0c6e60d36d17fe2921a4da26d8b02be5b45c",
-    "tree_clean": true,
+    "sha": "1a2125017dd09e9569853d0d6c68f3b8352f9785",
+    "tree_clean": false,
     "branch": "main"
   },
   "proofs": [],
   "integration_evidence": {
     "entry_points": [
       {
-        "name": "server scheduled fuzz campaign",
+        "name": "FUZZ-SHARD half — COMPLETE at abe65e484e109ecda7088c0bc8530e5bae6af242 (main-reachable)",
         "kind": "config-gate",
-        "trace": ".github/workflows/fuzz.yml defines five independent crate/target jobs, each with an explicit 300-second target budget, 20-minute job cap, isolated fuzz cache key, and crash/timeout upload; python3 scripts/ci_taxonomy.py --check passed."
+        "trace": "abe65e48 changed ONLY .github/workflows/fuzz.yml + scripts/ci_lane_budget.py (no .rs source, so classifier C6-isomorphism semantics unchanged). Guard differential target alter_session_parse is 4-way sharded with per-shard seeds 3001-3004; chain_verify + oauth_token_validate single-shard seeded. Verified 2026-07-22: PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/ci_lane_budget.py OK; python3 scripts/ci_lane_budget.py --selftest = 14/14 PASS (differential-shard-shape accepted, unsharded-differential refused, unseeded-shards refused); python3 scripts/ci_lane_budget.py fuzz-bound = PASS (1 job sharded+bounded, 120m ceiling, each shard carries -max_total_time)."
       },
       {
-        "name": "driver quality fuzz matrix",
-        "kind": "config-gate",
-        "trace": "The checksum-verified cross-repo handoff records rust-oracledb commit 4f1eb3abd3af604ad29f1899251025499b0a3869: concrete shards 0,1,2,3 retain the 120-second release/soak target budget and cache the standalone fuzz workspace."
-      },
-      {
-        "name": "driver release-qualification prep",
-        "kind": "config-gate",
-        "trace": "At driver commit 4f1eb3abd3af604ad29f1899251025499b0a3869, python3 scripts/verify_required_local.py --self-test passed the prep/strict graph, complete prep-result aggregation including fuzz-0 through fuzz-3, and strict-only evidence negative controls."
-      },
-      {
-        "name": "cross-repo checksum handoff",
-        "kind": "api",
-        "trace": "tests/artifacts/evidence/oraclemcp-eng-program-bp8ia.5.4-driver-handoff.json binds both repository commit/tree SHAs and SHA-256 digests for every D4 delivery path; an independent local verifier recomputed all values successfully."
+        "name": "RQ-PREP half — verifier landed, measurement BLOCKED",
+        "kind": "tool",
+        "trace": "scripts/ci_lane_budget.py rq-prep is the honest verifier (refuses without a hosted prep->strict pair at ONE exact SHA where strict started after prep completed, plus a cold baseline: E_NO_PREP/E_NO_STRICT/E_NOT_WARMED/E_NO_COLD_BASELINE/E_SHA_MISMATCH). Live read-only run 2026-07-22: 'python3 scripts/ci_lane_budget.py rq-prep --repo MuhDur/rust-oracledb --sha 2efd7b545d64261295e5bb37eb6306ba543c87d0' -> REFUSED [E_NO_PREP]. The two most recent RQ runs (29857867818 @2efd7b54, 29845920299 @4cb01769) are BOTH strict-mode at DIFFERENT SHAs; no prep run exists at any SHA."
       }
     ]
   },
@@ -52,12 +41,14 @@
     "artifacts": []
   },
   "limitations": [
-    "No external GitHub Actions fuzz or release-qualification run is claimed; this close is based on the checked workflow/parser contracts.",
-    "The driver's full workspace compile graph was not rerun because its mandatory Agent Mail build-slot service was unavailable; no unleased full build was substituted.",
-    "This close has no required-proof/v1 artifact and remains not-ready on scoped workflow tests."
+    "D4 is NOT complete: the RQ-prep acceptance (a hosted prep->strict cold-start reduction certified by rq-prep) cannot be met until the operator dispatches the Release Qualification workflow at one exact SHA in mode=prep then mode=strict and keeps the timing/cache evidence.",
+    "No hosted RQ prep run exists at any SHA as of 2026-07-22; rq-prep correctly refuses to fabricate a positive verdict.",
+    "This evidence file is a status record (readiness not-ready), NOT a closure; the bead stays open."
   ],
   "known_defects": [],
-  "follow_ups": [],
+  "follow_ups": [
+    "Operator: dispatch driver Release Qualification mode=prep then mode=strict at one exact SHA (routable to the dedicated rust-oracledb pane), then run scripts/ci_lane_budget.py rq-prep --repo MuhDur/rust-oracledb --sha <SHA> --require-reduction to certify the cold-start reduction and close D4."
+  ],
   "readiness": {
     "claim": "not-ready",
     "basis": "scoped-test"
