@@ -1,0 +1,65 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T11:58:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.4.6.5",
+  "scope": {
+    "summary": "C6 de-monolith: isomorphic extraction of the CLI surface (clap derive types) from main.rs into cli.rs, and systemd unit-file helpers from service_lifecycle.rs into service_lifecycle/service_units.rs. No flag, subcommand, help text, or exit code changed; main.rs re-exports via pub(crate) use cli::* so every existing reference resolves exactly as before. Ratchet updated downward for service_lifecycle.rs and adjusted for the new seam files.",
+    "in_scope": [
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/cli.rs",
+      "crates/oraclemcp/src/service_lifecycle.rs",
+      "crates/oraclemcp/src/service_lifecycle/service_units.rs",
+      "scripts/oraclemcp_arch_fitness_lint.sh"
+    ],
+    "out_of_scope": [
+      "The dispatch/ split (separate C6 bead; dispatch/mod.rs and dispatch/tool_routing.rs are another agent's in-flight work).",
+      "Any change to command behaviour, flags, subcommands, help text, or exit codes (isomorphic only).",
+      "The pre-existing golden_behavior and dispatch test failures on HEAD (caused by the A1a fail-closed catalog gate fa93e169, not this extraction)."
+    ]
+  },
+  "source": {
+    "sha": "fbee1a24fb41f2e7ef8b0fcc61f405963adfa51b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "CLI command-surface isomorphism (C9 snippet-truth + P2-6 help text)",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=target cargo test -p oraclemcp --test cli: 27 passed, 0 failed. Includes setup_generated_client_snippet_launches_serve_as_written (C9: printed onboarding snippets work VERBATIM) and the P2-6 help-text assertions (om serve/doctor/capabilities usage, exit code 2, no 'Usage: oraclemcp'). No test was edited — if the split had changed behaviour these would fail."
+      },
+      {
+        "name": "CLI-vs-running-server contract",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=target cargo test -p oraclemcp --test c6_cli_vs_running_server: 2 passed, 0 failed (store-collision naming + state-mutating verbs fail while store owned)."
+      },
+      {
+        "name": "Crate compiles after extraction",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=target cargo check -p oraclemcp: Finished dev profile, exit 0. The clap Parser/Subcommand/Args/ValueEnum derives moved byte-for-byte to cli.rs; main.rs adds only `mod cli;`, `pub(crate) use cli::*;`, and a #[cfg(test)] `use clap::Parser;` so main_tests.rs resolves exactly as before."
+      },
+      {
+        "name": "Max-file-size ratchet",
+        "kind": "cli",
+        "trace": "scripts/oraclemcp_arch_fitness_lint.sh: my in-scope files pass (main.rs 7249, cli.rs 502, service_lifecycle.rs 5448 downward from 5538, service_units.rs 97). The one remaining violation (dispatch/tests.rs 15703) is another agent's in-flight C6 dispatch work, out of this bead's scope."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "main.rs grew by 7 lines (7242->7249) for the module glue (mod cli; re-export; cfg(test) Parser import); the ratchet was raised to match in the same reviewed split commit, per the bead's instruction. The net campaign effect is still a large reduction in main.rs responsibility (the 502-line CLI surface is now a separate seam).",
+    "The pre-existing golden_behavior (3) and dispatch (65) test failures on HEAD are caused by the A1a fail-closed catalog gate (fa93e169), verified unrelated to this extraction: the extraction moved code between files without changing any logic, and the failing tests live in clean committed files (dispatch/tests.rs, golden fixtures) that this commit did not touch."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
