@@ -436,6 +436,8 @@ def dry_run() -> None:
         ROOT / "tests" / "artifacts" / "evidence" / "rfail-failure-injection-lanes.json",
         {
             "bead": BEAD,
+            "lane": "R-fail failure-injection lanes",
+            "run_id": f"dry-run-{SCENARIO}",
             "status": "dry-run",
             "wire_assertions": [
                 {"id": "wire_client_revoke", "status": "skipped", "wire": True},
@@ -467,6 +469,7 @@ def main() -> int:
     container = os.environ.get("ORACLEMCP_RFAIL_CONTAINER", os.environ.get("ORACLEMCP_RIG_D10_CONTAINER", "rust-oracledb-free"))
     e5.ensure_container_ready(container, int(os.environ.get("ORACLEMCP_RFAIL_READY_TIMEOUT_SECS", "300")))
     work = e5.artifact_dir()
+    run_id = f"local-{work.name}-rfail-failure-injection"
     binary, _source, source_sha = e5.install_artifact(work)
     port = e5.free_port()
     config = work / "config.toml"
@@ -505,6 +508,8 @@ def main() -> int:
         ROOT / "tests" / "artifacts" / "evidence" / "rfail-failure-injection-lanes.json",
         {
             "bead": BEAD,
+            "lane": "R-fail failure-injection lanes",
+            "run_id": run_id,
             "status": "pass",
             "source_sha": source_sha,
             "installed_binary": str(binary),
