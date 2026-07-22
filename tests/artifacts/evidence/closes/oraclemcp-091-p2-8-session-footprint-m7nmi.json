@@ -45,7 +45,7 @@
       },
       {
         "name": "D-lane corroboration",
-        "kind": "live-db",
+        "kind": "cli",
         "trace": "Child bead oraclemcp-20cw3 closed with closing=67800b29f958268093571c99f22fc6ee2b595e79 and source=a6e5cea5d86248737b6439f464c5c4635f83b603 after a Free23 D-lane V$SESSION probe observed exactly three tagged sessions: one pinned primary plus two stateless pool sessions."
       },
       {
@@ -73,6 +73,6 @@
   "follow_ups": [],
   "readiness": {
     "claim": "ready",
-    "basis": "required-proof-and-live-child"
+    "basis": "live-evidence"
   }
 }
