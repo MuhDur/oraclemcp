@@ -1,0 +1,69 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:40:35Z",
+  "bead_id": "oraclemcp-091-b10-snippet-auth-header-4lit2",
+  "scope": {
+    "summary": "B10 makes the setup-printed Claude HTTP onboarding snippet carry an Authorization header and proves it through the C9 snippet-truth lane.",
+    "in_scope": [
+      "README.md",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs",
+      "docs/operations.md",
+      "scripts/rig/onboarding_snippet_truth.py"
+    ],
+    "out_of_scope": [
+      "No change is made to HTTP authentication policy; unauthenticated /mcp remains refused unless explicit no-auth dev mode is selected.",
+      "No bearer value is committed; the C9 lane stores only redacted clients issue output."
+    ]
+  },
+  "source": {
+    "sha": "1b969d340c69acf0bafebfea5308c001a18a6f53",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "C9 snippet-truth lane",
+        "kind": "cli",
+        "trace": "env -u CARGO_TARGET_DIR scripts/swarm_discipline.sh bounded-run --timeout 900 -- bash scripts/rig/onboarding_snippet_truth.sh run --log passed at source 1b969d340c69acf0bafebfea5308c001a18a6f53. Artifact target/e2e/c9-snippet-truth-20260722T094018Z-2743004/summary.json records http_client_credentials.claude_mcp_add status=pass after extracting the real setup output and completing raw HTTP initialize with the issued bearer."
+      },
+      {
+        "name": "setup payload regression",
+        "kind": "cli",
+        "trace": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp setup_payload_is_generic_and_client_ready -- --nocapture passed: setup JSON includes claude_mcp_add with URL plus --header Authorization: Bearer <bearer>, and rendered text quotes the header as one shell argument."
+      },
+      {
+        "name": "clients issue client_command regression",
+        "kind": "cli",
+        "trace": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp client_credential_commands_distinguish_offline_and_live_revocation -- --nocapture passed: clients issue client_command carries the same HTTP URL plus Authorization header shape."
+      },
+      {
+        "name": "scoped compile and format",
+        "kind": "cli",
+        "trace": "cargo fmt --all -- --check and env -u CARGO_TARGET_DIR cargo check -p oraclemcp both passed after the B10 source changes."
+      },
+      {
+        "name": "C9 harness syntax",
+        "kind": "cli",
+        "trace": "PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/rig/onboarding_snippet_truth.py and bash -n scripts/rig/onboarding_snippet_truth.sh both passed before rerunning the lane."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped local evidence only; no full-workspace gate is claimed from this shared dirty checkout.",
+    "The setup snippet necessarily carries a <bearer> placeholder because setup does not mutate client credentials; C9 substitutes the shown-once bearer emitted by the real clients issue command in memory and stores only redacted output."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
