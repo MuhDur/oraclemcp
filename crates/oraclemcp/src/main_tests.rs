@@ -4556,3 +4556,100 @@ fn blocked_labels_bucket_reason_class_and_required_level() {
     );
     assert_eq!(blocked_labels(&weird), Some(("classifier", "n/a")));
 }
+
+/// jjtrc — an over-ceiling custom tool must REFUSE STARTUP, not be skipped.
+///
+/// This is the security half of the skip/refuse split. Skip-and-warn exists for
+/// a definition the operator got WRONG (malformed, unparseable): drop it, warn,
+/// start. A definition declaring a level the profile forbids is not a mistake in
+/// form — it is a request for a capability the ceiling denies, and the operator
+/// must see a refusal rather than a clean start that silently ignored them.
+///
+/// It regressed when SkippedCustomTool landed: the security predicate listed the
+/// three signature variants (accurately — that commit did not weaken signatures)
+/// but not Forbidden or OverCeiling, so both inherited the config-quality path.
+/// Execution stayed safe, because a skipped definition is never registered and
+/// therefore cannot run above the ceiling. The lie was to the operator, not to
+/// the guard — which is exactly the kind of loosening AGENTS.md's tighten-only
+/// rule exists to make deliberate.
+#[test]
+fn custom_tool_loader_refuses_startup_for_an_over_ceiling_tool() {
+    let tools_dir = target_tmp_file("jjtrc-over-ceiling");
+    fs::create_dir_all(&tools_dir).expect("create tools dir");
+    fs::write(
+        tools_dir.join("writer.toml"),
+        r#"
+        [[tool]]
+        name = "matrix_over_ceiling_writer_refused"
+        description = "ADMIN-pinned write custom tool"
+        sql = "UPDATE matrix_probe_target SET x = 1"
+        output_mode = "rows"
+        declared_level = "ADMIN"
+        "#,
+    )
+    .expect("write over-ceiling tool");
+
+    // Non-strict on purpose: the point is that a SECURITY refusal does not need
+    // strict mode to be enforced. Strict governs config QUALITY.
+    let error = load_custom_catalog_from_sources_with_policy(
+        None,
+        None,
+        false,
+        OperatingLevel::ReadOnly,
+        false,
+    )
+    .err()
+    .or_else(|| {
+        load_custom_catalog_from_sources_with_policy(
+            Some(&tools_dir),
+            None,
+            false,
+            OperatingLevel::ReadOnly,
+            false,
+        )
+        .err()
+    })
+    .expect("an over-ceiling tool must stop startup even in non-strict mode");
+    assert!(
+        error.message.contains("refuses to load"),
+        "the refusal must say it refused to load: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains("matrix_over_ceiling_writer_refused"),
+        "the refusal must name the offending tool: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains("ADMIN") && error.message.contains("READ_ONLY"),
+        "the refusal must name the declared level and the profile ceiling: {}",
+        error.message
+    );
+}
+
+/// The other direction, so the fix above cannot be "refuse everything": a
+/// MALFORMED definition is still skipped and warned about while the server
+/// starts, exactly as the config-quality path intends.
+#[test]
+fn custom_tool_loader_still_skips_a_malformed_definition_without_refusing() {
+    let tools_dir = target_tmp_file("jjtrc-malformed-still-skipped");
+    fs::create_dir_all(&tools_dir).expect("create tools dir");
+    fs::write(
+        tools_dir.join("broken.toml"),
+        "this is not valid toml [[[\n",
+    )
+    .expect("write malformed tool file");
+
+    let loaded = load_custom_catalog_from_sources_with_policy(
+        Some(&tools_dir),
+        None,
+        false,
+        OperatingLevel::ReadOnly,
+        false,
+    )
+    .expect("a malformed definition is a config-quality problem: skip it and start");
+    assert!(
+        !loaded.skipped.is_empty(),
+        "the malformed definition must be reported as skipped, not silently dropped"
+    );
+}

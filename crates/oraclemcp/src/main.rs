@@ -1547,12 +1547,32 @@ fn load_custom_catalog_from_sources_with_policy(
     })
 }
 
+/// Which load failures are SECURITY conditions rather than config-quality ones.
+///
+/// Skip-and-warn exists for a definition that is malformed or unparseable: the
+/// operator made a mistake, the tool is dropped, the server still starts. A tool
+/// whose body classifies `Forbidden`, or whose required level exceeds the
+/// profile ceiling, is a different thing entirely — the operator asked for a
+/// capability the profile forbids, and the answer to that is a refusal they can
+/// see, not a warning under a clean start.
+///
+/// Both were downgraded to skip-and-warn when SkippedCustomTool landed
+/// (5e1aca16). That commit's title is exact — it did not weaken SIGNATURES,
+/// which are listed here — but Forbidden and OverCeiling were security refusals
+/// too, and they inherited the quality path incidentally. Execution stayed safe
+/// (a skipped definition is never registered, so it cannot run above the
+/// ceiling), yet an operator who declared an ADMIN write tool under a READ_ONLY
+/// profile saw a clean start and had every reason to believe it was accepted.
+/// AGENTS.md makes the guard tighten-only: a startup refusal becoming a startup
+/// skip is a loosening, and it must be deliberate rather than incidental.
 fn custom_tool_load_error_is_security_invariant(error: &oraclemcp_core::LoadError) -> bool {
     matches!(
         error,
         oraclemcp_core::LoadError::SignatureRequired { .. }
             | oraclemcp_core::LoadError::SignatureInvalid { .. }
             | oraclemcp_core::LoadError::SignatureVersionUnsupported { .. }
+            | oraclemcp_core::LoadError::Forbidden { .. }
+            | oraclemcp_core::LoadError::OverCeiling { .. }
     )
 }
 
@@ -7547,6 +7567,9 @@ mod stub {
     impl OracleConnection for StubConnection {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Err(self.err())
         }
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Err(self.err())
