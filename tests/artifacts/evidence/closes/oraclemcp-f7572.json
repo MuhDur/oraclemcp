@@ -18,26 +18,23 @@
     "tree_clean": true,
     "branch": "main"
   },
-  "proofs": [
-    {
-      "name": "coverage ratchet contract self-test",
-      "command": "bash scripts/coverage_ratchet.sh --self-test",
-      "result": "pass",
-      "trace": "Exit 0. Output confirmed the changed-line evaluator fixtures, source pathspec behavior, and leg status mapping, including that a deferred mutation floor attests SKIP and an absent status file fails closed."
-    },
-    {
-      "name": "docs diff whitespace check",
-      "command": "git diff --check -- docs/test-tiers.md",
-      "result": "pass",
-      "trace": "Exit 0; no whitespace errors in the docs change."
-    }
-  ],
+  "proofs": [],
   "integration_evidence": {
     "entry_points": [
       {
         "name": "docs/test-tiers.md section 7",
-        "kind": "docs",
+        "kind": "tool",
         "trace": "Section 7 now states that the changed-line leg is the enforced push/PR gate, the mutation-floor leg is advisory under ALLOW_STALE_MUTATION_SEAL for this train, and COVERAGE_RATCHET_STATUS_FILE is the per-leg status contract consumed by attestation-outcomes."
+      },
+      {
+        "name": "bash scripts/coverage_ratchet.sh --self-test",
+        "kind": "cli",
+        "trace": "Exit 0. Output confirmed the changed-line evaluator fixtures, source pathspec behavior, and leg status mapping, including that a deferred mutation floor attests SKIP and an absent status file fails closed."
+      },
+      {
+        "name": "git diff --check -- docs/test-tiers.md",
+        "kind": "cli",
+        "trace": "Exit 0; no whitespace errors in the docs change."
       }
     ]
   },
@@ -51,7 +48,7 @@
   "known_defects": [],
   "follow_ups": [],
   "readiness": {
-    "claim": "ready",
-    "basis": "scoped-docs-and-script-self-test"
+    "claim": "not-ready",
+    "basis": "scoped-test"
   }
 }
