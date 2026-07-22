@@ -37,9 +37,11 @@ check_max_file_size_ratchet() {
     [web/src/app/App.tsx]=9708
     [crates/oraclemcp-db/src/connection.rs]=8812
     [crates/oraclemcp-guard/src/classifier.rs]=7678
-    [crates/oraclemcp/src/main.rs]=7722
+    [crates/oraclemcp/src/main.rs]=7249
+    [crates/oraclemcp/src/cli.rs]=502
     [crates/oraclemcp-core/src/doctor.rs]=5400
-    [crates/oraclemcp/src/service_lifecycle.rs]=5538
+    [crates/oraclemcp/src/service_lifecycle.rs]=5448
+    [crates/oraclemcp/src/service_lifecycle/service_units.rs]=97
     [crates/oraclemcp-core/src/lane.rs]=5510
     [crates/oraclemcp/src/main_tests.rs]=4690
     [crates/oraclemcp-core/src/http/tests_operator.rs]=4452
