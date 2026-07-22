@@ -1,0 +1,71 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:25:40Z",
+  "bead_id": "oraclemcp-091-b7b-logoff-verify-1w3pn",
+  "scope": {
+    "summary": "Extends the D7 AFTER LOGOFF rig to prove clean exit and SIGTERM logically close both the pinned Oracle session and the server-owned stateless pool session.",
+    "in_scope": [
+      "scripts/rig/verify_logoff_lane.sh"
+    ],
+    "out_of_scope": [
+      "A4e session recycle/reconnect work",
+      "changes to the sibling rust-oracledb driver repository"
+    ]
+  },
+  "source": {
+    "sha": "ae137a9b1818c290a5e0c30ac21972c59a721207",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/rig/verify_logoff_lane.sh",
+        "kind": "cli",
+        "trace": "Rig configures a unique Oracle MODULE per mode, enables a server-owned pool with min_idle=1, drives oracle_query to force the pinned session, requires at least two live v$session rows before shutdown, and asserts logoff row deltas and post-shutdown ghost counts."
+      },
+      {
+        "name": "bash -n scripts/rig/verify_logoff_lane.sh",
+        "kind": "cli",
+        "trace": "Passed shell syntax validation before commit ae137a9b1818c290a5e0c30ac21972c59a721207."
+      },
+      {
+        "name": "git diff --check -- scripts/rig/verify_logoff_lane.sh tests/artifacts/evidence/b7b-logoff-verify-2026-07-22.txt",
+        "kind": "cli",
+        "trace": "Passed whitespace check before commit ae137a9b1818c290a5e0c30ac21972c59a721207."
+      },
+      {
+        "name": "CARGO_TARGET_DIR=target cargo build -p oraclemcp",
+        "kind": "cli",
+        "trace": "Built target/debug/oraclemcp from the current checkout before running the live rig."
+      },
+      {
+        "name": "scripts/swarm_discipline.sh bounded-run --timeout 300 -- scripts/rig/verify_logoff_lane.sh",
+        "kind": "cli",
+        "trace": "Passed: clean exit logged two rows and no ghosts, SIGKILL logged no rows, SIGTERM logged two rows and no ghosts."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "b7b-pinned-pooled-logoff-transcript",
+        "path": "tests/artifacts/evidence/b7b-logoff-verify-2026-07-22.json",
+        "sha": "ae137a9b1818c290a5e0c30ac21972c59a721207"
+      }
+    ]
+  },
+  "limitations": [
+    "The SIGKILL case remains a control only; B7b acceptance is clean exit and SIGTERM for pinned plus pooled sessions.",
+    "A4e remains skipped per operator instruction; no dependency was edited."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
