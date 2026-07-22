@@ -1,0 +1,64 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:54:48Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.4.3",
+  "scope": {
+    "summary": "Triaged the original C3 stash set by stable stash message after the live stash stack shifted, with no stash mutation.",
+    "in_scope": [
+      "tests/artifacts/evidence/stash-triage/oraclemcp-eng-program-bp8ia.4.3.md"
+    ],
+    "out_of_scope": [
+      "Dropping, applying, popping, clearing, or otherwise removing any stash.",
+      "Pane 2's parked peer stash, currently message 'park peer beads export hunks during ws-b close', which was explicitly excluded from C3 triage material.",
+      "Any driver-repository stash triage or mutation."
+    ]
+  },
+  "source": {
+    "sha": "e664fa0ca6c8278bda1728f8a4648d98c798ac8a",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "git stash list --date=iso",
+        "kind": "cli",
+        "trace": "Re-read live stash stack after the operator warned that indices shifted. The pane-parked message 'park peer beads export hunks during ws-b close' was present at the top and excluded. The C3 set was keyed by message text rather than by unstable stash@{N} index."
+      },
+      {
+        "name": "git stash show -p stash@{N} --stat",
+        "kind": "cli",
+        "trace": "Read-only inspection was run over the current C3 index range after the shift, covering messages: d4-server-preserve-before-h6-20260720; WIP on release/v0.9.0: 6aa3174 test: align wallet mode expectations with driver support; temporary OCI IAM local-driver overlay after subject-mapping revalidation; temporary final OCI classic-IAM local driver override; temporary v6z2 local driver OCI override; temporary r2t0 OCI Legacy16 trace local-driver override; temporary r2t0 OCI revalidation StaticClientCert local-driver override; temporary r2t0 OCI diagnostics local-driver override and RUST_LOG pass-through; temporary r2t0 local-driver OCI validation full retry; temporary r2t0 local-driver OCI validation; K3-worker-offscope-wip-5c01862; WIP on main: 5c01862 chore(beads): close GATE-SEAL .16; w10 bead export not committed; w5 bead export not committed; w6b bead export not committed."
+      },
+      {
+        "name": "message-keyed verdict list",
+        "kind": "cli",
+        "trace": "Verdicts: d4-server-preserve-before-h6-20260720 = ALREADY LANDED because fuzz CI taxonomy entries are already in HEAD/history at a4fec26d/cb7ddfa0; WIP on release/v0.9.0: 6aa3174 test: align wallet mode expectations with driver support = OBSOLETE because it is old Cargo.lock churn superseded by current published-driver pinning; each temporary OCI local-driver override message = OBSOLETE because local rust-oracledb path overrides are dead by policy; K3-worker-offscope-wip-5c01862 = ALREADY LANDED because oracle_lineage live catalog cross-check symbols are in current tree/history at 70e744a9; WIP on main: 5c01862 chore(beads): close GATE-SEAL .16 = ALREADY LANDED because README release-version docs were landed/refined at 828955d5/be525cea/7ea7659a; w10/w5/w6b bead export not committed messages = ALREADY LANDED because those bead close exports are already reflected in the current tracker."
+      },
+      {
+        "name": "no stash mutation",
+        "kind": "cli",
+        "trace": "No git stash drop, git stash apply, git stash pop, git stash clear, or equivalent stash-mutating command was run. Removal remains operator-gated and awaits explicit operator authorization."
+      }
+    ],
+    "entry_points_excluded_reason": "no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is a read-only stash triage close, not a cleanup close: no stash was dropped, applied, popped, cleared, or removed.",
+    "Stash indices are volatile in this shared checkout; the durable verdict is keyed by stash message text, with current indices only incidental at inspection time.",
+    "Removal of any stash still awaits explicit operator authorization under AGENTS.md Rule 1.",
+    "Readiness remains not-ready because this close is based on manual/read-only review rather than a required-proof/v1 artifact."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
