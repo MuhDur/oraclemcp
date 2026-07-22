@@ -776,7 +776,7 @@ def main() -> int:
         "client_id": client_id,
         "wire_assertions": wire,
         "supplemental_assertions": supplemental,
-        "proof_boundary": "All HTTP/session/auth/refusal/expiry/teardown assertions are raw wire checks against the installed artifact. commit_in_doubt remains a supplemental archived-source cargo test because the installed binary has no public commit-in-doubt fault injection hook.",
+        "proof_boundary": "HTTP/session/auth/refusal/single-use-replay/teardown/revocation assertions are raw wire checks against the installed artifact. Grant expiry is not exercised because the public confirmation-grant TTL is fixed at 300s; commit_in_doubt remains a supplemental archived-source cargo test because the installed binary has no public commit-in-doubt fault injection hook.",
     }
     write_evidence(ROOT / "tests" / "artifacts" / "evidence" / "e5-failure-recovery-e2e.json", evidence)
     return 0
