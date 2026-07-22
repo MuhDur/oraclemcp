@@ -1,0 +1,106 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:28:56Z",
+  "bead_id": "oraclemcp-091-ws-d-live-env-pb6tp",
+  "scope": {
+    "summary": "WS-D parent close reconciles D1-D10 and finds every blocking live-environment child closed with committed evidence.",
+    "in_scope": [
+      ".beads/issues.jsonl",
+      "tests/artifacts/evidence/closes/oraclemcp-091-ws-d-live-env-pb6tp.json"
+    ],
+    "out_of_scope": [
+      "No new WS-D product code or live Oracle run is claimed by this parent close; child beads carry their own implementation and live-lane proof.",
+      "The release-train parent and downstream publish/e2e beads remain separate tracker work."
+    ]
+  },
+  "source": {
+    "sha": "bd910fe7da595efa007c8c0eae9f8a0be3289c37",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "br dep tree oraclemcp-091-ws-d-live-env-pb6tp",
+        "kind": "cli",
+        "trace": "WS-D parent is open; all ten blocking D1-D10 dependencies are closed. The only remaining open dependency edge is the parent-child link to the release-train root."
+      },
+      {
+        "name": "br show oraclemcp-091-ws-d-live-env-pb6tp --json",
+        "kind": "cli",
+        "trace": "Tracker dependencies list D1-D10 as type=blocks and status=closed; train-root is type=parent-child and remains separate parent work."
+      },
+      {
+        "name": "git log --oneline --all --grep='D1|D2|D3|D4|D5|D6|D7|D8|D9|D10|WS-D' --max-count=120",
+        "kind": "cli",
+        "trace": "Git history contains the named source, evidence, and close commits for the D1-D10 reconciliation set."
+      },
+      {
+        "name": "oraclemcp-091-d1-harness-r0hsx",
+        "kind": "api",
+        "trace": "D1 status=closed; source=96e43f4fd179cc7c1bae3dc4b03d6febb2ca57b4; closing=19b21015fa0e39ee4ec5e5265af5788b6309b77f; evidence=tests/artifacts/evidence/closes/oraclemcp-091-d1-harness-r0hsx.json"
+      },
+      {
+        "name": "oraclemcp-091-d2-capability-fixtures-k2udd",
+        "kind": "api",
+        "trace": "D2 status=closed; source=c5a22eaa54d6f105b5c97ca0d2ea23bf00c9fdba; closing=bab844dd0fdb77f873ed22bbbf7c86ad0169b7de; evidence=tests/artifacts/evidence/closes/oraclemcp-091-d2-capability-fixtures-k2udd.json"
+      },
+      {
+        "name": "oraclemcp-091-d3-vpd-fixture-x7u2s",
+        "kind": "api",
+        "trace": "D3 status=closed; source=1edfbc69cef76baf46eced0d64a0a32696cb9245; closing=39588b6e4f2a2c7406d09ff88c56faa6bd513eab; evidence=tests/artifacts/evidence/closes/oraclemcp-091-d3-vpd-fixture-x7u2s.json"
+      },
+      {
+        "name": "oraclemcp-091-d4-privilege-matrix-j7evu",
+        "kind": "api",
+        "trace": "D4 status=closed; source=e0abfe2f11f5b0ec348492291e07817eac92dfd6; closing=2fae8d5b32c31a2d23655c8bc9fba31a007079bb; evidence=tests/artifacts/evidence/closes/oraclemcp-091-d4-privilege-matrix-j7evu.json"
+      },
+      {
+        "name": "oraclemcp-091-d5-idle-kill-lane-83utt",
+        "kind": "api",
+        "trace": "D5 status=closed; source=7bc8913d70a5bb653ca5f6560f62331e1154cdb2; closing=c566b9f898f3f3decbad0fc853623f0d795429bf; evidence=tests/artifacts/evidence/closes/oraclemcp-091-d5-idle-kill-lane-83utt.json"
+      },
+      {
+        "name": "oraclemcp-091-d6-tcps-lane-3np97",
+        "kind": "api",
+        "trace": "D6 status=closed; source=0026b8cd3bea2d1c2dba22b5b26f07ecb5bce833; closing=39588b6e4f2a2c7406d09ff88c56faa6bd513eab; evidence=tests/artifacts/evidence/closes/oraclemcp-091-d6-tcps-lane-3np97.json"
+      },
+      {
+        "name": "oraclemcp-091-d7-logoff-lane-25nil",
+        "kind": "api",
+        "trace": "D7 status=closed; source=7e20771b907bd3e6556a723f5128e5b3dc31acd8; closing=d31acca8829201f63300b4e75320074c5b1e5d0c; evidence=tests/artifacts/evidence/closes/oraclemcp-091-d7-logoff-lane-25nil.json"
+      },
+      {
+        "name": "oraclemcp-091-d8-rig-doctor-ejuvj",
+        "kind": "api",
+        "trace": "D8 status=closed; source=681cbd53d48b43cb3df653c7ba92bc409380b0c0; closing=6b6b6261825e11adb4911cfd9eb596abae557271; evidence=tests/artifacts/evidence/closes/oraclemcp-091-d8-rig-doctor-ejuvj.json"
+      },
+      {
+        "name": "oraclemcp-091-d9-sample-schemas-n5a42",
+        "kind": "api",
+        "trace": "D9 status=closed; source=d6aafc64e02ec5b4b7e8e75a839328fd76e23ba5; closing=24f6eb001618d199f2d8e4509074bcb3a2f147c1; evidence=tests/artifacts/evidence/closes/oraclemcp-091-d9-sample-schemas-n5a42.json"
+      },
+      {
+        "name": "oraclemcp-091-d10-real-pool-kill-ptvvy",
+        "kind": "api",
+        "trace": "D10 status=closed; source=332c2c658d259babcd976e32084313b045d3b8b7; closing=c32ca87130d847afae66d96cf7d9794c53130d15; evidence=tests/artifacts/evidence/closes/oraclemcp-091-d10-real-pool-kill-ptvvy.json"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is a reconciliation close for the WS-D epic; implementation, two-sided, and live proof remain attached to the D1-D10 child beads.",
+    "No customer, field, OCI, or non-local live identifier is used or claimed by this parent evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
