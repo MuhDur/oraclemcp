@@ -2104,7 +2104,9 @@ fn args_for(name: &str) -> Value {
         "oracle_connection_info" => json!({}),
         "oracle_switch_profile" => json!({ "profile": "other" }),
         "oracle_set_session_level" => json!({ "action": "status" }),
-        "oracle_query" => json!({ "sql": "SELECT 1 FROM dual" }),
+        "oracle_query" => {
+            json!({ "sql": "SELECT e.id FROM app.employees e WHERE e.id = :1", "binds": [100] })
+        }
         "oracle_diff" => json!({ "sql": "SELECT 1 AS id FROM dual", "scn_a": 1, "scn_b": 2 }),
         "oracle_list_schemas" => json!({ "name_like": "APP%", "limit": 10 }),
         "oracle_schema_inspect" => json!({ "owner": "HR" }),
@@ -2169,7 +2171,9 @@ fn args_for(name: &str) -> Value {
         "switch_database" => json!({ "db": "other" }),
         "enable_writes" => json!({ "ttl_seconds": 60 }),
         "disable_writes" => json!({}),
-        "query" => json!({ "sql": "SELECT 1 FROM dual" }),
+        "query" => {
+            json!({ "sql": "SELECT e.id FROM app.employees e WHERE e.id = :1", "binds": [100] })
+        }
         "execute_approved" => {
             let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
             json!({ "sql": sql, "token": "preview-issued-confirmation-placeholder" })
@@ -14720,10 +14724,10 @@ fn preview_dml_runs_the_statement_in_a_sandbox_and_rolls_it_back() {
         .dispatch(
             "oracle_preview_dml",
             json!({
-                "sql": "UPDATE employees SET salary = salary * 2 WHERE department_id = :1",
-                "binds": [10],
-                "witness": "SELECT employee_id, salary FROM employees WHERE department_id = :1",
-                "witness_binds": [10],
+                "sql": "UPDATE app.employees SET salary = salary * 2 WHERE id = :1",
+                "binds": [100],
+                "witness": "SELECT e.id FROM app.employees e WHERE e.id = :1",
+                "witness_binds": [100],
             }),
         )
         .expect("a reversible DML can be dry-run");
@@ -14750,7 +14754,9 @@ fn preview_dml_runs_the_statement_in_a_sandbox_and_rolls_it_back() {
         "and takes it back last: {executed:?}"
     );
     assert!(
-        executed.iter().any(|sql| sql.contains("UPDATE employees")),
+        executed
+            .iter()
+            .any(|sql| sql.contains("UPDATE app.employees")),
         "the DML really ran: {executed:?}"
     );
     assert_eq!(
