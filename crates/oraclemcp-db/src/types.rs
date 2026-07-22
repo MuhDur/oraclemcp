@@ -4,7 +4,7 @@
 //! nullable text plus the Oracle type name; the deterministic NUMBER→string /
 //! ISO-8601 / NLS serializer (P0-5) builds the precise JSON mapping on top.
 
-use std::{fmt, path::PathBuf, time::Duration};
+use std::{fmt, future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
 use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize};
@@ -692,6 +692,95 @@ impl OracleSessionIdentity {
 /// [`OracleConnectOptions`] directly with [`Default::default`].
 pub const DEFAULT_ORACLE_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A redacted failure class returned by a refreshable IAM token source.
+///
+/// The source deliberately drops provider detail before crossing this boundary:
+/// callers may classify the failure for operator telemetry, but cannot render a
+/// token, signing key, provider response, or source-specific error to a client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum IamTokenRefreshError {
+    /// The provider could not execute or read the configured token reference.
+    SourceUnavailable,
+    /// The provider returned a missing, empty, or malformed token.
+    InvalidToken,
+    /// The provider exceeded its configured deadline.
+    TimedOut,
+}
+
+impl IamTokenRefreshError {
+    /// Stable, non-secret classification for operator-only diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceUnavailable => "source-unavailable",
+            Self::InvalidToken => "invalid-token",
+            Self::TimedOut => "timed-out",
+        }
+    }
+}
+
+impl fmt::Display for IamTokenRefreshError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::SourceUnavailable => "IAM token source is unavailable",
+            Self::InvalidToken => "IAM token source returned an invalid token",
+            Self::TimedOut => "IAM token source timed out",
+        })
+    }
+}
+
+impl std::error::Error for IamTokenRefreshError {}
+
+/// The asynchronous result returned by [`RefreshableIamTokenSource`].
+pub type IamTokenFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<String, IamTokenRefreshError>> + Send + 'a>>;
+
+/// A refreshable source of OCI IAM or OAuth2 database access tokens.
+///
+/// The driver adapter invokes this source once for every physical connection
+/// attempt. It must therefore either return a fresh token or fail: it must never
+/// supply a password or another lower-authentication fallback. Implementations
+/// must also be reference-unwind-safe so adding a source does not silently alter
+/// the established panic-safety contract of connection options and pools.
+pub trait RefreshableIamTokenSource: Send + Sync + std::panic::RefUnwindSafe {
+    /// Fetch a token for one physical connection attempt.
+    fn get_token(&self) -> IamTokenFuture<'_>;
+}
+
+/// Cloneable, redacted handle for a [`RefreshableIamTokenSource`].
+///
+/// This wrapper preserves source identity for option comparisons without
+/// exposing the source's internals or any resolved token in `Debug` output.
+#[derive(Clone)]
+pub struct IamTokenSourceHandle(Arc<dyn RefreshableIamTokenSource>);
+
+impl IamTokenSourceHandle {
+    /// Wrap a source for use in [`OracleConnectOptions`].
+    #[must_use]
+    pub fn new(source: Arc<dyn RefreshableIamTokenSource>) -> Self {
+        Self(source)
+    }
+
+    pub(crate) fn source(&self) -> &Arc<dyn RefreshableIamTokenSource> {
+        &self.0
+    }
+}
+
+impl fmt::Debug for IamTokenSourceHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("IamTokenSourceHandle(<redacted>)")
+    }
+}
+
+impl PartialEq for IamTokenSourceHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for IamTokenSourceHandle {}
+
 /// Options for opening a physical Oracle connection. Credentials and
 /// profile-owned setup statements may be present transiently after secret
 /// resolution; `Debug` must never expose their values.
@@ -729,7 +818,14 @@ pub struct OracleConnectOptions {
     /// Authenticate with an OCI IAM database token (P1-11 hardens this path).
     pub use_iam_token: bool,
     /// A pre-fetched OCI IAM database token, when `use_iam_token` is set.
+    ///
+    /// This remains available for callers that deliberately own a static token,
+    /// but server profiles use [`Self::iam_token_source`] so each physical
+    /// connection obtains a fresh value.
     pub iam_token: Option<String>,
+    /// A refreshable IAM token source. The adapter calls it for every physical
+    /// connection attempt and never persists its resolved token.
+    pub iam_token_source: Option<IamTokenSourceHandle>,
     /// The PKCS#8 PEM private key an OCI IAM *database* token is bound to. When
     /// present with `iam_token`, the driver performs the token's proof-of-possession
     /// (`AUTH_HEADER`/`AUTH_SIGNATURE`) — required for OCI IAM database tokens
@@ -779,6 +875,7 @@ impl Default for OracleConnectOptions {
             use_sni: None,
             use_iam_token: false,
             iam_token: None,
+            iam_token_source: None,
             iam_token_private_key: None,
             session_identity: None,
             app_context: Vec::new(),
@@ -819,6 +916,7 @@ impl std::fmt::Debug for OracleConnectOptions {
             .field("use_sni", &self.use_sni)
             .field("use_iam_token", &self.use_iam_token)
             .field("iam_token", &redact(&self.iam_token))
+            .field("iam_token_source", &self.iam_token_source)
             .field(
                 "iam_token_private_key",
                 &redact(&self.iam_token_private_key),
@@ -849,6 +947,9 @@ impl OracleConnectOptions {
         }
         if let Some(token) = &self.iam_token {
             values.push(token.clone());
+        }
+        if let Some(private_key) = &self.iam_token_private_key {
+            values.push(private_key.clone());
         }
         if let Some(wallet) = &self.wallet_location {
             values.push(wallet.display().to_string());
@@ -1147,6 +1248,7 @@ mod tests {
             use_sni: Some(false),
             use_iam_token: true,
             iam_token: Some("eyJ-IAM-TOKEN-VALUE".to_owned()),
+            iam_token_private_key: Some("PRIVATE-KEY-MUST-NOT-RENDER".to_owned()),
             app_context: vec![(
                 "private-namespace".to_owned(),
                 "private-key".to_owned(),
@@ -1190,6 +1292,10 @@ mod tests {
             "iam_token leaked: {rendered}"
         );
         assert!(
+            !rendered.contains("PRIVATE-KEY-MUST-NOT-RENDER"),
+            "IAM signing key leaked: {rendered}"
+        );
+        assert!(
             !rendered.contains("private-namespace")
                 && !rendered.contains("private-key")
                 && !rendered.contains("private-value"),
@@ -1212,6 +1318,13 @@ mod tests {
         assert!(rendered.contains("ssl_server_cert_dn: Some"));
         assert!(rendered.contains("use_sni: Some"));
         assert!(rendered.contains("iam_token: Some"));
+        assert!(rendered.contains("iam_token_private_key: Some"));
+        assert!(
+            opts.doctor_redaction_values()
+                .iter()
+                .any(|value| value == "PRIVATE-KEY-MUST-NOT-RENDER"),
+            "doctor redaction must include the IAM signing key"
+        );
         assert!(rendered.contains("app_context_count: 1"));
         assert!(rendered.contains("sdu: Some(32768)"));
         assert!(rendered.contains("session_statement_count: 1"));

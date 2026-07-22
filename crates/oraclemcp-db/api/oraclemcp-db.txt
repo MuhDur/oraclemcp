@@ -1018,6 +1018,70 @@ pub type oraclemcp_db::HealthSubcheck::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::HealthSubcheck where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::HealthSubcheck where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::HealthSubcheck::vzip(self) -> V
+#[non_exhaustive] pub enum oraclemcp_db::IamTokenRefreshError
+pub oraclemcp_db::IamTokenRefreshError::InvalidToken
+pub oraclemcp_db::IamTokenRefreshError::SourceUnavailable
+pub oraclemcp_db::IamTokenRefreshError::TimedOut
+impl oraclemcp_db::IamTokenRefreshError
+pub const fn oraclemcp_db::IamTokenRefreshError::as_str(self) -> &'static str
+impl core::clone::Clone for oraclemcp_db::IamTokenRefreshError
+pub fn oraclemcp_db::IamTokenRefreshError::clone(&self) -> oraclemcp_db::IamTokenRefreshError
+impl core::cmp::Eq for oraclemcp_db::IamTokenRefreshError
+impl core::cmp::PartialEq for oraclemcp_db::IamTokenRefreshError
+pub fn oraclemcp_db::IamTokenRefreshError::eq(&self, &oraclemcp_db::IamTokenRefreshError) -> bool
+impl core::error::Error for oraclemcp_db::IamTokenRefreshError
+impl core::fmt::Debug for oraclemcp_db::IamTokenRefreshError
+pub fn oraclemcp_db::IamTokenRefreshError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_db::IamTokenRefreshError
+pub fn oraclemcp_db::IamTokenRefreshError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::IamTokenRefreshError
+impl core::marker::StructuralPartialEq for oraclemcp_db::IamTokenRefreshError
+impl core::marker::Freeze for oraclemcp_db::IamTokenRefreshError
+impl core::marker::Send for oraclemcp_db::IamTokenRefreshError
+impl core::marker::Sync for oraclemcp_db::IamTokenRefreshError
+impl core::marker::Unpin for oraclemcp_db::IamTokenRefreshError
+impl core::marker::UnsafeUnpin for oraclemcp_db::IamTokenRefreshError
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::IamTokenRefreshError
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::IamTokenRefreshError
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::IamTokenRefreshError where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::IamTokenRefreshError where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::IamTokenRefreshError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::IamTokenRefreshError::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::IamTokenRefreshError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::IamTokenRefreshError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::IamTokenRefreshError where U: core::convert::From<T>
+pub fn oraclemcp_db::IamTokenRefreshError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::IamTokenRefreshError where U: core::convert::Into<T>
+pub type oraclemcp_db::IamTokenRefreshError::Error = core::convert::Infallible
+pub fn oraclemcp_db::IamTokenRefreshError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::IamTokenRefreshError where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::IamTokenRefreshError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::IamTokenRefreshError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::IamTokenRefreshError where T: core::clone::Clone
+pub type oraclemcp_db::IamTokenRefreshError::Owned = T
+pub fn oraclemcp_db::IamTokenRefreshError::clone_into(&self, &mut T)
+pub fn oraclemcp_db::IamTokenRefreshError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for oraclemcp_db::IamTokenRefreshError where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_db::IamTokenRefreshError::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::IamTokenRefreshError
+impl<T> core::any::Any for oraclemcp_db::IamTokenRefreshError where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::IamTokenRefreshError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::IamTokenRefreshError where T: ?core::marker::Sized
+pub fn oraclemcp_db::IamTokenRefreshError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::IamTokenRefreshError where T: ?core::marker::Sized
+pub fn oraclemcp_db::IamTokenRefreshError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::IamTokenRefreshError where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::IamTokenRefreshError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::IamTokenRefreshError
+pub fn oraclemcp_db::IamTokenRefreshError::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::IamTokenRefreshError
+impl<T> tracing::instrument::Instrument for oraclemcp_db::IamTokenRefreshError
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::IamTokenRefreshError
+impl<T> typenum::type_operators::Same for oraclemcp_db::IamTokenRefreshError
+pub type oraclemcp_db::IamTokenRefreshError::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::IamTokenRefreshError where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::IamTokenRefreshError where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::IamTokenRefreshError::vzip(self) -> V
 #[non_exhaustive] pub enum oraclemcp_db::MaskComparabilityBreak
 pub oraclemcp_db::MaskComparabilityBreak::ActionMismatch
 pub oraclemcp_db::MaskComparabilityBreak::ActionMismatch::a: oraclemcp_db::ResultMaskingDecisionAction
@@ -3831,6 +3895,60 @@ pub type oraclemcp_db::IamToken::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::IamToken where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::IamToken where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::IamToken::vzip(self) -> V
+pub struct oraclemcp_db::IamTokenSourceHandle(_)
+impl oraclemcp_db::IamTokenSourceHandle
+pub fn oraclemcp_db::IamTokenSourceHandle::new(alloc::sync::Arc<dyn oraclemcp_db::RefreshableIamTokenSource>) -> Self
+impl core::clone::Clone for oraclemcp_db::IamTokenSourceHandle
+pub fn oraclemcp_db::IamTokenSourceHandle::clone(&self) -> oraclemcp_db::IamTokenSourceHandle
+impl core::cmp::Eq for oraclemcp_db::IamTokenSourceHandle
+impl core::cmp::PartialEq for oraclemcp_db::IamTokenSourceHandle
+pub fn oraclemcp_db::IamTokenSourceHandle::eq(&self, &Self) -> bool
+impl core::fmt::Debug for oraclemcp_db::IamTokenSourceHandle
+pub fn oraclemcp_db::IamTokenSourceHandle::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for oraclemcp_db::IamTokenSourceHandle
+impl core::marker::Send for oraclemcp_db::IamTokenSourceHandle
+impl core::marker::Sync for oraclemcp_db::IamTokenSourceHandle
+impl core::marker::Unpin for oraclemcp_db::IamTokenSourceHandle
+impl core::marker::UnsafeUnpin for oraclemcp_db::IamTokenSourceHandle
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::IamTokenSourceHandle
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::IamTokenSourceHandle
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::IamTokenSourceHandle where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::IamTokenSourceHandle where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::IamTokenSourceHandle where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::IamTokenSourceHandle::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::IamTokenSourceHandle where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::IamTokenSourceHandle where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::IamTokenSourceHandle where U: core::convert::From<T>
+pub fn oraclemcp_db::IamTokenSourceHandle::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::IamTokenSourceHandle where U: core::convert::Into<T>
+pub type oraclemcp_db::IamTokenSourceHandle::Error = core::convert::Infallible
+pub fn oraclemcp_db::IamTokenSourceHandle::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::IamTokenSourceHandle where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::IamTokenSourceHandle::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::IamTokenSourceHandle::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::IamTokenSourceHandle where T: core::clone::Clone
+pub type oraclemcp_db::IamTokenSourceHandle::Owned = T
+pub fn oraclemcp_db::IamTokenSourceHandle::clone_into(&self, &mut T)
+pub fn oraclemcp_db::IamTokenSourceHandle::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::IamTokenSourceHandle
+impl<T> core::any::Any for oraclemcp_db::IamTokenSourceHandle where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::IamTokenSourceHandle::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::IamTokenSourceHandle where T: ?core::marker::Sized
+pub fn oraclemcp_db::IamTokenSourceHandle::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::IamTokenSourceHandle where T: ?core::marker::Sized
+pub fn oraclemcp_db::IamTokenSourceHandle::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::IamTokenSourceHandle where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::IamTokenSourceHandle::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::IamTokenSourceHandle
+pub fn oraclemcp_db::IamTokenSourceHandle::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::IamTokenSourceHandle
+impl<T> tracing::instrument::Instrument for oraclemcp_db::IamTokenSourceHandle
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::IamTokenSourceHandle
+impl<T> typenum::type_operators::Same for oraclemcp_db::IamTokenSourceHandle
+pub type oraclemcp_db::IamTokenSourceHandle::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::IamTokenSourceHandle where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::IamTokenSourceHandle where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::IamTokenSourceHandle::vzip(self) -> V
 pub struct oraclemcp_db::IncomparableMaskedColumn
 pub oraclemcp_db::IncomparableMaskedColumn::column: alloc::string::String
 pub oraclemcp_db::IncomparableMaskedColumn::reason: oraclemcp_db::MaskComparabilityBreak
@@ -4323,6 +4441,7 @@ pub oraclemcp_db::OracleConnectOptions::connect_timeout: core::option::Option<co
 pub oraclemcp_db::OracleConnectOptions::external_auth: bool
 pub oraclemcp_db::OracleConnectOptions::iam_token: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectOptions::iam_token_private_key: core::option::Option<alloc::string::String>
+pub oraclemcp_db::OracleConnectOptions::iam_token_source: core::option::Option<oraclemcp_db::IamTokenSourceHandle>
 pub oraclemcp_db::OracleConnectOptions::inactivity_timeout: core::option::Option<core::time::Duration>
 pub oraclemcp_db::OracleConnectOptions::keepalive_minutes: core::option::Option<u64>
 pub oraclemcp_db::OracleConnectOptions::password: core::option::Option<alloc::string::String>
@@ -8765,6 +8884,8 @@ pub fn oraclemcp_db::RustOracleConnection::set_call_timeout(&self, core::option:
 pub fn oraclemcp_db::RustOracleConnection::set_request_deadline(&self, &asupersync::cx::cx::Cx, core::option::Option<asupersync::types::id::Time>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::RustOracleConnection::set_request_quota(&self, &asupersync::cx::cx::Cx, core::option::Option<oraclemcp_db::DbRequestQuota>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::RustOracleConnection::unregister_cqn_query<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub trait oraclemcp_db::RefreshableIamTokenSource: core::marker::Send + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe
+pub fn oraclemcp_db::RefreshableIamTokenSource::get_token(&self) -> oraclemcp_db::IamTokenFuture<'_>
 pub async fn oraclemcp_db::apply_native_redaction_policy(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, bool, bool, &oraclemcp_db::NativeRedactionPolicy) -> core::result::Result<(), oraclemcp_db::NativeRedactionApplyError>
 pub fn oraclemcp_db::assemble_cost_estimate(&[oraclemcp_db::OracleRow]) -> core::option::Option<oraclemcp_db::PlanCostEstimate>
 pub fn oraclemcp_db::base64_encode(&[u8]) -> alloc::string::String
@@ -8868,3 +8989,4 @@ pub fn oraclemcp_db::top_sql_query(oraclemcp_db::DiagnosticsSource, oraclemcp_db
 pub fn oraclemcp_db::unusable_indexes_sql(oraclemcp_db::ViewTier) -> (&'static str, alloc::string::String)
 pub fn oraclemcp_db::validate_adb_connect_string(&str) -> core::result::Result<oraclemcp_db::AdbConnectInfo, oraclemcp_db::OciError>
 pub fn oraclemcp_db::wallet_certificate_validity(&std::path::Path, core::option::Option<&str>) -> alloc::vec::Vec<oraclemcp_db::WalletCertValidity>
+pub type oraclemcp_db::IamTokenFuture<'a> = core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::string::String, oraclemcp_db::IamTokenRefreshError>> + core::marker::Send + 'a)>>

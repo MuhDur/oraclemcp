@@ -182,10 +182,12 @@ pub use tns::{
     parse_tnsnames_dir,
 };
 pub use types::{
-    DEFAULT_ORACLE_CALL_TIMEOUT, ORACLE_CELL_STRUCTURED_CONTRACT_VERSION, OracleBackend,
-    OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow,
-    OracleSessionIdentity, RedactedNamedOracleBinds, RedactedOracleBind, RedactedOracleBinds,
-    RedactedOracleConnectionInfo, redacted_named_oracle_binds, redacted_oracle_binds,
+    DEFAULT_ORACLE_CALL_TIMEOUT, IamTokenFuture, IamTokenRefreshError, IamTokenSourceHandle,
+    ORACLE_CELL_STRUCTURED_CONTRACT_VERSION, OracleBackend, OracleBind, OracleCell,
+    OracleConnectOptions, OracleConnectionInfo, OracleRow, OracleSessionIdentity,
+    RedactedNamedOracleBinds, RedactedOracleBind, RedactedOracleBinds,
+    RedactedOracleConnectionInfo, RefreshableIamTokenSource, redacted_named_oracle_binds,
+    redacted_oracle_binds,
 };
 
 pub use pool::{OracleConnectionManager, OraclePool, PoolMetrics, PoolSettings};
