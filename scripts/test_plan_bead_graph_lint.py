@@ -180,12 +180,46 @@ class PlanBeadGraphLintTests(unittest.TestCase):
         bad = LINT.validate_manifest(fixture.write(broken, "bad-handoff.json"))
         self.assertTrue(any(line.startswith("E_HANDOFF_SHA256") for line in bad.findings.hard))
 
-    def test_mixed_parent_dependency_cycle_fails_iteratively(self) -> None:
+    def test_cycle_detection_is_per_edge_class_and_iterative(self) -> None:
+        # THE EPIC SHAPE IS NOT A CYCLE. `base.parent = child` makes
+        # `base --parent-child--> child` (hierarchy) while the fixture's
+        # `child.dependencies = [base]` makes `child --blocks--> base`
+        # (sequencing). Those are two different edge classes; reporting them as
+        # a cycle is the false positive eng_program_graph_lint.py settled, so the
+        # manifest check must accept it too.
         fixture = ManifestFixture()
         manifest = fixture.manifest()
         manifest["tasks"][0]["parent"] = "child"
         state = LINT.validate_manifest(fixture.write(manifest))
-        self.assertTrue(any(line.startswith("E_GRAPH_CYCLE") for line in state.findings.hard))
+        self.assertFalse(
+            any(line.startswith("E_GRAPH_CYCLE") for line in state.findings.hard),
+            f"the normal epic shape was wrongly reported as a cycle: {state.findings.hard}",
+        )
+
+        # A genuine HIERARCHY cycle (a bead is its own ancestor) is still
+        # rejected: base.parent = child AND child.parent = base.
+        fixture = ManifestFixture()
+        manifest = fixture.manifest()
+        manifest["tasks"][0]["parent"] = "child"
+        manifest["tasks"][1]["parent"] = "base"
+        manifest["tasks"][1]["dependencies"] = []  # drop the sequencing edge
+        state = LINT.validate_manifest(fixture.write(manifest))
+        self.assertTrue(
+            any(line.startswith("E_GRAPH_CYCLE") for line in state.findings.hard),
+            "a parent-child cycle was not rejected",
+        )
+
+        # A genuine SEQUENCING cycle (nothing in it can start) is still rejected:
+        # base --blocks--> child AND child --blocks--> base.
+        fixture = ManifestFixture()
+        manifest = fixture.manifest()
+        manifest["tasks"][0]["dependencies"] = ["child"]
+        manifest["tasks"][1]["dependencies"] = ["base"]
+        state = LINT.validate_manifest(fixture.write(manifest))
+        self.assertTrue(
+            any(line.startswith("E_GRAPH_CYCLE") for line in state.findings.hard),
+            "a blocks cycle was not rejected",
+        )
 
     def test_cluster_j_is_excluded_without_flag(self) -> None:
         fixture = ManifestFixture()

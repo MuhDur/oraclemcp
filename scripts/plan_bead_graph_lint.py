@@ -295,6 +295,31 @@ def _dependency_ids(issue: dict[str, Any]) -> Iterable[str]:
             yield target
 
 
+# Edge classes for cycle detection. A cycle is a contradiction only WITHIN one
+# class: sequencing work that cannot start, or a bead that is its own ancestor.
+# Mixing the classes reports the NORMAL epic shape as a cycle — an epic depends
+# on its child (`epic --blocks--> child`, so it cannot close first) while the
+# child names the epic as its parent (`child --parent-child--> epic`). Together
+# that is a 2-cycle in a combined graph, and the first version of this check
+# filed several against a well-formed program. `eng_program_graph_lint.py`
+# settled this for the live graph; the manifest check must use the same split.
+SEQUENCING_EDGE_TYPES = {"blocks"}
+HIERARCHY_EDGE_TYPES = {"parent-child"}
+# Provenance edges carry no sequencing, so a loop through them is not a
+# contradiction (bead r3sti settled this for the close gate).
+PROVENANCE_EDGE_TYPES = {"discovered-from", "related"}
+
+
+def _live_typed_edges(issue: dict[str, Any]) -> Iterable[tuple[str, str | None]]:
+    """Yield ``(target, edge_type)`` so callers can separate edge classes."""
+    for dependency in issue.get("dependencies") or []:
+        if not isinstance(dependency, dict):
+            continue
+        target = dependency.get("depends_on_id") or dependency.get("id") or dependency.get("to_id")
+        if isinstance(target, str) and target:
+            yield target, dependency.get("type")
+
+
 def _validate_source_document(raw: dict[str, Any], base: Path, findings: Findings) -> None:
     source = _mapping(raw.get("source_document"), findings, "E_SOURCE_DOCUMENT", "source_document")
     path = _safe_path(source.get("path"), base, findings, "E_SOURCE_DOCUMENT", "source_document.path", must_exist=True)
@@ -590,15 +615,28 @@ def _validate_graph(
     findings: Findings,
 ) -> tuple[dict[str, set[str]], set[str]]:
     graph: dict[str, set[str]] = defaultdict(set)
+    # Cycle detection runs PER EDGE CLASS (see SEQUENCING_EDGE_TYPES above):
+    # sequencing (blocks + cross-repo handoffs) and hierarchy (parent-child).
+    # The combined `graph` is still returned for the promotion-order contract,
+    # but a cycle is only reported within one class — mixing them flags the
+    # normal epic shape as a cycle.
+    sequencing: dict[str, set[str]] = defaultdict(set)
+    hierarchy: dict[str, set[str]] = defaultdict(set)
     for repository, issues in sorted(live.items()):
         for issue_id, issue in sorted(issues.items()):
             node = f"live:{repository}:{issue_id}"
             graph.setdefault(node, set())
-            for target in _dependency_ids(issue):
+            for target, edge_type in _live_typed_edges(issue):
                 if target not in issues:
                     findings.error("E_LIVE_REFERENCE", f"live issue {repository}:{issue_id} depends on missing local issue {target}")
                     continue
-                graph[node].add(f"live:{repository}:{target}")
+                target_node = f"live:{repository}:{target}"
+                graph[node].add(target_node)
+                if edge_type in HIERARCHY_EDGE_TYPES:
+                    hierarchy[node].add(target_node)
+                elif edge_type in SEQUENCING_EDGE_TYPES:
+                    sequencing[node].add(target_node)
+                # PROVENANCE_EDGE_TYPES are deliberately not sequenced.
     incoming_handoffs: set[str] = set()
     for slug, task in sorted(tasks.items()):
         node = _node_for_task(task)
@@ -607,6 +645,7 @@ def _validate_graph(
             target = _resolve_native_reference(task, reference, tasks, live, findings, f"task {slug}.dependencies[{index}]")
             if target is not None:
                 graph[node].add(target)
+                sequencing[node].add(target)
                 ref_slug = reference[1]
                 if task["promotion"] == "activate" and ref_slug in tasks and tasks[ref_slug]["promotion"] != "activate":
                     findings.error("E_PROMOTED_DEPENDS_NONPROMOTED", f"task {slug!r} activates but depends on non-promoted task {ref_slug!r}")
@@ -614,6 +653,7 @@ def _validate_graph(
             target = _resolve_native_reference(task, task["_parent"], tasks, live, findings, f"task {slug}.parent")
             if target is not None:
                 graph[node].add(target)
+                hierarchy[node].add(target)
         for index, handoff in enumerate(task["_handoffs"]):
             kind, target_slug, target_repo = handoff["target"]
             context = f"task {slug}.handoffs[{index}]"
@@ -629,28 +669,47 @@ def _validate_graph(
             if target_task["promotion"] == "activate":
                 findings.error("E_HANDOFF_PROMOTION", f"{context} target {target_slug!r} must remain deferred or held")
             incoming_handoffs.add(target_slug)
-            graph[_node_for_task(target_task)].add(node)
-    for source, target in _iterative_cycles(graph):
-        findings.error("E_GRAPH_CYCLE", f"mixed dependency/parent/handoff cycle through {source} -> {target}")
+            target_node = _node_for_task(target_task)
+            graph[target_node].add(node)
+            # A handoff is cross-repository logical ordering: sequencing class.
+            sequencing[target_node].add(node)
+    for source, target in _iterative_cycles(sequencing):
+        findings.error("E_GRAPH_CYCLE", f"sequencing cycle (blocks/handoff; nothing in it can start) through {source} -> {target}")
+    for source, target in _iterative_cycles(hierarchy):
+        findings.error("E_GRAPH_CYCLE", f"hierarchy cycle (parent-child; a bead is its own ancestor) through {source} -> {target}")
     return graph, incoming_handoffs
 
 
 def _validate_live_graph(
     live: dict[str, dict[str, dict[str, Any]]], findings: Findings, *, context: str
 ) -> None:
-    """Validate exported tracker state, including closed/tombstoned nodes."""
+    """Validate exported tracker state, including closed/tombstoned nodes.
+
+    Cycles are checked PER EDGE CLASS (sequencing vs hierarchy) so the normal
+    epic shape — `epic --blocks--> child` with `child --parent-child--> epic` —
+    is not reported as a cycle. See SEQUENCING_EDGE_TYPES.
+    """
     graph: dict[str, set[str]] = defaultdict(set)
+    sequencing: dict[str, set[str]] = defaultdict(set)
+    hierarchy: dict[str, set[str]] = defaultdict(set)
     for repository, issues in sorted(live.items()):
         for issue_id, issue in sorted(issues.items()):
             node = f"live:{repository}:{issue_id}"
             graph.setdefault(node, set())
-            for target in _dependency_ids(issue):
+            for target, edge_type in _live_typed_edges(issue):
                 if target not in issues:
                     findings.error("E_LIVE_REFERENCE", f"{context}: {repository}:{issue_id} depends on missing local issue {target}")
                     continue
-                graph[node].add(f"live:{repository}:{target}")
-    for source, target in _iterative_cycles(graph):
-        findings.error("E_GRAPH_CYCLE", f"{context}: live cycle through {source} -> {target}")
+                target_node = f"live:{repository}:{target}"
+                graph[node].add(target_node)
+                if edge_type in HIERARCHY_EDGE_TYPES:
+                    hierarchy[node].add(target_node)
+                elif edge_type in SEQUENCING_EDGE_TYPES:
+                    sequencing[node].add(target_node)
+    for source, target in _iterative_cycles(sequencing):
+        findings.error("E_GRAPH_CYCLE", f"{context}: live sequencing cycle through {source} -> {target}")
+    for source, target in _iterative_cycles(hierarchy):
+        findings.error("E_GRAPH_CYCLE", f"{context}: live hierarchy cycle through {source} -> {target}")
 
 
 def validate_manifest(path: Path) -> ManifestState:
