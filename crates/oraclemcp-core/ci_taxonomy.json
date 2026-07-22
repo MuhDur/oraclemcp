@@ -314,7 +314,7 @@
       "path_filtered": false
     },
     {
-      "check_name": "fuzz oraclemcp-audit / chain_verify",
+      "check_name": "fuzz oraclemcp-audit / chain_verify shard 0/1",
       "tier": "scheduled",
       "workflow": "Fuzz Campaign",
       "workflow_file": "fuzz.yml",
@@ -326,7 +326,7 @@
       "path_filtered": false
     },
     {
-      "check_name": "fuzz oraclemcp-auth / oauth_token_validate",
+      "check_name": "fuzz oraclemcp-auth / oauth_token_validate shard 0/1",
       "tier": "scheduled",
       "workflow": "Fuzz Campaign",
       "workflow_file": "fuzz.yml",
@@ -338,7 +338,7 @@
       "path_filtered": false
     },
     {
-      "check_name": "fuzz oraclemcp-config / config_toml",
+      "check_name": "fuzz oraclemcp-config / config_toml shard 0/1",
       "tier": "scheduled",
       "workflow": "Fuzz Campaign",
       "workflow_file": "fuzz.yml",
@@ -350,7 +350,7 @@
       "path_filtered": false
     },
     {
-      "check_name": "fuzz oraclemcp-guard / alter_session_parse",
+      "check_name": "fuzz oraclemcp-guard / alter_session_parse shard 0/4",
       "tier": "scheduled",
       "workflow": "Fuzz Campaign",
       "workflow_file": "fuzz.yml",
@@ -362,7 +362,43 @@
       "path_filtered": false
     },
     {
-      "check_name": "fuzz oraclemcp-guard / classify_fuzz",
+      "check_name": "fuzz oraclemcp-guard / alter_session_parse shard 1/4",
+      "tier": "scheduled",
+      "workflow": "Fuzz Campaign",
+      "workflow_file": "fuzz.yml",
+      "job_id": "fuzz",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "fuzz oraclemcp-guard / alter_session_parse shard 2/4",
+      "tier": "scheduled",
+      "workflow": "Fuzz Campaign",
+      "workflow_file": "fuzz.yml",
+      "job_id": "fuzz",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "fuzz oraclemcp-guard / alter_session_parse shard 3/4",
+      "tier": "scheduled",
+      "workflow": "Fuzz Campaign",
+      "workflow_file": "fuzz.yml",
+      "job_id": "fuzz",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "fuzz oraclemcp-guard / classify_fuzz shard 0/1",
       "tier": "scheduled",
       "workflow": "Fuzz Campaign",
       "workflow_file": "fuzz.yml",
@@ -827,11 +863,14 @@
         "workflow_dispatch"
       ],
       "jobs": [
-        "fuzz oraclemcp-audit / chain_verify",
-        "fuzz oraclemcp-auth / oauth_token_validate",
-        "fuzz oraclemcp-config / config_toml",
-        "fuzz oraclemcp-guard / alter_session_parse",
-        "fuzz oraclemcp-guard / classify_fuzz"
+        "fuzz oraclemcp-audit / chain_verify shard 0/1",
+        "fuzz oraclemcp-auth / oauth_token_validate shard 0/1",
+        "fuzz oraclemcp-config / config_toml shard 0/1",
+        "fuzz oraclemcp-guard / alter_session_parse shard 0/4",
+        "fuzz oraclemcp-guard / alter_session_parse shard 1/4",
+        "fuzz oraclemcp-guard / alter_session_parse shard 2/4",
+        "fuzz oraclemcp-guard / alter_session_parse shard 3/4",
+        "fuzz oraclemcp-guard / classify_fuzz shard 0/1"
       ]
     },
     "kani-safety.yml": {
@@ -997,11 +1036,14 @@
       "db shard offset 1",
       "dispatch shard offset 0",
       "dispatch shard offset 1",
-      "fuzz oraclemcp-audit / chain_verify",
-      "fuzz oraclemcp-auth / oauth_token_validate",
-      "fuzz oraclemcp-config / config_toml",
-      "fuzz oraclemcp-guard / alter_session_parse",
-      "fuzz oraclemcp-guard / classify_fuzz",
+      "fuzz oraclemcp-audit / chain_verify shard 0/1",
+      "fuzz oraclemcp-auth / oauth_token_validate shard 0/1",
+      "fuzz oraclemcp-config / config_toml shard 0/1",
+      "fuzz oraclemcp-guard / alter_session_parse shard 0/4",
+      "fuzz oraclemcp-guard / alter_session_parse shard 1/4",
+      "fuzz oraclemcp-guard / alter_session_parse shard 2/4",
+      "fuzz oraclemcp-guard / alter_session_parse shard 3/4",
+      "fuzz oraclemcp-guard / classify_fuzz shard 0/1",
       "guard shard offset 0",
       "guard shard offset 1",
       "watch required + scheduled lanes (server + driver)"
