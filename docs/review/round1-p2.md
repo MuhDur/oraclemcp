@@ -75,3 +75,27 @@
 - Claim checked: Privileged browser cookies are Secure under HTTPS, allowed without Secure only for server-observed loopback HTTP, and suppressed/refused for remote plaintext even with forwarded HTTPS headers.
 - Method: env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core cookie -- --nocapture.
 - Verdict: CLEAN.
+
+## [LOW] Profile base inheritance remains reuse, not a safety ceiling
+- Where: README.md:810; crates/oraclemcp-config/src/lib.rs:1242; crates/oraclemcp-config/tests/profile_merge_property.rs:184
+- Claim checked: `base` inherits only unset fields, a child can raise `max_level` above its base, and only `protected = true` pins the immutable READ_ONLY ceiling.
+- Method: env -u CARGO_TARGET_DIR cargo test -p oraclemcp-config --test profile_merge_property -- --nocapture; inspected `OracleMcpConfig::from_toml_str` validation and profile merge tests.
+- Verdict: CLEAN.
+
+## [LOW] MCP profile exposure stays a visibility opt-out for list, switch, and fleet search
+- Where: README.md:864; crates/oraclemcp-config/src/lib.rs:1288; crates/oraclemcp/src/dispatch/tests.rs:3391; crates/oraclemcp/src/dispatch/tests.rs:3440; crates/oraclemcp/src/dispatch/tests.rs:14425; crates/oraclemcp/src/main.rs:6252
+- Claim checked: `mcp_exposed = false` is per-profile visibility, not access control; hidden profiles are indistinguishable from guessed names on `oracle_list_profiles`, `oracle_switch_profile`, and fleet `oracle_search_objects`, while operator profile JSON still uses the all-profile view.
+- Method: env -u CARGO_TARGET_DIR cargo test -p oraclemcp-config mcp_exposure -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp e5_ -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp fleet_catalog_hidden_profile_is_indistinguishable_from_absence -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp profiles_json_reports_non_secret_metadata -- --nocapture.
+- Verdict: CLEAN.
+
+## [LOW] Profile completion hidden-profile behavior lacks a direct regression
+- Where: README.md:867; crates/oraclemcp-core/src/server.rs:2161; crates/oraclemcp-core/src/server.rs:2300
+- Claim checked: Completion for `profile`/`db` must fail closed like the MCP-visible profile list and must not offer hidden profile names.
+- Method: rg -n "completion_complete.*profile|profile_completion|completion.*oracle_list_profiles|oracle_list_profiles.*completion|\"argument\": \\{ \"name\": \"profile\"" crates/oraclemcp/tests crates/oraclemcp-core/src; inspected `handle_completion_complete`, `complete_profiles`, and `completion_kind`.
+- Verdict: UNPROVEN; code routes profile/db completion through filtered `oracle_list_profiles`, but I found no executable test that drives `completion/complete` for a hidden profile name.
+
+## [LOW] Protected profiles reject literal credential references
+- Where: README.md:893; crates/oraclemcp-auth/src/secrets.rs:192; crates/oraclemcp/src/main_tests.rs:1253; crates/oraclemcp/src/main_tests.rs:2383
+- Claim checked: `literal:` credential refs are allowed only for local development and are rejected when the effective profile is protected.
+- Method: env -u CARGO_TARGET_DIR cargo test -p oraclemcp-auth literal_is_denied_under_protected_profile -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp http_oauth_literal_secret_is_rejected_for_protected_profiles -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp wallet_password_ref_uses_profile_secret_resolution_policy -- --nocapture.
+- Verdict: CLEAN.
