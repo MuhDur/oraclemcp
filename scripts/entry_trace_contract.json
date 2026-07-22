@@ -136,6 +136,11 @@
       "excluded_reason": "tracker-graph-lint"
     },
     {
+      "path": "scripts/eng_program_manifest_build.py",
+      "kind": "helper",
+      "excluded_reason": "tracker-manifest-build"
+    },
+    {
       "path": "scripts/feature_powerset_disk_preflight.sh",
       "kind": "entry_point",
       "trace": "required-quality"

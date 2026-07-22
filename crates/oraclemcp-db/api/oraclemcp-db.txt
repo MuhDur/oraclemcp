@@ -1667,6 +1667,131 @@ pub type oraclemcp_db::OracleBind::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleBind where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleBind where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::OracleBind::vzip(self) -> V
+pub enum oraclemcp_db::OraclePolicyCatalogVisibility
+pub oraclemcp_db::OraclePolicyCatalogVisibility::NoPolicyRowsVisible
+pub oraclemcp_db::OraclePolicyCatalogVisibility::PolicyRowsVisible
+pub oraclemcp_db::OraclePolicyCatalogVisibility::Unavailable
+impl core::clone::Clone for oraclemcp_db::OraclePolicyCatalogVisibility
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::clone(&self) -> oraclemcp_db::OraclePolicyCatalogVisibility
+impl core::cmp::Eq for oraclemcp_db::OraclePolicyCatalogVisibility
+impl core::cmp::PartialEq for oraclemcp_db::OraclePolicyCatalogVisibility
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::eq(&self, &oraclemcp_db::OraclePolicyCatalogVisibility) -> bool
+impl core::fmt::Debug for oraclemcp_db::OraclePolicyCatalogVisibility
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::OraclePolicyCatalogVisibility
+impl core::marker::StructuralPartialEq for oraclemcp_db::OraclePolicyCatalogVisibility
+impl serde_core::ser::Serialize for oraclemcp_db::OraclePolicyCatalogVisibility
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::OraclePolicyCatalogVisibility
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::OraclePolicyCatalogVisibility
+impl core::marker::Send for oraclemcp_db::OraclePolicyCatalogVisibility
+impl core::marker::Sync for oraclemcp_db::OraclePolicyCatalogVisibility
+impl core::marker::Unpin for oraclemcp_db::OraclePolicyCatalogVisibility
+impl core::marker::UnsafeUnpin for oraclemcp_db::OraclePolicyCatalogVisibility
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OraclePolicyCatalogVisibility
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OraclePolicyCatalogVisibility
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OraclePolicyCatalogVisibility where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OraclePolicyCatalogVisibility where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::OraclePolicyCatalogVisibility where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OraclePolicyCatalogVisibility where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OraclePolicyCatalogVisibility where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OraclePolicyCatalogVisibility where U: core::convert::From<T>
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OraclePolicyCatalogVisibility where U: core::convert::Into<T>
+pub type oraclemcp_db::OraclePolicyCatalogVisibility::Error = core::convert::Infallible
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OraclePolicyCatalogVisibility where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OraclePolicyCatalogVisibility::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OraclePolicyCatalogVisibility where T: core::clone::Clone
+pub type oraclemcp_db::OraclePolicyCatalogVisibility::Owned = T
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OraclePolicyCatalogVisibility
+impl<T> core::any::Any for oraclemcp_db::OraclePolicyCatalogVisibility where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OraclePolicyCatalogVisibility where T: ?core::marker::Sized
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OraclePolicyCatalogVisibility where T: ?core::marker::Sized
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OraclePolicyCatalogVisibility where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OraclePolicyCatalogVisibility::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OraclePolicyCatalogVisibility
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OraclePolicyCatalogVisibility
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OraclePolicyCatalogVisibility where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OraclePolicyCatalogVisibility
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OraclePolicyCatalogVisibility
+impl<T> typenum::type_operators::Same for oraclemcp_db::OraclePolicyCatalogVisibility
+pub type oraclemcp_db::OraclePolicyCatalogVisibility::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OraclePolicyCatalogVisibility where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OraclePolicyCatalogVisibility where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OraclePolicyCatalogVisibility::vzip(self) -> V
+pub enum oraclemcp_db::OracleVpdRlsObservationStatus
+pub oraclemcp_db::OracleVpdRlsObservationStatus::NoVisibleMatchingPolicies
+pub oraclemcp_db::OracleVpdRlsObservationStatus::NoVisiblePolicyCatalogRows
+pub oraclemcp_db::OracleVpdRlsObservationStatus::PoliciesObserved
+pub oraclemcp_db::OracleVpdRlsObservationStatus::VisibilityUnavailable
+impl core::clone::Clone for oraclemcp_db::OracleVpdRlsObservationStatus
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::clone(&self) -> oraclemcp_db::OracleVpdRlsObservationStatus
+impl core::cmp::Eq for oraclemcp_db::OracleVpdRlsObservationStatus
+impl core::cmp::PartialEq for oraclemcp_db::OracleVpdRlsObservationStatus
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::eq(&self, &oraclemcp_db::OracleVpdRlsObservationStatus) -> bool
+impl core::fmt::Debug for oraclemcp_db::OracleVpdRlsObservationStatus
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::OracleVpdRlsObservationStatus
+impl core::marker::StructuralPartialEq for oraclemcp_db::OracleVpdRlsObservationStatus
+impl serde_core::ser::Serialize for oraclemcp_db::OracleVpdRlsObservationStatus
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::OracleVpdRlsObservationStatus
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::OracleVpdRlsObservationStatus
+impl core::marker::Send for oraclemcp_db::OracleVpdRlsObservationStatus
+impl core::marker::Sync for oraclemcp_db::OracleVpdRlsObservationStatus
+impl core::marker::Unpin for oraclemcp_db::OracleVpdRlsObservationStatus
+impl core::marker::UnsafeUnpin for oraclemcp_db::OracleVpdRlsObservationStatus
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OracleVpdRlsObservationStatus
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OracleVpdRlsObservationStatus
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OracleVpdRlsObservationStatus where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OracleVpdRlsObservationStatus where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::OracleVpdRlsObservationStatus where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OracleVpdRlsObservationStatus where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OracleVpdRlsObservationStatus where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OracleVpdRlsObservationStatus where U: core::convert::From<T>
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OracleVpdRlsObservationStatus where U: core::convert::Into<T>
+pub type oraclemcp_db::OracleVpdRlsObservationStatus::Error = core::convert::Infallible
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OracleVpdRlsObservationStatus where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OracleVpdRlsObservationStatus::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OracleVpdRlsObservationStatus where T: core::clone::Clone
+pub type oraclemcp_db::OracleVpdRlsObservationStatus::Owned = T
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OracleVpdRlsObservationStatus
+impl<T> core::any::Any for oraclemcp_db::OracleVpdRlsObservationStatus where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OracleVpdRlsObservationStatus where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OracleVpdRlsObservationStatus where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OracleVpdRlsObservationStatus where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OracleVpdRlsObservationStatus::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OracleVpdRlsObservationStatus
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleVpdRlsObservationStatus
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OracleVpdRlsObservationStatus where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleVpdRlsObservationStatus
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleVpdRlsObservationStatus
+impl<T> typenum::type_operators::Same for oraclemcp_db::OracleVpdRlsObservationStatus
+pub type oraclemcp_db::OracleVpdRlsObservationStatus::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleVpdRlsObservationStatus where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleVpdRlsObservationStatus where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OracleVpdRlsObservationStatus::vzip(self) -> V
 #[non_exhaustive] pub enum oraclemcp_db::QuarantineOutcome
 pub oraclemcp_db::QuarantineOutcome::CommitInDoubt
 pub oraclemcp_db::QuarantineOutcome::DiscardedUncommitted
@@ -4444,9 +4569,11 @@ pub oraclemcp_db::OracleConnectOptions::iam_token_private_key: core::option::Opt
 pub oraclemcp_db::OracleConnectOptions::iam_token_source: core::option::Option<oraclemcp_db::IamTokenSourceHandle>
 pub oraclemcp_db::OracleConnectOptions::inactivity_timeout: core::option::Option<core::time::Duration>
 pub oraclemcp_db::OracleConnectOptions::keepalive_minutes: core::option::Option<u64>
+pub oraclemcp_db::OracleConnectOptions::logoff_statements: alloc::vec::Vec<alloc::string::String>
 pub oraclemcp_db::OracleConnectOptions::password: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectOptions::sdu: core::option::Option<u32>
 pub oraclemcp_db::OracleConnectOptions::session_identity: core::option::Option<oraclemcp_db::OracleSessionIdentity>
+pub oraclemcp_db::OracleConnectOptions::session_release_statements: alloc::vec::Vec<alloc::string::String>
 pub oraclemcp_db::OracleConnectOptions::session_statements: alloc::vec::Vec<alloc::string::String>
 pub oraclemcp_db::OracleConnectOptions::ssl_server_cert_dn: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectOptions::ssl_server_dn_match: core::option::Option<bool>
@@ -4849,6 +4976,67 @@ pub type oraclemcp_db::OracleMetadataCacheKey::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleMetadataCacheKey where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleMetadataCacheKey where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::OracleMetadataCacheKey::vzip(self) -> V
+pub struct oraclemcp_db::OraclePolicyCatalogProbe
+pub oraclemcp_db::OraclePolicyCatalogProbe::detail: alloc::string::String
+pub oraclemcp_db::OraclePolicyCatalogProbe::visibility: oraclemcp_db::OraclePolicyCatalogVisibility
+pub oraclemcp_db::OraclePolicyCatalogProbe::visible_policy_rows_probe: core::option::Option<bool>
+impl core::clone::Clone for oraclemcp_db::OraclePolicyCatalogProbe
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::clone(&self) -> oraclemcp_db::OraclePolicyCatalogProbe
+impl core::cmp::Eq for oraclemcp_db::OraclePolicyCatalogProbe
+impl core::cmp::PartialEq for oraclemcp_db::OraclePolicyCatalogProbe
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::eq(&self, &oraclemcp_db::OraclePolicyCatalogProbe) -> bool
+impl core::fmt::Debug for oraclemcp_db::OraclePolicyCatalogProbe
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::OraclePolicyCatalogProbe
+impl serde_core::ser::Serialize for oraclemcp_db::OraclePolicyCatalogProbe
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::OraclePolicyCatalogProbe
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::OraclePolicyCatalogProbe
+impl core::marker::Send for oraclemcp_db::OraclePolicyCatalogProbe
+impl core::marker::Sync for oraclemcp_db::OraclePolicyCatalogProbe
+impl core::marker::Unpin for oraclemcp_db::OraclePolicyCatalogProbe
+impl core::marker::UnsafeUnpin for oraclemcp_db::OraclePolicyCatalogProbe
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OraclePolicyCatalogProbe
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OraclePolicyCatalogProbe
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OraclePolicyCatalogProbe where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OraclePolicyCatalogProbe where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::OraclePolicyCatalogProbe where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OraclePolicyCatalogProbe where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OraclePolicyCatalogProbe where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OraclePolicyCatalogProbe where U: core::convert::From<T>
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OraclePolicyCatalogProbe where U: core::convert::Into<T>
+pub type oraclemcp_db::OraclePolicyCatalogProbe::Error = core::convert::Infallible
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OraclePolicyCatalogProbe where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OraclePolicyCatalogProbe::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OraclePolicyCatalogProbe where T: core::clone::Clone
+pub type oraclemcp_db::OraclePolicyCatalogProbe::Owned = T
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OraclePolicyCatalogProbe
+impl<T> core::any::Any for oraclemcp_db::OraclePolicyCatalogProbe where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OraclePolicyCatalogProbe where T: ?core::marker::Sized
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OraclePolicyCatalogProbe where T: ?core::marker::Sized
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OraclePolicyCatalogProbe where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OraclePolicyCatalogProbe::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OraclePolicyCatalogProbe
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OraclePolicyCatalogProbe
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OraclePolicyCatalogProbe where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OraclePolicyCatalogProbe
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OraclePolicyCatalogProbe
+impl<T> typenum::type_operators::Same for oraclemcp_db::OraclePolicyCatalogProbe
+pub type oraclemcp_db::OraclePolicyCatalogProbe::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OraclePolicyCatalogProbe where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OraclePolicyCatalogProbe where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OraclePolicyCatalogProbe::vzip(self) -> V
 pub struct oraclemcp_db::OraclePool
 impl oraclemcp_db::OraclePool
 pub async fn oraclemcp_db::OraclePool::close(&self, &asupersync::cx::cx::Cx) -> core::result::Result<(), oraclemcp_db::DbError>
@@ -5126,6 +5314,198 @@ pub type oraclemcp_db::OracleSessionIdentity::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleSessionIdentity where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleSessionIdentity where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::OracleSessionIdentity::vzip(self) -> V
+pub struct oraclemcp_db::OracleSessionSecurityContext
+pub oraclemcp_db::OracleSessionSecurityContext::current_schema: alloc::string::String
+pub oraclemcp_db::OracleSessionSecurityContext::edition_name: core::option::Option<alloc::string::String>
+pub oraclemcp_db::OracleSessionSecurityContext::enabled_roles: alloc::vec::Vec<alloc::string::String>
+pub oraclemcp_db::OracleSessionSecurityContext::session_user: alloc::string::String
+impl core::clone::Clone for oraclemcp_db::OracleSessionSecurityContext
+pub fn oraclemcp_db::OracleSessionSecurityContext::clone(&self) -> oraclemcp_db::OracleSessionSecurityContext
+impl core::cmp::Eq for oraclemcp_db::OracleSessionSecurityContext
+impl core::cmp::PartialEq for oraclemcp_db::OracleSessionSecurityContext
+pub fn oraclemcp_db::OracleSessionSecurityContext::eq(&self, &oraclemcp_db::OracleSessionSecurityContext) -> bool
+impl core::fmt::Debug for oraclemcp_db::OracleSessionSecurityContext
+pub fn oraclemcp_db::OracleSessionSecurityContext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::OracleSessionSecurityContext
+impl serde_core::ser::Serialize for oraclemcp_db::OracleSessionSecurityContext
+pub fn oraclemcp_db::OracleSessionSecurityContext::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::OracleSessionSecurityContext
+pub fn oraclemcp_db::OracleSessionSecurityContext::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::OracleSessionSecurityContext
+impl core::marker::Send for oraclemcp_db::OracleSessionSecurityContext
+impl core::marker::Sync for oraclemcp_db::OracleSessionSecurityContext
+impl core::marker::Unpin for oraclemcp_db::OracleSessionSecurityContext
+impl core::marker::UnsafeUnpin for oraclemcp_db::OracleSessionSecurityContext
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OracleSessionSecurityContext
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OracleSessionSecurityContext
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OracleSessionSecurityContext where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OracleSessionSecurityContext where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::OracleSessionSecurityContext where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::OracleSessionSecurityContext::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OracleSessionSecurityContext where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OracleSessionSecurityContext where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OracleSessionSecurityContext where U: core::convert::From<T>
+pub fn oraclemcp_db::OracleSessionSecurityContext::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OracleSessionSecurityContext where U: core::convert::Into<T>
+pub type oraclemcp_db::OracleSessionSecurityContext::Error = core::convert::Infallible
+pub fn oraclemcp_db::OracleSessionSecurityContext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OracleSessionSecurityContext where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OracleSessionSecurityContext::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OracleSessionSecurityContext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OracleSessionSecurityContext where T: core::clone::Clone
+pub type oraclemcp_db::OracleSessionSecurityContext::Owned = T
+pub fn oraclemcp_db::OracleSessionSecurityContext::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OracleSessionSecurityContext::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OracleSessionSecurityContext
+impl<T> core::any::Any for oraclemcp_db::OracleSessionSecurityContext where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OracleSessionSecurityContext::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OracleSessionSecurityContext where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleSessionSecurityContext::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OracleSessionSecurityContext where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleSessionSecurityContext::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OracleSessionSecurityContext where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OracleSessionSecurityContext::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OracleSessionSecurityContext
+pub fn oraclemcp_db::OracleSessionSecurityContext::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleSessionSecurityContext
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OracleSessionSecurityContext where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleSessionSecurityContext
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleSessionSecurityContext
+impl<T> typenum::type_operators::Same for oraclemcp_db::OracleSessionSecurityContext
+pub type oraclemcp_db::OracleSessionSecurityContext::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleSessionSecurityContext where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleSessionSecurityContext where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OracleSessionSecurityContext::vzip(self) -> V
+pub struct oraclemcp_db::OracleVpdRlsObservation
+pub oraclemcp_db::OracleVpdRlsObservation::all_policies_probe: oraclemcp_db::OraclePolicyCatalogProbe
+pub oraclemcp_db::OracleVpdRlsObservation::detail: alloc::string::String
+pub oraclemcp_db::OracleVpdRlsObservation::policies: alloc::vec::Vec<oraclemcp_db::OracleVpdRlsPolicy>
+pub oraclemcp_db::OracleVpdRlsObservation::scope: alloc::string::String
+pub oraclemcp_db::OracleVpdRlsObservation::session: core::option::Option<oraclemcp_db::OracleSessionSecurityContext>
+pub oraclemcp_db::OracleVpdRlsObservation::status: oraclemcp_db::OracleVpdRlsObservationStatus
+impl core::clone::Clone for oraclemcp_db::OracleVpdRlsObservation
+pub fn oraclemcp_db::OracleVpdRlsObservation::clone(&self) -> oraclemcp_db::OracleVpdRlsObservation
+impl core::cmp::Eq for oraclemcp_db::OracleVpdRlsObservation
+impl core::cmp::PartialEq for oraclemcp_db::OracleVpdRlsObservation
+pub fn oraclemcp_db::OracleVpdRlsObservation::eq(&self, &oraclemcp_db::OracleVpdRlsObservation) -> bool
+impl core::fmt::Debug for oraclemcp_db::OracleVpdRlsObservation
+pub fn oraclemcp_db::OracleVpdRlsObservation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::OracleVpdRlsObservation
+impl serde_core::ser::Serialize for oraclemcp_db::OracleVpdRlsObservation
+pub fn oraclemcp_db::OracleVpdRlsObservation::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::OracleVpdRlsObservation
+pub fn oraclemcp_db::OracleVpdRlsObservation::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::OracleVpdRlsObservation
+impl core::marker::Send for oraclemcp_db::OracleVpdRlsObservation
+impl core::marker::Sync for oraclemcp_db::OracleVpdRlsObservation
+impl core::marker::Unpin for oraclemcp_db::OracleVpdRlsObservation
+impl core::marker::UnsafeUnpin for oraclemcp_db::OracleVpdRlsObservation
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OracleVpdRlsObservation
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OracleVpdRlsObservation
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OracleVpdRlsObservation where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OracleVpdRlsObservation where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::OracleVpdRlsObservation where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::OracleVpdRlsObservation::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OracleVpdRlsObservation where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OracleVpdRlsObservation where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OracleVpdRlsObservation where U: core::convert::From<T>
+pub fn oraclemcp_db::OracleVpdRlsObservation::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OracleVpdRlsObservation where U: core::convert::Into<T>
+pub type oraclemcp_db::OracleVpdRlsObservation::Error = core::convert::Infallible
+pub fn oraclemcp_db::OracleVpdRlsObservation::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OracleVpdRlsObservation where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OracleVpdRlsObservation::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OracleVpdRlsObservation::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OracleVpdRlsObservation where T: core::clone::Clone
+pub type oraclemcp_db::OracleVpdRlsObservation::Owned = T
+pub fn oraclemcp_db::OracleVpdRlsObservation::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OracleVpdRlsObservation::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OracleVpdRlsObservation
+impl<T> core::any::Any for oraclemcp_db::OracleVpdRlsObservation where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OracleVpdRlsObservation::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OracleVpdRlsObservation where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleVpdRlsObservation::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OracleVpdRlsObservation where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleVpdRlsObservation::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OracleVpdRlsObservation where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OracleVpdRlsObservation::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OracleVpdRlsObservation
+pub fn oraclemcp_db::OracleVpdRlsObservation::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleVpdRlsObservation
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OracleVpdRlsObservation where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleVpdRlsObservation
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleVpdRlsObservation
+impl<T> typenum::type_operators::Same for oraclemcp_db::OracleVpdRlsObservation
+pub type oraclemcp_db::OracleVpdRlsObservation::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleVpdRlsObservation where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleVpdRlsObservation where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OracleVpdRlsObservation::vzip(self) -> V
+pub struct oraclemcp_db::OracleVpdRlsPolicy
+pub oraclemcp_db::OracleVpdRlsPolicy::enabled: bool
+pub oraclemcp_db::OracleVpdRlsPolicy::function_name: core::option::Option<alloc::string::String>
+pub oraclemcp_db::OracleVpdRlsPolicy::function_owner: core::option::Option<alloc::string::String>
+pub oraclemcp_db::OracleVpdRlsPolicy::object_name: alloc::string::String
+pub oraclemcp_db::OracleVpdRlsPolicy::object_owner: alloc::string::String
+pub oraclemcp_db::OracleVpdRlsPolicy::package_name: core::option::Option<alloc::string::String>
+pub oraclemcp_db::OracleVpdRlsPolicy::policy_name: alloc::string::String
+pub oraclemcp_db::OracleVpdRlsPolicy::statement_types: alloc::vec::Vec<alloc::string::String>
+impl core::clone::Clone for oraclemcp_db::OracleVpdRlsPolicy
+pub fn oraclemcp_db::OracleVpdRlsPolicy::clone(&self) -> oraclemcp_db::OracleVpdRlsPolicy
+impl core::cmp::Eq for oraclemcp_db::OracleVpdRlsPolicy
+impl core::cmp::PartialEq for oraclemcp_db::OracleVpdRlsPolicy
+pub fn oraclemcp_db::OracleVpdRlsPolicy::eq(&self, &oraclemcp_db::OracleVpdRlsPolicy) -> bool
+impl core::fmt::Debug for oraclemcp_db::OracleVpdRlsPolicy
+pub fn oraclemcp_db::OracleVpdRlsPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::OracleVpdRlsPolicy
+impl serde_core::ser::Serialize for oraclemcp_db::OracleVpdRlsPolicy
+pub fn oraclemcp_db::OracleVpdRlsPolicy::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::OracleVpdRlsPolicy
+pub fn oraclemcp_db::OracleVpdRlsPolicy::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::OracleVpdRlsPolicy
+impl core::marker::Send for oraclemcp_db::OracleVpdRlsPolicy
+impl core::marker::Sync for oraclemcp_db::OracleVpdRlsPolicy
+impl core::marker::Unpin for oraclemcp_db::OracleVpdRlsPolicy
+impl core::marker::UnsafeUnpin for oraclemcp_db::OracleVpdRlsPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OracleVpdRlsPolicy
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OracleVpdRlsPolicy
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OracleVpdRlsPolicy where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OracleVpdRlsPolicy where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::OracleVpdRlsPolicy where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::OracleVpdRlsPolicy::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OracleVpdRlsPolicy where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OracleVpdRlsPolicy where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OracleVpdRlsPolicy where U: core::convert::From<T>
+pub fn oraclemcp_db::OracleVpdRlsPolicy::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OracleVpdRlsPolicy where U: core::convert::Into<T>
+pub type oraclemcp_db::OracleVpdRlsPolicy::Error = core::convert::Infallible
+pub fn oraclemcp_db::OracleVpdRlsPolicy::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OracleVpdRlsPolicy where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OracleVpdRlsPolicy::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OracleVpdRlsPolicy::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OracleVpdRlsPolicy where T: core::clone::Clone
+pub type oraclemcp_db::OracleVpdRlsPolicy::Owned = T
+pub fn oraclemcp_db::OracleVpdRlsPolicy::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OracleVpdRlsPolicy::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OracleVpdRlsPolicy
+impl<T> core::any::Any for oraclemcp_db::OracleVpdRlsPolicy where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OracleVpdRlsPolicy::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OracleVpdRlsPolicy where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleVpdRlsPolicy::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OracleVpdRlsPolicy where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleVpdRlsPolicy::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OracleVpdRlsPolicy where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OracleVpdRlsPolicy::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OracleVpdRlsPolicy
+pub fn oraclemcp_db::OracleVpdRlsPolicy::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleVpdRlsPolicy
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OracleVpdRlsPolicy where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleVpdRlsPolicy
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleVpdRlsPolicy
+impl<T> typenum::type_operators::Same for oraclemcp_db::OracleVpdRlsPolicy
+pub type oraclemcp_db::OracleVpdRlsPolicy::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleVpdRlsPolicy where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleVpdRlsPolicy where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OracleVpdRlsPolicy::vzip(self) -> V
 pub struct oraclemcp_db::OrientForeignKey
 pub oraclemcp_db::OrientForeignKey::child_owner: alloc::string::String
 pub oraclemcp_db::OrientForeignKey::child_table: alloc::string::String
@@ -6496,6 +6876,7 @@ pub oraclemcp_db::QueryResponse::columns: alloc::vec::Vec<alloc::string::String>
 pub oraclemcp_db::QueryResponse::mask_certificate: core::option::Option<oraclemcp_db::ResultMaskingCertificate>
 pub oraclemcp_db::QueryResponse::next_cursor: core::option::Option<alloc::string::String>
 pub oraclemcp_db::QueryResponse::observed_scn: core::option::Option<u64>
+pub oraclemcp_db::QueryResponse::rls_vpd: core::option::Option<oraclemcp_db::OracleVpdRlsObservation>
 pub oraclemcp_db::QueryResponse::row_count: usize
 pub oraclemcp_db::QueryResponse::rows: alloc::vec::Vec<serde_json::value::Value>
 pub oraclemcp_db::QueryResponse::total_bytes: usize
@@ -7174,6 +7555,7 @@ pub struct oraclemcp_db::RustOracleConnection
 impl oraclemcp_db::RustOracleConnection
 pub async fn oraclemcp_db::RustOracleConnection::connect(&asupersync::cx::cx::Cx, oraclemcp_db::OracleConnectOptions) -> core::result::Result<Self, oraclemcp_db::DbError>
 pub fn oraclemcp_db::RustOracleConnection::options(&self) -> &oraclemcp_db::OracleConnectOptions
+pub async fn oraclemcp_db::RustOracleConnection::run_session_release_statements(&self, &asupersync::cx::cx::Cx) -> core::result::Result<(), oraclemcp_db::DbError>
 impl oraclemcp_db::OracleConnection for oraclemcp_db::RustOracleConnection
 pub fn oraclemcp_db::RustOracleConnection::backend(&self) -> oraclemcp_db::OracleBackend
 pub fn oraclemcp_db::RustOracleConnection::call_routine<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleRoutineArg]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::ExecuteOutcome, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
@@ -8785,6 +9167,7 @@ pub const oraclemcp_db::DRIVER_VERSION: &str
 pub const oraclemcp_db::JSON_MIN_MAJOR: u8
 pub const oraclemcp_db::MASKED_RESULT_VALUE: &str
 pub const oraclemcp_db::MAX_CATALOG_NAMES: usize
+pub const oraclemcp_db::MAX_VPD_RLS_POLICY_ROWS: usize
 pub const oraclemcp_db::MIN_PROFILE_MASKING_SALT_BYTES: usize
 pub const oraclemcp_db::NATIVE_REDACTION_ADD_POLICY_SQL: &str
 pub const oraclemcp_db::NATIVE_REDACTION_OPTION_SQL: &str
@@ -8936,6 +9319,8 @@ pub async fn oraclemcp_db::list_schemas(&asupersync::cx::cx::Cx, &dyn oraclemcp_
 pub async fn oraclemcp_db::list_source_types(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::migration_plan(&oraclemcp_db::SchemaDiff) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::MigrationStep>, oraclemcp_db::SchemaDiffError>
 pub fn oraclemcp_db::normalize_source_object_type(&str) -> core::option::Option<&'static str>
+pub async fn oraclemcp_db::observe_vpd_rls_for_relations(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_guard::resolver::ResolvedObject]) -> oraclemcp_db::OracleVpdRlsObservation
+pub async fn oraclemcp_db::observe_vpd_rls_for_schema(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str) -> oraclemcp_db::OracleVpdRlsObservation
 pub fn oraclemcp_db::oracle_driver_compiled() -> bool
 pub async fn oraclemcp_db::orient_fks(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OrientForeignKey>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::orient_fks_page(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, usize, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OrientForeignKey>, oraclemcp_db::DbError>
@@ -8963,6 +9348,7 @@ pub async fn oraclemcp_db::read_lob(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::
 pub async fn oraclemcp_db::read_query(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &[oraclemcp_db::OracleBind], oraclemcp_db::QueryCaps, usize, &oraclemcp_db::SerializeOptions) -> core::result::Result<oraclemcp_db::QueryResponse, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::read_query_as_of(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &[oraclemcp_db::OracleBind], oraclemcp_db::QueryCaps, usize, &oraclemcp_db::SerializeOptions, &oraclemcp_db::AsOf) -> core::result::Result<oraclemcp_db::QueryResponse, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::read_query_named(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &[(alloc::string::String, oraclemcp_db::OracleBind)], oraclemcp_db::QueryCaps, usize, &oraclemcp_db::SerializeOptions) -> core::result::Result<oraclemcp_db::QueryResponse, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::read_session_security_context(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<oraclemcp_db::OracleSessionSecurityContext, oraclemcp_db::DbError>
 pub fn oraclemcp_db::recompile_with_plscope_statements(&str, &str, &str) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
 pub const fn oraclemcp_db::redacted_named_oracle_binds(&[(alloc::string::String, oraclemcp_db::OracleBind)]) -> oraclemcp_db::RedactedNamedOracleBinds<'_>
 pub const fn oraclemcp_db::redacted_oracle_binds(&[oraclemcp_db::OracleBind]) -> oraclemcp_db::RedactedOracleBinds<'_>
