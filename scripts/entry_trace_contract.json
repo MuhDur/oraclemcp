@@ -331,6 +331,11 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/test_ci_heartbeat.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/test_migrate_mutation_result.py",
       "kind": "entry_point",
       "trace": "required-quality"

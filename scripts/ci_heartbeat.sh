@@ -41,15 +41,16 @@
 # Usage:
 #   scripts/ci_heartbeat.sh [--out PATH] [--no-driver] [--quiet]
 #
-# Exit codes: 0 = every REQUIRED lane confirmed green (advisory nightly reds are
-# reported but never fail the heartbeat); 1 = at least one required lane is red
-# or unknown (see the printed report for which); 2 = the harness itself could not
-# run (missing `gh`/`jq`/`python3`, or the local taxonomy is broken).
+# Exit codes: 0 = every REQUIRED lane confirmed green (advisory scheduled reds
+# or unknowns are reported honestly but never fail the heartbeat); 1 = at least
+# one required lane is red or unknown (see the printed report for which); 2 =
+# the harness itself could not run (missing `gh`/`jq`/`python3`, or the local
+# taxonomy is broken).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON:-python3}"
-TAXONOMY="$ROOT/docs/ci_taxonomy.json"
+TAXONOMY="${CI_HEARTBEAT_TAXONOMY:-$ROOT/docs/ci_taxonomy.json}"
 
 SERVER_REPO="MuhDur/oraclemcp"
 DRIVER_REPO="MuhDur/rust-oracledb"
@@ -100,9 +101,34 @@ fi
 tmp_lanes="$(mktemp)"
 trap 'rm -f "$tmp_lanes"' EXIT
 
-any_red=0
-any_unknown=0
+# Required lanes drive this script's exit code and preserve the original
+# ci-heartbeat/v1 `blocked` / `any_*` semantics consumed by existing readers.
+required_red=0
+required_unknown=0
+# Watched lanes include advisory scheduled lanes. These fields prevent the
+# report from saying the watched set is green when advisory evidence is red,
+# missing, or otherwise unknown.
+watched_red=0
+watched_unknown=0
 declare -a report_errors=()
+
+note_lane_state() {
+  # state notify_required
+  case "$1" in
+    not_green)
+      watched_red=1
+      if [ "$2" = "1" ]; then
+        required_red=1
+      fi
+      ;;
+    unknown)
+      watched_unknown=1
+      if [ "$2" = "1" ]; then
+        required_unknown=1
+      fi
+      ;;
+  esac
+}
 
 record_lane() {
   # repo check_name tier state conclusion run_url head_sha updated_at
@@ -183,18 +209,14 @@ watch_workflow() {
   local run_json
   if ! run_json="$(fetch_latest_run "$repo" "$workflow_file" "$query_suffix")"; then
     record_lane "$repo" "$check_name" "$tier" "unknown" "" "" "" ""
+    note_lane_state "unknown" "$notify"
     report_errors+=("${repo} ${workflow_file}: gh api call failed")
-    if [ "$notify" = "1" ]; then
-      any_unknown=1
-    fi
     return
   fi
   if [ "$run_json" = "null" ]; then
     record_lane "$repo" "$check_name" "$tier" "unknown" "" "" "" ""
+    note_lane_state "unknown" "$notify"
     report_errors+=("${repo} ${workflow_file}: no completed non-superseded run was found")
-    if [ "$notify" = "1" ]; then
-      any_unknown=1
-    fi
     return
   fi
   local conclusion url sha updated state
@@ -206,11 +228,9 @@ watch_workflow() {
     state="success"
   else
     state="not_green"
-    if [ "$notify" = "1" ]; then
-      any_red=1
-    fi
   fi
   record_lane "$repo" "$check_name" "$tier" "$state" "$conclusion" "$url" "$sha" "$updated"
+  note_lane_state "$state" "$notify"
 }
 
 record_unknown_server_scheduled_jobs() {
@@ -219,6 +239,7 @@ record_unknown_server_scheduled_jobs() {
     record_job_lane \
       "$SERVER_REPO" "$check_name" "scheduled" "$workflow_file" "$job_id" \
       "schedule" "unknown" "" "" "" ""
+    note_lane_state "unknown" 0
   done < <(
     jq -r --arg workflow_file "$workflow_file" \
       '.jobs[] | select(.tier == "scheduled" and .workflow_file == $workflow_file) |
@@ -259,6 +280,7 @@ watch_server_scheduled_jobs() {
       record_job_lane \
         "$SERVER_REPO" "$check_name" "scheduled" "$workflow_file" "$job_id" \
         "schedule" "unknown" "" "" "" ""
+      note_lane_state "unknown" 0
       report_errors+=(
         "${SERVER_REPO} ${workflow_file}: expected one ${check_name} job, found ${count}"
       )
@@ -282,6 +304,7 @@ watch_server_scheduled_jobs() {
     record_job_lane \
       "$SERVER_REPO" "$check_name" "scheduled" "$workflow_file" "$job_id" \
       "schedule" "$state" "$conclusion" "$run_url" "$head_sha" "$completed_at"
+    note_lane_state "$state" 0
   done < <(
     jq -r --arg workflow_file "$workflow_file" \
       '.jobs[] | select(.tier == "scheduled" and .workflow_file == $workflow_file) |
@@ -340,9 +363,13 @@ fi
 
 lanes_json="$(jq -s '.' "$tmp_lanes")"
 now_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-blocked=false
-if [ "$any_red" = "1" ] || [ "$any_unknown" = "1" ]; then
-  blocked=true
+required_blocked=false
+if [ "$required_red" = "1" ] || [ "$required_unknown" = "1" ]; then
+  required_blocked=true
+fi
+watched_blocked=false
+if [ "$watched_red" = "1" ] || [ "$watched_unknown" = "1" ]; then
+  watched_blocked=true
 fi
 
 errors_json="$(printf '%s\n' "${report_errors[@]+"${report_errors[@]}"}" | jq -R . | jq -s 'map(select(length > 0))')"
@@ -350,9 +377,15 @@ errors_json="$(printf '%s\n' "${report_errors[@]+"${report_errors[@]}"}" | jq -R
 report="$(jq -n \
   --arg schema "ci-heartbeat/v1" \
   --arg generated_at "$now_utc" \
-  --argjson blocked "$blocked" \
-  --argjson any_red "$([ "$any_red" = "1" ] && echo true || echo false)" \
-  --argjson any_unknown "$([ "$any_unknown" = "1" ] && echo true || echo false)" \
+  --argjson blocked "$required_blocked" \
+  --argjson any_red "$([ "$required_red" = "1" ] && echo true || echo false)" \
+  --argjson any_unknown "$([ "$required_unknown" = "1" ] && echo true || echo false)" \
+  --argjson required_blocked "$required_blocked" \
+  --argjson required_red "$([ "$required_red" = "1" ] && echo true || echo false)" \
+  --argjson required_unknown "$([ "$required_unknown" = "1" ] && echo true || echo false)" \
+  --argjson watched_blocked "$watched_blocked" \
+  --argjson watched_red "$([ "$watched_red" = "1" ] && echo true || echo false)" \
+  --argjson watched_unknown "$([ "$watched_unknown" = "1" ] && echo true || echo false)" \
   --argjson lanes "$lanes_json" \
   --argjson errors "$errors_json" \
   '{
@@ -361,6 +394,12 @@ report="$(jq -n \
     blocked: $blocked,
     any_red: $any_red,
     any_unknown: $any_unknown,
+    required_blocked: $required_blocked,
+    required_red: $required_red,
+    required_unknown: $required_unknown,
+    watched_blocked: $watched_blocked,
+    watched_red: $watched_red,
+    watched_unknown: $watched_unknown,
     lanes: $lanes,
     errors: $errors
   }'
@@ -375,16 +414,30 @@ if [ "$QUIET" != "1" ]; then
   printf '%s\n' "$report"
 fi
 
-if [ "$blocked" = "true" ]; then
+if [ "$required_blocked" = "true" ]; then
   {
-    echo "::error::ci-heartbeat: at least one watched lane is red or unknown"
-    echo "ci-heartbeat: BLOCKED — a red or unknown lane was found (snapshot: $OUT_PATH)"
+    echo "::error::ci-heartbeat: at least one required lane is red or unknown"
+    echo "ci-heartbeat: BLOCKED — a required lane is red or unknown (snapshot: $OUT_PATH)"
     jq -r '.lanes[] | select(.state != "success") | "  \(.state)\t\(.repo)\t\(.check_name)\t\(.run_url // "no run observed")"' <<<"$report"
     for error in "${report_errors[@]+"${report_errors[@]}"}"; do
       echo "  error: $error"
     done
   } >&2
   exit 1
+fi
+
+if [ "$watched_blocked" = "true" ]; then
+  if [ "$QUIET" != "1" ]; then
+    {
+      echo "::warning::ci-heartbeat: required lanes are green, but an advisory watched lane is red or unknown"
+      echo "ci-heartbeat: ADVISORY — scheduled/advisory lane evidence is red or unknown (snapshot: $OUT_PATH)"
+      jq -r '.lanes[] | select(.state != "success") | "  \(.state)\t\(.repo)\t\(.check_name)\t\(.run_url // "no run observed")"' <<<"$report"
+      for error in "${report_errors[@]+"${report_errors[@]}"}"; do
+        echo "  error: $error"
+      done
+    } >&2
+  fi
+  exit 0
 fi
 
 [ "$QUIET" = "1" ] || echo "ci-heartbeat: all watched lanes are green" >&2

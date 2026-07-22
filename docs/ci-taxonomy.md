@@ -78,6 +78,15 @@ almost always a push superseding an in-flight one under this repo's
 would itself be a false alarm. A lane the script cannot observe (API failure,
 no completed run yet) renders `unknown`, never a fabricated `success`.
 
+The heartbeat snapshot separates gate posture from watched-lane posture.
+`blocked`, `any_red`, and `any_unknown` retain the required-lane exit-code
+contract: a required red or unknown lane fails the heartbeat job. The
+`watched_blocked`, `watched_red`, and `watched_unknown` fields cover every
+watched lane, including advisory scheduled lanes such as mutation shards and
+Loom. Those advisory lanes do not fail the heartbeat job, but a missing or red
+advisory lane must still render as red or unknown in the snapshot and warning
+output, never as "all watched lanes are green."
+
 `.github/workflows/ci-heartbeat.yml` drives it every 30 minutes
 (`workflow_dispatch` also works on demand). The script's exit code is the
 actual notification path: a non-zero exit turns that scheduled run red, which
