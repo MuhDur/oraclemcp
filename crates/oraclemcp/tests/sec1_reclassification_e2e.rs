@@ -537,3 +537,77 @@ fn source_history_revert_apply_ignores_tampered_read_only_verdict_for_live_ddl()
     inject_forged_stored_allow(&harness.root, &proposal_id);
     apply_and_assert_live_refusal(&harness, &proposal_id, REVERT_SOURCE);
 }
+
+/// WRITE-INTENT RECOVERY — fail-closed by design, no replay.
+///
+/// A writable server that crashes mid-write leaves a durable "pending" intent.
+/// On restart the recovery path must NOT silently re-execute that non-idempotent
+/// work and must NOT treat any stored outcome as authorization: the intent has
+/// to come back still-unresolved so the startup gate
+/// (`finish_write_intent_log_build`, unit-tested in main_tests) refuses writable
+/// startup with `ORACLEMCP_WRITE_INTENT_IN_DOUBT` until a human verifies the
+/// database outcome. This test proves the recovery half of that contract through
+/// the public `WriteIntentLog` API: a pending intent that survives a process
+/// boundary is recovered as unresolved — never auto-resolved, never dropped.
+#[test]
+fn write_intent_restart_recovers_in_doubt_and_never_auto_resolves() {
+    use oraclemcp_core::{WriteIntent, WriteIntentDetails, WriteIntentLog};
+    use oraclemcp_guard::ExecGrantBinding;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let sql = "UPDATE employees SET salary = salary * 2 WHERE employee_id = 100";
+    let binding = ExecGrantBinding::new("sess-1", "lane-1", "principal-1", 1);
+
+    // First process: a writable server records a pending intent and then dies
+    // before resolving it (the crash). Nothing here calls `resolve`.
+    let intent_id = {
+        let log = WriteIntentLog::open(root).expect("open intent log");
+        let intent = WriteIntent::new(WriteIntentDetails {
+            idempotency_key_material: "grant-sec1-write-intent",
+            subject: "profile:dev",
+            active_profile: Some("dev"),
+            tool: "oracle_execute",
+            sql,
+            required_level: OperatingLevel::ReadWrite,
+            binding: &binding,
+        });
+        log.append_pending(intent).expect("append pending intent")
+    };
+
+    // Second process: recovery reopens the same durable state. The recovered
+    // intent must still be in doubt — a recovery path that auto-resolved or
+    // replayed it would be silently re-executing non-idempotent work, which is
+    // exactly the stored-verdict-trust hazard SEC-1 forbids.
+    let recovered = WriteIntentLog::open(root).expect("reopen intent log after restart");
+    let unresolved = recovered.unresolved().expect("recover unresolved intents");
+    assert_eq!(
+        unresolved.len(),
+        1,
+        "the in-doubt intent must survive the restart unresolved; a recovery \
+         path that dropped or auto-resolved it would re-execute work silently"
+    );
+    assert_eq!(
+        unresolved[0].intent_id, intent_id,
+        "recovery surfaces the same intent, identified by its stable id"
+    );
+    assert_eq!(
+        unresolved[0].sql_sha256,
+        oraclemcp_audit::sha256_hex(sql.as_bytes()),
+        "recovery preserves the exact SQL digest; nothing is re-derived or \
+         re-classified from a stored authorization"
+    );
+
+    // The only way out is an explicit operator resolution after verifying the
+    // database — recovery itself never supplies an outcome.
+    recovered
+        .resolve(&intent_id, oraclemcp_core::WriteIntentOutcome::RolledBack)
+        .expect("operator resolves the in-doubt intent");
+    assert!(
+        recovered
+            .unresolved()
+            .expect("re-read unresolved")
+            .is_empty(),
+        "only an explicit resolution clears the in-doubt intent"
+    );
+}
