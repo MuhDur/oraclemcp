@@ -1,0 +1,68 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T07:29:24Z",
+  "bead_id": "oraclemcp-091-d5-idle-kill-lane-83utt",
+  "scope": {
+    "summary": "Wires D5 idle-kill coverage for the pooled DB-crate path and the real pinned OracleDispatcher session path.",
+    "in_scope": [
+      "crates/oraclemcp-db/tests/live_idle_kill.rs",
+      "crates/oraclemcp/tests/live_dispatcher_idle_kill.rs"
+    ],
+    "out_of_scope": [
+      "Changing pool validate-on-checkout behavior; A4a owns moving recovery earlier than reconnect-then-replay.",
+      "Changing pinned-session recycle/reconnect behavior; A4e owns any future transparent recovery design.",
+      "Running a full workspace Cargo gate.",
+      "Changing the sibling rust-oracledb driver repository."
+    ]
+  },
+  "source": {
+    "sha": "7bc8913d70a5bb653ca5f6560f62331e1154cdb2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "D5 pinned dispatcher idle-kill lane",
+        "kind": "cli",
+        "trace": "`ORACLEMCP_TEST_DSN=//localhost:1522/FREEPDB1 ORACLEMCP_TEST_USER=system ORACLEMCP_TEST_PASSWORD=<Docker-configured rust-oracledb-free password> CARGO_TARGET_DIR=target cargo test -p oraclemcp --features live-xe --test live_dispatcher_idle_kill -- --nocapture` exited 0. The test killed the dispatcher's real pinned session and observed `oracle_connection_info` return connected=false with a typed TRANSIENT connection_error instead of silently rebinding."
+      },
+      {
+        "name": "D5 pooled DB-crate idle-kill lane",
+        "kind": "cli",
+        "trace": "`ORACLEMCP_TEST_DSN=//localhost:1522/FREEPDB1 ORACLEMCP_TEST_USER=system ORACLEMCP_TEST_PASSWORD=<Docker-configured rust-oracledb-free password> CARGO_TARGET_DIR=target cargo test -p oraclemcp-db --features live-xe --test live_idle_kill -- --nocapture` exited 0. The test killed the single pooled session and observed replacement from sid 233 serial 9537 to sid 233 serial 40090."
+      },
+      {
+        "name": "D5 formatting gate",
+        "kind": "cli",
+        "trace": "`cargo fmt --all -- --check` exited 0 after the D5 test wiring."
+      },
+      {
+        "name": "D5 staged shared-checkout guards",
+        "kind": "cli",
+        "trace": "`scripts/swarm_discipline.sh struct-atomicity --staged`, `scripts/swarm_discipline.sh stale-delete-check --staged`, and `git diff --cached --check` exited 0 before the D5 commits."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The two Oracle kill lanes ran against the already-running local Free23 rig container and are recorded as scoped integration evidence, not as committed live-evidence artifacts.",
+    "The full workspace fmt/clippy/test/deny gate was not run; workspace-wide Cargo gates are serialized by the build lease.",
+    "The shared checkout contains dirty files outside this bead's scope, so only source-scoped tree cleanliness is claimed."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-a4a-validate-on-checkout-8knxx",
+    "oraclemcp-091-a4e-session-recycle-uyujp",
+    "oraclemcp-091-d10-real-pool-kill-ptvvy"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
