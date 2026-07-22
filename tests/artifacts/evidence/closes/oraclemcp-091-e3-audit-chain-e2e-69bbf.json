@@ -19,44 +19,13 @@
     "tree_clean": true,
     "branch": "main"
   },
-  "proofs": [
-    {
-      "kind": "test",
-      "name": "cargo test -p oraclemcp-audit --test e3_audit_chain_e2e",
-      "result": "10 passed; 0 failed",
-      "source": {
-        "name": "cargo test -p oraclemcp-audit --test e3_audit_chain_e2e -- --nocapture",
-        "kind": "cli",
-        "trace": "all 10 tests pass including new privileged_action_inventory_reconciles_against_chain_entries"
-      }
-    },
-    {
-      "kind": "lint",
-      "name": "cargo clippy -p oraclemcp-audit --test e3_audit_chain_e2e -- -D warnings",
-      "result": "clean",
-      "source": {
-        "name": "cargo clippy -p oraclemcp-audit --test e3_audit_chain_e2e -- -D warnings",
-        "kind": "cli",
-        "trace": "no warnings"
-      }
-    },
-    {
-      "kind": "format",
-      "name": "cargo fmt --all -- --check",
-      "result": "clean after fmt",
-      "source": {
-        "name": "cargo fmt --all",
-        "kind": "cli",
-        "trace": "rustfmt applied before commit"
-      }
-    }
-  ],
+  "proofs": [],
   "integration_evidence": {
     "entry_points": [
       {
         "name": "cargo test -p oraclemcp-audit --test e3_audit_chain_e2e",
         "kind": "cli",
-        "trace": "10 tests: intact chain verify+anchor, anchor round-trip, mid-chain edit detected+located, mid-chain drop detected+located, reorder detected, tail truncation invisible to chain but caught by anchor, empty-log truncation detected, forged anchor MAC refused, fail-closed open, inventory reconciliation"
+        "trace": "10 tests pass: intact chain verify+anchor, anchor round-trip, mid-chain edit detected+located, mid-chain drop detected+located, reorder detected, tail truncation invisible to chain but caught by anchor, empty-log truncation detected, forged anchor MAC refused, fail-closed open, privileged-action inventory reconciliation (5 actions cross-checked by tool+sql_sha256, gap-free seq 1..=5, chain verify, anchor match)"
       }
     ]
   },
