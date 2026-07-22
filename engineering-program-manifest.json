@@ -3904,7 +3904,7 @@
         "crates/oraclemcp-db/src/tns.rs",
         "README.md",
         "AGENTS.md",
-        "docs/TOOLCHAIN.md",
+        "docs/toolchain.md",
         "docs/operations.md",
         ".github/workflows/ci.yml"
       ],

@@ -82,4 +82,4 @@ Two levers, not one — and the first needs nobody upstream:
 
 The concrete procedure for bumping the pin in the meantime — when, the exact
 files to edit, how to validate, and how to roll back — lives in
-[`docs/TOOLCHAIN.md`](../TOOLCHAIN.md).
+[`docs/toolchain.md`](../toolchain.md).

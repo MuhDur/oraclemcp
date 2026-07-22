@@ -139,7 +139,7 @@ require_contains \
   "pinned \`oracledb\` $driver_version stack parses" \
   "EXPIRE_TIME driver provenance"
 require_contains \
-  "docs/TOOLCHAIN.md" \
+  "docs/toolchain.md" \
   "\`oracledb\` $driver_version driver's own source is stable-clean" \
   "toolchain driver provenance"
 require_contains \
@@ -187,7 +187,7 @@ require_contains \
   "asupersync $asupersync_version" \
   "operations asupersync provenance"
 require_contains \
-  "docs/TOOLCHAIN.md" \
+  "docs/toolchain.md" \
   "asupersync $asupersync_version" \
   "toolchain asupersync provenance"
 require_contains \

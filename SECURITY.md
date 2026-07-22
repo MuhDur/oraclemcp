@@ -108,4 +108,4 @@ SHA-256 checks transport integrity, while the cosign blob signature and
 attestation are the authenticity and provenance checks. Do not treat a checksum
 by itself as proof of origin. Service installation, service-manager mutation,
 and scoped client-credential issuance are opt-in actions. Source builds should
-use the pinned nightly documented in [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md).
+use the pinned nightly documented in [`docs/toolchain.md`](docs/toolchain.md).

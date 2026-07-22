@@ -4068,18 +4068,18 @@ convention (Critical / High / Medium / Low).
   the tracked `npm/oraclemcp/` wrapper sources (4 files) that nothing builds or
   ships while AGENTS.md states "No npm/npx channel is offered." Recommend:
   delete `npm/`, keep the guard workflow as the explicit tombstone.
-- **[Medium] Root plan monoliths:** `PLAN_0_4_0_PRODUCTION_HARDENING.md` (78 K),
-  `PLAN_0_5_0_STABLE_RELEASE.md` (61 K), `PLAN_0_6_0_INTERACTIVE_ALWAYS_ON.md`
-  (239 K), `PLAN_ASUPERSYNC_THIN_NATIVE.md` (72 K) live at repo root while newer
-  plans live in `docs/plan/`. `git mv` all four into `docs/plan/` (history
+- **[Medium] Root plan monoliths:** `docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md` (78 K),
+  `docs/plan/PLAN_0_5_0_STABLE_RELEASE.md` (61 K), `docs/plan/PLAN_0_6_0_INTERACTIVE_ALWAYS_ON.md`
+  (239 K), and `docs/plan/PLAN_ASUPERSYNC_THIN_NATIVE.md` (72 K) are under
+  `docs/plan/` with the newer plans after the C5 `git mv` pass (history
   preserved).
 - **[Low] `.skill-loop-progress.md`** at root — tracked residue of a completed
   skill loop (extreme-software-optimization, 2026-07-02). Delete.
 - **[Low] `refactor/`** (6 tracked files, untouched since 2026-06-15) — review,
   then delete or fold into docs; likely a finished campaign's scratch.
 - **[Low] docs naming split:** `docs/` mixes UPPERCASE
-  (`BEAD_CLOSE_EVIDENCE.md`, `ENTRY_TRACE_CONTRACT.md`, `REQUIRED_LOCAL_PROOF.md`,
-  `RESOURCE_BUDGET.md`, `TOOLCHAIN.md`) with kebab-case (20 files). Pick
+  (`bead-close-evidence.md`, `entry-trace-contract.md`, `required-local-proof.md`,
+  `resource-budget.md`, `toolchain.md`) with kebab-case (20 files). Pick
   kebab-case, rename the five (update inbound references — several scripts grep
   these paths).
 - **[Low] Tracked `.log` files vs `.gitignore`:** ~20 perf-campaign raw logs
@@ -5355,11 +5355,12 @@ right; two wires are missing.
    carries authoritative correlation for *governed* actions, but diagnostic logs
    currently can't be tied to a request at all.
 4. **Two operator-relevant events aren't logged at all:** guard refusals (the guard
-   crate has 0 `tracing` — refusals go only to the audit/refusal-corpus) and lease
-   revoke/expiry (`lease.rs` has 0 `tracing`). By design the guard returns typed
-   decisions, but an operator tailing stderr sees nothing when a refusal or a
-   revocation happens — a `warn!`/`info!` (reason-code only, no SQL/secret) on those
-   two paths is a cheap operator-experience win.
+   crate has 0 `tracing` — refusals go only to the audit/refusal-corpus) and the
+   former lease revoke/expiry path (the deleted `crates/oraclemcp-db/src/lease.rs`
+   had 0 `tracing` before B14b removed the dead subsystem). By design the guard
+   returns typed decisions, but an operator tailing stderr sees nothing when a
+   refusal or a revocation happens — a `warn!`/`info!` (reason-code only, no
+   SQL/secret) on those two paths is a cheap operator-experience win.
 5. These fold into §30.4 (the log-redaction test), §30.9-F (the no-stdout-in-serve +
    per-request-span as executable invariants), and Charter/arch-fitness — cheap, no
    new subsystem. The correlation fix (#3) is the one with real leverage.

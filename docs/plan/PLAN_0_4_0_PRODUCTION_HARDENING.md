@@ -411,7 +411,8 @@ assumptions, so the sibling can consume it cleanly.
   `block_on` + ambient-`Cx` lookup) to the native async `Connection`
   (`conn.execute_query(&cx,…).await`). Remove the `build_io_runtime()`/`block_on`
   wrapper; keep one asupersync runtime. *Area:* `oraclemcp-db/src/connection.rs`
-  (`db_checkpointed`, `RustOracleConnection`), `pool.rs`, `query.rs`, `lease.rs`.
+  (`db_checkpointed`, `RustOracleConnection`), `pool.rs`, `query.rs`, and the
+  then-present `lease.rs` (later deleted by B14b as a dead subsystem).
   **Decision (2026-06-19): the FULL migration is in 0.4.0 — not split.** No
   partial/seam-only fallback; the entire DB path becomes async in this release.
   **Upside beyond removing the mutex/`block_on`:** async unlocks oracledb's zero-copy
@@ -617,10 +618,10 @@ platform team say yes.
 - **D3 (M)** Supply-chain integrity: **SBOM (CycloneDX)** generated in CI; **build
   provenance (SLSA-style)** attestation; **signed releases** (cosign/sigstore) for
   binaries + Docker; `cargo deny`/`cargo vet` hardening. *Area:* `.github/workflows`.
-- **D4 (S)** Nightly hardening: a documented **re-pin runbook** (`docs/TOOLCHAIN.md`)
+- **D4 (S)** Nightly hardening: a documented **re-pin runbook** (`docs/toolchain.md`)
   + **multi-nightly early-warning CI** so the `nightly-2026-05-11` pin has a tracked,
   early-warned bump process (mirrors `oracledb` Wave 0 / W0-T2 — canary floating-nightly
-  + `docs/TOOLCHAIN.md`). Frame nightly as build-time-only.
+  + `docs/toolchain.md`). Frame nightly as build-time-only.
   Add a **`cargo tree -i opentelemetry_sdk` feature-inspection check** to this job so an
   upstream `rt-tokio` default-feature flip (which would pull tokio via the D1 OTel deps)
   is caught early (T5) — complements the standing `-i tokio`/`-i reqwest` DoD gate.
@@ -778,7 +779,7 @@ tagging `v0.4.0`:
 |------|------------|
 | `oracledb` execute-API consolidation churn (19 `execute_query*` → four operation-specific request types per W1-T3; zero `#[non_exhaustive]`) | B2 seam isolates it; the cut-over is the **named oracledb 0.3.0 / W2-T1 migration** (oraclemcp is a listed consumer); pin exactly until 0.3.0, then `^0.3` under oracledb's blocking SemVer contract (ADR-0002) |
 | D1 OTLP exporter rides asupersync's **outbound** HTTP client (net = lane-specific, not blanket-GA) | Validate the outbound client under sustained load (extend B3); telemetry failure drops (never blocks the request path); region-owned batch loop with bounded shutdown budget |
-| Nightly re-pin breakage | `docs/TOOLCHAIN.md` runbook + multi-nightly early-warning CI (D4) |
+| Nightly re-pin breakage | `docs/toolchain.md` runbook + multi-nightly early-warning CI (D4) |
 | Upstream `o0b`/`qm4`/`cco` never ship real support | Keep fail-closed; deliver precise classification, not fake support; they stay OUT |
 | Tuning/Diagnostics-Pack licensing for advisor/AWR | AWR already gated→Statspack; advisor stays OUT; preflight (C9) reports licensing |
 | Overclaiming "audited"/"stable" | §4 item 7 honesty guardrails enforced at the DoD doc gate (§8 item 8) |

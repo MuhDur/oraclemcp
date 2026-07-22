@@ -964,7 +964,7 @@ fn skin_conformance_2d_fallback_a11y() {
 
 #[test]
 fn b8_dashboard_acceptance_suite_is_accounted() {
-    let plan = read_repo_file("PLAN_0_6_0_INTERACTIVE_ALWAYS_ON.md");
+    let plan = read_repo_file("docs/plan/PLAN_0_6_0_INTERACTIVE_ALWAYS_ON.md");
     let http = read_http_source();
     let bundle = read_repo_file("scripts/dashboard_bundle_check.sh");
     let readonly_gate = read_repo_file("scripts/e2e/dashboard_readonly.sh");

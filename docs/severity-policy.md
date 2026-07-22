@@ -242,5 +242,5 @@ release-day procedure (D4 / `release-gre.1`),
 [`operations.md` §6](operations.md#6-verifying-release-artifacts-sbom-provenance-signatures)
 for the supply-chain verification commands (D3),
 [`hardening.md`](hardening.md) for the security-controls checklist, and the §8
-Definition of Done in `PLAN_0_4_0_PRODUCTION_HARDENING.md` (items 8 and 11) that
+Definition of Done in `docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md` (items 8 and 11) that
 this policy certifies.

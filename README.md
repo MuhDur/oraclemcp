@@ -245,7 +245,7 @@ default feature set, and reaches us through the `oracledb` dependency), and on
 **Windows** `oraclemcp-core` additionally needs `windows_by_handle`. The pinned
 `oracledb` 0.9.0 driver's own source is stable-clean — it is its asupersync
 dependency declaration that pulls the nightly feature in.
-[`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) has the exact mechanism. The
+[`docs/toolchain.md`](docs/toolchain.md) has the exact mechanism. The
 repository's `rust-toolchain.toml` selects the pin for local builds. Use the release installer above when you want
 the prebuilt binary; use `cargo install` only when you intentionally want a
 source build.
@@ -1063,7 +1063,7 @@ recorded in `rust-toolchain.toml`). Two independent things need it: asupersync 0
 is opt-in but on by default and reaches us via the `oracledb` 0.9.0 dependency; and,
 on Windows only, `windows_by_handle`. The pin is **build-time only**: the
 shipped binary has no runtime dependency on nightly. See
-[`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) for the full rationale and the
+[`docs/toolchain.md`](docs/toolchain.md) for the full rationale and the
 re-pin runbook.
 
 ```sh

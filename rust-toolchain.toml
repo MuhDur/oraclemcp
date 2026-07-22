@@ -6,7 +6,7 @@
 #      dependency, which does not opt out. Bead oraclemcp-yi2z tracks dropping it.
 #   2. Windows only: oraclemcp-core's `windows_by_handle`.
 # There is no stable MSRV for this line; bump this date deliberately with
-# asupersync/oracledb upgrades and CI workflow pins. See docs/TOOLCHAIN.md §1.
+# asupersync/oracledb upgrades and CI workflow pins. See docs/toolchain.md §1.
 [toolchain]
 channel = "nightly-2026-05-11"
 components = ["rustfmt", "clippy"]

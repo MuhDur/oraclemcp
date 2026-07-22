@@ -30,7 +30,7 @@ opt-in but on by default and reaches the build through the `oracledb` 0.9.0
 dependency, and on Windows `oraclemcp-core` also needs
 `windows_by_handle`. The `oracledb` 0.9.0 driver's own source is stable-clean —
 it is its asupersync dependency declaration that pulls the nightly feature in.
-[`TOOLCHAIN.md`](TOOLCHAIN.md) §1 has the exact mechanism.
+[`toolchain.md`](toolchain.md) §1 has the exact mechanism.
 
 **This is invisible at runtime.** Once compiled, `oraclemcp` is an ordinary
 native binary. The toolchain pin matters only when you build the binary or image

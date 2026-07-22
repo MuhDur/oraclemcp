@@ -234,9 +234,10 @@ the MCP protocol subset `oraclemcp` actually serves, with conformance tests.
 These contracts are implemented in the current codebase and must be treated as
 migration inputs, not optional features.
 
-- Session leases:
-  - `crates/oraclemcp-db/src/lease.rs`
-  - `crates/oraclemcp-core/src/session_tool.rs`
+- Session leases (historical files; both were later deleted by B14b as the dead
+  lease/session-tool subsystem):
+  - former `crates/oraclemcp-db/src/lease.rs`
+  - former `crates/oraclemcp-core/src/session_tool.rs`
   - current tests prove forced rollback on lease teardown and stateful routing
     to the pinned session
 - Canonical serialization:
@@ -794,7 +795,8 @@ Implementation notes:
     returning it to the clean pool,
   - timeout errors must remain structured and actionable.
 - Preserve AWR/ASH license gating and Statspack/unavailable degradation.
-- Preserve impact-preview/savepoint behavior already in `lease.rs`; if
+- Preserve impact-preview/savepoint behavior that lived in the former
+  `crates/oraclemcp-db/src/lease.rs` before B14b deleted that dead subsystem; if
   `oracle_explain_plan` still writes `PLAN_TABLE`, record that as a separate
   compatibility/correctness item rather than mixing it into the thin adapter.
 
@@ -910,7 +912,7 @@ Implementation notes:
   - `crates/oraclemcp/src/registry.rs`
   - `crates/oraclemcp-core/src/tools.rs`
   - `crates/oraclemcp-core/src/custom_tools.rs`
-  - `crates/oraclemcp-core/src/session_tool.rs`
+  - former `crates/oraclemcp-core/src/session_tool.rs` (deleted by B14b)
   - any compatibility aliases that call the dispatcher
 - Keep pure guard/classifier logic pure where it does not need `Cx`.
 - Critical safety rule: raw SQL classification and level gating must complete
@@ -1621,8 +1623,8 @@ Changed or reframed feedback:
   safe to phrase as audit tasks were added.
 
 - The review suggested impact preview must always be autonomous
-  savepoint-and-rollback. The repo already has savepoint preview machinery in
-  `lease.rs`, while `oracle_explain_plan` still appears to use `EXPLAIN PLAN`
+  savepoint-and-rollback. The repo already had savepoint preview machinery in
+  the former `crates/oraclemcp-db/src/lease.rs`, while `oracle_explain_plan` still appears to use `EXPLAIN PLAN`
   for read-only plan analysis. The plan now treats this as an inventory and
   compatibility/correctness item rather than rewriting tool semantics inside
   the thin adapter task.

@@ -658,7 +658,7 @@ independent but **must be sequenced / single-owner**, not run as concurrent agen
     imply SHA256 provides authenticity (honesty-grep is sensitive to exactly this).
     MCP auto-registration is **stdio-only**, never HTTP-`--allow-no-auth`; the
     registered server inherits the fail-closed default `READ_ONLY`),
-    `TOOLCHAIN.md` (still nightly via asupersync),
+    `toolchain.md` (still nightly via asupersync),
     behavior inventory, **`SECURITY.md`** (bump supported-versions to 0.5.x current
     / 0.4.x critical-only; fix the 0.3→0.4 transition sentence),
     `oraclemcp.example.toml` (new fields: connect-timeout, catalog mode if any),

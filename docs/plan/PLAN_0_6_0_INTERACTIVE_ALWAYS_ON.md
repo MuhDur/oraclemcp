@@ -139,9 +139,12 @@ the whole process. The dispatch runtime is a **single current-thread asupersync
 runtime with deliberately non-`Send` dispatch futures** — fine for single-principal,
 but WP-N must make an explicit runtime-topology decision (§N0a) or all lanes funnel
 through one executor.
-**Dormant primitives exist:** `lease.rs` `LeaseManager` (per-lease pinned session,
-TTL, force-rollback) + a `session_tool.rs` `oracle_session` tool — **unwired**
-(`oracle_session` not in the 52 registered tools; no `LeaseManager` in `main.rs`).
+**Dormant primitives exist:** at this historical point the former
+`crates/oraclemcp-db/src/lease.rs` `LeaseManager` (per-lease pinned session,
+TTL, force-rollback) + former `crates/oraclemcp-core/src/session_tool.rs`
+`oracle_session` tool existed — **unwired** (`oracle_session` not in the 52
+registered tools; no `LeaseManager` in `main.rs`). Both files were later deleted
+by B14b as dead subsystem code.
 ⚠️ `oracle_session` currently accepts `agent_identity` **as a tool argument** — this
 must **not** become the HTTP trust source (§D11).
 
@@ -757,7 +760,8 @@ incomplete on safety + infrastructure. CRITICAL items break the invariant as-was
 - **N-S5 Lease stamps server-derived Subject + re-asserts ALTER SESSION allowlist.** When
   N0 wires the lease, `agent_identity`→`v$session` must be the server Subject stable_id
   (never a tool arg); the new path re-checks `is_allowed_alter_session` itself (don't
-  inherit the lease's trust-the-caller contract, `lease.rs:427-437`).
+  inherit the former deleted lease implementation's trust-the-caller contract, historical
+  `crates/oraclemcp-db/src/lease.rs:427-437`).
 - **N-S6 Allow-list-first redaction for every new surface.** Redacting newtypes for
   `OracleBind` + `OracleConnectionInfo`; proof bundle/timeline use `sql_sha256` **not**
   `sql_preview` (or scrub inlined literals — they enter the signed chain today);
@@ -868,13 +872,15 @@ on it (rollback, terminate, reap, switch) must be marshaled to the owning lane t
 a control channel — a central manager must NOT touch conns directly.*
 - **C-arch (STRUCTURAL → WP-N N0a) LaneRuntime = a registry of lane HANDLES (mailboxes),
   not a map of connections.** Each lane = an OS thread owning {runtime, reactor, conn,
-  lease, level, grants} + a **control mailbox**. The shipped `LeaseManager`'s single
-  `Mutex<HashMap<.., Arc<AsyncMutex<Lease>>>>` with reactor-affine conns (`lease.rs:185`)
-  is **structurally incompatible** with per-lane reactors: `reap_expired`/`release` clone
-  the arcs and force-rollback with **one foreign `cx`**, driving conn futures on a reactor
-  that never registered them (C-2). Redesign: the central registry holds only handles; all
-  conn ops are **messages to the owning lane thread** (C-2/C-3).
-- **C-1 (STRUCTURAL) Idle/abandoned-lane reaping.** `reap_expired` (`lease.rs:447`) has
+  lease, level, grants} + a **control mailbox**. The shipped, now-deleted `LeaseManager`'s
+  single `Mutex<HashMap<.., Arc<AsyncMutex<Lease>>>>` with reactor-affine conns (historical
+  `crates/oraclemcp-db/src/lease.rs:185`) is **structurally incompatible** with per-lane
+  reactors: `reap_expired`/`release` clone the arcs and force-rollback with **one foreign
+  `cx`**, driving conn futures on a reactor that never registered them (C-2). Redesign:
+  the central registry holds only handles; all conn ops are **messages to the owning lane
+  thread** (C-2/C-3).
+- **C-1 (STRUCTURAL) Idle/abandoned-lane reaping.** The former deleted
+  `reap_expired` path (historical `crates/oraclemcp-db/src/lease.rs:447`) has
   **zero production callers**; expiry is lazy. With N5 (disconnect≠cancel), an abandoned
   dirty lease holds its txn + row locks until process exit. Design: a **watchdog** sends a
   `terminate`/`timeout` message to the lane's mailbox; a lane **parked in a DB call** is
@@ -883,9 +889,9 @@ a control channel — a central manager must NOT touch conns directly.*
 - **C-3 (STRUCTURAL) `DELETE MCP-Session-Id`** must be a message to the owning lane thread
   (rollback runs there) — never a force_rollback on the accept thread.
 - **C-4 (STRUCTURAL) `Lease` needs an epoch/generation + lane/subject id.** The monotonic
-  value A6/K2/K3 grant-invalidation compares against doesn't exist on `Lease`
-  (`lease.rs:144`); add it and **bind grants to it** (closes the check-vs-use window on the
-  ceiling).
+  value A6/K2/K3 grant-invalidation compares against didn't exist on the former `Lease`
+  (historical `crates/oraclemcp-db/src/lease.rs:144`, later deleted by B14b); add it and
+  **bind grants to it** (closes the check-vs-use window on the ceiling).
 - **C-5 (STRUCTURAL) `switch_profile` = an atomic conn-swap state machine.** A lease pins
   one non-optional conn for life; N1's per-lane switch must **acquire the new profile's
   permit/conn before releasing the old** (or represent a 'switching' lane state), rolling

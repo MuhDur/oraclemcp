@@ -2418,7 +2418,7 @@ shape).
 | S4 | Three divergent connection-lost lists; driver's correct set unused; 02396/00028/broken-pipe missing from lease discard-markers → **dead leased session reused**; ORA-04068 wrong-remedy | `oraclemcp-error/lib.rs:450-485`, `oraclemcp-db/error.rs:413-430/:636-651`, `resilience.rs:17` vs driver `recovery.rs:546-547` | A4b |
 | S5 | Latent dead retry machinery (`RetryPolicy` zero call sites) | `resilience.rs:17` | A4b |
 | S6 | `OracleConnection` trait has NO close(); switch_profile + shutdown DROP connections, never log off | `connection.rs:934-1221`; `dispatch/mod.rs:11802-11803`; `main.rs:3886/:4039` | B7c |
-| S7 | DRCP `purity=reuse` identity bleed: wired path never clears-before-set; safe machinery is unwired dead code | `connection.rs:1897-1954`; `lease.rs:68-102` (dead) | B14 |
+| S7 | DRCP `purity=reuse` identity bleed: wired path never clears-before-set; safe machinery is unwired dead code | `connection.rs:1897-1954`; former `crates/oraclemcp-db/src/lease.rs:68-102` (dead, deleted by B14b) | B14 |
 | S8 | `allowed_origins` normalization applied only to loopback branch; `allowed_hosts` case-sensitive; trim-on-validate-only | `http_guard.rs:125/:91-96/:137/:85`; config `lib.rs:883-901` | B15 |
 | S9 | `allowed_subjects` anchor worse than v1 stated: validator normalizes, build stores raw; symmetric pattern exists in `MtlsClientRegistry` | `lib.rs:648-660`, `main.rs:3355-3360` vs `http/config.rs:92/:107` | B1a |
 | S10 | Catch-all collapses: 5 preview-flow variants; incident trio reports IO as policy refusals | `main.rs:4613/:5313/:5375/:5408` | A2a |

@@ -108,7 +108,7 @@ refusal and each acceptance; CI runs it alongside the other lints.
 
 - Cargo workspace, `resolver = "2"`, pinned nightly
   **`nightly-2026-05-11`**, `edition = "2024"`. There is no stable MSRV, for two
-  independent reasons — see [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md):
+  independent reasons — see [`docs/toolchain.md`](docs/toolchain.md):
   1. **asupersync 0.3.9's `nightly-outcome-try` feature** enables
      `feature(try_trait_v2)` + `try_trait_v2_residual` inside asupersync itself
      (`asupersync-0.3.9/src/lib.rs:52-53`). It is **opt-in but on by default**,
@@ -258,7 +258,7 @@ commit, and canonical evidence path into `close_reason`. Release a claim with
 closes and preserves a bead that became closed. When a false close is found,
 correct that original bead with `bead_tracker_guard.sh correct-false-close
 --original-bead <id> ...`, never only a sibling. See
-[`docs/BEAD_CLOSE_EVIDENCE.md`](docs/BEAD_CLOSE_EVIDENCE.md).
+[`docs/bead-close-evidence.md`](docs/bead-close-evidence.md).
 
 ## bv - graph-aware triage sidecar
 

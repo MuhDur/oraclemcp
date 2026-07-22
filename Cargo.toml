@@ -26,7 +26,7 @@ homepage = "https://github.com/MuhDur/oraclemcp"
 # source uses the nightly syntax — it arrives transitively (bead oraclemcp-yi2z).
 # (2) Windows only: oraclemcp-core's windows_by_handle (see its lib.rs).
 # asupersync does not "require" nightly. The oracledb 0.9.0 driver's own source is stable-clean —
-# it is its dep declaration, not its source, that is the proximate cause. See docs/TOOLCHAIN.md §1.
+# it is its dep declaration, not its source, that is the proximate cause. See docs/toolchain.md §1.
 keywords = ["oracle", "mcp", "database", "sql"]
 categories = ["database", "development-tools"]
 

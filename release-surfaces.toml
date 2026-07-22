@@ -31,7 +31,7 @@ match_count = 1
 [[surface]]
 name = "toolchain_runtime_version"
 source = "runtime_version"
-path = "docs/TOOLCHAIN.md"
+path = "docs/toolchain.md"
 pattern = "asupersync (?P<value>[0-9]+\\.[0-9]+\\.[0-9]+)"
 replacement = "asupersync {runtime_version}"
 match_count = 1
@@ -39,7 +39,7 @@ match_count = 1
 [[surface]]
 name = "toolchain_driver_version"
 source = "driver_version"
-path = "docs/TOOLCHAIN.md"
+path = "docs/toolchain.md"
 pattern = "oracledb` (?P<value>[0-9]+\\.[0-9]+\\.[0-9]+) driver"
 replacement = "oracledb` {driver_version} driver"
 match_count = 1

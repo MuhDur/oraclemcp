@@ -8,7 +8,7 @@ records that the CI run on that commit is the evidence.
 These gates are not aspirational: every one of them already runs in
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) on the pinned
 toolchain (`nightly-2026-05-11`, see
-[`TOOLCHAIN.md`](TOOLCHAIN.md) and [ADR-0001](adr/0001-pinned-nightly-toolchain.md)).
+[`toolchain.md`](toolchain.md) and [ADR-0001](adr/0001-pinned-nightly-toolchain.md)).
 The checklist exists so the release operator confirms they ran on the **frozen
 RC SHA specifically** — not an earlier green run — and links that run from the
 release notes.
@@ -83,7 +83,7 @@ investigate, not a blocker:
   (`continue-on-error`; cargo-fuzz + `build-std` is churn-prone).
 - `multi-nightly` — builds/tests on the pinned date plus the floating `nightly`
   channel as an early warning for an upcoming toolchain break
-  (`continue-on-error`; see [`TOOLCHAIN.md`](TOOLCHAIN.md) §6).
+  (`continue-on-error`; see [`toolchain.md`](toolchain.md) §6).
 
 The separate Tier-2 `.github/workflows/loom.yml` lane runs weekly and by manual
 dispatch. Its `loom` job is bounded to two Cargo build jobs, three loom
@@ -262,7 +262,7 @@ Required gates green on the RC commit:
 > [`operations.md` §6](operations.md#6-verifying-release-artifacts-sbom-provenance-signatures).
 
 See also: [`severity-policy.md`](severity-policy.md) for the certifying gate
-(D9), [`TOOLCHAIN.md`](TOOLCHAIN.md) for re-pinning the toolchain,
+(D9), [`toolchain.md`](toolchain.md) for re-pinning the toolchain,
 [`operations.md`](operations.md) for the deployment runbook and release-artifact
 verification (§6), and [`hardening.md`](hardening.md) for the security
 checklist.
