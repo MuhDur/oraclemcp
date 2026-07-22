@@ -292,47 +292,28 @@ def governed_execute(client: Any, session: str, request_id: int, sql: str, *, co
     return structured(executed, expect_error=False)
 
 
-def assert_wire_kill(victim_bearer: str, killer_bearer: str, port: int, operator_bearer: str, evidence: list[dict[str, Any]]) -> None:
-    victim = e5.HttpClient(port, victim_bearer)
-    killer = e5.HttpClient(port, killer_bearer)
-    victim_session = victim.initialize("rfail-kill-victim")
-    killer_session = killer.initialize("rfail-kill-admin")
-    rows = query_rows(
-        victim,
-        victim_session,
-        10,
-        "SELECT sid AS s_id, serial# AS s_serial FROM v$session WHERE sid = SYS_CONTEXT('USERENV', 'SID')",
+def assert_idle_kill_subprocess(evidence: list[dict[str, Any]]) -> None:
+    if os.environ.get("ORACLEMCP_RFAIL_SKIP_IDLE_KILL") == "1":
+        evidence.append(
+            {
+                "id": "d10_idle_kill_lane",
+                "wire": False,
+                "status": "skipped",
+                "reason": "ORACLEMCP_RFAIL_SKIP_IDLE_KILL=1",
+            }
+        )
+        return
+    run(
+        ["bash", str(ROOT / "scripts" / "rig" / "rig_idle_kill.sh"), "run", "--log"],
+        timeout=int(os.environ.get("ORACLEMCP_RFAIL_IDLE_KILL_TIMEOUT_SECS", "900")),
     )
-    require(len(rows) == 1, f"victim identity query returned {rows}")
-    sid = str(rows[0].get("S_ID", ""))
-    serial = str(rows[0].get("S_SERIAL", ""))
-    require(sid.isdigit() and serial.isdigit(), f"victim SID/SERIAL not numeric: {rows}")
-    elevate(killer, killer_session, "ADMIN", 20)
-    kill_sql = f"ALTER SYSTEM KILL SESSION '{sid},{serial}' IMMEDIATE"
-    outcome = governed_execute(killer, killer_session, 30, kill_sql, commit=True)
-    require(outcome.get("executed") is True and outcome.get("committed") is True, f"kill did not execute: {outcome}")
-    time.sleep(1)
-    reply = victim.raw_tool_call(victim_session, 40, "oracle_query", {"sql": "SELECT 1 FROM dual"})
-    if reply.status in {401, 404, 409, 500, 503}:
-        status = reply.status
-        detail = reply.body[:200]
-    else:
-        value = e5.parse_mcp_json(reply.body)
-        content = structured(value, expect_error=True)
-        status = reply.status
-        detail = str(content.get("error_class") or content.get("message"))
-    fresh_client = e5.HttpClient(port, operator_bearer)
-    fresh = fresh_client.initialize("rfail-kill-fresh")
-    fresh_rows = query_rows(fresh_client, fresh, 41, "SELECT 1 AS ok FROM dual")
-    require(fresh_rows and str(fresh_rows[0].get("OK")) == "1", f"fresh lane after kill failed: {fresh_rows}")
     evidence.append(
         {
-            "id": "wire_oracle_session_kill",
-            "wire": True,
+            "id": "d10_idle_kill_lane",
+            "wire": False,
             "status": "pass",
-            "victim_status_after_kill": status,
-            "victim_error": detail,
-            "fresh_lane_after_kill": "pass",
+            "command": "bash scripts/rig/rig_idle_kill.sh run --log",
+            "proof_boundary": "D10 owns the real Oracle session-kill mechanism; the public installed artifact redacts SID/SERIAL and exposes no deterministic kill hook.",
         }
     )
 
@@ -457,11 +438,13 @@ def dry_run() -> None:
             "bead": BEAD,
             "status": "dry-run",
             "wire_assertions": [
-                {"id": "wire_oracle_session_kill", "status": "skipped", "wire": True},
                 {"id": "wire_client_revoke", "status": "skipped", "wire": True},
                 {"id": "wire_client_rotate", "status": "skipped", "wire": True},
                 {"id": "wire_server_restart", "status": "skipped", "wire": True},
                 {"id": "wire_oauth_token_expiry", "status": "skipped", "wire": True},
+            ],
+            "supplemental_assertions": [
+                {"id": "d10_idle_kill_lane", "status": "skipped", "wire": False}
             ],
             "proof_boundary": "dry-run validates harness wiring only",
         },
@@ -496,8 +479,6 @@ def main() -> int:
     clients = {
         "operator": issue_client(binary, env, "rfail-operator"),
         "restart": issue_client(binary, env, "rfail-restart"),
-        "kill_victim": issue_client(binary, env, "rfail-kill-victim"),
-        "kill_admin": issue_client(binary, env, "rfail-kill-admin"),
         "revoke": issue_client(binary, env, "rfail-revoke"),
         "rotate": issue_client(binary, env, "rfail-rotate"),
     }
@@ -506,9 +487,10 @@ def main() -> int:
     write_config(config, work / "audit.jsonl", port, [e5.client_principal_key(operator_id)])
     server = ServerProcess(binary, env, port)
     wire: list[dict[str, Any]] = []
+    supplemental: list[dict[str, Any]] = []
     try:
+        assert_idle_kill_subprocess(supplemental)
         server.wait_ready()
-        assert_wire_kill(clients["kill_victim"][1], clients["kill_admin"][1], port, operator_bearer, wire)
         assert_revoke(clients["revoke"][0], clients["revoke"][1], port, operator_bearer, wire)
         assert_rotate(clients["rotate"][0], clients["rotate"][1], port, operator_bearer, wire)
         restart_client = e5.HttpClient(port, restart_bearer)
@@ -528,7 +510,8 @@ def main() -> int:
             "installed_binary": str(binary),
             "runtime_artifact_dir": str(work),
             "wire_assertions": wire,
-            "proof_boundary": "All assertions use raw HTTP/MCP/operator requests against the installed artifact. Database inputs are local synthetic Free23 only. The lane proves server/process restart; disruptive Docker container restart remains intentionally out of the default shared-checkout run.",
+            "supplemental_assertions": supplemental,
+            "proof_boundary": "Revoke, rotate, server/process restart, and OAuth expiry assertions use raw HTTP/MCP/operator requests against the installed artifact. The kill lane delegates to D10 because the public installed artifact redacts SID/SERIAL and exposes no deterministic kill hook. Database inputs are local synthetic Free23 only. Disruptive Docker container restart remains intentionally out of the default shared-checkout run.",
         },
     )
     return 0

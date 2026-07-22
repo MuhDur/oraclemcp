@@ -19,11 +19,11 @@ Rig R-fail failure-injection lanes.
 Usage:
   bash scripts/rig/failure_injection_lanes.sh [run] [--log|--dry-run]
 
-`run` installs the committed oraclemcp artifact from a git archive, starts it as
-a real stateful HTTP service, and drives deterministic fault assertions on the
-wire: killed Oracle session, client revoke, client rotate, server restart, and
-OAuth access-token expiry. The database profile is synthetic/local only and
-stores credentials as env refs.
+`run` first executes the D10 live idle-kill rig lane, then installs the
+committed oraclemcp artifact from a git archive, starts it as a real stateful
+HTTP service, and drives deterministic fault assertions on the wire: client
+revoke, client rotate, server restart, and OAuth access-token expiry. The
+database profile is synthetic/local only and stores credentials as env refs.
 USAGE
   e2e_usage_common
 }
