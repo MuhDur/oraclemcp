@@ -1,0 +1,78 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T13:30:13Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.8.2",
+  "scope": {
+    "summary": "Driver Live nightly has reached the required three scheduled green runs, and the server CI-lane tile now embeds the current 22-lane scheduled/advisory taxonomy instead of a stale 19-lane copy.",
+    "in_scope": [
+      "crates/oraclemcp-core/ci_taxonomy.json"
+    ],
+    "out_of_scope": [
+      "Weakening, narrowing, or marking ignored any GitHub Actions lane or Rust test.",
+      "Claiming the server required CI lane is green; latest heartbeat evidence still reports required:ci.yml red on older hosted SHA 3e87e88.",
+      "Changing the sibling rust-oracledb repository; this close consumes its hosted Live nightly evidence only."
+    ]
+  },
+  "source": {
+    "sha": "92ce5af0f38f80919e3fd1191b507938de272f66",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "hosted driver Live nightly streak",
+        "kind": "cli",
+        "trace": "`gh run list --repo MuhDur/rust-oracledb --workflow=live.yml --limit 20 --json databaseId,displayTitle,headSha,headBranch,status,conclusion,event,createdAt,updatedAt,url` showed the latest three scheduled Live runs all completed with conclusion=success: 29722438114 (2026-07-20T06:42:32Z, sha 4fc6aa222c25b6c9ac906b3b3d298b5b47d8f836), 29806957606 (2026-07-21T06:25:10Z, sha 537373a1add992ea5e4369dce30d00803efab2ed), and 29896713651 (2026-07-22T06:25:25Z, sha 3934a23054c6e861096c79c21734620978900989)."
+      },
+      {
+        "name": "hosted driver Live jobs are real completed live-test jobs",
+        "kind": "cli",
+        "trace": "`gh run view --repo MuhDur/rust-oracledb 29722438114 29806957606 29896713651 --json jobs,...` was run one id at a time; each run contained `driver live tests (Oracle Free 23ai)` with status=completed and conclusion=success, including steps `Start Oracle Free 23ai`, `Wait for database ready`, `Bootstrap test schema`, `Verify connect-trace credentials are distinguishable`, and `Driver live tests (serial, ignored)`."
+      },
+      {
+        "name": "server heartbeat observes the driver Live lane as green",
+        "kind": "cli",
+        "trace": "`gh run view 29917633699 --log-failed` and the downloaded `ci-heartbeat-snapshot` show `MuhDur/rust-oracledb` lane `driver_scheduled:live.yml` at run 29896713651 with state=success, conclusion=success, head_sha=3934a23054c6e861096c79c21734620978900989, updated_at=2026-07-22T06:37:16Z. The same heartbeat remains red for server `required:ci.yml`; that is reported here as out-of-scope, not hidden."
+      },
+      {
+        "name": "CI-lane tile taxonomy sync",
+        "kind": "cli",
+        "trace": "`python3 - <<'PY' ... parse docs/ci_taxonomy.json and crates/oraclemcp-core/ci_taxonomy.json ... PY` showed the repo-root taxonomy had 22 watched scheduled/advisory lanes while the crate-local embedded copy had 19. Commit 3c524c55 copies the generated root taxonomy into `crates/oraclemcp-core/ci_taxonomy.json`, restoring byte identity and preventing the dashboard tile from silently omitting current watched lanes."
+      },
+      {
+        "name": "scoped CI-lane tile tests",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core ci_lane -- --nocapture` failed before the fix at `operator_ci_lanes_route_serves_a_fresh_configured_snapshot` with lanes length 19 vs catalog length 22, then passed after 3c524c55 with 9 passed, 0 failed."
+      },
+      {
+        "name": "heartbeat and taxonomy guard checks",
+        "kind": "cli",
+        "trace": "`bash scripts/test_ci_heartbeat.sh` passed (`ci-heartbeat: advisory lane honesty regression OK ...`), and `python3 scripts/ci_taxonomy.py --check` exited 0 after the embedded taxonomy sync."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "g2-driver-live-nightly-streak-transcript",
+        "path": "tests/artifacts/evidence/live/oraclemcp-g2-live-nightly-streak-2026-07-22.json",
+        "sha": "92ce5af0f38f80919e3fd1191b507938de272f66"
+      }
+    ]
+  },
+  "limitations": [
+    "The three-green streak is hosted elapsed evidence from the sibling driver repository. This oraclemcp commit fixes the server evidence/tile copy that had gone stale; it does not modify driver code.",
+    "The latest inspected server CI Heartbeat run 29917633699 still exits 1 because `required:ci.yml` is red on hosted SHA 3e87e88 and scheduled server mutation/loom evidence is red/unknown. Those are separate lanes, not hidden by this close.",
+    "The local shared checkout still contains unrelated untracked files outside this scope."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}

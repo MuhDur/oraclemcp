@@ -1,5 +1,8 @@
 {
   "schema": "oraclemcp-live-nightly-streak/v1",
+  "run_id": 29896713651,
+  "lane": "MuhDur/rust-oracledb driver_scheduled:live.yml",
+  "source_sha": "92ce5af0f38f80919e3fd1191b507938de272f66",
   "generated_at": "2026-07-22T13:30:13Z",
   "source_commands": [
     "gh run list --repo MuhDur/rust-oracledb --workflow=live.yml --limit 20 --json databaseId,displayTitle,headSha,headBranch,status,conclusion,event,createdAt,updatedAt,url",
