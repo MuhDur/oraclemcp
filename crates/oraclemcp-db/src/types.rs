@@ -858,6 +858,12 @@ pub struct OracleConnectOptions {
     pub call_timeout: Option<Duration>,
     /// Extra guarded session setup statements to run after canonical NLS setup.
     pub session_statements: Vec<String>,
+    /// Profile-owned cleanup statements to run before a checked-out pooled
+    /// session is returned to idle reuse.
+    pub session_release_statements: Vec<String>,
+    /// Profile-owned cleanup statements to run immediately before logical
+    /// Oracle logoff.
+    pub logoff_statements: Vec<String>,
 }
 
 impl Default for OracleConnectOptions {
@@ -886,6 +892,8 @@ impl Default for OracleConnectOptions {
             keepalive_minutes: None,
             call_timeout: Some(DEFAULT_ORACLE_CALL_TIMEOUT),
             session_statements: Vec::new(),
+            session_release_statements: Vec::new(),
+            logoff_statements: Vec::new(),
         }
     }
 }
@@ -903,6 +911,8 @@ impl std::fmt::Debug for OracleConnectOptions {
         let session_identity = self.session_identity.as_ref().map(|_| "<redacted>");
         let app_context_count = self.app_context.len();
         let session_statement_count = self.session_statements.len();
+        let session_release_statement_count = self.session_release_statements.len();
+        let logoff_statement_count = self.logoff_statements.len();
         f.debug_struct("OracleConnectOptions")
             .field("connect_string", &connect_string)
             .field("username", &redact(&self.username))
@@ -930,6 +940,11 @@ impl std::fmt::Debug for OracleConnectOptions {
             .field("keepalive_minutes", &self.keepalive_minutes)
             .field("call_timeout", &self.call_timeout)
             .field("session_statement_count", &session_statement_count)
+            .field(
+                "session_release_statement_count",
+                &session_release_statement_count,
+            )
+            .field("logoff_statement_count", &logoff_statement_count)
             .finish()
     }
 }
@@ -1259,6 +1274,14 @@ mod tests {
                 "BEGIN DBMS_SESSION.SET_CONTEXT('PRIVATE_NS','TOKEN','secret-token'); END;"
                     .to_owned(),
             ],
+            session_release_statements: vec![
+                "BEGIN DBMS_SESSION.SET_CONTEXT('PRIVATE_RELEASE','TOKEN','secret-release'); END;"
+                    .to_owned(),
+            ],
+            logoff_statements: vec![
+                "BEGIN DBMS_SESSION.SET_CONTEXT('PRIVATE_LOGOFF','TOKEN','secret-logoff'); END;"
+                    .to_owned(),
+            ],
             ..Default::default()
         };
         let rendered = format!("{opts:?}");
@@ -1305,6 +1328,13 @@ mod tests {
             !rendered.contains("secret-token") && !rendered.contains("PRIVATE_NS"),
             "session statement leaked: {rendered}"
         );
+        assert!(
+            !rendered.contains("secret-release")
+                && !rendered.contains("PRIVATE_RELEASE")
+                && !rendered.contains("secret-logoff")
+                && !rendered.contains("PRIVATE_LOGOFF"),
+            "teardown hook leaked: {rendered}"
+        );
         assert!(rendered.contains("<redacted>"));
         // Presence is preserved without exposing values.
         assert!(rendered.contains("connect_string"));
@@ -1319,6 +1349,8 @@ mod tests {
         assert!(rendered.contains("use_sni: Some"));
         assert!(rendered.contains("iam_token: Some"));
         assert!(rendered.contains("iam_token_private_key: Some"));
+        assert!(rendered.contains("session_release_statement_count: 1"));
+        assert!(rendered.contains("logoff_statement_count: 1"));
         assert!(
             opts.doctor_redaction_values()
                 .iter()

@@ -271,6 +271,16 @@ fn profile_to_options_for_level(
         keepalive_minutes: profile.keepalive_minutes.filter(|&m| m > 0),
         call_timeout: resolve_call_timeout(profile.call_timeout_seconds),
         session_statements: profile_session_statements(profile, level_state)?,
+        session_release_statements: profile_hook_statements(
+            profile,
+            "session_release_statements",
+            profile.session_release_statements.as_deref(),
+        )?,
+        logoff_statements: profile_hook_statements(
+            profile,
+            "logoff_statements",
+            profile.logoff_statements.as_deref(),
+        )?,
     })
 }
 
@@ -335,6 +345,20 @@ fn profile_session_statements(
     Ok(out)
 }
 
+fn profile_hook_statements(
+    profile: &ConnectionProfile,
+    field: &'static str,
+    statements: Option<&[String]>,
+) -> Result<Vec<String>, DbError> {
+    let mut out = Vec::new();
+    if let Some(statements) = statements {
+        for stmt in statements {
+            out.push(validate_trusted_hook_statement(&profile.name, field, stmt)?);
+        }
+    }
+    Ok(out)
+}
+
 fn validate_login_statement(profile: &str, statement: &str) -> Result<String, DbError> {
     let trimmed = statement.trim().trim_end_matches(';').trim();
     if trimmed.is_empty() {
@@ -352,10 +376,18 @@ fn validate_login_statement(profile: &str, statement: &str) -> Result<String, Db
 }
 
 fn validate_trusted_session_statement(profile: &str, statement: &str) -> Result<String, DbError> {
+    validate_trusted_hook_statement(profile, "trusted_session_statements", statement)
+}
+
+fn validate_trusted_hook_statement(
+    profile: &str,
+    field: &'static str,
+    statement: &str,
+) -> Result<String, DbError> {
     let trimmed = statement.trim();
     if trimmed.is_empty() {
         return Err(DbError::UnsupportedAuth(format!(
-            "profile `{profile}` contains an empty trusted_session_statements entry"
+            "profile `{profile}` contains an empty {field} entry"
         )));
     }
     Ok(trimmed.to_owned())
@@ -983,6 +1015,12 @@ mod tests {
             trusted_session_statements = [
               "BEGIN DBMS_SESSION.SET_CONTEXT('PRIVATE_NS','TOKEN','secret-token'); END;",
             ]
+            session_release_statements = [
+              "BEGIN DBMS_SESSION.SET_CONTEXT('PRIVATE_RELEASE','TOKEN','secret-release'); END;",
+            ]
+            logoff_statements = [
+              "BEGIN DBMS_SESSION.SET_CONTEXT('PRIVATE_LOGOFF','TOKEN','secret-logoff'); END;",
+            ]
             "#,
         );
         let ctx = build_session_context(&p, Some("secret-password".to_owned()), None, false)
@@ -994,11 +1032,20 @@ mod tests {
             "login statement leaked: {rendered}"
         );
         assert!(
+            !rendered.contains("secret-release")
+                && !rendered.contains("PRIVATE_RELEASE")
+                && !rendered.contains("secret-logoff")
+                && !rendered.contains("PRIVATE_LOGOFF"),
+            "release/logoff hook leaked: {rendered}"
+        );
+        assert!(
             !rendered.contains("secret-password"),
             "password leaked: {rendered}"
         );
         assert!(rendered.contains("login_statement_count"));
         assert!(rendered.contains("session_statement_count"));
+        assert!(rendered.contains("session_release_statement_count"));
+        assert!(rendered.contains("logoff_statement_count"));
     }
 
     #[test]
@@ -1015,6 +1062,54 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("empty trusted_session_statements entry")
+        );
+    }
+
+    #[test]
+    fn empty_release_and_logoff_hook_statements_are_rejected() {
+        for (field, expected) in [
+            (
+                "session_release_statements",
+                "empty session_release_statements entry",
+            ),
+            ("logoff_statements", "empty logoff_statements entry"),
+        ] {
+            let p = profile(&format!(
+                r#"
+                [[profiles]]
+                name = "dev"
+                connect_string = "localhost:1521/FREEPDB1"
+                {field} = ["  "]
+                "#
+            ));
+            let err = build_session_context(&p, None, None, false).unwrap_err();
+            assert!(err.to_string().contains(expected), "{field}: {err}");
+        }
+    }
+
+    #[test]
+    fn release_and_logoff_hooks_are_validated_and_carried_to_connect_options() {
+        let p = profile(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            session_release_statements = [
+              "  BEGIN DBMS_APPLICATION_INFO.SET_ACTION(NULL); END;  ",
+            ]
+            logoff_statements = [
+              "  BEGIN DBMS_APPLICATION_INFO.SET_CLIENT_INFO(NULL); END;  ",
+            ]
+            "#,
+        );
+        let ctx = build_session_context(&p, None, None, false).expect("context");
+        assert_eq!(
+            ctx.options.session_release_statements,
+            vec!["BEGIN DBMS_APPLICATION_INFO.SET_ACTION(NULL); END;"]
+        );
+        assert_eq!(
+            ctx.options.logoff_statements,
+            vec!["BEGIN DBMS_APPLICATION_INFO.SET_CLIENT_INFO(NULL); END;"]
         );
     }
 

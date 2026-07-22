@@ -194,6 +194,8 @@ field is unset after inheritance.
 | `login_script` | path | none | no | Path to a login script run during connection setup. Restricted to allowlisted `ALTER SESSION SET …` parameters. |
 | `login_statements` | array of strings | none | no | Inline login statements (allowlist-validated `ALTER SESSION SET …`). |
 | `trusted_session_statements` | array of strings | none | no | Trusted local session setup, authored by the profile owner and **never** accepted from agent tool calls; run verbatim after the guarded login statements. |
+| `session_release_statements` | array of strings | none | no | Trusted local pooled-session cleanup, authored by the profile owner and **never** accepted from agent tool calls; run before a clean pooled session returns to idle reuse. Failed or cancelled pooled calls are discarded instead. |
+| `logoff_statements` | array of strings | none | no | Trusted local logoff cleanup, authored by the profile owner and **never** accepted from agent tool calls; run immediately before logical Oracle logoff. |
 | `base` | string | none | no | Inherit unset fields from another profile (shallow-merge, child wins). See [Base inheritance](#base-inheritance). |
 
 ### Sub-tables

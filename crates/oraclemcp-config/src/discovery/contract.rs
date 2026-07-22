@@ -143,6 +143,16 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         help: "Trusted local session setup, authored by the profile owner, never accepted from agent tool calls.",
     },
     FieldDisposition {
+        field: "session_release_statements",
+        disposition: Disposition::Commented,
+        help: "Trusted local pooled-session release statements, authored by the profile owner, never accepted from agent tool calls.",
+    },
+    FieldDisposition {
+        field: "logoff_statements",
+        disposition: Disposition::Commented,
+        help: "Trusted local statements run immediately before logical Oracle logoff.",
+    },
+    FieldDisposition {
         field: "call_timeout_seconds",
         disposition: Disposition::Commented,
         help: "Per-round-trip Oracle call timeout, in seconds (default 30 when omitted).",
@@ -324,6 +334,8 @@ mod tests {
             login_script: Some(PathBuf::from("/dev/null")),
             login_statements: Some(vec!["ALTER SESSION SET NLS_LANGUAGE = english".to_owned()]),
             trusted_session_statements: Some(vec!["BEGIN NULL; END;".to_owned()]),
+            session_release_statements: Some(vec!["BEGIN NULL; END;".to_owned()]),
+            logoff_statements: Some(vec!["BEGIN NULL; END;".to_owned()]),
             call_timeout_seconds: Some(30),
             max_query_cost: Some(1_000),
             cumulative_query_cost_budget: Some(CumulativeQueryCostBudgetConfig {

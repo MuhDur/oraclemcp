@@ -208,6 +208,12 @@ fn render_profile_block(synth_profile: &SynthesizedProfile) -> String {
                 fd,
                 "[\"BEGIN DBMS_OUTPUT.ENABLE(500000); END;\"]",
             ),
+            "session_release_statements" => {
+                push_commented_scalar(&mut scalars, fd, "[\"BEGIN NULL; END;\"]");
+            }
+            "logoff_statements" => {
+                push_commented_scalar(&mut scalars, fd, "[\"BEGIN NULL; END;\"]");
+            }
             "call_timeout_seconds" => push_commented_scalar(&mut scalars, fd, "30"),
             "max_query_cost" => push_commented_scalar(&mut scalars, fd, "100000"),
             "connect_timeout_seconds" => push_commented_scalar(&mut scalars, fd, "20"),

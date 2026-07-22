@@ -1549,6 +1549,8 @@ fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionP
         && before.login_script == after.login_script
         && before.login_statements == after.login_statements
         && before.trusted_session_statements == after.trusted_session_statements
+        && before.session_release_statements == after.session_release_statements
+        && before.logoff_statements == after.logoff_statements
         && before.call_timeout_seconds == after.call_timeout_seconds
         && before.max_query_cost == after.max_query_cost
         && before.cumulative_query_cost_budget == after.cumulative_query_cost_budget

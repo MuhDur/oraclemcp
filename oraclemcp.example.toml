@@ -231,6 +231,19 @@ login_statements = [
 trusted_session_statements = [
   "BEGIN DBMS_OUTPUT.ENABLE(500000); END;",
 ]
+# Trusted local pooled-session cleanup, authored by the profile owner and NEVER
+# accepted from agent tool calls. Run before a clean pooled session returns to
+# idle reuse; failed or cancelled pooled calls are discarded instead.
+# Default: none.
+# session_release_statements = [
+#   "BEGIN DBMS_APPLICATION_INFO.SET_ACTION(NULL); END;",
+# ]
+# Trusted local logoff cleanup, authored by the profile owner and NEVER accepted
+# from agent tool calls. Run immediately before logical Oracle logoff.
+# Default: none.
+# logoff_statements = [
+#   "BEGIN DBMS_APPLICATION_INFO.SET_CLIENT_INFO(NULL); END;",
+# ]
 
 # [profiles.oci] — OCI / Oracle Cloud (Autonomous DB) connection fields. Optional.
 [profiles.oci]

@@ -236,6 +236,8 @@ pub fn synthesize_profiles(
             login_script: None,
             login_statements: None,
             trusted_session_statements: None,
+            session_release_statements: None,
+            logoff_statements: None,
             call_timeout_seconds: None,
             max_query_cost: None,
             cumulative_query_cost_budget: None,

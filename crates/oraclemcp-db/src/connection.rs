@@ -1429,6 +1429,12 @@ impl RustOracleConnection {
         &self.opts
     }
 
+    /// Run profile-owned pooled-session release hooks before returning this
+    /// physical session to idle reuse.
+    pub async fn run_session_release_statements(&self, cx: &Cx) -> Result<(), DbError> {
+        driver::run_session_release_statements(cx, self).await
+    }
+
     async fn take_connection(&self, cx: &Cx) -> Result<oracledb::Connection, DbError> {
         let mut guard = self
             .inner
@@ -1675,6 +1681,29 @@ mod driver {
             }),
             cqn_client_ids: SyncMutex::new(HashMap::new()),
         })
+    }
+
+    pub(super) async fn run_session_release_statements(
+        cx: &Cx,
+        adapter: &RustOracleConnection,
+    ) -> Result<(), DbError> {
+        if adapter.opts.session_release_statements.is_empty() {
+            return Ok(());
+        }
+        try_commit_section(cx, super::CLEANUP_MASKED_POLLS, async {
+            let timeout = Some(adapter.wire_limits()?.cleanup_timeout_ms());
+            let mut inner = adapter.lock_inner(cx).await?;
+            run_session_hooks(
+                cx,
+                &mut inner,
+                &adapter.opts,
+                &adapter.opts.session_release_statements,
+                "session release",
+                timeout,
+            )
+            .await
+        })
+        .await
     }
 
     async fn open_cqn_notification_receiver(
@@ -2121,15 +2150,23 @@ mod driver {
         result: Result<T, DbError>,
         statement_ordinal: usize,
     ) -> Result<T, DbError> {
+        redact_session_hook_result(result, "session setup", statement_ordinal)
+    }
+
+    pub(super) fn redact_session_hook_result<T>(
+        result: Result<T, DbError>,
+        hook_phase: &'static str,
+        statement_ordinal: usize,
+    ) -> Result<T, DbError> {
         match result {
             Ok(value) => Ok(value),
             Err(DbError::Execute(message)) => {
                 let detail = match parse_ora_code(&message) {
                     Some(code) => format!(
-                        "session setup statement {statement_ordinal} failed (ORA-{code:05}); server detail suppressed"
+                        "{hook_phase} statement {statement_ordinal} failed (ORA-{code:05}); server detail suppressed"
                     ),
                     None => format!(
-                        "session setup statement {statement_ordinal} failed; server detail suppressed"
+                        "{hook_phase} statement {statement_ordinal} failed; server detail suppressed"
                     ),
                 };
                 Err(DbError::Execute(detail))
@@ -2139,6 +2176,25 @@ mod driver {
             // its structural cancellation class for fail-fast propagation.
             Err(error) => Err(error),
         }
+    }
+
+    async fn run_session_hooks(
+        cx: &Cx,
+        inner: &mut oracledb::Connection,
+        opts: &OracleConnectOptions,
+        statements: &[String],
+        hook_phase: &'static str,
+        timeout_ms: Option<u32>,
+    ) -> Result<(), DbError> {
+        for (index, stmt) in statements.iter().enumerate() {
+            let result = inner
+                .execute_raw(cx, stmt, 0, &[], ExecuteOptions::default(), timeout_ms)
+                .await
+                .map(|_| ())
+                .map_err(|err| driver_execute_error(err, opts, hook_phase));
+            redact_session_hook_result(result, hook_phase, index + 1)?;
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5548,24 +5604,47 @@ mod driver {
                         message: reason.to_owned(),
                     });
                 }
-                let connection = slot.connection.take().ok_or_else(|| {
+                let mut connection = slot.connection.take().ok_or_else(|| {
                     DbError::Internal("thin connection is unavailable for logical close".to_owned())
                 })?;
-                let result = connection
+                let timeout = Some(
+                    super::WireLimits {
+                        call_timeout: self.opts.call_timeout,
+                        request_deadline: None,
+                        request_quota: None,
+                    }
+                    .cleanup_timeout_ms(),
+                );
+                let hook_result = run_session_hooks(
+                    cx,
+                    &mut connection,
+                    &self.opts,
+                    &self.opts.logoff_statements,
+                    "logoff",
+                    timeout,
+                )
+                .await;
+                let close_result = connection
                     .close(cx)
                     .await
                     .map_err(|err| driver_query_error(err, &self.opts, None));
-                match result {
-                    Ok(()) => {
+                match (hook_result, close_result) {
+                    (Ok(()), Ok(())) => {
                         slot.quarantine_reason =
                             Some(super::EXPLICIT_LOGOFF_CLOSED_REASON.to_owned());
                         Ok(())
                     }
-                    Err(error) => {
+                    (Err(primary), Ok(())) => {
+                        slot.quarantine_reason =
+                            Some(super::EXPLICIT_LOGOFF_CLOSED_REASON.to_owned());
+                        Err(primary)
+                    }
+                    (hook_result, Err(error)) => {
+                        let primary = hook_result.err().unwrap_or(error);
                         slot.quarantine_reason = Some(format!(
-                            "logical close consumed the thin connection after an error: {error}"
+                            "logical close consumed the thin connection after an error: {primary}"
                         ));
-                        Err(error)
+                        Err(primary)
                     }
                 }
             })
@@ -7946,6 +8025,29 @@ mod tests {
         let success = driver::redact_session_setup_result::<u64>(Ok(7), 3)
             .expect("successful setup is unchanged");
         assert_eq!(success, 7);
+    }
+
+    #[test]
+    fn session_teardown_hook_errors_discard_sql_and_server_detail() {
+        const SECRET: &str = "qa47-logoff-token-must-never-render";
+        const SQL: &str =
+            "BEGIN raise_application_error(-20001, 'qa47-logoff-token-must-never-render'); END;";
+        let raw = DbError::Execute(format!(
+            "logoff: ORA-20001: {SECRET}\nORA-06512: at line 1; SQL={SQL}"
+        ));
+
+        let error = driver::redact_session_hook_result::<()>(Err(raw), "logoff", 4)
+            .expect_err("the fourth logoff hook must remain a failure");
+        let rendered = error.to_string();
+        assert!(rendered.contains("logoff statement 4 failed"), "{rendered}");
+        assert!(rendered.contains("ORA-20001"), "{rendered}");
+        assert!(rendered.contains("server detail suppressed"), "{rendered}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        assert!(!rendered.contains(SQL), "statement leaked: {rendered}");
+        assert!(
+            !rendered.contains("ORA-06512"),
+            "server detail leaked: {rendered}"
+        );
     }
 
     #[test]

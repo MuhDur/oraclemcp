@@ -473,13 +473,6 @@ impl OraclePool {
                 _ => first_result,
             };
 
-            // Any final failure may have crossed an Oracle boundary and must
-            // be discarded. Successful calls are additionally pinged before
-            // check-in so a session killed after checkout is not returned idle.
-            let discard_after_call = match &result {
-                Err(_) => true,
-                Ok(_) => self.manager.has_broken(cx, checkout.connection()).await,
-            };
             let retry_fresh = matches!(
                 &result,
                 Err(error)
@@ -495,6 +488,24 @@ impl OraclePool {
                 .connection()
                 .set_request_deadline(cx, previous_deadline);
             let restore_error = quota_restore.err().or_else(|| deadline_restore.err());
+            let release_error = if result.is_ok() && restore_error.is_none() {
+                checkout
+                    .connection()
+                    .run_session_release_statements(cx)
+                    .await
+                    .err()
+            } else {
+                None
+            };
+            // Any final failure may have crossed an Oracle boundary and must
+            // be discarded. A successful call returns to idle only after
+            // request limits are restored, operator-owned release hooks pass,
+            // and a final liveness check succeeds.
+            let discard_after_call = match &result {
+                Err(_) => true,
+                Ok(_) if release_error.is_some() => true,
+                Ok(_) => self.manager.has_broken(cx, checkout.connection()).await,
+            };
             let discard = discard_after_call || restore_error.is_some();
             if discard && let Err(error) = checkout.connection().close(cx).await {
                 tracing::warn!(error = %error, "discarded pooled Oracle session logical close failed");
@@ -509,7 +520,10 @@ impl OraclePool {
                 Err(primary) => Err(primary),
                 Ok(value) => match restore_error {
                     Some(error) => Err(error),
-                    None => Ok(value),
+                    None => match release_error {
+                        Some(error) => Err(error),
+                        None => Ok(value),
+                    },
                 },
             };
         }

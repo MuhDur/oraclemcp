@@ -994,6 +994,8 @@ fn redacted_profile_snapshot(
                 &profile.login_script,
                 &profile.login_statements,
                 &profile.trusted_session_statements,
+                &profile.session_release_statements,
+                &profile.logoff_statements,
             ),
         ),
         thin_routing_revision: key.revision(

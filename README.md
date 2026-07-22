@@ -777,6 +777,11 @@ local session initialization such as `DBMS_APPLICATION_INFO`, application
 contexts, or `DBMS_OUTPUT`; they are never accepted from agent tool calls, and
 they keep environment-specific conventions in private config rather than in the
 open-source core.
+`session_release_statements` and `logoff_statements` are the matching teardown
+hooks for profile-owner cleanup: release hooks run only before a successful
+pooled call returns its physical session to idle reuse, while failed or
+cancelled pooled calls are discarded; logoff hooks run immediately before
+logical Oracle logoff.
 The `oracle_connection_info` tool reports allow-listed connection posture
 (`backend`, connection strategy, server version, role/open mode, read-only
 status). Session identity and client topology fields such as `os_user`,

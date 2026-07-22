@@ -816,6 +816,13 @@ pub struct ConnectionProfile {
     /// guarded login statements. These are never agent supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_session_statements: Option<Vec<String>>,
+    /// Operator-owned statements run before a checked-out pooled session is
+    /// returned to idle reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_release_statements: Option<Vec<String>>,
+    /// Operator-owned statements run immediately before logical Oracle logoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logoff_statements: Option<Vec<String>>,
     /// Optional per-round-trip Oracle call timeout, in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_timeout_seconds: Option<u64>,
@@ -927,6 +934,9 @@ impl std::fmt::Debug for ConnectionProfile {
         let redact_path = |value: &Option<PathBuf>| value.as_ref().map(|_| "<redacted>");
         let login_statement_count = self.login_statements.as_ref().map(Vec::len);
         let trusted_statement_count = self.trusted_session_statements.as_ref().map(Vec::len);
+        let session_release_statement_count =
+            self.session_release_statements.as_ref().map(Vec::len);
+        let logoff_statement_count = self.logoff_statements.as_ref().map(Vec::len);
         let app_context_count = self.app_context.as_ref().map(Vec::len);
         let masking_rule_count = self.masking.as_ref().map(|masking| masking.rules.len());
         let sql_policy_rule_count = self.sql_policy.as_ref().map(|policy| policy.rules.len());
@@ -939,6 +949,11 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("login_script", &redact_path(&self.login_script))
             .field("login_statement_count", &login_statement_count)
             .field("trusted_statement_count", &trusted_statement_count)
+            .field(
+                "session_release_statement_count",
+                &session_release_statement_count,
+            )
+            .field("logoff_statement_count", &logoff_statement_count)
             .field("call_timeout_seconds", &self.call_timeout_seconds)
             .field("max_query_cost", &self.max_query_cost)
             .field(
@@ -1095,6 +1110,8 @@ impl ConnectionProfile {
             login_script,
             login_statements,
             trusted_session_statements,
+            session_release_statements,
+            logoff_statements,
             call_timeout_seconds,
             max_query_cost,
             cumulative_query_cost_budget,
@@ -1306,6 +1323,8 @@ mod tests {
             login_script: None,
             login_statements: None,
             trusted_session_statements: None,
+            session_release_statements: None,
+            logoff_statements: None,
             call_timeout_seconds: None,
             max_query_cost: None,
             cumulative_query_cost_budget: None,
@@ -2431,6 +2450,10 @@ mod tests {
         ]);
         prof.trusted_session_statements =
             Some(vec!["BEGIN DBMS_OUTPUT.ENABLE(500000); END;".to_owned()]);
+        prof.session_release_statements = Some(vec![
+            "BEGIN release_secret_context(:not_a_bind); END;".to_owned(),
+        ]);
+        prof.logoff_statements = Some(vec!["BEGIN logoff_secret_context; END;".to_owned()]);
         prof.oci = Some(OciConfig {
             wallet_location: Some("/wallets/private".into()),
             wallet_password_ref: Some("env:WALLET_PASSWORD".to_owned()),
@@ -2484,6 +2507,8 @@ mod tests {
             "/home/operator/login.sql",
             "CURRENT_SCHEMA = PRIVATE",
             "DBMS_OUTPUT",
+            "release_secret_context",
+            "logoff_secret_context",
             "/wallets/private",
             "WALLET_PASSWORD",
             "CN=private-db",

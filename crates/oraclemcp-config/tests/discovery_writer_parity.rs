@@ -57,6 +57,8 @@ fn fully_populated_profile() -> ConnectionProfile {
         login_script: Some(PathBuf::from("/dev/null")),
         login_statements: Some(vec!["ALTER SESSION SET NLS_LANGUAGE = english".to_owned()]),
         trusted_session_statements: Some(vec!["BEGIN NULL; END;".to_owned()]),
+        session_release_statements: Some(vec!["BEGIN NULL; END;".to_owned()]),
+        logoff_statements: Some(vec!["BEGIN NULL; END;".to_owned()]),
         call_timeout_seconds: Some(30),
         max_query_cost: Some(1_000),
         cumulative_query_cost_budget: Some(CumulativeQueryCostBudgetConfig {
