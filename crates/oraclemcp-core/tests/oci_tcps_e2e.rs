@@ -233,9 +233,14 @@ fn profile_wallet_and_iam_token_reach_local_tcps_terminator() {
 
     let mut ctx =
         build_session_context(&profile, None, None, false).expect("profile maps to options");
-    inject_iam_token(&profile, &mut ctx.options).expect("token file injects over wallet TCPS");
+    inject_iam_token(&profile, &mut ctx.options)
+        .expect("token file configures a refreshable source over wallet TCPS");
     assert_eq!(ctx.options.connect_string, "LOCAL_TCPS");
-    assert_eq!(ctx.options.iam_token.as_deref(), Some(TOKEN));
+    assert!(
+        ctx.options.iam_token.is_none(),
+        "a server profile never stores the JWT"
+    );
+    assert!(ctx.options.iam_token_source.is_some());
     assert_eq!(
         ctx.options.wallet_location.as_deref(),
         Some(wallet.as_path())

@@ -1,9 +1,10 @@
 //! Server-side OCI IAM database-token resolution (beads B2.2a / B2.2b): the three
 //! server token sources — an **environment variable**, a **token file**, and a
-//! **command** (`token_exec`) — that feed a pre-fetched JWT database token into
-//! [`OracleConnectOptions::iam_token`](oraclemcp_db::OracleConnectOptions), which
-//! the B2 adapter then hands to the driver via `with_access_token` (TCPS-enforced;
-//! a token on a plaintext transport is refused).
+//! **command** (`token_exec`) — that configure a refreshable source in
+//! [`OracleConnectOptions`](oraclemcp_db::OracleConnectOptions). The B2 adapter
+//! gives that source to the driver, which fetches a fresh JWT for **each physical
+//! connection attempt** (TCPS-enforced; a token on a plaintext transport is
+//! refused before the source is consulted).
 //!
 //! Discipline (mirrors [`oraclemcp_auth::secrets`]): a token is an **external
 //! ref**. This module holds only the *reference* (an env-var NAME, a file PATH, or
@@ -39,15 +40,14 @@
 //!   bytes.
 //!
 //! The richer proactive-refresh seam (`oraclemcp_db::IamTokenSource` /
-//! `ensure_fresh_token`, for a future OCI-SDK source) is unchanged; these simple
-//! sources use the static [`with_access_token`] path and re-read on each connect,
-//! so a separate skew-based refresher is unnecessary for them.
-//!
-//! [`with_access_token`]: https://docs.rs/oracledb
+//! `ensure_fresh_token`, for a future OCI-SDK source) is unchanged. These simple
+//! sources implement `oraclemcp_db::RefreshableIamTokenSource`, keeping the
+//! driver itself behind the database adapter seam.
 
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -63,7 +63,10 @@ use std::{
 
 use command_group::{CommandGroup, GroupChild};
 use oraclemcp_config::{ConnectionProfile, OciConfig};
-use oraclemcp_db::OracleConnectOptions;
+use oraclemcp_db::{
+    IamTokenFuture, IamTokenRefreshError, IamTokenSourceHandle, OracleConnectOptions,
+    RefreshableIamTokenSource,
+};
 use thiserror::Error;
 use wait_timeout::ChildExt;
 
@@ -161,6 +164,38 @@ pub enum IamTokenError {
     /// The resolved proof-of-possession private key is empty (whitespace-only).
     #[error("resolved IAM token key from {0} is empty")]
     KeyEmpty(&'static str),
+    /// A caller attempted to combine a static token with the server's
+    /// refreshable source. The source path refuses this rather than allowing a
+    /// stale static credential to take precedence.
+    #[error("IAM token source cannot be combined with a static IAM token")]
+    StaticTokenConflict,
+}
+
+impl IamTokenError {
+    /// Non-secret reason retained in the operator audit/log path when a source
+    /// refresh fails. The public driver error deliberately receives only a
+    /// coarser redacted class.
+    const fn operator_reason(&self) -> &'static str {
+        match self {
+            Self::EnvMissing(_) => "env-missing",
+            Self::FileUnreadable(_) => "file-unreadable",
+            Self::Empty(_) => "empty",
+            Self::NonTcpsTransport => "non-tcps",
+            Self::TransportUnresolved => "transport-unresolved",
+            Self::AmbiguousSource => "ambiguous-source",
+            Self::ExecEmptyCommand => "exec-empty-command",
+            Self::ExecSpawnFailed(_) => "exec-spawn-failed",
+            Self::ExecTimedOut(_) => "exec-timed-out",
+            Self::ExecNonZeroExit(_) => "exec-nonzero-exit",
+            Self::ExecOutputTooLarge => "exec-output-too-large",
+            Self::ExecBadCharset => "exec-bad-charset",
+            Self::AmbiguousKeySource => "ambiguous-key-source",
+            Self::KeyFileUnreadable(_) => "key-file-unreadable",
+            Self::KeyEnvMissing(_) => "key-env-missing",
+            Self::KeyEmpty(_) => "key-empty",
+            Self::StaticTokenConflict => "static-token-conflict",
+        }
+    }
 }
 
 /// A simple server-side IAM database-token source: an environment variable, a
@@ -280,6 +315,43 @@ impl ServerIamTokenSource {
                 run_token_exec(argv)
             }
         }
+    }
+}
+
+impl RefreshableIamTokenSource for ServerIamTokenSource {
+    fn get_token(&self) -> IamTokenFuture<'_> {
+        Box::pin(async move {
+            self.get_token().map_err(|error| {
+                let reason = error.operator_reason();
+                let class = match error {
+                    IamTokenError::Empty(_)
+                    | IamTokenError::ExecOutputTooLarge
+                    | IamTokenError::ExecBadCharset => IamTokenRefreshError::InvalidToken,
+                    IamTokenError::ExecTimedOut(_) => IamTokenRefreshError::TimedOut,
+                    IamTokenError::EnvMissing(_)
+                    | IamTokenError::FileUnreadable(_)
+                    | IamTokenError::ExecEmptyCommand
+                    | IamTokenError::ExecSpawnFailed(_)
+                    | IamTokenError::ExecNonZeroExit(_)
+                    | IamTokenError::NonTcpsTransport
+                    | IamTokenError::TransportUnresolved
+                    | IamTokenError::AmbiguousSource
+                    | IamTokenError::AmbiguousKeySource
+                    | IamTokenError::KeyFileUnreadable(_)
+                    | IamTokenError::KeyEnvMissing(_)
+                    | IamTokenError::KeyEmpty(_)
+                    | IamTokenError::StaticTokenConflict => IamTokenRefreshError::SourceUnavailable,
+                };
+                // Keep source-specific failures in operator telemetry only. The
+                // driver bridge receives only this redacted failure class.
+                tracing::warn!(
+                    reason,
+                    class = class.as_str(),
+                    "IAM token refresh failed closed"
+                );
+                class
+            })
+        })
     }
 }
 
@@ -485,10 +557,10 @@ where
 /// retry. The direct child is reaped, and every fail-closed path logs its *reason*
 /// without the token or the stdout bytes.
 ///
-/// This runs in the **synchronous** connect path (`inject_iam_token` →
-/// `resolve_profile_options_with`), so it uses `std::thread` + `wait_timeout` and
-/// introduces **no** `block_on`, `tokio::spawn`, or async-runtime dependency — the
-/// concurrency-audit contract stays green.
+/// The refreshable driver source calls this while opening a physical connection.
+/// It uses `std::thread` + `wait_timeout` and introduces **no** `block_on`,
+/// `tokio::spawn`, or async-runtime dependency — the concurrency-audit contract
+/// stays green.
 fn run_token_exec(argv: &[String]) -> Result<String, IamTokenError> {
     run_token_exec_with_timeout(argv, EXEC_TIMEOUT)
 }
@@ -641,24 +713,30 @@ fn run_token_exec_with_timeout_inner(
     Ok(trimmed.to_owned())
 }
 
-/// Resolve the server-side IAM database token for `profile` (env/file source)
-/// and inject it into `options.iam_token`, so the B2 adapter wires it through
-/// `with_access_token`. A **no-op** when the profile does not use IAM-token auth.
+/// Configure the server-side IAM source for `profile` without fetching a token.
+///
+/// The source keeps only an env-var name, file path, or command arg-array. The
+/// B2 adapter fetches the actual token for every physical driver connection, so
+/// a refresh failure cannot fall through to password authentication or a stale
+/// static token. A **no-op** when the profile does not use IAM-token auth.
 ///
 /// Fails closed if `use_iam_token` is set but (a) the transport is not provably
 /// TCPS (a token must never travel in clear text — refused here as defense in
-/// depth, and again by the driver at connect), or (b) the configured source
-/// yields an empty/missing token. No error carries the token value.
-pub fn inject_iam_token(
+/// depth, and again by the driver at connect), or (b) the key reference is
+/// malformed. Token reads happen only in the driver source; no error carries a
+/// token or signing-key value.
+pub fn configure_iam_token_source(
     profile: &ConnectionProfile,
     options: &mut OracleConnectOptions,
 ) -> Result<(), IamTokenError> {
-    inject_iam_token_with(profile, options, |name| std::env::var(name).ok())
+    configure_iam_token_source_with(profile, options, |name| std::env::var(name).ok())
 }
 
-/// [`inject_iam_token`] with an injected environment lookup (deterministic
-/// tests). File resolution still reads the real filesystem.
-pub fn inject_iam_token_with(
+/// [`configure_iam_token_source`] with an injected environment lookup for the
+/// proof-of-possession key (deterministic tests). The token source itself is not
+/// consulted here; it reads the live reference only when the driver opens a
+/// physical connection.
+pub fn configure_iam_token_source_with(
     profile: &ConnectionProfile,
     options: &mut OracleConnectOptions,
     env_lookup: impl Fn(&str) -> Option<String>,
@@ -689,24 +767,51 @@ pub fn inject_iam_token_with(
     let Some(source) = ServerIamTokenSource::from_oci(oci)? else {
         return Ok(());
     };
-    let token = source.get_token_with(&env_lookup)?;
-    options.iam_token = Some(token);
+    if options.iam_token.is_some() {
+        tracing::warn!(
+            reason = "static-token-conflict",
+            "IAM token source refused (fail-closed)"
+        );
+        return Err(IamTokenError::StaticTokenConflict);
+    }
     // OCI IAM *database* tokens are proof-of-possession: resolve the bound private
     // key (a `token_key_file` path or `token_key_env` variable) so the driver can
     // sign the auth header. Absent for a plain OAuth2 bearer token; a database
     // token without its key fails closed later with ORA-01017 at connect.
-    if let Some(key) = resolve_iam_token_key(oci, &env_lookup)? {
-        options.iam_token_private_key = Some(key);
-    }
+    let private_key = resolve_iam_token_key(oci, &env_lookup)?;
+    options.iam_token_source = Some(IamTokenSourceHandle::new(Arc::new(source)));
+    options.iam_token_private_key = private_key;
     Ok(())
+}
+
+/// Backwards-compatible name for [`configure_iam_token_source`].
+///
+/// Despite the historic name, this no longer fetches or stores a token. New
+/// callers should use [`configure_iam_token_source`] so that contract is clear.
+pub fn inject_iam_token(
+    profile: &ConnectionProfile,
+    options: &mut OracleConnectOptions,
+) -> Result<(), IamTokenError> {
+    configure_iam_token_source(profile, options)
+}
+
+/// Backwards-compatible name for [`configure_iam_token_source_with`].
+#[cfg(test)]
+pub fn inject_iam_token_with(
+    profile: &ConnectionProfile,
+    options: &mut OracleConnectOptions,
+    env_lookup: impl Fn(&str) -> Option<String>,
+) -> Result<(), IamTokenError> {
+    configure_iam_token_source_with(profile, options, env_lookup)
 }
 
 /// Resolve the OCI IAM database-token proof-of-possession private key (PKCS#8
 /// PEM) from the profile's `token_key_file` (path) or `token_key_env` (variable
-/// name) reference, re-read fresh on every connect. The two are mutually
+/// name) reference while a profile is configured. The two are mutually
 /// exclusive. Returns `Ok(None)` when neither is configured (a plain OAuth2
-/// bearer token). The key is never persisted or logged; only path/name
-/// references appear in errors.
+/// bearer token). The key is held only in the transient in-memory connect
+/// options and is never persisted or logged; only path/name references appear
+/// in errors.
 fn resolve_iam_token_key(
     oci: &OciConfig,
     env_lookup: impl Fn(&str) -> Option<String>,
@@ -1007,8 +1112,13 @@ mod tests {
         let profile = tcps_profile();
         let mut opts = connect_options_for(&profile);
         let env = env_map(&[(IAM_TOKEN_ENV, "resolved.jwt.token")]);
-        inject_iam_token_with(&profile, &mut opts, &env).expect("inject over tcps");
-        assert_eq!(opts.iam_token.as_deref(), Some("resolved.jwt.token"));
+        configure_iam_token_source_with(&profile, &mut opts, &env)
+            .expect("configure source over tcps");
+        assert!(
+            opts.iam_token.is_none(),
+            "a server source never stores a JWT"
+        );
+        assert!(opts.iam_token_source.is_some());
     }
 
     #[test]
@@ -1031,10 +1141,12 @@ mod tests {
         .expect("profile");
         let mut opts = connect_options_for(&profile);
         let env = env_map(&[(IAM_TOKEN_ENV, "SECRET_JWT_SENTINEL.payload.sig")]);
-        let err = inject_iam_token_with(&profile, &mut opts, &env).expect_err("non-tcps refused");
+        let err = configure_iam_token_source_with(&profile, &mut opts, &env)
+            .expect_err("non-tcps refused");
         assert_eq!(err, IamTokenError::NonTcpsTransport);
-        // Fail-closed: no token was injected.
+        // Fail-closed: neither a token nor a source was configured.
         assert!(opts.iam_token.is_none());
+        assert!(opts.iam_token_source.is_none());
         // The refusal must not echo the token.
         assert!(!err.to_string().contains("SECRET_JWT_SENTINEL"));
     }
@@ -1055,8 +1167,25 @@ mod tests {
         .next()
         .expect("profile");
         let mut opts = connect_options_for(&profile);
-        inject_iam_token_with(&profile, &mut opts, env_map(&[])).expect("noop");
+        configure_iam_token_source_with(&profile, &mut opts, env_map(&[])).expect("noop");
         assert!(opts.iam_token.is_none());
+        assert!(opts.iam_token_source.is_none());
+    }
+
+    #[test]
+    fn configure_refuses_a_static_token_instead_of_overriding_refresh() {
+        let profile = tcps_profile();
+        let mut opts = connect_options_for(&profile);
+        opts.iam_token = Some("STATIC_TOKEN_SENTINEL".to_owned());
+
+        let err = configure_iam_token_source_with(&profile, &mut opts, env_map(&[]))
+            .expect_err("static token and refreshable source conflict");
+        assert_eq!(err, IamTokenError::StaticTokenConflict);
+        assert!(opts.iam_token_source.is_none());
+        assert!(
+            !err.to_string().contains("STATIC_TOKEN_SENTINEL"),
+            "a configuration refusal must not expose the static token"
+        );
     }
 
     #[test]
@@ -1449,23 +1578,35 @@ mod tests {
     }
 
     #[test]
-    fn inject_exec_over_tcps_sets_the_token() {
-        let printf = coreutil("printf");
+    fn configure_exec_over_tcps_does_not_run_until_a_physical_connect() {
+        let marker = std::env::temp_dir().join(format!(
+            "oraclemcp-iam-source-config-canary-{}-{:?}.marker",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let touch = coreutil("touch");
         let profile = tcps_profile_with_oci(&format!(
             r#"
             use_iam_token = true
-            token_exec = ["{printf}", "resolved.exec.jwt"]
-            "#
+            token_exec = ["{touch}", "{marker}"]
+            "#,
+            marker = marker.display(),
         ));
         let mut opts = connect_options_for(&profile);
-        inject_iam_token_with(&profile, &mut opts, env_map(&[])).expect("inject over tcps");
-        assert_eq!(opts.iam_token.as_deref(), Some("resolved.exec.jwt"));
+        configure_iam_token_source_with(&profile, &mut opts, env_map(&[]))
+            .expect("configure source over tcps");
+        assert!(opts.iam_token.is_none());
+        assert!(opts.iam_token_source.is_some());
+        assert!(
+            !marker.exists(),
+            "source configuration must not pre-fetch a token or execute token_exec"
+        );
     }
 
     #[test]
     fn inject_resolves_the_pop_private_key_from_env() {
         // An OCI IAM *database* token: the profile names both the token and the
-        // bound private key. inject must wire the key through so the driver can
+        // bound private key. Configuration must wire the key through so the driver can
         // sign the proof-of-possession header.
         let profile = tcps_profile_with_oci(
             r#"
@@ -1475,7 +1616,7 @@ mod tests {
             "#,
         );
         let mut opts = connect_options_for(&profile);
-        inject_iam_token_with(
+        configure_iam_token_source_with(
             &profile,
             &mut opts,
             env_map(&[
@@ -1486,8 +1627,12 @@ mod tests {
                 ),
             ]),
         )
-        .expect("inject over tcps");
-        assert_eq!(opts.iam_token.as_deref(), Some("header.payload.sig"));
+        .expect("configure source over tcps");
+        assert!(
+            opts.iam_token.is_none(),
+            "the source retains no resolved token"
+        );
+        assert!(opts.iam_token_source.is_some());
         assert!(
             opts.iam_token_private_key
                 .as_deref()
@@ -1514,12 +1659,8 @@ mod tests {
             key_path.display().to_string().replace('\\', "/")
         ));
         let mut opts = connect_options_for(&profile);
-        inject_iam_token_with(
-            &profile,
-            &mut opts,
-            env_map(&[("OMCP_TEST_IAM_TOKEN", "header.payload.sig")]),
-        )
-        .expect("inject over tcps");
+        configure_iam_token_source_with(&profile, &mut opts, env_map(&[]))
+            .expect("configure source over tcps");
         let _ = std::fs::remove_file(&key_path);
         assert!(
             opts.iam_token_private_key
@@ -1539,7 +1680,7 @@ mod tests {
             "#,
         );
         let mut opts = connect_options_for(&profile);
-        let err = inject_iam_token_with(
+        let err = configure_iam_token_source_with(
             &profile,
             &mut opts,
             env_map(&[("OMCP_TEST_IAM_TOKEN", "header.payload.sig")]),
@@ -1559,13 +1700,14 @@ mod tests {
             "#,
         );
         let mut opts = connect_options_for(&profile);
-        inject_iam_token_with(
+        configure_iam_token_source_with(
             &profile,
             &mut opts,
             env_map(&[("OMCP_TEST_IAM_TOKEN", "header.payload.sig")]),
         )
-        .expect("inject");
-        assert!(opts.iam_token.is_some());
+        .expect("configure source");
+        assert!(opts.iam_token.is_none());
+        assert!(opts.iam_token_source.is_some());
         assert!(opts.iam_token_private_key.is_none());
     }
 
@@ -1600,10 +1742,11 @@ mod tests {
         .next()
         .expect("profile");
         let mut opts = connect_options_for(&profile);
-        let err =
-            inject_iam_token_with(&profile, &mut opts, env_map(&[])).expect_err("non-tcps refused");
+        let err = configure_iam_token_source_with(&profile, &mut opts, env_map(&[]))
+            .expect_err("non-tcps refused");
         assert_eq!(err, IamTokenError::NonTcpsTransport);
         assert!(opts.iam_token.is_none());
+        assert!(opts.iam_token_source.is_none());
         // Give any (erroneously) spawned child a beat, then prove it never ran.
         assert!(
             !marker.exists(),
@@ -1624,18 +1767,23 @@ mod tests {
         );
         let mut opts = connect_options_for(&profile);
         let lookups = std::cell::Cell::new(0usize);
-        let err = inject_iam_token_with(&profile, &mut opts, |_| {
+        let err = configure_iam_token_source_with(&profile, &mut opts, |_| {
             lookups.set(lookups.get() + 1);
             Some("must.not.be.resolved".to_owned())
         })
         .expect_err("the first selected address is plaintext");
         assert_eq!(err, IamTokenError::NonTcpsTransport);
-        assert_eq!(lookups.get(), 0, "token source must not be consulted");
+        assert_eq!(
+            lookups.get(),
+            0,
+            "key lookup must not precede transport proof"
+        );
         assert!(opts.iam_token.is_none());
+        assert!(opts.iam_token_source.is_none());
     }
 
     #[test]
-    fn tcps_first_mixed_descriptor_resolves_the_token() {
+    fn tcps_first_mixed_descriptor_configures_a_source_without_token_io() {
         let mut profile = tcps_profile();
         profile.connect_string = Some(
             "(DESCRIPTION=(ADDRESS_LIST=\
@@ -1645,13 +1793,19 @@ mod tests {
                 .to_owned(),
         );
         let mut opts = connect_options_for(&profile);
-        inject_iam_token_with(
-            &profile,
-            &mut opts,
-            env_map(&[(IAM_TOKEN_ENV, "selected.tcps.token")]),
-        )
+        let lookups = std::cell::Cell::new(0usize);
+        configure_iam_token_source_with(&profile, &mut opts, |_| {
+            lookups.set(lookups.get() + 1);
+            Some("must.not.be.resolved.at-config-time".to_owned())
+        })
         .expect("the selected first address is TCPS");
-        assert_eq!(opts.iam_token.as_deref(), Some("selected.tcps.token"));
+        assert_eq!(
+            lookups.get(),
+            0,
+            "token source must not be read at configuration"
+        );
+        assert!(opts.iam_token.is_none());
+        assert!(opts.iam_token_source.is_some());
     }
 
     #[test]
@@ -1664,23 +1818,24 @@ mod tests {
         profile.oci.as_mut().expect("OCI").wallet_location = Some(tns_fixtures_dir());
         let mut opts = connect_options_for(&profile);
         let lookups = std::cell::Cell::new(0usize);
-        let err = inject_iam_token_with(&profile, &mut opts, |_| {
+        let err = configure_iam_token_source_with(&profile, &mut opts, |_| {
             lookups.set(lookups.get() + 1);
             Some("must.not.be.resolved".to_owned())
         })
         .expect_err("plaintext alias is refused");
         assert_eq!(err, IamTokenError::NonTcpsTransport);
-        assert_eq!(lookups.get(), 0, "alias proof precedes token lookup");
+        assert_eq!(lookups.get(), 0, "alias proof precedes key lookup");
 
         profile.connect_string = Some("primary_tcps".to_owned());
         let mut opts = connect_options_for(&profile);
-        inject_iam_token_with(
+        configure_iam_token_source_with(
             &profile,
             &mut opts,
             env_map(&[(IAM_TOKEN_ENV, "alias.tcps.token")]),
         )
-        .expect("TCPS alias resolves before token lookup");
-        assert_eq!(opts.iam_token.as_deref(), Some("alias.tcps.token"));
+        .expect("TCPS alias configures before token lookup");
+        assert!(opts.iam_token.is_none());
+        assert!(opts.iam_token_source.is_some());
     }
 
     #[test]
@@ -1697,14 +1852,15 @@ mod tests {
             profile.oci.as_mut().expect("OCI").wallet_location = Some(wallet_location);
             let mut opts = connect_options_for(&profile);
             let lookups = std::cell::Cell::new(0usize);
-            let err = inject_iam_token_with(&profile, &mut opts, |_| {
+            let err = configure_iam_token_source_with(&profile, &mut opts, |_| {
                 lookups.set(lookups.get() + 1);
                 Some("must.not.be.resolved".to_owned())
             })
             .expect_err("unresolved target is refused");
             assert_eq!(err, IamTokenError::TransportUnresolved);
-            assert_eq!(lookups.get(), 0, "token source must not be consulted");
+            assert_eq!(lookups.get(), 0, "key lookup must not precede target proof");
             assert!(opts.iam_token.is_none());
+            assert!(opts.iam_token_source.is_none());
         }
     }
 
@@ -1718,10 +1874,11 @@ mod tests {
             "#,
         );
         let mut opts = connect_options_for(&profile);
-        let err = inject_iam_token_with(&profile, &mut opts, env_map(&[]))
+        let err = configure_iam_token_source_with(&profile, &mut opts, env_map(&[]))
             .expect_err("ambiguous source refused");
         assert_eq!(err, IamTokenError::AmbiguousSource);
         assert!(opts.iam_token.is_none());
+        assert!(opts.iam_token_source.is_none());
     }
 
     /// EXEC-FUZZ corpus: every adversarial `token_exec` case MUST fail closed —
