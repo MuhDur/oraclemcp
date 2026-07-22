@@ -21,6 +21,7 @@ DRIVER_ROOT="${ORACLEMCP_DRIVER_ROOT:-$ROOT/../rust-oracledb}"
 DRIVER_CONTAINER="$DRIVER_ROOT/scripts/container.sh"
 DRIVER_BOOTSTRAP="$DRIVER_ROOT/scripts/bootstrap_live_schema.sh"
 CAPABILITY_FIXTURES_SQL="$ROOT/scripts/rig/oracle_l1_capabilities.sql"
+PRIVILEGE_MATRIX_SQL="$ROOT/scripts/rig/oracle_l1_privilege_matrix.sql"
 READY_TIMEOUT_SECS="${ORACLEMCP_RIG_L1_READY_TIMEOUT_SECS:-300}"
 BOOTSTRAP_TIMEOUT_SECS="${ORACLEMCP_RIG_L1_BOOTSTRAP_TIMEOUT_SECS:-300}"
 # The driver bootstrap owns this throwaway principal. Keep the D2 fixture
@@ -43,7 +44,7 @@ Rig L1 Oracle container harness.
 
 Usage:
   bash scripts/rig/oracle_l1.sh run --log
-  bash scripts/rig/oracle_l1.sh <up|wait|bootstrap|fixtures|smoke|drcp-identity|down|run> [--log|--dry-run]
+  bash scripts/rig/oracle_l1.sh <up|wait|bootstrap|fixtures|smoke|drcp-identity|privilege-matrix|down|run> [--log|--dry-run]
 
 `run` is the one-command L1 cycle: start stopped existing containers, wait for
 the Oracle readiness sentinel, seed the reusable driver schema, smoke-query
@@ -54,6 +55,12 @@ running lanes untouched.
 `drcp-identity` runs the two-profile DRCP reuse assertion against FREE 23ai.
 It intentionally fails until B14a clears identity before setting it; that red
 result is the fixture's proof that it can catch the cross-profile bleed.
+
+`privilege-matrix` provisions the D4 fixture (no-flashback + catalog-blind
+principals) on FREE 23ai and prints the ORACLEMCP_D4_* environment the live test
+crates/oraclemcp-db/tests/privilege_matrix_live.rs consumes. Eval its stdout to
+export that environment. The two test cases stay #[ignore]d expected-red until
+A3a/A3b and A1a land.
 
 Environment:
   ORACLEMCP_DRIVER_ROOT                 rust-oracledb checkout (default sibling)
@@ -384,6 +391,74 @@ drcp_identity_fixture() {
   e2e_log_event 'drcp_identity_fixture' 'assert' 'pass' "$(( $(e2e_epoch_ms) - started ))" 'lane=free23 DRCP profile isolation held'
 }
 
+# Host port each lane's Oracle listener is published on. Mirrors the container
+# names (oracle-xe18-1518, oracle-xe21-1520) and the free23 mapping to 1522.
+lane_host_port() {
+  case "$1" in
+    xe18) printf '%s\n' '1518' ;;
+    xe21) printf '%s\n' '1520' ;;
+    free23) printf '%s\n' '1522' ;;
+    *) return 1 ;;
+  esac
+}
+
+# D4 — provision the privilege-matrix fixture (no-flashback + catalog-blind
+# principals) and emit the environment the live Rust test consumes.
+#
+# The fixture SQL runs as SYSDBA inside the PDB: it recreates the three
+# ORACLEMCP_D4_* principals, proves from the catalog that the guarded table has
+# exactly one enabled SELECT VPD policy and one virtual column, and prints
+# `oraclemcp-d4-catalog-object-id=<id>`. This command surfaces that verified
+# object id plus the restricted-principal DSN/credentials so the live test
+# (crates/oraclemcp-db/tests/privilege_matrix_live.rs) can run against the exact
+# identity the rig proved — never against an accidentally privileged account.
+#
+# The two test cases are #[ignore]d expected-red until A3a/A3b and A1a land; this
+# command provisions the fixture and records the failing half, it does not flip
+# them green.
+privilege_matrix_fixture() {
+  local lane='free23'
+  local container pdb host_port started output fixture_exit object_id
+  container="$(lane_container "$lane")"
+  pdb="$(lane_pdb "$lane")"
+  host_port="$(lane_host_port "$lane")"
+  if [ "$E2E_DRY_RUN" = '1' ]; then
+    e2e_log_event 'privilege_matrix_fixture' 'assert' 'skipped' 0 "lane=$lane dry-run"
+    return 0
+  fi
+  [ -r "$PRIVILEGE_MATRIX_SQL" ] || e2e_finish_fail "D4 privilege-matrix fixture SQL is not readable: $PRIVILEGE_MATRIX_SQL"
+  container_running "$container" || e2e_finish_fail "lane=$lane container is not running: $container"
+  started="$(e2e_epoch_ms)"
+  e2e_log_event 'privilege_matrix_fixture' 'act' 'running' 0 "lane=$lane schema=ORACLEMCP_D4_*"
+  set +e
+  output="$( { printf 'alter session set container=%s;\n' "$pdb"; cat "$PRIVILEGE_MATRIX_SQL"; } \
+    | timeout -k 10 "$BOOTSTRAP_TIMEOUT_SECS" docker exec -i "$container" sqlplus -S -L "/ as sysdba" 2>&1 )"
+  fixture_exit=$?
+  set -e
+  if [ "$fixture_exit" -ne 0 ]; then
+    e2e_log_event 'privilege_matrix_fixture' 'assert' 'fail' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane D4 fixture load failed"
+    printf '%s\n' "$output" >&2
+    e2e_finish_fail "lane=$lane D4 privilege-matrix fixture load failed"
+  fi
+  object_id="$(printf '%s\n' "$output" | grep -oE 'oraclemcp-d4-catalog-object-id=[0-9]+' | head -1 | cut -d= -f2)"
+  if [ -z "$object_id" ]; then
+    e2e_log_event 'privilege_matrix_fixture' 'assert' 'fail' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane fixture did not report a verified object id"
+    printf '%s\n' "$output" >&2
+    e2e_finish_fail "lane=$lane D4 fixture did not emit oraclemcp-d4-catalog-object-id"
+  fi
+  e2e_log_event 'privilege_matrix_fixture' 'assert' 'pass' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane D4 fixture ready object_id=$object_id"
+  # The restricted-principal password is a synthetic fixture value baked into the
+  # fixture SQL; it is not a secret and the live test needs it to connect.
+  cat <<ENV
+ORACLEMCP_D4_DSN=//localhost:${host_port}/${pdb}
+ORACLEMCP_D4_NO_FLASHBACK_USER=ORACLEMCP_D4_NO_FLASHBACK
+ORACLEMCP_D4_NO_FLASHBACK_PASSWORD=D4_Privilege_Test_42
+ORACLEMCP_D4_CATALOG_BLIND_USER=ORACLEMCP_D4_CATALOG_BLIND
+ORACLEMCP_D4_CATALOG_BLIND_PASSWORD=D4_Privilege_Test_42
+ORACLEMCP_D4_CATALOG_OBJECT_ID=${object_id}
+ENV
+}
+
 smoke_lane() {
   local lane="$1"
   local container pdb password started output query_exit
@@ -457,7 +532,7 @@ run_all_lanes() {
 command='run'
 if [ "$#" -gt 0 ]; then
   case "$1" in
-    up | wait | bootstrap | fixtures | smoke | drcp-identity | down | run)
+    up | wait | bootstrap | fixtures | smoke | drcp-identity | privilege-matrix | down | run)
       command="$1"
       shift
       ;;
@@ -500,6 +575,9 @@ case "$command" in
     ;;
   drcp-identity)
     drcp_identity_fixture
+    ;;
+  privilege-matrix)
+    privilege_matrix_fixture
     ;;
   down)
     teardown_owned_lanes
