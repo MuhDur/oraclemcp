@@ -25,7 +25,7 @@ Usage:
 Validates:
   B5    UnknownIssuer with retry_count=20 returns inside the fast budget.
   B6    SSL_CERT_FILE and SSL_CERT_DIR trust synthetic public roots.
-  P2-4  Wallet profile with unset SNI records the current adapter-forced-SNI red.
+  P2-4  Wallet profile with unset SNI reaches the local TCPS terminator.
   P-U4  Legacy 3DES ewallet.p12 decrypts through the server wallet path.
 USAGE
   e2e_usage_common
@@ -104,9 +104,9 @@ run_lane() {
   e2e_cargo_test_filter "assert" "B6 SSL_CERT_DIR root override" 1 -- \
     cargo test -p oraclemcp-core --test oci_tcps_e2e \
       b6_ssl_cert_dir_public_root_reaches_local_tcps_terminator -- --nocapture
-  e2e_cargo_test_filter "assert" "P2-4 wallet default SNI current red" 1 -- \
+  e2e_cargo_test_filter "assert" "P2-4 wallet default SNI reaches terminator" 1 -- \
     cargo test -p oraclemcp-core --test oci_tcps_e2e \
-      p2_4_wallet_profile_without_explicit_sni_records_current_default_red -- --nocapture
+      p2_4_wallet_profile_without_explicit_sni_reaches_local_tcps_terminator -- --nocapture
   e2e_cargo_test_filter "assert" "P-U4 legacy 3DES server wallet path" 1 -- \
     cargo test -p oraclemcp-core --test doctor_wallet_posture \
       legacy_3des_p12_decrypts_through_the_server_wallet_path -- --nocapture
