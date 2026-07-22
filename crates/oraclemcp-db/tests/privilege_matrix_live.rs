@@ -98,7 +98,6 @@ fn guarded_fixture_table() -> ResolvedObject {
 /// state-changing path, rather than a synthetic error mapper, and then proves
 /// whether the same physical connection remains usable.
 #[test]
-#[ignore = "expected failure until A3a preflights missing DBMS_FLASHBACK EXECUTE before session-state cleanup"]
 fn d4_no_flashback_principal_gets_typed_refusal_and_connection_stays_usable() {
     run_with_cx(|cx| async move {
         let conn = RustOracleConnection::connect(&cx, no_flashback_options())

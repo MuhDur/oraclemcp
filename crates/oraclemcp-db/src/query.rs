@@ -328,6 +328,11 @@ pub async fn read_query_as_of(
         .await
         .ok()
         .and_then(|info| info.server_version);
+    AsOf::current_system_change_number(cx, conn)
+        .await
+        .map_err(|error| {
+            map_flashback_refusal_with_server_version(error, flashback_server_version.as_deref())
+        })?;
     // Resolve a timestamp before opening the flashback window. The fixed,
     // server-owned conversion preserves the exact SCN Oracle chose and lets the
     // response carry a deterministic replay handle for either input form.
@@ -1355,7 +1360,7 @@ mod tests {
             {
                 return Err(DbError::Query(message.clone()));
             }
-            if self.fail_read {
+            if self.fail_read && sql != CURRENT_SCN_SQL && sql != TIMESTAMP_TO_SCN_SQL {
                 return Err(DbError::Query(
                     self.fail_read_message
                         .clone()
@@ -1566,6 +1571,7 @@ mod tests {
         assert_eq!(
             events,
             vec![
+                format!("query[0]:{CURRENT_SCN_SQL}"),
                 "rollback".to_owned(),
                 "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
                 "exec[1]:BEGIN DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;".to_owned(),
@@ -1599,6 +1605,7 @@ mod tests {
         assert_eq!(
             events,
             vec![
+                format!("query[0]:{CURRENT_SCN_SQL}"),
                 format!("query[1]:{TIMESTAMP_TO_SCN_SQL}"),
                 "rollback".to_owned(),
                 "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
@@ -1650,6 +1657,7 @@ mod tests {
         assert_eq!(
             events,
             vec![
+                format!("query[0]:{CURRENT_SCN_SQL}"),
                 "rollback".to_owned(),
                 "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
                 "exec[1]:BEGIN DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;".to_owned(),
@@ -1661,10 +1669,8 @@ mod tests {
     #[test]
     fn read_query_as_of_refuses_missing_dbms_flashback_before_opening_a_window() {
         let conn = FlashbackRecorder {
-            fail_disable_call: Some(1),
-            fail_disable_message: Some(
-                "ORA-06550: line 1, column 7:\nPLS-00201: identifier 'DBMS_FLASHBACK' must be declared"
-                    .to_owned(),
+            current_scn_error: Some(
+                "ORA-00904: \"SYS\".\"DBMS_FLASHBACK\": invalid identifier".to_owned(),
             ),
             connection_info: OracleConnectionInfo {
                 server_version: Some("18.4.0.0.0".to_owned()),
@@ -1696,7 +1702,7 @@ mod tests {
                 ora_code,
             } => {
                 assert_eq!(kind, crate::FlashbackRefusalKind::CapabilityUnavailable);
-                assert_eq!(ora_code, None, "the PLS wrapper is not the root cause");
+                assert_eq!(ora_code, Some(904), "the preflight names the root cause");
                 assert!(message.contains("DBMS_FLASHBACK"), "{message}");
                 assert!(message.contains("18.4.0.0.0"), "{message}");
             }
@@ -1708,19 +1714,15 @@ mod tests {
         );
         assert_eq!(
             events,
-            vec![
-                "rollback".to_owned(),
-                "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
-            ],
-            "the unsupported capability must be refused before ENABLE or the caller read"
+            vec![format!("query[0]:{CURRENT_SCN_SQL}")],
+            "the unsupported capability must be refused before rollback, DISABLE, ENABLE, or the caller read"
         );
     }
 
     #[test]
     fn read_query_as_of_keeps_missing_flashback_capability_typed_after_quarantine() {
         let conn = FlashbackRecorder {
-            fail_rollback_call: Some(1),
-            fail_rollback_message: Some(
+            current_scn_error: Some(
                 "database session quarantined (unknown_discarded): DBMS_FLASHBACK.DISABLE cleanup failed; \
                  the thin connection was discarded: server returned Oracle error: ORA-06550: line 1, column 7:\n\
                  PLS-00201: identifier 'DBMS_FLASHBACK' must be declared"
@@ -1765,7 +1767,7 @@ mod tests {
         assert!(envelope.message.contains("21.3.0.0.0"));
         assert_eq!(
             events,
-            vec!["rollback".to_owned()],
+            vec![format!("query[0]:{CURRENT_SCN_SQL}")],
             "the inherited quarantine is refused before a new window is opened"
         );
     }
