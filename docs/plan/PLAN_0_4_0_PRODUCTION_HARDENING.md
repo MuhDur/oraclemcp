@@ -112,7 +112,7 @@ quietly revert them.
      frequently (~15 releases Feb–Jun 2026, ~9 days apart) with **no 1.0/API freeze**
      and an unpinned-nightly MSRV. **Lock it exactly via `Cargo.lock`** and budget a
      migration pass per minor bump.
-3. **"Fully audited" is overstated — be honest.** asupersync's audit is a
+3. **"Fully audited" is overstated — be honest.** asupersync's audit is a <!-- honesty-allow: plan-only example of banned phrasing, preserved for transition notes -->
    *self-administered* regime (extensive property tests; a loom / Lean / TLA+ regime
    *claimed in the README* but whose loom tests, `.lean` proofs, and `.tla` specs are
    **not shipped in the published 0.3.4 crate** — only prose + a Rust TLA+ export
@@ -230,12 +230,12 @@ nightly-2026-05-11.
    "stable Rust" / "independently audited dependencies" / "1.0-frozen API" for the
    nightly/asupersync/oracledb stack; **"read-only only" / "cannot write"** (it ships a
    confirmation-gated escalation ladder up to Admin, §4 item 1); **"tamper-evident
-   audit" / "fully audited" / "every action audited"** until WP-A8 wires + signs the
+   audit" / "fully audited" / "every action audited"** until WP-A8 wires + signs the <!-- honesty-allow: historical planning prohibition; not a live product claim -->
    served audit path (E1/E2); nor **imply per-caller authority** — today it is
    single-principal-per-process (one profile chosen at start), not per-identity RBAC
    (E9, §11). Position the *guardrails*, not the absence of capability. Enforced by a
-   mechanical **honesty-grep DoD gate** (§8 item 8) that fails on "safe-by-default",
-   "read-only binary", "fully audited", or un-caveated "PAM"; the doc sweep
+   mechanical **honesty-grep DoD gate** (§8 item 8) that fails on "safe-by-default", <!-- honesty-allow: describes the prohibited phrase for planning of the gate -->
+   "read-only binary", "fully audited", or un-caveated "PAM"; the doc sweep <!-- honesty-allow: plan checklist listing prohibited phrases -->
    (`README.md` + `docs/behavior-inventory.md`) is WP-F1. Claims must be substantiable
    (§10, §11).
 
@@ -674,7 +674,7 @@ platform team say yes.
   discipline for AI-to-Oracle"* and the six pillars. Concrete tasks:
   - **Sweep the existing docs off the stale read-only framing** (same stale-doc class
     Round 0.2 fixed in AGENTS.md): `README.md` hero alt-text + one-line description +
-    the "Why oraclemcp" section still say *"safe-by-default" / "fail-closed by
+    the "Why oraclemcp" section still say *"safe-by-default" / "fail-closed by <!-- honesty-allow: historical task note quoting exact banned phrase -->
     construction"*, and `docs/behavior-inventory.md:55` literally says *"This read-only
     binary"* (it also frames guarded-write orchestration as "out of the served
     surface" — false; `oracle_execute`/`execute_approved` are in `TOOL_NAMES`).
@@ -687,7 +687,7 @@ platform team say yes.
     privilege; SQLcl = privilege-delegated/no-classifier; genai-toolbox = Query-vs-Exec
     flag/no-parser. Plus NUMBER→string fidelity + single-binary deploy.
   **Honesty (§4 item 7):** no read-only-only / stable-Rust / independently-audited-deps /
-  "fully audited" (until A8) claims; document the build-time-nightly reality plainly.
+  "fully audited" (until A8) claims; document the build-time-nightly reality plainly. <!-- honesty-allow: historical milestone text; no current surface claim -->
 
 ---
 
@@ -729,7 +729,7 @@ tagging `v0.4.0`:
 7. MCP conformance matrix at 100% for the served surface (incl. new E-stream arms).
 8. README/docs/package metadata/source docs pass the §4 item 7 honesty guardrails,
    enforced by a **mechanical honesty-grep gate** (fail the build on
-   "safe-by-default", "read-only binary", "fully audited", or un-caveated "PAM"
+   "safe-by-default", "read-only binary", "fully audited", or un-caveated "PAM" <!-- honesty-allow: release-gate rule text intentionally naming banned wording -->
    outside explicitly approved historical/negative-test contexts), plus
    `release_preflight.sh` version alignment.
 9. Cross-repo check (lightweight — see §12): confirm B1/WP-C introduce no breaking
@@ -1005,7 +1005,7 @@ mirror the dependency graph (§7), and validate with `br dep cycles` (must be em
 | R2-03 | Medium | A8 audit wiring | The served `oracle_execute`/`execute_approved` path is unaudited, but "binary crate doesn't even depend on audit" was imprecise: there is no direct dependency/import or wired auditor in served dispatch, while `oraclemcp-audit` appears transitively through spine crates. | `crates/oraclemcp/src/registry.rs:18-26`; `crates/oraclemcp/src/registry.rs:769-773`; `crates/oraclemcp/src/dispatch/mod.rs:1539-1609`; `crates/oraclemcp-core/src/query_execute.rs:16-17`; `crates/oraclemcp-core/src/query_execute.rs:100-150`; `crates/oraclemcp/Cargo.toml:16-30`; `crates/oraclemcp-core/Cargo.toml:12-20` | Kept A8 blocking, but changed the task to add a direct audit dependency or route served execution through a core auditor-owned API. |
 | R2-04 | Medium | D1 OpenTelemetry | D1 should consume the exact asupersync 0.3.4 surfaces: logs HTTP export and generic HTTP send are production-reachable; richer metrics/trace protobuf builders are test/fuzz-gated; trace queue/backpressure already exists as `TraceExporter`/`LoadSheddingTraceExporter`. | `/home/durakovic/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/asupersync-0.3.4/src/observability/otel.rs:1430-1488`; `/home/durakovic/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/asupersync-0.3.4/src/observability/otel.rs:1941-2174`; `/home/durakovic/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/asupersync-0.3.4/src/observability/otel.rs:7670-7682`; `/home/durakovic/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/asupersync-0.3.4/src/observability/otlp_trace_exporter.rs:389-426` | Reframed D1 as reuse of asupersync transport/retry/queueing plus local or upstreamed production protobuf mapping. |
 | R2-05 | Medium | B5 API gates | `cargo-semver-checks 0.48.0` is installed, but `cargo public-api` is not available under the pinned nightly in this checkout. B5 needs an explicit tool install/version pin rather than assuming developer machines have it. | `rust-toolchain.toml:6-8`; `/home/durakovic/projects/rust-oracledb/docs/ROAD_TO_1_0.md:168-184`; command evidence: `cargo +nightly-2026-05-11 public-api --version` returned "no such command"; command evidence: `cargo semver-checks --version` returned `0.48.0` | Added an explicit CI/preflight install+pin requirement for `cargo-public-api`; keep semver-checks adoption. **(Round 3 update: `cargo-public-api` 0.52.0 is now installed locally and runs under the pin — the "no such command" evidence is stale; the install/pin-in-CI requirement still stands for fresh agent machines.)** |
-| R2-06 | Medium | F1 / DoD honesty gate | The proposed honesty grep was too narrow. Current package metadata and source docs still contain "safe-by-default", and behavior inventory still says "read-only binary"; README/docs-only grep would miss release-visible claims. | `crates/oraclemcp/Cargo.toml:4`; `crates/oraclemcp/src/registry.rs:1-5`; `docs/behavior-inventory.md:55`; `README.md:2`; `README.md:15` | Expanded DoD gate to README/docs/package metadata/source docs, with allowed historical/negative-test contexts only. |
+| R2-06 | Medium | F1 / DoD honesty gate | The proposed honesty grep was too narrow. Current package metadata and source docs still contain "safe-by-default", and behavior inventory still says "read-only binary"; README/docs-only grep would miss release-visible claims. <!-- honesty-allow: retrospective evidence row quoting prohibited phrases --> | `crates/oraclemcp/Cargo.toml:4`; `crates/oraclemcp/src/registry.rs:1-5`; `docs/behavior-inventory.md:55`; `README.md:2`; `README.md:15` | Expanded DoD gate to README/docs/package metadata/source docs, with allowed historical/negative-test contexts only. |
 | R2-07 | High | §13 bead conversion | The conversion instruction was stale after Rounds 1.2/1.3; it omitted A9, B6, C10, D8/D9, E1-E7, F1, and release gates, risking dropped scope in beads. | intra-doc references (§6 WP-A/B/C/D/E, §13 inventory) — self-citation line numbers omitted as drift-prone | Replaced the partial list with the full inventory A1-A9, B1-B6, C1-C10, D1-D9, E1-E7, F1, plus release DoD gates; kept D1 split explicit. |
 
 **Round 2 bead-readiness by WP:** A = GO (A8 remains blocking and must be first-class);

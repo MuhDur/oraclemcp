@@ -83,31 +83,31 @@ fn write_capable_custom_tool_invocation_refuses_before_oracle_execute_path() {
 
 Run result: `scripts/oraclemcp_honesty_grep.sh` reports `FAIL — 9 over-claiming occurrence(s)`.
 
-1. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:115 — exact phrase: `"Fully audited"`
+1. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:115 — exact phrase: `"Fully audited"` <!-- honesty-allow: quoted prohibition from plan to explicitly classify intent -->
    - Classification: (b)
    - Historical planning narrative in conversion notes about clarifying dependency-audit claims.
-2. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:233 — exact phrase: `"audit" / "fully audited" / "every action audited"`
+2. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:233 — exact phrase: `"audit" / "fully audited" / "every action audited"` <!-- honesty-allow: quoted plan prohibition text -->
    - Classification: (b)
    - Plan requirement text for what to refrain from claiming before WP-A8 audit wiring is done.
-3. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:237 — exact phrase: `"safe-by-default"`
+3. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:237 — exact phrase: `"safe-by-default"` <!-- honesty-allow: quoted plan prohibition text -->
    - Classification: (b)
    - Historical DoD/guardrail wording for release hygiene, not current product behavior claim.
-4. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:238 — exact phrase: `"read-only binary", "fully audited", "PAM"`
+4. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:238 — exact phrase: `"read-only binary", "fully audited", "PAM"` <!-- honesty-allow: quoted plan prohibition text -->
    - Classification: (b)
    - Plan checklist text defining prohibited release phrasing for that campaign phase.
-5. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:677 — exact phrase: `"safe-by-default" / "fail-closed by construction"`
+5. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:677 — exact phrase: `"safe-by-default" / "fail-closed by construction"` <!-- honesty-allow: audit review evidence listing quoted plan lines -->
    - Classification: (b)
    - Explicit task backlog in an earlier plan sweep item, including an old wording correction.
-6. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:690 — exact phrase: `"fully audited"`
+6. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:690 — exact phrase: `"fully audited"` <!-- honesty-allow: audit review evidence listing quoted plan lines -->
    - Classification: (b)
    - Staged statement tied to A8 milestone, still planning context.
-7. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:732 — exact phrase: `"safe-by-default", "read-only binary", "fully audited"`
+7. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:732 — exact phrase: `"safe-by-default", "read-only binary", "fully audited"` <!-- honesty-allow: quoted plan checklist item -->
    - Classification: (b)
    - Release checklist text in plan section; historical control language, not release claim.
-8. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:1008 — exact phrase: `"safe-by-default", and behavior inventory still says "read-only binary"`
+8. docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md:1008 — exact phrase: `"safe-by-default", and behavior inventory still says "read-only binary"` <!-- honesty-allow: quoted retrospective audit evidence row title -->
    - Classification: (b)
    - Retrospective evidence entry for bead R2-06, not a present-tense shipping claim.
-9. docs/plan/PLAN_0_6_0_INTERACTIVE_ALWAYS_ON.md:824 — exact phrase: `"safe-by-default"`
+9. docs/plan/PLAN_0_6_0_INTERACTIVE_ALWAYS_ON.md:824 — exact phrase: `"safe-by-default"` <!-- honesty-allow: quoted plan-side expectation for gate scan -->
    - Classification: (b)
    - Plan-side note in 0_6_0 for future doc/gate expectations, not current product framing.
 

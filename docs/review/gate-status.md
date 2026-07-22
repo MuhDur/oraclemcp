@@ -26,7 +26,7 @@ Each step was executed with 30-minute bounded run; workspace-wide commands used
 ## Honesty-grep failure summary
 
 - 18 forbidden occurrences, including entries re-quoted in `docs/review/round1-p9.md`.
-- Failure originates from over-claiming framing (e.g., `"safe-by-default"`, `"fully audited"`) in `docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md` and `docs/plan/PLAN_0_6_0_INTERACTIVE_ALWAYS_ON.md`, with some counted via review artifacts.
+- Failure originates from over-claiming framing (e.g., `"safe-by-default"`, `"fully audited"`) in `docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md` and `docs/plan/PLAN_0_6_0_INTERACTIVE_ALWAYS_ON.md`, with some counted via review artifacts. <!-- honesty-allow: historical status narrative about this specific policy hold -->
 
 ## Net verdict
 

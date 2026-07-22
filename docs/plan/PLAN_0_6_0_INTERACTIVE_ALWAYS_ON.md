@@ -821,7 +821,7 @@ W1─►W9; C1/C2─►C5─►W7); A7/A7b add N4/N5 typed-error variants + re-b
 `dashboard_workbench`) = `schema_version` bump + migration note (G2/W2/W4/W8);
 `oracle_capabilities` (server-direct path) must report the **calling lane's**
 level/profile/DB; G2 upgrade note covers per-lane `switch_profile` + N8-fail-closed +
-lane-bound tokens; honesty-grep must scan `server.json` ("safe-by-default" wording);
+	lane-bound tokens; honesty-grep must scan `server.json` ("safe-by-default" wording); <!-- honesty-allow: plan text about where the gate applies, not a surface claim -->
 toolchain pin consistency (now + Node); **SSE GET auth** = SameSite=Strict cookie +
 **mandatory** Origin + `guard_http_request` + subject-verified `Last-Event-ID` (EventSource
 can't send bearer/CSRF); **local-pairing trust root** = 0600 token in `$XDG_RUNTIME_DIR`,
