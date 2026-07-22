@@ -40,6 +40,7 @@
 //!   after the caller's statement has already failed once, which is only safe
 //!   for a replayable statement. A4a moves the check earlier; it does not
 //!   introduce recovery that was missing.
+//!
 //! A prior version of this lane asserted the pinned half through the removed
 //! `LeaseManager` subsystem. That was vacuous because no production tool used
 //! that subsystem; keep pinned-session assertions on the real dispatcher state.
