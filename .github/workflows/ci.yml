@@ -848,13 +848,59 @@ jobs:
           print('granted EXECUTE ON DBMS_FLASHBACK to E2E_ORACLE')
           "
       - name: 23ai matrix lane and VECTOR_DISTANCE smoke
+        id: free23-matrix
         env:
           ORACLEMCP_LIVE_XE: "1"
           ORACLEMCP_ORACLE_MATRIX_BINARY: target/debug/oraclemcp
           ORACLE_MATRIX_FREE23_DSN: localhost:1522/FREEPDB1
           ORACLE_MATRIX_FREE23_USER: E2E_ORACLE
           ORACLE_MATRIX_FREE23_PASSWORD: E2EOracle23
-        run: bash scripts/e2e/oracle_version_matrix.sh --log --lane free23
+        run: |
+          set -euo pipefail
+          mkdir -p target/test-attestation-evidence
+          bash scripts/e2e/oracle_version_matrix.sh --log --lane free23 2>&1 \
+            | tee target/test-attestation-evidence/e2e-oracle-version-matrix-free23.log
+      - name: Derive e2e attestation outcome
+        if: always()
+        id: e2e-attestation
+        run: |
+          set -euo pipefail
+          case "${{ steps.free23-matrix.outcome }}" in
+            success) outcome=PASS ;;
+            failure) outcome=FAIL ;;
+            cancelled|skipped) outcome=SKIP ;;
+            *) outcome=FAIL ;;
+          esac
+          echo "tests=e2e:oracle-version-matrix-free23=$outcome" >> "$GITHUB_OUTPUT"
+          printf 'e2e:oracle-version-matrix-free23=%s\n' "$outcome"
+      - name: Record e2e-lane attestation status
+        if: always()
+        uses: ./.github/actions/test-attestation
+        env:
+          ORACLEMCP_TEST_ATTESTATION_KEY: ${{ secrets.ORACLEMCP_TEST_ATTESTATION_KEY }}
+          ORACLEMCP_TEST_ATTESTATION_KEY_ID: ${{ vars.TEST_ATTESTATION_KEY_ID || 'github-actions-v1' }}
+        with:
+          enabled: ${{ vars.ENABLE_TEST_ATTESTATION == 'true' }}
+          trusted-context: ${{ github.event_name == 'push' }}
+          lane: e2e-oracle-free23
+          command: bash scripts/e2e/oracle_version_matrix.sh --log --lane free23
+          tests: ${{ steps.e2e-attestation.outputs.tests }}
+          artifacts: target/test-attestation-evidence/e2e-oracle-version-matrix-free23.log
+          output-name: e2e-oracle-free23.jsonl
+      - name: Verify the e2e attestation this lane produced
+        if: always()
+        run: |
+          python3 scripts/check_test_attestations.py --selftest
+          python3 scripts/check_test_attestations.py target/test-attestations
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: e2e-oracle-free23-attestation-${{ github.run_number }}
+          path: |
+            target/test-attestation-evidence/e2e-oracle-version-matrix-free23.log
+            target/test-attestations/
+          if-no-files-found: error
+          retention-days: 30
 
   # No deployment-specific identifiers or secrets may reach the public repo.
   # Generic heuristics run here; operators add a site denylist locally via
