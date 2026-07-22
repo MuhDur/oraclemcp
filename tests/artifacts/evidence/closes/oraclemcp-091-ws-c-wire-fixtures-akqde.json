@@ -1,0 +1,64 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:48:13Z",
+  "bead_id": "oraclemcp-091-ws-c-wire-fixtures-akqde",
+  "scope": {
+    "summary": "WS-C now has a machine-checked C1-C9 anti-recurrence ledger: all nine fixture close artifacts are present, all required red-run artifacts are present, C4 binds to the R3 installed-artifact browser lane, and C9 binds to the R1/C9 installed-artifact external-client lane.",
+    "in_scope": [
+      "scripts/rig/ws_c_wire_fixture_ledger.py",
+      "tests/artifacts/evidence/ws-c-wire-fixtures-ledger.json"
+    ],
+    "out_of_scope": [
+      "This close does not rerun every underlying C fixture; it audits their committed close/red-run evidence and records the umbrella binding.",
+      "C1-C3 and C5-C8 remain the offline fixtures described by the WS-C bead text, not duplicate installed-artifact rig lanes.",
+      "Release-candidate acceptance still owns the final failed-before/passes-after release ledger across the fix beads that flipped individual C fixtures green."
+    ]
+  },
+  "source": {
+    "sha": "2fddccc4438790cc32e7e46dcb3be8e325de4df7",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "WS-C C1-C9 fixture ledger",
+        "kind": "cli",
+        "trace": "`python3 scripts/rig/ws_c_wire_fixture_ledger.py --out tests/artifacts/evidence/ws-c-wire-fixtures-ledger.json` exited 0 and wrote status=pass with fixtures_total=9, missing_evidence_count=0, installed_artifact_wire_count=2, offline_fixture_count=7."
+      },
+      {
+        "name": "C4 installed-artifact browser binding",
+        "kind": "api",
+        "trace": "Ledger binds C4 to tests/artifacts/evidence/closes/oraclemcp-091-c4-dashboard-browser-flow-cw3e2.json, whose evidence records rig_browser_lane building the installed artifact with omcpb and driving Chromium through Playwright."
+      },
+      {
+        "name": "C9 installed-artifact external-client binding",
+        "kind": "api",
+        "trace": "Ledger binds C9 to tests/artifacts/evidence/closes/oraclemcp-091-c9-snippet-truth-00gb2.json and tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c9-snippet-truth-00gb2.json, whose evidence records installing oraclemcp from git archive HEAD and driving raw stdio/HTTP clients against the emitted setup snippets."
+      },
+      {
+        "name": "C1-C3 and C5-C8 offline fixture bindings",
+        "kind": "api",
+        "trace": "Ledger records present close and red-run evidence for C1, C2, C3, C5, C6, C7, and C8 and marks them as the offline fixture class named in the WS-C bead text."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped proof only: the umbrella ledger and its committed evidence were verified, not a workspace-wide cargo gate.",
+    "The close does not claim C1-C3/C5-C8 are installed-artifact rig lanes; it preserves that distinction in the ledger."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-eng-program-bp8ia.13 re-asserts the full failed-before/passes-after release ledger at RC acceptance."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
