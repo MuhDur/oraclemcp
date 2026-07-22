@@ -1,0 +1,90 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T11:43:23Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.4.6.9",
+  "scope": {
+    "summary": "C6 split extracted the operator action policy and dashboard workbench release-gate helpers from http/operator.rs into a flat sibling module without changing operator route behavior.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/http/operator.rs",
+      "crates/oraclemcp-core/src/http/operator_action_policy.rs",
+      "crates/oraclemcp-core/src/http/mod.rs"
+    ],
+    "out_of_scope": [
+      "No operator route authentication, CSRF, same-origin, route-scoped action-ticket, or dashboard pairing validation behavior was intentionally changed.",
+      "No test files were edited to make the split pass.",
+      "No workspace-wide cargo clippy/test gate or hosted CI proof is claimed from this shared checkout.",
+      "The source commit also lowered the operator.rs architecture ratchet from 4290 to 4092 lines; the ratchet script is not in the guarded close scope because another pane has an unrelated uncommitted web App.tsx ratchet hunk in that file at close time."
+    ]
+  },
+  "source": {
+    "sha": "3745e9c5a9a660261ce7b17809e5df35181d0608",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "implementation commit",
+        "kind": "cli",
+        "trace": "`git show --stat --oneline --no-renames 3745e9c5a9a660261ce7b17809e5df35181d0608` shows http/mod.rs +1, http/operator.rs -206/+6 net split, new http/operator_action_policy.rs +211, and scripts/oraclemcp_arch_fitness_lint.sh ratchet update. No test file is in the commit."
+      },
+      {
+        "name": "scoped compile",
+        "kind": "cli",
+        "trace": "`env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/cod6-core-check cargo check -p oraclemcp-core` exited 0 after the split."
+      },
+      {
+        "name": "operator route surface",
+        "kind": "cli",
+        "trace": "`env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/cod6-core-check cargo test -p oraclemcp-core operator -- --nocapture` exited 0: 38 operator tests passed and 656 were filtered; the C3 mTLS operator-subject tests in the same run reported 3 passed. The intentionally synthetic idempotency panic test was caught by the test and passed."
+      },
+      {
+        "name": "dashboard origin enforcement",
+        "kind": "cli",
+        "trace": "`env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/cod6-core-check cargo test -p oraclemcp-core dashboard_operator_auth -- --nocapture` exited 0: dashboard_operator_auth_enforces_origin_even_for_authenticated_principals passed."
+      },
+      {
+        "name": "browser action policy table",
+        "kind": "cli",
+        "trace": "`env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/cod6-core-check cargo test -p oraclemcp-core every_browser_action_tool_has_an_explicit_release_policy -- --nocapture` exited 0, and `... cargo test -p oraclemcp-core restored_dashboard_read_only_actions_are_allowed_on_execute -- --nocapture` exited 0."
+      },
+      {
+        "name": "dashboard release gate",
+        "kind": "cli",
+        "trace": "`env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/cod6-core-check cargo test -p oraclemcp-core dashboard_workbench_ddl_apply_is_release_gated -- --nocapture` exited 0, and `... cargo test -p oraclemcp-core dashboard_structured_ddl_preview_remains_available -- --nocapture` exited 0."
+      },
+      {
+        "name": "uniform auth rejection posture",
+        "kind": "cli",
+        "trace": "`env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/cod6-core-check cargo test -p oraclemcp-core c1_negative_tokens_share_one_opaque_challenge -- --nocapture` exited 0, preserving the uniform OAuth negative-token challenge posture."
+      },
+      {
+        "name": "format and architecture ratchet",
+        "kind": "cli",
+        "trace": "`cargo fmt --all -- --check` exited 0. `scripts/oraclemcp_arch_fitness_lint.sh` confirms the operator.rs ratchet was tightened to the measured 4092 lines in the source commit, but the whole lint currently exits 1 because committed HEAD has an unrelated pre-existing violation: crates/oraclemcp/src/dispatch/tests.rs has 15703 lines, above measured ratchet 15676."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The split was proven with targeted oraclemcp-core compile and operator/dashboard/auth tests, not a full workspace gate.",
+    "The architecture lint's operator.rs ratchet was tightened in the source commit, but the whole lint is still red on the unrelated dispatch/tests.rs ratchet violation noted in the trace.",
+    "The ratchet script has an unrelated uncommitted web App.tsx ratchet edit from another pane at close time; it was not mutated or committed by this close evidence step."
+  ],
+  "known_defects": [
+    {
+      "description": "Architecture fitness lint currently fails on committed dispatch test fixture size: crates/oraclemcp/src/dispatch/tests.rs has 15703 lines, above measured ratchet 15676.",
+      "bead_id": "oraclemcp-eng-program-bp8ia.4.6"
+    }
+  ],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
