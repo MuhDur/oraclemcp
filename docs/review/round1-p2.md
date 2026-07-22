@@ -99,3 +99,21 @@
 - Claim checked: `literal:` credential refs are allowed only for local development and are rejected when the effective profile is protected.
 - Method: env -u CARGO_TARGET_DIR cargo test -p oraclemcp-auth literal_is_denied_under_protected_profile -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp http_oauth_literal_secret_is_rejected_for_protected_profiles -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp wallet_password_ref_uses_profile_secret_resolution_policy -- --nocapture.
 - Verdict: CLEAN.
+
+## [LOW] Historical plan docs pointed at deleted lease/session files
+- Where: docs/plan/PLAN_ENGINEERING_PROGRAM.md:5359; docs/plan/PLAN_0_6_0_INTERACTIVE_ALWAYS_ON.md:143; docs/plan/PLAN_ASUPERSYNC_THIN_NATIVE.md:239; docs/plan/PLAN_0_9_1_FIELD_HARDENING.md:2421
+- Claim checked: Historical planning docs should not send future readers looking for `crates/oraclemcp-db/src/lease.rs` or `crates/oraclemcp-core/src/session_tool.rs` after B14b removed the dead lease/session-tool subsystem.
+- Method: git log --all --oneline --name-status -- crates/oraclemcp-db/src/lease.rs crates/oraclemcp-core/src/session_tool.rs; rg -n 'lease\\.rs|session_tool\\.rs|session\\.rs' docs/plan; edited only stale source-path references in the working tree to mark them as former/deleted-by-B14b history; left those edits uncommitted because the same plan paths already carry a pre-existing staged docs/plan move and unrelated doc-normalization hunks.
+- Verdict: CONFIRMED DEFECT.
+
+## [LOW] Resources and prompts advertise only the intended browsable surface
+- Where: crates/oraclemcp-core/src/server.rs:1756; crates/oraclemcp-core/src/server.rs:2527; crates/oraclemcp-core/src/resources.rs:124; crates/oraclemcp-core/src/resources.rs:244
+- Claim checked: `resources/list` exposes `oracle://capabilities` and `oracle://tools`; `resources/templates/list` exposes schema/object read templates; `prompts/list` serves the expert playbook catalog.
+- Method: env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core resource -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core prompt -- --nocapture.
+- Verdict: CLEAN.
+
+## [LOW] Resource template reads preserve the guarded dispatch and transport context
+- Where: crates/oraclemcp-core/src/server.rs:1802; crates/oraclemcp-core/src/server.rs:1938; crates/oraclemcp-core/src/server.rs:1963; crates/oraclemcp-core/src/server.rs:2022; crates/oraclemcp-core/src/server.rs:3568
+- Claim checked: Reading `oracle://schema/{owner}` or `oracle://object/{owner}/{type}/{name}` cannot bypass the guard; it must route through `oracle_schema_inspect`, `oracle_get_source`, or `oracle_get_ddl` with the same transport authorization context.
+- Method: Added `resource_template_reads_route_through_dispatch_with_transport_context`; ran env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core resource_template_reads_route_through_dispatch_with_transport_context -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core resource -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp discovery_resources_reflect_the_calling_session_level -- --nocapture; env -u CARGO_TARGET_DIR cargo clippy -p oraclemcp-core --lib --tests -- -D warnings.
+- Verdict: CLEAN.
