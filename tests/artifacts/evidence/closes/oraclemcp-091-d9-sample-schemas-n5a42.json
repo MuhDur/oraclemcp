@@ -1,0 +1,67 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:48:03Z",
+  "bead_id": "oraclemcp-091-d9-sample-schemas-n5a42",
+  "scope": {
+    "summary": "The rig L2 lane vendors MIT HR/CO/SH sample schemas at a pinned upstream commit and loads them with a synthetic governance overlay on Free23 and XE21.",
+    "in_scope": [
+      "scripts/rig/oracle_l2_sample_schemas.sh",
+      "scripts/rig/verify_sample_schemas.sh",
+      "tests/fixtures/sample_schemas"
+    ],
+    "out_of_scope": [
+      "Bulk SH CSV data; the committed lane intentionally loads SH structure-only.",
+      "A data-volume benchmark lane over SH rows.",
+      "Loading CO on XE18; the default live L2 proof covers Free23 and XE21.",
+      "Any field-test or customer-derived schema, identifier, wallet, or data."
+    ]
+  },
+  "source": {
+    "sha": "d6aafc64e02ec5b4b7e8e75a839328fd76e23ba5",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "bash scripts/rig/verify_sample_schemas.sh",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22: 19 files matched the pinned upstream commit, the MIT licence was present, and no unvetted additions were present."
+      },
+      {
+        "name": "bash scripts/rig/verify_sample_schemas.sh --selftest",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22: drift, unvetted additions, missing licence, and missing manifest files were all refused; a clean tree passed."
+      },
+      {
+        "name": "bash scripts/rig/oracle_l2_sample_schemas.sh run --log",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22 against synthetic local lanes free23 and xe21. For both lanes, HR, CO, SH structure-only, and the governance overlay loaded successfully, and l2_object_assert verified HR/CO/SH/governance objects."
+      },
+      {
+        "name": "bash -n scripts/rig/oracle_l2_sample_schemas.sh scripts/rig/verify_sample_schemas.sh",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22; both L2 shell entrypoints parse."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The live L2 proof uses only synthetic local lab containers rust-oracledb-free/FREEPDB1 and oracle-xe21-1520/XEPDB1.",
+    "SH is structure-only by design because the large upstream CSV data files are not committed.",
+    "The full workspace gate was not run because this shared checkout has unrelated in-flight panes."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-r2-tool-sweep-nvxo4"
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}

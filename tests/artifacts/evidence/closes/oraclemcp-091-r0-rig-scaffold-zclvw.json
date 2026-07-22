@@ -1,0 +1,65 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:48:03Z",
+  "bead_id": "oraclemcp-091-r0-rig-scaffold-zclvw",
+  "scope": {
+    "summary": "The Local Integrator Rig scaffold provides the rig.sh command namespace, Tier A pseudo-home isolation, report skeleton, host-hygiene assertion, and boundary lint wiring.",
+    "in_scope": [
+      "scripts/rig/rig.sh",
+      "scripts/rig/rig_boundary_lint.sh",
+      "scripts/oraclemcp_boundary_lint.sh"
+    ],
+    "out_of_scope": [
+      "External MCP client reachability over stdio or HTTP; those are R1/R2/R3 follow-ups.",
+      "Browser automation lanes and installed-artifact sweeps beyond the scaffold command shell.",
+      "Tier B invasive systemd/container lanes beyond the non-invasive Tier A default.",
+      "Any sibling rust-oracledb driver source change."
+    ]
+  },
+  "source": {
+    "sha": "d6aafc64e02ec5b4b7e8e75a839328fd76e23ba5",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "bash scripts/rig/rig.sh run --dry-run --log",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22. The rig doctor reported 16 passing preflight checks, rig-boundary-lint passed, Tier A pseudo-home preparation was scheduled, L1 xe18/xe21/free23 setup/assert/teardown stages were scheduled, report generation passed, and host hygiene was explicitly dry-run skipped."
+      },
+      {
+        "name": "bash scripts/rig/rig.sh report --dry-run --log && bash scripts/rig/rig.sh down --dry-run --log",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22. The report command emitted a findings.md path under target/e2e/rig, and the down command exercised the safe teardown refusal/allowance path in dry-run mode."
+      },
+      {
+        "name": "bash -n scripts/rig/rig.sh scripts/rig/rig_boundary_lint.sh scripts/oraclemcp_boundary_lint.sh && bash scripts/rig/rig_boundary_lint.sh",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22; shell syntax is valid and the committed boundary lint reported rig-boundary-lint: OK."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The final verification is scaffold-level and dry-run for the host-mutating paths; no full workspace Cargo gate is claimed from this shared dirty checkout.",
+    "The default Tier A scaffold is closed here; richer external-client and browser coverage remains in dependent rig beads.",
+    "Dirty files outside the evidence scope remain in the shared checkout and are excluded from tree_clean by the close auditor."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-r1-external-client-tmc5j",
+    "oraclemcp-091-r2-tool-sweep-nvxo4",
+    "oraclemcp-091-r3-browser-lane-43kev",
+    "oraclemcp-091-rfail-injection-lanes-ok400"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
