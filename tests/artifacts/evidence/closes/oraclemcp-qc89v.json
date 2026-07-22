@@ -1,0 +1,42 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T18:20:09Z",
+  "bead_id": "oraclemcp-qc89v",
+  "scope": {
+    "summary": "Route write-capable custom tools through execute_sql with full session/profile gating and confirmation flow.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "README.md"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "0ccc4776689ce2e74927477df252531616586457",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [
+  ],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "custom tool dispatch runtime path",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/cargo-oraclemcp-qc89v cargo test -p oraclemcp custom_tool_ executes both custom_tool_write_uses_runtime_level_refusal_before_db and custom_tool_write_runs_with_confirmation_on_writable_profile in a clean tree run"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
