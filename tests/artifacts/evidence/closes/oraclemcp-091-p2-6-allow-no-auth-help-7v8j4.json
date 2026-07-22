@@ -1,0 +1,57 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:17:48Z",
+  "bead_id": "oraclemcp-091-p2-6-allow-no-auth-help-7v8j4",
+  "scope": {
+    "summary": "--allow-no-auth help and docs describe both stdio init-token disabling and HTTP unauthenticated local-development startup.",
+    "in_scope": [
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs",
+      "README.md",
+      "docs/configuration.md",
+      "docs/behavior-inventory.md"
+    ],
+    "out_of_scope": [
+      "No runtime auth behavior changed in this close; this bead is documentation/help-text alignment only."
+    ]
+  },
+  "source": {
+    "sha": "fae24cba29f134bf87b26819e90e9cf7f439d391",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "serve help text",
+        "kind": "cli",
+        "trace": "crates/oraclemcp/src/main.rs help says --allow-no-auth disables stdio's init-token requirement when no token is configured, permits HTTP to start without configured auth, and warns non-loopback HTTP still requires explicit remote opt-in."
+      },
+      {
+        "name": "help text regression test",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp allow_no_auth_help_names_stdio_and_http_behavior -- --nocapture passed: 1 passed, 0 failed."
+      },
+      {
+        "name": "documentation consistency",
+        "kind": "cli",
+        "trace": "README.md, docs/configuration.md, and docs/behavior-inventory.md describe --allow-no-auth as explicit local-development auth bypass covering stdio and HTTP, with HTTP still subject to bind/auth guard posture."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped local help-test proof only; no full-workspace clippy/test gate is claimed from this shared dirty checkout."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
