@@ -1,23 +1,22 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-07-22T09:24:49Z",
+  "generated_at": "2026-07-22T10:34:00Z",
   "bead_id": "oraclemcp-091-p2-8-session-footprint-m7nmi",
   "scope": {
     "summary": "Make the pinned plus stateless session footprint report honest and pin a regression test that fails if the report understates observed physical sessions.",
     "in_scope": [
       "crates/oraclemcp/src/dispatch/mod.rs",
       "crates/oraclemcp/src/dispatch/tests.rs",
-      "README.md",
       "docs/configuration.md"
     ],
     "out_of_scope": [
-      "Credentialed D-lane V$SESSION corroboration owned by oraclemcp-20cw3",
+      "Current uncommitted README.md edit from another pane; committed README/docs wording is cited by SHA in the trace.",
       "Physical-session teardown and SIGTERM/logoff verification owned by the B7 lane"
     ]
   },
   "source": {
-    "sha": "4e6a95ea454dffd783bf4b5d4b05a5b902cf631a",
+    "sha": "a6e5cea5d86248737b6439f464c5c4635f83b603",
     "tree_clean": true,
     "branch": "main"
   },
@@ -32,17 +31,22 @@
       {
         "name": "understatement regression",
         "kind": "cli",
-        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp reported_footprint_never_understates_the_observable_session_count -- --nocapture` exited 0; the test observed both primary and stateless physical handles and would fail if the reported strategy implied fewer sessions than were observably live."
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp reported_footprint_never_understates_the_observable_session_count -- --nocapture` exited 0 on 2026-07-22; the test observed both primary and stateless physical handles and would fail if the reported strategy implied fewer sessions than were observably live."
       },
       {
         "name": "existing stateless strategy regression",
         "kind": "cli",
-        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp connection_info_reports_stateless_read_strategy_when_configured -- --nocapture` exited 0; the existing regression still reports pinned_plus_stateless and a separate stateless_metadata_pool block."
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp connection_info_reports_stateless_read_strategy_when_configured -- --nocapture` exited 0 on 2026-07-22; the existing regression still reports pinned_plus_stateless and a separate stateless_metadata_pool block."
       },
       {
         "name": "operator docs",
         "kind": "config-gate",
-        "trace": "README.md and docs/configuration.md document that user work stays on the pinned main session, stateless metadata reads use separate pool session(s), oracle_connection_info reports pinned_plus_stateless, and max_size caps the additional stateless connections."
+        "trace": "README.md and docs/configuration.md document that user work stays on the pinned main session, stateless metadata reads use separate pool session(s), oracle_connection_info reports pinned_plus_stateless, and max_size caps the additional stateless connections; the Workstream P docs landed in 5259fba5."
+      },
+      {
+        "name": "D-lane corroboration",
+        "kind": "live-db",
+        "trace": "Child bead oraclemcp-20cw3 closed with closing=67800b29f958268093571c99f22fc6ee2b595e79 and source=a6e5cea5d86248737b6439f464c5c4635f83b603 after a Free23 D-lane V$SESSION probe observed exactly three tagged sessions: one pinned primary plus two stateless pool sessions."
       },
       {
         "name": "diff hygiene",
@@ -52,19 +56,23 @@
     ]
   },
   "live_evidence": {
-    "claimed": false,
-    "artifacts": []
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "local-free23-d-lane-vsession",
+        "path": "tests/artifacts/evidence/live/oraclemcp-20cw3-p2-8-session-footprint.json",
+        "sha": "a6e5cea5d86248737b6439f464c5c4635f83b603"
+      }
+    ]
   },
   "limitations": [
-    "This close does not claim a fresh credentialed D-lane V$SESSION capture; oraclemcp-20cw3 remains the live corroboration bead.",
+    "The fresh D-lane V$SESSION capture is delegated to and closed by child bead oraclemcp-20cw3; this parent evidence cites that child close instead of duplicating the raw live probe.",
     "The reported pool_open_connections value is the observed local stateless pool open count at the time of oracle_connection_info, not a count of unrelated database sessions."
   ],
   "known_defects": [],
-  "follow_ups": [
-    "oraclemcp-20cw3"
-  ],
+  "follow_ups": [],
   "readiness": {
     "claim": "ready",
-    "basis": "required-proof"
+    "basis": "required-proof-and-live-child"
   }
 }
