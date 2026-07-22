@@ -1,0 +1,77 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:04:29Z",
+  "bead_id": "oraclemcp-091-a1a-catalog-gates-fail-open-59d9v",
+  "scope": {
+    "summary": "A1a closes the fail-open VPD and virtual-column catalog gates by requiring positive catalog visibility before empty probes can certify read-only purity.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/catalog_resolver.rs",
+      "crates/oraclemcp-db/tests/privilege_matrix_live.rs"
+    ],
+    "out_of_scope": [
+      "A1e VPD/RLS doctor and query-result visibility diagnostics.",
+      "A3a/A3b DBMS_FLASHBACK capability preflight and teardown-quarantine behavior.",
+      "Workspace-wide formatting or full workspace gates in the shared dirty checkout."
+    ]
+  },
+  "source": {
+    "sha": "fa93e169b3f9bcc173a045a5d5f2057e8311c73a",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "D4 fixture provisioning",
+        "kind": "cli",
+        "trace": "`timeout 180 bash scripts/rig/oracle_l1.sh privilege-matrix --log` exited 0 in the shared checkout: the rig verified exactly one enabled SELECT VPD policy and one virtual column on ORACLEMCP_D4_OWNER.ORACLEMCP_D4_GUARDED and emitted ORACLEMCP_D4_CATALOG_OBJECT_ID=126290."
+      },
+      {
+        "name": "A1a-only resolver unit module",
+        "kind": "cli",
+        "trace": "`timeout 180 env CARGO_TARGET_DIR=target cargo test -p oraclemcp-db --lib catalog_resolver::tests -- --nocapture` exited 0 in the clean A1a worktree at fa93e169: 17 passed, 0 failed, 0 ignored; C8 blind-catalog and sighted-clean-table assertions both passed."
+      },
+      {
+        "name": "D4 catalog-blind live twin",
+        "kind": "cli",
+        "trace": "`timeout 180 env CARGO_TARGET_DIR=target ORACLEMCP_D4_* cargo test -p oraclemcp-db --features live-xe --test privilege_matrix_live d4_catalog_blind_principal_cannot_prove_the_known_guarded_table_read_only -- --nocapture` exited 0 in the clean A1a worktree at fa93e169: the unignored live D4 catalog-blind case passed against //localhost:1522/FREEPDB1."
+      },
+      {
+        "name": "DB package formatting",
+        "kind": "cli",
+        "trace": "`CARGO_TARGET_DIR=target cargo fmt --package oraclemcp-db --check` exited 0 in the clean A1a worktree before commit."
+      },
+      {
+        "name": "Committed path boundary",
+        "kind": "cli",
+        "trace": "`git commit -m \"fix(db): fail closed on blind catalog gates\" -- crates/oraclemcp-db/src/catalog_resolver.rs crates/oraclemcp-db/tests/privilege_matrix_live.rs` created fa93e169 with exactly those two paths: 50 insertions and 7 deletions."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The shared checkout remained dirty with other agents' work; the A1a commit and evidence were produced from a clean temporary worktree rooted at the pre-A1a main SHA, then main was fast-forwarded to that commit.",
+    "The no-flashback D4 case remains ignored and red for the separate A3a/A3b DBMS_FLASHBACK cleanup-quarantine defect; running it with --ignored still fails with DBMS_FLASHBACK.DISABLE PLS-00201 and unknown_discarded quarantine.",
+    "The full workspace fmt/check/test gates were not claimed because unrelated dirty shared-checkout work is currently red for formatting outside A1a."
+  ],
+  "known_defects": [
+    {
+      "description": "A principal without EXECUTE ON DBMS_FLASHBACK is still quarantined after DBMS_FLASHBACK.DISABLE cleanup fails; A3a/A3b own that fix.",
+      "bead_id": "oraclemcp-091-a3a-flashback-preflight-dwbma"
+    }
+  ],
+  "follow_ups": [
+    "oraclemcp-091-a3a-flashback-preflight-dwbma",
+    "oraclemcp-091-a3b-refusal-vs-teardown-vl3w9",
+    "oraclemcp-091-h3-release-notes-oj5em"
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}
