@@ -62,7 +62,7 @@
     "Pane 5 owns lowering the C6 file-size ratchet for crates/oraclemcp-core/src/lane.rs in scripts/oraclemcp_arch_fitness_lint.sh once the shared script is no longer dirty/reserved."
   ],
   "readiness": {
-    "claim": "ready",
+    "claim": "not-ready",
     "basis": "scoped-test"
   }
 }
