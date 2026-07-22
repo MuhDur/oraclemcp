@@ -23,7 +23,8 @@ use oraclemcp_core::{
     ChangeProposalStore, FileStore, SourceHistoryStore, SourceObjectTarget, SourceSnapshotDraft,
 };
 use oraclemcp_db::{
-    DbError, OracleBackend, OracleBind, OracleConnection, OracleConnectionInfo, OracleRow,
+    DbError, OracleBackend, OracleBind, OracleCell, OracleConnection, OracleConnectionInfo,
+    OracleRow,
 };
 use oraclemcp_guard::{OperatingLevel, SessionLevelState};
 use serde_json::{Value, json};
@@ -31,6 +32,75 @@ use serde_json::{Value, json};
 const FORGED_STORED_ALLOW: &str = "stored verdict claims READ_ONLY";
 const SYNTHETIC_DDL: &str = "DROP TABLE sec1_reclassification_probe";
 const REVERT_SOURCE: &str = "CREATE OR REPLACE PROCEDURE APP.SEC1_REVERT_PROBE IS BEGIN NULL; END;";
+
+fn string_bind(binds: &[OracleBind], idx: usize) -> Option<&str> {
+    match binds.get(idx) {
+        Some(OracleBind::String(value)) => Some(value),
+        _ => None,
+    }
+}
+
+fn catalog_row(columns: &[(&str, Option<&str>)]) -> OracleRow {
+    OracleRow {
+        columns: columns
+            .iter()
+            .map(|(name, value)| {
+                (
+                    (*name).to_owned(),
+                    OracleCell::new("VARCHAR2", value.map(str::to_owned)),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn sample_rows_catalog(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>> {
+    let normalized = sql.to_ascii_lowercase();
+    if normalized.contains("sys_context('userenv', 'session_user')") {
+        return Some(vec![catalog_row(&[
+            ("SESSION_USER", Some("APP")),
+            ("CURRENT_SCHEMA", Some("APP")),
+            ("EDITION_NAME", Some("ORA$BASE")),
+        ])]);
+    }
+    if normalized.contains("from session_roles") {
+        return Some(Vec::new());
+    }
+    if normalized.contains("from all_objects")
+        && normalized.contains("object_id, status, edition_name")
+    {
+        let owner = string_bind(binds, 0).unwrap_or("APP");
+        let name = string_bind(binds, 1).unwrap_or("ORDERS");
+        return Some(vec![catalog_row(&[
+            ("OWNER", Some(owner)),
+            ("OBJECT_NAME", Some(name)),
+            ("OBJECT_TYPE", Some("TABLE")),
+            ("OBJECT_ID", Some("42")),
+            ("STATUS", Some("VALID")),
+            ("EDITION_NAME", None),
+        ])]);
+    }
+    if normalized.contains("from all_synonyms")
+        || normalized.contains("from all_arguments")
+        || (normalized.contains("from all_tab_columns") && !normalized.contains("table_name = :2"))
+        || normalized.contains("from all_policies")
+        || normalized.contains("from all_tab_cols")
+    {
+        return Some(Vec::new());
+    }
+    if normalized.contains("from all_tab_columns") && normalized.contains("table_name = :2") {
+        let column = string_bind(binds, 2).unwrap_or("RECYCLE_MARKER");
+        return Some(vec![catalog_row(&[
+            ("COLUMN_NAME", Some(column)),
+            ("COLUMN_ID", Some("1")),
+        ])]);
+    }
+    None
+}
+
+fn is_synthetic_ddl(sql: &str) -> bool {
+    sql.trim().eq_ignore_ascii_case(SYNTHETIC_DDL)
+}
 
 /// The database seam records any statement that crossed the apply-time guard.
 /// SEC-1 refusals must leave this at zero.
@@ -67,6 +137,132 @@ impl OracleConnection for RecordingConnection {
 
     async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
         self.execute_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(0)
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+/// First pinned session for the A4e recovery row: reads are uncertain, so the
+/// dispatcher must quarantine and recycle the connection before any retry.
+struct RecoverableReadConnection {
+    query_calls: Arc<AtomicUsize>,
+    execute_calls: Arc<AtomicUsize>,
+    close_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait(?Send)]
+impl OracleConnection for RecoverableReadConnection {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.close_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo::default())
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        if let Some(rows) = sample_rows_catalog(sql, binds) {
+            return Ok(rows);
+        }
+        self.query_calls.fetch_add(1, Ordering::SeqCst);
+        Err(DbError::Cancelled(
+            "injected recoverable pinned-session uncertainty".to_owned(),
+        ))
+    }
+
+    async fn execute(&self, _cx: &Cx, sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        if is_synthetic_ddl(sql) {
+            self.execute_calls.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(0)
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+/// Replacement pinned session used after A4e recycle.  It proves the
+/// reconnect happened by serving the retried read, while still recording any
+/// forbidden DDL execute that would cross the guard.
+struct RecycledReadOnlyConnection {
+    query_calls: Arc<AtomicUsize>,
+    execute_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait(?Send)]
+impl OracleConnection for RecycledReadOnlyConnection {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo::default())
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        self.query_calls.fetch_add(1, Ordering::SeqCst);
+        let normalized = sql.to_ascii_lowercase();
+        if normalized.contains("get_system_change_number")
+            || normalized.contains("timestamp_to_scn")
+        {
+            return Ok(vec![OracleRow {
+                columns: vec![(
+                    "OBSERVED_SCN".to_owned(),
+                    OracleCell::new("NUMBER", Some("424242".to_owned())),
+                )],
+            }]);
+        }
+        Ok(vec![OracleRow {
+            columns: vec![(
+                "RECYCLE_MARKER".to_owned(),
+                OracleCell::new("VARCHAR2", Some("reconnected".to_owned())),
+            )],
+        }])
+    }
+
+    async fn execute(&self, _cx: &Cx, sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        if is_synthetic_ddl(sql) {
+            self.execute_calls.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(0)
     }
 
@@ -477,6 +673,86 @@ fn profile_switch_reentry_reclassifies_before_using_a_stored_ddl_confirmation() 
     // A switch both replaces the connection and lowers the live policy. The
     // execute path must classify the original DDL against that new state before
     // it considers the pre-switch confirmation.
+    assert_live_ddl_refusal_after_recovery(&dispatcher, &stored_confirmation, &execute_calls);
+}
+
+#[test]
+fn session_recycle_rearms_read_only_before_using_a_stored_ddl_confirmation() {
+    let execute_calls = Arc::new(AtomicUsize::new(0));
+    let first_query_calls = Arc::new(AtomicUsize::new(0));
+    let first_close_calls = Arc::new(AtomicUsize::new(0));
+    let connector_calls = Arc::new(AtomicUsize::new(0));
+    let replacement_query_calls = Arc::new(AtomicUsize::new(0));
+    let replacement_execute_calls = Arc::clone(&execute_calls);
+    let replacement_query_calls_for_connector = Arc::clone(&replacement_query_calls);
+    let connector_calls_for_connector = Arc::clone(&connector_calls);
+    let dispatcher = OracleDispatcher::new_switchable(
+        Box::new(RecoverableReadConnection {
+            query_calls: Arc::clone(&first_query_calls),
+            execute_calls: Arc::clone(&execute_calls),
+            close_calls: Arc::clone(&first_close_calls),
+        }),
+        Some("sec1-recycle".to_owned()),
+        SessionLevelState::new(OperatingLevel::Ddl, false),
+        Arc::new(move |_cx, generation| {
+            assert_eq!(generation.profile(), "sec1-recycle");
+            connector_calls_for_connector.fetch_add(1, Ordering::SeqCst);
+            let query_calls = Arc::clone(&replacement_query_calls_for_connector);
+            let execute_calls = Arc::clone(&replacement_execute_calls);
+            Box::pin(async move {
+                Ok(ProfileConnectionBundle::new(
+                    Box::new(RecycledReadOnlyConnection {
+                        query_calls,
+                        execute_calls,
+                    }),
+                    None,
+                ))
+            })
+        }),
+    );
+
+    elevate_to_ddl(&dispatcher, 60);
+    let stored_confirmation = stored_ddl_confirmation(&dispatcher);
+    let first = dispatcher
+        .dispatch(
+            "oracle_sample_rows",
+            json!({ "owner": "APP", "table": "ORDERS", "max_rows": 1 }),
+        )
+        .expect_err("first uncertain pinned read records a recoverable quarantine");
+    assert_eq!(first.error_class, ErrorClass::Timeout);
+    assert_eq!(first_query_calls.load(Ordering::SeqCst), 1);
+
+    let second = dispatcher
+        .dispatch(
+            "oracle_sample_rows",
+            json!({ "owner": "APP", "table": "ORDERS", "max_rows": 1 }),
+        )
+        .expect("recoverable quarantine reconnects and retries on the replacement session");
+    assert_eq!(second["rows"][0]["RECYCLE_MARKER"], json!("reconnected"));
+    assert_eq!(
+        connector_calls.load(Ordering::SeqCst),
+        1,
+        "A4e recovery must open exactly one replacement session"
+    );
+    assert_eq!(
+        first_close_calls.load(Ordering::SeqCst),
+        1,
+        "the quarantined pinned session is closed after recycle"
+    );
+    assert_eq!(
+        replacement_query_calls.load(Ordering::SeqCst),
+        1,
+        "the successful sample read must come from the recycled session"
+    );
+    assert_eq!(
+        execute_calls.load(Ordering::SeqCst),
+        0,
+        "A4e read recovery itself must not execute the stored DDL"
+    );
+
+    // The pre-recycle confirmation is durable caller state.  The safe recovery
+    // path is not "the token disappeared"; it is a fresh classify/check against
+    // the post-reconnect READ_ONLY level before any DDL reaches the database.
     assert_live_ddl_refusal_after_recovery(&dispatcher, &stored_confirmation, &execute_calls);
 }
 
