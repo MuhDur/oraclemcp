@@ -1,0 +1,51 @@
+{
+  "bead": "oraclemcp-091-rfail-injection-lanes-ok400",
+  "installed_binary": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T104208Z/prefix/bin/oraclemcp",
+  "proof_boundary": "Revoke, rotate, server/process restart, and OAuth expiry assertions use raw HTTP/MCP/operator requests against the installed artifact. The kill lane delegates to D10 because the public installed artifact redacts SID/SERIAL and exposes no deterministic kill hook. Database inputs are local synthetic Free23 only. Disruptive Docker container restart remains intentionally out of the default shared-checkout run.",
+  "runtime_artifact_dir": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T104208Z",
+  "source_sha": "4e7683a2a46d4c5d0e8fba25efe25b9b8a7cb1e5",
+  "status": "pass",
+  "supplemental_assertions": [
+    {
+      "command": "bash scripts/rig/rig_idle_kill.sh run --log",
+      "id": "d10_idle_kill_lane",
+      "proof_boundary": "D10 owns the real Oracle session-kill mechanism; the public installed artifact redacts SID/SERIAL and exposes no deterministic kill hook.",
+      "status": "pass",
+      "wire": false
+    }
+  ],
+  "wire_assertions": [
+    {
+      "closed_sessions": 1,
+      "fresh_after_revoke_status": 401,
+      "id": "wire_client_revoke",
+      "replay_after_revoke_status": 401,
+      "status": "pass",
+      "wire": true
+    },
+    {
+      "bearer_recorded": false,
+      "closed_sessions": 1,
+      "id": "wire_client_rotate",
+      "new_bearer_fresh": "pass",
+      "old_bearer_fresh_status": 401,
+      "status": "pass",
+      "wire": true
+    },
+    {
+      "fresh_lane_after_restart": "pass",
+      "id": "wire_server_restart",
+      "old_session_status": 404,
+      "status": "pass",
+      "wire": true
+    },
+    {
+      "held_token_after_expiry_status": 401,
+      "id": "wire_oauth_token_expiry",
+      "initial_expired_status": 401,
+      "status": "pass",
+      "token_material_recorded": false,
+      "wire": true
+    }
+  ]
+}
