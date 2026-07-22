@@ -1,0 +1,72 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:52:25Z",
+  "bead_id": "oraclemcp-6i9kx",
+  "scope": {
+    "summary": "Fixes CI heartbeat reporting so required-lane gating and all watched advisory lane posture are represented separately, preventing advisory red or unknown mutation/Loom evidence from being reported as green.",
+    "in_scope": [
+      "scripts/ci_heartbeat.sh",
+      "scripts/test_ci_heartbeat.sh",
+      "scripts/entry_trace_contract.json",
+      "docs/ci-taxonomy.md"
+    ],
+    "out_of_scope": [
+      "No live GitHub Actions lane triage or rerun is claimed.",
+      "No mutation shard, Loom workflow, driver workflow, or unrelated CI-red root cause is fixed by this close.",
+      "No change is made to the existing required-lane exit-code contract: required red or unknown lanes still fail the heartbeat; advisory scheduled lanes still do not."
+    ]
+  },
+  "source": {
+    "sha": "ff15cc810023cc614d160f64293c7c1d5e82e3da",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "CI heartbeat watched-lane posture",
+        "kind": "cli",
+        "trace": "scripts/ci_heartbeat.sh now tracks required_red/required_unknown separately from watched_red/watched_unknown. The emitted ci-heartbeat/v1 snapshot preserves blocked/any_red/any_unknown for required-lane exit semantics and adds required_* plus watched_* fields so advisory scheduled red or unknown evidence cannot be summarized as all watched lanes green."
+      },
+      {
+        "name": "mocked mutation and Loom heartbeat regression",
+        "kind": "cli",
+        "trace": "`bash -n scripts/ci_heartbeat.sh scripts/test_ci_heartbeat.sh && bash scripts/test_ci_heartbeat.sh` exited 0. The test uses a fake gh and a minimal taxonomy: the required lane succeeds, five scheduled mutation shard jobs from one run return failure, Loom has no completed scheduled run, and the heartbeat exits 0 while emitting watched_blocked=true, watched_red=true, watched_unknown=true, five not_green shard rows, one unknown Loom row, and no `all watched lanes are green` message."
+      },
+      {
+        "name": "entry trace registration",
+        "kind": "cli",
+        "trace": "scripts/entry_trace_contract.json registers scripts/test_ci_heartbeat.sh as a required-quality entry point. `bash scripts/check_entry_trace_contract.sh` no longer reports test_ci_heartbeat.sh; it still exits 1 on pre-existing unrelated unregistered scripts: scripts/eng_program_manifest_build.py, scripts/swarm_orchestrator_tick.sh, and scripts/swarm_target_janitor.sh."
+      },
+      {
+        "name": "syntax, JSON, whitespace, and swarm staged checks",
+        "kind": "cli",
+        "trace": "`bash -n scripts/ci_heartbeat.sh scripts/test_ci_heartbeat.sh`, `jq empty scripts/entry_trace_contract.json`, `git diff --cached --check`, `scripts/swarm_discipline.sh struct-atomicity --staged`, and `scripts/swarm_discipline.sh stale-delete-check --staged` all exited 0 before the implementation commit."
+      },
+      {
+        "name": "landed source",
+        "kind": "cli",
+        "trace": "`git show --stat HEAD` for ff15cc810023cc614d160f64293c7c1d5e82e3da reported exactly docs/ci-taxonomy.md, scripts/ci_heartbeat.sh, scripts/entry_trace_contract.json, and scripts/test_ci_heartbeat.sh changed: 280 insertions, 25 deletions; scripts/test_ci_heartbeat.sh is mode 100755."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This close proves heartbeat reporting logic with a local fake GitHub API; it does not claim a subsequent hosted CI Heartbeat run concluded success.",
+    "The original bead acceptance asks for live lane green/root-cause filing; the operator narrowed this turn to the heartbeat misreporting honesty defect and explicitly said not to chase unrelated red lanes.",
+    "No full workspace cargo gate is claimed from this shared checkout."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "A future CI-tending phase can run the hosted heartbeat and triage actual current red lanes if the operator assigns that work."
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
