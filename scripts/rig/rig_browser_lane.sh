@@ -75,5 +75,5 @@ if ! e2e_run_command "act" npm --prefix web exec -- playwright test --config web
   e2e_finish_fail "browser lane failed"
 fi
 
-e2e_log_event "scenario_assert" "assert" "pass" 0 "Chromium paired via 303 redirect, browser action POST returned 200, and EventSource resumed with Last-Event-ID"
+e2e_log_event "scenario_assert" "assert" "pass" 0 "dashboard 403 returned a uniform ErrorEnvelope, Chromium paired via 303 redirect, browser action POST returned 200, and EventSource resumed with Last-Event-ID"
 e2e_finish_pass

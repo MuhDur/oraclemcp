@@ -38,6 +38,7 @@ scenarios=(
   scripts/e2e/capability_smoke.sh
   scripts/e2e/http_oauth_lanes.sh
   scripts/e2e/dashboard_readonly.sh
+  scripts/rig/rig_browser_lane.sh
   scripts/e2e/served_console.sh
   scripts/e2e/audit_append.sh
   scripts/e2e/verdict_certificate.sh
@@ -90,7 +91,9 @@ for script in "${scenarios[@]}"; do
   # `ORACLEMCP_*` configuration keys. Scope them to their one scenario so they
   # cannot leak into another served process or change an unrelated result.
   set +e
-  if [ "$name" = "served_egress" ]; then
+  if [ "$name" = "rig_browser_lane" ]; then
+    bash "$script" run "${args[@]}" >"$out" 2>"$err"
+  elif [ "$name" = "served_egress" ]; then
     bash "$script" "${args[@]}" >"$out" 2>"$err"
   else
     env \

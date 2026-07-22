@@ -320,6 +320,61 @@ fn e2e_orchestrator_aggregates_dry_run_scenarios() {
     );
 }
 
+#[test]
+fn dashboard_browser_lane_e2e_is_registered_without_parallel_harness() {
+    if !omcpb_available() {
+        eprintln!("skipping: omcpb (swarm build wrapper) is not on PATH (CI env)");
+        return;
+    }
+    let root = repo_root();
+    let output = run_script(
+        "scripts/rig/rig_browser_lane.sh",
+        &["run", "--log", "--dry-run"],
+    );
+    assert!(
+        output.status.success(),
+        "browser lane dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = json_lines(&output.stderr);
+    assert!(
+        events.iter().any(|event| event["event"] == "command_start"
+            && event["message"].as_str().is_some_and(
+                |message| message.contains("omcpb build -p oraclemcp --bin oraclemcp")
+            )),
+        "browser lane dry-run did not schedule the shared omcpb build: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "browser_lane"),
+        "missing passing browser-lane completion: {events:?}"
+    );
+
+    let runner =
+        std::fs::read_to_string(root.join("scripts/e2e/run_all.sh")).expect("read run_all.sh");
+    assert!(
+        runner.contains("scripts/rig/rig_browser_lane.sh"),
+        "operator/dashboard E4 must dispatch the R3 browser lane from run_all.sh"
+    );
+    assert!(
+        runner.contains("bash \"$script\" run \"${args[@]}\""),
+        "run_all.sh must invoke the R3 rig lane with its explicit run subcommand"
+    );
+    assert!(
+        !runner.contains("scripts/e2e/dashboard_browser"),
+        "E4 must not add a parallel dashboard browser harness"
+    );
+    let browser_lane = std::fs::read_to_string(root.join("scripts/rig/rig_browser_lane.sh"))
+        .expect("read R3 browser lane");
+    assert!(
+        browser_lane.contains("web/playwright.live-serve.config.ts"),
+        "E4 must remain wired to R3's live-serve Playwright config"
+    );
+}
+
 /// Arc L's console scenario is release evidence only when its non-dry-run path
 /// requires a real lab connection. A missing live input must fail before any
 /// UI-only honesty assertion can be mistaken for a served-Oracle proof.

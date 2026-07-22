@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
 
 const BIN = process.env.OMCP_BIN ?? "";
 const ENABLED = process.env.OMCP_BROWSER_LANE === "1";
@@ -36,6 +36,14 @@ type PairingOutcome = {
   status: number;
   origin: string | undefined;
   body: string;
+};
+
+type DashboardForbiddenEnvelope = {
+  isError?: boolean;
+  error_class?: string;
+  message?: string;
+  next_steps?: string[];
+  error?: unknown;
 };
 
 let server: ChildProcess | undefined;
@@ -213,6 +221,26 @@ async function executeCapabilities(page: Page, session: DashboardSession): Promi
   );
 }
 
+async function unauthorizedDashboardPost(request: APIRequestContext): Promise<JsonFetchResult> {
+  const res = await request.post(`${baseUrl}/operator/v1/actions/execute`, {
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      origin: "http://attacker.invalid"
+    },
+    data: {
+      idempotency_key: `browser-lane-refused-${randomUUID()}`,
+      tool: "oracle_capabilities",
+      arguments: { detail_level: "compact" }
+    }
+  });
+  return {
+    status: res.status(),
+    headers: res.headers(),
+    body: await res.json()
+  };
+}
+
 async function observeSseResume(page: Page): Promise<string[]> {
   return page.evaluate(async () => {
     return new Promise<string[]>((resolve, reject) => {
@@ -253,8 +281,29 @@ test.afterAll(() => {
 });
 
 test("Chromium pairs, performs an authenticated operator action, and resumes SSE", async ({
-  page
+  page,
+  request
 }) => {
+  const forbidden = await unauthorizedDashboardPost(request);
+  expect(forbidden.status, "unauthorized dashboard POST should return a structured 403").toBe(403);
+  expect(forbidden.headers["content-type"]).toContain("application/json");
+  const forbiddenEnvelope = forbidden.body as DashboardForbiddenEnvelope;
+  expect(forbiddenEnvelope.isError).toBe(true);
+  expect(forbiddenEnvelope.error_class).toBe("POLICY_DENIED");
+  expect(forbiddenEnvelope.message).toBe("dashboard request was refused");
+  expect(forbiddenEnvelope.next_steps?.length ?? 0).toBeGreaterThan(0);
+  expect(forbiddenEnvelope.error, "dashboard 403 must not expose cause-specific error labels").toBeUndefined();
+  const forbiddenText = JSON.stringify(forbidden.body);
+  for (const leakedReason of [
+    "dashboard_same_origin_required",
+    "Origin header",
+    "Host header",
+    "csrf",
+    "action_ticket"
+  ]) {
+    expect(forbiddenText, `dashboard 403 must not reveal ${leakedReason}`).not.toContain(leakedReason);
+  }
+
   const pairing = await pairBrowser(page);
   const session = await dashboardSession(page);
 
@@ -271,6 +320,11 @@ test("Chromium pairs, performs an authenticated operator action, and resumes SSE
     join(runDir, "browser-lane-result.json"),
     JSON.stringify(
       {
+        dashboard_403: {
+          status: forbidden.status,
+          error_class: forbiddenEnvelope.error_class,
+          next_steps: forbiddenEnvelope.next_steps?.length ?? 0
+        },
         browser_pairing: pairing,
         action_status: action.status,
         action_tool: (action.body as { data?: { mcp_tool?: string } }).data?.mcp_tool,

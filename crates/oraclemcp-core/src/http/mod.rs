@@ -1002,6 +1002,19 @@ fn guard_http_request(config: &HttpTransportConfig, request: &HttpRequest) -> Op
     }
 }
 
+fn guard_dashboard_http_request(
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+) -> Option<HttpResponse> {
+    guard_http_request(config, request).map(|response| {
+        if response.status == 403 {
+            dashboard_forbidden_response()
+        } else {
+            with_dashboard_security_headers(response)
+        }
+    })
+}
+
 enum HttpExchange {
     Buffered(HttpResponse),
     SseStream(HttpSseStream),
@@ -1087,6 +1100,14 @@ fn handle_http_exchange(
         }
         HttpRoute::OperatorApi => {
             if let Some(response) = guard_http_request(config, &request) {
+                let response = if config.dashboard_auth.is_some()
+                    && request.header("authorization").is_none()
+                    && response.status == 403
+                {
+                    dashboard_forbidden_response()
+                } else {
+                    response
+                };
                 return HttpExchange::Buffered(response);
             }
             let operator_route = operator_route_kind(&request.path);
@@ -1264,8 +1285,8 @@ fn handle_dashboard_pairing_route(
             empty_response(405).with_header("allow", "GET, POST"),
         );
     }
-    if let Some(response) = guard_http_request(config, request) {
-        return with_dashboard_security_headers(response);
+    if let Some(response) = guard_dashboard_http_request(config, request) {
+        return response;
     }
     let Some(auth) = &config.dashboard_auth else {
         return with_dashboard_security_headers(empty_response(404));
@@ -1395,8 +1416,8 @@ fn handle_dashboard_session_route(
     if request.method != "GET" {
         return with_dashboard_security_headers(empty_response(405).with_header("allow", "GET"));
     }
-    if let Some(response) = guard_http_request(config, request) {
-        return with_dashboard_security_headers(response);
+    if let Some(response) = guard_dashboard_http_request(config, request) {
+        return response;
     }
     if let Some(response) = enforce_dashboard_get_headers(request) {
         return response;
@@ -1516,7 +1537,17 @@ fn origin_matches_host(origin: &str, host: Option<&str>) -> bool {
     matches!(scheme, "http" | "https") && authority.eq_ignore_ascii_case(host)
 }
 
+fn dashboard_forbidden_response() -> HttpResponse {
+    let envelope = ErrorEnvelope::new(ErrorClass::PolicyDenied, "dashboard request was refused")
+        .with_next_step("retry from the local dashboard page after refreshing session state");
+    with_dashboard_security_headers(json_response(403, &envelope.to_json()))
+        .with_header("cache-control", "no-store")
+}
+
 fn dashboard_auth_error_response(status: u16, error: &'static str) -> HttpResponse {
+    if status == 403 {
+        return dashboard_forbidden_response();
+    }
     with_dashboard_security_headers(json_response(
         status,
         &json!({
@@ -1645,7 +1676,7 @@ fn handle_dashboard_route(
     {
         return None;
     }
-    if let Some(response) = guard_http_request(config, request) {
+    if let Some(response) = guard_dashboard_http_request(config, request) {
         return Some(response);
     }
     if config.dashboard_auth.is_some() {

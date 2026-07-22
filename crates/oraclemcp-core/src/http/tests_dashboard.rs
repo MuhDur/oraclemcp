@@ -336,9 +336,36 @@ fn malicious_page_cannot_trigger_dashboard_gated_action() {
         .with_peer_loopback(true),
     );
     assert_eq!(malicious.status, 403);
+    let malicious_json = response_json(&malicious);
     assert_eq!(
-        response_json(&malicious)["error"],
-        serde_json::json!("dashboard_same_origin_required")
+        malicious_json["error_class"],
+        serde_json::json!("POLICY_DENIED")
+    );
+    assert_eq!(
+        malicious_json["message"],
+        serde_json::json!("dashboard request was refused")
+    );
+    assert!(
+        malicious_json["next_steps"].as_array().is_some_and(|steps| !steps.is_empty()),
+        "dashboard 403 envelope should keep the actionable ErrorEnvelope shape"
+    );
+    let malicious_body =
+        String::from_utf8(malicious.body.clone()).expect("dashboard 403 body is UTF-8");
+    for leaked_reason in [
+        "dashboard_same_origin_required",
+        "Origin header",
+        "Host header",
+        "csrf",
+        "action_ticket",
+    ] {
+        assert!(
+            !malicious_body.contains(leaked_reason),
+            "dashboard 403 must not reveal refusal cause {leaked_reason}: {malicious_body}"
+        );
+    }
+    assert!(
+        malicious_json.get("error").is_none(),
+        "dashboard 403 uses ErrorEnvelope fields, not cause-specific error labels"
     );
     assert_eq!(
         calls.load(AtomicOrdering::SeqCst),
@@ -367,10 +394,12 @@ fn malicious_page_cannot_trigger_dashboard_gated_action() {
         .with_peer_loopback(true),
     );
     assert_eq!(null_origin.status, 403);
+    let null_origin_json = response_json(&null_origin);
     assert_eq!(
-        String::from_utf8(null_origin.body.clone()).expect("origin guard body is UTF-8"),
-        "Forbidden: Origin header is not allowed"
+        null_origin_json["error_class"],
+        serde_json::json!("POLICY_DENIED")
     );
+    assert_eq!(null_origin_json, malicious_json);
     assert_eq!(
         calls.load(AtomicOrdering::SeqCst),
         0,
