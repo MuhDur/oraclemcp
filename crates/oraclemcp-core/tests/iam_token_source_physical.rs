@@ -41,6 +41,12 @@ struct B16aTerminatorObservation {
     post_tls_bytes: usize,
 }
 
+type B16aTerminatorHandle = (
+    u16,
+    mpsc::Receiver<Result<Vec<B16aTerminatorObservation>, String>>,
+    std::thread::JoinHandle<()>,
+);
+
 fn synthetic_dn() -> rcgen::DistinguishedName {
     let mut dn = rcgen::DistinguishedName::new();
     dn.push(rcgen::DnType::CommonName, SYNTHETIC_CN);
@@ -112,11 +118,7 @@ fn server_config(material: &B16aSyntheticMaterial) -> Arc<ServerConfig> {
 fn spawn_tcps_terminator(
     material: B16aSyntheticMaterial,
     expected_connections: usize,
-) -> (
-    u16,
-    mpsc::Receiver<Result<Vec<B16aTerminatorObservation>, String>>,
-    std::thread::JoinHandle<()>,
-) {
+) -> B16aTerminatorHandle {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback TCPS terminator");
     let port = listener.local_addr().expect("listener address").port();
     let config = server_config(&material);

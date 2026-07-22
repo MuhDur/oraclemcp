@@ -43,6 +43,12 @@ struct TerminatorObservation {
     post_tls_bytes: usize,
 }
 
+type TerminatorHandle<T> = (
+    u16,
+    mpsc::Receiver<Result<T, String>>,
+    std::thread::JoinHandle<()>,
+);
+
 fn synthetic_dn() -> rcgen::DistinguishedName {
     let mut dn = rcgen::DistinguishedName::new();
     dn.push(rcgen::DnType::CommonName, SYNTHETIC_CN);
@@ -166,11 +172,7 @@ fn observe_tcps_connection(
 
 fn spawn_tcps_terminator_with_config(
     config: Arc<ServerConfig>,
-) -> (
-    u16,
-    mpsc::Receiver<Result<TerminatorObservation, String>>,
-    std::thread::JoinHandle<()>,
-) {
+) -> TerminatorHandle<TerminatorObservation> {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback TCPS terminator");
     let port = listener.local_addr().expect("listener address").port();
     let (tx, rx) = mpsc::channel();
@@ -187,11 +189,7 @@ fn spawn_tcps_terminator_with_config(
 fn spawn_tcps_terminator_with_config_for(
     config: Arc<ServerConfig>,
     expected_connections: usize,
-) -> (
-    u16,
-    mpsc::Receiver<Result<Vec<TerminatorObservation>, String>>,
-    std::thread::JoinHandle<()>,
-) {
+) -> TerminatorHandle<Vec<TerminatorObservation>> {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback TCPS terminator");
     let port = listener.local_addr().expect("listener address").port();
     let (tx, rx) = mpsc::channel();
@@ -209,45 +207,27 @@ fn spawn_tcps_terminator_with_config_for(
     (port, rx, handle)
 }
 
-fn spawn_tcps_terminator(
-    material: SyntheticMaterial,
-) -> (
-    u16,
-    mpsc::Receiver<Result<TerminatorObservation, String>>,
-    std::thread::JoinHandle<()>,
-) {
+fn spawn_tcps_terminator(material: SyntheticMaterial) -> TerminatorHandle<TerminatorObservation> {
     spawn_tcps_terminator_with_config(server_config(&material))
 }
 
 fn spawn_tcps_terminator_for(
     material: SyntheticMaterial,
     expected_connections: usize,
-) -> (
-    u16,
-    mpsc::Receiver<Result<Vec<TerminatorObservation>, String>>,
-    std::thread::JoinHandle<()>,
-) {
+) -> TerminatorHandle<Vec<TerminatorObservation>> {
     spawn_tcps_terminator_with_config_for(server_config(&material), expected_connections)
 }
 
 fn spawn_tcps_terminator_without_client_auth(
     material: SyntheticMaterial,
-) -> (
-    u16,
-    mpsc::Receiver<Result<TerminatorObservation, String>>,
-    std::thread::JoinHandle<()>,
-) {
+) -> TerminatorHandle<TerminatorObservation> {
     spawn_tcps_terminator_with_config(server_config_without_client_auth(&material))
 }
 
 fn spawn_optional_tcps_terminator(
     material: SyntheticMaterial,
     wait_for_dial: Duration,
-) -> (
-    u16,
-    mpsc::Receiver<Result<Option<TerminatorObservation>, String>>,
-    std::thread::JoinHandle<()>,
-) {
+) -> TerminatorHandle<Option<TerminatorObservation>> {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback TCPS terminator");
     listener
         .set_nonblocking(true)
