@@ -69,6 +69,6 @@
   "follow_ups": [],
   "readiness": {
     "claim": "ready",
-    "basis": "scoped-test"
+    "basis": "required-proof"
   }
 }
