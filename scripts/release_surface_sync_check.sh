@@ -26,6 +26,7 @@ need() {
 }
 
 need cargo
+need git
 need jq
 need grep
 
@@ -42,6 +43,55 @@ versions="$(
 version_count="$(printf '%s\n' "$versions" | sed '/^$/d' | wc -l | tr -d ' ')"
 [ "$version_count" = "1" ] || fail "workspace packages must share one version: $versions"
 version="$versions"
+
+capabilities_descriptor="Compact discovery entry point: tools, operating level + gates, connection/standby status, feature tiers, version. Pass detail_level=full for the complete descriptor report."
+require_contains \
+  "crates/oraclemcp-core/src/server.rs" \
+  "$capabilities_descriptor" \
+  "oracle_capabilities descriptor"
+capabilities_descriptor_surfaces=(
+  crates/oraclemcp-core/src/server.rs
+)
+while IFS= read -r golden; do
+  capabilities_descriptor_surfaces+=("$golden")
+done < <(git ls-files 'tests/golden/stdio/*.json' 'tests/golden/http/*.json')
+if grep -nE 'pre-[0-9]+\.[0-9]+\.[0-9]+ descriptor report' \
+  "${capabilities_descriptor_surfaces[@]}" >/tmp/oraclemcp-stale-capabilities-descriptor.$$; then
+  cat /tmp/oraclemcp-stale-capabilities-descriptor.$$ >&2
+  rm -f /tmp/oraclemcp-stale-capabilities-descriptor.$$
+  fail "oracle_capabilities descriptor still carries a stale pre-version label"
+fi
+rm -f /tmp/oraclemcp-stale-capabilities-descriptor.$$
+
+require_contains \
+  "scripts/eng_program_manifest_build.py" \
+  "DEFAULT_RELEASE_TARGET = \"$version\"" \
+  "engineering-program manifest generator release target"
+manifest_target="$(
+  jq -r '.release_targets[] | select(.repository == "server") | .version' \
+    engineering-program-manifest.json |
+    sort -u
+)"
+[ "$manifest_target" = "$version" ] ||
+  fail "engineering-program-manifest.json server release target '$manifest_target' != workspace '$version'"
+task_targets="$(
+  jq -r '.tasks[] | select(.repository == "server" and has("release_target")) | .release_target' \
+    engineering-program-manifest.json |
+    sort -u
+)"
+[ "$task_targets" = "$version" ] ||
+  fail "engineering-program-manifest.json task release_target set '$task_targets' != workspace '$version'"
+require_contains \
+  "engineering-program-manifest.json" \
+  "\"title\": \"Publish oraclemcp $version (terminal sink; operator tags)\"" \
+  "engineering-program terminal publish task"
+if grep -nE 'Publish oraclemcp [0-9]+\.[0-9]+\.[0-9]+' engineering-program-manifest.json |
+  grep -vF "Publish oraclemcp $version " >/tmp/oraclemcp-stale-publish-title.$$; then
+  cat /tmp/oraclemcp-stale-publish-title.$$ >&2
+  rm -f /tmp/oraclemcp-stale-publish-title.$$
+  fail "engineering-program manifest contains a stale terminal publish title"
+fi
+rm -f /tmp/oraclemcp-stale-publish-title.$$
 
 expected_packages=(
   oraclemcp-error

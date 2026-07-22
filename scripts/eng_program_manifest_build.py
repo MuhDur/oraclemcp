@@ -85,7 +85,7 @@ DEFAULT_SECTION = "§33"
 # Priority -> execution tier. The lint accepts P0-P4, T0-T3, tier-1..3, and the
 # named tiers; we use the tier-N form so the mapping is total and deterministic.
 PRIORITY_TIER = {0: "tier-1", 1: "tier-2", 2: "tier-3", 3: "tier-3", 4: "tier-3"}
-DEFAULT_RELEASE_TARGET = "0.9.1"
+DEFAULT_RELEASE_TARGET = "0.10.0"
 
 
 def slugify(issue_id: str) -> str:
@@ -111,10 +111,10 @@ def load_records(path: Path) -> list[dict]:
 
 
 def engineering_program_ids(records: list[dict], source_repo: str) -> set[str]:
-    """The eng-program graph: train-091 seeds plus everything they reach, scoped
+    """The eng-program graph: train-0100 seeds plus everything they reach, scoped
     to one repository. Edges leaving the closure are reported by the caller."""
     by_id = {r["id"]: r for r in records if r.get("id")}
-    seeds = {r["id"] for r in records if "train-091" in (r.get("labels") or [])}
+    seeds = {r["id"] for r in records if "train-0100" in (r.get("labels") or [])}
     graph: set[str] = set(seeds)
     frontier = list(seeds)
     while frontier:
@@ -430,7 +430,7 @@ def _selftest() -> int:
     def bead(issue_id, status="open", **kw):
         rec = {"id": issue_id, "status": status, "source_repo": "oraclemcp",
                "title": f"title {issue_id}", "issue_type": "task", "priority": 1,
-               "labels": ["train-091"], "dependencies": []}
+               "labels": ["train-0100"], "dependencies": []}
         rec.update(kw)
         return rec
 

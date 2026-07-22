@@ -2643,7 +2643,7 @@ fn tools_json_for_descriptors(descriptors: &[ToolDescriptor]) -> Vec<Value> {
     tools.push(json!({
         "name": CAPABILITIES_TOOL,
         "title": "Oracle Capabilities",
-        "description": "Compact discovery entry point: tools, operating level + gates, connection/standby status, feature tiers, version. Pass detail_level=full for the complete pre-0.9.1 descriptor report.",
+        "description": "Compact discovery entry point: tools, operating level + gates, connection/standby status, feature tiers, version. Pass detail_level=full for the complete descriptor report.",
         "inputSchema": {
             "type": "object",
             "properties": {
