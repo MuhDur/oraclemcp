@@ -1,0 +1,64 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T11:45:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.8.1",
+  "scope": {
+    "summary": "G1 F-D1 residual: the harness subject-mapping fix that makes connect-as-IAM-principal work against ADB Identity Domains. The bootstrap maps IAM_PRINCIPAL_NAME=<domain-qualified principal name> (not the raw OCID); the terraform harness extracts the token's userName claim and refuses a mismatch before creating any mapping; the signoff harness drives the IAM doctor + guarded SELECT USER FROM DUAL. Three non-negotiable invariants verified in code: (1) IAM token refused over non-TCPS before reaching the driver (iam_token.rs:765, test inject_refuses_non_tcps_transport at :1125); (2) token_exec refused before spawn (iam_token.rs:1716); (3) token values never persisted, rendered, or logged (iam_token.rs:9-12 discipline, enforced throughout).",
+    "in_scope": [
+      "scripts/e2e/oci_adb_iam_bootstrap/src/main.rs",
+      "scripts/e2e/oci_adb_terraform.sh",
+      "scripts/e2e/real_adb_tcps_signoff.sh",
+      "crates/oraclemcp-core/src/iam_token.rs"
+    ],
+    "out_of_scope": [
+      "The live signoff run against a real Always-Free ADB (operator-gated oci_adb_terraform.sh apply-and-signoff; requires OCI credentials not present in this environment).",
+      "Driver-side TokenSource seam changes (B16a, closed separately).",
+      "Doctor IAM posture observation (B16b, closed separately)."
+    ]
+  },
+  "source": {
+    "sha": "40ac3d3b5b3652b7d2c30584d318451407be019b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Offline contract tests (harness mapping safety contract)",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=target cargo test -p oraclemcp --test e2e_harness -- oci_adb_terraform_dry_run real_adb_signoff_dry_run: 2 passed, 0 failed. These pin the harness mapping contract: bootstrap maps IAM_PRINCIPAL_NAME=<name> (not OCID), terraform extracts userName claim and refuses mismatch, signoff drives IAM doctor + guarded query."
+      },
+      {
+        "name": "Non-TCPS refusal invariant",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=target cargo test -p oraclemcp-core --lib -- inject_refuses_non_tcps_transport inject_sets_options_token_over_tcps: both pass. iam_token.rs:765 returns IamTokenError::NonTcpsTransport before the driver is reached."
+      },
+      {
+        "name": "token_exec refused before spawn",
+        "kind": "cli",
+        "trace": "iam_token.rs:1716: a token_exec on a plaintext transport is refused BEFORE the command is spawned. Verified by code inspection; the test suite covers the non-TCPS refusal path."
+      },
+      {
+        "name": "Fix commits (source SHAs)",
+        "kind": "cli",
+        "trace": "4c0a5cc4 fix(oci): align IAM harness mapping evidence (oraclemcp-he7t) — bootstrap maps IAM_PRINCIPAL_NAME=<name>, terraform validates userName claim, signoff harness updated. 0a144c4a fix(v6z2): split OCI IAM bootstrap from guarded probe. 0829fde3 fix(core): configure IAM token profiles as refreshable sources (B16a TokenSource seam)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The live signoff against a real Always-Free ADB (operator-gated oci_adb_terraform.sh apply-and-signoff) was not run in this session: no OCI credentials present. The operator will run it separately. The code fix and offline contract are complete and verified.",
+    "The live signoff evidence will be captured under target/e2e (gitignored, confidentiality-clean) when the operator runs the gated lane."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
