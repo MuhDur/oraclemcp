@@ -1,27 +1,28 @@
 # Gate Status At Committed HEAD
 
-- Recorded: 2026-07-22 15:56 Europe/Vienna
-- HEAD checked: `0cdc76a217f867c3c77a3bae8addf62542f2cb55`
-- Clean worktree: `/var/tmp/oraclemcp-green-gate-0cdc76a-p5`
-- Target dir: `/var/tmp/oraclemcp-green-gate-0cdc76a-p5-target`
+- Recorded: 2026-07-22T17:16:42+02:00
+- HEAD checked: `beedfff3`
+- Clean worktree: `/tmp/oraclemcp-gate-full` at `HEAD beedfff3`
+- Target dir: `/var/tmp/oraclemcp-gate-full-target`
 - Scope: verdict-gathering only; no push performed.
 
 ## Verdicts
 
-| Gate | Bound | Verdict | Evidence |
-| --- | ---: | --- | --- |
-| `cargo fmt --all -- --check` | 300s | PASS | Exited 0. |
-| `scripts/build_lease.sh -- cargo clippy --workspace --all-targets -- -D warnings` | 1800s | PASS | Exited 0 under build lease; finished in 2m 22s. |
-| `scripts/build_lease.sh -- cargo test --workspace` | 1800s | FAIL | Exited 101 under build lease. Failing test: `tests::embedded_installers_match_repo_root` in `oraclemcp --bin oraclemcp`; assertion says `crates/oraclemcp/install.ps1` drifted from repo-root `install.ps1`. |
-| `cargo deny check` | 900s | PASS | Exited 0. Warnings only: unmatched license/advisory allowances; deny summary: advisories ok, bans ok, licenses ok, sources ok. |
-| `bash scripts/oraclemcp_agent_surface_lint.sh` | 300s | PASS | Exited 0: `call_routine` absent from agent-facing surfaces. |
-| `bash scripts/oraclemcp_driver_seam_lint.sh` | 300s | PASS | Exited 0: all `oracledb::` driver paths confined to `crates/oraclemcp-db/src/connection.rs`. |
-| `bash scripts/oraclemcp_honesty_grep.sh` | 300s | FAIL | Exited 1: 9 forbidden-framing occurrences, all reported in `docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md`. |
-| `bash scripts/oraclemcp_api_lock.sh` | 300s | PASS | Exited 0 with dedicated `CARGO_TARGET_DIR`; locked public API surfaces match baselines for `oraclemcp-error`, `oraclemcp-guard`, and `oraclemcp-db`. |
-| `bash scripts/release_surface_sync_check.sh` | 300s | FAIL | Exited 1: missing dashboard SBOM at `web/dist/oraclemcp-dashboard.cyclonedx.json`. |
+Each command was executed under a bounded timeout (1800s, with heavy commands
+still taking `scripts/build_lease.sh`).
+
+| Command | Verdict | Failure detail |
+| --- | --- | --- |
+| `cargo fmt --all -- --check` | PASS | Exited 0. |
+| `scripts/build_lease.sh -- cargo clippy --workspace --all-targets -- -D warnings` | PASS | Exited 0 under lease (target guard passed). |
+| `scripts/build_lease.sh -- cargo test --workspace` | **FAIL** | Exited 101 under lease. Failing test: `oracle_query_structured_content_matches_advertised_output_schema_fields` in `crates/oraclemcp/tests/e2e_stdio.rs:341`. Panic: `structuredContent must include required outputSchema field columns`. |
+| `cargo deny check` | PASS | Exited 0. Warnings only for unmatched deny.toml allowances (`MIT-0`, `MPL-2.0`, `UPL-1.0`, `Unicode-DFS-2016`, `BSL-1.0`, and stale RustSec entries). |
+| `bash scripts/oraclemcp_agent_surface_lint.sh` | PASS | Exited 0. |
+| `bash scripts/oraclemcp_driver_seam_lint.sh` | PASS | Exited 0. |
+| `bash scripts/oraclemcp_honesty_grep.sh` | **FAIL** | Exited 1. 18 over-claiming occurrences (expected per current branch policy; mostly `docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md` and review artifacts). |
+| `bash scripts/oraclemcp_api_lock.sh` | PASS | Exited 0 with dedicated target dir; all three locked crates (`oraclemcp-error`, `oraclemcp-guard`, `oraclemcp-db`) match baselines. |
+| `bash scripts/release_surface_sync_check.sh` | PASS | Exited 0. |
 
 ## Notes
 
-- The shared checkout was dirty with peer in-flight files, so these gates ran from the clean detached worktree above at committed HEAD.
-- The initial API-lock attempt omitted `CARGO_TARGET_DIR` and was correctly refused by the build guard for trying to use `/home/durakovic/.cache/cargo-target`; the recorded verdict is from the corrected rerun with the dedicated target dir.
-- The workspace test was not rerun after the failure. A bounded single-test probe confirmed the named failure and assertion text.
+- The run used a dedicated clean worktree at `beedfff3` because shared checkout is currently dirty with peer edits.
