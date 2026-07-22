@@ -1,10 +1,10 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-07-21T20:12:34Z",
+  "generated_at": "2026-07-22T01:20:00Z",
   "bead_id": "oraclemcp-eng-program-bp8ia.7.11.19",
   "scope": {
-    "summary": "CF3 migrates legacy audit state through verified capability directory handles, no-follow operations, identity checks, and an atomic create-new hard-link install that refuses destination replacement.",
+    "summary": "CF3 removes the doctor atomic-install rename race: apply_legacy_state_migration walks to the destination through verified no-follow directory handles, creates 0600 create-new files, checks identity at commit, and installs the migrated audit state with an atomic hard link that refuses to replace an existing destination. Re-derived at 009dc02f, the tree this evidence was produced from.",
     "in_scope": [
       "crates/oraclemcp-core/src/doctor.rs"
     ],
@@ -14,7 +14,7 @@
     ]
   },
   "source": {
-    "sha": "f3650548bdfd7c970ec4d4c17797984b6d963796",
+    "sha": "009dc02f30bff17746aea420957e47dce6777c7b",
     "tree_clean": true,
     "branch": "main"
   },
@@ -24,12 +24,12 @@
       {
         "name": "apply_legacy_state_migration",
         "kind": "cli",
-        "trace": "The final migration fix f3650548 preserves the CF3 capability-handle design: apply_legacy_state_migration traverses parents with no-follow directory handles, writes 0600 create-new files, validates identities, and uses a hard link for the verified atomic install. legacy_migration_refuses_symlink_swaps_at_atomic_install deterministically replaces both the destination parent and final destination with symlinks; each case is refused without writing through the attacker-controlled replacement, while the legacy source remains unchanged."
+        "trace": "Provenance, derived from git rather than asserted: ee1b23adc5300c22e8fcba26c16fe09a14a06d2d ('fix(doctor): harden atomic audit migration') is the commit whose diff introduced both the capability-handle migration and its negative regression test, and f3650548bdfd7c970ec4d4c17797984b6d963796 ('fix(doctor): unbreak the hardened audit migration') repaired a path-traversal/EBADF regression inside it. Both are ancestors of 009dc02f. doctor.rs is byte-identical from bceab7599b6a87437300a1fc6d63416d835b5c53 (the last commit to touch it) through 009dc02f, so the behavior proved below is the behavior this close binds."
       },
       {
-        "name": "scoped core test-target compile",
+        "name": "legacy_migration_refuses_symlink_swaps_at_atomic_install",
         "kind": "cli",
-        "trace": "After proving doctor.rs unchanged from f3650548, CARGO_TARGET_DIR=/var/tmp/oraclemcp-p0-close-evidence-target cargo check -p oraclemcp-core --tests --locked completed successfully."
+        "trace": "Executed, not cited: in a dedicated clean worktree checked out at 009dc02f (constitution rule 14), CARGO_TARGET_DIR=/var/tmp/omcp-cf3-close-target cargo test -p oraclemcp-core --lib legacy_migration reported 'test doctor::tests::legacy_migration_refuses_symlink_swaps_at_atomic_install ... ok; 1 passed; 0 failed'. The test deterministically replaces the destination parent and then the final destination with attacker-controlled symlinks; each swap is refused without writing through the replacement, and the legacy source is left untouched."
       }
     ]
   },
@@ -38,13 +38,14 @@
     "artifacts": []
   },
   "limitations": [
-    "This close correction makes no live-service claim; the deterministic filesystem race regression is Unix-only, matching the behavior it asserts.",
-    "The original evidence artifact was later deleted by an unrelated stale-index commit; this document restores the original bead's committed proof record and binding."
+    "This close correction makes no live-service claim; the filesystem race regression it proves is deterministic and Unix-only, matching the behavior it asserts.",
+    "The prior document bound f3650548, which landed AFTER the original closing commit bc1bfa1d651cd7807b2f67c7b717f52ba1ab55c9 and is not its ancestor; that is what produced CLOSE_REASON_SOURCE_MISMATCH, SOURCE_NOT_ANCESTOR, CLOSE_EVIDENCE_CHANGED_AFTER_CLOSE and SCOPE_CHANGED_AFTER_SOURCE. This document is re-derived at 009dc02f instead of re-pointed at a convenient commit.",
+    "source.tree_clean is scope-relative and was established in a clean worktree at 009dc02f. The shared checkout's own copy of doctor.rs carries another agent's uncommitted OracleConnection::close() test-fake additions, which are unrelated to CF3 and are not claimed here."
   ],
   "known_defects": [],
   "follow_ups": [],
   "readiness": {
     "claim": "not-ready",
-    "basis": "manual-review"
+    "basis": "scoped-test"
   }
 }
