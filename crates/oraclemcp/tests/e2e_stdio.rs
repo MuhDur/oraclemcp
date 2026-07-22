@@ -71,6 +71,11 @@ fn resolver_dictionary_rows(sql: &str, binds: &[OracleBind]) -> Option<Vec<Oracl
     if sql.contains("FROM all_synonyms") {
         return Some(Vec::new());
     }
+    if sql.contains("policy_name FROM all_policies WHERE ROWNUM <= 1") {
+        return Some(vec![OracleRow {
+            columns: vec![("POLICY_NAME".to_owned(), resolver_text("VISIBLE_POLICY"))],
+        }]);
+    }
     if sql.contains("all_tab_columns") && sql.contains("table_name = :2") {
         return Some(vec![OracleRow {
             columns: vec![
