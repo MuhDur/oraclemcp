@@ -93,3 +93,33 @@
 - Claim checked: Round 3 honesty contract that an unsupported shape is reported as a typed unsupported marker with provenance rather than silently flattened or guessed into an ordinary-looking placeholder string.
 - Method: rg -n "implicit.*unsupported|unsupported.*implicit|QueryValue::Cursor|QueryValue::Text\(|RETURN_RESULT" crates/oraclemcp-db/src/connection.rs crates/oraclemcp-db/tests; source inspection of crates/oraclemcp-db/src/connection.rs:4160-4192; CARGO_TARGET_DIR=target cargo test -p oraclemcp-db --test structured_schema_golden
 - Verdict: CONFIRMED DEFECT - implicit_result_row maps any non-cursor implicit result QueryValue to OracleCell::new("VARCHAR2", Some("<unsupported implicit resultset value ...>")), so the serialized output is an ordinary string and loses the structured unsupported marker/provenance shape used by the normal value paths.
+
+## [HIGH] Health and readyz bodies stay secret-free
+- Where: crates/oraclemcp-telemetry/src/health.rs:85; crates/oraclemcp-core/src/http/mod.rs:1732; crates/oraclemcp-core/src/http/tests_stores.rs:1295
+- Claim checked: SEC-5 surface inventory: /healthz and /readyz must expose no secrets, connect strings, usernames, or profile internals.
+- Method: CARGO_TARGET_DIR=target cargo test -p oraclemcp-core surface_inventory_authn_no_leak; source inspection of HealthReport and handle_observability_route.
+- Verdict: CLEAN
+
+## [HIGH] OTLP logs traces and metrics pass through the redaction funnel
+- Where: crates/oraclemcp-telemetry/src/otlp/redact.rs:45; crates/oraclemcp-telemetry/src/otlp/metrics.rs:248; crates/oraclemcp-telemetry/src/otlp/logs.rs:82; crates/oraclemcp-telemetry/src/otlp/traces.rs:76
+- Claim checked: SEC-5 OTLP export must expose no secrets, connect strings, usernames, or profile internals.
+- Method: CARGO_TARGET_DIR=target cargo test -p oraclemcp-telemetry redacts_secret_looking_values_on_freeform_keys; CARGO_TARGET_DIR=target cargo test -p oraclemcp-telemetry no_secret_labels_reach_the_wire; CARGO_TARGET_DIR=target cargo test -p oraclemcp-telemetry dynamic_db_labels_use_the_finite_redaction_policy; CARGO_TARGET_DIR=target cargo test -p oraclemcp-telemetry secret_attributes_are_dropped_and_bodies_redacted; CARGO_TARGET_DIR=target cargo test -p oraclemcp-telemetry span_tree_is_captured_with_threaded_ids_and_redaction
+- Verdict: CLEAN
+
+## [HIGH] Unauthenticated Prometheus metrics can echo caller-controlled tool labels
+- Where: crates/oraclemcp-telemetry/src/metrics.rs:114; crates/oraclemcp-telemetry/src/metrics.rs:321; crates/oraclemcp/src/main.rs:2278; crates/oraclemcp-core/src/http/mod.rs:1086
+- Claim checked: SEC-5 telemetry surface must not leak secrets through unauthenticated observability surfaces.
+- Method: source trace from MetricsDispatch::dispatch name -> Metrics::record_request -> Metrics::prometheus_text; CARGO_TARGET_DIR=target cargo test -p oraclemcp-core surface_inventory_authn_no_leak
+- Verdict: CONFIRMED DEFECT - the no-leak test only records oracle_query, but production records the caller-supplied tool name before registry validation and /metrics emits it with only Prometheus escaping, so an unknown tool name containing a password or connect string would be exposed on the unauthenticated metrics endpoint.
+
+## [HIGH] Represented CI-lane evidence degrades to unknown instead of green
+- Where: README.md:472; crates/oraclemcp-core/src/http/ci_lanes.rs:724; crates/oraclemcp-core/src/http/ci_lanes.rs:1254; crates/oraclemcp-core/src/http/ci_lanes.rs:1333
+- Claim checked: README CI-lane tile contract that missing, stale, contradictory, or unavailable evidence renders UNKNOWN, never green.
+- Method: CARGO_TARGET_DIR=target cargo test -p oraclemcp-core ci_lane_streak_is_exact_and_missing_evidence_is_never_green; CARGO_TARGET_DIR=target cargo test -p oraclemcp-core heartbeat_snapshot_rejects_or_quarantines_contradictory_evidence; CARGO_TARGET_DIR=target cargo test -p oraclemcp-core blocked_or_stale_heartbeat_never_renders_a_green_summary; CARGO_TARGET_DIR=target cargo test -p oraclemcp-core production_poller_persists_unknown_when_github_is_unavailable; CARGO_TARGET_DIR=target cargo test -p oraclemcp-core operator_ci_lanes_route_is_unavailable_without_a_configured_snapshot
+- Verdict: CLEAN
+
+## [HIGH] CI-lane route omits repo-root taxonomy lanes when embedded copy drifts
+- Where: crates/oraclemcp-core/src/http/ci_lanes.rs:80; crates/oraclemcp-core/src/http/tests_ci_lanes.rs:880; crates/oraclemcp-core/src/http/tests_ci_lanes.rs:918
+- Claim checked: README CI-lane tile contract that the tile reads the generated scheduled/advisory lane taxonomy and missing evidence renders UNKNOWN, never green.
+- Method: CARGO_TARGET_DIR=target cargo test -p oraclemcp-core ci_lane; CARGO_TARGET_DIR=target cargo test -p oraclemcp-core crate_local_ci_taxonomy_matches_repo_root; diff -u crates/oraclemcp-core/ci_taxonomy.json docs/ci_taxonomy.json
+- Verdict: CONFIRMED DEFECT - the served route renders 19 lanes from stale crates/oraclemcp-core/ci_taxonomy.json while docs/ci_taxonomy.json contains 22 scheduled/advisory lanes, so omitted lanes disappear from the summary instead of appearing as UNKNOWN.
