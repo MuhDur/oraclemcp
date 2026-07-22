@@ -1,0 +1,61 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:05:33Z",
+  "bead_id": "oraclemcp-091-r1-external-client-tmc5j",
+  "scope": {
+    "summary": "R1 adds a binary-level external MCP client proof that drives the built oraclemcp artifact over raw stdio and raw Streamable HTTP, without importing server-side MCP helpers.",
+    "in_scope": [
+      "crates/oraclemcp/tests/r1_external_client.rs"
+    ],
+    "out_of_scope": [
+      "scripts/rig harness changes owned by pane 4",
+      "authenticated HTTP principal matrix beyond the local --allow-no-auth reachability lane",
+      "live Oracle endpoint proof"
+    ]
+  },
+  "source": {
+    "sha": "b16c282b5f2574e5b91fe4f7d7df3336b6c818c9",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "pre-fix external-client proof target",
+        "kind": "cli",
+        "trace": "`git show b16c282b^:crates/oraclemcp/tests/r1_external_client.rs >/dev/null 2>&1; echo pre_fix_test_path_status=$?` printed `pre_fix_test_path_status=128`, proving the previous committed tree had no R1 external-client binary proof target."
+      },
+      {
+        "name": "external raw stdio client against installed artifact",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp --test r1_external_client -- --nocapture` exited 0; `installed_artifact_accepts_raw_external_stdio_client` passed after spawning `env!(\"CARGO_BIN_EXE_oraclemcp\")`, sending literal newline-delimited JSON-RPC initialize, tools/list, and oracle_query frames, and receiving structured JSON-RPC replies."
+      },
+      {
+        "name": "external raw HTTP client against installed artifact",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp --test r1_external_client -- --nocapture` exited 0; `installed_artifact_accepts_raw_external_http_client` passed after spawning `env!(\"CARGO_BIN_EXE_oraclemcp\")`, opening `/mcp` over loopback Streamable HTTP, and completing initialize, tools/list, and oracle_query through raw HTTP requests."
+      },
+      {
+        "name": "format and whitespace checks",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo fmt --all -- --check` exited 0, and `git diff --check -- crates/oraclemcp/tests/r1_external_client.rs` exited 0."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is an offline local reachability proof over the built Cargo binary artifact; it does not contact a live Oracle database.",
+    "HTTP proof uses explicit loopback --allow-no-auth development mode to isolate transport reachability from OAuth/client-credential policy."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
