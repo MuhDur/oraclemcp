@@ -3,10 +3,11 @@
 //! `Cx`-first and `async` (B1): callers get bounded session reuse without a
 //! Tokio/r2d2 boundary, and cancellation is observed through explicit
 //! `&asupersync::Cx` checkpoints around checkout and through the native-async
-//! DB calls themselves. A cancelled call or a driver-proven connection loss
-//! discards the checked-out connection DIRTY (it never returns to the idle
-//! set) so a torn round trip can never be reused. A known safe, idempotent
-//! read failure may be retried once under the shared driver taxonomy.
+//! DB calls themselves. A cancelled or failed pooled call discards the checked-out
+//! connection DIRTY (it never returns to the idle set) so a torn round trip can
+//! never be reused. A known safe, idempotent read failure may be retried once
+//! under the shared driver taxonomy; only the final result decides whether the
+//! session can return to the idle set.
 //!
 //! ## Sizing and failover posture (B4)
 //!
@@ -472,12 +473,11 @@ impl OraclePool {
                 _ => first_result,
             };
 
-            // A known connection loss/cancellation may have crossed an Oracle
-            // boundary and must be discarded. Ordinary SQL errors and an
-            // exhausted retry-in-place error leave the session reusable; a
-            // successful call is additionally pinged before check-in.
-            let broken = match &result {
-                Err(error) => error.is_uncertain_session_state(),
+            // Any final failure may have crossed an Oracle boundary and must
+            // be discarded. Successful calls are additionally pinged before
+            // check-in so a session killed after checkout is not returned idle.
+            let discard_after_call = match &result {
+                Err(_) => true,
                 Ok(_) => self.manager.has_broken(cx, checkout.connection()).await,
             };
             let retry_fresh = matches!(
@@ -495,7 +495,7 @@ impl OraclePool {
                 .connection()
                 .set_request_deadline(cx, previous_deadline);
             let restore_error = quota_restore.err().or_else(|| deadline_restore.err());
-            let discard = broken || restore_error.is_some();
+            let discard = discard_after_call || restore_error.is_some();
             if discard && let Err(error) = checkout.connection().close(cx).await {
                 tracing::warn!(error = %error, "discarded pooled Oracle session logical close failed");
             }
@@ -860,11 +860,7 @@ fn should_discard_after_call<T>(
     result: &Result<T, DbError>,
     manager_broken: impl FnOnce() -> bool,
 ) -> bool {
-    result
-        .as_ref()
-        .err()
-        .is_some_and(DbError::is_uncertain_session_state)
-        || manager_broken()
+    result.is_err() || manager_broken()
 }
 
 #[cfg(test)]
@@ -1035,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn only_uncertain_error_calls_discard_checked_out_connection() {
+    fn every_final_failure_discards_checked_out_connection() {
         let cancelled: Result<(), DbError> =
             Err(DbError::Cancelled("test cancellation".to_owned()));
         assert!(
@@ -1046,8 +1042,13 @@ mod tests {
             "ORA-04068: existing state of packages has been discarded".to_owned(),
         ));
         assert!(
-            !should_discard_after_call(&package_reset, || false),
-            "ORA-04068 keeps the session usable for its one safe retry"
+            should_discard_after_call(&package_reset, || false),
+            "a final failed pooled call is discarded even if the error class was retry-in-place"
+        );
+        let syntax_error: Result<(), DbError> = Err(DbError::Query("ORA-00942".to_owned()));
+        assert!(
+            should_discard_after_call(&syntax_error, || false),
+            "ordinary final SQL errors are not returned to the idle pool"
         );
         let ok: Result<(), DbError> = Ok(());
         assert!(!should_discard_after_call(&ok, || false));
