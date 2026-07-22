@@ -1,0 +1,49 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T07:35:00Z",
+  "bead_id": "oraclemcp-mqmo9",
+  "scope": {
+    "summary": "Windows shipping_spool concurrency tests fixed by replacing Linux-calibrated wall-clock budgets with GateForwarder property assertions; Windows CI lane confirmed green.",
+    "in_scope": [
+      "crates/oraclemcp-audit/src/shipping_spool.rs"
+    ],
+    "out_of_scope": [
+      "Oracle FREE 23ai matrix failure on the same CI run (unrelated)",
+      "E2/E3 e2e test suites"
+    ]
+  },
+  "source": {
+    "sha": "2746b6c12347fd1a7bd8e899d2f0b7c9a1b0f1bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "cargo test -p oraclemcp-audit --lib shipping_spool",
+        "kind": "cli",
+        "trace": "Fix at 731b083a replaced 150ms/1000ms wall-clock budgets with GateForwarder: gate proves delivery=0 while appends return, gap-free 1..=8 preserved, 30s hang detector only. 244 audit tests pass on Linux; each targeted test passed 50 consecutive runs."
+      },
+      {
+        "name": "GitHub Actions Rust workspace (Windows) — run 29899848208",
+        "kind": "tool",
+        "trace": "gh run view 29899848208: head 40b1f032 (contains fix 731b083a as ancestor). Job 'Rust workspace (Windows)' conclusion=success. The two tests that failed on run 29831595915 (concurrent_local_chain_stays_gap_free_while_shipping_is_stalled, slow_destination_does_not_delay_durable_local_append) pass on Windows."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The overall CI run 29899848208 has an unrelated Oracle FREE 23ai matrix failure; only the Windows workspace lane is cited as green"
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
