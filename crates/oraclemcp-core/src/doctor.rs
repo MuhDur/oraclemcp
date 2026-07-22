@@ -3110,6 +3110,9 @@ mod tests {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
         }
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
@@ -3142,6 +3145,10 @@ mod tests {
     impl OracleConnection for PoolPingFailMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
 
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -3180,6 +3187,10 @@ mod tests {
     impl OracleConnection for CancelledPreflightMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
 
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -3228,6 +3239,10 @@ mod tests {
             OracleBackend::RustOracle
         }
 
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
@@ -3270,6 +3285,9 @@ mod tests {
     impl OracleConnection for WriteCapableMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())

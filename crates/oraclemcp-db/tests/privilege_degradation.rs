@@ -38,6 +38,9 @@ impl OracleConnection for LeastPrivConn {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
+    async fn close(&self, _cx: &Cx) -> Result<(), oraclemcp_db::DbError> {
+        Ok(())
+    }
     async fn ping(&self, _cx: &Cx) -> Result<(), oraclemcp_db::DbError> {
         Ok(())
     }

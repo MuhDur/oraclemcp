@@ -1084,6 +1084,9 @@ mod tests {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
         }
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
@@ -1155,6 +1158,10 @@ mod tests {
     impl OracleConnection for ScriptedHealthMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
 
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {

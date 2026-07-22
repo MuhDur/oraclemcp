@@ -652,6 +652,9 @@ mod tests {
         fn backend(&self) -> crate::types::OracleBackend {
             crate::types::OracleBackend::RustOracle
         }
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
@@ -749,6 +752,9 @@ mod tests {
     impl OracleConnection for BoundedPageMock {
         fn backend(&self) -> crate::types::OracleBackend {
             crate::types::OracleBackend::RustOracle
+        }
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
@@ -1322,6 +1328,9 @@ mod tests {
     impl OracleConnection for FlashbackRecorder {
         fn backend(&self) -> crate::types::OracleBackend {
             crate::types::OracleBackend::RustOracle
+        }
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
@@ -1947,6 +1956,9 @@ mod tests {
     impl OracleConnection for OffsetAwareMock {
         fn backend(&self) -> crate::types::OracleBackend {
             crate::types::OracleBackend::RustOracle
+        }
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())

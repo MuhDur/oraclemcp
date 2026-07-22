@@ -35,6 +35,10 @@ impl OracleConnection for NoExecMock {
         OracleBackend::RustOracle
     }
 
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -87,6 +91,10 @@ impl ProfileEchoMock {
 impl OracleConnection for ProfileEchoMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
     }
 
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {

@@ -113,6 +113,10 @@ impl OracleConnection for OneRowMock {
         OracleBackend::RustOracle
     }
 
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -202,6 +206,10 @@ impl OracleConnection for PagedMock {
         OracleBackend::RustOracle
     }
 
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -249,6 +257,10 @@ struct FailingMock;
 impl OracleConnection for FailingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
     }
 
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -584,6 +596,9 @@ struct ExportMock;
 impl OracleConnection for ExportMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
     }
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
@@ -944,6 +959,9 @@ struct SearchMock;
 impl OracleConnection for SearchMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
     }
     async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())

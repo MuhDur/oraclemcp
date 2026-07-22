@@ -1204,12 +1204,11 @@ pub trait OracleConnection: Send + Sync {
     ///
     /// Lifecycle owners call this after their rollback/finalization work rather
     /// than relying on Rust drop. The thin implementation delegates to the
-    /// driver's consuming logical-logoff path; lightweight test backends may
-    /// retain this no-op default when they do not own a physical session.
-    async fn close(&self, cx: &Cx) -> Result<(), DbError> {
-        let _ = cx;
-        Ok(())
-    }
+    /// driver's consuming logical-logoff path. Lightweight test backends that
+    /// do not own a physical session must still implement this explicitly, so a
+    /// newly added backend cannot silently skip logical logoff by inheriting a
+    /// no-op default.
+    async fn close(&self, cx: &Cx) -> Result<(), DbError>;
 
     /// Tear down any `DBMS_FLASHBACK` session read-snapshot window (K9).
     ///
@@ -1522,8 +1521,8 @@ mod driver {
     use crate::query::{QueryCaps, QueryPageBuilder, QueryPagePush, QueryResponse};
     use crate::serialize::{SerializeOptions, StructuredDecodeCaps, json_byte_len};
     use crate::types::{
-        OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleNestedResult,
-        OracleRow, OracleSessionIdentity,
+        IamTokenRefreshError, IamTokenSourceHandle, OracleBind, OracleCell, OracleConnectOptions,
+        OracleConnectionInfo, OracleNestedResult, OracleRow, OracleSessionIdentity,
     };
     use asupersync::Cx;
     use asupersync::combinator::try_commit_section;
@@ -1558,6 +1557,37 @@ mod driver {
 
     const FETCH_BATCH_ROWS: u32 = 512;
     pub(super) const BOUNDED_PAGE_FETCH_ROWS: u32 = 1;
+
+    /// Driver-local bridge from the server's driver-free token-source contract.
+    ///
+    /// This is intentionally the only `oracledb::TokenSource` implementation in
+    /// the workspace. A failed refresh is reduced to the driver's redacted
+    /// failure class; it cannot become a password or static-token fallback.
+    #[derive(Clone)]
+    struct DriverIamTokenSource(Arc<dyn crate::types::RefreshableIamTokenSource>);
+
+    impl DriverIamTokenSource {
+        fn new(handle: &IamTokenSourceHandle) -> Self {
+            Self(Arc::clone(handle.source()))
+        }
+    }
+
+    impl oracledb::TokenSource for DriverIamTokenSource {
+        fn get_token(&self) -> oracledb::BoxFuture<'_, Result<String, oracledb::TokenSourceError>> {
+            Box::pin(async move {
+                self.0.get_token().await.map_err(|error| {
+                    // This log is operator-only and carries a stable failure
+                    // class, never the provider's error text, token, or key.
+                    tracing::warn!(reason = error.as_str(), "IAM token refresh failed closed");
+                    match error {
+                        IamTokenRefreshError::SourceUnavailable => oracledb::TokenSourceError::Exec,
+                        IamTokenRefreshError::InvalidToken => oracledb::TokenSourceError::Invalid,
+                        IamTokenRefreshError::TimedOut => oracledb::TokenSourceError::Timeout,
+                    }
+                })
+            })
+        }
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct LobReadLimits {
@@ -1800,28 +1830,46 @@ mod driver {
         // TCPS transport check below see the resolved (possibly `PROTOCOL=TCPS`)
         // descriptor.
         let selected_target = super::resolve_selected_connect_target(opts)?;
-        // OCI IAM database-token auth. The pinned driver DOES support it via
-        // `ConnectOptions::with_access_token` (the token is sent as `AUTH_TOKEN`
-        // with no password verifier). It is only wireable once a token has been
-        // fetched from OCI IAM; `use_iam_token` without a token means the
-        // token-source seam (oraclemcp_db::IamTokenSource / ensure_fresh_token)
-        // has not run yet — a setup error, not a driver-unsupported one.
-        let iam_token = match (opts.use_iam_token, opts.iam_token.as_deref()) {
-            (_, Some(token)) => Some(token),
-            (true, None) => {
+        // OCI IAM database-token auth. A server profile supplies a refreshable
+        // source, not a pre-fetched JWT: the driver invokes it once per physical
+        // connection attempt. A static token remains supported for direct library
+        // callers, but mixing it with a source is refused so a stale token can
+        // never silently take precedence over refresh.
+        enum IamAuth<'a> {
+            Static(&'a str),
+            Refreshable(&'a IamTokenSourceHandle),
+        }
+        let iam_auth = match (
+            opts.use_iam_token,
+            opts.iam_token.as_deref(),
+            opts.iam_token_source.as_ref(),
+        ) {
+            (_, Some(_), Some(_)) => {
                 return Err(DbError::UnsupportedAuth(
-                    "OCI IAM database-token auth is configured (use_iam_token) but no token was \
-                     fetched; obtain one via the IAM token source before connecting"
+                    "OCI IAM database-token auth cannot combine a static token with a refreshable source"
                         .to_owned(),
                 ));
             }
-            (false, None) => None,
+            (_, Some(token), None) => Some(IamAuth::Static(token)),
+            (true, None, Some(source)) => Some(IamAuth::Refreshable(source)),
+            (true, None, None) => {
+                return Err(DbError::UnsupportedAuth(
+                    "OCI IAM database-token auth is configured (use_iam_token) but no refreshable token source is configured"
+                        .to_owned(),
+                ));
+            }
+            (false, None, Some(_)) => {
+                return Err(DbError::UnsupportedAuth(
+                    "a refreshable IAM token source requires use_iam_token".to_owned(),
+                ));
+            }
+            (false, None, None) => None,
         };
         // A database access token must never travel in clear text. Fail closed
         // on a non-TCPS transport BEFORE we hand the token to the driver (the
         // driver also rejects this, but defense-in-depth keeps the token off a
         // plaintext socket and gives a precise typed error).
-        if iam_token.is_some() && !selected_target.uses_tcps {
+        if iam_auth.is_some() && !selected_target.uses_tcps {
             return Err(DbError::UnsupportedAuth(
                 "OCI IAM database-token auth requires a TLS (TCPS) transport; use a tcps:// \
                  connect string or a descriptor whose selected address uses PROTOCOL=TCPS"
@@ -1832,8 +1880,8 @@ mod driver {
             DbError::UnsupportedAuth("thin mode currently requires an explicit username".to_owned())
         })?;
         // Token auth carries the credential in the token itself, so no password
-        // is required (or used) when an IAM token is present.
-        let password = match iam_token {
+        // is required (or used) when an IAM token or source is present.
+        let password = match iam_auth {
             Some(_) => "",
             None => opts.password.as_deref().ok_or_else(|| {
                 DbError::UnsupportedAuth(
@@ -1854,16 +1902,26 @@ mod driver {
             connect_string_with_expire_time(&connect_string, opts.keepalive_minutes)?;
         let mut connect_options =
             oracledb::ConnectOptions::new(&connect_string, user, password, identity);
-        if let Some(token) = iam_token {
+        if let Some(iam_auth) = iam_auth {
             // OCI IAM *database* tokens are proof-of-possession: when the profile
             // resolved the bound private key, wire it through so the driver signs
             // the auth header (`AUTH_HEADER`/`AUTH_SIGNATURE`). Without the key the
             // database refuses the bearer token with ORA-01017; a plain OAuth2
             // bearer token has no key and uses the token-only path.
-            connect_options = match opts.iam_token_private_key.as_deref() {
-                Some(private_key) => connect_options
-                    .with_access_token_and_key(token.to_owned(), private_key.to_owned()),
-                None => connect_options.with_access_token(token.to_owned()),
+            connect_options = match iam_auth {
+                IamAuth::Static(token) => match opts.iam_token_private_key.as_deref() {
+                    Some(private_key) => connect_options
+                        .with_access_token_and_key(token.to_owned(), private_key.to_owned()),
+                    None => connect_options.with_access_token(token.to_owned()),
+                },
+                IamAuth::Refreshable(source) => {
+                    let source = Arc::new(DriverIamTokenSource::new(source));
+                    match opts.iam_token_private_key.as_deref() {
+                        Some(private_key) => connect_options
+                            .with_token_source_and_key(source, private_key.to_owned()),
+                        None => connect_options.with_token_source(source),
+                    }
+                }
             };
         }
         // session_identity.edition must be sent during authentication so no user
@@ -5257,6 +5315,9 @@ mod driver {
         if let Some(token) = &opts.iam_token {
             exact_secrets.push(token.clone());
         }
+        if let Some(private_key) = &opts.iam_token_private_key {
+            exact_secrets.push(private_key.clone());
+        }
         if let Some(wallet) = &opts.wallet_location {
             exact_secrets.push(wallet.display().to_string());
         }
@@ -6396,8 +6457,13 @@ mod driver {
 mod tests {
     use super::*;
     use crate::auth_adapter::AuthAdapter;
-    use crate::types::OracleSessionIdentity;
+    use crate::types::{
+        IamTokenFuture, IamTokenRefreshError, IamTokenSourceHandle, OracleSessionIdentity,
+        RefreshableIamTokenSource,
+    };
     use asupersync::runtime::RuntimeBuilder;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn bounded_page_cell_options_cap_every_expandable_cell_to_one_page() {
@@ -7414,6 +7480,123 @@ mod tests {
         assert!(!rendered.contains("iam.jwt.token"), "{rendered}");
     }
 
+    struct RefreshFailsClosed {
+        token: String,
+    }
+
+    impl RefreshableIamTokenSource for RefreshFailsClosed {
+        fn get_token(&self) -> IamTokenFuture<'_> {
+            Box::pin(async move {
+                // The sentinel models a source that holds a credential reference
+                // internally but fails before returning it.
+                let _ = self.token.as_str();
+                Err(IamTokenRefreshError::TimedOut)
+            })
+        }
+    }
+
+    #[test]
+    fn refreshable_iam_token_failure_is_typed_and_never_falls_back() {
+        const TOKEN_SENTINEL: &str = "B16A_TOKEN_MUST_NEVER_BE_STORED";
+        const KEY_SENTINEL: &str = "B16A_PRIVATE_KEY_MUST_NEVER_BE_RENDERED";
+
+        let opts = OracleConnectOptions {
+            connect_string: "tcps://adb.eu.oraclecloud.com:1522/svc_high".to_owned(),
+            username: Some("APP_USER".to_owned()),
+            // Deliberately omit a password. If a refresh error were allowed to
+            // degrade to password auth, this test would not be able to construct
+            // driver options at all; the only configured credential is the source.
+            password: None,
+            use_iam_token: true,
+            iam_token: None,
+            iam_token_source: Some(IamTokenSourceHandle::new(Arc::new(RefreshFailsClosed {
+                token: TOKEN_SENTINEL.to_owned(),
+            }))),
+            iam_token_private_key: Some(KEY_SENTINEL.to_owned()),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("source is wired");
+        assert!(
+            connect.access_token().is_none(),
+            "a refreshable source must not be replaced with a static token"
+        );
+        assert!(
+            format!("{connect:?}").contains("access_token_private_key: Some"),
+            "the refreshable source must be paired with its bound signing key"
+        );
+        let source = connect.token_source().expect("driver receives source");
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let error = runtime.block_on(async {
+            source
+                .get_token()
+                .await
+                .expect_err("refresh failure must be returned")
+        });
+        assert_eq!(error, oracledb::TokenSourceError::Timeout);
+
+        // Neither the source failure nor any rendered option surface is allowed
+        // to act as a credential oracle or reveal the key material.
+        let rendered = format!("{opts:?} {connect:?} {error:?} {error}");
+        assert!(!rendered.contains(TOKEN_SENTINEL), "{rendered}");
+        assert!(!rendered.contains(KEY_SENTINEL), "{rendered}");
+
+        let client = driver::connect_error_to_db_error(&oracledb::Error::TokenSource(error), &opts)
+            .into_envelope();
+        assert_eq!(
+            client.error_class,
+            oraclemcp_error::ErrorClass::ConnectionFailed
+        );
+        assert_eq!(
+            client.message, "Oracle connection failed; driver detail suppressed",
+            "anonymous callers receive no refresh-failure oracle"
+        );
+    }
+
+    struct CountingTokenSource {
+        fetches: Arc<AtomicUsize>,
+    }
+
+    impl RefreshableIamTokenSource for CountingTokenSource {
+        fn get_token(&self) -> IamTokenFuture<'_> {
+            let fetches = Arc::clone(&self.fetches);
+            Box::pin(async move {
+                let fetch = fetches.fetch_add(1, Ordering::SeqCst) + 1;
+                Ok(format!("fresh.iam.token.{fetch}"))
+            })
+        }
+    }
+
+    #[test]
+    fn driver_bridge_forwards_every_refresh_request_without_caching() {
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let opts = OracleConnectOptions {
+            connect_string: "tcps://adb.eu.oraclecloud.com:1522/svc_high".to_owned(),
+            username: Some("APP_USER".to_owned()),
+            use_iam_token: true,
+            iam_token_source: Some(IamTokenSourceHandle::new(Arc::new(CountingTokenSource {
+                fetches: Arc::clone(&fetches),
+            }))),
+            ..Default::default()
+        };
+        let connect = driver::to_connect_options(&opts).expect("source is wired");
+        let source = connect.token_source().expect("driver receives source");
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let tokens = runtime.block_on(async {
+            let first = source.get_token().await.expect("first fresh token");
+            let second = source.get_token().await.expect("second fresh token");
+            (first, second)
+        });
+        assert_eq!(tokens.0, "fresh.iam.token.1");
+        assert_eq!(tokens.1, "fresh.iam.token.2");
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+        assert!(connect.access_token().is_none());
+    }
+
     #[test]
     fn iam_token_over_non_tcps_is_refused_fail_closed() {
         // A5: an IAM token must never travel over a plaintext transport. We fail
@@ -7619,9 +7802,9 @@ mod tests {
     }
 
     #[test]
-    fn use_iam_token_without_a_fetched_token_is_a_setup_error() {
-        // use_iam_token set but no token fetched yet: a setup error pointing at
-        // the IAM token-source seam, NOT a driver-unsupported error.
+    fn use_iam_token_without_a_source_is_a_setup_error() {
+        // use_iam_token set but neither a static token nor a source exists: a
+        // setup error, never a password-auth fallback.
         let opts = OracleConnectOptions {
             connect_string: "tcps://adb.eu.oraclecloud.com:1522/svc_high".to_owned(),
             username: Some("APP_USER".to_owned()),
@@ -7630,9 +7813,13 @@ mod tests {
             ..Default::default()
         };
 
-        let err = driver::to_connect_options(&opts).expect_err("no token fetched");
+        let err = driver::to_connect_options(&opts).expect_err("no source configured");
         assert!(matches!(err, DbError::UnsupportedAuth(_)));
-        assert!(err.to_string().contains("no token was fetched"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("no refreshable token source is configured"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -457,6 +457,10 @@ mod tests {
             OracleBackend::RustOracle
         }
 
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }

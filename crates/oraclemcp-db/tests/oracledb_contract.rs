@@ -158,6 +158,9 @@ impl OracleConnection for ScriptedConn {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
     async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
         contract_checkpoint(cx)
     }
@@ -805,6 +808,9 @@ fn contract_named_binds_default_rejects_explicitly_not_silently() {
     impl OracleConnection for NoNamedBinds {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())

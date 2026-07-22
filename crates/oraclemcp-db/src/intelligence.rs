@@ -2547,6 +2547,10 @@ mod tests {
             OracleBackend::RustOracle
         }
 
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
@@ -2703,6 +2707,10 @@ mod tests {
             OracleBackend::RustOracle
         }
 
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
@@ -2757,6 +2765,10 @@ mod tests {
     impl OracleConnection for MultiSourceMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
 
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -2829,6 +2841,10 @@ mod tests {
     impl OracleConnection for LobMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
 
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -3437,6 +3453,10 @@ mod tests {
             OracleBackend::RustOracle
         }
 
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
@@ -3767,6 +3787,9 @@ mod tests {
     impl OracleConnection for SearchObjectsMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
@@ -4232,6 +4255,10 @@ mod tests {
     impl OracleConnection for DependentsMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
         }
 
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
