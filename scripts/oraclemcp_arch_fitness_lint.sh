@@ -38,7 +38,7 @@ check_max_file_size_ratchet() {
     [crates/oraclemcp-db/src/connection.rs]=8812
     [crates/oraclemcp-guard/src/classifier.rs]=7678
     [crates/oraclemcp/src/main.rs]=7722
-    [crates/oraclemcp-core/src/doctor.rs]=5569
+    [crates/oraclemcp-core/src/doctor.rs]=5400
     [crates/oraclemcp/src/service_lifecycle.rs]=5538
     [crates/oraclemcp-core/src/lane.rs]=5510
     [crates/oraclemcp/src/main_tests.rs]=4690
