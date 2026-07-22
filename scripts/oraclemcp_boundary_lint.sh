@@ -198,6 +198,7 @@ check_production_dependency_graph
 show_all_target_dependency_graph
 inspect_opentelemetry_runtime
 check_compat_markers
+bash "$ROOT/scripts/rig/rig_boundary_lint.sh"
 
 if [ "$violations" -ne 0 ]; then
   echo "" >&2
