@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T11:39:22Z",
+  "bead_id": "oraclemcp-nl105",
+  "scope": {
+    "summary": "Repair audit-wiring read fixtures by making the shared mock catalog prove both target-table cleanliness and dictionary visibility, so the tests assert audit wiring instead of failing at the semantic-read gate.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/tests.rs"
+    ],
+    "out_of_scope": [
+      "Changing production dispatch, guard, audit, or database catalog-resolution logic.",
+      "Weakening any audit-wiring assertion in crates/oraclemcp/src/dispatch/tests/audit_wiring.rs.",
+      "Changing the moved module path introduced by the C6 split."
+    ]
+  },
+  "source": {
+    "sha": "14039b89c609f6fe9fbde132cdccc95c80e2df33",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "audit-wiring read-path regression",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/nl105-probe cargo test -p oraclemcp --lib -- dispatch::tests::audit_wiring::served_read_is_audited_with_a_replay_scn passed: 1 passed, 364 filtered out."
+      },
+      {
+        "name": "full audit-wiring family",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/nl105-probe cargo test -p oraclemcp --lib -- dispatch::tests::audit_wiring:: passed: 16 passed, 349 filtered out."
+      },
+      {
+        "name": "semantic read gate fixture coverage",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/nl105-probe cargo test -p oraclemcp --lib -- dispatch::tests::served_read_gate passed: 3 passed, 362 filtered out."
+      },
+      {
+        "name": "semantic search fixture coverage",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/nl105-probe cargo test -p oraclemcp --lib -- dispatch::tests::semantic_ passed: 3 passed, 362 filtered out."
+      },
+      {
+        "name": "wrong fixture assumption adjudicated",
+        "kind": "api",
+        "trace": "The old mocks returned empty rows for all ALL_POLICIES and ALL_TAB_COLS reads. Under the tightened semantic-read gate, empty visibility probes mean catalog-blind risk, not proof that the target table has no SELECT VPD policy or virtual columns. The repair keeps target-object probes empty where appropriate and returns a visible catalog row for the proof probes."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The proof uses an isolated repo-local target directory, target/nl105-probe, to avoid stale shared-target artifacts and custom-fingerprint churn; no live Oracle evidence is claimed.",
+    "The ordinary shared checkout target had stale test binaries during this session; those runs are not used as green evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
