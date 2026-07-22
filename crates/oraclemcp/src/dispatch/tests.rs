@@ -174,10 +174,40 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
             ("COLUMN_ID", Some("1")),
         ])]);
     }
-    if normalized.contains("from all_policies") || normalized.contains("from all_tab_cols") {
-        return Some(Vec::new());
+    if normalized.contains("from all_policies") {
+        if normalized.contains("object_owner = :1") {
+            return Some(Vec::new());
+        }
+        return Some(vec![semantic_row(&[(
+            "POLICY_NAME",
+            Some("VISIBLE_POLICY"),
+        )])]);
+    }
+    if normalized.contains("from all_tab_cols") {
+        if normalized.contains("virtual_column = 'yes'") {
+            return Some(Vec::new());
+        }
+        return Some(vec![semantic_row(&[("COLUMN_NAME", Some("ID"))])]);
     }
     None
+}
+
+fn semantic_policy_rows_for(sql: &str, binds: &[OracleBind]) -> Vec<OracleRow> {
+    let normalized = sql.to_ascii_lowercase();
+    if normalized.contains("object_owner = :1") {
+        return (string_bind(binds, 1) == Some("POLICY_TABLE"))
+            .then(|| semantic_row(&[("POLICY_NAME", Some("P"))]))
+            .into_iter()
+            .collect();
+    }
+    vec![semantic_row(&[("POLICY_NAME", Some("VISIBLE_POLICY"))])]
+}
+
+fn semantic_tab_col_rows_for(sql: &str) -> Vec<OracleRow> {
+    if sql.to_ascii_lowercase().contains("virtual_column = 'yes'") {
+        return Vec::new();
+    }
+    vec![semantic_row(&[("COLUMN_NAME", Some("ID"))])]
 }
 
 #[async_trait::async_trait(?Send)]
@@ -286,13 +316,10 @@ impl OracleConnection for SemanticGuardMock {
             return Ok(Vec::new());
         }
         if normalized.contains("from all_policies") {
-            return Ok((string_bind(binds, 1) == Some("POLICY_TABLE"))
-                .then(|| semantic_row(&[("POLICY_NAME", Some("P"))]))
-                .into_iter()
-                .collect());
+            return Ok(semantic_policy_rows_for(sql, binds));
         }
         if normalized.contains("from all_tab_cols") {
-            return Ok(Vec::new());
+            return Ok(semantic_tab_col_rows_for(sql));
         }
         self.state.caller_queries.fetch_add(1, Ordering::SeqCst);
         self.state
