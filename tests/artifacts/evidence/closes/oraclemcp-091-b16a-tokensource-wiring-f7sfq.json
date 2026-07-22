@@ -1,0 +1,69 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:04:31Z",
+  "bead_id": "oraclemcp-091-b16a-tokensource-wiring-f7sfq",
+  "scope": {
+    "summary": "Server IAM token profiles now configure a refreshable driver TokenSource instead of embedding a one-shot JWT, and an offline TCPS counter test proves token_exec is invoked once per physical connect attempt.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/iam_token.rs",
+      "crates/oraclemcp-core/src/connect.rs",
+      "crates/oraclemcp-core/tests/iam_token_source_physical.rs",
+      "crates/oraclemcp-db/src/connection.rs",
+      "crates/oraclemcp-db/src/types.rs"
+    ],
+    "out_of_scope": [
+      "The D6 local TCPS lane work currently dirty in crates/oraclemcp-core/tests/oci_tcps_e2e.rs.",
+      "The live R-fail token-expiry lane with a real database and elapsed token lifetime.",
+      "Any sibling rust-oracledb driver repository change."
+    ]
+  },
+  "source": {
+    "sha": "a36dcf5934bd551c7388abdfb7e27b8d5971fc6d",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "server profile IAM token source configuration",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core iam_token -- --nocapture` exited 0 after the B16a source changes with 45 passed; it proves config load installs a refreshable source without storing a JWT, rejects static-token/source conflicts, refuses non-TCPS before token I/O, preserves PoP key wiring, and keeps token_exec sandboxing fail-closed."
+      },
+      {
+        "name": "physical TCPS connect token_exec counter proof",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core --test iam_token_source_physical -- --nocapture` exited 0 at source a36dcf59 with 1 passed; it drives two real RustOracleConnection::connect attempts into a local rustls TCPS terminator and proves the counter-backed token_exec source runs exactly once per physical connect attempt, while config load runs it zero times and connect errors do not leak token or wallet material."
+      },
+      {
+        "name": "driver TokenSource adapter bridge",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-db driver_bridge_forwards_every_refresh_request_without_caching -- --nocapture` exited 0 with 1 passed; it proves repeated driver TokenSource requests forward to the server source without caching or replacing it with a static access token."
+      },
+      {
+        "name": "driver TokenSource failure redaction",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-db refreshable_iam_token_failure_is_typed_and_never_falls_back -- --nocapture` exited 0 with 1 passed; it proves refresh failures stay typed/redacted, do not fall back to password or static token auth, and do not render token or private-key sentinels."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This close is scoped/offline proof; it does not claim a live Oracle database token-expiry run.",
+    "The live token-expiry and rotation fault-injection lane remains tracked by oraclemcp-091-rfail-injection-lanes-ok400.",
+    "This close does not run a workspace-wide Cargo gate.",
+    "Dirty files outside this bead's source scope remain in the shared checkout; they are excluded from tree_clean by the close auditor."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-rfail-injection-lanes-ok400"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
