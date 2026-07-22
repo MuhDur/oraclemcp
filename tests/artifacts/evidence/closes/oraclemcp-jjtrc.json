@@ -1,0 +1,56 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T07:51:28Z",
+  "bead_id": "oraclemcp-jjtrc",
+  "scope": {
+    "summary": "Over-ceiling and forbidden custom tools are security refusals at startup, while malformed config-quality files still skip-and-warn.",
+    "in_scope": [
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs"
+    ],
+    "out_of_scope": [
+      "No change to the Oracle version matrix script is included or claimed.",
+      "No live Oracle lane is claimed; this close proves the startup posture with scoped local tests."
+    ]
+  },
+  "source": {
+    "sha": "b514ee3ccbeedbcbb3d2ed07a6e6a4f0822ca0c4",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "custom-tool startup security split",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp custom_tool_loader_ -- --nocapture: custom_tool_loader_refuses_startup_for_an_over_ceiling_tool passed and custom_tool_loader_still_skips_a_malformed_definition_without_refusing passed."
+      },
+      {
+        "name": "profile ceiling wiring",
+        "kind": "api",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp custom_tool_loader_ -- --nocapture: custom_tool_loader_uses_each_profiles_real_ceiling passed."
+      },
+      {
+        "name": "signature tamper remains fail-closed",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp custom_tool_loader_ -- --nocapture: custom_tool_loader_never_skips_a_tampered_signature passed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped local tests only; the FREE 23ai matrix script was not rerun in this close."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T07:51:28Z",
+  "bead_id": "oraclemcp-091-b12c-skip-and-warn-38yf3",
+  "scope": {
+    "summary": "Custom-tool config-quality failures skip-and-warn by default while remaining loud on stderr, doctor, capabilities, and the signed/refusal security trail for signature failures.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/capabilities.rs",
+      "crates/oraclemcp-core/src/doctor.rs",
+      "crates/oraclemcp-core/src/lib.rs",
+      "crates/oraclemcp-core/src/custom_tools.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/refusal_corpus.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs"
+    ],
+    "out_of_scope": [
+      "No live Oracle lane is claimed; this close proves the loader and advertised local surfaces with scoped tests."
+    ]
+  },
+  "source": {
+    "sha": "b514ee3ccbeedbcbb3d2ed07a6e6a4f0822ca0c4",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "custom-tool loader default and strict policy",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp custom_tool_loader_ -- --nocapture: 5 passed, including malformed skip-and-start, strict-mode refusal, tampered-signature refusal, over-ceiling refusal, and real profile-ceiling wiring."
+      },
+      {
+        "name": "oracle_capabilities skipped_custom_tools surface",
+        "kind": "api",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-core skipped_custom_tools -- --nocapture: capabilities::tests::skipped_custom_tools_are_visible_without_changing_the_tool_surface passed."
+      },
+      {
+        "name": "doctor virtual tools warning surface",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-core skipped_custom_tools -- --nocapture: doctor::tests::skipped_custom_tools_are_reported_as_a_warning passed."
+      },
+      {
+        "name": "oraclemcp-core compilation",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo check -p oraclemcp-core passed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped local tests only; no live Oracle database or full-workspace gate is claimed.",
+    "Security-critical custom-tool invariants intentionally remain startup refusals instead of skip-and-warn."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
