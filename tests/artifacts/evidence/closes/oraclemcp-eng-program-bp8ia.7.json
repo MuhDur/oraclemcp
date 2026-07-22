@@ -1,0 +1,82 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:58:52Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7",
+  "scope": {
+    "summary": "Scoped reconciliation close of the Cluster F (§28 bug-hunt) parent: all direct Cluster F children are closed in Beads; all oraclemcp-owned F-LOW descendants are closed with bound evidence; the sole open descendant, DC5, is explicitly recorded as a rust-oracledb driver handoff outside this checkout.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp-telemetry/src/metrics.rs",
+      "tests/artifacts/evidence/f-low-normalization/oraclemcp-eng-program-bp8ia.7.11.json",
+      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.7.11.2.json",
+      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.7.11.6.json",
+      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.7.11.9.json",
+      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.7.11.14.json"
+    ],
+    "out_of_scope": [
+      "Implementing DC5: bead oraclemcp-eng-program-bp8ia.7.11.1 targets /home/durakovic/projects/rust-oracledb/crates/oracledb/src/sql_convert.rs and remains open for the driver pane.",
+      "Re-opening or re-verifying the already-closed children individually; their own close reasons and evidence artifacts remain the source of truth."
+    ]
+  },
+  "source": {
+    "sha": "7ce64039b1beb25ed77b7a68f3de3d8075a2ef3e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "cargo test -p oraclemcp --lib held_execute_survives_late_cancellation_and_is_not_reported_as_cancelled",
+        "kind": "cli",
+        "trace": "F-DI1 (bp8ia.7.8) discriminating pin: held oracle_execute is exactly-once; a late outer deadline no longer discards the successful response and a retry cannot double-apply the DML. Implementing commit 2e54c6a9 is an ancestor of source 7ce64039. Re-run 2026-07-22 with CARGO_TARGET_DIR=target: 1 passed, 0 failed."
+      },
+      {
+        "name": "cargo test -p oraclemcp-telemetry --lib tool_label_cardinality_is_bounded_against_attacker_controlled_names",
+        "kind": "cli",
+        "trace": "F-MET (bp8ia.7.9) discriminating pin: N attacker-controlled tool names yield O(1) distinct metric labels using the advertised-tools allowlist and unlisted sentinel, not O(N). Implementing commit 549fc8e6 is an ancestor of source 7ce64039. Re-run 2026-07-22 with CARGO_TARGET_DIR=target: 1 passed, 0 failed."
+      },
+      {
+        "name": "git merge-base --is-ancestor 2e54c6a9 7ce64039 / 549fc8e6 7ce64039 / 124d62c1 7ce64039",
+        "kind": "cli",
+        "trace": "All three server-side implementing commits (DI1=2e54c6a9, MET=549fc8e6, DI6 terminal-effect=124d62c1) are ancestors of the source commit."
+      },
+      {
+        "name": "tracker parent-child descendant query",
+        "kind": "config-gate",
+        "trace": "The exported Beads graph at source 7ce64039 has 17 direct parent-child children for oraclemcp-eng-program-bp8ia.7, all status=closed. Its F-LOW normalization child has 20 descendants: 19 status=closed and 1 status=open. The open descendant is DC5, a driver-side bead explicitly handed off in comments 111 and 139; all oraclemcp-owned Cluster F descendants are closed."
+      },
+      {
+        "name": "DC5 handoff audit",
+        "kind": "config-gate",
+        "trace": "br show oraclemcp-eng-program-bp8ia.7.11.1 --json shows status=open, labels include repo-driver, and comment 139 records the active blocker: the implementation site is the sibling rust-oracledb repo, no rust-oracledb edit/test/commit was made from this oraclemcp-only pane, and the fix remains routed to the driver pane."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "tree_clean is computed over the scoped paths only; the wider shared checkout carries other agents' uncommitted work on unrelated files (constitution rule 13).",
+    "DC5 is not claimed fixed or closed here. It remains open in this oraclemcp tracker as a driver-side handoff for /home/durakovic/projects/rust-oracledb/crates/oracledb/src/sql_convert.rs.",
+    "Driver-side §28 findings are verified only via their own tracker closes or handoff comments, not re-run here; the sibling driver checkout is outside this pane's editing scope.",
+    "This is a scoped-test basis: the two cargo pins confirm the server fixes; they do not re-certify the full Cluster F acceptance across both repositories."
+  ],
+  "known_defects": [
+    {
+      "description": "DC5 remains open for the driver pane: sub-minute FixedOffset values still need typed rejection in rust-oracledb.",
+      "bead_id": "oraclemcp-eng-program-bp8ia.7.11.1"
+    }
+  ],
+  "follow_ups": [
+    "oraclemcp-eng-program-bp8ia.7.11.1: driver-side DC5 handoff remains open.",
+    "oraclemcp-n4rnp: the engineering-program import manifest still needs the editorial authoring pass (167 tasks need acceptance, 81 need scope/evidence) before the plan-bead-graph lint returns PASS."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
