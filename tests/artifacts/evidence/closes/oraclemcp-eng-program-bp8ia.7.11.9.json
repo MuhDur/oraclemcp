@@ -1,0 +1,62 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:05:53Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.9",
+  "scope": {
+    "summary": "DI6 preserves successful oracle_checkpoint and oracle_undo_to responses across late deadline handling while leaving previews and effectless bodies cancellable.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.7.11.9.json"
+    ],
+    "out_of_scope": [
+      "No live Oracle deadline-injection lane is claimed; this close is pinned by the dispatcher unit tests that exercise the terminal-effect classifier directly.",
+      "No changes to dashboard HTTP operator files or session-recycle paths are included."
+    ]
+  },
+  "source": {
+    "sha": "332c2c658d259babcd976e32084313b045d3b8b7",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "OracleDispatcher late-deadline terminal-effect classifier",
+        "kind": "tool",
+        "trace": "crates/oraclemcp/src/dispatch/mod.rs:12020-12040 classifies successful oracle_checkpoint responses carrying a checkpoint string and oracle_undo_to responses carrying a statement string as terminal effects, including full rollback responses whose undone_to is null."
+      },
+      {
+        "name": "cargo test -p oraclemcp --lib successful_checkpoint_and_undo_are_terminal_effects -- --nocapture",
+        "kind": "cli",
+        "trace": "Re-run after source verification on 2026-07-22: 1 passed, 0 failed, 0 ignored. The test covers successful checkpoint, named undo, and full undo response shapes."
+      },
+      {
+        "name": "cargo test -p oraclemcp --lib previews_and_effectless_bodies_stay_cancellable -- --nocapture",
+        "kind": "cli",
+        "trace": "Re-run on 2026-07-22: 1 passed, 0 failed, 0 ignored. The test proves oracle_preview_dml and malformed/effectless checkpoint/undo bodies do not become terminal effects."
+      },
+      {
+        "name": "git diff --quiet 3fa4fc06a7bfb946dc6ad6aea7f6b08b344e4057..332c2c658d259babcd976e32084313b045d3b8b7 -- crates/oraclemcp/src/dispatch/mod.rs crates/oraclemcp/src/registry.rs",
+        "kind": "config-gate",
+        "trace": "Exit 0: HEAD advanced during verification only via tracker sync; the DI6 source content at evidence HEAD is identical to the source content tested."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped-test close only; no full workspace gate or live Oracle deadline race fixture is claimed.",
+    "The shared checkout had unrelated dirty files outside this scope; the scoped source paths and evidence files were clean before this evidence was written."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

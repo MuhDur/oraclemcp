@@ -1,0 +1,68 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:05:53Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.6",
+  "scope": {
+    "summary": "DI2 clamps oracle_preview_dml witness rows to the enforced query ceiling and publishes that ceiling in the tool schema.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp/src/registry.rs",
+      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.7.11.6.json"
+    ],
+    "out_of_scope": [
+      "No live Oracle preview_dml run is claimed; this close is pinned by the dispatcher/runtime clamp and registry schema unit tests.",
+      "No changes to dashboard HTTP operator files or session-recycle paths are included."
+    ]
+  },
+  "source": {
+    "sha": "332c2c658d259babcd976e32084313b045d3b8b7",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_preview_dml runtime witness row clamp",
+        "kind": "tool",
+        "trace": "crates/oraclemcp/src/dispatch/mod.rs:9069-9071 clamps requested witness rows into 1..=MAX_QUERY_MAX_ROWS, and preview_dml_inner uses that clamped value for QueryCaps before producing witness_rows."
+      },
+      {
+        "name": "oracle_preview_dml public schema maximum",
+        "kind": "tool",
+        "trace": "crates/oraclemcp/src/registry.rs publishes max_rows with a finite maximum matching the enforced MAX_QUERY_MAX_ROWS ceiling, so clients see the same upper bound the runtime enforces."
+      },
+      {
+        "name": "cargo test -p oraclemcp --lib preview_witness_max_rows_is_clamped_at_the_query_ceiling -- --nocapture",
+        "kind": "cli",
+        "trace": "Re-run after source verification on 2026-07-22: 1 passed, 0 failed, 0 ignored. The test covers usize::MAX, over-ceiling values, zero-to-one lower clamp, default behavior, and exact ceiling."
+      },
+      {
+        "name": "cargo test -p oraclemcp --lib preview_dml_schema_publishes_the_enforced_row_ceiling -- --nocapture",
+        "kind": "cli",
+        "trace": "Re-run on 2026-07-22: 1 passed, 0 failed, 0 ignored. The test verifies the registry schema publishes the enforced ceiling."
+      },
+      {
+        "name": "git diff --quiet 3fa4fc06a7bfb946dc6ad6aea7f6b08b344e4057..332c2c658d259babcd976e32084313b045d3b8b7 -- crates/oraclemcp/src/dispatch/mod.rs crates/oraclemcp/src/registry.rs",
+        "kind": "config-gate",
+        "trace": "Exit 0: HEAD advanced during verification only via tracker sync; the DI2 source content at evidence HEAD is identical to the source content tested."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped-test close only; no full workspace gate or live Oracle preview witness run is claimed.",
+    "The shared checkout had unrelated dirty files outside this scope; the scoped source paths and evidence files were clean before this evidence was written."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
