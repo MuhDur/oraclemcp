@@ -1,0 +1,87 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:02:18Z",
+  "bead_id": "oraclemcp-091-b14b-delete-lease-subsystem-ex6sf",
+  "scope": {
+    "summary": "The dead lease/session subsystem is absent at HEAD, B14a's clear-before-set sequence survives as the wired session identity path, and stale session-resource registry/docs references have been removed.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/resources.rs",
+      "crates/oraclemcp-core/src/server.rs",
+      "crates/oraclemcp-core/tests/mcp_conformance.rs",
+      "README.md",
+      "docs/behavior-inventory.md",
+      "crates/oraclemcp-db/src/connection.rs",
+      "crates/oraclemcp-db/src/lib.rs",
+      "crates/oraclemcp-db/api/oraclemcp-db.txt"
+    ],
+    "out_of_scope": [
+      "No tracked file deletion was performed in this turn; commit b5736dce, already an ancestor of HEAD, removed crates/oraclemcp-db/src/lease.rs and crates/oraclemcp-core/src/session_tool.rs.",
+      "The live DRCP lane was not run in this turn."
+    ]
+  },
+  "source": {
+    "sha": "56994f4ad9fab24805f6d0b4ddf19b4028086273",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "deleted lease/session subsystem is absent at HEAD",
+        "kind": "cli",
+        "trace": "git merge-base --is-ancestor b5736dce HEAD passed; git show --name-status --oneline b5736dce shows D crates/oraclemcp-core/src/session_tool.rs and D crates/oraclemcp-db/src/lease.rs; test ! -e crates/oraclemcp-db/src/lease.rs and test ! -e crates/oraclemcp-core/src/session_tool.rs printed lease_rs_absent and session_tool_absent."
+      },
+      {
+        "name": "surviving B14a clear sequence is in the wired db connection path",
+        "kind": "cli",
+        "trace": "rg -n 'apply_session_identity|CLEAR_IDENTIFIER|SET_MODULE\\\\(NULL|SET_CLIENT_INFO\\\\(NULL' crates/oraclemcp-db/src/connection.rs found apply_session_identity and the clear PL/SQL block at connection.rs:2001 and connection.rs:2014."
+      },
+      {
+        "name": "no stale core registry/resource/docs session template remains",
+        "kind": "cli",
+        "trace": "rg -n 'oracle://session|lease-backed|session state for a lease|ResourceUri::Session|session_tool|crates/oraclemcp-db/src/lease.rs|PreviewImpact|require_lease_id' crates README.md docs tests/conformance scripts --glob '!target/**' produced no B14b registry, resource template, or docs references after fb7c093e."
+      },
+      {
+        "name": "oraclemcp-core compilation",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo check -p oraclemcp-core passed at HEAD 56994f4a."
+      },
+      {
+        "name": "resource URI and template unit coverage",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-core --lib resources -- --nocapture passed: 7 passed, 0 failed."
+      },
+      {
+        "name": "MCP resource conformance coverage",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-core --test mcp_conformance resources -- --nocapture passed: 2 passed, 0 failed."
+      },
+      {
+        "name": "oraclemcp-db compilation",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo check -p oraclemcp-db passed at HEAD 56994f4a."
+      },
+      {
+        "name": "db connect option regression coverage",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-db thin_connect_options -- --nocapture passed: 21 passed, 0 failed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped local tests only; no full-workspace clippy/test gate is claimed from this shared dirty checkout.",
+    "Residual string matches in crates/oraclemcp-db/tests/live_idle_kill.rs, crates/oraclemcp-telemetry/src/otlp/logs.rs, and crates/oraclemcp-core/tests/phase0_capacity.rs are not B14b registry/resource/docs references."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
