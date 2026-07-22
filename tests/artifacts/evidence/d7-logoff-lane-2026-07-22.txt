@@ -1,13 +1,14 @@
-D7 AFTER LOGOFF lane live transcript
-
-source_sha: 7e20771b907bd3e6556a723f5128e5b3dc31acd8
-container: rust-oracledb-free
-pdb: FREEPDB1
-command: scripts/swarm_discipline.sh bounded-run --timeout 300 -- scripts/rig/verify_logoff_lane.sh
-
-Result:
-D7 AFTER LOGOFF lane against rust-oracledb-free/FREEPDB1
-  OK      clean: session 237 was live and the database recorded a LOGICAL CLOSE (+1 row)
-  OK      kill: session 237 was live and the database recorded NO logoff, as an abrupt end must look
-  NOTE    term: session 237 closed LOGICALLY (+1 row). If this used to leak, the fix has landed - update this lane deliberately.
-PASS verify_logoff_lane
+{
+  "run_id": "local-2026-07-22-d7-logoff-lane-sageraven",
+  "lane": "D7 AFTER LOGOFF lane",
+  "source_sha": "7e20771b907bd3e6556a723f5128e5b3dc31acd8",
+  "container": "rust-oracledb-free",
+  "pdb": "FREEPDB1",
+  "command": "scripts/swarm_discipline.sh bounded-run --timeout 300 -- scripts/rig/verify_logoff_lane.sh",
+  "result": "PASS verify_logoff_lane",
+  "observations": [
+    "clean: session 237 was live and the database recorded a LOGICAL CLOSE (+1 row)",
+    "kill: session 237 was live and the database recorded NO logoff, as an abrupt end must look",
+    "term: session 237 closed LOGICALLY (+1 row)"
+  ]
+}
