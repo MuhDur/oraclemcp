@@ -1,0 +1,55 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T19:48:59Z",
+  "bead_id": "oraclemcp-m02vm",
+  "scope": {
+    "summary": "Mirror charter rules 13-18 and the swarm-discipline helpers into rust-oracledb, including documented mechanized commands and a repository-specific self-test adaptation.",
+    "in_scope": [
+      "AGENTS.md"
+    ],
+    "out_of_scope": [
+      "Sibling rust-oracledb/AGENTS.md updates",
+      "Sibling rust-oracledb/scripts/swarm_discipline.sh implementation",
+      "sibling-script entry-trace contract registration"
+    ]
+  },
+  "source": {
+    "sha": "f2c6bd6d67a281f554b0bc8569ffaf8f640e00de",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "rust-oracledb AGENTS rules block",
+        "kind": "api",
+        "trace": "In /home/durakovic/projects/rust-oracledb, AGENTS.md contains rules 13–18 plus the mechanized command block (foreign-edit/evidence-source/verified-push/bounded-run/unbounded-wait-lint/struct-atomicity/stale-delete-check), matching this bead scope."
+      },
+      {
+        "name": "swarm discipline helper in rust-oracledb",
+        "kind": "config-gate",
+        "trace": "scripts/swarm_discipline.sh exists in rust-oracledb and `bash scripts/swarm_discipline.sh --selftest` passes all 18 checks."
+      },
+      {
+        "name": "entry-trace contract registration",
+        "kind": "api",
+        "trace": "`bash scripts/check_entry_trace_contract.sh --self-test` passes after adding rust-oracledb/scripts/entry_trace_contract.json entry for scripts/swarm_discipline.sh."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Sibling repo changes are referenced by path because this bead is cross-repo: the substantive file edits are in rust-oracledb."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
