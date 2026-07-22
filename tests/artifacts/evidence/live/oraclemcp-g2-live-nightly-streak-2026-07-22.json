@@ -1,0 +1,106 @@
+{
+  "schema": "oraclemcp-live-nightly-streak/v1",
+  "generated_at": "2026-07-22T13:30:13Z",
+  "source_commands": [
+    "gh run list --repo MuhDur/rust-oracledb --workflow=live.yml --limit 20 --json databaseId,displayTitle,headSha,headBranch,status,conclusion,event,createdAt,updatedAt,url",
+    "gh run view --repo MuhDur/rust-oracledb 29722438114 --json databaseId,displayTitle,headSha,headBranch,status,conclusion,event,createdAt,updatedAt,url,jobs",
+    "gh run view --repo MuhDur/rust-oracledb 29806957606 --json databaseId,displayTitle,headSha,headBranch,status,conclusion,event,createdAt,updatedAt,url,jobs",
+    "gh run view --repo MuhDur/rust-oracledb 29896713651 --json databaseId,displayTitle,headSha,headBranch,status,conclusion,event,createdAt,updatedAt,url,jobs",
+    "gh run view 29917633699 --log-failed",
+    "gh run download 29917633699 -n ci-heartbeat-snapshot -D /tmp/oraclemcp-heartbeat-29917633699"
+  ],
+  "driver_repo": "MuhDur/rust-oracledb",
+  "workflow_file": "live.yml",
+  "workflow_display_title": "Live (database) tests",
+  "required_streak_count": 3,
+  "observed_streak_count": 3,
+  "streak_conclusion": "success",
+  "scheduled_runs": [
+    {
+      "run_id": 29722438114,
+      "url": "https://github.com/MuhDur/rust-oracledb/actions/runs/29722438114",
+      "event": "schedule",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-07-20T06:42:32Z",
+      "updated_at": "2026-07-20T06:49:57Z",
+      "head_sha": "4fc6aa222c25b6c9ac906b3b3d298b5b47d8f836",
+      "job": {
+        "name": "driver live tests (Oracle Free 23ai)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-07-20T06:49:56Z",
+        "required_steps_completed_successfully": [
+          "Start Oracle Free 23ai",
+          "Wait for database ready",
+          "Bootstrap test schema (pythontest user + grants)",
+          "Verify connect-trace credentials are distinguishable",
+          "Driver live tests (serial, ignored)"
+        ]
+      }
+    },
+    {
+      "run_id": 29806957606,
+      "url": "https://github.com/MuhDur/rust-oracledb/actions/runs/29806957606",
+      "event": "schedule",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-07-21T06:25:10Z",
+      "updated_at": "2026-07-21T06:29:29Z",
+      "head_sha": "537373a1add992ea5e4369dce30d00803efab2ed",
+      "job": {
+        "name": "driver live tests (Oracle Free 23ai)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-07-21T06:29:28Z",
+        "required_steps_completed_successfully": [
+          "Start Oracle Free 23ai",
+          "Wait for database ready",
+          "Bootstrap test schema (pythontest user + grants)",
+          "Verify connect-trace credentials are distinguishable",
+          "Driver live tests (serial, ignored)"
+        ]
+      }
+    },
+    {
+      "run_id": 29896713651,
+      "url": "https://github.com/MuhDur/rust-oracledb/actions/runs/29896713651",
+      "event": "schedule",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-07-22T06:25:25Z",
+      "updated_at": "2026-07-22T06:37:16Z",
+      "head_sha": "3934a23054c6e861096c79c21734620978900989",
+      "job": {
+        "name": "driver live tests (Oracle Free 23ai)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-07-22T06:37:15Z",
+        "required_steps_completed_successfully": [
+          "Start Oracle Free 23ai",
+          "Wait for database ready",
+          "Bootstrap test schema (pythontest user + grants)",
+          "Verify connect-trace credentials are distinguishable",
+          "Driver live tests (serial, ignored)"
+        ]
+      }
+    }
+  ],
+  "server_heartbeat_observation": {
+    "repo": "MuhDur/oraclemcp",
+    "run_id": 29917633699,
+    "url": "https://github.com/MuhDur/oraclemcp/actions/runs/29917633699",
+    "snapshot_lane": {
+      "repo": "MuhDur/rust-oracledb",
+      "check_name": "driver_scheduled:live.yml",
+      "tier": "driver_scheduled",
+      "state": "success",
+      "conclusion": "success",
+      "run_url": "https://github.com/MuhDur/rust-oracledb/actions/runs/29896713651",
+      "head_sha": "3934a23054c6e861096c79c21734620978900989",
+      "updated_at": "2026-07-22T06:37:16Z"
+    },
+    "important_context": "The heartbeat run itself failed because server required:ci.yml was red on hosted SHA 3e87e88 and server scheduled loom/mutation evidence was red or unknown. The driver Live lane was green in the same snapshot."
+  },
+  "verdict": "The driver Live nightly lane satisfied the bead acceptance of three consecutive scheduled green runs. The oraclemcp-side defect found during close was stale embedded CI taxonomy evidence, fixed separately in commit 3c524c55."
+}
