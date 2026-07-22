@@ -4905,6 +4905,136 @@ fn custom_tool_write_uses_runtime_level_refusal_before_db() {
 }
 
 #[test]
+fn custom_tool_write_runs_with_confirmation_on_writable_profile() {
+    let defs = oraclemcp_core::parse_tools_file(
+        r#"
+            [[tool]]
+            name = "app_customer_set_name"
+            description = "Update a customer name"
+            sql = "UPDATE app_customers SET name = :name WHERE id = :id"
+            output_mode = "rows"
+
+            [[tool.params]]
+            name = "id"
+            type = "integer"
+            required = true
+            description = "Customer id"
+
+            [[tool.params]]
+            name = "name"
+            type = "string"
+            required = true
+            description = "Customer name"
+            "#,
+    )
+    .expect("custom tool parses");
+    let loaded = oraclemcp_core::load_tools(
+        &defs,
+        &Classifier::new(ClassifierConfig::new()),
+        OperatingLevel::ReadWrite,
+    )
+    .expect("write custom tool loads on writable profile ceiling");
+    assert_eq!(loaded[0].required_level, OperatingLevel::ReadWrite);
+
+    let state = std::sync::Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools(
+        Box::new(ExecRecordingMock {
+            state: std::sync::Arc::clone(&state),
+            rows_affected: 7,
+        }),
+        Some("dev".to_owned()),
+        SessionLevelState::new(OperatingLevel::ReadWrite, false),
+        std::sync::Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(session_bundle(OneRowMock)) })
+        }),
+        CustomToolCatalog::new(loaded),
+        None,
+    );
+
+    let set_preview = dispatcher
+        .dispatch(
+            "oracle_set_session_level",
+            json!({
+                "level": "READ_WRITE",
+                "ttl_seconds": 900
+            }),
+        )
+        .expect("session level preview to enable writable execution");
+    let set_token = set_preview
+        .pointer("/confirmation/confirm")
+        .and_then(Value::as_str)
+        .expect("session level preview minted execute confirmation");
+    let elevated = dispatcher
+        .dispatch(
+            "oracle_set_session_level",
+            json!({
+                "level": "READ_WRITE",
+                "ttl_seconds": 900,
+                "execute": true,
+                "token": set_token,
+            }),
+        )
+        .expect("writable session level should apply");
+    assert_eq!(elevated["session"]["current_level"], json!("READ_WRITE"));
+
+    let token = dispatcher
+        .dispatch(
+            "oracle_preview_sql",
+            json!({
+                "sql": "UPDATE app_customers SET name = :name WHERE id = :id",
+            }),
+        )
+        .expect("custom tool SQL should preview");
+    let token = token
+        .pointer("/execute_confirmation/confirm")
+        .and_then(Value::as_str)
+        .expect("preview minted execute grant")
+        .to_owned();
+
+    let err = dispatcher
+        .dispatch(
+            "app_customer_set_name",
+            json!({
+                "id": 7,
+                "name": "Acme",
+                "commit": true,
+            }),
+        )
+        .expect_err("custom tool should require execute confirmation for commit");
+    assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+
+    let out = dispatcher
+        .dispatch(
+            "app_customer_set_name",
+            json!({
+                "id": 7,
+                "name": "Acme",
+                "commit": true,
+                "confirm": token,
+            }),
+        )
+        .expect("custom tool applies with confirmation");
+    assert_eq!(out["executed"], json!(true));
+    assert_eq!(out["committed"], json!(true));
+    assert_eq!(out["rolled_back"], json!(false));
+    assert_eq!(out["rows_affected"], json!(7));
+
+    let executed = state.executed.lock().expect("executed mutex");
+    assert_eq!(executed.len(), 1);
+    assert!(
+        executed[0]
+            .0
+            .ends_with("UPDATE app_customers SET name = :name WHERE id = :id"),
+        "execution used the tool body SQL in the audited statement"
+    );
+    assert_eq!(
+        executed[0].1,
+        vec![OracleBind::String("Acme".to_owned()), OracleBind::I64(7)]
+    );
+    assert!(state.queried.lock().expect("queried mutex").is_empty());
+}
+
+#[test]
 fn qa45_profile_switch_refreshes_every_discovery_surface_and_execution() {
     fn catalog(name: &str) -> CustomToolCatalog {
         let source = format!(
