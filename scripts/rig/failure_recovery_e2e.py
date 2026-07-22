@@ -1355,10 +1355,16 @@ def main() -> int:
     finally:
         server.stop()
 
+    # scripts/audit_bead_closes.py treats a live_evidence artifact as scheduled-lane
+    # provenance and hard-fails it without run_id and lane. This rig is a LOCAL lane,
+    # not a hosted one, so it records that plainly rather than borrowing CI's identity:
+    # the run id is the timestamped artifact dir the run actually wrote.
     evidence = {
         "bead": BEAD,
         "status": "pass",
         "source_sha": source_sha,
+        "run_id": work.name,
+        "lane": "local-rig/failure_recovery_e2e",
         "installed_binary": str(binary),
         "runtime_artifact_dir": str(work),
         "client_id": client_id,
