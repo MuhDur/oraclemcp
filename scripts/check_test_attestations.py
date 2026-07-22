@@ -307,8 +307,21 @@ def main() -> int:
     if args.directory is None:
         parser.error("a directory is required unless --selftest is given")
     if not args.directory.is_dir():
-        print(f"check_test_attestations: no such directory: {args.directory}", file=sys.stderr)
-        return 2
+        # AN ABSENT DIRECTORY IS A RESULT, NOT A CRASH. It is what a lane looks
+        # like when the signer never ran at all — the same honest path as "every
+        # lane skipped", not a filesystem error. Dying here made a run that
+        # produced no attestations indistinguishable from a broken checker, and
+        # hard-failed CI for the one outcome this script exists to report calmly.
+        print(
+            f"check_test_attestations: {args.directory} does not exist, so this lane produced "
+            "NO attestations at all — not even a typed SKIP status. The signer is gated on "
+            "vars.ENABLE_TEST_ATTESTATION plus the ORACLEMCP_TEST_ATTESTATION_KEY secret, and "
+            "neither exists in this repository. Do not cite this run as attested."
+        )
+        if args.require_signed:
+            print("FAIL check_test_attestations: --require-signed was given and no lane signed")
+            return 1
+        return 0
 
     findings = Findings()
     signed, skipped = check_directory(args.directory, findings)
