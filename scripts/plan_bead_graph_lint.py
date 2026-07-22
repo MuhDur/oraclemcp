@@ -50,7 +50,7 @@ import json
 import re
 import subprocess
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -1140,11 +1140,13 @@ def report_manifest(state: ManifestState) -> None:
         print(f"lint: WARN {line}")
     for line in sorted(state.findings.hard):
         print(f"lint: HARD {line}")
-    deferred = sum(task["promotion"] != "activate" for task in state.tasks.values())
+    promotions = Counter(task["promotion"] for task in state.tasks.values())
+    promotion_summary = ",".join(f"{name}:{promotions[name]}" for name in sorted(promotions))
     verdict = "FAIL" if state.findings.hard else "PASS"
     print(
         f"plan-bead-graph: {verdict} — program={state.raw.get('program', {}).get('slug', '?')} "
-        f"tasks={len(state.tasks)} repositories={len(state.repositories)} deferred={deferred} hard={len(state.findings.hard)}"
+        f"tasks={len(state.tasks)} repositories={len(state.repositories)} "
+        f"promotions={promotion_summary} hard={len(state.findings.hard)}"
     )
 
 

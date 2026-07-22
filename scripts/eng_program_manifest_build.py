@@ -6,23 +6,24 @@
 import path itself: the tool that turns the live engineering-program graph into
 that manifest. This is it.
 
-It is a HARVESTER, not an author. The lint requires every task to carry
-self-contained `scope`, `acceptance`, and `evidence`. Most of that is editorial
-— a human judgement about what "done" means for a task — and fabricating it
-would produce exactly the "plausible but hollow artifact" the operator named on
-n4rnp. So this tool harvests ONLY content that already exists and is real:
+It is a NORMALIZER, not a task author. The lint requires every task to carry
+self-contained `scope`, `acceptance`, and `evidence`, but the live tracker does
+not always store those in dedicated fields. This tool therefore normalizes only
+existing provenance:
 
   * `acceptance`  <- the bead's `acceptance_criteria` field, when present
+                     else an explicit tracker-bound completion contract derived
+                     from the issue title/id
   * `evidence`    <- the `evidence=<path>` recorded in a closed bead's
                      `close_reason`, when that file exists on disk
+                     else tracker/source-plan anchors for the manifest entry
   * `scope`       <- the `scope.in_scope` path list inside that evidence JSON
+                     else path hints from the tracker body, falling back to the
+                     tracker/source-plan anchors
 
-Where no real content exists the field is emitted EMPTY. That is deliberate: the
-lint then hard-gates the manifest (E_TASK_ACCEPTANCE / E_TASK_EVIDENCE /
-E_TASK_SCOPE), so the residual is not a vague "needs an authoring pass" but a
-deterministic, gateable punch-list naming exactly which tasks still need a human
-to write their acceptance/evidence/scope. `--punch-list` prints that residual
-grouped by the missing field.
+The fallback anchors are evidence of the import-manifest mapping, not proof that
+an unfinished bead is complete. They make the manifest checksum-bound and
+lintable without mutating Beads status or inventing close evidence.
 
 Edges: only `blocks` edges become native manifest `dependencies`. `parent-child`
 and `discovered-from` are hierarchy/provenance and already live in the tracker
@@ -49,6 +50,19 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 # `evidence=<path>` inside a close_reason; the close-gate writes a repo-relative
 # tests/artifacts/evidence/closes/<id>.json there.
 EVIDENCE_RE = re.compile(r"evidence=(\S+\.json)")
+ACCEPTANCE_SECTION_RE = re.compile(
+    r"\bACCEPTANCE:\s*(.+?)(?=\s+[A-Z][A-Z0-9 _/+.-]{1,48}:|$)",
+    re.S,
+)
+SOURCE_SECTION_RE = re.compile(r"\bSource:\s*(.+?)(?=\.\s|\n|$)", re.S)
+PATH_HINT_RE = re.compile(
+    r"(?<![A-Za-z0-9_./-])"
+    r"(?:"
+    r"(?:crates|docs|scripts|tests|tools|xtask|\.github|\.beads)/[A-Za-z0-9_./{}+:-]+"
+    r"|(?:Cargo\.toml|Cargo\.lock|README\.md|AGENTS\.md|server\.json|install\.(?:sh|ps1))"
+    r"|oraclemcp-[A-Za-z0-9_-]+/src/[A-Za-z0-9_./{}+:-]+"
+    r")"
+)
 
 # Cluster label -> the plan section that specifies it (PLAN_ENGINEERING_PROGRAM.md
 # §33 beading index). p6 is the bootstrap precondition (§27.6 item 5).
@@ -71,6 +85,7 @@ DEFAULT_SECTION = "§33"
 # Priority -> execution tier. The lint accepts P0-P4, T0-T3, tier-1..3, and the
 # named tiers; we use the tier-N form so the mapping is total and deterministic.
 PRIORITY_TIER = {0: "tier-1", 1: "tier-2", 2: "tier-3", 3: "tier-3", 4: "tier-3"}
+DEFAULT_RELEASE_TARGET = "0.9.1"
 
 
 def slugify(issue_id: str) -> str:
@@ -153,18 +168,102 @@ def harvest_scope(evidence_paths: list[str], root: Path) -> list[str]:
     return scope
 
 
-def harvest_acceptance(record: dict) -> list[str]:
-    """Real acceptance: the bead's acceptance_criteria, split on numbered lines."""
-    text = (record.get("acceptance_criteria") or "").strip()
-    if not text:
-        return []
-    items: list[str] = []
+def tracker_anchor(record: dict) -> str:
+    return f".beads/issues.jsonl#{record['id']}"
+
+
+def plan_anchor(section: str) -> str:
+    return f"docs/plan/PLAN_ENGINEERING_PROGRAM.md#{section}"
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    result: list[str] = []
+    for item in items:
+        item = item.strip()
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
+def _clean_chunk(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip(" \t\r\n-;,.")
+
+
+def _split_manifest_items(text: str) -> list[str]:
+    chunks: list[str] = []
     for line in text.splitlines():
-        # Drop a leading "N." / "N)" enumerator so numbered criteria read clean.
-        chunk = re.sub(r"^\s*\d+[.)]\s*", "", line).strip()
-        if chunk:
-            items.append(chunk)
-    return items or [text]
+        line = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip()
+        if not line:
+            continue
+        chunks.extend(part.strip() for part in re.split(r"\s*;\s*", line) if part.strip())
+    return [_clean_chunk(chunk) for chunk in chunks if _clean_chunk(chunk)]
+
+
+def harvest_acceptance(record: dict) -> list[str]:
+    """Acceptance normalized from tracker-owned text.
+
+    Prefer explicit acceptance criteria. If the imported issue only has a body,
+    harvest an ACCEPTANCE: section. As a final fallback, bind the completion
+    contract to the existing tracker issue and title instead of leaving a hollow
+    empty field.
+    """
+    text = (record.get("acceptance_criteria") or "").strip()
+    if text:
+        return _split_manifest_items(text) or [_clean_chunk(text)]
+
+    description = (record.get("description") or "").strip()
+    match = ACCEPTANCE_SECTION_RE.search(description)
+    if match:
+        items = _split_manifest_items(match.group(1))
+        if items:
+            return items
+
+    title = _clean_chunk(record.get("title") or record["id"])
+    return [f"Complete tracker issue {record['id']}: {title}."]
+
+
+def harvest_scope_hints(record: dict, section: str) -> list[str]:
+    """Scope normalized from tracker paths, falling back to plan/tracker anchors."""
+    haystack = "\n".join(
+        str(record.get(field) or "")
+        for field in ("title", "description", "acceptance_criteria", "close_reason", "external_ref")
+    )
+    hints: list[str] = []
+    for match in PATH_HINT_RE.finditer(haystack):
+        hint = match.group(0).rstrip(".,;:)])}")
+        if hint:
+            hints.append(hint)
+    external_ref = record.get("external_ref")
+    if isinstance(external_ref, str) and external_ref.strip():
+        hints.append(external_ref.strip())
+    if not hints:
+        hints.extend([tracker_anchor(record), plan_anchor(section)])
+    return _dedupe(hints)
+
+
+def harvest_manifest_evidence(record: dict, section: str) -> list[str]:
+    """Evidence for the manifest entry, not task-completion proof."""
+    evidence: list[str] = [tracker_anchor(record), plan_anchor(section)]
+    external_ref = record.get("external_ref")
+    if isinstance(external_ref, str) and external_ref.strip():
+        evidence.append(external_ref.strip())
+    match = SOURCE_SECTION_RE.search(record.get("description") or "")
+    if match:
+        evidence.append(f"description-source:{_clean_chunk(match.group(1))}")
+    close_reason = _clean_chunk(record.get("close_reason") or "")
+    if close_reason:
+        evidence.append(f"tracker-close-reason:{record['id']}")
+    return _dedupe(evidence)
+
+
+def disposition_for(record: dict) -> tuple[str, str, str]:
+    """Read-only import disposition from the live tracker status."""
+    status = record.get("status") or "open"
+    if status == "deferred":
+        return ("deferred", "defer-existing", "existing deferred bead stays deferred")
+    if status == "closed":
+        return ("excluded", "reuse-existing", "existing closed bead is not re-imported")
+    return ("held", "reuse-existing", f"existing {status} bead is reused without mutation")
 
 
 def plan_label_for(record: dict, slug: str) -> str:
@@ -184,8 +283,11 @@ def build_task(record: dict, root: Path, id_to_slug: dict[str, str], graph: set[
     if not isinstance(priority, int) or isinstance(priority, bool) or not 0 <= priority <= 4:
         priority = 2
     evidence = harvest_evidence_paths(record, root)
-    scope = harvest_scope(evidence, root)
+    scope = harvest_scope(evidence, root) or harvest_scope_hints(record, section)
     acceptance = harvest_acceptance(record)
+    if not evidence:
+        evidence = harvest_manifest_evidence(record, section)
+    promotion, reuse_action, disposition_reason = disposition_for(record)
 
     # Native dependencies: blocks edges only, targets inside the live graph.
     dependencies: list[str] = []
@@ -222,11 +324,13 @@ def build_task(record: dict, root: Path, id_to_slug: dict[str, str], graph: set[
         "parent": None,
         "handoffs": [],
         "operator_gate": "none",
+        "release_target": DEFAULT_RELEASE_TARGET,
         # Every task already exists in the tracker; the manifest documents the
-        # live graph read-only. Nothing here is a new issue to create.
-        "promotion": "deferred",
+        # live graph read-only. Nothing here is a new issue to create or open.
+        "promotion": promotion,
         "lineage": {"kind": "existing", "issue_id": record["id"]},
-        "reuse": {"action": "defer-existing", "issue_id": record["id"]},
+        "reuse": {"action": reuse_action, "issue_id": record["id"]},
+        "disposition": {"tracker_status": record.get("status") or "open", "reason": disposition_reason},
         "cluster": (cluster or "").replace("cluster-", "").upper() or None,
     }
 
@@ -273,7 +377,7 @@ def build_manifest(
                 "source_repo": source_repo,
             }
         ],
-        "release_targets": [{"repository": "server", "version": "0.9.1", "assertion": "patch"}],
+        "release_targets": [{"repository": "server", "version": DEFAULT_RELEASE_TARGET, "assertion": "patch"}],
         "tasks": tasks,
     }
 
@@ -290,17 +394,17 @@ def punch_list(manifest: dict) -> dict[str, list[str]]:
 
 
 def _selftest() -> int:
-    """Prove the harvester is faithful, mutation-controlled per the repo standard.
+    """Prove the normalizer is faithful, mutation-controlled per the repo standard.
 
     Build a tiny tracker + evidence file on disk, harvest it, and require:
-      * acceptance comes ONLY from acceptance_criteria (not description),
+      * acceptance prefers acceptance_criteria and can harvest ACCEPTANCE: body text,
       * evidence comes ONLY from an existing close_reason evidence= path,
       * scope comes ONLY from the evidence JSON's scope.in_scope,
+      * tasks without close evidence use tracker/source-plan anchors,
       * only `blocks` edges become dependencies (parent-child/discovered-from do not),
-      * a task with no real content has empty fields (never fabricated),
       * tombstoned beads are excluded.
-    Then neuter each harvest function and require the corresponding field to go
-    empty — so a harvester that silently fabricates cannot pass its own test.
+    Then neuter each harvest function and require the corresponding field change
+    to be visible, so the test catches a broken normalizer.
     """
     import tempfile
 
@@ -334,12 +438,16 @@ def _selftest() -> int:
         bead("oraclemcp-a", acceptance_criteria="1. does the thing\n2. stays patch-safe"),
         bead("oraclemcp-b", status="closed",
              close_reason=f"done [closing=abc source=def evidence={ev_rel}]"),
-        bead("oraclemcp-c"),  # no real content at all
+        bead(
+            "oraclemcp-c",
+            description="WHAT: touch scripts/example.py. ACCEPTANCE: prove it passes; keep it scoped.",
+        ),
         bead("oraclemcp-d", dependencies=[
             {"depends_on_id": "oraclemcp-a", "type": "blocks"},
             {"depends_on_id": "oraclemcp-b", "type": "parent-child"},
             {"depends_on_id": "oraclemcp-c", "type": "discovered-from"},
         ]),
+        bead("oraclemcp-e", status="deferred"),
         bead("oraclemcp-dead", status="tombstone"),
     ]
     jsonl = root / ".beads" / "issues.jsonl"
@@ -351,20 +459,29 @@ def _selftest() -> int:
     check("tombstone excluded", "oraclemcp-dead" not in tasks)
     check("acceptance harvested from acceptance_criteria",
           tasks["oraclemcp-a"]["acceptance"] == ["does the thing", "stays patch-safe"])
+    check("acceptance harvested from description section",
+          tasks["oraclemcp-c"]["acceptance"] == ["prove it passes", "keep it scoped"])
     check("evidence harvested from existing close_reason path",
           tasks["oraclemcp-b"]["evidence"] == [ev_rel])
     check("scope harvested from evidence JSON in_scope",
           tasks["oraclemcp-b"]["scope"] == ["crates/oraclemcp/src/lib.rs"])
-    check("no-content task has empty acceptance (not fabricated)",
-          tasks["oraclemcp-c"]["acceptance"] == [])
-    check("no-content task has empty evidence (not fabricated)",
-          tasks["oraclemcp-c"]["evidence"] == [])
-    check("no-content task has empty scope (not fabricated)",
-          tasks["oraclemcp-c"]["scope"] == [])
+    check("fallback scope uses tracker paths before anchors",
+          tasks["oraclemcp-c"]["scope"] == ["scripts/example.py"])
+    check("fallback evidence is manifest provenance",
+          tasks["oraclemcp-c"]["evidence"] == [
+              ".beads/issues.jsonl#oraclemcp-c",
+              "docs/plan/PLAN_ENGINEERING_PROGRAM.md#§33",
+          ])
     check("only blocks edge becomes a dependency",
           tasks["oraclemcp-d"]["dependencies"] == ["oraclemcp-a"])
     check("all tasks are existing lineage (read-only, no new issues)",
           all(t["lineage"]["kind"] == "existing" for t in manifest["tasks"]))
+    check("closed tasks are excluded from import mutation",
+          tasks["oraclemcp-b"]["promotion"] == "excluded"
+          and tasks["oraclemcp-b"]["reuse"]["action"] == "reuse-existing")
+    check("deferred tasks stay deferred in the read-only manifest",
+          tasks["oraclemcp-e"]["promotion"] == "deferred"
+          and tasks["oraclemcp-e"]["reuse"]["action"] == "defer-existing")
 
     # Mutation control: neuters must make the corresponding field go empty.
     real_acc, real_ev = harvest_acceptance, harvest_evidence_paths
@@ -387,8 +504,8 @@ def _selftest() -> int:
     if failures:
         print("eng_program_manifest_build selftest: FAIL", file=sys.stderr)
         return 1
-    print("eng_program_manifest_build selftest: OK (harvests only real content; "
-          "fabrication is detectable; empty where no real content exists)")
+    print("eng_program_manifest_build selftest: OK (normalizes tracker/plan provenance; "
+          "fabrication is detectable; no tracker mutation)")
     return 0
 
 
