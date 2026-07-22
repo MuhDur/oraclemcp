@@ -6,9 +6,13 @@
   "scope": {
     "summary": "Reconciles WS-E cross-repo e2e suite E1-E6: every child lane is closed with its own committed evidence, and no WS-E child scope remains open.",
     "in_scope": [
-      "tests/",
-      "scripts/e2e/",
-      "scripts/rig/"
+      ".beads/issues.jsonl",
+      "tests/artifacts/evidence/closes/oraclemcp-091-e1-ladder-e2e-jel20.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-e2-sec1-reclassify-64fpf.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-e3-audit-chain-e2e-69bbf.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-e4-dashboard-e2e-sobjr.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-e5-failure-recovery-e2e-bf1qa.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-e6-e2e-attestations-ocqon.json"
     ],
     "out_of_scope": [
       "This epic close asserts child closure only. It does not itself re-run E1-E6, and it makes no readiness claim about the product beyond what each child's own evidence establishes.",
@@ -16,7 +20,7 @@
     ]
   },
   "source": {
-    "sha": "47e5fff32d380fe968bcc5a9adc9746c4f674cf1",
+    "sha": "5ba44f2c9337e05e1d9435443cf8766f8bd4b387",
     "tree_clean": true,
     "branch": "main"
   },
