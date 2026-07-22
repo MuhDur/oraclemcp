@@ -1,0 +1,73 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T11:47:35Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.4.6.6",
+  "scope": {
+    "summary": "Split the doctor authentication capability and IAM-source diagnostic seam into a private child module without changing rendered doctor output, redaction, or exit-code behavior.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/doctor.rs",
+      "crates/oraclemcp-core/src/doctor/auth.rs",
+      "scripts/oraclemcp_arch_fitness_lint.sh"
+    ],
+    "out_of_scope": [
+      "Other C6 splits, including dispatch/tests.rs, http/operator.rs, service_lifecycle.rs, classifier.rs, lane.rs, App.tsx, and main.rs",
+      "Live Oracle doctor output; this close uses offline/unit/golden proof only"
+    ]
+  },
+  "source": {
+    "sha": "b0833a8ce02ee0cc08796cc475d89b9756eb945a",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "source split commit",
+        "kind": "cli",
+        "trace": "`git show --stat --name-status b0833a8ce02ee0cc08796cc475d89b9756eb945a` shows doctor.rs split into doctor/auth.rs and scripts/oraclemcp_arch_fitness_lint.sh updated in the same commit; doctor.rs ratchet lowered to the measured 5400 lines."
+      },
+      {
+        "name": "scoped compile",
+        "kind": "cli",
+        "trace": "`timeout 180s env CARGO_TARGET_DIR=target cargo check -p oraclemcp-core` exited 0 after the split."
+      },
+      {
+        "name": "oraclemcp doctor auth capability rendering",
+        "kind": "cli",
+        "trace": "`timeout 180s env CARGO_TARGET_DIR=target cargo test -p oraclemcp-core doctor::tests::auth_capability_matrix_is_thin_and_redaction_safe -- --exact` exited 0: 1 passed. The test asserts rendered JSON/text omit dbhost:1521/private_service, APP_USER, super_secret, MCP_PROXY, APP_OWNER, /wallets/private, wallet_secret, CN=private-db, iam.jwt.token, and another.secret.token."
+      },
+      {
+        "name": "oraclemcp doctor redaction filter",
+        "kind": "cli",
+        "trace": "`timeout 180s env CARGO_TARGET_DIR=target cargo test -p oraclemcp-core redacts` exited 0: 5 passed. Included doctor::tests::connection_error_redacts_profile_sensitive_values and doctor::tests::iam_token_refresh_failure_redacts_jwt, preserving credential_ref wording without exposing configured credential values."
+      },
+      {
+        "name": "oraclemcp doctor connectivity failure golden",
+        "kind": "cli",
+        "trace": "`timeout 180s env CARGO_TARGET_DIR=target cargo test -p oraclemcp-core --test doctor_secret_golden` exited 0: doctor_connectivity_failure_secret_redaction_golden passed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The doctor.rs source split and doctor.rs ratchet landed together in b0833a8ce02ee0cc08796cc475d89b9756eb945a; current shared-tree scripts/oraclemcp_arch_fitness_lint.sh also has an unrelated main.rs ratchet hunk that depends on uncommitted main.rs split work and is not part of this close.",
+    "A full arch-fitness run on current HEAD is red on out-of-scope crates/oraclemcp/src/dispatch/tests.rs: committed file has 15703 lines versus ratchet 15676.",
+    "Tree is not globally clean because other panes have C5/service-lifecycle/doc-plan work in progress; in-scope doctor source paths are clean at source."
+  ],
+  "known_defects": [
+    {
+      "description": "Current committed arch-fitness ratchet violation for crates/oraclemcp/src/dispatch/tests.rs: committed file has 15703 lines versus ratchet 15676.",
+      "bead_id": "oraclemcp-eng-program-bp8ia.4.6"
+    }
+  ],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
