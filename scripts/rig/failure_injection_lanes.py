@@ -292,9 +292,7 @@ def governed_execute(client: Any, session: str, request_id: int, sql: str, *, co
     return structured(executed, expect_error=False)
 
 
-def assert_wire_kill(binary: pathlib.Path, env: dict[str, str], port: int, operator_bearer: str, evidence: list[dict[str, Any]]) -> None:
-    _victim_id, victim_bearer = issue_client(binary, env, "rfail-kill-victim")
-    _killer_id, killer_bearer = issue_client(binary, env, "rfail-kill-admin")
+def assert_wire_kill(victim_bearer: str, killer_bearer: str, port: int, operator_bearer: str, evidence: list[dict[str, Any]]) -> None:
     victim = e5.HttpClient(port, victim_bearer)
     killer = e5.HttpClient(port, killer_bearer)
     victim_session = victim.initialize("rfail-kill-victim")
@@ -339,8 +337,7 @@ def assert_wire_kill(binary: pathlib.Path, env: dict[str, str], port: int, opera
     )
 
 
-def assert_revoke(binary: pathlib.Path, env: dict[str, str], port: int, operator_bearer: str, evidence: list[dict[str, Any]]) -> None:
-    client_id, bearer = issue_client(binary, env, "rfail-revoke")
+def assert_revoke(client_id: str, bearer: str, port: int, operator_bearer: str, evidence: list[dict[str, Any]]) -> None:
     client = e5.HttpClient(port, bearer)
     session = client.initialize("rfail-revoke")
     query_rows(client, session, 50, "SELECT 1 AS ok FROM dual")
@@ -369,8 +366,7 @@ def assert_revoke(binary: pathlib.Path, env: dict[str, str], port: int, operator
     )
 
 
-def assert_rotate(binary: pathlib.Path, env: dict[str, str], port: int, operator_bearer: str, evidence: list[dict[str, Any]]) -> None:
-    client_id, old_bearer = issue_client(binary, env, "rfail-rotate")
+def assert_rotate(client_id: str, old_bearer: str, port: int, operator_bearer: str, evidence: list[dict[str, Any]]) -> None:
     old_client = e5.HttpClient(port, old_bearer)
     session = old_client.initialize("rfail-rotate")
     query_rows(old_client, session, 60, "SELECT 1 AS ok FROM dual")
@@ -497,16 +493,24 @@ def main() -> int:
     for key in ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
         pathlib.Path(env[key]).mkdir(parents=True, exist_ok=True)
 
-    operator_id, operator_bearer = issue_client(binary, env, "rfail-operator")
-    _restart_id, restart_bearer = issue_client(binary, env, "rfail-restart")
+    clients = {
+        "operator": issue_client(binary, env, "rfail-operator"),
+        "restart": issue_client(binary, env, "rfail-restart"),
+        "kill_victim": issue_client(binary, env, "rfail-kill-victim"),
+        "kill_admin": issue_client(binary, env, "rfail-kill-admin"),
+        "revoke": issue_client(binary, env, "rfail-revoke"),
+        "rotate": issue_client(binary, env, "rfail-rotate"),
+    }
+    operator_id, operator_bearer = clients["operator"]
+    _restart_id, restart_bearer = clients["restart"]
     write_config(config, work / "audit.jsonl", port, [e5.client_principal_key(operator_id)])
     server = ServerProcess(binary, env, port)
     wire: list[dict[str, Any]] = []
     try:
         server.wait_ready()
-        assert_wire_kill(binary, env, port, operator_bearer, wire)
-        assert_revoke(binary, env, port, operator_bearer, wire)
-        assert_rotate(binary, env, port, operator_bearer, wire)
+        assert_wire_kill(clients["kill_victim"][1], clients["kill_admin"][1], port, operator_bearer, wire)
+        assert_revoke(clients["revoke"][0], clients["revoke"][1], port, operator_bearer, wire)
+        assert_rotate(clients["rotate"][0], clients["rotate"][1], port, operator_bearer, wire)
         restart_client = e5.HttpClient(port, restart_bearer)
         old_session = restart_client.initialize("rfail-restart-before")
         query_rows(restart_client, old_session, 70, "SELECT 1 AS ok FROM dual")
