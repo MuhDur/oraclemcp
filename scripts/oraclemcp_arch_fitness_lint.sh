@@ -23,6 +23,59 @@ indent_text() {
   done
 }
 
+count_lines() {
+  local path="$1"
+  wc -l <"$path" | tr -d ' '
+}
+
+check_max_file_size_ratchet() {
+  local global_limit=16508
+  local path line_count
+  declare -A path_limits=(
+    [crates/oraclemcp/src/dispatch/tests.rs]=16508
+    [crates/oraclemcp/src/dispatch/mod.rs]=15829
+    [web/src/app/App.tsx]=9892
+    [crates/oraclemcp-db/src/connection.rs]=8812
+    [crates/oraclemcp-guard/src/classifier.rs]=7814
+    [crates/oraclemcp/src/main.rs]=7722
+    [crates/oraclemcp-core/src/doctor.rs]=5569
+    [crates/oraclemcp/src/service_lifecycle.rs]=5538
+    [crates/oraclemcp-core/src/lane.rs]=5510
+    [crates/oraclemcp/src/main_tests.rs]=4690
+    [crates/oraclemcp-core/src/http/tests_operator.rs]=4452
+    [crates/oraclemcp-db/src/intelligence.rs]=4425
+    [crates/oraclemcp-audit/src/record.rs]=4334
+    [crates/oraclemcp-core/src/http/operator.rs]=4290
+    [crates/oraclemcp-core/src/server.rs]=4145
+    [crates/oraclemcp-config/src/lib.rs]=3756
+    [web/src/app/operator-client.ts]=3278
+    [crates/oraclemcp/src/plsql_tools.rs]=3228
+    [crates/oraclemcp-audit/src/sink.rs]=3115
+  )
+
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    [ -f "$path" ] || continue
+    line_count="$(count_lines "$path")"
+    if [ "$line_count" -gt "$global_limit" ]; then
+      echo "ARCH-FITNESS VIOLATION: $path has $line_count lines, above global tracked-source limit $global_limit" >&2
+      violations=$((violations + 1))
+    fi
+  done < <(git ls-files 'crates/**/*.rs' 'web/src/**/*.ts' 'web/src/**/*.tsx')
+
+  for path in "${!path_limits[@]}"; do
+    [ -f "$path" ] || continue
+    line_count="$(count_lines "$path")"
+    if [ "$line_count" -gt "${path_limits[$path]}" ]; then
+      echo "ARCH-FITNESS VIOLATION: $path has $line_count lines, above measured ratchet ${path_limits[$path]}" >&2
+      echo "Split or move code behind an isomorphic seam, or lower the ratchet in the same reviewed split commit." >&2
+      violations=$((violations + 1))
+    fi
+  done
+
+  echo "OK[file-size]: tracked Rust/TS source files are within measured max-file-size ratchets."
+}
+
 need cargo
 need jq
 
@@ -112,11 +165,13 @@ for crate in "${domain_crates[@]}"; do
   echo "OK[domain]: $crate normal internal deps are inward only: ${forbidden:-<none>}"
 done
 
+check_max_file_size_ratchet
+
 if [ "$violations" -ne 0 ]; then
   echo "" >&2
   echo "oraclemcp-arch-fitness-lint: $violations violation(s)." >&2
-  echo "Domain/security crates must stay independent of transport/frontend/storage adapters." >&2
+  echo "Domain/security crates must stay independent of transport/frontend/storage adapters, and monolith files must not regrow past their measured ratchets." >&2
   exit 1
 fi
 
-echo "oraclemcp-arch-fitness-lint: OK — workspace dependency graph points inward."
+echo "oraclemcp-arch-fitness-lint: OK — workspace dependency graph points inward and file-size ratchets hold."
