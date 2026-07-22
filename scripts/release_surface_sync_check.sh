@@ -253,6 +253,29 @@ for golden in tests/golden/stdio/*.json; do
     jq -r '.. | objects | select(has("serverInfo")) | .serverInfo.version? // empty' "$golden" |
       sort -u
   )
+
+  # `serverInfo.version` is not the only place a golden records the release.
+  # The capabilities payload carries `server_version` too — once as JSON, and
+  # again ESCAPED inside the untrusted-data text block, where no jq walk can
+  # reach it. A bump that moved only serverInfo.version passed this check and
+  # then failed golden_behavior with a diff thousands of characters wide, which
+  # is a miserable way to learn a version surface was missed. Scan the raw
+  # bytes so both spellings are covered.
+  while IFS= read -r stale; do
+    [ -n "$stale" ] || continue
+    fail "$golden still records server_version $stale, not workspace '$version' \
+(check the ESCAPED copy inside the untrusted-data text block too)"
+  done < <(
+    grep -oE '\\?"server_version\\?": ?\\?"[0-9]+\.[0-9]+\.[0-9]+\\?"' "$golden" |
+      grep -oE '[0-9]+\.[0-9]+\.[0-9]+' |
+      sort -u |
+      grep -vxF "$version" |
+      # The Oracle server version travels under the same key and is unrelated
+      # to ours; only the values that look like a release of THIS project are
+      # in scope, so anchor on the workspace major.minor lineage instead of
+      # guessing. A golden recording a previous release of ours is the defect.
+      grep -E "^0\." || true
+  )
 done
 
 dashboard_sbom="$ROOT/web/dist/oraclemcp-dashboard.cyclonedx.json"
