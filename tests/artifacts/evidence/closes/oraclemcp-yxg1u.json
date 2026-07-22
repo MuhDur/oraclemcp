@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:07:38Z",
+  "bead_id": "oraclemcp-yxg1u",
+  "scope": {
+    "summary": "OAuth rejected-bearer responses keep a uniform public invalid_token challenge with no error_description, while the typed rejection category is retained only in the operator audit trail.",
+    "in_scope": [
+      "README.md",
+      "crates/oraclemcp-auth/src/oauth_rs.rs",
+      "crates/oraclemcp-core/src/http/mod.rs",
+      "crates/oraclemcp-core/src/http/tests_serve.rs",
+      "crates/oraclemcp-core/tests/c1_oauth_literal_jwt.rs",
+      "crates/oraclemcp/tests/e2e_http_oauth.rs"
+    ],
+    "out_of_scope": [
+      "Any change to accepted-token validation semantics.",
+      "Any live external OAuth provider or network identity-provider run."
+    ]
+  },
+  "source": {
+    "sha": "3719ed8d24e62de13f038ae495e32cd25b2b8d61",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "core HTTP OAuth rejection audit/challenge contract",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core oauth_rejections_keep_one_challenge_and_audit_the_fixed_reason -- --nocapture` exited 0 with 1 passed; it proves bad-signature and expired presented bearers produce byte-identical `WWW-Authenticate` headers with `error=\"invalid_token\"` and no `error_description`, while the operator audit records `oauth_bad_signature` and `oauth_expired`."
+      },
+      {
+        "name": "literal JWT negative wire fixture",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core --test c1_oauth_literal_jwt c1_negative_tokens_share_one_opaque_challenge -- --nocapture` exited 0 with 1 passed; it proves distinct rejected literal JWTs share the same opaque public challenge and do not expose `error_description`."
+      },
+      {
+        "name": "binary HTTP OAuth e2e rejection contract",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp --test e2e_http_oauth binary_http_oauth_rejects_missing_invalid_and_insufficient_tokens -- --nocapture` exited 0 with 1 passed; it proves the running binary HTTP path returns metadata-only for missing bearer, `invalid_token` without description for malformed presented bearer, and `insufficient_scope` for authorization failure."
+      },
+      {
+        "name": "auth crate challenge renderer",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-auth metadata_and_challenge_render -- --nocapture` exited 0 with 1 passed; it proves the resource-server challenge renderer emits `invalid_token` without `error_description`."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This close is scoped offline proof; it does not claim a live external OAuth provider run.",
+    "This close does not run a workspace-wide Cargo gate.",
+    "Dirty files outside this bead's source scope remain in the shared checkout; they are excluded from tree_clean by the close auditor."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
