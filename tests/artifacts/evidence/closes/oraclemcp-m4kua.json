@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:37:03Z",
+  "bead_id": "oraclemcp-m4kua",
+  "scope": {
+    "summary": "Adds a parsed-YAML guard test proving release.yml outward-facing publishing jobs remain unreachable from non-tag release rehearsal events.",
+    "in_scope": [
+      "Cargo.lock",
+      "crates/oraclemcp/Cargo.toml",
+      "crates/oraclemcp/tests/release_publish_guards.rs"
+    ],
+    "out_of_scope": [
+      "No changes to .github/workflows/release.yml, .github/workflows/docker.yml, or .github/workflows/publish-mcp.yml.",
+      "No actionlint installation or auxiliary workflow behavior changes."
+    ]
+  },
+  "source": {
+    "sha": "a06eeb8c321286b034f060831d49ac4635e3906e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "release_publishing_jobs_stay_tag_gated_on_actual_workflow_conditions",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp --test release_publish_guards -- --nocapture` exited 0 with 2/2 passed. This test parses .github/workflows/release.yml as YAML, validates tag push plus workflow_dispatch triggers, requires direct positive startsWith(github.ref, 'refs/tags/') guards on release/publish-crates/docker/publish-mcp-registry, verifies verify-mcp-registry is skipped through publish-mcp-registry, and confirms docker.yml/publish-mcp.yml remain workflow_dispatch-only recovery workflows."
+      },
+      {
+        "name": "release_publish_guard_mutation_selftest_catches_removed_job_guards",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp --test release_publish_guards -- --nocapture` exited 0 with 2/2 passed. The mutation self-test mutates the parsed workflow in memory by replacing each direct publishing job guard with always() and by rewiring verify-mcp-registry away from publish-mcp-registry; each mutation must produce a checker error naming the affected job."
+      },
+      {
+        "name": "scoped clippy",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo clippy -p oraclemcp --test release_publish_guards -- -D warnings` exited 0."
+      },
+      {
+        "name": "new guard file formatting",
+        "kind": "cli",
+        "trace": "`rustfmt --edition 2024 --check crates/oraclemcp/tests/release_publish_guards.rs` exited 0."
+      },
+      {
+        "name": "source whitespace and staged discipline",
+        "kind": "cli",
+        "trace": "`git diff --check -- Cargo.lock crates/oraclemcp/Cargo.toml crates/oraclemcp/tests/release_publish_guards.rs` exited 0. `scripts/swarm_discipline.sh struct-atomicity --staged && scripts/swarm_discipline.sh stale-delete-check --staged` exited 0 before the source commit."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "cargo fmt -p oraclemcp -- --check was not used as close evidence because the shared checkout has an unrelated dirty crates/oraclemcp/src/main.rs formatting diff outside this bead; the new guard file was checked directly with rustfmt."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
