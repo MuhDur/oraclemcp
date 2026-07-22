@@ -26,17 +26,17 @@
     "entry_points": [
       {
         "name": "D10 positive rig lane",
-        "kind": "rig",
+        "kind": "cli",
         "trace": "scripts/swarm_discipline.sh bounded-run --timeout 1200 -- bash scripts/rig/rig.sh idle-kill --log passed in clean worktree /home/durakovic/projects/oraclemcp-d10-clean-332c2c65. Rig doctor reported 16 checks passed, Free23 readiness passed, pooled checkout replaced killed session 202,12538 -> 202,45625, pinned dispatcher idle-kill ran 1 test, rig_idle_kill passed, host hygiene passed."
       },
       {
         "name": "D10 failure-probe rig lane",
-        "kind": "rig",
+        "kind": "cli",
         "trace": "scripts/swarm_discipline.sh bounded-run --timeout 1200 -- bash scripts/rig/rig.sh idle-kill-failure-probe --log passed in clean worktree /home/durakovic/projects/oraclemcp-d10-clean-332c2c65. The pooled no-kill probe failed for the expected 'kill never took effect' signature with same session 206,44270 -> 206,44270; the pinned no-kill probe failed for the expected 'must not remain connected or be silently rebound' signature with victim 231,22844; rig_idle_kill passed and host hygiene passed."
       },
       {
         "name": "D10 rig syntax and dry-runs",
-        "kind": "command",
+        "kind": "cli",
         "trace": "bash -n scripts/rig/rig_idle_kill.sh && bash -n scripts/rig/rig.sh passed. scripts/swarm_discipline.sh bounded-run --timeout 120 -- bash scripts/rig/rig.sh idle-kill --dry-run --log and scripts/swarm_discipline.sh bounded-run --timeout 120 -- bash scripts/rig/rig.sh idle-kill-failure-probe --dry-run --log both passed in the clean worktree."
       }
     ]
@@ -47,12 +47,12 @@
       {
         "kind": "rig-log",
         "path": "target/e2e/rig/20260722T100503Z-3488982",
-        "summary": "Positive clean-worktree rig run: pooled checkout and pinned dispatcher live idle-kill both passed; host hygiene passed."
+        "sha": "332c2c658d259babcd976e32084313b045d3b8b7"
       },
       {
         "kind": "rig-log",
         "path": "target/e2e/rig/20260722T101123Z-3658614",
-        "summary": "Failure-probe clean-worktree rig run: pooled and pinned no-kill probes both failed for expected signatures; host hygiene passed."
+        "sha": "332c2c658d259babcd976e32084313b045d3b8b7"
       }
     ]
   },
@@ -63,6 +63,6 @@
   "follow_ups": [],
   "readiness": {
     "claim": "ready",
-    "basis": "live-rig"
+    "basis": "live-evidence"
   }
 }
