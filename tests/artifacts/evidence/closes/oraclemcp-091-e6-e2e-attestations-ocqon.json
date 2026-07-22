@@ -1,0 +1,76 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:21:33Z",
+  "bead_id": "oraclemcp-091-e6-e2e-attestations-ocqon",
+  "scope": {
+    "summary": "Wire the Oracle FREE 23ai e2e CI lane to emit, verify, and upload K-format test-attestation artifacts or a typed SKIP status.",
+    "in_scope": [
+      ".github/workflows/ci.yml"
+    ],
+    "out_of_scope": [
+      "Creating or enabling the repository signing secret",
+      "Claiming a hosted GitHub Actions run after this local commit",
+      "Changing lower-level scripts/rig harness ownership"
+    ]
+  },
+  "source": {
+    "sha": "ef3e6c8cfc21ac6d5a51ca991ef37bf17624fcc5",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle-free23 CI e2e lane",
+        "kind": "config-gate",
+        "trace": ".github/workflows/ci.yml now tees the oracle_version_matrix free23 e2e run into target/test-attestation-evidence/e2e-oracle-version-matrix-free23.log, derives PASS/FAIL/SKIP from steps.free23-matrix.outcome, invokes ./.github/actions/test-attestation with lane=e2e-oracle-free23, verifies target/test-attestations with scripts/check_test_attestations.py, and uploads both the e2e log and target/test-attestations."
+      },
+      {
+        "name": "disabled signer posture",
+        "kind": "config-gate",
+        "trace": "When vars.ENABLE_TEST_ATTESTATION is not exactly true or the workflow is not a trusted push context, the existing action emits test-attestation-status/v1 with reason operator-not-enabled or untrusted-context instead of an unsigned .jsonl lookalike."
+      },
+      {
+        "name": "attestation consumer selftest",
+        "kind": "cli",
+        "trace": "`python3 scripts/check_test_attestations.py --selftest` exited 0 and accepted valid signed evidence plus typed SKIP while rejecting missing, tampered, unsigned, claimed-but-absent, and unknown-reason shapes."
+      },
+      {
+        "name": "test-attest CLI regression",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-verifier --test test_attest_cli -- --nocapture` exited 0 with 3/3 passed: missing/malformed secrets refuse output, signed artifacts verify, and existing outputs are not overwritten."
+      },
+      {
+        "name": "test-attestation format contract",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-verifier --test test_attestation -- --test-threads=1` exited 0 with 11/11 passed: golden format, digest binding, malformed frames, over-claiming, key identity, and MAC checks remain intact."
+      },
+      {
+        "name": "workflow supply-chain lint",
+        "kind": "cli",
+        "trace": "`bash scripts/workflow_supply_chain_check.sh` exited 0, accepting the modified CI workflow action policy."
+      },
+      {
+        "name": "workflow diff whitespace check",
+        "kind": "cli",
+        "trace": "`git diff --check -- .github/workflows/ci.yml` exited 0 before commit."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This close proves local workflow wiring and verifier behavior. It does not claim a hosted oracle-free23 GitHub Actions run after ef3e6c8c.",
+    "The repository signing key remains operator-owned; if ENABLE_TEST_ATTESTATION is false or no ORACLEMCP_TEST_ATTESTATION_KEY secret is present, the e2e lane emits typed SKIP status rather than signed evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
