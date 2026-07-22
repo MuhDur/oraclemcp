@@ -1,0 +1,47 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T15:37:25Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.4.5",
+  "scope": {
+    "summary": "C5 repo-janitor cleanup: removes stale tracked C5 artifacts (`npm/oraclemcp`, `.skill-loop-progress.md`, `refactor/`) while keeping prior C5 moves/renames and non-runtime scope out of this commit.",
+    "in_scope": [
+      "README.md",
+      "AGENTS.md",
+      "docs/plan"
+    ],
+    "out_of_scope": [
+      "Earlier C5 move+rename work for tracked plan docs and manifest rewires is already claimed on this bead chain and is not part of this final closure commit.",
+      "No runtime behaviour, API surface, or authentication logic was touched in this tracked-content cleanup.",
+      "Workspace-wide build/test matrix was not rerun for this close evidence step."
+    ]
+  },
+  "source": {
+    "sha": "d2fa643c374ba0579a01f664c8baa4edcd03926f",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "tracked cleanup verification",
+        "kind": "cli",
+        "trace": "`git status --short --untracked-files=no` shows neither `npm/oraclemcp` nor `.skill-loop-progress.md` nor `refactor/` tracked in working tree after the committed cleanup."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The scope only cites tracked-docs-facing paths; code-path deletion proof is encoded by the tracked deletion commit itself and is summarized in the closure scope."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
