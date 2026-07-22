@@ -7,8 +7,6 @@
 //! plan: non-`Send` dispatch futures are never spawned across OS threads, and
 //! all stateful DB work is marshaled to the owning lane.
 
-#[cfg(debug_assertions)]
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
@@ -48,6 +46,12 @@ use crate::server::{
     ToolStreamSender, recv_terminal_after_cancel,
 };
 
+mod runtime_lock;
+
+use runtime_lock::assert_no_lane_registry_lock;
+#[cfg(debug_assertions)]
+use runtime_lock::{enter_lane_registry_lock, exit_lane_registry_lock};
+
 /// Default number of queued dispatch commands accepted by one lane.
 pub const DEFAULT_LANE_MAILBOX_CAPACITY: usize = 64;
 
@@ -57,49 +61,6 @@ const STATUS_STARTING: u8 = 0;
 const STATUS_RUNNING: u8 = 1;
 const STATUS_STOPPED: u8 = 2;
 const STATUS_QUARANTINED: u8 = 3;
-
-// DL-4 canonical lock rank for the served lane path:
-// Config watch snapshot/read -> lifecycle generation -> lane registry -> lane handle/status ->
-// lease state -> grants -> audit-chain writer -> metadata cache.
-//
-// The high-risk AB-BA edge is Registry -> Lane mailbox. The registry may copy
-// or insert `LaneRuntime` handles, but it must not dispatch, surface-state, or
-// close a lane while the registry guard is held. The debug rank below makes
-// that edge executable in tests.
-#[cfg(debug_assertions)]
-thread_local! {
-    static LANE_REGISTRY_LOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
-}
-
-#[cfg(debug_assertions)]
-fn enter_lane_registry_lock() {
-    LANE_REGISTRY_LOCK_DEPTH.with(|depth| depth.set(depth.get() + 1));
-}
-
-#[cfg(debug_assertions)]
-fn exit_lane_registry_lock() {
-    LANE_REGISTRY_LOCK_DEPTH.with(|depth| {
-        let current = depth.get();
-        debug_assert!(current > 0, "lane registry lock depth underflow");
-        depth.set(current.saturating_sub(1));
-    });
-}
-
-#[cfg(debug_assertions)]
-fn lane_registry_lock_held() -> bool {
-    LANE_REGISTRY_LOCK_DEPTH.with(|depth| depth.get() > 0)
-}
-
-#[cfg(debug_assertions)]
-fn assert_no_lane_registry_lock(operation: &str) {
-    debug_assert!(
-        !lane_registry_lock_held(),
-        "{operation} while holding the lane registry lock violates DL-4"
-    );
-}
-
-#[cfg(not(debug_assertions))]
-fn assert_no_lane_registry_lock(_operation: &str) {}
 
 /// Async factory that builds the concrete dispatcher on the lane's own runtime.
 ///
