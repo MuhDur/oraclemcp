@@ -1,0 +1,98 @@
+{
+  "schema": "rc-mutation-seal-precondition-check/v1",
+  "bead": "oraclemcp-091-rc-mutation-seal-5aqwf",
+  "generated_at": "2026-07-22T10:58:21Z",
+  "run_id": "local-20260722T105821Z-rc-mutation-seal-preconditions",
+  "lane": "RC mutation seal precondition check",
+  "source_sha": "7ce64039b1beb25ed77b7a68f3de3d8075a2ef3e",
+  "status": "blocked",
+  "advisory_contract": {
+    "must_not_block_publish": true,
+    "release_gate_changes_made": false,
+    "bead_updates_made": false,
+    "beads_reason": "Operator directed this pane not to edit .beads/ while pane 3 owned .beads/issues.jsonl."
+  },
+  "preconditions": {
+    "rc_tag_exists": {
+      "status": "blocked",
+      "command": "git tag -l '*0.9.1*' '*0.10*' '*0.11*' '*rc*' | sort",
+      "matches": []
+    },
+    "safety_surface_settled": {
+      "status": "blocked",
+      "safety_paths": [
+        "crates/oraclemcp-guard",
+        "crates/oraclemcp-audit",
+        "crates/oraclemcp-core",
+        "crates/oraclemcp-db",
+        "crates/oraclemcp-dispatch"
+      ],
+      "commits_in_last_24h": 103,
+      "latest_safety_commit": {
+        "sha": "79bba6c67b305853b5baa8c89558146bf393782c",
+        "commit_time": "2026-07-22 12:18:00 +0200",
+        "subject": "fix: structure dashboard 403 and wire browser lane"
+      },
+      "commits_after_fuzz_shard_abe65e48": [
+        {
+          "sha": "79bba6c67b305853b5baa8c89558146bf393782c",
+          "commit_time": "2026-07-22 12:18:00 +0200",
+          "subject": "fix: structure dashboard 403 and wire browser lane"
+        }
+      ],
+      "commits_after_rfail_close_989b68ca": []
+    },
+    "fresh_five_surface_campaign_exists": {
+      "status": "blocked",
+      "command": "find tests/artifacts -maxdepth 4 -iname '*mutation*' -o -iname '*seal*'",
+      "matches": []
+    }
+  },
+  "landed_prerequisite_checks": {
+    "fuzz_shard_landed": {
+      "status": "pass",
+      "sha": "abe65e48",
+      "subject": "ci: shard guard differential fuzz target",
+      "files": [
+        ".github/workflows/fuzz.yml",
+        "scripts/ci_lane_budget.py"
+      ]
+    },
+    "rfail_lanes_landed": {
+      "status": "pass",
+      "sha": "989b68ca",
+      "subject": "chore(beads): close R-fail injection lanes"
+    }
+  },
+  "tooling_checks": [
+    {
+      "status": "pass",
+      "command": "scripts/swarm_discipline.sh bounded-run --timeout 180 -- bash scripts/mutation_safety_gate.sh self-test",
+      "summary": "mutation-gate self-test OK: D3 stale-hash rejection plus D2 valid pass and lowered guard/audit/db failures."
+    },
+    {
+      "status": "pass",
+      "command": "python3 -m py_compile scripts/migrate_mutation_result.py scripts/test_migrate_mutation_result.py",
+      "summary": "Verifier and test module compile."
+    },
+    {
+      "status": "pass",
+      "command": "python3 scripts/migrate_mutation_result.py --help",
+      "summary": "Verifier/converter CLI loads and advertises required shard integrity inputs."
+    }
+  ],
+  "advisory_flag_locations": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+    ".github/workflows/docker.yml",
+    ".github/workflows/publish-mcp.yml",
+    "scripts/mutation_safety_gate.sh",
+    "scripts/coverage_ratchet.sh",
+    "docs/plan/PLAN_0_9_1_FIELD_HARDENING.md"
+  ],
+  "verdict": "Precondition blocker still holds after abe65e48 and R-fail: no RC tag/RC-era source exists, the safety surface is still recently changed, and no fresh five-surface mutation campaign artifacts exist. Seal tooling is ready and remains advisory; no release gate was tightened.",
+  "pending_bead_update": {
+    "intended_action": "comment-only; leave bead open/unclaimed",
+    "comment": "2026-07-22 RC mutation seal precondition recheck (advisory/background; must never block publish): PRECONDITIONS STILL NOT MET. Evidence committed at tests/artifacts/evidence/rc-mutation-seal-precondition-check.json. No RC tag/RC-era source exists (`git tag -l '*0.9.1*' '*0.10*' '*0.11*' '*rc*'` returned empty). Safety-surface churn is still not settled: 103 commits touched guard/audit/core/db/dispatch in the last 24h; after fuzz shard abe65e48 exactly one safety commit still landed (79bba6c6, 2026-07-22 12:18 +0200, dashboard 403/browser lane); after R-fail close 989b68ca there were zero further safety-surface commits, but the last one is still too recent to call this an RC seal point. No committed five-surface mutation/seal artifacts were found under tests/artifacts. Tooling is ready: `scripts/swarm_discipline.sh bounded-run --timeout 180 -- bash scripts/mutation_safety_gate.sh self-test` passed, and `python3 -m py_compile scripts/migrate_mutation_result.py scripts/test_migrate_mutation_result.py` plus `python3 scripts/migrate_mutation_result.py --help` passed. `ALLOW_STALE_MUTATION_SEAL` remains the advisory/no-stall mechanism in ci/release/docker/publish paths with loud warnings. Do not close yet; when an RC-era SHA exists and safety-crate churn has settled, run the background five-surface campaign and feed complete OOM-free shard outputs plus integrity sidecars through `scripts/migrate_mutation_result.py`. No release gate should be made failing by this bead."
+  }
+}
