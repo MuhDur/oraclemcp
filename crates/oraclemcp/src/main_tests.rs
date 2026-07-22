@@ -630,7 +630,11 @@ fn doctor_audit_posture_matches_startup_audit_policy_without_opening_a_log() {
     assert!(!unsigned_refusal_trail_enabled(false, false));
     assert!(!unsigned_refusal_trail_enabled(true, true));
     assert_eq!(
-        doctor_audit_posture_from_config(&read_only, &active, false),
+        doctor_audit_posture_from_config(
+            &read_only,
+            &active,
+            DoctorAuditSigningKeyPosture::Missing,
+        ),
         DoctorAuditPosture::DisabledReadOnly {
             unsigned_refusal_trail_path: Some(default_unsigned_refusal_trail_path()),
         },
@@ -640,11 +644,32 @@ fn doctor_audit_posture_matches_startup_audit_policy_without_opening_a_log() {
     let mut opted_out = read_only.clone();
     opted_out.audit.unsigned_refusal_log = false;
     assert_eq!(
-        doctor_audit_posture_from_config(&opted_out, &active, false),
+        doctor_audit_posture_from_config(
+            &opted_out,
+            &active,
+            DoctorAuditSigningKeyPosture::Missing,
+        ),
         DoctorAuditPosture::DisabledReadOnly {
             unsigned_refusal_trail_path: None,
         },
         "an explicit opt-out disables only the unsigned refusal trail"
+    );
+    let empty_env_reason = match doctor_legacy_audit_env_key_posture(Ok(String::new())) {
+        DoctorAuditSigningKeyPosture::Invalid(reason) => reason,
+        posture => panic!("empty legacy env key must be invalid, got {posture:?}"),
+    };
+    assert!(empty_env_reason.contains("ORACLEMCP_AUDIT_KEY is invalid"));
+    assert!(empty_env_reason.contains("0 bytes"));
+    assert_eq!(
+        doctor_audit_posture_from_config(
+            &read_only,
+            &active,
+            DoctorAuditSigningKeyPosture::Invalid(empty_env_reason.clone()),
+        ),
+        DoctorAuditPosture::Unavailable {
+            reason: empty_env_reason,
+        },
+        "doctor must not report disabled/read-only for a legacy env key that startup rejects"
     );
 
     let writable = OracleMcpConfig::from_toml_str(
@@ -657,7 +682,7 @@ fn doctor_audit_posture_matches_startup_audit_policy_without_opening_a_log() {
     )
     .expect("writable config parses");
     assert_eq!(
-        doctor_audit_posture_from_config(&writable, &active, false),
+        doctor_audit_posture_from_config(&writable, &active, DoctorAuditSigningKeyPosture::Missing,),
         DoctorAuditPosture::StartupRefused {
             reachable_ceiling: OperatingLevel::ReadWrite,
         },
@@ -678,7 +703,11 @@ fn doctor_audit_posture_matches_startup_audit_policy_without_opening_a_log() {
     )
     .expect("signed config parses");
     assert_eq!(
-        doctor_audit_posture_from_config(&signed, &active, true),
+        doctor_audit_posture_from_config(
+            &signed,
+            &active,
+            DoctorAuditSigningKeyPosture::Configured,
+        ),
         DoctorAuditPosture::SigningKeyConfigured {
             path: PathBuf::from("target/test-doctor-signed-audit.jsonl"),
         },

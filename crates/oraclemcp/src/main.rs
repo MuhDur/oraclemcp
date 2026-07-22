@@ -7114,22 +7114,54 @@ fn doctor_audit_posture(profile: Option<&str>) -> DoctorAuditPosture {
             };
         }
     };
-    let signing_key_configured = config.audit.key_ref.is_some()
-        || std::env::var_os(AUDIT_KEY_ENV).is_some_and(|value| !value.is_empty());
-    doctor_audit_posture_from_config(&config, &active_level, signing_key_configured)
+    let signing_key_posture = if config.audit.key_ref.is_some() {
+        DoctorAuditSigningKeyPosture::Configured
+    } else {
+        doctor_legacy_audit_env_key_posture(std::env::var(AUDIT_KEY_ENV))
+    };
+    doctor_audit_posture_from_config(&config, &active_level, signing_key_posture)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DoctorAuditSigningKeyPosture {
+    Configured,
+    Missing,
+    Invalid(String),
+}
+
+fn doctor_legacy_audit_env_key_posture(
+    env_value: Result<String, std::env::VarError>,
+) -> DoctorAuditSigningKeyPosture {
+    match env_value {
+        Ok(raw) => match SigningKey::new("doctor-legacy-env", raw.as_bytes().to_vec()) {
+            Ok(_) => DoctorAuditSigningKeyPosture::Configured,
+            Err(error) => DoctorAuditSigningKeyPosture::Invalid(format!(
+                "{AUDIT_KEY_ENV} is invalid: {error}"
+            )),
+        },
+        Err(std::env::VarError::NotPresent) | Err(std::env::VarError::NotUnicode(_)) => {
+            DoctorAuditSigningKeyPosture::Missing
+        }
+    }
 }
 
 /// Pure audit posture decision used by doctor and unit tests.
 fn doctor_audit_posture_from_config(
     config: &OracleMcpConfig,
     active_level: &SessionLevelState,
-    signing_key_configured: bool,
+    signing_key_posture: DoctorAuditSigningKeyPosture,
 ) -> DoctorAuditPosture {
     let reachable_ceiling = max_reachable_write_ceiling(config, active_level);
-    if signing_key_configured {
-        return DoctorAuditPosture::SigningKeyConfigured {
-            path: config.audit.path.clone().unwrap_or_else(default_audit_path),
-        };
+    match signing_key_posture {
+        DoctorAuditSigningKeyPosture::Configured => {
+            return DoctorAuditPosture::SigningKeyConfigured {
+                path: config.audit.path.clone().unwrap_or_else(default_audit_path),
+            };
+        }
+        DoctorAuditSigningKeyPosture::Invalid(reason) => {
+            return DoctorAuditPosture::Unavailable { reason };
+        }
+        DoctorAuditSigningKeyPosture::Missing => {}
     }
     if reachable_ceiling > OperatingLevel::ReadOnly {
         return DoctorAuditPosture::StartupRefused { reachable_ceiling };
