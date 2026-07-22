@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:29:10Z",
+  "bead_id": "oraclemcp-091-c9-snippet-truth-00gb2",
+  "scope": {
+    "summary": "C9 adds a rig lane that extracts the setup-printed onboarding client snippets from real oraclemcp output and executes those snippets verbatim against the installed artifact.",
+    "in_scope": [
+      "scripts/rig/onboarding_snippet_truth.sh",
+      "scripts/rig/onboarding_snippet_truth.py",
+      "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c9-snippet-truth-00gb2.json"
+    ],
+    "out_of_scope": [
+      "Fixing the HTTP Claude snippet to carry bearer/header material; bead oraclemcp-091-b10-snippet-auth-header-4lit2 owns the green half.",
+      "Reintroducing or validating secure stdio snippets; current setup output does not print a secure_stdio client snippet.",
+      "Running a live Oracle profile; this fixture uses the synthetic setup profile and asserts MCP initialize/tool discovery only."
+    ]
+  },
+  "source": {
+    "sha": "993b0280cb561990ef25873f145ae487d776390d",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "bash -n scripts/rig/onboarding_snippet_truth.sh && PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/rig/onboarding_snippet_truth.py",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22. The shell entrypoint parses and the Python raw JSON-RPC/HTTP runner compiles without importing oraclemcp crates or MCP helper libraries."
+      },
+      {
+        "name": "bash scripts/rig/onboarding_snippet_truth.sh xfail --dry-run --log",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22. The dry run scheduled installed-artifact setup and snippet truth assertions without running cargo or touching services."
+      },
+      {
+        "name": "env -u CARGO_TARGET_DIR scripts/swarm_discipline.sh bounded-run --timeout 900 -- bash scripts/rig/onboarding_snippet_truth.sh run --log",
+        "kind": "cli",
+        "trace": "Expected-red on 2026-07-22 at source 0e4821a46c0e08cad88870180bb61a9ec3928bc0. The runner installed oraclemcp from git archive HEAD, extracted snippets from real setup output, then proved claude_mcp_json and codex_config_toml initialized over raw stdio while http_client_credentials.claude_mcp_add failed raw HTTP initialize with 401 client_credential_required. Scrubbed artifact: tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c9-snippet-truth-00gb2.json."
+      },
+      {
+        "name": "env -u CARGO_TARGET_DIR scripts/swarm_discipline.sh bounded-run --timeout 900 -- bash scripts/rig/onboarding_snippet_truth.sh xfail --log",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22 at source 0e4821a46c0e08cad88870180bb61a9ec3928bc0. The expected-failure mode observed the same printed HTTP Claude snippet failure and exited green for this fixture-close convention."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The full workspace gate was not run because this shared checkout has unrelated in-flight pane changes.",
+    "The HTTP service test binds the setup-printed loopback endpoint 127.0.0.1:7070; a future port-policy change should update setup output and this extractor together.",
+    "The runner executes setup-printed client snippets only. It does not execute installer, service-manager mutation, Docker, Homebrew, winget, or validation-command examples."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-b10-snippet-auth-header-4lit2"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
