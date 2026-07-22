@@ -1,0 +1,57 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:55:25Z",
+  "bead_id": "oraclemcp-f7572",
+  "scope": {
+    "summary": "Corrected docs/test-tiers.md section 7 so D2 describes the enforced changed-line coverage leg and the advisory, SKIP-attested mutation-floor leg.",
+    "in_scope": [
+      "docs/test-tiers.md"
+    ],
+    "out_of_scope": [
+      "Changing coverage ratchet behavior or CI workflow wiring.",
+      "Producing the RC mutation seal for oraclemcp-091-rc-mutation-seal-5aqwf."
+    ]
+  },
+  "source": {
+    "sha": "c6f1fb20a1f0a2b3afda45df59342445a8cee8b5",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [
+    {
+      "name": "coverage ratchet contract self-test",
+      "command": "bash scripts/coverage_ratchet.sh --self-test",
+      "result": "pass",
+      "trace": "Exit 0. Output confirmed the changed-line evaluator fixtures, source pathspec behavior, and leg status mapping, including that a deferred mutation floor attests SKIP and an absent status file fails closed."
+    },
+    {
+      "name": "docs diff whitespace check",
+      "command": "git diff --check -- docs/test-tiers.md",
+      "result": "pass",
+      "trace": "Exit 0; no whitespace errors in the docs change."
+    }
+  ],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "docs/test-tiers.md section 7",
+        "kind": "docs",
+        "trace": "Section 7 now states that the changed-line leg is the enforced push/PR gate, the mutation-floor leg is advisory under ALLOW_STALE_MUTATION_SEAL for this train, and COVERAGE_RATCHET_STATUS_FILE is the per-leg status contract consumed by attestation-outcomes."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Docs-only close; no runtime behavior or CI workflow was changed."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "scoped-docs-and-script-self-test"
+  }
+}
