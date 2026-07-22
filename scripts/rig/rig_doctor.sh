@@ -30,8 +30,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=/dev/null
 . "$ROOT/scripts/e2e/lib.sh"
 
-E2E_SCENARIO="rig_doctor"
-E2E_LANE="rig"
+export E2E_SCENARIO="rig_doctor"
+export E2E_LANE="rig"
 
 # Overridable so the coverage assertion below can be aimed at a deliberately
 # malformed rig and shown to fail; defaults to the real one.
@@ -350,6 +350,7 @@ selftest() {
 
   # Each check, aimed at an environment it must reject.
   local saved_path="$PATH"
+  # shellcheck disable=SC2123
   PATH="/nonexistent"
   selftest_check_can_fail "docker-binary" check_docker_binary || failures=1
   selftest_check_can_fail "timeout-binary" check_timeout_tool || failures=1
@@ -363,6 +364,7 @@ selftest() {
     selftest_check_can_fail "state-dir" check_state_dir || failures=1
 
   # A lane whose container cannot exist.
+  # shellcheck disable=SC2329
   lane_container() { printf '%s\n' 'oraclemcp-rig-doctor-absent-container'; }
   selftest_check_can_fail "container-lane" check_lane_container xe18 || failures=1
 
@@ -370,6 +372,7 @@ selftest() {
   # that refuses nothing, so at least one must still pass on this machine.
   local before="$FINDINGS"
   unset -f lane_container
+  # shellcheck disable=SC2329
   lane_container() {
     case "$1" in
       xe18) printf '%s\n' 'oracle-xe18-1518' ;;
