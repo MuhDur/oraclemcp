@@ -1675,21 +1675,29 @@ pub async fn compile_errors(
     name: Option<&str>,
     max_rows: usize,
 ) -> Result<Vec<OracleRow>, DbError> {
+    // Each `:n` OCCURRENCE consumes one positional value — the thin driver
+    // binds per occurrence, not per distinct name, so the optional name filter
+    // is written `:2 ... :3` and its value supplied twice. Reusing `:2` made
+    // this statement declare four slots against three values, and Oracle
+    // answered every call with ORA-01008.
     let sql = "SELECT * FROM ( \
                    SELECT name, type, line, position, text, attribute \
                    FROM all_errors \
-                   WHERE owner = :1 AND (:2 IS NULL OR name = :2) \
+                   WHERE owner = :1 AND (:2 IS NULL OR name = :3) \
                    ORDER BY name, type, sequence \
-               ) WHERE ROWNUM <= :3";
-    let name_bind = name.map_or(OracleBind::Null, |n| {
-        OracleBind::from(n.to_ascii_uppercase())
-    });
+               ) WHERE ROWNUM <= :4";
+    let name_bind = || {
+        name.map_or(OracleBind::Null, |n| {
+            OracleBind::from(n.to_ascii_uppercase())
+        })
+    };
     conn.query_rows(
         cx,
         sql,
         &[
             OracleBind::from(owner.to_ascii_uppercase()),
-            name_bind,
+            name_bind(),
+            name_bind(),
             OracleBind::from(max_rows.max(1) as i64),
         ],
     )
@@ -1761,11 +1769,24 @@ pub async fn get_source(
             "unsupported source object type: {object_type:?}"
         )));
     };
+    // One positional value per `:n` OCCURRENCE (see `compile_errors`): each
+    // optional line bound is tested and compared through its own placeholder
+    // and supplied twice, rather than reusing `:4`/`:5`.
     let sql = "SELECT line, text FROM all_source \
                WHERE owner = :1 AND name = :2 AND type = :3 \
-                 AND (:4 IS NULL OR line >= :4) \
-                 AND (:5 IS NULL OR line <= :5) \
+                 AND (:4 IS NULL OR line >= :5) \
+                 AND (:6 IS NULL OR line <= :7) \
                ORDER BY line";
+    let from_bind = || {
+        options
+            .from_line
+            .map_or(OracleBind::Null, |line| OracleBind::from(line as i64))
+    };
+    let to_bind = || {
+        options
+            .to_line
+            .map_or(OracleBind::Null, |line| OracleBind::from(line as i64))
+    };
     let rows = conn
         .query_rows(
             cx,
@@ -1774,12 +1795,10 @@ pub async fn get_source(
                 OracleBind::from(owner.to_ascii_uppercase()),
                 OracleBind::from(name.to_ascii_uppercase()),
                 OracleBind::from(source_type),
-                options
-                    .from_line
-                    .map_or(OracleBind::Null, |line| OracleBind::from(line as i64)),
-                options
-                    .to_line
-                    .map_or(OracleBind::Null, |line| OracleBind::from(line as i64)),
+                from_bind(),
+                from_bind(),
+                to_bind(),
+                to_bind(),
             ],
         )
         .await?;
@@ -3307,8 +3326,15 @@ mod tests {
             .first()
             .cloned()
             .expect("one source query");
-        assert!(sql.contains("line >= :4"));
-        assert!(sql.contains("line <= :5"));
+        // Each bound is tested and compared through its OWN placeholder. The
+        // earlier `(:4 IS NULL OR line >= :4)` spelling looked economical and
+        // was a bug: the driver binds per occurrence, so it declared seven
+        // slots against five values and Oracle refused every call with
+        // ORA-01008. This assertion pinned the SQL text but not the agreement
+        // between the text and the bind vector, which is the pair that has to
+        // hold; tests/positional_bind_shape.rs now enforces it crate-wide.
+        assert!(sql.contains("(:4 IS NULL OR line >= :5)"));
+        assert!(sql.contains("(:6 IS NULL OR line <= :7)"));
         assert_eq!(
             binds,
             vec![
@@ -3316,6 +3342,8 @@ mod tests {
                 OracleBind::String("EMP_API".to_owned()),
                 OracleBind::String("PACKAGE BODY".to_owned()),
                 OracleBind::I64(37),
+                OracleBind::I64(37),
+                OracleBind::I64(42),
                 OracleBind::I64(42),
             ]
         );

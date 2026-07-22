@@ -533,6 +533,18 @@ pub fn classify_ora_code(code: i32) -> ErrorClass {
         }
         // Read-only transaction violation (SET TRANSACTION READ ONLY, §6.3).
         1456 | 16000 => ErrorClass::ForbiddenStatement,
+        // Bind-shape family. These say the statement text and the bind vector
+        // disagree; the session that reported them is by definition alive,
+        // because the server had to parse the statement to complain. Left
+        // unclassified they fell to the `DbError::Query` fallback below, which
+        // calls an unknown ORA code a connection failure and suggests
+        // `oracle_connection_info` — the same confidently-wrong misdirection
+        // the account-lifecycle codes above were reclassified to stop. It cost
+        // real time: a dictionary tool with one bind too few read as a dead
+        // 23ai session nine seconds after an unrelated refusal.
+        //   1006 bind variable does not exist · 1008 not all variables bound ·
+        //   1036 illegal variable name/number.
+        1006 | 1008 | 1036 => ErrorClass::InvalidArguments,
         // Driver-classified connection loss, retry-in-place conditions, and an
         // Oracle package-state reset are transient for idempotent reads. The
         // retry action (fresh connection vs same connection) is carried by
@@ -744,6 +756,37 @@ mod tests {
         let env = envelope_from_oracle_message("ORA-28000: the account is locked");
         assert_eq!(env.error_class, ErrorClass::InsufficientPrivilege);
         assert_eq!(env.ora_code, Some(28000));
+    }
+
+    #[test]
+    fn bind_shape_codes_are_never_reported_as_a_broken_connection() {
+        // A server that answers ORA-01008 has parsed the statement, so the
+        // session is alive by construction. Calling this a connection failure
+        // sent a reader looking for a dead 23ai session when the real defect
+        // was a dictionary statement one bind short.
+        for code in [1006, 1008, 1036] {
+            let class = classify_ora_code(code);
+            assert_eq!(
+                class,
+                ErrorClass::InvalidArguments,
+                "ORA-{code:05} is a statement/bind shape error, not a transport failure"
+            );
+            assert_ne!(class, ErrorClass::ConnectionFailed);
+            assert!(
+                !class.is_retryable(),
+                "ORA-{code:05} cannot be fixed by retrying the same statement"
+            );
+        }
+        let env = envelope_from_oracle_message(
+            "ORA-01008: value for bind variable placeholder was not provided",
+        );
+        assert_eq!(env.error_class, ErrorClass::InvalidArguments);
+        assert_eq!(env.ora_code, Some(1008));
+        // The point of the reclassification: no "go look at your connection".
+        assert_ne!(
+            env.suggested_tool.as_deref(),
+            Some("oracle_connection_info"),
+        );
     }
 
     #[test]
