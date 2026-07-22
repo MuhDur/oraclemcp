@@ -130,11 +130,11 @@
 - Method: `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp semantic_text_search_requires_both_capabilities_before_a_read_can_escape -- --nocapture`.
 - Verdict: CONFIRMED DEFECT - the test fails before reaching its RuntimeStateRequired assertions because the generated read is refused as `FORBIDDEN_STATEMENT` with `unresolved semantic read dependency`; the narrower `semantic_text_search_refuses_an_absent_or_ambiguous_local_model` and `raw_query_cannot_claim_the_local_embedding_exception` checks still pass.
 
-## [LOW] Broad offline registry route proof is currently unproven in this shared checkout
+## [MEDIUM] Broad offline registry route proof is broken by an unproven helper query
 - Where: crates/oraclemcp/src/dispatch/tests.rs:2107; crates/oraclemcp/src/dispatch/tests.rs:2228
 - Claim checked: The offline registry test should prove every registered tool routes and deserializes without a live Oracle connection.
-- Method: `git diff -- crates/oraclemcp/src/dispatch/tests.rs`, `git show HEAD:crates/oraclemcp/src/dispatch/tests.rs | nl -ba | sed -n '2096,2248p'`, and `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp every_registry_tool_routes_and_deserializes_offline -- --nocapture`.
-- Verdict: UNPROVEN - the test fails in the shared working tree because another pane's uncommitted helper change feeds `oracle_query` an unproven `app.employees` relation instead of HEAD's `SELECT 1 FROM dual`; I did not edit or revert the live dirty file.
+- Method: `nl -ba crates/oraclemcp/src/dispatch/tests.rs | sed -n '2100,2120p;2218,2226p'` and `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp every_registry_tool_routes_and_deserializes_offline -- --nocapture`.
+- Verdict: CONFIRMED DEFECT - the committed helper now feeds `oracle_query` `SELECT e.id FROM app.employees e WHERE e.id = :1`, which the fail-closed guard refuses as `FORBIDDEN_STATEMENT` before the offline route/deserialization proof can run.
 
 ## [LOW] oracle_connection_info degrades in band with structured recovery
 - Where: crates/oraclemcp/src/dispatch/mod.rs:11315; crates/oraclemcp/src/dispatch/tests.rs:2997
