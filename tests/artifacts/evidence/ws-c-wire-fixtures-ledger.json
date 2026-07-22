@@ -1,0 +1,242 @@
+{
+  "fixtures": [
+    {
+      "assertion_boundary": "in-process HTTP route handler plus verifier API",
+      "basis": "Close evidence drives handle_http_request and ResourceServerConfig::validate from a crate test; it does not start the installed oraclemcp artifact and issue raw external HTTP.",
+      "bead_id": "oraclemcp-091-c1-oauth-literal-jwt-v9m9z",
+      "binding": "Needs a C1 wire lift before WS-C can close.",
+      "close_evidence": "tests/artifacts/evidence/closes/oraclemcp-091-c1-oauth-literal-jwt-v9m9z.json",
+      "close_evidence_present": true,
+      "close_scope": [
+        "crates/oraclemcp-core/tests/c1_oauth_literal_jwt.rs",
+        "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c1-oauth-literal-jwt-v9m9z.json"
+      ],
+      "close_source_sha": "67933d6564bb340c3760b5168b62c3cc21a092a9",
+      "code": "C1",
+      "installed_artifact_wire": false,
+      "red_evidence": "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c1-oauth-literal-jwt-v9m9z.json",
+      "red_evidence_present": true,
+      "red_source_sha": null,
+      "title": "OAuth literal JWT"
+    },
+    {
+      "assertion_boundary": "in-process stdio service helper",
+      "basis": "Close evidence uses serve_stdio_with_io from a crate test; it does not execute the installed binary over raw stdio.",
+      "bead_id": "oraclemcp-091-c2-stdio-token-literal-frame-t2b5q",
+      "binding": "Needs a C2 wire lift before WS-C can close.",
+      "close_evidence": "tests/artifacts/evidence/closes/oraclemcp-091-c2-stdio-token-literal-frame-t2b5q.json",
+      "close_evidence_present": true,
+      "close_scope": [
+        "crates/oraclemcp-core/tests/c2_stdio_init_token_literal_frame.rs",
+        "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c2-stdio-token-literal-frame-t2b5q.json"
+      ],
+      "close_source_sha": "2e08a368a4f77d31fc62450d8d45728ae30e664e",
+      "code": "C2",
+      "installed_artifact_wire": false,
+      "red_evidence": "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c2-stdio-token-literal-frame-t2b5q.json",
+      "red_evidence_present": true,
+      "red_source_sha": null,
+      "title": "Stdio init-token literal frame"
+    },
+    {
+      "assertion_boundary": "in-process HTTP route handler",
+      "basis": "Close evidence drives handle_http_request directly; it does not run TLS/mTLS through the installed artifact.",
+      "bead_id": "oraclemcp-091-c3-mtls-literal-fingerprints-fqh5k",
+      "binding": "Needs a C3 wire lift before WS-C can close.",
+      "close_evidence": "tests/artifacts/evidence/closes/oraclemcp-091-c3-mtls-literal-fingerprints-fqh5k.json",
+      "close_evidence_present": true,
+      "close_scope": [
+        "crates/oraclemcp-core/tests/c3_mtls_literal_fingerprints.rs",
+        "crates/oraclemcp-core/tests/fixtures/mtls/c3_client.der",
+        "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c3-mtls-literal-fingerprints-fqh5k.json"
+      ],
+      "close_source_sha": "b7ac85db99beb3724adfda93029b9a44dbfc04be",
+      "code": "C3",
+      "installed_artifact_wire": false,
+      "red_evidence": "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c3-mtls-literal-fingerprints-fqh5k.json",
+      "red_evidence_present": true,
+      "red_source_sha": null,
+      "title": "mTLS literal fingerprints"
+    },
+    {
+      "assertion_boundary": "installed artifact plus Chromium browser wire",
+      "basis": "Bound to R3/C4 close evidence: rig_browser_lane builds the installed artifact with omcpb, then Playwright drives Chromium against the served dashboard.",
+      "bead_id": "oraclemcp-091-c4-dashboard-browser-flow-cw3e2",
+      "binding": "No duplicate fixture required; C4 is the binding.",
+      "close_evidence": "tests/artifacts/evidence/closes/oraclemcp-091-c4-dashboard-browser-flow-cw3e2.json",
+      "close_evidence_present": true,
+      "close_scope": [
+        "web/e2e/live-serve-browser.spec.ts",
+        "scripts/rig/rig_browser_lane.sh",
+        "crates/oraclemcp-db/tests/privilege_matrix_live.rs"
+      ],
+      "close_source_sha": "51c83ce7898ac949115b9cac64224eadb2861d05",
+      "code": "C4",
+      "installed_artifact_wire": true,
+      "red_evidence": null,
+      "red_evidence_present": true,
+      "red_source_sha": null,
+      "title": "Dashboard browser flow"
+    },
+    {
+      "assertion_boundary": "config/session-context API",
+      "basis": "Close evidence asserts setup ordering in the session-context builder layer, not through a running installed server connection.",
+      "bead_id": "oraclemcp-091-c5-setup-ordering-postures-02d0i",
+      "binding": "Needs a C5 wire lift before WS-C can close.",
+      "close_evidence": "tests/artifacts/evidence/closes/oraclemcp-091-c5-setup-ordering-postures-02d0i.json",
+      "close_evidence_present": true,
+      "close_scope": [
+        "crates/oraclemcp-core/src/connect.rs",
+        "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c5-setup-ordering-postures-02d0i.json"
+      ],
+      "close_source_sha": "642730f5fb36d47b0524e3bcb082b0ce3e594b45",
+      "code": "C5",
+      "installed_artifact_wire": false,
+      "red_evidence": "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c5-setup-ordering-postures-02d0i.json",
+      "red_evidence_present": true,
+      "red_source_sha": null,
+      "title": "Session setup ordering"
+    },
+    {
+      "assertion_boundary": "separate CLI process contention",
+      "basis": "C6 crosses a process boundary, but the recorded fixture uses the Cargo test harness and CARGO_BIN_EXE rather than the installed artifact under the rig.",
+      "bead_id": "oraclemcp-091-c6-cli-vs-server-collision-6o0m9",
+      "binding": "Needs a C6 installed-artifact lift before WS-C can close.",
+      "close_evidence": "tests/artifacts/evidence/closes/oraclemcp-091-c6-cli-vs-server-collision-6o0m9.json",
+      "close_evidence_present": true,
+      "close_scope": [
+        "crates/oraclemcp/tests/c6_cli_vs_running_server.rs",
+        "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c6-cli-vs-server-collision-6o0m9.json"
+      ],
+      "close_source_sha": "9f30ed1032a7a1b11107bf921cd4cd83caabd7c5",
+      "code": "C6",
+      "installed_artifact_wire": false,
+      "red_evidence": "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c6-cli-vs-server-collision-6o0m9.json",
+      "red_evidence_present": true,
+      "red_source_sha": null,
+      "title": "CLI versus running server collision"
+    },
+    {
+      "assertion_boundary": "QueryPageBuilder API",
+      "basis": "Close evidence asserts the builder contract directly; it does not issue a raw MCP tool call to a running installed artifact.",
+      "bead_id": "oraclemcp-091-c7-zero-rows-columns-v6zdw",
+      "binding": "Needs a C7 wire lift before WS-C can close.",
+      "close_evidence": "tests/artifacts/evidence/closes/oraclemcp-091-c7-zero-rows-columns-v6zdw.json",
+      "close_evidence_present": true,
+      "close_scope": [
+        "crates/oraclemcp-db/src/query.rs",
+        "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c7-zero-rows-columns-v6zdw.json"
+      ],
+      "close_source_sha": "98380bd7a5698e6e1b925fd6bbbc5e8d36b72506",
+      "code": "C7",
+      "installed_artifact_wire": false,
+      "red_evidence": "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c7-zero-rows-columns-v6zdw.json",
+      "red_evidence_present": true,
+      "red_source_sha": null,
+      "title": "Zero-row columns population"
+    },
+    {
+      "assertion_boundary": "catalog resolver API with mocked connection",
+      "basis": "Close evidence asserts catalog_resolver behavior directly; it does not query a running installed artifact over MCP wire.",
+      "bead_id": "oraclemcp-091-c8-blind-catalog-refuse-w9iie",
+      "binding": "Needs a C8 wire lift before WS-C can close.",
+      "close_evidence": "tests/artifacts/evidence/closes/oraclemcp-091-c8-blind-catalog-refuse-w9iie.json",
+      "close_evidence_present": true,
+      "close_scope": [
+        "crates/oraclemcp-db/src/catalog_resolver.rs",
+        "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c8-blind-catalog-refuse-w9iie.json"
+      ],
+      "close_source_sha": "bf409f9b281fcde9ce2d5c2a3eb5d6ace928146e",
+      "code": "C8",
+      "installed_artifact_wire": false,
+      "red_evidence": "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c8-blind-catalog-refuse-w9iie.json",
+      "red_evidence_present": true,
+      "red_source_sha": null,
+      "title": "Blind catalog refusal"
+    },
+    {
+      "assertion_boundary": "installed artifact plus raw stdio/HTTP clients",
+      "basis": "Bound to C9 close evidence: onboarding_snippet_truth installs oraclemcp from a git archive of HEAD, extracts real setup output, and runs raw JSON-RPC/HTTP clients.",
+      "bead_id": "oraclemcp-091-c9-snippet-truth-00gb2",
+      "binding": "No duplicate fixture required; C9 is the binding.",
+      "close_evidence": "tests/artifacts/evidence/closes/oraclemcp-091-c9-snippet-truth-00gb2.json",
+      "close_evidence_present": true,
+      "close_scope": [
+        "scripts/rig/onboarding_snippet_truth.sh",
+        "scripts/rig/onboarding_snippet_truth.py",
+        "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c9-snippet-truth-00gb2.json"
+      ],
+      "close_source_sha": "993b0280cb561990ef25873f145ae487d776390d",
+      "code": "C9",
+      "installed_artifact_wire": true,
+      "red_evidence": "tests/artifacts/evidence/ws-c-red-runs/oraclemcp-091-c9-snippet-truth-00gb2.json",
+      "red_evidence_present": true,
+      "red_source_sha": null,
+      "title": "Onboarding snippet truth"
+    }
+  ],
+  "gaps": [
+    {
+      "bead_id": "oraclemcp-091-c1-oauth-literal-jwt-v9m9z",
+      "code": "C1",
+      "reason": "Close evidence drives handle_http_request and ResourceServerConfig::validate from a crate test; it does not start the installed oraclemcp artifact and issue raw external HTTP.",
+      "required_action": "Needs a C1 wire lift before WS-C can close."
+    },
+    {
+      "bead_id": "oraclemcp-091-c2-stdio-token-literal-frame-t2b5q",
+      "code": "C2",
+      "reason": "Close evidence uses serve_stdio_with_io from a crate test; it does not execute the installed binary over raw stdio.",
+      "required_action": "Needs a C2 wire lift before WS-C can close."
+    },
+    {
+      "bead_id": "oraclemcp-091-c3-mtls-literal-fingerprints-fqh5k",
+      "code": "C3",
+      "reason": "Close evidence drives handle_http_request directly; it does not run TLS/mTLS through the installed artifact.",
+      "required_action": "Needs a C3 wire lift before WS-C can close."
+    },
+    {
+      "bead_id": "oraclemcp-091-c5-setup-ordering-postures-02d0i",
+      "code": "C5",
+      "reason": "Close evidence asserts setup ordering in the session-context builder layer, not through a running installed server connection.",
+      "required_action": "Needs a C5 wire lift before WS-C can close."
+    },
+    {
+      "bead_id": "oraclemcp-091-c6-cli-vs-server-collision-6o0m9",
+      "code": "C6",
+      "reason": "C6 crosses a process boundary, but the recorded fixture uses the Cargo test harness and CARGO_BIN_EXE rather than the installed artifact under the rig.",
+      "required_action": "Needs a C6 installed-artifact lift before WS-C can close."
+    },
+    {
+      "bead_id": "oraclemcp-091-c7-zero-rows-columns-v6zdw",
+      "code": "C7",
+      "reason": "Close evidence asserts the builder contract directly; it does not issue a raw MCP tool call to a running installed artifact.",
+      "required_action": "Needs a C7 wire lift before WS-C can close."
+    },
+    {
+      "bead_id": "oraclemcp-091-c8-blind-catalog-refuse-w9iie",
+      "code": "C8",
+      "reason": "Close evidence asserts catalog_resolver behavior directly; it does not query a running installed artifact over MCP wire.",
+      "required_action": "Needs a C8 wire lift before WS-C can close."
+    }
+  ],
+  "generated_at": "2026-07-22T09:41:42Z",
+  "missing_evidence": [],
+  "repo": "oraclemcp",
+  "requirement": "Every C1-C9 fixture that asserts a process or protocol contract must prove it over the wire against the installed oraclemcp artifact. C4 and C9 bind to their existing installed-artifact lanes instead of duplicating them.",
+  "schema": "ws-c-wire-fixture-ledger/v1",
+  "source": {
+    "dirty_paths_under_audit_scope": [
+      " M scripts/rig/rig_browser_lane.sh",
+      "?? scripts/rig/ws_c_wire_fixture_ledger.py",
+      "?? tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.7.json"
+    ],
+    "sha": "1928ee7ee3ed87364fc3cf1b99ec21e6c4a12752"
+  },
+  "status": "fail",
+  "summary": {
+    "fixtures_total": 9,
+    "gap_count": 7,
+    "installed_artifact_wire_count": 2,
+    "missing_evidence_count": 0
+  }
+}
