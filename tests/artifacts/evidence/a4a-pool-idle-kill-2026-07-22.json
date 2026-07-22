@@ -1,0 +1,14 @@
+{
+  "run_id": "local-2026-07-22-a4a-pooled-idle-kill-emeraldraven",
+  "lane": "A4a pooled idle-kill validate-on-checkout",
+  "source_sha": "54920269d610fc893f4193ee2cf0742f665eeb82",
+  "container": "rust-oracledb-free",
+  "pdb": "FREEPDB1",
+  "command": "ORACLEMCP_TEST_DSN=//localhost:1522/FREEPDB1 ORACLEMCP_TEST_USER=system ORACLEMCP_TEST_PASSWORD=<from docker env> CARGO_TARGET_DIR=target cargo test -p oraclemcp-db --features live-xe --test live_idle_kill -- --nocapture",
+  "result": "PASS",
+  "observations": [
+    "a_killed_pooled_session_is_replaced_without_the_caller_seeing_it passed",
+    "victim=SessionKey { sid: \"233\", serial: \"48817\" }",
+    "replacement=SessionKey { sid: \"233\", serial: \"22981\" }"
+  ]
+}

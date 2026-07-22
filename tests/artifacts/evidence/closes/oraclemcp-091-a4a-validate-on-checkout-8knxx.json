@@ -1,0 +1,81 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T07:55:50Z",
+  "bead_id": "oraclemcp-091-a4a-validate-on-checkout-8knxx",
+  "scope": {
+    "summary": "The server-owned OraclePool validates idle sessions before checkout and discards every final failed pooled call instead of returning it to idle reuse.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/pool.rs",
+      "crates/oraclemcp-db/tests/live_idle_kill.rs"
+    ],
+    "out_of_scope": [
+      "Pinned dispatcher-session recycle/reconnect; that is A4e.",
+      "Installed service or HTTP pooled-client matrix proof; this close uses the DB crate live pooled lane.",
+      "Sibling rust-oracledb driver source changes."
+    ]
+  },
+  "source": {
+    "sha": "54920269d610fc893f4193ee2cf0742f665eeb82",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "OraclePool checkout",
+        "kind": "api",
+        "trace": "OraclePool::try_checkout validates every idle RustOracleConnection with manager.is_valid before returning it; failed validation discards the slot and loops to open or select a fresh session."
+      },
+      {
+        "name": "OraclePool return path",
+        "kind": "api",
+        "trace": "OraclePool::with_conn now discards every final Err result and only returns successful calls to idle after manager.has_broken ping succeeds; cancelled and failed calls cannot re-enter idle reuse."
+      },
+      {
+        "name": "cargo fmt --all -- --check",
+        "kind": "cli",
+        "trace": "Passed after the A4a pool hardening change."
+      },
+      {
+        "name": "CARGO_TARGET_DIR=target cargo test -p oraclemcp-db pool --lib",
+        "kind": "cli",
+        "trace": "Passed 23 focused pool-related unit tests, including every_final_failure_discards_checked_out_connection and dirty_discard_no_pool_return."
+      },
+      {
+        "name": "CARGO_TARGET_DIR=target cargo check -p oraclemcp-db",
+        "kind": "cli",
+        "trace": "Passed after the A4a pool hardening change."
+      },
+      {
+        "name": "CARGO_TARGET_DIR=target cargo test -p oraclemcp-db --features live-xe --test live_idle_kill -- --nocapture",
+        "kind": "cli",
+        "trace": "Passed against rust-oracledb-free/FREEPDB1; the one-connection pool replaced killed idle session 233,48817 with 233,22981 without surfacing the death to the caller."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "a4a-pooled-idle-kill-transcript",
+        "path": "tests/artifacts/evidence/a4a-pool-idle-kill-2026-07-22.json",
+        "sha": "54920269d610fc893f4193ee2cf0742f665eeb82"
+      }
+    ]
+  },
+  "limitations": [
+    "This closes the server-owned stateless pool surface only; the pinned field path remains A4e.",
+    "The live proof uses the existing synthetic Free23 container and DB crate lane, not an installed service run.",
+    "The full workspace gate was not run because this shared checkout has unrelated in-flight panes."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-a4e-session-recycle-uyujp"
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}
