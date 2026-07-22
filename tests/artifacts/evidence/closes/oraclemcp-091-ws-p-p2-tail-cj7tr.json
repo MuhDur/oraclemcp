@@ -1,0 +1,170 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:39:48Z",
+  "bead_id": "oraclemcp-091-ws-p-p2-tail-cj7tr",
+  "scope": {
+    "summary": "WS-P parent close reconciles the P2 tail and finds every blocking P2/P-U child already closed with committed evidence.",
+    "in_scope": [
+      "tests/artifacts/evidence/closes/oraclemcp-091-p2-1-node-extra-ca-doc-9enoe.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-p2-10-discover-dash-fuuse.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-p2-11-requires-23ai-pt3t0.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-p2-12-base-ceiling-doc-y5szi.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-p2-13-sign-tool-write-s5hq4.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-p2-3-current-db-redaction-t0ufb.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-p2-4-sni-default-flip-4hkt9.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-p2-5-config-check-routing-l9lhp.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-p2-6-allow-no-auth-help-7v8j4.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-p2-7-instance-lock-doc-6j0ac.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-p2-8-session-footprint-m7nmi.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-p2-9-stale-lock-stderr-4vqcm.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-pu1-search-source-line-cap-9f9bp.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-pu2-get-source-range-9yvbk.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-pu3-dashboard-403-envelope-o5l8g.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-pu4-3des-server-path-uht9b.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-pu5-wallet-truth-table-dst6s.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-pu6-hsts-ulizx.json"
+    ],
+    "out_of_scope": [
+      "No new WS-P implementation is claimed by this parent close; the child beads carry their own implementation and test evidence.",
+      "P2-2 is not chased because the WS-P parent description says it was retracted and no bead exists for it.",
+      "The release-train parent and downstream publish beads remain separate tracker work.",
+      ".beads/issues.jsonl is a cross-pane tracker export path and was reserved by SageRaven during this reconciliation; this parent close uses the committed tracker at source plus child close artifacts as evidence rather than treating the dirty export as its behavior-source scope."
+    ]
+  },
+  "source": {
+    "sha": "b254fadd5af7e23afa05bd4cfa613a5d233d18e2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "br dep tree oraclemcp-091-ws-p-p2-tail-cj7tr",
+        "kind": "cli",
+        "trace": "WS-P parent is open; every blocking P2/P-U child is closed. The only open dependency edge is the parent-child link to the release-train root."
+      },
+      {
+        "name": "br show oraclemcp-091-ws-p-p2-tail-cj7tr --json",
+        "kind": "cli",
+        "trace": "Tracker dependencies list 18 type=blocks children and all 18 have status=closed; P2-2 is retracted by parent description and has no bead."
+      },
+      {
+        "name": "git show HEAD:.beads/issues.jsonl",
+        "kind": "cli",
+        "trace": "The committed tracker export at source b254fadd lists all 18 WS-P blocking children closed with close_reason bindings."
+      },
+      {
+        "name": "git log --oneline --all --grep='P2-4|P2-6|P2-8|P-U2|P-U3|P-U4|WS-P|P2 tail|SNI|allow-no-auth|session footprint|range fetch|403 envelope|3DES' --max-count=160",
+        "kind": "cli",
+        "trace": "Git history contains the named implementation, evidence, and close commits for the recently closed P2/P-U reconciliation set."
+      },
+      {
+        "name": "oraclemcp-091-p2-1-node-extra-ca-doc-9enoe",
+        "kind": "api",
+        "trace": "status=closed; source=62dd4879ef47c42c20aa780a0406991e782aa127; closing=4b414a032e5590930f2b80c0851d5debf3820851; evidence=tests/artifacts/evidence/closes/oraclemcp-091-p2-1-node-extra-ca-doc-9enoe.json"
+      },
+      {
+        "name": "oraclemcp-091-p2-3-current-db-redaction-t0ufb",
+        "kind": "api",
+        "trace": "status=closed; source=ec0d4ab5a8c59124cd5a5d9ee156c3570edf51ab; closing=d8eb325bbc2d6930089fb28504c768ee95bedb2a; evidence=tests/artifacts/evidence/closes/oraclemcp-091-p2-3-current-db-redaction-t0ufb.json"
+      },
+      {
+        "name": "oraclemcp-091-p2-4-sni-default-flip-4hkt9",
+        "kind": "api",
+        "trace": "status=closed; source=b21afa0f04d212278cb1d92f545b86b52eed8f97; closing=4b113b04ad536573e2d3f8f301ee36e12829b0c6; evidence=tests/artifacts/evidence/closes/oraclemcp-091-p2-4-sni-default-flip-4hkt9.json"
+      },
+      {
+        "name": "oraclemcp-091-p2-5-config-check-routing-l9lhp",
+        "kind": "api",
+        "trace": "status=closed; source=03ce97c171334b62486106ce073b5e858be46aee; closing=e0266e391341221219705f71c7b1d630b58170de; evidence=tests/artifacts/evidence/closes/oraclemcp-091-p2-5-config-check-routing-l9lhp.json"
+      },
+      {
+        "name": "oraclemcp-091-p2-6-allow-no-auth-help-7v8j4",
+        "kind": "api",
+        "trace": "status=closed; source=fae24cba29f134bf87b26819e90e9cf7f439d391; closing=6b4a9a27fc3030158d8a0b8a41b7ab1c94a87663; evidence=tests/artifacts/evidence/closes/oraclemcp-091-p2-6-allow-no-auth-help-7v8j4.json"
+      },
+      {
+        "name": "oraclemcp-091-p2-7-instance-lock-doc-6j0ac",
+        "kind": "api",
+        "trace": "status=closed; source=5259fba508886109837c2094c25d6f6b2183596c; closing=a9d9672c10b519a6f578b5f1dc232e1fb3258dd8; evidence=tests/artifacts/evidence/closes/oraclemcp-091-p2-7-instance-lock-doc-6j0ac.json"
+      },
+      {
+        "name": "oraclemcp-091-p2-8-session-footprint-m7nmi",
+        "kind": "api",
+        "trace": "status=closed; source=a6e5cea5d86248737b6439f464c5c4635f83b603; closing=a4c9bf31d7725376b4e770f80be308b61d5f5e9d; evidence=tests/artifacts/evidence/closes/oraclemcp-091-p2-8-session-footprint-m7nmi.json"
+      },
+      {
+        "name": "oraclemcp-091-p2-9-stale-lock-stderr-4vqcm",
+        "kind": "api",
+        "trace": "status=closed; source=a1041b03b5dca4883911443b511f807e18488665; closing=aeae5d841283355f53134f0c1f22a6205688a764; evidence=tests/artifacts/evidence/closes/oraclemcp-091-p2-9-stale-lock-stderr-4vqcm.json"
+      },
+      {
+        "name": "oraclemcp-091-p2-10-discover-dash-fuuse",
+        "kind": "api",
+        "trace": "status=closed; source=cc119ba82c528aa1457c10db5d77c46aa15e68eb; closing=1341ae206772455096291170c9fd1b94e8af1b4c; evidence=tests/artifacts/evidence/closes/oraclemcp-091-p2-10-discover-dash-fuuse.json"
+      },
+      {
+        "name": "oraclemcp-091-p2-11-requires-23ai-pt3t0",
+        "kind": "api",
+        "trace": "status=closed; source=7dce02683cd6e7785aa060e6001e9866425a525c; closing=adec2df680272fe52932e75d1099bc62ff4dd5f1; evidence=tests/artifacts/evidence/closes/oraclemcp-091-p2-11-requires-23ai-pt3t0.json"
+      },
+      {
+        "name": "oraclemcp-091-p2-12-base-ceiling-doc-y5szi",
+        "kind": "api",
+        "trace": "status=closed; source=84cc174fe50f6b9a4dbad2302978c08527f1ad85; closing=7ccc5c1a47035a3e84cc7f9b1f33ec0a18566229; evidence=tests/artifacts/evidence/closes/oraclemcp-091-p2-12-base-ceiling-doc-y5szi.json"
+      },
+      {
+        "name": "oraclemcp-091-p2-13-sign-tool-write-s5hq4",
+        "kind": "api",
+        "trace": "status=closed; source=b1767892ac614b03407109a16ad33d8218f9d501; closing=d72c78d59da1cc2c161b7016cd013156aad310c0; evidence=tests/artifacts/evidence/closes/oraclemcp-091-p2-13-sign-tool-write-s5hq4.json"
+      },
+      {
+        "name": "oraclemcp-091-pu1-search-source-line-cap-9f9bp",
+        "kind": "api",
+        "trace": "status=closed; source=39859487e0dbbab7cb36c35962fc150718045afd; closing=2106de73bd2dfe581dde6005de2e49eb0dc0a11b; evidence=tests/artifacts/evidence/closes/oraclemcp-091-pu1-search-source-line-cap-9f9bp.json"
+      },
+      {
+        "name": "oraclemcp-091-pu2-get-source-range-9yvbk",
+        "kind": "api",
+        "trace": "status=closed; source=0e4821a46c0e08cad88870180bb61a9ec3928bc0; closing=51c83ce7898ac949115b9cac64224eadb2861d05; evidence=tests/artifacts/evidence/closes/oraclemcp-091-pu2-get-source-range-9yvbk.json"
+      },
+      {
+        "name": "oraclemcp-091-pu3-dashboard-403-envelope-o5l8g",
+        "kind": "api",
+        "trace": "status=closed; source=79bba6c67b305853b5baa8c89558146bf393782c; closing=b5b6ebf216cb85bcf1a9d4e754957afddceeac09; evidence=tests/artifacts/evidence/closes/oraclemcp-091-pu3-dashboard-403-envelope-o5l8g.json"
+      },
+      {
+        "name": "oraclemcp-091-pu4-3des-server-path-uht9b",
+        "kind": "api",
+        "trace": "status=closed; source=113d9a55281a8004c87a36e707458dff1fb519b6; closing=e5fd7190127df7dd42ccd0cba04bc627cbb684d2; evidence=tests/artifacts/evidence/closes/oraclemcp-091-pu4-3des-server-path-uht9b.json"
+      },
+      {
+        "name": "oraclemcp-091-pu5-wallet-truth-table-dst6s",
+        "kind": "api",
+        "trace": "status=closed; source=5259fba508886109837c2094c25d6f6b2183596c; closing=b5d53f2ce29bd2075c19b51007d9bb95f674624f; evidence=tests/artifacts/evidence/closes/oraclemcp-091-pu5-wallet-truth-table-dst6s.json"
+      },
+      {
+        "name": "oraclemcp-091-pu6-hsts-ulizx",
+        "kind": "api",
+        "trace": "status=closed; source=6afbd1a57505dfa6b3a313aced698c81cfa9c137; closing=6180689cddec648b123f24386ed886275653afed; evidence=tests/artifacts/evidence/closes/oraclemcp-091-pu6-hsts-ulizx.json"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is a reconciliation close for the WS-P epic; implementation and test proof remain attached to the child beads.",
+    ".beads/issues.jsonl had an uncommitted H3 tracker export while SageRaven held the tracker reservation, so the source scope is the already-landed child close evidence set rather than the dirty tracker file.",
+    "No new live Oracle lane is claimed by this parent evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
