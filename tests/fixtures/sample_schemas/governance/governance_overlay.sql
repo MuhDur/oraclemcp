@@ -49,6 +49,22 @@ declare
   principal_missing exception;
   pragma exception_init(principal_missing, -1918);
 begin
+  for sess in (
+    select sid, serial#
+      from v$session
+     where username in ('ORACLEMCP_D9_PROXY', 'ORACLEMCP_D9_TARGET')
+  ) loop
+    begin
+      execute immediate
+        'alter system disconnect session ''' || sess.sid || ',' || sess.serial# || ''' immediate';
+    exception
+      when others then
+        -- A rerun can race PMON cleanup after the previous attempt. The next
+        -- DROP USER will still prove whether the session is truly gone.
+        null;
+    end;
+  end loop;
+
   for principal in (
     select 'ORACLEMCP_D9_PROXY' as name from dual
     union all select 'ORACLEMCP_D9_TARGET' from dual

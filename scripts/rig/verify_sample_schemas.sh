@@ -93,8 +93,7 @@ selftest() {
   cp -r "$VENDOR_DIR/." "$work/"
 
   local out
-  out="$(ORACLEMCP_SAMPLE_SCHEMA_DIR="$work" bash "${BASH_SOURCE[0]}" 2>&1)"
-  if [ $? -ne 0 ]; then
+  if ! out="$(ORACLEMCP_SAMPLE_SCHEMA_DIR="$work" bash "${BASH_SOURCE[0]}" 2>&1)"; then
     echo "selftest: an untouched copy of the vendored tree was refused: $out" >&2
     failures=1
   fi
