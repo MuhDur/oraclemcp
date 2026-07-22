@@ -4460,8 +4460,8 @@ Sequencing:
   service-form-SNI capability **already shipped in driver 0.8.4** (§27.7 correction) —
   its remaining slice is `he7t` (the IAM subject-mapping config step) + F-D2 (the
   Live nightly green streak, the driver release gate); **F-S1 and F-S2 both ride the
-  server's 0.9.1 patch** — F-S1's typed refusal reuses existing error/refusal/audit
-  surfaces so it stays patch-safe (§29.7). Nothing deferred.
+  server's 0.10.0 train** — F-S1's typed refusal reuses existing error/refusal/audit
+  surfaces and does not expand because of the rename (§29.7). Nothing deferred.
 - What must be preserved while fixing all this (retro §4): the self-catching
   adversarial-review culture, honest negative-result closes, the exact-SHA evidence
   chain, and the omcp-land property that real merge conflicts never occurred.
@@ -4629,9 +4629,9 @@ it *populated* one:
   assertions above, and DC1/DC2 double as **F-D1 (ADB) regression armor** (V2 golden
   wire-bytes per auth mode covers DC2's cert-DN path).
 - **DC2/DC3/DC4** are driver TLS/timeout correctness → the driver's next release
-  (0.8.5 patch, §29.7 — behavior fixes, no public-API change; DC4 is the GH#14 class).
+  (0.9.0, §29.7 correction — behavior fixes; DC4 is the GH#14 class).
 - **DI1 + MET + CC1** are server correctness/robustness → the server's next release
-  (0.9.1 patch, §29.7);
+  (0.10.0 correction, §29.7);
   DI1's double-apply is the same integrity class as the retro's publish-before-persist
   findings and belongs with the T1 "landed-evidence" discipline mindset.
 - **PY1-PY5** harden the parity harness, which §27.6 V5 requires before any parity
@@ -4804,8 +4804,8 @@ The bug hunt was run against pre-0.9.0 HEAD; post-release, its findings partitio
 - **NOT yet beaded — promote these** (their vetted fix + discriminating test are in
   §28.2/28.3): **DC1** (Arrow TSTZ offset), **DC2/DC3** (DSN cert-DN pin ignored /
   DN_MATCH=OFF), **DI1** (held-execute double-apply), **MET** (metric-cardinality
-  DoS), **PY1–PY5** (parity harness). These land on the driver's 0.8.5 and the
-  server's 0.9.1 (both **patch**, §29.7) per §28.5; DC2 is the highest new-security item (a silently
+  DoS), **PY1–PY5** (parity harness). These land on the driver's 0.9.0 and the
+  server's 0.10.0 (driver minor, server semver-corrected, §29.7) per §28.5; DC2 is the highest new-security item (a silently
   ignored cert-DN pin) and should lead the driver TLS batch alongside F-D1.
 
 ### 29.5 cass mining note
@@ -4840,29 +4840,27 @@ operator-gated.)
    the release path is now clear, so §25.7.1's "zero workflow edits during release"
    hold is lifted.
 
-### 29.7 Next release train is +0.0.1 — patch only (operator directive, 2026-07-18)
+### 29.7 Next release train correction — server 0.10.0 / driver 0.9.0 (operator correction, 2026-07-22)
 
-The next release of **both** repos is exactly one patch increment — **not more, not
-less**:
+The next release train is **driver 0.9.0 / server 0.10.0**. This corrects the
+earlier patch-only wording: the workspace already shipped server 0.10.0 after
+`cargo-semver-checks` found major public-API findings against published 0.9.0.
+The train name must follow the artifact, not the superseded patch intent.
 
 | Repo | Current | Next |
 |---|---|---|
-| oraclemcp (server) | 0.9.0 | **0.9.1** |
-| rust-oracledb (`oracledb` driver) | 0.8.4 | **0.8.5** |
+| oraclemcp (server) | 0.9.0 | **0.10.0** |
+| rust-oracledb (`oracledb` driver) | 0.8.4 | **0.9.0** |
 
-This binds **how the work is implemented**, not what ships: **nothing is deferred —
-the entire pending scope lands in 0.9.1 / 0.8.5**, engineered to be patch-legal. SemVer
-plus the repos' own `cargo-semver-checks` release gate (§25.2 / §32) mean a patch admits
-only non-breaking changes, so every item below is implemented as **behavior / internal /
-existing-surface** work — no removed/renamed/signature-changed public items and no *new*
-published-crate public API. This is achievable for all of it (they are corrections and
-capability-probes, not new type surfaces). The one genuine hazard is a change that would
-need a **new public field** on the constructible `GuardDecision`/`ErrorEnvelope` structs
-(§29.1 — those forced 0.9.0's minor and are not `#[non_exhaustive]`): the rule is to
-**engineer around it** (carry the signal through existing fields / the audit record /
-the typed-refusal path), not to defer the fix.
+This remains a correction train, not an excuse to expand scope: **nothing is
+deferred because of the rename**. The driver target is the already-ruled 0.9.0
+minor. The server target is 0.10.0 because semver evidence forced the minor
+position on a 0.x line: the intended lease-subsystem removal and metadata-bound
+changes removed or changed public API relative to published 0.9.0. Do not change
+Cargo version metadata as part of this text correction; the release-visible
+surfaces already moved together and are gate-verified elsewhere.
 
-**Everything ships in 0.9.1 / 0.8.5 — how each stays patch-legal:**
+**Everything ships in 0.10.0 / 0.9.0 — how each stays correction-scoped:**
 - Every §28 bug-fix as a **behavior correction**, no public-signature change: DC1 (Arrow
   TSTZ), DC2/DC3/DC4 (driver TLS/timeout), DI1 (held-execute), MET (metric-cardinality),
   PY1–PY5 (parity) — each = fix + discriminating test.
@@ -5186,7 +5184,7 @@ Oracle behavior.
   — it's a wiring task on already-installed tooling and it makes every later "is X
   tested?" answerable. Lands in CI Tranche 2 (§25.7) as the coverage lane.
 - **P1:** the surgical regressions (30.4 items 1–5, 7, 8) — they are the §28
-  bug-fixes' tests; they ride the driver/server next-release beads (0.8.5/0.9.1 patch, §27.7/§29.4/§29.7) so
+  bug-fixes' tests; they ride the driver/server next-release beads (0.9.0/0.10.0 train, §27.7/§29.4/§29.7) so
   each fix ships with its guard. The self-fulfilling-fixture prevention rule (30.5)
   folds into §27.6 V-series + the review checklist.
 - **P2:** loom lanes, config fuzz, `sql.rs` fuzz, OAuth/verifier matrix depth (30.4
@@ -5512,8 +5510,8 @@ authorized until the operator says GO.
 | C | **Repo/disk janitor** — 21 worktrees, dead branches/tags, ~50 GB, stray nested `target/`, file moves | §26.1–26.6 | both | anytime idle; janitor pass w/ operator ack | P1 | ~6 |
 | D | **CI velocity — Tranche 2** (`_quality.yml` split + parser update, fuzz shard, prep mode, **coverage baseline+ratchet** §30.2, mutation-lane integrity §27.2 C3 / §32.2 TRI-2) | §25.7.3, §30.2, §32.2 TRI-1/TRI-2 | both | after Tranche 1 | P0-P1 | ~10 |
 | E | **Charter v2 + swarm hardening** (worktree-per-agent W1, build-lease W3, 12-rule constitution, spawn preflight O4, CI heartbeat O3, tracker T1–T4, cm seeding) | §27.3–27.5 (Tranches 4–5) | both + AGENTS.md/NTM | before next swarm campaign | P0 (gates next swarm) | ~15 |
-| F | **Bug-hunt fixes** (§28 verified: 4 High DC1/DC2/PY1/PY2, 5 Med DC3/PY3/PY4/DI1/MET, Low set) each = fix + discriminating test | §28.2–28.5 (priority §28.5) | both | driver 0.8.5 / server 0.9.1 (**patch**, §29.7 — behavior fixes, no public-API change) | **P1** (4 High first) | ~25 |
-| G | **Product features** — F-D1 residual (`he7t` IAM subject-mapping config → first full OCI signoff), F-D2 (Live-green streak), F-S1 (typed SCN), F-S2 (lane-health tile), F-S3 (ADK compat fixes) — **all in the 0.9.1/0.8.5 patch, engineered patch-safe (§29.7); nothing deferred** | §27.7, §29.7 | both | 0.9.1/0.8.5 patch; F-D1/he7t small | P1 | ~6 |
+| F | **Bug-hunt fixes** (§28 verified: 4 High DC1/DC2/PY1/PY2, 5 Med DC3/PY3/PY4/DI1/MET, Low set) each = fix + discriminating test | §28.2–28.5 (priority §28.5) | both | driver 0.9.0 / server 0.10.0 (§29.7 correction — behavior fixes, no extra scope from the rename) | **P1** (4 High first) | ~25 |
+| G | **Product features** — F-D1 residual (`he7t` IAM subject-mapping config → first full OCI signoff), F-D2 (Live-green streak), F-S1 (typed SCN), F-S2 (lane-health tile), F-S3 (ADK compat fixes) — **all in the 0.10.0/0.9.0 train; nothing deferred by the rename** | §27.7, §29.7 | both | 0.10.0/0.9.0 train; F-D1/he7t small | P1 | ~6 |
 | H | **Test coverage & organization** — surgical regressions §30.4 (1–11), verification hardening §27.6 V-series, error-path/contract/migration matrix §32.2 TRI-3/TRI-4/TRI-6, loom/fuzz §30.4, tier manifest §30.6, self-fulfilling-fixture rule §30.5, logging fixes §31.2 | §30.4, §30.6, §30.9, §31.2, §32.2 | both | with F (each bug's test) + Tranche 2 | P1-P2 (TRI-3/TRI-4/TRI-6 highest) | ~20 |
 | I | **OCI Always-Free ADB e2e** — one disposable ADB, isolated schemas/users, full capability sweep, teardown-as-incident | §30.7, §32.2 TRI-5 | oraclemcp | after `he7t` (config step); then **agent-runnable** (free-tier guardrails, no per-run approval) | P2 (F-D1's acceptance evidence) | ~4 |
 | J | **GCP/Vertex demo → site → video → launch** | §7/§11/§12/§13, beads §19.1–19.5, procedure §19.6 | oraclemcp (G) + durakovic-ai (S/V/L) | operator GO + target SHA (v0.9.0); two-wave handoff §19.6; campaign-order gate §13.0 | **credibility fuel for the money goal (§2.7)** — supporting act, ship-before-polish, don't let it starve the GTM | ~30 |
