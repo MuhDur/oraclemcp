@@ -1,0 +1,163 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:22:01Z",
+  "bead_id": "oraclemcp-091-ws-a-p0-adoption-ixw0w",
+  "scope": {
+    "summary": "WS-A parent close reconciles every child dependency and finds no remaining implementation blocker.",
+    "in_scope": [
+      ".beads/issues.jsonl",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a1a-catalog-gates-fail-open-59d9v.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a1b-setup-ordering-1m9xr.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a1c-columns-describe-rvg64.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a1d-describe-notfound-q9e4v.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a1e-rls-visibility-lpect.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a1f-robot-docs-pool-setup-9y1bl.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a2a-error-collapse-quu5b.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a2b-revocation-command-meq5i.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a2c-lock-granularity-fmb0e.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a3a-flashback-preflight-dwbma.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a3b-refusal-vs-teardown-vl3w9.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a4a-validate-on-checkout-8knxx.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a4b-retry-unify-c6whb.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a4c-connection-honesty-wxq4k.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a4d-typed-envelopes-wr0o4.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a4e-session-recycle-uyujp.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a5-dashboard-fetch-first-d4tiv.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-a5-secreview-0sdpx.json"
+    ],
+    "out_of_scope": [
+      "No new WS-A product code is claimed by this parent close; child beads carry their own implementation proof.",
+      "Release-train parent and downstream release beads remain separate tracker work."
+    ]
+  },
+  "source": {
+    "sha": "b5b6ebf216cb85bcf1a9d4e754957afddceeac09",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "br show oraclemcp-091-ws-a-p0-adoption-ixw0w --json",
+        "kind": "cli",
+        "trace": "Parent dependency list contained only closed WS-A child blockers plus the release-train parent link; no child dependency remained open or blocked."
+      },
+      {
+        "name": "br ready --json",
+        "kind": "cli",
+        "trace": "WS-A parent appeared as ready/open after all child blockers closed."
+      },
+      {
+        "name": "git log --oneline --all --grep='close A1|close A2|close A3|close A4|close A5|catalog gate|RLS VPD|flashback evidence|pool checkout|security review' -120",
+        "kind": "cli",
+        "trace": "Git history contains the named source/evidence/close commits for the reconciled child set."
+      },
+      {
+        "name": "oraclemcp-091-a1a-catalog-gates-fail-open-59d9v",
+        "kind": "api",
+        "trace": "status=closed; source=fa93e169b3f9bcc173a045a5d5f2057e8311c73a; closing=b462e99240ed56ddcc550676554db7a62cc2930b; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a1a-catalog-gates-fail-open-59d9v.json"
+      },
+      {
+        "name": "oraclemcp-091-a1b-setup-ordering-1m9xr",
+        "kind": "api",
+        "trace": "status=closed; source=c499310c7f0e6ef88d90ec033251c86d10cd9289; closing=78d0b18b1d1cfa6cfac848334043d27d87718468; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a1b-setup-ordering-1m9xr.json"
+      },
+      {
+        "name": "oraclemcp-091-a1c-columns-describe-rvg64",
+        "kind": "api",
+        "trace": "status=closed; source=3bbb549e279c3a41c9f51262b1aa2fc99feb5767; closing=60a4383d3e07399881c8695a4832d1d97a9a54c1; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a1c-columns-describe-rvg64.json"
+      },
+      {
+        "name": "oraclemcp-091-a1d-describe-notfound-q9e4v",
+        "kind": "api",
+        "trace": "status=closed; source=ec0d4ab5a8c59124cd5a5d9ee156c3570edf51ab; closing=901cfcb41bac05ba7f7bd9a56decd3ed36f2862d; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a1d-describe-notfound-q9e4v.json"
+      },
+      {
+        "name": "oraclemcp-091-a1e-rls-visibility-lpect",
+        "kind": "api",
+        "trace": "status=closed; source=5c7a15b150ba3bf909ce4b527c3636114214d722; closing=8af0cd5e5b867e8a4604d8fa183524b657bf75ab; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a1e-rls-visibility-lpect.json"
+      },
+      {
+        "name": "oraclemcp-091-a1f-robot-docs-pool-setup-9y1bl",
+        "kind": "api",
+        "trace": "status=closed; source=d3d5fc107ad216ffa5eab830dd40073b7250f350; closing=818c3aa6b5692c5eac38ea2b2f04dfed216cc648; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a1f-robot-docs-pool-setup-9y1bl.json"
+      },
+      {
+        "name": "oraclemcp-091-a2a-error-collapse-quu5b",
+        "kind": "api",
+        "trace": "status=closed; source=42e2f7af5dd280718e65ce7456e12ffdb9756afd; closing=88d320172fa4818b70d72a0c5d31a1e4f8f3c6fa; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a2a-error-collapse-quu5b.json"
+      },
+      {
+        "name": "oraclemcp-091-a2b-revocation-command-meq5i",
+        "kind": "api",
+        "trace": "status=closed; source=ef9c33a8582d8b39877c4c61c2f076fb7e29821b; closing=842a15300d87155a3cf9bff0da38911f7142e5c8; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a2b-revocation-command-meq5i.json"
+      },
+      {
+        "name": "oraclemcp-091-a2c-lock-granularity-fmb0e",
+        "kind": "api",
+        "trace": "status=closed; source=b64958281af36264cd50d545a84679d5b5e280fb; closing=bc1bfa1d651cd7807b2f67c7b717f52ba1ab55c9; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a2c-lock-granularity-fmb0e.json"
+      },
+      {
+        "name": "oraclemcp-091-a3a-flashback-preflight-dwbma",
+        "kind": "api",
+        "trace": "status=closed; source=707ffbd28cf24214bfd44589d18c6bc73241b2c9; closing=b8d6139759456feaebf197ce28f37a78151e080a; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a3a-flashback-preflight-dwbma.json"
+      },
+      {
+        "name": "oraclemcp-091-a3b-refusal-vs-teardown-vl3w9",
+        "kind": "api",
+        "trace": "status=closed; source=707ffbd28cf24214bfd44589d18c6bc73241b2c9; closing=b8d6139759456feaebf197ce28f37a78151e080a; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a3b-refusal-vs-teardown-vl3w9.json"
+      },
+      {
+        "name": "oraclemcp-091-a4a-validate-on-checkout-8knxx",
+        "kind": "api",
+        "trace": "status=closed; source=54920269d610fc893f4193ee2cf0742f665eeb82; closing=78e2e62a0d044d2037dd5b8f5ed192082d1ba8f1; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a4a-validate-on-checkout-8knxx.json"
+      },
+      {
+        "name": "oraclemcp-091-a4b-retry-unify-c6whb",
+        "kind": "api",
+        "trace": "status=closed; source=6419d7e4e8b3189ed5cfaa30c7721807207a15fc; closing=d9c7f96c7c645a1f4d42a3e96b2a6a198111f15c; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a4b-retry-unify-c6whb.json"
+      },
+      {
+        "name": "oraclemcp-091-a4c-connection-honesty-wxq4k",
+        "kind": "api",
+        "trace": "status=closed; source=a7a19c80fbf241cffcb9e6d0be5e1f08f92e5483; closing=b77555c0cbd4a849cc72566c56e6213a5a39587e; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a4c-connection-honesty-wxq4k.json"
+      },
+      {
+        "name": "oraclemcp-091-a4d-typed-envelopes-wr0o4",
+        "kind": "api",
+        "trace": "status=closed; source=13a7e6fe4848b84efd9c6ab38eb25a52ba798f20; closing=a08cfb25d5e0f4574c4d6bd79e94304510e2f910; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a4d-typed-envelopes-wr0o4.json"
+      },
+      {
+        "name": "oraclemcp-091-a4e-session-recycle-uyujp",
+        "kind": "api",
+        "trace": "status=closed; source=6ad5c9f6c6c06f12f290aa1c805b53c42881433d; closing=1516b7f2ea8a7bc094dbc0aca8e8d96620c63d8f; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a4e-session-recycle-uyujp.json"
+      },
+      {
+        "name": "oraclemcp-091-a5-dashboard-fetch-first-d4tiv",
+        "kind": "api",
+        "trace": "status=closed; source=9b127a2e347e6949546cc5e04425be41c2b2c555; closing=497b718870d34e0420546f1505086466536fc4a5; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a5-dashboard-fetch-first-d4tiv.json"
+      },
+      {
+        "name": "oraclemcp-091-a5-secreview-0sdpx",
+        "kind": "api",
+        "trace": "status=closed; source=7103aef84a95fb0c0108b987238ef588e6b97b35; closing=ef140e098337966a5e9b9dc6cc12d8fe6dff0c4b; evidence=tests/artifacts/evidence/closes/oraclemcp-091-a5-secreview-0sdpx.json"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is a reconciliation close for the WS-A epic; implementation and test proof remain attached to the child beads.",
+    "No new live Oracle lane is claimed by this parent evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
