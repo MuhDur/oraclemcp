@@ -6,15 +6,16 @@
   "scope": {
     "summary": "WS-D parent close reconciles D1-D10 and finds every blocking live-environment child closed with committed evidence.",
     "in_scope": [
-      ".beads/issues.jsonl"
+      "tests/artifacts/evidence/closes/oraclemcp-091-d10-real-pool-kill-ptvvy.json"
     ],
     "out_of_scope": [
       "No new WS-D product code or live Oracle run is claimed by this parent close; child beads carry their own implementation and live-lane proof.",
-      "The release-train parent and downstream publish/e2e beads remain separate tracker work."
+      "The release-train parent and downstream publish/e2e beads remain separate tracker work.",
+      ".beads/issues.jsonl is the cross-pane tracker export path and was held by SageRaven during this reconciliation; it is not used as the behavior-source scope for this parent close."
     ]
   },
   "source": {
-    "sha": "375aa96be826be15daf8da5eda79d53e860bea66",
+    "sha": "82069ad9f0d2ed450925bd41d9ee0d97e70f4332",
     "tree_clean": true,
     "branch": "main"
   },
@@ -94,6 +95,7 @@
   },
   "limitations": [
     "This is a reconciliation close for the WS-D epic; implementation, two-sided, and live proof remain attached to the D1-D10 child beads.",
+    "The cross-pane tracker export path .beads/issues.jsonl changed while SageRaven held its reservation, so this parent close scopes the source check to the already-landed D10 evidence path owned by this pane and enumerates D1-D10 from the tracker as integration evidence.",
     "No customer, field, OCI, or non-local live identifier is used or claimed by this parent evidence."
   ],
   "known_defects": [],
