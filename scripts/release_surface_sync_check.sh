@@ -338,7 +338,12 @@ if [ -f "$dashboard_sbom" ]; then
   ' --arg name "$package_name" --arg version "$version" "$dashboard_sbom" >/dev/null ||
     fail "dashboard SBOM is not current for $package_name@$version"
 else
-  fail "missing dashboard SBOM (run dashboard build): $dashboard_sbom"
+  command -v npm >/dev/null 2>&1 || fail "missing dashboard SBOM and npm is unavailable: $dashboard_sbom"
+  bash "$ROOT/scripts/release_sbom_check.sh" --generate-dashboard "$dashboard_sbom" >/tmp/release-surface-sbom.log 2>&1 || {
+    cat /tmp/release-surface-sbom.log
+    fail "unable to generate dashboard SBOM: $dashboard_sbom"
+  }
+  rm -f /tmp/release-surface-sbom.log
 fi
 
 echo "release-surface-sync: OK version=$version surfaces=$(wc -l < docs/release-surfaces.md | tr -d ' ') inventory lines"
