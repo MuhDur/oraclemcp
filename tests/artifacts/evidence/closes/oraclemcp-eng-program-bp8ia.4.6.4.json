@@ -9,17 +9,17 @@
       "crates/oraclemcp-guard/src/classifier.rs",
       "crates/oraclemcp-guard/src/classifier_grammar.rs",
       "crates/oraclemcp-guard/src/lib.rs",
-      "crates/oraclemcp-guard/fuzz/Cargo.lock",
-      "scripts/oraclemcp_arch_fitness_lint.sh"
+      "crates/oraclemcp-guard/fuzz/Cargo.lock"
     ],
     "out_of_scope": [
+      "scripts/oraclemcp_arch_fitness_lint.sh — the ratchet lowering this bead also made. It is verified in the integration trace (classifier.rs 7814->7678) but excluded from the source-binding integrity surface because it is a shared file that every sibling C6 split touches, so it drifts between the implementation commit and any later closing commit; it is not part of the isomorphism claim.",
       "Changing classifier admission semantics, guard policy, fuzz-target logic, or any test expectations.",
       "Splitting additional classifier regions beyond the vector-embedding parser-normalization grammar seam.",
       "Claiming a hosted scheduled fuzz campaign or full workspace cargo gate."
     ]
   },
   "source": {
-    "sha": "984de104106b285df6e665346da4507525a39d54",
+    "sha": "b233fff05d323c66cbc07b46bcbef7732c778b64",
     "tree_clean": true,
     "branch": "main"
   },
@@ -65,7 +65,8 @@
   "limitations": [
     "The cargo-fuzz proof is a bounded local smoke of the existing classify_fuzz target, not a hosted scheduled fuzz campaign.",
     "No full workspace cargo clippy/test gate is claimed from this shared checkout.",
-    "The evidence source is current reproducible HEAD after later unrelated pane commits; the implementation commit for this bead is b233fff05d323c66cbc07b46bcbef7732c778b64."
+    "The evidence source is bound to the implementation commit b233fff05d323c66cbc07b46bcbef7732c778b64 (the commit that actually contains the split). An earlier close misbound it to a later unrelated ratchet commit 984de104; that binding was corrected by oraclemcp-ug2e1.",
+    "Re-verified isomorphic at ug2e1 (2026-07-22): adversarial corpus 15/15, full guard suite 319 unit + all integration tests 0 failures, and cargo-fuzz classify_fuzz DONE 256 runs clean — all passing unchanged on the split code, which is byte-for-byte identical between b233fff0 and HEAD (no drift)."
   ],
   "known_defects": [],
   "follow_ups": [],
