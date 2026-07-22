@@ -161,6 +161,18 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
             ("EDITION_NAME", None),
         ])]);
     }
+    if normalized.contains("from all_tab_columns") && normalized.contains("column_name = :1") {
+        let column = string_bind(binds, 0).unwrap_or("ID").to_ascii_uppercase();
+        return match column.as_str() {
+            "ID" | "EMBEDDING" | "LABEL" => Some(vec![semantic_row(&[
+                ("OWNER", Some("APP")),
+                ("TABLE_NAME", Some("ORDERS")),
+                ("COLUMN_NAME", Some(column.as_str())),
+                ("COLUMN_ID", Some("1")),
+            ])]),
+            _ => Some(Vec::new()),
+        };
+    }
     if normalized.contains("from all_synonyms")
         || normalized.contains("from all_arguments")
         || (normalized.contains("from all_tab_columns") && !normalized.contains("table_name = :2"))
@@ -304,6 +316,20 @@ impl OracleConnection for SemanticGuardMock {
                 ("IN_OUT", Some("OUT")),
                 ("DEFAULTED", Some("N")),
             ])]);
+        }
+        if normalized.contains("from all_tab_columns") && normalized.contains("column_name = :1") {
+            let column = string_bind(binds, 0)
+                .unwrap_or_default()
+                .to_ascii_uppercase();
+            return Ok(match column.as_str() {
+                "ID" | "EMBEDDING" | "LABEL" => vec![semantic_row(&[
+                    ("OWNER", Some("APP")),
+                    ("TABLE_NAME", Some("ORDERS")),
+                    ("COLUMN_NAME", Some(column.as_str())),
+                    ("COLUMN_ID", Some("1")),
+                ])],
+                _ => Vec::new(),
+            });
         }
         if normalized.contains("from all_tab_columns") && normalized.contains("table_name = :2") {
             let column = string_bind(binds, 2).unwrap_or_default();
@@ -2105,7 +2131,7 @@ fn args_for(name: &str) -> Value {
         "oracle_switch_profile" => json!({ "profile": "other" }),
         "oracle_set_session_level" => json!({ "action": "status" }),
         "oracle_query" => {
-            json!({ "sql": "SELECT e.id FROM app.employees e WHERE e.id = :1", "binds": [100] })
+            json!({ "sql": "SELECT o.id FROM app.orders o WHERE o.id = :1", "binds": [100] })
         }
         "oracle_diff" => json!({ "sql": "SELECT 1 AS id FROM dual", "scn_a": 1, "scn_b": 2 }),
         "oracle_list_schemas" => json!({ "name_like": "APP%", "limit": 10 }),
@@ -2172,7 +2198,7 @@ fn args_for(name: &str) -> Value {
         "enable_writes" => json!({ "ttl_seconds": 60 }),
         "disable_writes" => json!({}),
         "query" => {
-            json!({ "sql": "SELECT e.id FROM app.employees e WHERE e.id = :1", "binds": [100] })
+            json!({ "sql": "SELECT o.id FROM app.orders o WHERE o.id = :1", "binds": [100] })
         }
         "execute_approved" => {
             let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
