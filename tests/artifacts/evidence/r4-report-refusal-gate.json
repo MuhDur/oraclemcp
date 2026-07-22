@@ -1,0 +1,29 @@
+{
+  "bead_id": "oraclemcp-091-r4-report-refusal-gate-1u1oc",
+  "source_sha": "f8211f4175b8bf149571ca2180214e5a0c8db5a5",
+  "direct_report": {
+    "command": "env -u CARGO_TARGET_DIR scripts/swarm_discipline.sh bounded-run --timeout 300 -- bash scripts/rig/rig_report.sh run --log",
+    "status": "pass",
+    "summary": "target/e2e/r4-report-20260722T093401Z-2525320/summary.json",
+    "findings_jsonl": "target/e2e/r4-report-20260722T093401Z-2525320/findings.jsonl",
+    "findings_md": "target/e2e/r4-report-20260722T093401Z-2525320/findings.md"
+  },
+  "integrated_rig_report": {
+    "command": "env -u CARGO_TARGET_DIR scripts/swarm_discipline.sh bounded-run --timeout 300 -- bash scripts/rig/rig.sh report --log",
+    "status": "pass",
+    "summary": "target/e2e/rig/20260722T093401Z-2525382/summary.json",
+    "findings_jsonl": "target/e2e/rig/20260722T093401Z-2525382/findings.jsonl",
+    "findings_md": "target/e2e/rig/20260722T093401Z-2525382/findings.md"
+  },
+  "refusal_diff": {
+    "finding_count": 2,
+    "category_changed_count": 1,
+    "newly_allowed_count": 1,
+    "seeded_fixture_caught": true,
+    "sensitive_scan_hits": []
+  },
+  "confidentiality": {
+    "live_oci_or_customer_identifiers": false,
+    "synthetic_only": true
+  }
+}
