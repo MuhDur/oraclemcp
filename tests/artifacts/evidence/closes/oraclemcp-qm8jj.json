@@ -1,0 +1,65 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T13:36:41Z",
+  "bead_id": "oraclemcp-qm8jj",
+  "scope": {
+    "summary": "Doctor RLS/VPD diagnostics now redact runtime-observed session identity before rendering detail, and the regression test requires the live session user to stay omitted.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/doctor.rs"
+    ],
+    "out_of_scope": [
+      "No live Oracle D3 fixture was run in this close; coverage is the doctor unit mock that exercises the RLS/VPD observation path.",
+      "No classifier, query-result RLS/VPD surfacing, or PL/SQL intelligence behavior was changed."
+    ]
+  },
+  "source": {
+    "sha": "626ef612f76a52af0187a2d0549adc51cf72741e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "focused RLS/VPD doctor redaction regression",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-core doctor_rls_vpd_visibility -- --nocapture exited 0; doctor_rls_vpd_visibility_names_visible_policy now asserts session_user=<redacted> and forbids ORACLEMCP_D3_SIGHTED / ORACLEMCP_D3_OWNER in the detail while preserving ORACLEMCP_D3_VPD."
+      },
+      {
+        "name": "doctor secret golden",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-core --test doctor_secret_golden -- --nocapture exited 0."
+      },
+      {
+        "name": "scoped compile",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo check -p oraclemcp-core exited 0."
+      },
+      {
+        "name": "format check",
+        "kind": "cli",
+        "trace": "cargo fmt -p oraclemcp-core -- --check exited 0."
+      },
+      {
+        "name": "oraclemcp doctor RLS/VPD visibility check",
+        "kind": "cli",
+        "trace": "run_doctor includes check_rls_vpd_visibility; the source commit routes the OracleVpdRlsObservation session context through sanitized_detail_with_extra_values before building the CheckResult detail."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The shared checkout had unrelated untracked files from other panes; evidence is scoped to the committed doctor.rs source change.",
+    "The source commit is 626ef612f76a52af0187a2d0549adc51cf72741e rather than current HEAD because another pane advanced HEAD before this close evidence was written."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
