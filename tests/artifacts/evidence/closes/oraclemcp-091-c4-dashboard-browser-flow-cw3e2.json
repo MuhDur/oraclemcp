@@ -1,0 +1,82 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:29:34Z",
+  "bead_id": "oraclemcp-091-c4-dashboard-browser-flow-cw3e2",
+  "scope": {
+    "summary": "C4 is now an explicit R3 browser-lane expected-red fixture: strict Chromium pairing plus authenticated action POST is enforced without fallback, while the default lane records the current pre-A5 failure and still proves action POST 200/SSE resume through direct same-origin bootstrap.",
+    "in_scope": [
+      "web/e2e/live-serve-browser.spec.ts",
+      "scripts/rig/rig_browser_lane.sh",
+      "crates/oraclemcp-db/tests/privilege_matrix_live.rs"
+    ],
+    "out_of_scope": [
+      "A5 dashboard fetch-first/product behavior is not changed here; the real Chromium pairing path still returns 403 from Origin:null until A5 lands.",
+      "Pane 5's A1e VPD/RLS work in catalog_resolver.rs/doctor.rs is untouched.",
+      "No workspace-wide cargo gate is claimed from the shared dirty checkout."
+    ]
+  },
+  "source": {
+    "sha": "51c83ce7898ac949115b9cac64224eadb2861d05",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "D4 privilege-matrix provisioning",
+        "kind": "cli",
+        "trace": "`timeout 180 bash scripts/rig/oracle_l1.sh privilege-matrix --log` exited 0 and verified the free23 D4 fixture with ORACLEMCP_D4_CATALOG_OBJECT_ID=126296."
+      },
+      {
+        "name": "D4 no-flashback and catalog-blind live lane",
+        "kind": "cli",
+        "trace": "`timeout 240 env CARGO_TARGET_DIR=target ORACLEMCP_D4_* cargo test -p oraclemcp-db --features live-xe --test privilege_matrix_live -- --nocapture` exited 0 in the clean cod6-c4 worktree: d4_no_flashback_principal_gets_typed_refusal_and_connection_stays_usable and d4_catalog_blind_principal_cannot_prove_the_known_guarded_table_read_only both passed, with 0 ignored."
+      },
+      {
+        "name": "C4 browser fixture discovery",
+        "kind": "cli",
+        "trace": "`NODE_PATH=/home/durakovic/projects/oraclemcp/web/node_modules /home/durakovic/projects/oraclemcp/web/node_modules/.bin/playwright test --config web/playwright.live-serve.config.ts --list` exited 0 in the clean cod6-c4 worktree and listed 2 Chromium tests, including `C4: Chromium pairing and authenticated action POST are enforced`."
+      },
+      {
+        "name": "C4 expected-red default browser lane",
+        "kind": "cli",
+        "trace": "`timeout 240 env NODE_PATH=/home/durakovic/projects/oraclemcp/web/node_modules bash scripts/rig/rig_browser_lane.sh run --log` exited 0 in the clean cod6-c4 worktree: omcpb built oraclemcp, Playwright ran 2 Chromium tests, the C4 enforced browser pair+action test was expected-red, and the lane recorded browser pairing 403 from Origin:null plus direct-bootstrap action POST 200 and EventSource resume."
+      },
+      {
+        "name": "C4 strict green-mode red proof",
+        "kind": "cli",
+        "trace": "`timeout 240 env NODE_PATH=/home/durakovic/projects/oraclemcp/web/node_modules OMCP_BROWSER_LANE_EXPECT_PRE_A5_FAILURE=0 bash scripts/rig/rig_browser_lane.sh run --log` exited 1 as expected before A5: both browser-flow tests failed at `pairing form POST should redirect after setting the session`, receiving 403 with body `Forbidden: Origin header is not allowed` instead of 303."
+      },
+      {
+        "name": "Scoped formatting and TypeScript checks",
+        "kind": "cli",
+        "trace": "`cargo fmt --package oraclemcp-db --check`, `bash -n scripts/rig/rig_browser_lane.sh`, and `npm --prefix web exec -- tsc -p web/tsconfig.json --noEmit` all exited 0 in the shared checkout."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "C4 closes on the committed failing fixture per the bead convention; A5 owns the product fix and the green flip.",
+    "The strict browser-pairing path is still red before A5 because the real browser POST serializes Origin:null under the current pairing page policy, and the server correctly refuses it instead of accepting literal Origin:null.",
+    "The authenticated action POST proof in default mode runs after a direct same-origin pairing bootstrap installs the dashboard cookie, isolating the action route from the known pairing blocker."
+  ],
+  "known_defects": [
+    {
+      "description": "A5 must make Chromium pairing return POST -> 303 -> / without accepting literal Origin:null or weakening dashboard same-origin checks.",
+      "bead_id": "oraclemcp-091-a5-dashboard-fetch-first-d4tiv"
+    }
+  ],
+  "follow_ups": [
+    "oraclemcp-091-a5-dashboard-fetch-first-d4tiv",
+    "oraclemcp-091-e4-dashboard-e2e-sobjr"
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}
