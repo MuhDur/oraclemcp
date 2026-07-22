@@ -1022,12 +1022,14 @@ description = "Customer id"
 
 Custom tool SQL uses named binds (`:id` above). Agent-supplied values are typed
 from `params` and bound by name; they are never interpolated into SQL text. The
-binary loads definitions the classifier deems safe for the profile ceiling,
-then executes them through a runtime gate that blocks unsupported privilege levels
-before Oracle sees them. In this release, write/DDL/PL/SQL custom tools can be
-loaded and advertised when the ceiling permits, but their invocation is refused
-with `OperatingLevelTooLow` before any live DB call. Unproven package call
-definitions are rejected by gate policy as forbidden.
+binary loads definitions the classifier deems safe for the active profile
+ceiling and binds them to the same runtime gate as operator-facing execution
+tools. Read-only tools execute on a dedicated read-only executor. Write/DDL/PL/SQL
+tools run through `oracle_execute`-equivalent semantics: statement-level
+classification, session/profile gating, preview token verification when required,
+rollback-by-default for non-confirmed DML, and write-intent/audit recording on
+committed effects. Unproven package call definitions are rejected by gate policy
+as forbidden.
 
 On protected profiles, every custom tool must carry a valid HMAC signature. Set
 `ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY` in the server environment to verify signed
