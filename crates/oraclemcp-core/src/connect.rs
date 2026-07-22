@@ -29,8 +29,8 @@ pub struct SessionContext {
     pub level_state: SessionLevelState,
     /// Optional local stateless-read pool settings from `[profiles.pool]`.
     pub pool_settings: Option<PoolSettings>,
-    /// Ordered login statements: canonical NLS, the read-only backstop (if the
-    /// level is `READ_ONLY`), then the operator's profile login statements.
+    /// Ordered login statements: canonical NLS, operator login statements and
+    /// trusted setup, then the read-only backstop (if the level is `READ_ONLY`).
     pub login_statements: Vec<String>,
 }
 
@@ -233,17 +233,16 @@ fn profile_to_options_for_level(
         ssl_server_cert_dn: oci.as_ref().and_then(|o| o.ssl_server_cert_dn.clone()),
         use_sni: oci.as_ref().and_then(|o| o.use_sni),
         use_iam_token: oci.as_ref().is_some_and(|o| o.use_iam_token),
-        // The B2 adapter (oraclemcp_db) wires an IAM database token through
-        // `with_access_token` (TCPS-enforced) whenever this field is `Some`.
-        // Profile bootstrap never embeds a token: it is resolved at connect time
-        // from the profile's `[profiles.oci]` env/file source and injected by the
-        // caller via `oraclemcp_core::inject_iam_token` (B2.2a — the two SIMPLE
-        // `ServerIamTokenSource` variants, each re-read on every connect). A
-        // future OCI-SDK source can feed the same field through the
-        // `oraclemcp_db::IamTokenSource` / `ensure_fresh_token` refresh seam. With
-        // `use_iam_token` set but no token injected, the adapter returns a precise
-        // setup error rather than attempting a password connect.
+        // Static IAM tokens remain available to direct library callers. Server
+        // profiles never embed one: `configure_iam_token_source` installs a
+        // refreshable source after profile resolution, and the driver fetches a
+        // fresh value for each physical TCPS connection. With `use_iam_token` set
+        // but neither credential path configured, the adapter returns a precise
+        // setup error rather than attempting password authentication.
         iam_token: None,
+        // Server IAM profiles install a refreshable source after secret/profile
+        // resolution; bootstrap itself contains neither a token nor a source.
+        iam_token_source: None,
         // Like the token itself, the OCI IAM database-token proof-of-possession
         // private key is resolved at connect time from the profile's
         // `[profiles.oci]` `token_key_file` / `token_key_env` reference and
@@ -308,14 +307,6 @@ fn profile_session_statements(
     level_state: &SessionLevelState,
 ) -> Result<Vec<String>, DbError> {
     let mut out = Vec::new();
-    // Read-only backstop when the session starts (and stays capped at) READ_ONLY.
-    if level_state.effective_ceiling() == OperatingLevel::ReadOnly {
-        out.extend(
-            read_only_setup_statements(OperatingLevel::ReadOnly)
-                .into_iter()
-                .map(str::to_owned),
-        );
-    }
     if let Some(extra) = &profile.login_statements {
         for stmt in extra {
             out.push(validate_login_statement(&profile.name, stmt)?);
@@ -330,6 +321,16 @@ fn profile_session_statements(
         for stmt in extra {
             out.push(validate_trusted_session_statement(&profile.name, stmt)?);
         }
+    }
+    // Trusted setup may establish table-backed application context. Re-assert
+    // the read-only transaction only after it has run, so protected profiles
+    // retain their backstop without making that setup impossible.
+    if level_state.effective_ceiling() == OperatingLevel::ReadOnly {
+        out.extend(
+            read_only_setup_statements(OperatingLevel::ReadOnly)
+                .into_iter()
+                .map(str::to_owned),
+        );
     }
     Ok(out)
 }
@@ -691,6 +692,30 @@ mod tests {
     }
 
     #[test]
+    fn proxy_bracket_username_reaches_typed_connect_options() {
+        let profile = profile(
+            r#"
+            [[profiles]]
+            name = "proxy"
+            connect_string = "localhost:1521/FREEPDB1"
+            username = "MCP_PROXY[APP_OWNER]"
+            credential_ref = "env:PROXY_PASSWORD"
+            "#,
+        );
+        let ctx = build_session_context(&profile, Some("proxy-password".to_owned()), None, false)
+            .expect("bracket proxy config builds a typed session");
+
+        assert_eq!(ctx.options.username.as_deref(), Some("MCP_PROXY"));
+        assert!(matches!(
+            ctx.options.auth_adapter,
+            AuthAdapter::Proxy {
+                ref proxy_user,
+                ref target_schema
+            } if proxy_user == "MCP_PROXY" && target_schema == "APP_OWNER"
+        ));
+    }
+
+    #[test]
     fn session_identity_is_carried_to_connect_options() {
         let p = profile(
             r#"
@@ -830,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn trusted_session_statements_are_carried_after_guarded_login_statements() {
+    fn trusted_session_statements_run_before_the_read_only_backstop() {
         let p = profile(
             r#"
             [[profiles]]
@@ -845,15 +870,13 @@ mod tests {
             "#,
         );
         let ctx = build_session_context(&p, None, None, false).expect("context");
+        let statements = ctx.options.session_statements;
+        let login = position_of(&statements, "ALTER SESSION SET NLS_LANGUAGE=english");
+        let trusted = position_of(&statements, "BEGIN DBMS_OUTPUT.ENABLE(500000); END;");
+        let backstop = position_of(&statements, SET_TRANSACTION_READ_ONLY);
         assert!(
-            ctx.options
-                .session_statements
-                .iter()
-                .any(|s| s == "ALTER SESSION SET NLS_LANGUAGE=english")
-        );
-        assert_eq!(
-            ctx.options.session_statements.last().map(String::as_str),
-            Some("BEGIN DBMS_OUTPUT.ENABLE(500000); END;")
+            login < trusted && trusted < backstop,
+            "trusted setup follows guarded login and precedes the read-only backstop: {statements:?}"
         );
     }
 
@@ -934,24 +957,10 @@ mod tests {
 
     /// The failing half of C5.
     ///
-    /// `profile_session_statements` pushes the backstop first whenever the
-    /// ceiling is `READ_ONLY`, then login statements, then trusted setup. On a
-    /// protected profile — the posture the README actively recommends — every
-    /// trusted session statement therefore runs inside an already-open read-only
-    /// transaction. Anything that writes fails with ORA-01456, which makes
-    /// table-backed application context, and so the standard way of driving VPD,
-    /// impossible by construction rather than by policy.
-    ///
-    /// The existing `trusted_session_statements_are_carried_after_guarded_login_statements`
-    /// cannot catch this: it uses one unprotected profile, so the posture where
-    /// the backstop appears at all is never built. Test-shape rule §A.8-5 —
-    /// setup ordering is part of the contract, so assert it per posture.
-    ///
-    /// Bead `oraclemcp-091-a1b-*` (A1b) reorders: trusted setup first, backstop
-    /// re-asserted after. Flipping this green means removing the `#[ignore]`;
-    /// the assertion must not change.
+    /// A protected profile must establish trusted setup before opening its
+    /// read-only transaction. This pins the ordering contract without weakening
+    /// the backstop or changing the per-request enforcement path.
     #[test]
-    #[ignore = "expected failure until A1b re-asserts the read-only backstop after trusted setup (bead oraclemcp-091-c5-setup-ordering-postures-02d0i)"]
     fn c5_a_protected_posture_runs_trusted_setup_before_the_read_only_backstop() {
         let statements = c5_statements("protected = true");
         let backstop = position_of(&statements, SET_TRANSACTION_READ_ONLY);
