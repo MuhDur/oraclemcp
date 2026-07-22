@@ -1,0 +1,202 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:35:00Z",
+  "bead_id": "oraclemcp-091-ws-b-p1-fixes-71da0",
+  "scope": {
+    "summary": "WS-B parent close reconciles every oraclemcp-side child dependency after separating driver-side halves into the dedicated rust-oracledb lane.",
+    "in_scope": [
+      ".beads/issues.jsonl"
+    ],
+    "out_of_scope": [
+      "No new WS-B product implementation is claimed by this parent close; child beads carry their own implementation proof.",
+      "Driver-side halves B5 verify, B6 trust union, B9b bracket parity, B13a TTC-129, and B16c TokenSource contract are routed to the dedicated rust-oracledb pane/tracker by operator direction on 2026-07-22.",
+      "SageRaven/pane-4 ownership of dispatch/mod.rs remains outside this tracker-only close."
+    ]
+  },
+  "source": {
+    "sha": "e56712cf46da20b5cb32ce0a943aecc79cc6d723",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "br show oraclemcp-091-ws-b-p1-fixes-71da0 --json",
+        "kind": "cli",
+        "trace": "Parent dependency list contained only closed repo-local WS-B child blockers plus the release-train parent link."
+      },
+      {
+        "name": "env CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target CARGO_BUILD_JOBS=1 cargo clippy -p oraclemcp-db --lib",
+        "kind": "cli",
+        "trace": "Exit 0 on 2026-07-22; this re-grounded the stale clean-merge red-gate note after get_source moved to SourceReadOptions at crates/oraclemcp-db/src/intelligence.rs:1759."
+      },
+      {
+        "name": "oraclemcp-091-b1a-mtls-normalize-eg2il",
+        "kind": "api",
+        "trace": "status=closed; source=1beb302db264093d4ee705e320b1a8f33e21efa2; closing=a31061e25c7f163628ff54164460c530d9c2941a; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b1a-mtls-normalize-eg2il.json"
+      },
+      {
+        "name": "oraclemcp-091-b1b-drop-log-warn-aijat",
+        "kind": "api",
+        "trace": "status=closed; source=cd501a7c217f02b76cc3b942501f4b987483e7ea; closing=b59406fcd9454e504971a3a6f963147abdebeb70; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b1b-drop-log-warn-aijat.json"
+      },
+      {
+        "name": "oraclemcp-091-b1c-ingress-budget-htzz2",
+        "kind": "api",
+        "trace": "status=closed; source=15596ba2dd4a76c517b03f1fabdd971dd97cf725; closing=f0581fdc5558c58c3c88d9ff71d0ec2b40bba242; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b1c-ingress-budget-htzz2.json"
+      },
+      {
+        "name": "oraclemcp-091-b2-oauth-contract-g5xmr",
+        "kind": "api",
+        "trace": "status=closed; source=15596ba2dd4a76c517b03f1fabdd971dd97cf725; closing=08b962de7997d393e5a48fa9113a7ba5c536dde6; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b2-oauth-contract-g5xmr.json"
+      },
+      {
+        "name": "oraclemcp-091-b2c-doctor-oauth-gci1b",
+        "kind": "api",
+        "trace": "status=closed; source=0e488ca3b1419e002998505c10121ec7795399dc; closing=785bbe6e0e98854587b8716883c54917484ed40b; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b2c-doctor-oauth-gci1b.json"
+      },
+      {
+        "name": "oraclemcp-091-b3-stdio-token-nzmiv",
+        "kind": "api",
+        "trace": "status=closed; source=d0263cb279a78fc79a2b28703f79920979f41800; closing=d092a07cbd565028f0289a5508d28e67bda4e093; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b3-stdio-token-nzmiv.json"
+      },
+      {
+        "name": "oraclemcp-091-b4-credential-lifecycle-sgyz0",
+        "kind": "api",
+        "trace": "status=closed; source=ea3a44c73e947f536cdde2458b13a4c76878bd76; closing=0206384a57e12b8c44fc0748f8ee3f29612a2ed7; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b4-credential-lifecycle-sgyz0.json"
+      },
+      {
+        "name": "oraclemcp-091-b7a-logoff-hooks-k9jhg",
+        "kind": "api",
+        "trace": "status=closed; source=fae24cba29f134bf87b26819e90e9cf7f439d391; closing=0090183f9e4b0a76da60ac6e3aaa658d511ad2fb; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b7a-logoff-hooks-k9jhg.json"
+      },
+      {
+        "name": "oraclemcp-091-b7b-logoff-verify-1w3pn",
+        "kind": "api",
+        "trace": "status=closed; source=ae137a9b1818c290a5e0c30ac21972c59a721207; closing=f3282d8c839a1d342a155ff08d783993ac5e7ba1; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b7b-logoff-verify-1w3pn.json"
+      },
+      {
+        "name": "oraclemcp-091-b7c-trait-close-w2yo6",
+        "kind": "api",
+        "trace": "status=closed; source=7e20771b907bd3e6556a723f5128e5b3dc31acd8; closing=d31acca8829201f63300b4e75320074c5b1e5d0c; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b7c-trait-close-w2yo6.json"
+      },
+      {
+        "name": "oraclemcp-091-b8a-doctor-audit-honesty-a2zg9",
+        "kind": "api",
+        "trace": "status=closed; source=f01f6a9ac08f2e93d4a08e11d34486e1008a23f2; closing=3e76d25f3e897bc81863dcf989eae3aafbe16b3b; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b8a-doctor-audit-honesty-a2zg9.json"
+      },
+      {
+        "name": "oraclemcp-091-b8b-audit-doc-thf7d",
+        "kind": "api",
+        "trace": "status=closed; source=259b7e05a328944bed5d87f431456597bc00a17f; closing=afd5e16ac9c8b0edd1b3f9a3bd622c4e53cdd63b; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b8b-audit-doc-thf7d.json"
+      },
+      {
+        "name": "oraclemcp-091-b8c-refusal-trail-rhg0m",
+        "kind": "api",
+        "trace": "status=closed; source=320c9363e69f384a4d89cb66566ffcc6e8020291; closing=263db76d694e95b9e300bde76e2290572a152b37; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b8c-refusal-trail-rhg0m.json"
+      },
+      {
+        "name": "oraclemcp-091-b8d-doctor-observe-sweep-a05ww",
+        "kind": "api",
+        "trace": "status=closed; source=c378dcab0a5e0e687cb1ade879840d50b13cc264; closing=994f01c34e8d55bbcea8db39316ed8b7642a31b5; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b8d-doctor-observe-sweep-a05ww.json"
+      },
+      {
+        "name": "oraclemcp-091-b9a-proxy-bracket-rhhb9",
+        "kind": "api",
+        "trace": "status=closed; source=481e080badaef2cb1e61765225a1849d5cbf38ff; closing=8e44db48112763ded5be6c88b10d8acf3801d16a; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b9a-proxy-bracket-rhhb9.json"
+      },
+      {
+        "name": "oraclemcp-091-b10-message-sweep-1pt6b",
+        "kind": "api",
+        "trace": "status=closed; source=5d258599e1aa32ccb44424b0b0d13e1e4a40bd96; closing=c8dd4aca9b285a98612c4cb1ecad88e11a8ca23d; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b10-message-sweep-1pt6b.json"
+      },
+      {
+        "name": "oraclemcp-091-b10-snippet-auth-header-4lit2",
+        "kind": "api",
+        "trace": "status=closed; source=1b969d340c69acf0bafebfea5308c001a18a6f53; closing=1928ee7ee3ed87364fc3cf1b99ec21e6c4a12752; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b10-snippet-auth-header-4lit2.json"
+      },
+      {
+        "name": "oraclemcp-091-b11a-orientation-caps-sua6x",
+        "kind": "api",
+        "trace": "status=closed; source=9ea3425ee7d937fa3bfbf0a72e00cae427149e52; closing=7fba787ee44347f95c38d48fdd20ddb75a2715fe; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b11a-orientation-caps-sua6x.json"
+      },
+      {
+        "name": "oraclemcp-091-b11b-metadata-caps-0lx5m",
+        "kind": "api",
+        "trace": "status=closed; source=9ea3425ee7d937fa3bfbf0a72e00cae427149e52; closing=7fba787ee44347f95c38d48fdd20ddb75a2715fe; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b11b-metadata-caps-0lx5m.json"
+      },
+      {
+        "name": "oraclemcp-091-b12a-purity-allowlist-1vagp",
+        "kind": "api",
+        "trace": "status=closed; source=3eae78153771bd96cb08ac1add7c92b4fa443340; closing=b2930a8abe4926a1f4c0db269bae2a3f9699a6c4; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b12a-purity-allowlist-1vagp.json"
+      },
+      {
+        "name": "oraclemcp-091-b12b-custom-tool-ceiling-xe54f",
+        "kind": "api",
+        "trace": "status=closed; source=667c0ec0e4fbd0a5292aae879e277429a910c3a9; closing=301a284a180cfb9eef369bcc741e654e90d6c1d4; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b12b-custom-tool-ceiling-xe54f.json"
+      },
+      {
+        "name": "oraclemcp-091-b12c-skip-and-warn-38yf3",
+        "kind": "api",
+        "trace": "status=closed; source=b514ee3ccbeedbcbb3d2ed07a6e6a4f0822ca0c4; closing=5c6ae17707dc093fbea4ae321d818b25e066495c; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b12c-skip-and-warn-38yf3.json"
+      },
+      {
+        "name": "oraclemcp-091-b12d-purity-metadata-2vynq",
+        "kind": "api",
+        "trace": "status=closed; source=0090183f9e4b0a76da60ac6e3aaa658d511ad2fb; closing=24ac22cab9efc482de14dc66133e5299104238a1; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b12d-purity-metadata-2vynq.json"
+      },
+      {
+        "name": "oraclemcp-091-b13b-ttc129-server-aqllj",
+        "kind": "api",
+        "trace": "status=closed; source=67c7eb51ed43fb50e404c476b55627707b3afe1c; closing=b4586e69393f6902fe11ec57fb2f5c64e7eb08d9; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b13b-ttc129-server-aqllj.json"
+      },
+      {
+        "name": "oraclemcp-091-b14a-drcp-clear-before-set-jzgub",
+        "kind": "api",
+        "trace": "status=closed; source=e724338c25c5ddc34adad98476e562612500d395; closing=1667f71b2cf822c44d19139040a055ce1d4ce6fd; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b14a-drcp-clear-before-set-jzgub.json"
+      },
+      {
+        "name": "oraclemcp-091-b14b-delete-lease-subsystem-ex6sf",
+        "kind": "api",
+        "trace": "status=closed; source=56994f4ad9fab24805f6d0b4ddf19b4028086273; closing=a36dcf5934bd551c7388abdfb7e27b8d5971fc6d; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b14b-delete-lease-subsystem-ex6sf.json"
+      },
+      {
+        "name": "oraclemcp-091-b15-http-guard-normalize-rf6sa",
+        "kind": "api",
+        "trace": "status=closed; source=1beb302db264093d4ee705e320b1a8f33e21efa2; closing=a31061e25c7f163628ff54164460c530d9c2941a; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b15-http-guard-normalize-rf6sa.json"
+      },
+      {
+        "name": "oraclemcp-091-b15c-trim-on-store-bokri",
+        "kind": "api",
+        "trace": "status=closed; source=1beb302db264093d4ee705e320b1a8f33e21efa2; closing=a31061e25c7f163628ff54164460c530d9c2941a; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b15c-trim-on-store-bokri.json"
+      },
+      {
+        "name": "oraclemcp-091-b16a-tokensource-wiring-f7sfq",
+        "kind": "api",
+        "trace": "status=closed; source=a36dcf5934bd551c7388abdfb7e27b8d5971fc6d; closing=dba35b5544c7d2794d2fd295f0c9b9fa261e959f; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b16a-tokensource-wiring-f7sfq.json"
+      },
+      {
+        "name": "oraclemcp-091-b16b-iam-doctor-mk7cv",
+        "kind": "api",
+        "trace": "status=closed; source=24dab42093e8a5f26b663504c144ef46750ef7cd; closing=7295f52e3f9477fd0086f6e6611b695fb986fd20; evidence=tests/artifacts/evidence/closes/oraclemcp-091-b16b-iam-doctor-mk7cv.json"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is a reconciliation close for the WS-B epic; implementation and test proof remain attached to the child beads.",
+    "No live Oracle or external driver evidence is claimed by this parent evidence.",
+    "Driver-side halves are explicitly out of scope for this oraclemcp epic and remain routed to rust-oracledb."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
