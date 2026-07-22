@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T14:12:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.4.6.1",
+  "scope": {
+    "summary": "C6 isomorphic split of dispatch/mod.rs: the C2 orientation + fleet-orientation tool family extracted behind a facade seam into dispatch/orient.rs, with the dispatch/mod.rs file-size ratchet lowered in a paired commit; no tool-surface or behavior change.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/orient.rs",
+      "scripts/oraclemcp_arch_fitness_lint.sh"
+    ],
+    "out_of_scope": [
+      "Splitting the other dispatch/mod.rs tool families (this bead extracts one seam at a time; the remaining families stay for follow-up C6 beads)",
+      "The concurrent dispatch/tests.rs ratchet violation (another pane's A1e RLS/VPD test additions; rule 13, not this bead's file)",
+      "Any change to the classifier fuzz target or the registry tool surface"
+    ]
+  },
+  "source": {
+    "sha": "c207ea4362193baeaa1e04631db93fee023ad283",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "orient/fleet-orient seam extraction (commit 82ed7b99)",
+        "kind": "route",
+        "trace": "Extracted 453 lines (8 structs + 1 enum + 10 free fns) from dispatch/mod.rs into dispatch/orient.rs, wired via 'mod orient; use orient::*;' (the established facade pattern matching limits.rs/args.rs). All items pub(super); effective visibility within dispatch unchanged. git diff --stat: 491 insertions / 466 deletions across mod.rs + orient.rs."
+      },
+      {
+        "name": "isomorphism — tool surface unchanged",
+        "kind": "route",
+        "trace": "registry.rs still exactly 34 oracle_ tools + 25 compat aliases (verified by parsing TOOL_NAMES). Classifier fuzz target untouched (lives in oraclemcp-guard). cargo clippy -p oraclemcp --lib -- -D warnings: clean."
+      },
+      {
+        "name": "isomorphism — orient/fleet contract tests",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp --lib -- orient fleet_orient fleet_catalog: 5 passed, 0 failed (fleet_orient_compares_each_reachable_profile_to_a_stable_baseline, fleet_catalog_masks_each_profile_before_merging_results, fleet_orient_returns_every_visible_profile_when_one_lane_is_unreachable, fleet_catalog_hidden_profile_is_indistinguishable_from_absence, orient_assembles_selector_stable_snapshot_and_reloads_on_catalog_revision)."
+      },
+      {
+        "name": "file-size ratchet lowered (commit e61a2b19)",
+        "kind": "config-gate",
+        "trace": "scripts/oraclemcp_arch_fitness_lint.sh dispatch/mod.rs ratchet lowered 15623 -> 15167 to match the post-split size (wc -l = 15167). Landed as an immediate follow-up commit because the split commit is already on main in the shared checkout."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This bead extracts ONE tool-family seam; dispatch/mod.rs still holds the remaining families for follow-up C6 beads.",
+    "The arch-fitness lint currently reports a dispatch/tests.rs ratchet violation (15703 > 15676) caused by another pane's concurrent A1e RLS/VPD test additions — out of scope for this bead (rule 13).",
+    "65 dispatch tests fail in the shared tree from the concurrent A1e RLS/VPD semantic-purity work (ForbiddenStatement/UnprovenSideEffect), NOT from this extraction; all orient/fleet tests pass."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "Continue C6 de-monolith of dispatch/mod.rs one tool-family seam at a time (remaining families), each lowering the ratchet in its split commit."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
