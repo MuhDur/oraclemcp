@@ -1,0 +1,72 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:43:05Z",
+  "bead_id": "oraclemcp-091-rfail-injection-lanes-ok400",
+  "scope": {
+    "summary": "R-fail adds a rig lane for deterministic local failure injection over the installed artifact, plus committed evidence from a full pass.",
+    "in_scope": [
+      "scripts/rig/failure_injection_lanes.py",
+      "scripts/rig/failure_injection_lanes.sh",
+      "scripts/rig/rig.sh",
+      "tests/artifacts/evidence/rfail-failure-injection-lanes.json"
+    ],
+    "out_of_scope": [
+      "New product-only fault-injection hooks for commit_in_doubt or confirmation-grant TTL manipulation.",
+      "Disruptive Docker container restart inside the default shared-checkout lane."
+    ]
+  },
+  "source": {
+    "sha": "a4f79ba3a320370c346e9e34ca55724a74cb3065",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "bash scripts/rig/rig.sh failure-injection --log",
+        "kind": "cli",
+        "trace": "rig.sh dispatches to scripts/rig/failure_injection_lanes.sh, which runs the committed installed-artifact harness."
+      },
+      {
+        "name": "bash scripts/rig/failure_injection_lanes.sh run --log",
+        "kind": "cli",
+        "trace": "Full pass recorded in tests/artifacts/evidence/rfail-failure-injection-lanes.json with source_sha 4e7683a2a46d4c5d0e8fba25efe25b9b8a7cb1e5."
+      },
+      {
+        "name": "scripts/swarm_discipline.sh bounded-run --timeout 1800 -- bash scripts/rig/failure_injection_lanes.sh run --log",
+        "kind": "cli",
+        "trace": "Exited 0. The installed-artifact lane passed wire_client_revoke, wire_client_rotate, wire_server_restart, and wire_oauth_token_expiry; it also ran the D10 idle-kill subprocess assertion successfully."
+      },
+      {
+        "name": "R-fail syntax and whitespace checks",
+        "kind": "cli",
+        "trace": "PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/rig/failure_injection_lanes.py, bash -n scripts/rig/failure_injection_lanes.sh, and git diff --check over the R-fail harness paths all exited 0."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "rfail-failure-injection-lanes",
+        "path": "tests/artifacts/evidence/rfail-failure-injection-lanes.json",
+        "sha": "a4f79ba3a320370c346e9e34ca55724a74cb3065"
+      }
+    ]
+  },
+  "limitations": [
+    "The D10 idle-kill lane is included as a supplemental subprocess assertion because the public installed artifact redacts SID/SERIAL and exposes no deterministic wire kill hook.",
+    "The lane proves server process restart, not a disruptive Docker container restart, in the default shared-checkout run.",
+    "R-fail does not by itself unblock E5's grant-expiry timing or commit_in_doubt injection gaps."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "Use the R-fail revoke, restart, OAuth expiry, rotation, and D10 idle-kill mechanisms from E5; file separate hooks for E5's grant-expiry and commit_in_doubt injection gaps if they remain required."
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}
