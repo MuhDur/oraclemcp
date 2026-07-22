@@ -1,0 +1,69 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T11:03:13Z",
+  "bead_id": "oraclemcp-091-rc-mutation-seal-5aqwf",
+  "scope": {
+    "summary": "RC mutation-seal work is closed as an advisory/background precondition proof: no release gate is tightened, tooling is ready, and the seal remains non-blocking for publish.",
+    "in_scope": [
+      "tests/artifacts/evidence/rc-mutation-seal-precondition-check.json"
+    ],
+    "out_of_scope": [
+      "No fresh five-surface mutation campaign was run or sealed.",
+      "No release, publish, CI, pre-push, or coverage gate was changed to fail on the missing seal.",
+      "No docs/plan or bead-title rename work is included; pane 2 owns the repo-wide train rename."
+    ]
+  },
+  "source": {
+    "sha": "80df069429390511c40b26fa4d030b15ef737cd0",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "RC mutation seal precondition artifact",
+        "kind": "api",
+        "trace": "tests/artifacts/evidence/rc-mutation-seal-precondition-check.json records status=blocked for the campaign preconditions, advisory_contract.must_not_block_publish=true, release_gate_changes_made=false, and bead_updates_made=false at source 7ce64039b1beb25ed77b7a68f3de3d8075a2ef3e."
+      },
+      {
+        "name": "RC tag precondition",
+        "kind": "cli",
+        "trace": "`git tag -l '*0.9.1*' '*0.10*' '*0.11*' '*rc*' | sort` returned no matches, so no RC-era source exists for an exact-SHA mutation seal."
+      },
+      {
+        "name": "Safety-surface churn precondition",
+        "kind": "cli",
+        "trace": "The artifact records 103 commits touching guard/audit/core/db/dispatch in the prior 24h, one safety-surface commit after fuzz shard abe65e48, and zero safety-surface commits after R-fail close 989b68ca."
+      },
+      {
+        "name": "Seal tooling readiness",
+        "kind": "cli",
+        "trace": "`scripts/swarm_discipline.sh bounded-run --timeout 180 -- bash scripts/mutation_safety_gate.sh self-test` passed; `python3 -m py_compile scripts/migrate_mutation_result.py scripts/test_migrate_mutation_result.py` passed; `python3 scripts/migrate_mutation_result.py --help` loaded the verifier/converter CLI."
+      },
+      {
+        "name": "No committed campaign artifact",
+        "kind": "cli",
+        "trace": "`find tests/artifacts -maxdepth 4 -iname '*mutation*' -o -iname '*seal*'` found no fresh five-surface mutation/seal artifacts for this RC-seal bead."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This close does not claim a fresh mutation seal exists; it records the operator-directed advisory/no-stall disposition and the current precondition blocker.",
+    "The campaign should only run later as background work when an RC-era SHA exists and safety-crate churn has settled; its result must still pass through scripts/migrate_mutation_result.py with complete OOM-free shard outputs and integrity sidecars.",
+    "The seal is a test-quality measurement, not a runtime-safety gate; fuzz lanes remain the robustness gate."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "When the operator asks for the background campaign, produce a fresh five-surface seal for the exact RC-era SHA without making publish wait on it."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
