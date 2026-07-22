@@ -66,9 +66,14 @@ const SELECT_POLICY_SQL: &str = "SELECT policy_name FROM all_policies \
     WHERE object_owner = :1 AND object_name = :2 \
     AND enable = 'YES' AND sel = 'YES' AND ROWNUM <= 1";
 
+const POLICY_CATALOG_PROOF_SQL: &str = "SELECT policy_name FROM all_policies WHERE ROWNUM <= 1";
+
 const VIRTUAL_COLUMN_SQL: &str = "SELECT column_name FROM all_tab_cols \
     WHERE owner = :1 AND table_name = :2 \
     AND virtual_column = 'YES' AND ROWNUM <= 1";
+
+const TARGET_COLUMN_CATALOG_PROOF_SQL: &str = "SELECT column_name FROM all_tab_cols \
+    WHERE owner = :1 AND table_name = :2 AND ROWNUM <= 1";
 
 /// Immutable set of live dictionary answers for one exact resolution context.
 #[derive(Debug, Clone)]
@@ -372,6 +377,12 @@ pub async fn resolved_relations_read_purity(
             )
             .await?;
         if !virtual_columns.is_empty() {
+            return Ok(oraclemcp_guard::Purity::Unknown);
+        }
+        if !policy_catalog_has_visible_rows(cx, conn).await? {
+            return Ok(oraclemcp_guard::Purity::Unknown);
+        }
+        if !target_column_catalog_has_visible_rows(cx, conn, relation).await? {
             return Ok(oraclemcp_guard::Purity::Unknown);
         }
     }
@@ -1345,6 +1356,34 @@ fn optional_text(row: &OracleRow, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+async fn policy_catalog_has_visible_rows(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+) -> Result<bool, DbError> {
+    Ok(!conn
+        .query_rows(cx, POLICY_CATALOG_PROOF_SQL, &[])
+        .await?
+        .is_empty())
+}
+
+async fn target_column_catalog_has_visible_rows(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relation: &ResolvedObject,
+) -> Result<bool, DbError> {
+    Ok(!conn
+        .query_rows(
+            cx,
+            TARGET_COLUMN_CATALOG_PROOF_SQL,
+            &[
+                OracleBind::from(relation.owner.as_str()),
+                OracleBind::from(relation.name.as_str()),
+            ],
+        )
+        .await?
+        .is_empty())
+}
+
 fn cache_lock_error<T>(_error: std::sync::PoisonError<T>) -> DbError {
     DbError::Query("catalog resolver cache lock poisoned".to_owned())
 }
@@ -1471,7 +1510,9 @@ mod tests {
             COLUMN_CONFLICT_SQL,
             RELATION_COLUMN_SQL,
             SELECT_POLICY_SQL,
+            POLICY_CATALOG_PROOF_SQL,
             VIRTUAL_COLUMN_SQL,
+            TARGET_COLUMN_CATALOG_PROOF_SQL,
         ] {
             assert!(!sql.contains("{}"));
         }
@@ -1528,7 +1569,12 @@ mod tests {
     #[test]
     fn relation_purity_requires_plain_policy_free_non_virtual_tables() {
         run_with_cx(|cx| async move {
-            let clean = ScriptedRows::new([Vec::new(), Vec::new()]);
+            let clean = ScriptedRows::new([
+                Vec::new(),
+                Vec::new(),
+                vec![row(&[("POLICY_NAME", Some("ANY_POLICY"))])],
+                vec![row(&[("COLUMN_NAME", Some("ID"))])],
+            ]);
             assert_eq!(
                 resolved_relations_read_purity(&cx, &clean, &[table_object()])
                     .await
@@ -1537,9 +1583,11 @@ mod tests {
             );
             {
                 let queries = clean.queries.lock().expect("queries lock");
-                assert_eq!(queries.len(), 2);
+                assert_eq!(queries.len(), 4);
                 assert_eq!(queries[0].0, SELECT_POLICY_SQL);
                 assert_eq!(queries[1].0, VIRTUAL_COLUMN_SQL);
+                assert_eq!(queries[2].0, POLICY_CATALOG_PROOF_SQL);
+                assert_eq!(queries[3].0, TARGET_COLUMN_CATALOG_PROOF_SQL);
             }
 
             let policy = ScriptedRows::new([vec![row(&[("POLICY_NAME", Some("P"))])]]);
@@ -2160,11 +2208,7 @@ mod tests {
     /// Bead `oraclemcp-091-a1a-*` (A1a) makes both probes require positive
     /// visibility evidence. Flipping this green means removing the `#[ignore]`;
     /// the assertion must not change. Note for A1a:
-    /// `relation_purity_requires_plain_policy_free_non_virtual_tables` pins
-    /// `queries.len() == 2` and will need updating deliberately when a
-    /// visibility probe is added.
     #[test]
-    #[ignore = "expected failure until A1a requires positive catalog visibility (bead oraclemcp-091-c8-blind-catalog-refuse-w9iie)"]
     fn c8_a_catalog_blind_principal_must_not_yield_a_read_only_proof() {
         run_with_cx(|cx| async move {
             let blind = CatalogVisibility::blind();

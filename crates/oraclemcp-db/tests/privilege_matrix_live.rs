@@ -169,7 +169,6 @@ fn d4_no_flashback_principal_gets_typed_refusal_and_connection_stays_usable() {
 /// probes successfully return an empty result.  The product must regard that
 /// as missing proof, not as evidence that the known guarded table is clean.
 #[test]
-#[ignore = "expected failure until A1a requires positive catalog visibility (C8 live twin)"]
 fn d4_catalog_blind_principal_cannot_prove_the_known_guarded_table_read_only() {
     run_with_cx(|cx| async move {
         let conn = RustOracleConnection::connect(&cx, catalog_blind_options())
