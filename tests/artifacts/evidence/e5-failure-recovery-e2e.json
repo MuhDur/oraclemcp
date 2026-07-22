@@ -1,10 +1,28 @@
 {
   "bead": "oraclemcp-091-e5-failure-recovery-e2e-bf1qa",
-  "client_id": "client-5be892a6847c827d601753d02c21ba40",
-  "installed_binary": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T101959Z/prefix/bin/oraclemcp",
+  "client_id": "client-e314f937ae1a48b2f1e7fad60b07b21e",
+  "delegated_failure_injection": {
+    "bead": "oraclemcp-091-rfail-injection-lanes-ok400",
+    "close_reason": "R-fail live rig passed revoke, rotate, restart, OAuth expiry, and D10 idle-kill coverage against the installed artifact; E5 still needs separate grant-expiry/CommitInDoubt injection hooks. [closing=72db212d7dc889e9adef9537b1cba37252ae18ec source=57ec979f7a46eaec37072ed50e65dfb93eb14129 evidence=tests/artifacts/evidence/closes/oraclemcp-091-rfail-injection-lanes-ok400.json]",
+    "evidence_path": "tests/artifacts/evidence/rfail-failure-injection-lanes.json",
+    "source_sha": "57ec979f7a46eaec37072ed50e65dfb93eb14129",
+    "status": "pass",
+    "wire_assertions": [
+      "wire_client_revoke",
+      "wire_client_rotate",
+      "wire_server_restart",
+      "wire_oauth_token_expiry"
+    ],
+    "supplemental_assertions": [
+      "d10_idle_kill_lane"
+    ]
+  },
+  "installed_binary": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T104853Z/prefix/bin/oraclemcp",
+  "lane": "E5 failure/recovery e2e",
   "proof_boundary": "HTTP/session/auth/refusal/single-use-replay/teardown/revocation assertions are raw wire checks against the installed artifact. Grant expiry is not exercised because the public confirmation-grant TTL is fixed at 300s; commit_in_doubt remains a supplemental archived-source cargo test because the installed binary has no public commit-in-doubt fault injection hook.",
-  "runtime_artifact_dir": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T101959Z",
-  "source_sha": "4f016fea92044989ab1619db0efafb68543d707c",
+  "run_id": "local-20260722T104853Z-e5-failure-recovery",
+  "runtime_artifact_dir": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T104853Z",
+  "source_sha": "989b68ca150fde7709b01ee221620e4020cf09a6",
   "status": "pass",
   "supplemental_assertions": [
     {
