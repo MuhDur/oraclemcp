@@ -1,0 +1,68 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T14:19:30Z",
+  "bead_id": "oraclemcp-z3oit",
+  "scope": {
+    "summary": "Brings dispatch/tests.rs back under its committed file-size ratchet by splitting further (never raising the ratchet): three read-only gate refusal-shape test families moved verbatim into a sibling tests/gate_refusal_reasons.rs.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp/src/dispatch/tests/gate_refusal_reasons.rs"
+    ],
+    "out_of_scope": [
+      "Raising or editing the dispatch/tests.rs ratchet (left at 15676, untouched) \u2014 the fix is a further split, not a threshold change.",
+      "Editing any test assertion, fixture, or expected value \u2014 the families moved verbatim.",
+      "The 65 pre-existing dispatch::tests failures (guard/classifier behavior changes from other agents' work, e.g. UnprovenSideEffect refusals) \u2014 verified identical with this split stashed, so they are not caused by it."
+    ]
+  },
+  "source": {
+    "sha": "0a51dcb93287856d041366f59a6cbfc6a2c73248",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "implementation commit",
+        "kind": "cli",
+        "trace": "`git show --stat 7d2d1404` (ancestor of HEAD 0a51dcb9) reported exactly two paths: crates/oraclemcp/src/dispatch/tests.rs (-158 lines) and crates/oraclemcp/src/dispatch/tests/gate_refusal_reasons.rs (+166, new). The three families parameterization_hint, parenless_qualified_callable_gate, and structured_reason moved verbatim, following the established audit_wiring sibling-file pattern; no test was edited."
+      },
+      {
+        "name": "extracted families pass with unchanged module paths",
+        "kind": "cli",
+        "trace": "`cargo test -p oraclemcp --lib -- parameterization_hint parenless_qualified_callable_gate structured_reason` \u2192 7 passed, 0 failed. Test paths are byte-identical to before (dispatch::tests::parameterization_hint::\u2026, dispatch::tests::parenless_qualified_callable_gate::\u2026, dispatch::tests::structured_reason::\u2026), proving the split is isomorphic at the test-name level."
+      },
+      {
+        "name": "full dispatch suite unchanged (isomorphism)",
+        "kind": "cli",
+        "trace": "`cargo test -p oraclemcp --lib -- dispatch::tests` \u2192 238 passed, 65 failed both WITH the split and with it stashed (clean HEAD). The 65 failures are pre-existing guard/classifier behavior changes from other agents' work, identical in both runs, so this split introduces zero new failures."
+      },
+      {
+        "name": "ratchet now holds (the actual fix)",
+        "kind": "cli",
+        "trace": "dispatch/tests.rs is 15549 lines, under its committed ratchet 15676 (was 15703, over by 27). `bash scripts/oraclemcp_arch_fitness_lint.sh` \u2192 'oraclemcp-arch-fitness-lint: OK \u2014 workspace dependency graph points inward and file-size ratchets hold.' The ratchet line [crates/oraclemcp/src/dispatch/tests.rs]=15676 is unchanged; the script has no uncommitted edit from this bead."
+      },
+      {
+        "name": "formatting",
+        "kind": "cli",
+        "trace": "`cargo fmt -p oraclemcp -- --check` reports no diff in dispatch/tests.rs or gate_refusal_reasons.rs."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "tree_clean is computed over the two scoped paths only, which are clean at HEAD; the wider shared checkout carries other agents' uncommitted work on unrelated files (constitution rule 13).",
+    "This is a scoped-test basis: isomorphism is proven by the extracted families passing with unchanged module paths and the full dispatch suite passing identically with the split stashed, not by a full workspace cargo gate (lease-gated, and currently red from foreign dispatch/guard work).",
+    "The 65 pre-existing dispatch::tests failures are documented as out-of-scope; they were verified identical on clean HEAD with this split stashed."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
