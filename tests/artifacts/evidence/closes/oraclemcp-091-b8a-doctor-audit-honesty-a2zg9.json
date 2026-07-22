@@ -1,22 +1,21 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-07-21T12:58:46Z",
+  "generated_at": "2026-07-22T07:25:15Z",
   "bead_id": "oraclemcp-091-b8a-doctor-audit-honesty-a2zg9",
   "scope": {
-    "summary": "Make doctor distinguish an intentionally absent signed auditor from a configured signing source or the fail-closed no-key startup refusal; do not infer an active auditor from the default audit path.",
+    "summary": "Doctor audit posture now treats an invalid legacy ORACLEMCP_AUDIT_KEY as unavailable instead of reporting the keyless read-only disabled posture that startup does not use.",
     "in_scope": [
-      "crates/oraclemcp-core/src/doctor.rs",
-      "crates/oraclemcp-core/src/lib.rs",
       "crates/oraclemcp/src/main.rs",
       "crates/oraclemcp/src/main_tests.rs"
     ],
     "out_of_scope": [
-      "Implementing the separate B8c unsigned refusal/security-event trail."
+      "General doctor rendering in crates/oraclemcp-core/src/doctor.rs; that file was already dirty with another agent's work in this shared checkout.",
+      "Live Oracle or service-start acceptance; this close uses a scoped local unit test for the audit-posture decision."
     ]
   },
   "source": {
-    "sha": "320c6894b9ae25028c27695421e2110c16856c37",
+    "sha": "f01f6a9ac08f2e93d4a08e11d34486e1008a23f2",
     "tree_clean": true,
     "branch": "main"
   },
@@ -24,14 +23,14 @@
   "integration_evidence": {
     "entry_points": [
       {
-        "name": "doctor check 13 audit/state layout",
+        "name": "oraclemcp doctor audit posture derivation",
         "kind": "cli",
-        "trace": "CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/ws-b-proof cargo test -p oraclemcp-core --lib doctor::tests::audit_posture_is_not_inferred_from_the_default_audit_path -- --exact: 1 passed in a clean detached worktree at cc119ba82c528aa1457c10db5d77c46aa15e68eb. The test asserts keyless read-only output is audit: DISABLED with Skip status, a configured signer is described as configuration rather than an active auditor, and keyless writable output is Fail with ORACLEMCP_AUDIT_KEY_REQUIRED."
+        "trace": "doctor_audit_posture in crates/oraclemcp/src/main.rs now classifies a present legacy ORACLEMCP_AUDIT_KEY through SigningKey::new before deriving the DoctorAuditPosture rendered by the doctor report."
       },
       {
-        "name": "binary startup-policy mapping",
-        "kind": "config-gate",
-        "trace": "CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/ws-b-proof cargo test -p oraclemcp --bin oraclemcp tests::doctor_audit_posture_matches_startup_audit_policy_without_opening_a_log -- --exact: 1 passed in a clean detached worktree at cc119ba82c528aa1457c10db5d77c46aa15e68eb. The test covers read-only DISABLED, writable no-key refusal, and a configured signing source without opening an audit log."
+        "name": "focused B8a unit test",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp doctor_audit_posture_matches_startup_audit_policy_without_opening_a_log -- --nocapture passed: src/main.rs selected test 1 passed, 0 failed."
       }
     ]
   },
@@ -40,12 +39,11 @@
     "artifacts": []
   },
   "limitations": [
-    "No live Oracle result is claimed."
+    "Scoped local proof only; full workspace gates and live service startup were not run.",
+    "The shared checkout had dirty files outside the evidence scope; the scaffold explicitly excluded them from tree_clean."
   ],
   "known_defects": [],
-  "follow_ups": [
-    "oraclemcp-091-b8c-refusal-trail-rhg0m remains open; doctor must add the explicitly labeled unsigned refusal-trail status only when that feature lands."
-  ],
+  "follow_ups": [],
   "readiness": {
     "claim": "not-ready",
     "basis": "scoped-test"
