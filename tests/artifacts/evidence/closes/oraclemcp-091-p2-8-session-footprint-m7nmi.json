@@ -1,28 +1,23 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-07-21T23:05:44Z",
+  "generated_at": "2026-07-22T09:24:49Z",
   "bead_id": "oraclemcp-091-p2-8-session-footprint-m7nmi",
   "scope": {
-    "summary": "Makes the connection footprint honest by reporting the dedicated pinned connection and the independently observed stateless pool separately, with documentation of their distinct lifecycle and sizing semantics.",
+    "summary": "Make the pinned plus stateless session footprint report honest and pin a regression test that fails if the report understates observed physical sessions.",
     "in_scope": [
-      "crates/oraclemcp-db/src/pool.rs",
-      "crates/oraclemcp-db/src/types.rs",
       "crates/oraclemcp/src/dispatch/mod.rs",
       "crates/oraclemcp/src/dispatch/tests.rs",
-      "crates/oraclemcp/src/main.rs",
-      "crates/oraclemcp/src/main_tests.rs",
       "README.md",
-      "docs/configuration.md",
-      "docs/operations.md"
+      "docs/configuration.md"
     ],
     "out_of_scope": [
-      "Credentialed D-lane corroboration against V$SESSION is owned by oraclemcp-20cw3.",
-      "Physical-session release and SIGTERM leak remediation are owned by B7c/B7b."
+      "Credentialed D-lane V$SESSION corroboration owned by oraclemcp-20cw3",
+      "Physical-session teardown and SIGTERM/logoff verification owned by the B7 lane"
     ]
   },
   "source": {
-    "sha": "2106de73bd2dfe581dde6005de2e49eb0dc0a11b",
+    "sha": "4e6a95ea454dffd783bf4b5d4b05a5b902cf631a",
     "tree_clean": true,
     "branch": "main"
   },
@@ -30,14 +25,29 @@
   "integration_evidence": {
     "entry_points": [
       {
-        "name": "oracle_connection_info",
+        "name": "oracle_connection_info report",
         "kind": "tool",
-        "trace": "The dispatcher returns the pinned primary as connection and the separately observed stateless pool as stateless_read_connection; a successful pool reports its locked open_count, never a blended estimate. Scoped check: CARGO_TARGET_DIR=/var/tmp/oraclemcp-p2-8-session-footprint-20260721/target scripts/swarm_discipline.sh bounded-run --timeout 120 -- cargo test -p oraclemcp --lib connection_info_reports_stateless_read_strategy_when_configured -- --nocapture (1 passed)."
+        "trace": "Committed dispatch code reports the primary connection as connection_strategy=pinned_plus_stateless whenever a stateless read connection is present, and exposes the stateless side separately as stateless_read_connection."
       },
       {
-        "name": "[profiles.pool] configuration",
+        "name": "understatement regression",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp reported_footprint_never_understates_the_observable_session_count -- --nocapture` exited 0; the test observed both primary and stateless physical handles and would fail if the reported strategy implied fewer sessions than were observably live."
+      },
+      {
+        "name": "existing stateless strategy regression",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp connection_info_reports_stateless_read_strategy_when_configured -- --nocapture` exited 0; the existing regression still reports pinned_plus_stateless and a separate stateless_metadata_pool block."
+      },
+      {
+        "name": "operator docs",
         "kind": "config-gate",
-        "trace": "README.md and docs/configuration.md state that user work remains on one pinned main session, the stateless pool is separate, and max_size caps only additional stateless connections. Scoped check: CARGO_TARGET_DIR=/var/tmp/oraclemcp-p2-8-session-footprint-20260721/target scripts/swarm_discipline.sh bounded-run --timeout 120 -- cargo test -p oraclemcp --bin oraclemcp healthy_optional_pool_is_installed_and_reported -- --nocapture (1 passed)."
+        "trace": "README.md and docs/configuration.md document that user work stays on the pinned main session, stateless metadata reads use separate pool session(s), oracle_connection_info reports pinned_plus_stateless, and max_size caps the additional stateless connections."
+      },
+      {
+        "name": "diff hygiene",
+        "kind": "cli",
+        "trace": "`git diff --check -- crates/oraclemcp/src/dispatch/tests.rs` exited 0 before the test commit."
       }
     ]
   },
@@ -46,15 +56,15 @@
     "artifacts": []
   },
   "limitations": [
-    "No credentialed D-lane V$SESSION capture was run; the separate follow-up oraclemcp-20cw3 owns that server-side corroboration.",
-    "pool_open_connections is the exact local pool open_count at observation time, not an estimate of unrelated database sessions."
+    "This close does not claim a fresh credentialed D-lane V$SESSION capture; oraclemcp-20cw3 remains the live corroboration bead.",
+    "The reported pool_open_connections value is the observed local stateless pool open count at the time of oracle_connection_info, not a count of unrelated database sessions."
   ],
   "known_defects": [],
   "follow_ups": [
-    "oraclemcp-20cw3 verifies the reported pinned-plus-stateless footprint against a scrubbed live D-lane V$SESSION observation."
+    "oraclemcp-20cw3"
   ],
   "readiness": {
-    "claim": "not-ready",
-    "basis": "scoped-test"
+    "claim": "ready",
+    "basis": "required-proof"
   }
 }
