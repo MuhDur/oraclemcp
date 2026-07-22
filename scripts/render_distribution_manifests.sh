@@ -45,7 +45,12 @@ sha256_from_file() {
 
   archive="$ARTIFACT_DIR/$asset"
   checksum_file="$ARTIFACT_DIR/$asset.sha256"
-  [ -f "$checksum_file" ] || fail "missing checksum file: $checksum_file"
+  # Name the resolved directory, not just the path that was not found. A
+  # relative ARTIFACT_DIR resolves against whatever cwd the caller happened to
+  # have, and when that disagreed with the caller's expectation this message
+  # was indistinguishable from "the release archive was never built".
+  [ -f "$checksum_file" ] ||
+    fail "missing checksum file: $checksum_file (ARTIFACT_DIR=$ARTIFACT_DIR resolved from $PWD)"
 
   while IFS= read -r line || [ -n "$line" ]; do
     lines+=("${line%$'\r'}")

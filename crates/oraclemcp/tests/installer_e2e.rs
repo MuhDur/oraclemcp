@@ -701,9 +701,30 @@ fn binstall_brew_winget_metadata_valid() {
     assert!(workflow.contains("artifacts/distribution-manifests/homebrew/Formula/oraclemcp.rb"));
     assert!(workflow.contains("artifacts/distribution-manifests/winget/**/*.yaml"));
 
+    // CARGO_TARGET_DIR may be RELATIVE — CI's coverage lane sets exactly that
+    // (`CARGO_TARGET_DIR: target/coverage-ratchet`). Cargo reads it relative to
+    // where cargo was invoked (the workspace root); this test process runs with
+    // its cwd at the PACKAGE root, and spawns the renderer with cwd at the
+    // workspace root. Passing the relative path through unresolved meant the
+    // fixtures were written under crates/oraclemcp/ and looked for one level
+    // up, so the renderer correctly reported a checksum file that genuinely was
+    // not there. The test passed on every machine where CARGO_TARGET_DIR was
+    // unset or absolute, and failed only on the runner.
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
+        .map(|dir| {
+            if dir.is_absolute() {
+                dir
+            } else {
+                root.join(dir)
+            }
+        })
         .unwrap_or_else(|| root.join("target"));
+    assert!(
+        target_dir.is_absolute(),
+        "fixture root must be absolute before it crosses a process boundary: {}",
+        target_dir.display(),
+    );
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock is after the Unix epoch")
