@@ -247,6 +247,20 @@ def parse_claude_registration(argv: list[str], env: dict[str, str], artifact: Pa
     return url, headers
 
 
+def bearer_from_clients_issue_stdout(stdout: str) -> str:
+    for line in stdout.splitlines():
+        prefix = "bearer (shown once): "
+        if line.startswith(prefix):
+            bearer = line[len(prefix) :].strip()
+            if bearer:
+                return bearer
+    raise AssertionError("clients issue output did not include the shown-once bearer")
+
+
+def substitute_bearer_placeholder(argv: list[str], bearer: str) -> list[str]:
+    return [arg.replace("<bearer>", bearer) for arg in argv]
+
+
 def install_from_head(root: Path, artifact: Path) -> tuple[str, Path]:
     source_sha = checked(["git", "rev-parse", "HEAD"], env=os.environ.copy(), cwd=root).stdout.strip()
     source = artifact / "source"
@@ -318,6 +332,7 @@ def run_http_snippet(binary: Path, setup_json: dict[str, Any], claude_argv: list
     guard.close()
     issue_argv = setup_json["http_client_credentials"]["issue_once"]
     issue = checked([str(binary) if part == "oraclemcp" else part for part in issue_argv], env=env, cwd=artifact, timeout=30)
+    bearer = bearer_from_clients_issue_stdout(issue.stdout)
     (artifact / "clients-issue.stdout.redacted").write_text("<redacted bearer output>\n")
     if issue.stderr:
         (artifact / "clients-issue.stderr").write_text(issue.stderr)
@@ -332,7 +347,9 @@ def run_http_snippet(binary: Path, setup_json: dict[str, Any], claude_argv: list
     )
     try:
         wait_for_port(7070, server)
-        url, headers = parse_claude_registration(claude_argv, env, artifact)
+        url, headers = parse_claude_registration(
+            substitute_bearer_placeholder(claude_argv, bearer), env, artifact
+        )
         status, body, raw = post_initialize(url, headers)
         (artifact / "http-initialize.raw").write_text(raw)
         if status != 200:
