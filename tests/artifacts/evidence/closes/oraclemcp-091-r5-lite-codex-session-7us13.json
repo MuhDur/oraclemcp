@@ -1,0 +1,49 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T17:08:41Z",
+  "bead_id": "oraclemcp-091-r5-lite-codex-session-7us13",
+  "scope": {
+    "summary": "Confirms the external R5-lite Codex session can reach both transports and enforces step-up on elevated session-level changes.",
+    "in_scope": [
+      "AGENTS.md"
+    ],
+    "out_of_scope": [
+      "No code changes are claimed and no additional transport or authentication paths were newly tested.",
+      "No extra sessions beyond this bead's run are claimed."
+    ]
+  },
+  "source": {
+    "sha": "8e84062232c3cbe654073ad801e25839cb6c9ad8",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "R5-lite external session transport coverage",
+        "kind": "cli",
+        "trace": "The completed codex-session run exercised both installed-server transports: stdio and streamable-http. Both were reachable and tool-callable from external process context."
+      },
+      {
+        "name": "R5-lite level-stepup refusal",
+        "kind": "tool",
+        "trace": "In the external session, an attempt to invoke oracle_set_session_level in a single step was refused before application with CHALLENGE_REQUIRED, confirming preview/confirm remains mandatory and no bypass exists for this path."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The close does not add a new test fixture; it records the previously-run R5-lite outcome in the source artifact as closure evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
