@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,6 +24,15 @@ BEAD = "oraclemcp-091-e5-failure-recovery-e2e-bf1qa"
 PROTOCOL_VERSION = "2025-11-25"
 SCENARIO = "failure_recovery_e2e"
 AUDIT_KEY = "0123456789abcdef0123456789abcdef"
+COMMIT_IN_DOUBT_TARGET = "E5_COMMIT_IN_DOUBT_TARGET"
+COMMIT_IN_DOUBT_ROWS = 20000
+
+
+def e5_db_params() -> tuple[str, str, str]:
+    container = os.environ.get("ORACLEMCP_RIG_E5_CONTAINER", os.environ.get("ORACLEMCP_RIG_D10_CONTAINER", "rust-oracledb-free"))
+    host_port = os.environ.get("ORACLEMCP_RIG_E5_HOST_PORT", os.environ.get("ORACLEMCP_RIG_D10_HOST_PORT", "1522"))
+    pdb = os.environ.get("ORACLEMCP_RIG_E5_PDB", os.environ.get("ORACLEMCP_RIG_D10_PDB", "FREEPDB1"))
+    return container, host_port, pdb
 
 
 def emit(event: str, phase: str, outcome: str, message: str, duration_ms: int = 0) -> None:
@@ -393,6 +403,296 @@ def tool_result(value: dict[str, Any], *, expect_error: bool) -> dict[str, Any]:
     return structured
 
 
+def parse_session_key(row: dict[str, Any]) -> tuple[str, str]:
+    sid = row.get("S_ID") or row.get("s_id") or row.get("Sid") or row.get("sid")
+    serial = (
+        row.get("S_SERIAL")
+        or row.get("s_serial")
+        or row.get("Serial")
+        or row.get("serial")
+        or row.get("Srl")
+    )
+    require(sid is not None, f"session sid missing: {row}")
+    require(serial is not None, f"session serial missing: {row}")
+    sid_text = str(sid).strip()
+    serial_text = str(serial).strip()
+    require(sid_text.isdigit(), f"session sid must be numeric: {sid_text}")
+    require(serial_text.isdigit(), f"session serial must be numeric: {serial_text}")
+    return sid_text, serial_text
+
+
+def query_session_key(client: HttpClient, session: str, request_id: int, sql: str) -> tuple[str, str]:
+    _, replied = client.tool_call(session, request_id, "oracle_query", {"sql": sql})
+    structured = tool_result(replied, expect_error=False)
+    rows = structured.get("rows")
+    require(isinstance(rows, list) and rows, f"session-key query returned no rows: {structured}")
+    first = rows[0]
+    require(isinstance(first, dict), f"session-key row malformed: {rows}")
+    return parse_session_key(first)
+
+
+def query_rows(client: HttpClient, session: str, request_id: int, sql: str) -> list[dict[str, Any]]:
+    _, value = client.tool_call(session, request_id, "oracle_query", {"sql": sql, "max_rows": 1})
+    structured = tool_result(value, expect_error=False)
+    rows = structured.get("rows")
+    require(isinstance(rows, list), f"query failed (non-list rows): {structured}")
+    return rows
+
+
+def query_scalar(client: HttpClient, session: str, request_id: int, sql: str) -> str:
+    rows = query_rows(client, session, request_id, sql)
+    require(rows, f"scalar query returned no rows: {sql}")
+    row = rows[0]
+    require(isinstance(row, dict) and row, f"scalar query row malformed: {rows}")
+    value = row.get("SID") or row.get("sid") or row.get("Sid")
+    if value is None:
+        value = next(iter(row.values()))
+    require(value is not None, f"scalar query missing value: {row}")
+    return str(value).strip()
+
+
+def prepare_commit_in_doubt_fixture(
+    container: str,
+    password: str,
+    pdb: str,
+    table_name: str = COMMIT_IN_DOUBT_TARGET,
+    rows: int = COMMIT_IN_DOUBT_ROWS,
+) -> None:
+    run_sqlplus(
+        container,
+        password,
+        pdb,
+        f"""
+        DECLARE
+            l_exists NUMBER;
+        BEGIN
+            SELECT COUNT(*) INTO l_exists FROM user_tables WHERE table_name = '{table_name}';
+            IF l_exists > 0 THEN
+                EXECUTE IMMEDIATE 'DROP TABLE {table_name} PURGE';
+            END IF;
+            EXECUTE IMMEDIATE 'CREATE TABLE {table_name} (id NUMBER PRIMARY KEY, payload VARCHAR2(1024))';
+        END;
+        /
+        INSERT /*+ APPEND */ INTO {table_name} (id, payload)
+            SELECT level, RPAD('x', 64, 'x')
+            FROM dual
+            CONNECT BY level <= {rows}
+        ;
+        COMMIT;
+        """,
+    )
+
+
+def run_sqlplus(container: str, password: str, pdb: str, sql: str, timeout_secs: int = 30) -> subprocess.CompletedProcess[str]:
+    payload = (
+        "set heading off\n"
+        "set feedback off\n"
+        "set pagesize 0\n"
+        "set linesize 4000\n"
+        "set trimout on\n"
+        "set trimspool on\n"
+        f"{sql}\n"
+        "exit\n"
+    )
+    proc = subprocess.run(
+        [
+            "timeout",
+            str(timeout_secs),
+            "docker",
+            "exec",
+            "-i",
+            container,
+            "sqlplus",
+            "-S",
+            "-L",
+            f"system/{password}@localhost:1521/{pdb}",
+        ],
+        input=payload,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(f"sqlplus execution failed ({proc.returncode}): {proc.stderr or proc.stdout}")
+    return proc
+
+
+def sqlplus_scalar(container: str, password: str, pdb: str, sql: str, timeout_secs: int = 30) -> str:
+    marker = "E5VAL"
+    sql_text = sql.strip()
+    if sql_text.lower().startswith("select "):
+        payload = sql_text
+    else:
+        payload = f"select '{marker}:' || ({sql_text}) from dual;"
+    proc = run_sqlplus(container, password, pdb, payload, timeout_secs=timeout_secs)
+    for line in proc.stdout.splitlines():
+        match = re.match(rf"^{marker}:(.*)$", line.strip())
+        if match:
+            return match.group(1).strip()
+    raise AssertionError(f"sqlplus did not return a scalar for: {sql}\nstdout={proc.stdout}\nstderr={proc.stderr}")
+
+
+def sqlplus_scalar_or_none(container: str, password: str, pdb: str, sql: str, timeout_secs: int = 30) -> str | None:
+    marker = "E5VAL"
+    payload = f"select '{marker}:' || ({sql}) from dual;"
+    proc = run_sqlplus(container, password, pdb, payload, timeout_secs=timeout_secs)
+    for line in proc.stdout.splitlines():
+        match = re.match(rf"^{marker}:(.*)$", line.strip())
+        if match:
+            value = match.group(1).strip()
+            return value if value else None
+    if "no rows selected" in proc.stdout.lower():
+        return None
+    raise AssertionError(f"sqlplus did not return a scalar for: {sql}\nstdout={proc.stdout}\nstderr={proc.stderr}")
+
+
+def query_session_state(
+    container: str,
+    password: str,
+    pdb: str,
+    sid: str,
+) -> tuple[str | None, str | None, str | None, str | None, bool]:
+    sid_text = sid.strip()
+    if sid_text.startswith("E5VAL:"):
+        sid_text = sid_text.split(":", 1)[1]
+    marker_sql = (
+        "SELECT 'E5VAL:' || TO_CHAR(s.serial#) || '|' || TO_CHAR(s.command) || '|' || NVL(s.event, ' ') "
+        "|| '|' || s.state || '|' || CASE WHEN t.addr IS NULL THEN 0 ELSE 1 END "
+        f"FROM v$session s LEFT JOIN v$transaction t ON t.ses_addr = s.saddr WHERE s.sid = TO_NUMBER({sid_text})"
+    )
+    text = sqlplus_scalar_or_none(container, password, pdb, marker_sql)
+    if text is None:
+        return None, None, None, None, False
+    fields = [item.strip() for item in text.split("|", maxsplit=5)]
+    if len(fields) < 5:
+        serial = fields[0] if fields else None
+        if serial is not None and serial.startswith("E5VAL:"):
+            serial = serial.split(":", 1)[1]
+        return serial, None, None, None, False
+    serial, command, event, state, has_tx = fields[:5]
+    if serial is not None and serial.startswith("E5VAL:"):
+        serial = serial.split(":", 1)[1]
+    return serial, command, event, state, has_tx == "1"
+
+
+def query_session_serial(
+    container: str,
+    password: str,
+    pdb: str,
+    sid: str,
+) -> str | None:
+    sid_text = sid.strip()
+    if sid_text.startswith("E5VAL:"):
+        sid_text = sid_text.split(":", 1)[1]
+    serial = sqlplus_scalar_or_none(
+        container,
+        password,
+        pdb,
+        f"SELECT 'E5VAL:' || TO_CHAR(serial#) FROM v$session WHERE sid = TO_NUMBER({sid_text})",
+    )
+    if serial is None:
+        return None
+    if serial.startswith("E5VAL:"):
+        serial = serial.split(":", 1)[1]
+    serial = serial.strip()
+    return serial if serial.isdigit() else None
+
+
+def query_session_identity_by_audsid(
+    container: str,
+    password: str,
+    pdb: str,
+    audsid: str,
+) -> tuple[str, str] | None:
+    audsid_text = audsid.strip()
+    if audsid_text.startswith("E5VAL:"):
+        audsid_text = audsid_text.split(":", 1)[1]
+    row = sqlplus_scalar_or_none(
+        container,
+        password,
+        pdb,
+        f"SELECT 'E5VAL:' || TO_CHAR(sid) || '|' || TO_CHAR(serial#) FROM v$session WHERE audsid = TO_NUMBER({audsid_text})",
+    )
+    if row is None:
+        return None
+    if row.startswith("E5VAL:"):
+        row = row.split(":", 1)[1]
+    sid, serial = [part.strip() for part in row.split("|", maxsplit=1)]
+    return (sid, serial) if sid.isdigit() and serial.isdigit() else None
+
+
+def find_session_by_sql_fragment(
+    container: str,
+    password: str,
+    pdb: str,
+    sql_fragment: str,
+) -> tuple[str, str] | None:
+    marker = sql_fragment.replace("'", "''")
+    sql = (
+        "SELECT 'E5VAL:' || TO_CHAR(sid) || '|' || TO_CHAR(serial#) "
+        "FROM (SELECT s.sid, s.serial#, q.sql_text "
+        "      FROM v$session s "
+        "      JOIN v$sql q ON q.sql_id = s.sql_id "
+        "      WHERE s.username = 'SYSTEM' "
+        "        AND s.status = 'ACTIVE' "
+        "        AND q.sql_text LIKE '%"
+        + marker
+        + "%' "
+        "      ORDER BY s.last_call_et DESC) "
+        "WHERE rownum = 1"
+    )
+    text = sqlplus_scalar_or_none(container, password, pdb, sql)
+    if text is None:
+        return None
+    parts = [item.strip() for item in text.split("|")]
+    if len(parts) < 2:
+        return None
+    sid = parts[0]
+    if sid.startswith("E5VAL:"):
+        sid = sid.split(":", 1)[1]
+    return sid, parts[1]
+
+
+def classify_http_tool_reply(reply: HttpReply) -> dict[str, Any] | None:
+    if not reply.body:
+        return None
+    try:
+        result = parse_mcp_json(reply.body).get("result")
+    except Exception:
+        return None
+    return result if isinstance(result, dict) else None
+
+
+def set_session_level(
+    client: HttpClient,
+    session: str,
+    request_id: int,
+    level: str,
+    *,
+    confirm: bool = False,
+) -> None:
+    _, preview = client.tool_call(
+        session,
+        request_id,
+        "oracle_set_session_level",
+        {"level": level, "ttl_seconds": 300},
+    )
+    structured = tool_result(preview, expect_error=False)
+    confirm_token = structured.get("confirmation", {}).get("confirm")
+    require(isinstance(confirm_token, str) and confirm_token, f"session-level preview omitted confirm: {structured}")
+    _, applied = client.tool_call(
+        session,
+        request_id + 1,
+        "oracle_set_session_level",
+        {"level": level, "ttl_seconds": 300, "execute": True, "confirm": confirm_token},
+    )
+    applied_structured = tool_result(applied, expect_error=False)
+    require(
+        (applied_structured.get("session") or {}).get("current_level") == level,
+        f"failed to apply level {level}: {applied_structured}",
+    )
+
+
 class ServerProcess:
     def __init__(self, binary: pathlib.Path, env: dict[str, str], port: int) -> None:
         self.port = port
@@ -448,7 +748,16 @@ class ServerProcess:
             self.stderr.extend(self.proc.stderr.read().splitlines())
 
 
-def issue_client(binary: pathlib.Path, env: dict[str, str], label: str) -> tuple[str, str]:
+def issue_client(
+    binary: pathlib.Path,
+    env: dict[str, str],
+    label: str,
+    *,
+    admin: bool = False,
+) -> tuple[str, str]:
+    scopes = ["--scope", "oracle:read", "--scope", "oracle:execute"]
+    if admin:
+        scopes.extend(["--scope", "oracle:admin"])
     proc = run(
         [
             str(binary),
@@ -457,10 +766,7 @@ def issue_client(binary: pathlib.Path, env: dict[str, str], label: str) -> tuple
             "issue",
             "--label",
             label,
-            "--scope",
-            "oracle:read",
-            "--scope",
-            "oracle:execute",
+            *scopes,
         ],
         env=env,
         timeout=30,
@@ -523,7 +829,7 @@ def assert_single_use_grant_replay_refused_without_quarantine(client: HttpClient
         session,
         20,
         "oracle_set_session_level",
-        {"level": "READ_WRITE", "ttl_seconds": 1},
+        {"level": "READ_WRITE", "ttl_seconds": 300},
     )
     structured = tool_result(preview, expect_error=False)
     confirm = structured.get("confirmation", {}).get("confirm")
@@ -532,7 +838,7 @@ def assert_single_use_grant_replay_refused_without_quarantine(client: HttpClient
         session,
         21,
         "oracle_set_session_level",
-        {"level": "READ_WRITE", "ttl_seconds": 1, "execute": True, "confirm": confirm},
+        {"level": "READ_WRITE", "ttl_seconds": 300, "execute": True, "confirm": confirm},
     )
     tool_result(applied, expect_error=False)
     _, dropped = client.tool_call(session, 22, "oracle_set_session_level", {"action": "drop"})
@@ -541,11 +847,55 @@ def assert_single_use_grant_replay_refused_without_quarantine(client: HttpClient
         session,
         23,
         "oracle_set_session_level",
-        {"level": "READ_WRITE", "ttl_seconds": 1, "execute": True, "confirm": confirm},
+        {"level": "READ_WRITE", "ttl_seconds": 300, "execute": True, "confirm": confirm},
     )
     replay_structured = tool_result(replay, expect_error=True)
     require(replay_structured.get("error_class") == "CHALLENGE_REQUIRED", f"unexpected replay error: {replay_structured}")
-    _, ok = client.tool_call(session, 24, "oracle_query", {"sql": "SELECT 1 FROM dual"})
+
+    _, preview_expiry = client.tool_call(
+        session,
+        24,
+        "oracle_set_session_level",
+        {"level": "READ_WRITE", "ttl_seconds": 300},
+    )
+    structured_expiry = tool_result(preview_expiry, expect_error=False)
+    confirm_expiry = structured_expiry.get("confirmation", {}).get("confirm")
+    require(isinstance(confirm_expiry, str) and confirm_expiry, f"expiry preview did not mint confirm: {structured_expiry}")
+    grant_wait_secs = int(os.environ.get("ORACLEMCP_E5_GRANT_WAIT_SECONDS", "312"))
+    emit("grant_wait", "act", "running", f"waiting for fixed 300s execute-confirmation TTL: {grant_wait_secs}s")
+    time.sleep(grant_wait_secs)
+    _, replay_expired = client.tool_call(
+        session,
+        25,
+        "oracle_set_session_level",
+        {"level": "READ_WRITE", "ttl_seconds": 300, "execute": True, "confirm": confirm_expiry},
+    )
+    skip_grant_expiry = os.environ.get("ORACLEMCP_E5_SKIP_GRANT_EXPIRY_CHECK", "0") == "1"
+    if skip_grant_expiry:
+        skip_structured = replay_expired
+        require(isinstance(skip_structured, dict), f"replay_expired response was not JSON: {replay_expired}")
+        replay_expired_structured = skip_structured
+    else:
+        replay_expired_structured = tool_result(replay_expired, expect_error=True)
+    if skip_grant_expiry:
+        evidence.append(
+            {
+                "id": "single_use_grant_replay_refusal",
+                "wire": True,
+                "status": "pass",
+                "replay_error_class": replay_structured.get("error_class"),
+                "expiry_error_class": replay_expired_structured.get("error_class"),
+                "commit_grant_ttl_seconds": 300,
+                "post_replay_refusal_read": "pass",
+                "proof_boundary": "single-use rejection was proven; expiry proof was intentionally skipped by ORACLEMCP_E5_SKIP_GRANT_EXPIRY_CHECK=1",
+            }
+        )
+        return
+    require(
+        replay_expired_structured.get("error_class") == "CHALLENGE_REQUIRED",
+        f"unexpected expiry error: {replay_expired_structured}",
+    )
+    _, ok = client.tool_call(session, 26, "oracle_query", {"sql": "SELECT 1 FROM dual"})
     tool_result(ok, expect_error=False)
     evidence.append(
         {
@@ -553,8 +903,10 @@ def assert_single_use_grant_replay_refused_without_quarantine(client: HttpClient
             "wire": True,
             "status": "pass",
             "replay_error_class": replay_structured.get("error_class"),
+            "expiry_error_class": replay_expired_structured.get("error_class"),
+            "commit_grant_ttl_seconds": 300,
             "post_replay_refusal_read": "pass",
-            "proof_boundary": "public wire grant expiry is fixed at 300s; this bounded rig proves single-use replay refusal but does not wait for expiry",
+            "proof_boundary": "single-use rejection and expiry were both proved against the fixed 300s wire-confirmation grant TTL; no product hook was added.",
         }
     )
 
@@ -646,31 +998,256 @@ def assert_revoked_client_loses_sessions(
     )
 
 
-def run_commit_in_doubt_supplement(source: pathlib.Path, evidence: list[dict[str, Any]]) -> None:
-    env = os.environ.copy()
-    env["CARGO_TARGET_DIR"] = str(ROOT / "target")
-    env.setdefault("CARGO_BUILD_JOBS", "2")
-    run(
-        [
-            "cargo",
-            "test",
-            "-p",
-            "oraclemcp",
-            "execute_commit_in_doubt_leaves_durable_intent_unresolved",
-            "--",
-            "--exact",
-        ],
-        cwd=source,
-        env=env,
-        timeout=300,
+def run_commit_in_doubt_wire(
+    server: ServerProcess,
+    binary: pathlib.Path,
+    env: dict[str, str],
+    port: int,
+    victim_bearer: str,
+    container: str,
+    pdb: str,
+    db_password: str,
+    evidence: list[dict[str, Any]],
+) -> None:
+    victim_table = f"{COMMIT_IN_DOUBT_TARGET}_{int(time.time() * 1000)}"
+    victim_sql_tag = f"{victim_table}_tag"
+    prepare_commit_in_doubt_fixture(container, db_password, pdb, table_name=victim_table)
+    victim_client = HttpClient(port, victim_bearer)
+    victim_session = victim_client.initialize("e5-commit-in-doubt")
+    set_session_level(victim_client, victim_session, 20, "READ_WRITE", confirm=True)
+    victim_sql = (
+        f"UPDATE {victim_table} /* {victim_sql_tag} */\n"
+        "SET payload = payload || TO_CHAR(\n"
+        "  (SELECT COUNT(*)\n"
+        "   FROM all_objects a\n"
+        "   CROSS JOIN all_objects b)\n"
+        ")\n"
+        f"WHERE id = 1"
     )
+
+    shared: dict[str, Any] = {}
+    started = threading.Event()
+
+    def run_victim_commit() -> None:
+        try:
+            _, preview = victim_client.tool_call(
+                victim_session,
+                24,
+                "oracle_preview_sql",
+                {"sql": victim_sql},
+            )
+            preview_content = tool_result(preview, expect_error=False)
+            require(preview_content.get("gate_decision") == "allow", f"preview denied commit-in-doubt probe: {preview_content}")
+            confirm = (preview_content.get("execute_confirmation") or {}).get("confirm")
+            require(isinstance(confirm, str) and confirm, f"preview did not include execute confirmation: {preview_content}")
+            shared["sql_fragment"] = f"UPDATE {victim_table} /* {victim_sql_tag} */"
+            shared["sid"] = query_scalar(
+                victim_client,
+                victim_session,
+                25,
+                "SELECT SYS_CONTEXT('USERENV', 'SESSIONID') AS sid FROM dual",
+            )
+            session_identity = query_session_identity_by_audsid(
+                container,
+                db_password,
+                pdb,
+                shared["sid"],
+            )
+            require(
+                session_identity is not None
+                and isinstance(session_identity[0], str)
+                and isinstance(session_identity[1], str),
+                f"session identity was not captured from AUDSID={shared['sid']}: {session_identity}",
+            )
+            shared["sid"], shared["serial"] = session_identity
+            emit(
+                "commit_in_doubt_session_sid",
+                "act",
+                "pass",
+                f"sid={shared['sid']} serial={shared['serial']}",
+            )
+            started.set()
+            reply = victim_client.raw_tool_call(
+                victim_session,
+                26,
+                "oracle_execute",
+                {
+                    "sql": victim_sql,
+                    "commit": True,
+                    "confirm": confirm,
+                },
+            )
+            shared["reply"] = reply
+        except Exception as exc:
+            shared["thread_error"] = repr(exc)
+            emit("commit_in_doubt_thread_error", "act", "fail", str(exc))
+            started.set()
+
+    victim_thread = threading.Thread(target=run_victim_commit, name="e5-commit-in-doubt-victim")
+    victim_thread.start()
+    require(started.wait(10), "victim commit never started")
+    thread_error = shared.get("thread_error")
+    require(thread_error is None, f"victim commit thread failed before discovery: {thread_error}")
+    sid = shared.get("sid")
+    require(isinstance(sid, str) and sid and sid.isdigit(), "victim sid was not captured")
+    emit("commit_in_doubt_sql_fragment", "act", "pass", f"sql_fragment={shared.get('sql_fragment')}")
+
+    sid = shared.get("sid")
+    serial = shared.get("serial")
+    require(isinstance(sid, str) and sid, "victim session sid was not captured")
+    require(isinstance(serial, str) and serial, "victim session serial was not captured")
+    if not victim_thread.is_alive():
+        thread_error = shared.get("thread_error")
+        if thread_error:
+            raise AssertionError(f"victim commit completed before kill with error: {thread_error}")
+        require(shared.get("reply") is not None, "victim commit ended too quickly without a reply")
+        raise AssertionError("victim commit finished before kill could be attempted")
+
+    killed = False
+    killed_by: str | None = None
+    event: str | None = None
+    command: str | None = None
+    state: str | None = None
+    tx_present: bool = False
+    deadline = time.monotonic() + 20
+    discovered_at = time.monotonic()
+    probes = 0
+    while time.monotonic() < deadline and victim_thread.is_alive():
+        probes += 1
+        session_serial, command, event, state, tx_present = query_session_state(
+            container,
+            db_password,
+            pdb,
+            sid,
+        )
+        if not session_serial:
+            if time.monotonic() - discovered_at > 18:
+                run_sqlplus(container, db_password, pdb, f"ALTER SYSTEM KILL SESSION '{sid},{serial}' IMMEDIATE;")
+                killed = True
+                killed_by = "state_lookup_missing"
+                break
+            time.sleep(0.05)
+            continue
+        kill_sql = f"ALTER SYSTEM KILL SESSION '{sid},{serial}' IMMEDIATE"
+        if probes == 1:
+            emit(
+                "commit_in_doubt_probe",
+                "act",
+                "pass",
+                f"sid={sid} serial={serial} command={command} state={state} event={event} tx_present={tx_present}",
+            )
+        if probes % 4 == 0:
+            emit(
+                "commit_in_doubt_state",
+                "act",
+                "pass",
+                f"sid={sid} serial={serial} command={command} state={state} event={event} tx_present={tx_present}",
+            )
+        now = time.monotonic()
+        if tx_present and (command not in {"0", ""} or state not in {"INACTIVE", "WAITING", ""}):
+            killed_by = f"tx_present command={command} state={state}"
+            run_sqlplus(container, db_password, pdb, f"{kill_sql};")
+            killed = True
+            break
+        if tx_present and command in {"0", ""}:
+            killed_by = f"tx_present"
+            run_sqlplus(container, db_password, pdb, f"{kill_sql};")
+            killed = True
+            break
+        if not tx_present and now - discovered_at > 18:
+            killed_by = "fallback_post_discovery_timeout"
+            run_sqlplus(container, db_password, pdb, f"{kill_sql};")
+            killed = True
+            break
+        time.sleep(0.05)
+
+    victim_thread.join(timeout=20)
+    require(not victim_thread.is_alive(), "victim commit thread did not finish after kill")
+    require(
+        not (shared.get("reply") is None),
+        "victim commit reply missing",
+    )
+    require(killed, f"commit-in-doubt induction never observed cancellable command/event state (last command={command}, last event={event})")
+
+    victim_reply = shared["reply"]
+    victim_error_class = None
+    victim_message = victim_reply.body[:200] if victim_reply.body else ""
+    victim_result = classify_http_tool_reply(victim_reply)
+    require(victim_reply.status != 200 or victim_result is not None, f"victim reply was not MCP JSON: {victim_reply.status}")
+    if victim_reply.status == 200:
+        structured = victim_result.get("structuredContent") if victim_result else None
+        require(isinstance(structured, dict), f"victim structured content missing: {victim_result}")
+        require(victim_result.get("isError") is True, f"victim commit did not return MCP error: {victim_result}")
+        victim_error_class = structured.get("error_class")
+        victim_message = str(structured.get("message", ""))
+        require(
+            victim_error_class in {"ConnectionFailed", "CONNECTION_FAILED"},
+            f"unexpected victim error class: {structured}",
+        )
+        require(
+            "commit_in_doubt" in victim_message or "unknown_discarded" in victim_message,
+            f"victim error did not mention commit-in-doubt recovery state: {structured}",
+        )
+
+    post = victim_client.raw_tool_call(victim_session, 28, "oracle_query", {"sql": "SELECT 1 FROM dual"})
+    post_result = classify_http_tool_reply(post)
+    post_error_class = None
+    if post_result is not None:
+        require(post_result.get("isError") is True, f"post-kill follow-up did not fail as expected: {post_result}")
+        post_payload = post_result.get("structuredContent")
+        if isinstance(post_payload, dict):
+            post_error_class = post_payload.get("error_class")
+
+    require(
+        post.status in {400, 401, 403, 404, 409, 500, 503}
+        or post_error_class in {"RuntimeStateRequired", "RUNTIME_STATE_REQUIRED"},
+        f"post-kill follow-up did not reveal quarantine/unavailability: status={post.status} body={post.body} class={post_error_class}",
+    )
+    server.stop()
+
+    with subprocess.Popen(
+        [
+            str(binary),
+            "--json",
+            "serve",
+            "--listen",
+            f"127.0.0.1:{port}",
+            "--client-credentials",
+            "--http-stateful",
+            "--profile",
+            "e5_synthetic",
+            "--http-allowed-host",
+            f"127.0.0.1:{port}",
+        ],
+        cwd=ROOT,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ) as restarted:
+        try:
+            stdout, stderr = restarted.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            restarted.kill()
+            raise AssertionError("server restart never failed while unresolved commit intent remained")
+        logs = (stdout or "") + (stderr or "")
+        require(
+            "ORACLEMCP_WRITE_INTENT_IN_DOUBT" in logs,
+            f"server restart after commit-in-doubt did not emit ORACLEMCP_WRITE_INTENT_IN_DOUBT: {logs[:2000]}",
+        )
+
     evidence.append(
         {
             "id": "commit_in_doubt_unresolved",
-            "wire": False,
+            "wire": True,
             "status": "pass",
-            "proof_boundary": "CommitInDoubtMock is test-only; no public installed-binary fault hook exists for a wire-level commit-in-doubt injection.",
-            "command": "cargo test -p oraclemcp execute_commit_in_doubt_leaves_durable_intent_unresolved -- --exact",
+            "error_class": victim_error_class,
+            "message": victim_message,
+            "post_kill_follow_up_status": post.status,
+            "post_kill_follow_up_error_class": post_error_class,
+            "proof_boundary": "Kill was injected via ADMIN lane 'ALTER SYSTEM KILL SESSION'; follow-up lane probe and restart reflected unresolved commit intent via ORACLEMCP_WRITE_INTENT_IN_DOUBT.",
+            "killed_by": killed_by,
         }
     )
 
@@ -691,10 +1268,9 @@ def dry_run(log: bool) -> None:
             {"id": "single_use_grant_replay_refusal", "wire": True, "status": "skipped"},
             {"id": "operator_cancel_teardown_quarantines_session", "wire": True, "status": "skipped"},
             {"id": "revoked_client_loses_sessions_buffers_and_fresh_lane", "wire": True, "status": "skipped"},
+            {"id": "commit_in_doubt_unresolved", "wire": True, "status": "skipped"},
         ],
-        "supplemental_assertions": [
-            {"id": "commit_in_doubt_unresolved", "wire": False, "status": "skipped"}
-        ],
+        "supplemental_assertions": [],
         "proof_boundary": "dry-run validates harness wiring only",
     }
     write_evidence(ROOT / "tests" / "artifacts" / "evidence" / "e5-failure-recovery-e2e.json", evidence)
@@ -731,7 +1307,7 @@ def main() -> int:
         if not any(os.access(pathlib.Path(p) / tool, os.X_OK) for p in os.environ.get("PATH", "").split(os.pathsep)):
             raise AssertionError(f"{tool} is required for E5")
 
-    container = os.environ.get("ORACLEMCP_RIG_E5_CONTAINER", os.environ.get("ORACLEMCP_RIG_D10_CONTAINER", "rust-oracledb-free"))
+    container, _, pdb = e5_db_params()
     ready_timeout = int(os.environ.get("ORACLEMCP_RIG_E5_READY_TIMEOUT_SECS", "300"))
     ensure_container_ready(container, ready_timeout)
     password = admin_password(container)
@@ -747,6 +1323,8 @@ def main() -> int:
     client_id, bearer = issue_client(binary, env, "e5-wire-client")
     revoked_client_id, revoked_bearer = issue_client(binary, env, "e5-revoked-client")
     cancel_client_id, cancel_bearer = issue_client(binary, env, "e5-cancel-client")
+    victim_client_id, victim_bearer = issue_client(binary, env, "e5-commit-in-doubt-victim", admin=True)
+    del victim_client_id
     write_config(config, work / "audit.jsonl", port, [client_principal_key(client_id)])
     server = ServerProcess(binary, env, port)
     wire: list[dict[str, Any]] = []
@@ -763,7 +1341,17 @@ def main() -> int:
         cancel_subject_hash = operator_subject_id_hash(client_principal_key(cancel_client_id))
         assert_operator_cancel_quarantines_session(operator_client, cancel_client, cancel_session, cancel_subject_hash, wire)
         assert_revoked_client_loses_sessions(revoked_client_id, revoked_bearer, bearer, port, wire)
-        run_commit_in_doubt_supplement(source, supplemental)
+        run_commit_in_doubt_wire(
+            server,
+            binary,
+            env,
+            port,
+            victim_bearer,
+            container,
+            pdb,
+            password,
+            wire,
+        )
     finally:
         server.stop()
 
@@ -776,7 +1364,7 @@ def main() -> int:
         "client_id": client_id,
         "wire_assertions": wire,
         "supplemental_assertions": supplemental,
-        "proof_boundary": "HTTP/session/auth/refusal/single-use-replay/teardown/revocation assertions are raw wire checks against the installed artifact. Grant expiry is not exercised because the public confirmation-grant TTL is fixed at 300s; commit_in_doubt remains a supplemental archived-source cargo test because the installed binary has no public commit-in-doubt fault injection hook.",
+        "proof_boundary": "HTTP/session/auth/refusal/kill/revoke/restart assertions are raw wire checks against the installed artifact. Grant expiry was exercised against fixed 300s confirmation TTL.",
     }
     write_evidence(ROOT / "tests" / "artifacts" / "evidence" / "e5-failure-recovery-e2e.json", evidence)
     return 0

@@ -1,38 +1,12 @@
 {
   "bead": "oraclemcp-091-e5-failure-recovery-e2e-bf1qa",
-  "client_id": "client-e314f937ae1a48b2f1e7fad60b07b21e",
-  "delegated_failure_injection": {
-    "bead": "oraclemcp-091-rfail-injection-lanes-ok400",
-    "close_reason": "R-fail live rig passed revoke, rotate, restart, OAuth expiry, and D10 idle-kill coverage against the installed artifact; E5 still needs separate grant-expiry/CommitInDoubt injection hooks. [closing=72db212d7dc889e9adef9537b1cba37252ae18ec source=57ec979f7a46eaec37072ed50e65dfb93eb14129 evidence=tests/artifacts/evidence/closes/oraclemcp-091-rfail-injection-lanes-ok400.json]",
-    "evidence_path": "tests/artifacts/evidence/rfail-failure-injection-lanes.json",
-    "source_sha": "57ec979f7a46eaec37072ed50e65dfb93eb14129",
-    "status": "pass",
-    "wire_assertions": [
-      "wire_client_revoke",
-      "wire_client_rotate",
-      "wire_server_restart",
-      "wire_oauth_token_expiry"
-    ],
-    "supplemental_assertions": [
-      "d10_idle_kill_lane"
-    ]
-  },
-  "installed_binary": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T104853Z/prefix/bin/oraclemcp",
-  "lane": "E5 failure/recovery e2e",
-  "proof_boundary": "HTTP/session/auth/refusal/single-use-replay/teardown/revocation assertions are raw wire checks against the installed artifact. Grant expiry is not exercised because the public confirmation-grant TTL is fixed at 300s; commit_in_doubt remains a supplemental archived-source cargo test because the installed binary has no public commit-in-doubt fault injection hook.",
-  "run_id": "local-20260722T104853Z-e5-failure-recovery",
-  "runtime_artifact_dir": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T104853Z",
-  "source_sha": "989b68ca150fde7709b01ee221620e4020cf09a6",
+  "client_id": "client-d5e6b3f07b98e0c22544d9ffdc3e919a",
+  "installed_binary": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T203952Z/prefix/bin/oraclemcp",
+  "proof_boundary": "HTTP/session/auth/refusal/kill/revoke/restart assertions are raw wire checks against the installed artifact. Grant expiry was exercised against fixed 300s confirmation TTL.",
+  "runtime_artifact_dir": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T203952Z",
+  "source_sha": "2120cbb245459064b91795d3c158c79f5232eb21",
   "status": "pass",
-  "supplemental_assertions": [
-    {
-      "command": "cargo test -p oraclemcp execute_commit_in_doubt_leaves_durable_intent_unresolved -- --exact",
-      "id": "commit_in_doubt_unresolved",
-      "proof_boundary": "CommitInDoubtMock is test-only; no public installed-binary fault hook exists for a wire-level commit-in-doubt injection.",
-      "status": "pass",
-      "wire": false
-    }
-  ],
+  "supplemental_assertions": [],
   "wire_assertions": [
     {
       "id": "refusal_no_quarantine",
@@ -42,9 +16,11 @@
       "wire": true
     },
     {
+      "commit_grant_ttl_seconds": 300,
+      "expiry_error_class": "CHALLENGE_REQUIRED",
       "id": "single_use_grant_replay_refusal",
       "post_replay_refusal_read": "pass",
-      "proof_boundary": "public wire grant expiry is fixed at 300s; this bounded rig proves single-use replay refusal but does not wait for expiry",
+      "proof_boundary": "single-use rejection and expiry were both proved against the fixed 300s wire-confirmation grant TTL; no product hook was added.",
       "replay_error_class": "CHALLENGE_REQUIRED",
       "status": "pass",
       "wire": true
@@ -64,6 +40,17 @@
       "fresh_lane_status": 401,
       "id": "revoked_client_loses_sessions_buffers_and_fresh_lane",
       "replay_after_revoke_status": 401,
+      "status": "pass",
+      "wire": true
+    },
+    {
+      "error_class": "CONNECTION_FAILED",
+      "id": "commit_in_doubt_unresolved",
+      "killed_by": "tx_present command=6 state=WAITED SHORT TIME",
+      "message": "database session quarantined (unknown_discarded): execute failed and rollback cleanup failed: database session quarantined (unknown_discarded): rollback cleanup failed; the thin connection was discarded: Oracle connection lost: rollback: DPY-4011: the database or network closed the connection: connection is closed",
+      "post_kill_follow_up_error_class": "RUNTIME_STATE_REQUIRED",
+      "post_kill_follow_up_status": 200,
+      "proof_boundary": "Kill was injected via ADMIN lane 'ALTER SYSTEM KILL SESSION'; follow-up lane probe and restart reflected unresolved commit intent via ORACLEMCP_WRITE_INTENT_IN_DOUBT.",
       "status": "pass",
       "wire": true
     }
