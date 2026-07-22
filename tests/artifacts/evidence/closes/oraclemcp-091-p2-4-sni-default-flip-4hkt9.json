@@ -23,59 +23,38 @@
     "tree_clean": true,
     "branch": "main"
   },
-  "proofs": [
-    {
-      "command": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp-db thin_connect_options_leave_wallet_sni_at_driver_default -- --nocapture",
-      "result": "pass",
-      "summary": "Wallet-only connect options keep use_sni at the driver default instead of forcing true."
-    },
-    {
-      "command": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp-db thin_connect_options_apply_explicit_tls_fields -- --nocapture",
-      "result": "pass",
-      "summary": "Explicit wallet, DN, and use_sni=false fields still pass through to the driver."
-    },
-    {
-      "command": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp-config --test example_config_parses -- --nocapture",
-      "result": "pass",
-      "summary": "The updated annotated example config still parses and validates."
-    },
-    {
-      "command": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core --test oci_tcps_e2e p2_4_wallet_profile_without_explicit_sni_reaches_local_tcps_terminator -- --nocapture",
-      "result": "pass",
-      "summary": "The D6 synthetic wallet lane reaches the local TCPS terminator without an explicit use_sni value."
-    },
-    {
-      "command": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core --test oci_tcps_e2e token_exec_runs_once_per_physical_tcps_connect_attempt -- --nocapture",
-      "result": "pass",
-      "summary": "Same-file pre-existing IAM token-exec TCPS addition was verified before committing oci_tcps_e2e.rs by explicit path."
-    },
-    {
-      "command": "env -u CARGO_TARGET_DIR cargo fmt --all -- --check",
-      "result": "pass",
-      "summary": "Formatting check passed after the code/test/docs patch."
-    },
-    {
-      "command": "git diff --check -- README.md docs/configuration.md oraclemcp.example.toml crates/oraclemcp-db/src/connection.rs crates/oraclemcp-core/tests/oci_tcps_e2e.rs",
-      "result": "pass",
-      "summary": "No whitespace errors in the touched paths."
-    }
-  ],
+  "proofs": [],
   "integration_evidence": {
     "entry_points": [
       {
         "name": "oraclemcp-db driver adapter",
-        "kind": "crate-test",
-        "trace": "thin_connect_options_leave_wallet_sni_at_driver_default"
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-db thin_connect_options_leave_wallet_sni_at_driver_default -- --nocapture` exited 0 with 1 passed; it proves wallet-only connect options keep use_sni at the driver default instead of forcing true."
       },
       {
-        "name": "D6 local TCPS lane",
-        "kind": "crate-test",
-        "trace": "p2_4_wallet_profile_without_explicit_sni_reaches_local_tcps_terminator"
+        "name": "oraclemcp-db explicit TLS field pass-through",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-db thin_connect_options_apply_explicit_tls_fields -- --nocapture` exited 0 with 1 passed; it proves explicit wallet, DN, and use_sni=false fields still pass through to the driver."
       },
       {
         "name": "profile documentation and example config",
-        "kind": "config-doc",
-        "trace": "example_config_parses_and_validates"
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-config --test example_config_parses -- --nocapture` exited 0 with 1 passed; it proves the updated annotated example config still parses and validates."
+      },
+      {
+        "name": "D6 local TCPS lane",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core --test oci_tcps_e2e p2_4_wallet_profile_without_explicit_sni_reaches_local_tcps_terminator -- --nocapture` exited 0 with 1 passed; it proves the synthetic wallet lane reaches the local TCPS terminator without an explicit use_sni value."
+      },
+      {
+        "name": "same-file inherited token-exec TCPS test",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core --test oci_tcps_e2e token_exec_runs_once_per_physical_tcps_connect_attempt -- --nocapture` exited 0 with 1 passed; it verifies the pre-existing same-file IAM token-exec addition before committing oci_tcps_e2e.rs by explicit path."
+      },
+      {
+        "name": "format and whitespace checks",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo fmt --all -- --check` exited 0, and `git diff --check -- README.md docs/configuration.md oraclemcp.example.toml crates/oraclemcp-db/src/connection.rs crates/oraclemcp-core/tests/oci_tcps_e2e.rs` exited 0."
       }
     ]
   },
