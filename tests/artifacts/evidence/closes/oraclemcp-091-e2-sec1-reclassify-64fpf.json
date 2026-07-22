@@ -1,0 +1,80 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:10:28Z",
+  "bead_id": "oraclemcp-091-e2-sec1-reclassify-64fpf",
+  "scope": {
+    "summary": "SEC-1 e2e coverage proves each persisted recovery/apply path re-classifies at apply time and refuses forged/stale authorization before DDL reaches the mock database seam.",
+    "in_scope": [
+      "crates/oraclemcp/tests/sec1_reclassification_e2e.rs"
+    ],
+    "out_of_scope": [
+      "live Oracle execution; this is the driver-free integration proof for dispatcher/operator recovery seams",
+      "dirty files outside this scope that belonged to other active panes during evidence generation"
+    ]
+  },
+  "source": {
+    "sha": "7d4314bf159caba2f52986216cfc93937364bcfe",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "change-proposal apply",
+        "kind": "route",
+        "trace": "stored READ_ONLY verdict is ignored; live DDL reclassification returns OPERATING_LEVEL_TOO_LOW with zero DDL execute calls"
+      },
+      {
+        "name": "source-history revert apply",
+        "kind": "route",
+        "trace": "tampered stored verdict in the recovered proposal remains advisory only and live DDL is refused"
+      },
+      {
+        "name": "durable write-intent restart",
+        "kind": "api",
+        "trace": "pending intent reopens unresolved and is never auto-resolved or replayed"
+      },
+      {
+        "name": "session recycle/reconnect",
+        "kind": "tool",
+        "trace": "recoverable pinned read quarantine reconnects the profile, lowers live state to READ_ONLY, and a pre-recycle DDL confirmation receives OPERATING_LEVEL_TOO_LOW before DDL execute"
+      },
+      {
+        "name": "env -u CARGO_TARGET_DIR cargo fmt --all -- --check",
+        "kind": "cli",
+        "trace": "Passed before evidence generation for source SHA 7d4314bf159caba2f52986216cfc93937364bcfe."
+      },
+      {
+        "name": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp --test sec1_reclassification_e2e -- --nocapture",
+        "kind": "cli",
+        "trace": "Passed: 8 tests passed, 0 failed; covers change-proposal apply, failed apply retry, durable proposal restart, source-history revert, write-intent restart no-replay, profile-switch re-entry, passive elevation expiry, and A4e session recycle/reconnect."
+      },
+      {
+        "name": "env -u CARGO_TARGET_DIR cargo check -p oraclemcp-core",
+        "kind": "cli",
+        "trace": "Passed scoped core check before close evidence."
+      },
+      {
+        "name": "env -u CARGO_TARGET_DIR cargo clippy -p oraclemcp --test sec1_reclassification_e2e -- -D warnings",
+        "kind": "cli",
+        "trace": "Passed focused integration-test clippy with warnings denied."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Evidence is scoped to the driver-free integration suite and committed source SHA 7d4314bf159caba2f52986216cfc93937364bcfe.",
+    "The evidence scaffold reported dirty paths outside the E2 scope; they were excluded from this close proof."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
