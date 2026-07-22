@@ -12,6 +12,8 @@
 //! verdict the engine binds from the consumer side (keeps the one-way boundary
 //! intact — §0 hard rule 1).
 
+mod classifier_grammar;
+
 pub mod classifier;
 pub mod clock;
 pub mod corpus;

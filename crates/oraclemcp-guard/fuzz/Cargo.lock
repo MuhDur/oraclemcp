@@ -191,7 +191,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "oraclemcp-audit"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "oraclemcp-error",
  "parking_lot",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-error"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -213,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-guard"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "oraclemcp-audit",
  "oraclemcp-error",
