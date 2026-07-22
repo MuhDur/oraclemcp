@@ -1,0 +1,73 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:09:09Z",
+  "bead_id": "oraclemcp-091-d6-tcps-lane-3np97",
+  "scope": {
+    "summary": "Adds the local synthetic TCPS rig lane and B5/B6/P2-4 probes on top of the existing profile-backed TCPS terminator.",
+    "in_scope": [
+      "crates/oraclemcp-core/tests/oci_tcps_e2e.rs",
+      "scripts/rig/oracle_tcps_lane.sh"
+    ],
+    "out_of_scope": [
+      "No live OCI, ADB, field, or customer wallet material is included.",
+      "No sibling rust-oracledb checkout changes were made.",
+      "The B5 driver fix is not made here; the lane records the current pinned-driver red signature.",
+      "The P2-4 default-SNI behavior is not flipped here; the lane records the current server adapter red signature."
+    ]
+  },
+  "source": {
+    "sha": "0026b8cd3bea2d1c2dba22b5b26f07ecb5bce833",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/rig/oracle_tcps_lane.sh run --log",
+        "kind": "cli",
+        "trace": "Clean worktree /tmp/oraclemcp-d6-clean-1076065 at 0026b8cd: ORACLEMCP_RIG_CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target scripts/rig/oracle_tcps_lane.sh run --log passed. Events: synthetic_material_scan pass; B5 current_red_observed pass with call timeout of 20000 ms exceeded; B6 SSL_CERT_FILE root override 1 test matched and passed; B6 SSL_CERT_DIR root override 1 test matched and passed; P2-4 wallet default SNI current red 1 test matched and passed; P-U4 legacy 3DES server wallet path 1 test matched and passed; scenario_complete pass."
+      },
+      {
+        "name": "default oci_tcps_e2e binary",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=target cargo test -p oraclemcp-core --test oci_tcps_e2e -- --nocapture passed in the shared checkout before close evidence: 5 passed, 0 failed, 3 ignored. B5 fast-budget probes are ignored until the driver fix exists."
+      },
+      {
+        "name": "rig script shell checks",
+        "kind": "cli",
+        "trace": "bash -n scripts/rig/oracle_tcps_lane.sh and shellcheck scripts/rig/oracle_tcps_lane.sh passed."
+      },
+      {
+        "name": "boundary lint",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=target scripts/oraclemcp_boundary_lint.sh passed: oraclemcp-boundary-lint OK and rig-boundary-lint OK."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "B5 is intentionally current-red against the pinned crates.io driver: the observed failure is call timeout of 20000 ms exceeded, not a fast UnknownIssuer.",
+    "P2-4 is intentionally current-red until the server wallet-implies-SNI default is flipped.",
+    "The lane is local-loopback synthetic TCPS only; it does not connect to live OCI or customer infrastructure."
+  ],
+  "known_defects": [
+    {
+      "description": "Pinned driver 0.9.0 still burns the full 20s call-timeout budget for the B5 UnknownIssuer probe.",
+      "bead_id": "oraclemcp-u9ldz"
+    }
+  ],
+  "follow_ups": [
+    "Escalate the B5 driver behavior in oraclemcp tracking because the driver repository is out of scope for this agent.",
+    "Flip the B5 lane expectation from current-red to green after the driver fix is consumed.",
+    "Flip the P2-4 lane expectation after the server SNI-default bead lands."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
