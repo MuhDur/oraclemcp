@@ -1,0 +1,64 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T07:33:26Z",
+  "bead_id": "oraclemcp-091-b3-stdio-token-nzmiv",
+  "scope": {
+    "summary": "Makes the stdio init-token JSON path discoverable and removes the uncompletable generic setup secure-stdio snippet.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/server.rs",
+      "crates/oraclemcp-core/src/init_token.rs",
+      "crates/oraclemcp-core/tests/c2_stdio_init_token_literal_frame.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs",
+      "crates/oraclemcp/src/robot_docs.rs",
+      "README.md",
+      "docs/configuration.md"
+    ],
+    "out_of_scope": [
+      "The full R1 external-client rig lane.",
+      "The full C9 onboarding-snippet truth fixture, which also covers the HTTP Authorization-header work owned by B10.",
+      "Any sibling rust-oracledb driver change."
+    ]
+  },
+  "source": {
+    "sha": "d0263cb279a78fc79a2b28703f79920979f41800",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "literal stdio initialize frame fixture",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core --test c2_stdio_init_token_literal_frame -- --nocapture` exited 0 at d0263cb2 with 5 passed; it proves the literal params._meta[\"oraclemcp/initToken\"] path authenticates, misplaced/absent tokens are Missing, mismatched tokens are Mismatch, and the exact path is documented."
+      },
+      {
+        "name": "stdio init-token gate unit",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core init_token_gate_rejects_missing_and_wrong_under_required -- --nocapture` exited 0 at d0263cb2 with 1 passed; it asserts the Missing error text carries params._meta[\"oraclemcp/initToken\"] and says the value must be a JSON string."
+      },
+      {
+        "name": "generic setup payload snippet contract",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp --bin oraclemcp setup_payload_is_generic_and_client_ready -- --nocapture` exited 0 at d0263cb2 with 1 passed; it asserts setup omits secure_stdio and ORACLEMCP_STDIO_TOKEN from generic MCP snippets because mainstream clients cannot inject initialize _meta."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This close does not claim the full C9/R1 external-client rig lane; that fixture remains open and also covers B10's HTTP snippet Authorization header.",
+    "This close does not run a workspace-wide Cargo gate.",
+    "The shared checkout contains dirty files outside this bead's scope, so only the source-scoped tree cleanliness is claimed."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
