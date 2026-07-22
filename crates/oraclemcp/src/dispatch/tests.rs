@@ -1229,6 +1229,10 @@ impl OracleConnection for RangeSourceMock {
         Ok(())
     }
 
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
     async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo {
             current_schema: Some("APP".to_owned()),
