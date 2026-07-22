@@ -230,28 +230,52 @@ with open(path, "w", encoding="utf-8") as handle:
 ' "$@"
 }
 
-gate_verdict() {
-  local repo path head recorded
-  repo="$(repo_root)"
-  path="$(verdict_path "$repo")"
-  [[ -f "$path" ]] || die "no gate verdict recorded yet at $path"
-  head="$(git -C "$repo" rev-parse HEAD)"
-  recorded="$("$PYTHON_BIN" -c '
+# Print "<sha>\t<status>" from a verdict file, or "\t" when the file is absent
+# or unreadable. Callers compare the fields themselves so an unreadable verdict
+# can never masquerade as a matching pass.
+read_verdict_sha_status() {
+  "$PYTHON_BIN" -c '
 import json, sys
 try:
     with open(sys.argv[1], encoding="utf-8") as handle:
-        print(json.load(handle).get("sha", ""))
+        record = json.load(handle)
+    print("{}\t{}".format(record.get("sha", ""), record.get("status", "")))
 except (OSError, ValueError):
-    print("")
-' "$path")"
+    print("\t")
+' "$1"
+}
+
+gate_verdict() {
+  local repo path head line recorded status
+  repo="$(repo_root)"
+  path="$(verdict_path "$repo")"
+  head="$(git -C "$repo" rev-parse HEAD)"
+  # ABSENT IS A REFUSAL THAT NAMES THE CANDIDATE. "no verdict recorded yet"
+  # hides which commit went ungated; an agent reading it cannot tell whether
+  # HEAD was gated or some other commit was. Name the candidate explicitly.
+  if [[ ! -f "$path" ]]; then
+    refuse "no verdict recorded for ${head:0:12}; run the gate (verified-push --gate-cmd ...) at HEAD before reading a verdict"
+  fi
+  line="$(read_verdict_sha_status "$path")"
+  recorded="${line%%$'\t'*}"
+  status="${line#*$'\t'}"
   # A STALE VERDICT IS WORSE THAN NO VERDICT. An absent one blocks safely: the
   # reader knows nothing was gated. One that describes a DIFFERENT commit looks
   # present, reads "pass", and is how someone pushes on evidence that was never
   # about the code in front of them. This bit us: the tool printed a verdict for
-  # an unrelated SHA while HEAD had never been gated at all.
+  # an unrelated SHA while HEAD had never been gated at all. Report it as "no
+  # verdict recorded for <candidate>" — because that is the truth — and name the
+  # record SHA too, so the reader can see which commit was actually gated.
   if [[ "$recorded" != "$head" ]]; then
     local shown="${recorded:-<unreadable>}"
-    refuse "the recorded verdict describes ${shown:0:12}, not HEAD ${head:0:12}; it does not gate what you are about to push — re-run the gate at HEAD"
+    refuse "no verdict recorded for ${head:0:12}; a verdict describing ${shown:0:12} exists but it does not gate what you are about to push — re-run the gate at HEAD"
+  fi
+  # A VERDICT AT HEAD THAT IS NOT A PASS IS A FAILURE. A gate that printed a
+  # failure is a failure regardless of how a later push went; surfacing a
+  # matching fail/stale record as exit 0 would let an agent read "verdict
+  # present" and push on a gate that never passed.
+  if [[ "$status" != "pass" ]]; then
+    refuse "the gate verdict at ${head:0:12} is '${status:-<unreadable>}', not pass; a gate that printed a failure is a failure — fix the gate, do not push"
   fi
   cat "$path"
 }
@@ -309,6 +333,18 @@ verified_push() {
     refuse "HEAD moved from ${head:0:12} to ${after:0:12} while the gate ran; that verdict does not describe what you are about to push"
   fi
   write_verdict "$path" "$head" "$gate" pass "$code" "$started" "$finished"
+  # BELT-AND-BRACES: re-read the verdict we just wrote and refuse the push
+  # unless the recorded SHA exactly equals the candidate HEAD and the status is
+  # pass. The push is authorized by the recorded verdict, never by the exit code
+  # we observed a moment ago — so a verdict that is absent, for another SHA, or
+  # not a pass must stop the push here even if something raced the write.
+  local final_line final_sha final_status
+  final_line="$(read_verdict_sha_status "$path")"
+  final_sha="${final_line%%$'\t'*}"
+  final_status="${final_line#*$'\t'}"
+  if [[ "$final_sha" != "$head" || "$final_status" != "pass" ]]; then
+    refuse "the recorded verdict (sha=${final_sha:-<none>} status=${final_status:-<none>}) does not authorize a push of ${head:0:12} with status=pass; nothing was pushed"
+  fi
   printf 'swarm-discipline: gate passed at %s; pushing\n' "${head:0:12}" >&2
   git -C "$repo" push "${push_args[@]}"
 }
@@ -818,17 +854,51 @@ PY
   verdict_file="$(git -C "$verdict_repo" rev-parse --path-format=absolute --git-common-dir)/oraclemcp-gate-verdict.json"
   verdict_head="$(git -C "$verdict_repo" rev-parse HEAD)"
 
+  # ABSENT: no verdict file at all must be refused and must name the candidate
+  # SHA, not print a generic "no verdict yet" that hides which commit went
+  # ungated.
+  rm -f "$verdict_file"
+  local absent_out=""
+  status=0
+  absent_out="$(cd "$verdict_repo" && bash "$ROOT/scripts/swarm_discipline.sh" gate-verdict 2>&1)" || status=$?
+  (( status == 65 )) || die "selftest: an ABSENT verdict was accepted (exit $status); nothing was gated, so nothing may read as a verdict"
+  [[ "$absent_out" == *"no verdict recorded for ${verdict_head:0:12}"* ]] \
+    || die "selftest: the absent-verdict refusal did not name the candidate SHA: $absent_out"
+  printf 'PASS selftest: an absent verdict is refused and names the candidate SHA\n'
+
   write_verdict "$verdict_file" "$verdict_head" 'true' pass 0 't0' 't1'
   status=0
   ( cd "$verdict_repo" && bash "$ROOT/scripts/swarm_discipline.sh" gate-verdict ) >/dev/null 2>&1 || status=$?
   (( status == 0 )) || die "selftest: a verdict recorded AT HEAD was refused (exit $status)"
   printf 'PASS selftest: a verdict whose sha is HEAD is accepted\n'
 
-  write_verdict "$verdict_file" "$(printf '0%.0s' {1..40})" 'true' pass 0 't0' 't1'
+  # MATCHING-FAIL: a verdict at HEAD that is a failure must be refused. A gate
+  # that printed a failure is a failure regardless of how a later push went;
+  # surfacing it as exit 0 would let an agent push on a gate that never passed.
+  write_verdict "$verdict_file" "$verdict_head" 'false' fail 1 't0' 't1'
+  local fail_out=""
   status=0
-  ( cd "$verdict_repo" && bash "$ROOT/scripts/swarm_discipline.sh" gate-verdict ) >/dev/null 2>&1 || status=$?
+  fail_out="$(cd "$verdict_repo" && bash "$ROOT/scripts/swarm_discipline.sh" gate-verdict 2>&1)" || status=$?
+  (( status == 65 )) || die "selftest: a matching FAIL verdict was accepted (exit $status); a gate that printed a failure is a failure"
+  [[ "$fail_out" == *"not pass"* ]] \
+    || die "selftest: the matching-fail refusal did not say the verdict is not pass: $fail_out"
+  printf 'PASS selftest: a matching verdict that is a failure is refused\n'
+
+  # STALE/MISMATCHED: a verdict for a different SHA must be refused, reported as
+  # "no verdict recorded for <candidate>", and name BOTH the candidate and the
+  # record SHA so the reader sees which commit was actually gated.
+  local other_sha
+  other_sha="$(printf '0%.0s' {1..40})"
+  write_verdict "$verdict_file" "$other_sha" 'true' pass 0 't0' 't1'
+  local stale_out=""
+  status=0
+  stale_out="$(cd "$verdict_repo" && bash "$ROOT/scripts/swarm_discipline.sh" gate-verdict 2>&1)" || status=$?
   (( status == 65 )) || die "selftest: a verdict for a DIFFERENT sha was accepted (exit $status); a stale verdict must never read as a verdict"
-  printf 'PASS selftest: a verdict describing another commit is refused\n'
+  [[ "$stale_out" == *"no verdict recorded for ${verdict_head:0:12}"* ]] \
+    || die "selftest: the stale-verdict refusal did not name the candidate SHA: $stale_out"
+  [[ "$stale_out" == *"${other_sha:0:12}"* ]] \
+    || die "selftest: the stale-verdict refusal did not name the record SHA: $stale_out"
+  printf 'PASS selftest: a verdict describing another commit is refused and names both SHAs\n'
 }
 
 command_name="${1:-}"
