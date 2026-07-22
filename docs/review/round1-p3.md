@@ -39,3 +39,27 @@
 - Claim checked: README contract that execution grants are process-local, single-use, exact-SQL and lane/session/principal/profile/generation bound.
 - Method: CARGO_TARGET_DIR=target cargo test -p oraclemcp-guard exec_grant -- --nocapture; CARGO_TARGET_DIR=target cargo test -p oraclemcp the_commit_grant_is_consumed_exactly_once; CARGO_TARGET_DIR=target cargo test -p oraclemcp commit_re_; CARGO_TARGET_DIR=target cargo test -p oraclemcp execute_confirmation_preserves_semantic_whitespace_before_database_io
 - Verdict: CLEAN
+
+## [HIGH] Failed or cancelled pooled calls are dirty-discarded
+- Where: crates/oraclemcp-db/src/pool.rs:431; crates/oraclemcp-db/src/pool.rs:504; crates/oraclemcp-db/src/pool.rs:755; crates/oraclemcp-db/src/pool.rs:781
+- Claim checked: Round 2 lifecycle contract that a cancelled or failed pooled call is DISCARDED and never returned to idle reuse.
+- Method: git log --since="8 hours ago" --oneline -- crates/oraclemcp-db crates/oraclemcp/src/dispatch/mod.rs crates/oraclemcp/src/dispatch/tests.rs; CARGO_TARGET_DIR=target cargo test -p oraclemcp-db pool::tests
+- Verdict: CLEAN
+
+## [CRITICAL] Commit-in-doubt stays primary and quarantines
+- Where: crates/oraclemcp/src/dispatch/mod.rs:9256; crates/oraclemcp/src/dispatch/tests.rs:9193; crates/oraclemcp/src/dispatch/tests.rs:9253; crates/oraclemcp/src/dispatch/tests.rs:10543
+- Claim checked: Round 2 lifecycle contract that a failed commit is never fixed by a follow-up rollback and quarantines the session as commit_in_doubt.
+- Method: CARGO_TARGET_DIR=target cargo test -p oraclemcp commit_in_doubt
+- Verdict: CLEAN
+
+## [HIGH] Preview-DML sandbox proof test is stale under fail-closed catalog gate
+- Where: crates/oraclemcp/src/dispatch/tests.rs:14715
+- Claim checked: Round 2 lifecycle contract that lease-backed preview DML rolls back to its savepoint after the DML path.
+- Method: CARGO_TARGET_DIR=target cargo test -p oraclemcp preview_dml_runs_the_statement_in_a_sandbox_and_rolls_it_back; CARGO_TARGET_DIR=target cargo test -p oraclemcp every_registry_tool_routes_and_deserializes_offline
+- Verdict: CONFIRMED DEFECT - the focused sandbox test exits 101 before asserting SAVEPOINT/ROLLBACK because the tightened semantic read gate refuses the test witness with "unresolved semantic read dependency"; the registry smoke test also exits 101 at oracle_query for the same fail-closed catalog reason.
+
+## [HIGH] Preview-DML late-cancellation-after-DML proof is not pinned by passing tests
+- Where: crates/oraclemcp/src/dispatch/mod.rs:8505; crates/oraclemcp/src/dispatch/mod.rs:8649; crates/oraclemcp/src/dispatch/mod.rs:8674; crates/oraclemcp/src/dispatch/tests.rs:10437; crates/oraclemcp/src/dispatch/tests.rs:14715
+- Claim checked: Round 2 lifecycle contract that lease-backed preview DML rolls back to its savepoint even when cancellation is observed after the DML.
+- Method: rg -n "preview_dml.*cancel|cancel.*preview_dml|late cancellation|cancel_on_execute|cancel_on_rollback|OMCP_PREVIEW_DML|ROLLBACK TO SAVEPOINT" crates/oraclemcp/src/dispatch/tests.rs crates/oraclemcp/src/dispatch/mod.rs; CARGO_TARGET_DIR=target cargo test -p oraclemcp rollback_preview_with_late_cancellation_is_not_reported_as_success; CARGO_TARGET_DIR=target cargo test -p oraclemcp preview_dml_runs_the_statement_in_a_sandbox_and_rolls_it_back
+- Verdict: UNPROVEN - source drives ROLLBACK TO SAVEPOINT through cleanup after the sandboxed DML future resolves, and the adjacent rollback-preview late-cancellation test passes, but no passing focused test injects cancellation after oracle_preview_dml's DML execute; the ordinary sandbox proof is currently red.
