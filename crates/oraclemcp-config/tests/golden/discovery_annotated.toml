@@ -48,6 +48,10 @@ credential_ref = "env:ORACLE_SALES_RO_PASSWORD"
 # login_statements = ["ALTER SESSION SET NLS_LANGUAGE = english"]
 # Trusted local session setup, authored by the profile owner, never accepted from agent tool calls.
 # trusted_session_statements = ["BEGIN DBMS_OUTPUT.ENABLE(500000); END;"]
+# Trusted local pooled-session release statements, authored by the profile owner, never accepted from agent tool calls.
+# session_release_statements = ["BEGIN NULL; END;"]
+# Trusted local statements run immediately before logical Oracle logoff.
+# logoff_statements = ["BEGIN NULL; END;"]
 # Per-round-trip Oracle call timeout, in seconds (default 30 when omitted).
 # call_timeout_seconds = 30
 # Per-query cooperative cost ceiling for oracle_query; per-call overrides may only lower it.
@@ -141,6 +145,10 @@ credential_ref = "env:ORACLE_PRIMARY_TCPS_PASSWORD"
 # login_statements = ["ALTER SESSION SET NLS_LANGUAGE = english"]
 # Trusted local session setup, authored by the profile owner, never accepted from agent tool calls.
 # trusted_session_statements = ["BEGIN DBMS_OUTPUT.ENABLE(500000); END;"]
+# Trusted local pooled-session release statements, authored by the profile owner, never accepted from agent tool calls.
+# session_release_statements = ["BEGIN NULL; END;"]
+# Trusted local statements run immediately before logical Oracle logoff.
+# logoff_statements = ["BEGIN NULL; END;"]
 # Per-round-trip Oracle call timeout, in seconds (default 30 when omitted).
 # call_timeout_seconds = 30
 # Per-query cooperative cost ceiling for oracle_query; per-call overrides may only lower it.

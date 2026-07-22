@@ -856,6 +856,7 @@ fn installers_offer_consent_gated_tns_discovery_via_the_binary() {
     let ps = fs::read_to_string(root.join("install.ps1")).expect("read install.ps1");
     for needle in [
         "function Invoke-OptionalDiscovery",
+        "if (-not (Test-InteractiveInstall))",
         "Discover databases from tnsnames.ora now?",
         "& $oraclemcp setup --discover",
         "    Invoke-OptionalDiscovery\n",

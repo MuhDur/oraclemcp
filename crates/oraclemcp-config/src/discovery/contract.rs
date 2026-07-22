@@ -399,11 +399,11 @@ mod tests {
             actual.difference(&documented).collect::<Vec<_>>(),
             documented.difference(&actual).collect::<Vec<_>>(),
         );
-        // The spec fixes the count at 33.
+        // The spec fixes the count at 35.
         assert_eq!(
             CONNECTION_PROFILE_FIELD_DISPOSITIONS.len(),
-            33,
-            "the design spec fixes ConnectionProfile at 33 serde fields"
+            35,
+            "the design spec fixes ConnectionProfile at 35 serde fields"
         );
     }
 

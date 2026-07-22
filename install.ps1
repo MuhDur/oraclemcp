@@ -725,6 +725,10 @@ function Invoke-OptionalDoctor {
 # which carries the fail-closed consent gate and writes READ_ONLY profiles
 # through config-ops. Parity with the Unix installer's maybe_offer_discovery.
 function Invoke-OptionalDiscovery {
+    if (-not (Test-InteractiveInstall)) {
+        Write-Output "oraclemcp installer: discovery skipped (run 'oraclemcp setup --discover' anytime)"
+        return
+    }
     if (-not (Read-InstallerConsent -Prompt "Discover databases from tnsnames.ora now?" -DefaultYes $false)) {
         Write-Output "oraclemcp installer: discovery skipped (run 'oraclemcp setup --discover' anytime)"
         return
