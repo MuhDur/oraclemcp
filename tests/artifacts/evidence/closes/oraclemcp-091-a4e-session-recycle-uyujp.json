@@ -1,0 +1,51 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:42:04Z",
+  "bead_id": "oraclemcp-091-a4e-session-recycle-uyujp",
+  "scope": {
+    "summary": "Recoverable pinned-session uncertainty now reconnects the active profile through an audited session_recycle path while nonrecoverable quarantines remain fail-closed.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/server.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs"
+    ],
+    "out_of_scope": [
+      "No new live Oracle kill-lane artifact is claimed by this close.",
+      "Pooled checkout discard semantics are unchanged."
+    ]
+  },
+  "source": {
+    "sha": "6ad5c9f6c6c06f12f290aa1c805b53c42881433d",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_sample_rows",
+        "kind": "tool",
+        "trace": "scripts/swarm_discipline.sh bounded-run --timeout 300 -- env CARGO_TARGET_DIR=target cargo test -p oraclemcp pinned_quarantine -- --nocapture passed in clean worktree /home/durakovic/projects/oraclemcp-a4e-close-clean-6ad5c9f6: recoverable_pinned_quarantine_recycles_switchable_session_on_retry and nonrecoverable_pinned_quarantine_still_refuses_without_reconnect"
+      },
+      {
+        "name": "oracle_query streaming and buffered dispatch",
+        "kind": "tool",
+        "trace": "Clean worktree gates passed: scripts/swarm_discipline.sh bounded-run --timeout 300 -- env CARGO_TARGET_DIR=target cargo check -p oraclemcp; scripts/swarm_discipline.sh bounded-run --timeout 240 -- cargo fmt --all -- --check; scripts/swarm_discipline.sh bounded-run --timeout 300 -- env CARGO_TARGET_DIR=target cargo clippy -p oraclemcp --all-targets -- -D warnings"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Readiness is scoped-test because no required-proof/v1 artifact or new exact-SHA live Oracle kill artifact was produced for this close."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
