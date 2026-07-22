@@ -595,7 +595,7 @@ impl<T> tracing::instrument::Instrument for oraclemcp_guard::corpus::CorpusRedac
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::corpus::CorpusRedactionError
 impl<T> typenum::type_operators::Same for oraclemcp_guard::corpus::CorpusRedactionError
 pub type oraclemcp_guard::corpus::CorpusRedactionError::Output = T
-pub struct oraclemcp_guard::corpus::CorpusRecord
+#[non_exhaustive] pub struct oraclemcp_guard::corpus::CorpusRecord
 pub oraclemcp_guard::corpus::CorpusRecord::authenticity: oraclemcp_guard::corpus::CorpusAuthenticity
 pub oraclemcp_guard::corpus::CorpusRecord::id: alloc::string::String
 pub oraclemcp_guard::corpus::CorpusRecord::refusal_class: oraclemcp_error::ReasonCategory

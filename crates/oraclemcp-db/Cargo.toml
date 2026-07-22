@@ -1,6 +1,6 @@
 [package]
 name = "oraclemcp-db"
-version = "0.9.0"
+version = "0.10.0"
 description = "Oracle connectivity, pooling, session leases and the type/NLS serializer for oraclemcp."
 readme = "README.md"
 edition.workspace = true
@@ -21,8 +21,8 @@ test-utils = []
 [dependencies]
 asupersync.workspace = true
 async-trait.workspace = true
-oraclemcp-error = { path = "../oraclemcp-error", version = "0.9.0" }
-oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.9.0" }
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.10.0" }
+oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.10.0" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

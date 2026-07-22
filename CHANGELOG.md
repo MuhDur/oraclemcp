@@ -6,6 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] — unreleased
+
+This line was planned as `0.9.1`. It is `0.10.0` because the work below removes
+public API, and on a `0.x` line the minor position is the breaking one — the
+same call the driver made at `0.8.0`. `cargo semver-checks check-release` is the
+gate that forced it, and suppressing that report was never an option: a removed
+error variant and a reshaped dictionary signature are exactly what a downstream
+consumer needs to be told about.
+
+### Breaking
+
+- The dead session-lease subsystem is gone. `oraclemcp-error` drops
+  `OracleMcpError::LeaseRequired`, and `oraclemcp-db` drops `LeaseManager`,
+  `LeaseInfo`, `LeaseId`, `PreviewImpact`, and `require_lease_id`. Nothing in
+  the shipped surface routed through it.
+- Dictionary reads are now bounded at the source rather than trusted to be
+  small. `compile_errors`, `describe_constraints`, `plscope_identifiers`, and
+  `plscope_statements` take a `max_rows` cap, and `get_sources_by_name` takes an
+  inclusive line range, so each grew parameters.
+- `oraclemcp_guard::corpus::CorpusRecord` is `#[non_exhaustive]`. Its doc
+  comment already said the record was constructible only through the two
+  redact-then-verify constructors; the attribute makes that a rule rather than
+  a request, and stops a downstream crate assembling a corpus record around an
+  unredacted statement the guard never proved safe.
+
 ## [0.9.0] — 2026-07-18
 
 ### Breaking

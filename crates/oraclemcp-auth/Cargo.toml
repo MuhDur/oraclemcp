@@ -1,6 +1,6 @@
 [package]
 name = "oraclemcp-auth"
-version = "0.9.0"
+version = "0.10.0"
 description = "Transport auth (OAuth 2.1 RS, mTLS, init token), step-up confirmation delivery and secrets for oraclemcp (Apache-2.0 OR MIT)"
 edition.workspace = true
 license.workspace = true
@@ -10,9 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-oraclemcp-error = { path = "../oraclemcp-error", version = "0.9.0" }
-oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.9.0" }
-oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.9.0" }
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.10.0" }
+oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.10.0" }
+oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.10.0" }
 # Keyring helpers run in a POSIX process group / Windows Job Object so one
 # deadline owns the complete process tree and descendant-held pipes.
 command-group = "5.0.1"

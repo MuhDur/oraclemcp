@@ -1,6 +1,6 @@
 [package]
 name = "oraclemcp-config"
-version = "0.9.0"
+version = "0.10.0"
 description = "Layered configuration + connection profiles for the oraclemcp Oracle MCP server (Apache-2.0 OR MIT)"
 edition.workspace = true
 license.workspace = true
@@ -10,8 +10,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-oraclemcp-error = { path = "../oraclemcp-error", version = "0.9.0" }
-oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.9.0" }
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.10.0" }
+oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.10.0" }
 figment = { version = "0.10", features = ["toml", "env"] }
 serde.workspace = true
 serde_json.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "oraclemcp"
-version = "0.9.0"
+version = "0.10.0"
 description = "Engine-free, governed least-privilege Oracle Database MCP server with a fail-closed SQL guard and confirmation-gated operating levels (independent open-source project)."
 edition.workspace = true
 license.workspace = true
@@ -57,14 +57,14 @@ dashboard-bundle = ["oraclemcp-core/dashboard-bundle"]
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
-oraclemcp-core = { path = "../oraclemcp-core", version = "0.9.0" }
-oraclemcp-db = { path = "../oraclemcp-db", version = "0.9.0" }
-oraclemcp-config = { path = "../oraclemcp-config", version = "0.9.0" }
-oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.9.0" }
-oraclemcp-auth = { path = "../oraclemcp-auth", version = "0.9.0" }
-oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.9.0" }
-oraclemcp-error = { path = "../oraclemcp-error", version = "0.9.0" }
-oraclemcp-telemetry = { path = "../oraclemcp-telemetry", version = "0.9.0" }
+oraclemcp-core = { path = "../oraclemcp-core", version = "0.10.0" }
+oraclemcp-db = { path = "../oraclemcp-db", version = "0.10.0" }
+oraclemcp-config = { path = "../oraclemcp-config", version = "0.10.0" }
+oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.10.0" }
+oraclemcp-auth = { path = "../oraclemcp-auth", version = "0.10.0" }
+oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.10.0" }
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.10.0" }
+oraclemcp-telemetry = { path = "../oraclemcp-telemetry", version = "0.10.0" }
 asupersync.workspace = true
 async-trait.workspace = true
 arrow-array = "59.0.0"
@@ -100,7 +100,7 @@ plsql-sast = { workspace = true, optional = true }
 plsql-output = { workspace = true, optional = true }
 
 [dev-dependencies]
-oraclemcp-db = { path = "../oraclemcp-db", version = "0.9.0", features = ["test-utils"] }
+oraclemcp-db = { path = "../oraclemcp-db", version = "0.10.0", features = ["test-utils"] }
 rcgen = "0.13"
 toml = "0.8"
 # Golden-artifact discipline (D6.3d). `regex` powers the shared `Scrubber` in

@@ -161,6 +161,13 @@ pub enum CorpusAuthenticity {
 /// [`CorpusRecord::from_jsonl_line`], both of which redact and then verify.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+// The doc comment above says this record is constructible only through the two
+// redact-then-verify constructors. Without this attribute that was a request,
+// not a rule: a downstream crate could assemble one with a struct literal and
+// hand the corpus an unredacted statement the guard never proved safe. It also
+// makes a future field additive rather than breaking, which is how
+// `authenticity` broke the 0.9.0 API in the first place.
+#[non_exhaustive]
 pub struct CorpusRecord {
     /// Content hash over the redacted fields. Also the dedup key.
     pub id: String,
