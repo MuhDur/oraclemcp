@@ -30,6 +30,11 @@ use crate::response_budget::ResponseByteBudget;
 use crate::tools::{ToolAnnotations, ToolDescriptor, ToolRegistry};
 use oraclemcp_guard::OperatingLevel;
 
+#[cfg(test)]
+mod dispatch_context_tests;
+#[cfg(test)]
+mod resource_template_reads;
+
 /// The `_meta` field carrying the stdio init token on the `initialize` request.
 /// The client places its shared token here so the server can gate the handshake
 /// before any other request (§7.1). Kept namespaced to avoid colliding with
@@ -2801,46 +2806,6 @@ mod tests {
     use oraclemcp_guard::OperatingLevel;
     use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[test]
-    fn owned_dispatch_context_preserves_lane_time_and_caller_budget() {
-        let request_started_at = Instant::now();
-        let admitted_at = Time::from_secs(100);
-        let caller_budget = Budget::new()
-            .with_deadline(Time::from_secs(130))
-            .with_poll_quota(321)
-            .with_cost_quota(654);
-        let request_budget = RequestBudget::from_budget_at(admitted_at, caller_budget);
-        let owned = DispatchContext::default()
-            .with_http_session_id("session-1")
-            .with_principal_key("principal-1")
-            .with_local_transport(false)
-            .with_lane_identity("lane-1", 7)
-            .with_request_started_at(request_started_at)
-            .with_admitted_at(admitted_at)
-            .with_caller_budget(caller_budget)
-            .with_request_budget(&request_budget)
-            .to_owned_context();
-        let borrowed = owned.as_dispatch_context();
-
-        assert_eq!(borrowed.http_session_id(), Some("session-1"));
-        assert_eq!(borrowed.principal_key(), Some("principal-1"));
-        assert_eq!(borrowed.lane_id(), Some("lane-1"));
-        assert_eq!(borrowed.lane_generation(), Some(7));
-        assert!(!borrowed.is_local_transport());
-        assert_eq!(borrowed.request_started_at(), Some(request_started_at));
-        assert_eq!(borrowed.admitted_at(), Some(admitted_at));
-        assert_eq!(borrowed.caller_budget(), Some(caller_budget));
-        assert!(
-            borrowed
-                .request_budget()
-                .expect("request budget round-trips")
-                .db_quota()
-                .ptr_eq(&request_budget.db_quota()),
-            "owned context clones must share consumed quota"
-        );
-    }
-
     #[test]
     fn streaming_terminal_wait_expiry_uses_lane_safety_hook() {
         let (_sender, receiver) = oneshot::channel();
@@ -2927,33 +2892,6 @@ mod tests {
                     ));
                 }
                 Outcome::Ok(serde_json::json!({ "echoed": name, "args": args }))
-            })
-        }
-    }
-
-    struct ContextEchoDispatcher;
-    impl ToolDispatch for ContextEchoDispatcher {
-        fn dispatch<'a>(
-            &'a self,
-            _cx: &'a Cx,
-            context: DispatchContext<'a>,
-            name: &'a str,
-            args: Value,
-        ) -> DispatchFuture<'a> {
-            let scopes = context
-                .scope_grant()
-                .map(|grant| grant.0.clone())
-                .unwrap_or_default();
-            let session_id = context.http_session_id().map(str::to_owned);
-            let principal_key = context.principal_key().map(str::to_owned);
-            Box::pin(async move {
-                Outcome::Ok(serde_json::json!({
-                    "tool": name,
-                    "args": args,
-                    "scopes": scopes,
-                    "session_id": session_id,
-                    "principal_key": principal_key,
-                }))
             })
         }
     }
@@ -3051,25 +2989,6 @@ mod tests {
             },
         );
         OracleMcpServer::new("0.1.0", registry, caps, Arc::new(EchoDispatcher))
-    }
-
-    fn context_echo_server() -> OracleMcpServer {
-        let caps = CapabilitiesReport::new(
-            "0.1.0",
-            Vec::new(),
-            OperatingLevel::ReadOnly,
-            FeatureTiers {
-                live_db: true,
-                engine: true,
-                http_transport: true,
-            },
-        );
-        OracleMcpServer::new(
-            "0.1.0",
-            ToolRegistry::new(),
-            caps,
-            Arc::new(ContextEchoDispatcher),
-        )
     }
 
     fn stdio_frame(value: &Value) -> Vec<u8> {
@@ -3562,56 +3481,6 @@ mod tests {
                 .is_some(),
             "detail_level=full is the pinned-client escape hatch"
         );
-    }
-
-    #[test]
-    fn resource_template_reads_route_through_dispatch_with_transport_context() {
-        let s = context_echo_server();
-        let grant = crate::http::ScopeGrant(vec!["oracle:read".to_owned()]);
-        let context = DispatchContext::with_scope_grant(&grant)
-            .with_principal_key("principal-a")
-            .with_http_session_id("session-a")
-            .with_local_transport(false);
-
-        let read = |uri: &str| -> Value {
-            let reply = s
-                .handle_jsonrpc_request_with_context(
-                    serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": uri,
-                        "method": "resources/read",
-                        "params": { "uri": uri },
-                    }),
-                    None,
-                    context,
-                )
-                .expect("resource read reply");
-            let text = reply["result"]["contents"][0]["text"]
-                .as_str()
-                .expect("resource text");
-            serde_json::from_str(text).expect("resource text is dispatcher JSON")
-        };
-
-        let schema = read("oracle://schema/HR");
-        assert_eq!(schema["tool"], serde_json::json!("oracle_schema_inspect"));
-        assert_eq!(schema["args"], serde_json::json!({ "owner": "HR" }));
-        assert_eq!(schema["scopes"], serde_json::json!(["oracle:read"]));
-        assert_eq!(schema["principal_key"], serde_json::json!("principal-a"));
-        assert_eq!(schema["session_id"], serde_json::json!("session-a"));
-
-        let object = read("oracle://object/HR/PACKAGE/EMP_API");
-        assert_eq!(object["tool"], serde_json::json!("oracle_get_source"));
-        assert_eq!(
-            object["args"],
-            serde_json::json!({
-                "owner": "HR",
-                "object_type": "PACKAGE",
-                "name": "EMP_API",
-            })
-        );
-        assert_eq!(object["scopes"], serde_json::json!(["oracle:read"]));
-        assert_eq!(object["principal_key"], serde_json::json!("principal-a"));
-        assert_eq!(object["session_id"], serde_json::json!("session-a"));
     }
 
     fn initialize_frame(token: Option<&str>) -> Vec<u8> {
