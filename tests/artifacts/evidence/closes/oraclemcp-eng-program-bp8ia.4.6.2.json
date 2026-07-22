@@ -1,0 +1,81 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T11:20:22Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.4.6.2",
+  "scope": {
+    "summary": "Split the existing dispatch audit-wiring contract-family tests into a child module while preserving the dispatch::tests::audit_wiring filter and lowering the measured max-file-size ratchets.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp/src/dispatch/tests/audit_wiring.rs",
+      "scripts/oraclemcp_arch_fitness_lint.sh"
+    ],
+    "out_of_scope": [
+      "Changing audit-wiring assertions or weakening the guard behavior they exercise.",
+      "Fixing the current semantic-read refusal failures in the audit-wiring family.",
+      "Any docs/plan or bead-title train-rename work."
+    ]
+  },
+  "source": {
+    "sha": "8f64f933eb976d89ae43f1486427ae720d85e132",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "audit-wiring split commit",
+        "kind": "cli",
+        "trace": "git show --stat --oneline 14bb6f40 reported only crates/oraclemcp/src/dispatch/tests.rs and crates/oraclemcp/src/dispatch/tests/audit_wiring.rs: 826 insertions, 833 deletions, new audit_wiring.rs."
+      },
+      {
+        "name": "max-file-size ratchet commit",
+        "kind": "cli",
+        "trace": "git show --stat --oneline 8f64f933 reported only scripts/oraclemcp_arch_fitness_lint.sh: 3 insertions, 3 deletions. The ratchets now cap dispatch/tests.rs at 15676 and the global tracked-source maximum at 15829."
+      },
+      {
+        "name": "architecture fitness",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target scripts/oraclemcp_arch_fitness_lint.sh passed, including OK[file-size] for the lowered ratchets."
+      },
+      {
+        "name": "moved filter remains discoverable",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp --lib -- dispatch::tests::audit_wiring:: selected 16 tests after the split. It failed 8 passed / 8 failed with ForbiddenStatement semantic-read refusals, preserving the assertions instead of hiding them."
+      },
+      {
+        "name": "moved exact test still passes",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp --lib -- dispatch::tests::audit_wiring::served_write_appends_pending_then_signed_outcome passed: 1 passed, 364 filtered out."
+      },
+      {
+        "name": "neighboring dispatch filter unchanged",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp --lib -- dispatch::tests::dictionary_tools_accept_default_owner_qualified_names_and_aliases passed: 1 passed, 364 filtered out."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The full dispatch::tests::audit_wiring:: filter is not green at this source: 8 of 16 tests fail before their audit assertions with ErrorClass::ForbiddenStatement and the message \"read-only server could not prove this statement safe: a relation can invoke an unproven view, policy, or virtual-column dependency\".",
+    "A forced fresh compile with RUSTFLAGS='--cfg oraclemcp_c6_split_probe' showed the same 8/16 red state with panic locations in crates/oraclemcp/src/dispatch/tests/audit_wiring.rs, proving the moved module is compiled and still asserts the same contracts.",
+    "The split is isomorphic only; no production dispatch, guard, database, or audit logic was changed."
+  ],
+  "known_defects": [
+    {
+      "bead_id": "oraclemcp-nl105",
+      "description": "The audit-wiring read-path tests currently use semantic-read inputs such as SELECT 1 FROM dual and SELECT owner FROM all_objects that are refused before the audit assertions run under the tightened semantic-read guard."
+    }
+  ],
+  "follow_ups": [
+    "Repair or adjudicate the audit-wiring semantic-read fixture inputs in a separate bead without weakening the fail-closed guard."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
