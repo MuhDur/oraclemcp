@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:45:51Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.14",
+  "scope": {
+    "summary": "Makes operator idempotency leases panic-safe by generation-tagging in-progress entries and dropping only the lease's own unresolved generation.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/http/operator.rs",
+      "crates/oraclemcp-core/src/http/tests_operator.rs"
+    ],
+    "out_of_scope": [
+      "No changes to dispatcher durable write-intent storage or Oracle execution semantics.",
+      "No formatting of unrelated pre-existing rustfmt drift in tests_operator.rs."
+    ]
+  },
+  "source": {
+    "sha": "14b4495dc4601787903146a150455c5081b749e7",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "operator idempotency regression set",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core idempotency -- --nocapture` exited 0 with 5/5 matched tests passed. This includes immediate Fresh retry after catch_unwind drops a Fresh lease, stale-generation drop preserving a newer in-progress entry, capacity eviction preserving in-progress entries, in-progress reporting before completion, and normal response replay/conflict behavior."
+      },
+      {
+        "name": "panic-safe lease focused subset",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core operator_idempotency -- --nocapture` exited 0 with 3/3 matched tests passed, covering the new panic-drop and stale-generation lease behavior plus the existing in-progress-before-complete contract."
+      },
+      {
+        "name": "scoped clippy",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo clippy -p oraclemcp-core --lib -- -D warnings` exited 0."
+      },
+      {
+        "name": "owned-path formatting and whitespace",
+        "kind": "cli",
+        "trace": "`rustfmt --edition 2024 --check crates/oraclemcp-core/src/http/operator.rs` exited 0. `git diff --check -- crates/oraclemcp-core/src/http/operator.rs crates/oraclemcp-core/src/http/tests_operator.rs` exited 0."
+      },
+      {
+        "name": "shared-checkout staged discipline",
+        "kind": "cli",
+        "trace": "`scripts/swarm_discipline.sh struct-atomicity --staged && scripts/swarm_discipline.sh stale-delete-check --staged` exited 0 before the source commit."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The proof is local and scoped to the operator idempotency ledger/HTTP edge. It does not claim a full workspace gate.",
+    "`rustfmt --edition 2024 --check crates/oraclemcp-core/src/http/tests_operator.rs` was not used as evidence because that existing file has unrelated formatting drift outside this bead's hunks."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
