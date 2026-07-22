@@ -1,0 +1,50 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:05:00Z",
+  "bead_id": "oraclemcp-lnate",
+  "scope": {
+    "summary": "Rule 15: a gate verdict is usable only when its recorded SHA exactly equals the candidate HEAD and its status is pass; absent, mismatched, and non-pass verdicts are explicit refusals, never usable verdicts.",
+    "in_scope": [
+      "scripts/swarm_discipline.sh"
+    ],
+    "out_of_scope": [
+      "the gate commands themselves (cargo fmt/clippy/test) — only the verdict-reading/push-authorization logic changed",
+      "rules 13, 14, 16, 17, 18 subcommands (untouched)",
+      "CI workflow wiring"
+    ]
+  },
+  "source": {
+    "sha": "8d0c759622b0ac786fa873a301bc06e224168982",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/swarm_discipline.sh --selftest",
+        "kind": "cli",
+        "trace": "All 19 self-tests pass, including the four verdict-state cases: 'an absent verdict is refused and names the candidate SHA', 'a verdict whose sha is HEAD is accepted', 'a matching verdict that is a failure is refused', 'a verdict describing another commit is refused and names both SHAs'."
+      },
+      {
+        "name": "scripts/swarm_discipline.sh gate-verdict",
+        "kind": "cli",
+        "trace": "Manual throwaway-repo check of all four states: absent -> exit 65 'no verdict recorded for <candidate>'; mismatched SHA -> exit 65 'no verdict recorded for <candidate>; a verdict describing <record-sha> exists'; matching fail -> exit 65 'is fail, not pass'; matching pass -> exit 0 prints the verdict. shellcheck clean."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "verified-push's re-read guard is exercised by the failed-gate and recorded-verdict self-tests; the race between write_verdict and the re-read is defended in code but not induced under a live concurrent writer in CI"
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
