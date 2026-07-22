@@ -147,3 +147,39 @@
 - Claim checked: Error paths must not leak connect strings, usernames, credential_ref values, passwords, proxy identities, wallet passwords, IAM tokens, wallet paths, or server DNs.
 - Method: `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-core connection_error_redacts_profile_sensitive_values wallet_decrypt_password_echo_is_redacted iam_token_refresh_failure_redacts_jwt -- --nocapture`, `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp profile_secret_resolution_errors_do_not_echo_secret_locators connection_diagnostics_report_exact_generation_without_config_secrets profile_response_omits_connection_and_secret_material guard_refusal_appends_only_a_redacted_classifier_proven_corpus_record -- --nocapture`, and `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-db connection_info_debug_and_redacted_json_are_allowlist_first debug_redacts_connect_material debug_redacts_session_identity_values -- --nocapture`.
 - Verdict: CLEAN - sampled profile-resolution errors, connection diagnostics, refusal corpus output, and connection-info JSON did not echo the tested secret or identity values.
+
+## [LOW] Release has one normal tag-driven publishing pipeline
+- Where: AGENTS.md:225; .github/workflows/release.yml:21; .github/workflows/docker.yml:7; .github/workflows/publish-mcp.yml:12
+- Claim checked: A `vX.Y.Z` tag should drive exactly one normal pipeline, `.github/workflows/release.yml`; `docker.yml` and `publish-mcp.yml` must remain manual recovery auxiliaries.
+- Method: Code read of AGENTS.md release flow, README release gate command, and all three workflow triggers; `rg -n "^on:|^  push:|^    tags:|^  workflow_dispatch:|publish-crates:|^  release:|^  docker:|publish-mcp-registry:|verify-mcp-registry:|id-token: write|mcp-publisher|ghcr\\.io/muhdur/oraclemcp" .github/workflows/release.yml .github/workflows/docker.yml .github/workflows/publish-mcp.yml`; `rg -n "tags: \\[|refs/tags|on:.*push|^  push:" .github/workflows`.
+- Verdict: CLEAN - `release.yml` is the only release workflow with `push.tags`, and it contains release gates, crates.io, GitHub release/assets, GHCR, and MCP registry jobs; `docker.yml` and `publish-mcp.yml` are `workflow_dispatch` only.
+
+## [LOW] m4kua release-publish guard covers both auxiliary workflows
+- Where: crates/oraclemcp/tests/release_publish_guards.rs:289; tests/artifacts/evidence/closes/oraclemcp-m4kua.json:24
+- Claim checked: The m4kua guard should cover both `docker.yml` and `publish-mcp.yml`, not just `release.yml` publishing jobs.
+- Method: Code read of `check_auxiliary_publish_workflow_is_manual_only` and `release_publishing_jobs_stay_tag_gated_on_actual_workflow_conditions`; `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp --test release_publish_guards -- --nocapture`.
+- Verdict: CLEAN - the guard test passed 2/2 and explicitly checks both auxiliary workflows are `workflow_dispatch` only; the mutation self-test exercises release.yml job-guard removal and transitive MCP verification rewiring.
+
+## [LOW] Release metadata mismatch fails closed
+- Where: scripts/release_surface_sync_check.sh:210; scripts/release_preflight.sh:25
+- Claim checked: `release_surface_sync_check.sh` and `release_preflight.sh` should catch version/metadata mismatches before publishing.
+- Method: `bash scripts/release_surface_sync_check.sh` exited 0 on the current tree; then a detached temp worktree at `/tmp/oraclemcp-p5-round4-negative-1784725359-1706725` changed only `server.json` from `0.10.0` to `0.10.1`, and both `CARGO_TARGET_DIR=$worktree/target bash scripts/release_surface_sync_check.sh` and `CARGO_TARGET_DIR=$worktree/target bash scripts/release_preflight.sh` exited 1 with `server.json version '0.10.1' != workspace '0.10.0'`.
+- Verdict: CLEAN - the direct surface check and preflight wrapper both fail before any publish step when server metadata drifts from workspace version.
+
+## [MEDIUM] Agent-facing capabilities text still says pre-0.9.1
+- Where: crates/oraclemcp-core/src/server.rs:2646; tests/golden/stdio/main_tool_transcript.json:121; tests/golden/http/stateful_streamable_session.json:173
+- Claim checked: The 0.10.0 rename should leave no release-visible surface still claiming 0.9.1.
+- Method: `rg -n "0\\.9\\.1" AGENTS.md README.md server.json Cargo.toml web/package.json web/package-lock.json release-surfaces.toml docs/release-surfaces.md scripts/release_preflight.sh scripts/release_surface_sync_check.sh .github/workflows/release.yml .github/workflows/docker.yml .github/workflows/publish-mcp.yml` returned no hits, but `rg -n "0\\.9\\.1" --glob '!target/**' --glob '!Cargo.lock' --glob '!tests/artifacts/**' --glob '!docs/review/**' .` found the live tool descriptor and generated goldens; `bash scripts/release_surface_sync_check.sh` still passed.
+- Verdict: CONFIRMED DEFECT - the served `oracle_capabilities` descriptor says `pre-0.9.1 descriptor report` in source and goldens, and current release-surface checks do not catch it.
+
+## [MEDIUM] Engineering program release target still points at 0.9.1
+- Where: scripts/eng_program_manifest_build.py:88; engineering-program-manifest.json:9; scripts/plan_bead_graph_lint.py:17
+- Claim checked: The 0.10.0 rename should update current operator-facing release metadata, not leave publish planning at 0.9.1.
+- Method: `nl -ba scripts/eng_program_manifest_build.py | sed -n '80,92p'`, `nl -ba engineering-program-manifest.json | sed -n '1,14p'`, and `rg -n "0\\.9\\.1" engineering-program-manifest.json scripts/eng_program_manifest_build.py scripts/plan_bead_graph_lint.py`.
+- Verdict: CONFIRMED DEFECT - the generated engineering program manifest and its generator still declare server release target `0.9.1`, including the terminal publish task title, while the release metadata is otherwise `0.10.0`.
+
+## [LOW] Full release_preflight clean run was not proven in this review window
+- Where: scripts/release_preflight.sh:1
+- Claim checked: Full release preflight should complete cleanly on the current release surface.
+- Method: `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target scripts/swarm_discipline.sh bounded-run --timeout 120 -- bash scripts/release_preflight.sh`.
+- Verdict: UNPROVEN - the run progressed past release-surface sync and boundary/architecture/agent-surface lints, then hit the 120-second bounded-run timeout; I did not wait again.
