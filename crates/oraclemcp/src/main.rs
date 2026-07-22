@@ -39,7 +39,7 @@ use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode, ExitStatus};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -4054,11 +4054,27 @@ fn run_serve(
                     unsigned_refusal_log,
                 },
             );
+            install_stdio_signal_close(server.clone());
             emit_serve_status(robot_json, "stdio", None, &advertised_tools);
-            match server.serve_stdio(&auth) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
+            let serve_result = server.clone().serve_stdio(&auth);
+            let close_result = server.close_blocking(DispatchCloseReason::ServerShutdown);
+            match (serve_result, close_result) {
+                (Ok(()), Ok(())) => ExitCode::SUCCESS,
+                (Ok(()), Err(error)) => {
+                    eprintln!(
+                        "oraclemcp serve: stdio shutdown cleanup failed ({:?}): {}",
+                        error.error_class, error.message
+                    );
+                    ExitCode::from(1)
+                }
+                (Err(e), close_result) => {
                     eprintln!("oraclemcp serve: stdio transport error: {e}");
+                    if let Err(error) = close_result {
+                        eprintln!(
+                            "oraclemcp serve: stdio cleanup after transport error failed ({:?}): {}",
+                            error.error_class, error.message
+                        );
+                    }
                     ExitCode::from(1)
                 }
             }
@@ -4504,6 +4520,34 @@ fn run_serve(
         }
     }
 }
+
+#[cfg(unix)]
+fn install_stdio_signal_close(server: OracleMcpServer) {
+    use signal_hook::consts::signal::{SIGINT, SIGTERM};
+
+    let received = Arc::new(AtomicBool::new(false));
+    for signal in [SIGTERM, SIGINT] {
+        if let Err(error) = signal_hook::flag::register(signal, Arc::clone(&received)) {
+            tracing::warn!(signal, error = %error, "stdio signal close handler registration failed");
+            return;
+        }
+    }
+    std::thread::Builder::new()
+        .name("oraclemcp-stdio-signal-close".to_owned())
+        .spawn(move || {
+            while !received.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if let Err(error) = server.close_blocking(DispatchCloseReason::ServerShutdown) {
+                tracing::warn!(error = %error.message, "stdio signal close failed");
+            }
+            std::process::exit(0);
+        })
+        .ok();
+}
+
+#[cfg(not(unix))]
+fn install_stdio_signal_close(_server: OracleMcpServer) {}
 
 /// Install a best-effort SIGTERM/SIGINT bridge: on the first delivery, begin the
 /// graceful drain (flip `/readyz`) and set the accept-loop shutdown flag so

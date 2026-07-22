@@ -1223,6 +1223,19 @@ impl OracleMcpServer {
         })
     }
 
+    /// Close the server dispatcher from a blocking transport or signal watcher.
+    ///
+    /// Native stdio owns the process thread and can be blocked in `read(2)` when
+    /// a service manager sends SIGTERM. A normal watcher thread can call this
+    /// helper to drive the same lane lifecycle cleanup that explicit transport
+    /// shutdown uses, without doing Oracle I/O from the signal handler itself.
+    pub fn close_blocking(&self, reason: DispatchCloseReason) -> Result<(), ErrorEnvelope> {
+        crate::lane::block_on_lane_bridge(async {
+            let cx = Cx::current().expect("lane bridge installs a current Cx");
+            self.dispatcher.close(&cx, reason).await
+        })
+    }
+
     fn visible_tool_descriptors(&self, surface: &McpSurfaceState) -> Vec<ToolDescriptor> {
         let mut descriptors = self
             .registry

@@ -42,10 +42,10 @@ use crate::http::{HttpLaneBinding, HttpLaneSnapshot, HttpSessionLifecycle};
 use crate::operator_protocol::operator_subject_id_hash;
 use crate::request_budget::{DEFAULT_REQUEST_POLL_QUOTA, DEFAULT_REQUEST_TIMEOUT, RequestBudget};
 use crate::server::{
-    DispatchCloseReason, DispatchContext, DispatchFuture, DispatchOutcome, DispatchReplyReceiver,
-    DispatchStreamStartFuture, McpSurfaceDetail, McpSurfaceFuture, McpSurfaceOutcome,
-    OwnedDispatchContext, TerminalReplyWaitError, ToolDispatch, ToolStreamSender,
-    recv_terminal_after_cancel,
+    DispatchCloseFuture, DispatchCloseReason, DispatchContext, DispatchFuture, DispatchOutcome,
+    DispatchReplyReceiver, DispatchStreamStartFuture, McpSurfaceDetail, McpSurfaceFuture,
+    McpSurfaceOutcome, OwnedDispatchContext, TerminalReplyWaitError, ToolDispatch,
+    ToolStreamSender, recv_terminal_after_cancel,
 };
 
 /// Default number of queued dispatch commands accepted by one lane.
@@ -1046,6 +1046,13 @@ impl ToolDispatch for LaneRuntime {
             }
         })
     }
+
+    fn close<'a>(&'a self, _cx: &'a Cx, reason: DispatchCloseReason) -> DispatchCloseFuture<'a> {
+        Box::pin(async move {
+            self.close_with_reason(reason);
+            Ok(())
+        })
+    }
 }
 
 /// Guard for stateful HTTP lane dispatch.
@@ -1598,11 +1605,15 @@ impl StatefulLaneDispatch {
 
     /// Close every registered lane and return how many were present.
     pub fn close_all_sessions(&self) -> usize {
+        self.close_all_sessions_with_reason(DispatchCloseReason::ServerShutdown)
+    }
+
+    fn close_all_sessions_with_reason(&self, reason: DispatchCloseReason) -> usize {
         let (lanes, count) = {
             let mut lifecycle = self.lifecycle.lock();
             let invalidated =
                 std::mem::replace(&mut lifecycle.global_token, Arc::new(LaneCloseState::new()));
-            invalidated.request(DispatchCloseReason::ServerShutdown);
+            invalidated.request(reason);
             let creating = lifecycle.creating_lanes.clone();
             let mut registered = self.lock_lanes();
             let count = registered
@@ -1618,7 +1629,7 @@ impl StatefulLaneDispatch {
         };
         self.creation_changed.notify_all();
         for lane in lanes {
-            lane.close_with_reason(DispatchCloseReason::ServerShutdown);
+            lane.close_with_reason(reason);
         }
         count
     }
@@ -1790,6 +1801,13 @@ impl ToolDispatch for StatefulLaneDispatch {
             }
             let lane = self.resolve_lane(cx, context)?;
             lane.mcp_surface_state(cx, context, detail).await
+        })
+    }
+
+    fn close<'a>(&'a self, _cx: &'a Cx, reason: DispatchCloseReason) -> DispatchCloseFuture<'a> {
+        Box::pin(async move {
+            self.close_all_sessions_with_reason(reason);
+            Ok(())
         })
     }
 }

@@ -75,6 +75,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 serde.workspace = true
 serde_json.workspace = true
+signal-hook = "0.4"
 getrandom = "0.2"
 cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"
