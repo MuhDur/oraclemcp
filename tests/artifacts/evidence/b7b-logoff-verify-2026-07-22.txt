@@ -1,0 +1,11 @@
+command: scripts/swarm_discipline.sh bounded-run --timeout 300 -- scripts/rig/verify_logoff_lane.sh
+source_before_commit: e0abfe2f11f5b0ec348492291e07817eac92dfd6
+container: rust-oracledb-free
+pdb: FREEPDB1
+result: PASS verify_logoff_lane
+
+D7 AFTER LOGOFF lane against rust-oracledb-free/FREEPDB1
+  OK      clean: pinned sid 205 and pooled session were live; database recorded LOGICAL CLOSE for both (+2 rows, no v$session ghosts)
+  OK      kill: pinned sid 205 and pooled session were live; database recorded NO logoff, as an abrupt end must look
+  OK      term: pinned sid 205 and pooled session were live; database recorded LOGICAL CLOSE for both (+2 rows, no v$session ghosts)
+PASS verify_logoff_lane

@@ -14,7 +14,8 @@
 # leaks every session on shutdown: some other session logging off cleanly would
 # satisfy it. The property is the DIFFERENCE — a clean exit must produce a row
 # and an abrupt kill must not — and each half has to be attributed to the
-# server's own session.
+# server's own session. B7b extends that guard across the two server-owned
+# connection surfaces: one pinned session plus one pooled stateless session.
 #
 # THE ANTI-VACUITY GUARD, which is the whole reason this lane is trustworthy:
 # "no logoff row" is also what you observe when THERE WAS NEVER A SESSION. This
@@ -60,15 +61,12 @@ sys_value() {
     | grep -oE 'D7VAL:[0-9]+' | cut -d: -f2 | head -1
 }
 
-# Rows written by the SERVER's sessions. SQL*Plus sessions (this lane's own
-# probes, and any other lane sharing the database) are excluded by module, and
-# SIDs are NOT used as identity: Oracle reuses them, and this log already holds
-# 39 unrelated rows for one SID.
-server_logoff_rows() {
-  sys_value "count(*)" "from ${FIXTURE_USER}.ORACLEMCP_D9_LOGOFF_LOG where nvl(module,'x') not like 'SQL*Plus%'"
+session_module() {
+  printf 'oraclemcp-d7-%s-%s-%s' "$(date +%s)" "$$" "$1"
 }
 
 setup_workspace() {
+  local module="$1"
   mkdir -p "$WORK/home"
   cat >"$WORK/oraclemcp.toml" <<EOF
 [[profiles]]
@@ -76,17 +74,44 @@ name = "d7"
 connect_string = "localhost:${HOST_PORT}/${PDB}"
 username = "${FIXTURE_USER}"
 credential_ref = "env:D7_FIXTURE_PW"
+
+[profiles.pool]
+max_size = 1
+min_idle = 1
+acquire_timeout_secs = 3
+statement_cache_size = 50
+
+[profiles.session_identity]
+module = "${module}"
+client_identifier = "${module}"
 EOF
   # NOTE: the credential env var must NOT be named ORACLEMCP_*. The config
   # loader claims that entire namespace for config overrides, so ORACLEMCP_D7_PW
   # is rejected as "unknown field d7_pw" before the server ever starts.
 }
 
-# Runs the server, drives one real query so a session exists, and shuts it down
-# in the requested way. Echoes "<sid> <delta>".
+# Rows written by this mode's SERVER sessions. The profile installs a unique
+# MODULE per mode, so concurrent lanes and this script's own SQL*Plus probes are
+# excluded by construction.
+server_logoff_rows() {
+  local module="$1"
+  sys_value "count(*)" "from ${FIXTURE_USER}.ORACLEMCP_D9_LOGOFF_LOG where module='${module}'"
+}
+
+live_server_sessions() {
+  local module="$1"
+  sys_value "count(*)" "from v\$session where username='${FIXTURE_USER}' and module='${module}'"
+}
+
+# Runs the server, drives one real query so the pinned session exists (pool
+# min_idle eagerly establishes the stateless session during profile connect),
+# and shuts it down in the requested way. Echoes
+# "<pinned_sid> <live_sessions> <delta> <ghosts> <module>".
 run_mode() {
-  local mode="$1" before after sid alive srv
-  before="$(server_logoff_rows)"
+  local mode="$1" module before after sid alive ghosts srv
+  module="$(session_module "$mode")"
+  setup_workspace "$module"
+  before="$(server_logoff_rows "$module")"
 
   rm -f "$WORK/fin" "$WORK/fout"
   mkfifo "$WORK/fin" "$WORK/fout"
@@ -113,7 +138,7 @@ for line in sys.stdin:
         print(d['result']['structuredContent']['rows'][0]['SID'])
 " | head -1)"
 
-  alive="$(sys_value "count(*)" "from v\$session where sid=${sid:-0} and username='${FIXTURE_USER}'")"
+  alive="$(live_server_sessions "$module")"
 
   case "$mode" in
     clean) exec 9>&- ;;                         # stdin EOF: the orderly path
@@ -123,42 +148,43 @@ for line in sys.stdin:
   wait "$srv" 2>/dev/null
   [ "$mode" = "clean" ] || exec 9>&-
 
-  after="$(server_logoff_rows)"
-  printf '%s %s %s\n' "${sid:-none}" "${alive:-0}" "$(( ${after:-0} - ${before:-0} ))"
+  after="$(server_logoff_rows "$module")"
+  ghosts="$(live_server_sessions "$module")"
+  printf '%s %s %s %s %s\n' "${sid:-none}" "${alive:-0}" "$(( ${after:-0} - ${before:-0} ))" "${ghosts:-0}" "$module"
 }
 
 assert_mode() {
-  local mode="$1" expect="$2" result sid alive delta
+  local mode="$1" expect="$2" result sid alive delta ghosts module
   result="$(run_mode "$mode")"
   sid="$(printf '%s' "$result" | awk '{print $1}')"
   alive="$(printf '%s' "$result" | awk '{print $2}')"
   delta="$(printf '%s' "$result" | awk '{print $3}')"
+  ghosts="$(printf '%s' "$result" | awk '{print $4}')"
+  module="$(printf '%s' "$result" | awk '{print $5}')"
 
   # The guard. Without a session there is nothing to close, and "no row" would
-  # be true of a server that never touched the database.
-  if [ "$sid" = "none" ] || [ "${alive:-0}" -lt 1 ]; then
-    bad "$mode: could not prove the server held a live session (sid=$sid, v\$session=$alive) — a missing logoff row would mean nothing"
+  # be true of a server that never touched the database. B7b requires both
+  # server-owned surfaces to be present before interpreting any teardown result:
+  # pinned oracle_query plus the server-owned stateless pool's min_idle session.
+  if [ "$sid" = "none" ] || [ "${alive:-0}" -lt 2 ]; then
+    bad "$mode: could not prove the server held pinned + pooled live sessions (module=$module, pinned_sid=$sid, v\$session=$alive) — a missing or partial logoff row would mean nothing"
     return
   fi
 
   case "$expect" in
     row)
-      if [ "${delta:-0}" -ge 1 ]; then
-        ok "$mode: session $sid was live and the database recorded a LOGICAL CLOSE (+$delta row)"
+      if [ "${delta:-0}" -ge 2 ] && [ "${ghosts:-0}" -eq 0 ]; then
+        ok "$mode: pinned sid $sid and pooled session were live; database recorded LOGICAL CLOSE for both (+$delta rows, no v\$session ghosts)"
+      elif [ "${delta:-0}" -ge 2 ]; then
+        bad "$mode: pinned + pooled sessions logged off (+$delta rows) but ${ghosts:-0} v\$session row(s) remained for module $module"
       else
-        bad "$mode: session $sid was live but the database recorded NO logoff — the server dropped the socket instead of releasing the session"
+        bad "$mode: pinned + pooled sessions were live but the database recorded only ${delta:-0} logoff row(s) — one server-owned surface did not release logically"
       fi ;;
     no_row)
       if [ "${delta:-0}" -eq 0 ]; then
-        ok "$mode: session $sid was live and the database recorded NO logoff, as an abrupt end must look"
+        ok "$mode: pinned sid $sid and pooled session were live; database recorded NO logoff, as an abrupt end must look"
       else
         bad "$mode: an abrupt end produced $delta logoff row(s); the lane cannot distinguish clean from abrupt"
-      fi ;;
-    record)
-      if [ "${delta:-0}" -ge 1 ]; then
-        note "$mode: session $sid closed LOGICALLY (+$delta row). If this used to leak, the fix has landed — update this lane deliberately."
-      else
-        bad "$mode: RECORDED LEAK — session $sid was live and the server exited on SIGTERM without the database observing a logical close. systemd stops the service with SIGTERM, so every service stop leaks its session to PMON."
       fi ;;
   esac
 }
@@ -166,12 +192,11 @@ assert_mode() {
 main() {
   command -v docker >/dev/null 2>&1 || { echo "docker is required" >&2; exit 2; }
   [ -x "$BIN" ] || { echo "no oraclemcp binary at $BIN (build it, or set ORACLEMCP_D7_BIN)" >&2; exit 2; }
-  setup_workspace
 
   echo "D7 AFTER LOGOFF lane against ${CONTAINER}/${PDB}"
   assert_mode clean row      # the orderly path must be observable
   assert_mode kill  no_row   # the control: abrupt must look different
-  assert_mode term  record   # the acceptance case, currently the failing half
+  assert_mode term  row      # service-manager shutdown must release both surfaces
 
   if [ "$FINDINGS" -ne 0 ]; then
     echo "FAIL verify_logoff_lane: $FINDINGS finding(s)" >&2
