@@ -231,10 +231,28 @@ with open(path, "w", encoding="utf-8") as handle:
 }
 
 gate_verdict() {
-  local repo path
+  local repo path head recorded
   repo="$(repo_root)"
   path="$(verdict_path "$repo")"
   [[ -f "$path" ]] || die "no gate verdict recorded yet at $path"
+  head="$(git -C "$repo" rev-parse HEAD)"
+  recorded="$("$PYTHON_BIN" -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        print(json.load(handle).get("sha", ""))
+except (OSError, ValueError):
+    print("")
+' "$path")"
+  # A STALE VERDICT IS WORSE THAN NO VERDICT. An absent one blocks safely: the
+  # reader knows nothing was gated. One that describes a DIFFERENT commit looks
+  # present, reads "pass", and is how someone pushes on evidence that was never
+  # about the code in front of them. This bit us: the tool printed a verdict for
+  # an unrelated SHA while HEAD had never been gated at all.
+  if [[ "$recorded" != "$head" ]]; then
+    local shown="${recorded:-<unreadable>}"
+    refuse "the recorded verdict describes ${shown:0:12}, not HEAD ${head:0:12}; it does not gate what you are about to push — re-run the gate at HEAD"
+  fi
   cat "$path"
 }
 
@@ -775,13 +793,42 @@ PY
   # read "unset" whether or not the runner leaked, and passed against a
   # deliberately re-broken runner. The variable must actually be SET for the
   # question to mean anything.
+  # RUN IT INSIDE THE THROWAWAY REPO. verified-push writes its verdict to the
+  # git common dir of whatever repository it runs in, so invoking it here in the
+  # REAL checkout made the selftest overwrite this repository's gate verdict with
+  # a fabricated failing one for HEAD — a verdict that misrepresents, which is
+  # the exact thing the stale-verdict check below exists to prevent. A test must
+  # not forge the evidence its own subject is judged by.
   local observed="$work/gate-env-observed"
-  ORACLEMCP_GATE_CMD="printf %s \"\${ORACLEMCP_GATE_CMD-ABSENT}\" >'$observed'; false" \
-    bash "$ROOT/scripts/swarm_discipline.sh" verified-push -- origin HEAD >/dev/null 2>&1 || true
+  ( cd "$work" \
+      && ORACLEMCP_GATE_CMD="printf %s \"\${ORACLEMCP_GATE_CMD-ABSENT}\" >'$observed'; false" \
+         bash "$ROOT/scripts/swarm_discipline.sh" verified-push -- origin HEAD ) >/dev/null 2>&1 || true
   [[ -f "$observed" ]] || die "selftest: the gate never ran, so its environment proves nothing"
   [[ "$(cat "$observed")" == "ABSENT" ]] \
     || die "selftest: the gate saw ORACLEMCP_GATE_CMD=$(cat "$observed"); the runner leaks its own config into the gate"
   printf 'PASS selftest: the gate subprocess cannot see the runner own config variable\n'
+
+  # A STALE VERDICT MUST NOT READ AS A VERDICT. An absent one blocks safely --
+  # the reader knows nothing was gated. One naming a DIFFERENT commit looks
+  # present and says "pass", which is how a push happens on evidence that was
+  # never about the code being pushed. Both directions are checked, because a
+  # gate_verdict that refused everything would be equally useless.
+  local verdict_repo verdict_file verdict_head
+  verdict_repo="$work"
+  verdict_file="$(git -C "$verdict_repo" rev-parse --path-format=absolute --git-common-dir)/oraclemcp-gate-verdict.json"
+  verdict_head="$(git -C "$verdict_repo" rev-parse HEAD)"
+
+  write_verdict "$verdict_file" "$verdict_head" 'true' pass 0 't0' 't1'
+  status=0
+  ( cd "$verdict_repo" && bash "$ROOT/scripts/swarm_discipline.sh" gate-verdict ) >/dev/null 2>&1 || status=$?
+  (( status == 0 )) || die "selftest: a verdict recorded AT HEAD was refused (exit $status)"
+  printf 'PASS selftest: a verdict whose sha is HEAD is accepted\n'
+
+  write_verdict "$verdict_file" "$(printf '0%.0s' {1..40})" 'true' pass 0 't0' 't1'
+  status=0
+  ( cd "$verdict_repo" && bash "$ROOT/scripts/swarm_discipline.sh" gate-verdict ) >/dev/null 2>&1 || status=$?
+  (( status == 65 )) || die "selftest: a verdict for a DIFFERENT sha was accepted (exit $status); a stale verdict must never read as a verdict"
+  printf 'PASS selftest: a verdict describing another commit is refused\n'
 }
 
 command_name="${1:-}"
