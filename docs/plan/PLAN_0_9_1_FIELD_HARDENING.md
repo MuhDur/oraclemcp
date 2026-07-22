@@ -1,8 +1,8 @@
-# PLAN — oraclemcp 0.9.1 / driver 0.9.0: field-hardening, self-sufficient testing, OCI
+# PLAN — oraclemcp 0.10.0 / driver 0.9.0: field-hardening, self-sufficient testing, OCI
 
 **Version:** v5 (v2: review round 1 — CI-red ground truth → Workstream Z, P2 tail → Workstream P, P1-2 grounded, 17/17 Appendix-A claims re-verified. v3: inferred-sibling sweep S1–S15 → §A.10, new B14/B15/B16. v4: **Workstream R — the Local Integrator Rig**. v5: **operator rulings recorded on every open decision** (marked "OPERATOR RULING (2026-07-20)" inline), Z1 RESOLVED in-session — root cause was CI shallow checkout, `codex/d2-completion` landed as `5a52bf6`+`3f057e2`, `ci.yml` fetch-depth fixed — and the driver bug-bead un-deferral ruling folded as G12). **Date:** 2026-07-20.
 **Owner:** lead orchestrator. **Release is operator-gated** — agents never tag or publish.
-**v7 delta (2026-07-21):** the Z2 fresh mutation campaign is **DEFERRED OUT of 0.9.1** (operator
+**v7 delta (2026-07-21):** the Z2 fresh mutation campaign is **DEFERRED OUT of 0.10.0** (operator
 ruling) — a seal binds to a SHA and would re-stale on every safety-crate fix, so it is produced once
 on the release candidate. **Deferring the campaign does NOT defer green-main:** the per-push
 `E_STALE_SEAL` check is gated behind `ALLOW_STALE_MUTATION_SEAL=1`, set in `ci.yml` only (development
@@ -26,6 +26,12 @@ cannot-reproduce residue are pre-authorized RC deferrals, exempt from the publis
 (§10). (5) **A5 pairing-page implementation pinned** to `Referrer-Policy: same-origin` on that one
 page (a `pairing.js` would abandon the advertised script-free property). (6) **B11 rider:**
 release-note the `oracle_capabilities` compact default — it changes the mandated first call.
+**v9 correction (2026-07-22):** the server side of this train is **0.10.0, not
+0.9.1**. `cargo-semver-checks` found major public-API findings against the
+published 0.9.0 server crates after the intended lease-removal and metadata
+bounding changes, so the artifact shipped as 0.10.0. This is a naming
+correction to keep the plan/tracker train name aligned with the shipped
+artifact; it does not change Cargo version metadata.
 
 **How to use this document.** It is written to be self-contained: an agent that has never seen this
 project should be able to pick any task here and implement it without asking a human. Every task names
@@ -67,7 +73,7 @@ failure on the HEAD run. The "full local gate ✅" row above is true and insuffi
 ### 1.2 Bead inventory (oraclemcp `.beads/issues.jsonl`, 51 open/in_progress)
 | Group | Count | Disposition in this plan |
 |---|---:|---|
-| F-LOW children `7.11.1..20` (P3 real defects, `file:line` specified) | 20 | Workstream G3 — triaged, not all in 0.9.1 |
+| F-LOW children `7.11.1..20` (P3 real defects, `file:line` specified) | 20 | Workstream G3 — triaged, not all in 0.10.0 |
 | Epics (close as children drain) | 11 | Bookkeeping; close at the end |
 | Work beads | 11 | Workstreams G1/G2/G4–G9 + H (bead `13`) |
 | Cluster I — OCI Always-Free e2e | 4 | **Workstream F (in scope)** |
@@ -77,11 +83,11 @@ Driver beads (**corrected in review round 1**): the driver tracker holds **83 de
 including `rust-oracledb-4sfc` (retry-masking; §4.B5) and `rust-oracledb-s0se` (close_notify;
 §A.6.11), both currently `deferred` with **uncommitted close-evidence files already sitting in the
 driver working tree** (`tests/artifacts/evidence/closes/…` — see Z4). All other deferred driver beads
-stay deferred (operator ruling); the deferred `0.8.5`-named driver release beads (`5jdu`/`5swy`) are
+stay deferred (operator ruling); the obsolete patch-named driver release beads are
 retitled per §7 at bead conversion. Also relevant: deferred server bead `oraclemcp-vzui` (Windows
 `file_store` durable-state "Access is denied") — see Z3.
 
-The 11 work beads: `plan-bead-graph-lint-eshv` (P0), `13` release train (P1, versions now fixed: driver 0.9.0 / server 0.9.1), `5.2` D2 coverage
+The 11 work beads: `plan-bead-graph-lint-eshv` (P0), `13` release train (P1, versions now fixed: driver 0.9.0 / server 0.10.0), `5.2` D2 coverage
 ratchet (P1), `8.1` G1 IAM subject-mapping (P1), `4.3` C3 stash triage, `4.5` C5 moves/renames,
 `4.6` C6 de-monolith, `5.4` D4 fuzz shard (reopened for a cold-start proof), `8.2` G2 Live-nightly
 streak, `12.3` K3 attestation lanes (P3), `izk5` stale driver-version comment (P3).
@@ -210,7 +216,7 @@ base. Nothing else in this plan can show honest green until Z lands (constitutio
   **Rule (stays; goes into AGENTS.md alongside §A.8):** close evidence must cite commits **reachable
   from `origin/main`** at close time — the shallow-checkout episode proves the reachability check
   must also run against a full-history view.
-- **Z2 [DEFERRED OUT OF 0.9.1 — OPERATOR RULING (2026-07-21)]. The fresh five-surface mutation
+- **Z2 [DEFERRED OUT OF 0.10.0 — OPERATOR RULING (2026-07-21)]. The fresh five-surface mutation
   campaign is removed from this plan's scope entirely.** Rationale (recorded): a mutation seal binds
   to an exact source SHA, and this plan's A/B workstreams change the safety crates (guard, audit, db,
   dispatch) repeatedly — so a seal produced now would be re-staled by the first safety-crate fix and
@@ -739,7 +745,7 @@ escape hatch. The fix pattern already exists in-product: `oracle_search_objects`
 **v8 rider:** the `oracle_capabilities` compact default changes the response of the **mandated
 first call** every fresh agent makes (the server's own `instructions` field sends them there) —
 release-note it alongside A1a's blast-radius note, and keep `detail_level:"full"` returning the
-pre-0.9.1 shape so pinned clients have a one-flag escape.
+pre-0.10.0 shape so pinned clients have a one-flag escape.
 
 **Round-2 caps matrix (§A.10) — extend the same treatment to the uncapped metadata tools:**
 `oracle_compile_errors` is UNCAPPED and schema-wide when `name` is omitted
@@ -1170,7 +1176,7 @@ risk this machine. Two tiers:
 
 **Placement: Tier-3 operator/nightly lane, NEVER required CI** (same posture as F3) — the rig must
 not be able to red the front page; the required-lanes-only heartbeat is preserved.
-**Phasing:** 0.9.1 = R1 + R2 (free23 lane) + R3 + R4 + D9, **plus R5-lite on the release candidate**
+**Phasing:** 0.10.0 = R1 + R2 (free23 lane) + R3 + R4 + D9, **plus R5-lite on the release candidate**
 (in-train per the 2026-07-20 ruling). Deferred: the multi-generation sweep matrix, the FULL R5
 harness matrix (`claude -p` / opencode), the HTTPS+mTLS+OAuth browser matrix (needs B1/B15 landed
 first), chaos beyond idle-kill/token-expiry.
@@ -1239,7 +1245,7 @@ authoritative AVAILABLE=0 check before and after every run.
 ### Workstream G — Remaining beads
 
 - **G1 [P1] `8.1` IAM subject-mapping config** (`he7t` residual) — last product gap from the OCI/IAM work.
-- **G2 [P1] `5.2` D2 coverage ratchet — changed-line leg only in 0.9.1; mutation-floor leg DEFERRED
+- **G2 [P1] `5.2` D2 coverage ratchet — changed-line leg only in 0.10.0; mutation-floor leg DEFERRED
   with Z2.** The changed-line-coverage leg (coverage on modified `src/*.rs` lines gated at the crate
   floor) stays in scope. The per-crate **mutation kill-rate floor** leg depends on the
   `check-floor-report` seal, which requires the fresh campaign now deferred (§Z2) — so it defers to
@@ -1309,7 +1315,7 @@ authoritative AVAILABLE=0 check before and after every run.
 See §7 for the version decision, §9 for the gate.
 
 **OPERATOR RULING (2026-07-20): publishing is the LAST bead, full stop.** The two publish beads —
-driver **0.9.0** and server **0.9.1** — are the bead graph's terminal sinks: **every other bead in
+driver **0.9.0** and server **0.10.0** — are the bead graph's terminal sinks: **every other bead in
 the converted graph is their ancestor** (directly or transitively). Nothing tags, nothing
 publishes, until all P0/P1 work, the rig's §9.2 acceptance run, and every non-deferred bead are
 done. §10's conversion requirements enforce this structurally.
@@ -1377,31 +1383,36 @@ Add regression coverage for anything above that a planned change comes near.
 
 ## 7. Release-scope decision (operator ruling recorded 2026-07-20)
 
-Bead `13` specifies **strictly patch**: `cargo-semver-checks` must stay at patch, and if it flags minor
-the change is reworked patch-safe or held — never silently bumped.
+Bead `13` originally specified **strictly patch**: `cargo-semver-checks` must stay at patch, and if it flags minor
+the change is reworked patch-safe or held — never silently bumped. The server-side result was later corrected by semver evidence rather than preference.
 
 **Complication discovered today:** the driver's public source inventory went **908 → 915** items with the
 stage-aware TLS work already on `main`. Added public API is *minor*-compatible, not patch.
 
 **OPERATOR DECISION (2026-07-20): driver → `0.9.0`, server → `0.9.1`.**
+**CORRECTION (2026-07-22): driver remains `0.9.0`, server train name is `0.10.0`.**
 
 - **Driver `0.8.4 → 0.9.0`** — a **minor** bump. This is the honest call: the stage-aware TLS work
   already on `main` grew the public source inventory 908 → 915, and this plan adds more (B6 platform
   trust anchors, B7 teardown hooks). A minor bump removes the incentive to contort real improvements
   into patch-safe shapes.
-- **Server `0.9.0 → 0.9.1`** — `+0.0.1` as instructed.
+- **Server `0.9.0 → 0.10.0`** — a semver-required minor bump. `cargo-semver-checks`
+  found public-API major findings against published 0.9.0 after the intended
+  lease-subsystem removal and metadata-bounding changes. On a 0.x line, those
+  findings force the minor position; the shipped artifact is therefore 0.10.0.
 
 **Consequences, and they are deliberate:**
 1. Bead `13`'s original "STRICTLY patch, rework or hold if semver-checks flags minor" constraint is
-   **superseded for the driver** by this ruling. It still applies to the **server**: if a server change
-   forces a minor, it is reworked patch-safe or held — the server is `+0.0.1`.
+   **superseded for the driver** by the 2026-07-20 ruling and **superseded for
+   the server** by the 2026-07-22 semver evidence. Future scope discipline
+   still applies: the rename does not authorize unrelated API churn.
 2. `cargo-semver-checks` still runs on both, but its role changes: for the driver it **documents** the
-   surface delta (and must show no *breaking* change — 0.9.0 is minor, not major); for the server it
-   **gates**.
+   surface delta (and must show no *breaking* change — 0.9.0 is minor, not major). For the server it
+   forced the correction from 0.9.1 to 0.10.0.
 3. The server's `oracledb` dependency pin moves to `=0.9.0`; the release-surface sync check and the
    driver-version references (bead `izk5`, `doctor.rs` comments) must be updated in the same train.
-   Bead titles still carrying `0.8.5` — server bead `13` and the deferred driver release beads
-   `5jdu`/`5swy` — are retitled to the ruled versions during bead conversion (§10).
+   Bead titles still carrying obsolete patch-train names are retitled to the
+   ruled versions during bead conversion (§10).
 4. **Any breaking change in the driver is out of scope.** 0.9.0 is additive-only. If something requires
    a break, it waits for 1.0 (the `road-to-1-0` line, still deferred).
 
@@ -1482,10 +1493,10 @@ operator "go" — do not ask for it; wait for it.** Requirements:
 - **no bead closes without landed evidence** (§9.2 item 6), and evidence SHAs must be reachable from
   `origin/main` (Z1's rule);
 - Workstream P converts to **individually-closable** P2/P3 beads — no umbrella bead;
-- bead titles still saying `0.8.5` (server `13`, driver `5jdu`/`5swy`) are retitled per §7;
+- bead titles still carrying obsolete patch-train names are retitled per §7;
 - G12's driver bug beads are un-deferred (not re-created) and G13's server duplicates are
   dedup-closed against their `7.11.x` canonicals — one bead per defect, ever;
-- **the two publish beads (driver 0.9.0, server 0.9.1) are the graph's terminal sinks** — every
+- **the two publish beads (driver 0.9.0, server 0.10.0) are the graph's terminal sinks** — every
   other non-deferred bead is made their ancestor, so `br ready` can never surface publishing while
   anything else is open (operator ruling 2026-07-20; G9's lint verifies the sink property).
   **v8 sink exceptions (operator no-stall ruling 2026-07-21):** exactly three beads are NOT sink
@@ -2374,7 +2385,7 @@ checks.
 `marker v=2 source=4dca0b2… scopes=guard,audit files=27 mutants=1889 shards=3/3 status=stale` →
 `E_STALE_SEAL: committed mutation marker status=stale; a fresh complete five-surface campaign is
 required` (`scripts/mutation_safety_gate.sh`). **Disposition: DEFERRED (§Z2, operator ruling
-2026-07-21)** — the fresh seal is produced once on the release candidate, not in 0.9.1. Per-push CI
+2026-07-21)** — the fresh seal is produced once on the release candidate, not in 0.10.0. Per-push CI
 goes green via `ALLOW_STALE_MUTATION_SEAL` (set in `ci.yml` only, loud warning); the release path
 never sets it, so an actual release still enforces a fresh seal.
 
