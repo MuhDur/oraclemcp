@@ -1,0 +1,88 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T07:47:37Z",
+  "bead_id": "oraclemcp-091-b7c-trait-close-w2yo6",
+  "scope": {
+    "summary": "OracleConnection now requires explicit logical close implementations and the server shutdown/profile/pool lifecycle drives them instead of relying on drop.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/connection.rs",
+      "crates/oraclemcp-db/src/pool.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp-core/src/lane.rs",
+      "crates/oraclemcp-core/src/server.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/Cargo.toml",
+      "Cargo.lock"
+    ],
+    "out_of_scope": [
+      "B7a logoff/session_release hooks",
+      "B7b pooled installed-service proof beyond the D7 stdio lane",
+      "driver source changes in the sibling rust-oracledb repo"
+    ]
+  },
+  "source": {
+    "sha": "7e20771b907bd3e6556a723f5128e5b3dc31acd8",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "OracleConnection trait and thin adapter close path",
+        "kind": "api",
+        "trace": "Commit 2746b6c1 makes OracleConnection::close required instead of a default no-op, implements it across production/test backends, and RustOracleConnection delegates to the published driver's consuming Connection::close path."
+      },
+      {
+        "name": "Pool, dispatcher, lane, and stdio shutdown lifecycle",
+        "kind": "api",
+        "trace": "Commit 2746b6c1 closes retired pool/dispatcher sessions; commit 7e20771b makes LaneRuntime and StatefulLaneDispatch close their owning lanes, exposes OracleMcpServer::close_blocking, and calls it on stdio EOF plus SIGTERM/SIGINT."
+      },
+      {
+        "name": "cargo fmt --all -- --check",
+        "kind": "cli",
+        "trace": "Passed after the B7c/D7 shutdown changes."
+      },
+      {
+        "name": "CARGO_TARGET_DIR=target cargo check -p oraclemcp-db",
+        "kind": "cli",
+        "trace": "Passed after making OracleConnection::close required and explicit across the DB crate."
+      },
+      {
+        "name": "CARGO_TARGET_DIR=target cargo check -p oraclemcp-core && CARGO_TARGET_DIR=target cargo check -p oraclemcp",
+        "kind": "cli",
+        "trace": "Both scoped checks passed after the lane/server/stdout shutdown close changes."
+      },
+      {
+        "name": "scripts/swarm_discipline.sh bounded-run --timeout 300 -- scripts/rig/verify_logoff_lane.sh",
+        "kind": "cli",
+        "trace": "Passed against rust-oracledb-free/FREEPDB1: clean EOF produced +1 logoff row, SIGKILL produced 0 rows as the abrupt-control, and SIGTERM produced +1 logoff row."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "d7-logoff-lane-transcript",
+        "path": "tests/artifacts/evidence/d7-logoff-lane-2026-07-22.txt",
+        "sha": "7e20771b907bd3e6556a723f5128e5b3dc31acd8"
+      }
+    ]
+  },
+  "limitations": [
+    "The D7 lane is a stdio/process SIGTERM proof against the existing Free23 container, not an installed systemd service run.",
+    "The live D7 lane drives the single stateful stdio session; broader pooled installed-service proof remains in B7b/D7 follow-on scope.",
+    "The full workspace gate was not run because this shared checkout has unrelated in-flight panes."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-b7b-logoff-verify-1w3pn",
+    "oraclemcp-091-b7a-logoff-hooks-k9jhg"
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}

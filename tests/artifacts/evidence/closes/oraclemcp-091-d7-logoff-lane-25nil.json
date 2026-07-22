@@ -1,0 +1,75 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T07:47:37Z",
+  "bead_id": "oraclemcp-091-d7-logoff-lane-25nil",
+  "scope": {
+    "summary": "The D7 AFTER LOGOFF lane is wired and now proves clean EOF, abrupt SIGKILL control, and SIGTERM logical close against the synthetic D9 Free23 fixture.",
+    "in_scope": [
+      "scripts/rig/verify_logoff_lane.sh",
+      "crates/oraclemcp-core/src/lane.rs",
+      "crates/oraclemcp-core/src/server.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/Cargo.toml",
+      "Cargo.lock"
+    ],
+    "out_of_scope": [
+      "Installed systemd service stop path",
+      "Pooled HTTP/read-worker logoff proof",
+      "Any sibling rust-oracledb driver source change"
+    ]
+  },
+  "source": {
+    "sha": "7e20771b907bd3e6556a723f5128e5b3dc31acd8",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/rig/verify_logoff_lane.sh",
+        "kind": "cli",
+        "trace": "The lane drives a real oracle_query, reads the server session SID, requires that session to be visible in v$session, then compares logoff-trigger row deltas by non-SQL*Plus module attribution."
+      },
+      {
+        "name": "scripts/swarm_discipline.sh bounded-run --timeout 300 -- scripts/rig/verify_logoff_lane.sh",
+        "kind": "cli",
+        "trace": "Passed against rust-oracledb-free/FREEPDB1: clean session 237 was live and recorded +1 logical-close row; SIGKILL session 237 was live and recorded 0 rows; SIGTERM session 237 closed logically with +1 row."
+      },
+      {
+        "name": "CARGO_TARGET_DIR=target cargo build -p oraclemcp",
+        "kind": "cli",
+        "trace": "Built target/debug/oraclemcp before the passing D7 lane run."
+      },
+      {
+        "name": "cargo fmt --all -- --check && CARGO_TARGET_DIR=target cargo check -p oraclemcp-core && CARGO_TARGET_DIR=target cargo check -p oraclemcp",
+        "kind": "cli",
+        "trace": "All scoped format/check gates passed for the code paths that make stdio EOF and SIGTERM call lane logical close."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "d7-logoff-lane-transcript",
+        "path": "tests/artifacts/evidence/d7-logoff-lane-2026-07-22.txt",
+        "sha": "7e20771b907bd3e6556a723f5128e5b3dc31acd8"
+      }
+    ]
+  },
+  "limitations": [
+    "The lane uses the existing synthetic D9 Free23 fixture in rust-oracledb-free/FREEPDB1.",
+    "The lane proves stdio clean EOF and process SIGTERM; installed service/systemd and pooled HTTP surfaces remain outside this D7 close.",
+    "The full workspace gate was not run because this shared checkout has unrelated in-flight panes."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-b7b-logoff-verify-1w3pn"
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}
