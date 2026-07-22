@@ -1,0 +1,80 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:56:48Z",
+  "bead_id": "oraclemcp-n4rnp",
+  "scope": {
+    "summary": "Normalizes the full engineering-program import manifest from live tracker provenance and validates it with the plan-bead-graph/v2 lint.",
+    "in_scope": [
+      "scripts/eng_program_manifest_build.py",
+      "scripts/plan_bead_graph_lint.py",
+      "engineering-program-manifest.json",
+      "tests/artifacts/plan_graph/engineering-program-manifest-lint.txt"
+    ],
+    "out_of_scope": [
+      "No Beads status changes were made for any imported task other than closing this bead through the guarded path.",
+      "No promotion was applied; the manifest remains a read-only import/reuse plan.",
+      "No sibling rust-oracledb repository files or driver dependency overrides were touched.",
+      "Unrelated shared-checkout dirty files were not used as evidence."
+    ]
+  },
+  "source": {
+    "sha": "51db5ca99797f442a777f85d4117f8f4ffa6b22b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "manifest builder selftest",
+        "kind": "cli",
+        "trace": "`python3 scripts/eng_program_manifest_build.py --selftest` exited 0 and printed `eng_program_manifest_build selftest: OK (normalizes tracker/plan provenance; fabrication is detectable; no tracker mutation)`."
+      },
+      {
+        "name": "plan-bead-graph lint selftest",
+        "kind": "cli",
+        "trace": "`python3 scripts/plan_bead_graph_lint.py --selftest` exited 0 with 15 mutation checks, including missing acceptance text, release target disagreement, label dot rejection, same-repository handoff rejection, promoted task depending on a deferred task, and dangling live tracker edge rejection."
+      },
+      {
+        "name": "plan-bead-graph regression test",
+        "kind": "cli",
+        "trace": "`python3 scripts/test_plan_bead_graph_lint.py` exited 0 with 8/8 tests passed."
+      },
+      {
+        "name": "manifest generation",
+        "kind": "cli",
+        "trace": "`python3 scripts/eng_program_manifest_build.py --out engineering-program-manifest.json --punch-list` exited 0, wrote 174 tasks, and printed `174/174 tasks fully authored` with missing scope=0, missing acceptance=0, missing evidence=0."
+      },
+      {
+        "name": "committed manifest lint",
+        "kind": "cli",
+        "trace": "`python3 scripts/plan_bead_graph_lint.py --manifest engineering-program-manifest.json | tee tests/artifacts/plan_graph/engineering-program-manifest-lint.txt` exited 0 and saved a PASS line for program=engineering-program, tasks=174, repositories=1, promotions=deferred:2,excluded:124,held:48, hard=0."
+      },
+      {
+        "name": "python bytecode compile",
+        "kind": "cli",
+        "trace": "`python3 -m py_compile scripts/eng_program_manifest_build.py scripts/plan_bead_graph_lint.py` exited 0."
+      },
+      {
+        "name": "diff hygiene",
+        "kind": "cli",
+        "trace": "`git diff --check -- scripts/eng_program_manifest_build.py scripts/plan_bead_graph_lint.py engineering-program-manifest.json tests/artifacts/plan_graph/engineering-program-manifest-lint.txt` exited 0."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The manifest evidence anchors for unfinished beads prove the import mapping and source provenance; they are not task-completion proof for those beads.",
+    "The manifest records read-only reuse dispositions only. It does not open, close, defer, undefer, or promote any imported bead."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
