@@ -1271,6 +1271,24 @@ fn sanitized_detail(ctx: &DoctorContext, detail: impl Into<String>) -> String {
     crate::redacted::redact_exact_substrings(&detail.into(), &ctx.sensitive_values)
 }
 
+fn sanitized_detail_with_extra_values(
+    ctx: &DoctorContext,
+    detail: impl Into<String>,
+    extra_values: &[String],
+) -> String {
+    if extra_values.is_empty() {
+        return sanitized_detail(ctx, detail);
+    }
+    let mut sensitive_values = ctx.sensitive_values.clone();
+    sensitive_values.extend(
+        extra_values
+            .iter()
+            .filter(|value| !value.is_empty())
+            .cloned(),
+    );
+    crate::redacted::redact_exact_substrings(&detail.into(), &sensitive_values)
+}
+
 fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
     match (&ctx.tns_admin, &ctx.wallet_location) {
         (None, None) => CheckResult::new(
@@ -2348,10 +2366,16 @@ fn rls_vpd_check_from_observation(
     ctx: &DoctorContext<'_>,
     observation: OracleVpdRlsObservation,
 ) -> CheckResult {
+    let mut runtime_sensitive_values = Vec::new();
     let session = observation
         .session
         .as_ref()
         .map(|session| {
+            runtime_sensitive_values.push(session.session_user.clone());
+            runtime_sensitive_values.push(session.current_schema.clone());
+            if let Some(edition_name) = &session.edition_name {
+                runtime_sensitive_values.push(edition_name.clone());
+            }
             format!(
                 "session_user={}, current_schema={}, edition={}, enabled_roles={}",
                 session.session_user,
@@ -2377,12 +2401,13 @@ fn rls_vpd_check_from_observation(
     } else {
         format!("visible_policies={named}")
     };
-    let detail = sanitized_detail(
+    let detail = sanitized_detail_with_extra_values(
         ctx,
         format!(
             "{session}; {}; {}; {}",
             observation.detail, observation.all_policies_probe.detail, visible
         ),
+        &runtime_sensitive_values,
     );
     match observation.status {
         OracleVpdRlsObservationStatus::PoliciesObserved => CheckResult::new(
@@ -3731,8 +3756,18 @@ mod tests {
             check.detail
         );
         assert!(
-            check.detail.contains("session_user=ORACLEMCP_D3_SIGHTED"),
-            "{}",
+            check.detail.contains("session_user=<redacted>"),
+            "runtime-observed session users must be redacted: {}",
+            check.detail
+        );
+        assert!(
+            !check.detail.contains("ORACLEMCP_D3_SIGHTED"),
+            "runtime-observed session user leaked: {}",
+            check.detail
+        );
+        assert!(
+            !check.detail.contains("ORACLEMCP_D3_OWNER"),
+            "runtime-observed current schema leaked: {}",
             check.detail
         );
     }
