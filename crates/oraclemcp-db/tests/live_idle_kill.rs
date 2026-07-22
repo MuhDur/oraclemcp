@@ -1,17 +1,18 @@
 //! D5 — the idle-kill lane: prove the server survives a session killed out from
-//! under it, on BOTH surfaces, asserted separately.
+//! under its stateless pool.
 //!
-//! The two surfaces are not the same code path and must not be proven by the
-//! same test (plan §A.6.9 settles the architecture: **the pinned session is NOT
-//! pooled** — it is a single long-lived connection whose only recovery today is
-//! an explicit profile switch, and the field's P0-5 symptom ran on that path):
+//! The pooled and pinned surfaces are not the same code path and must not be
+//! proven by the same test (plan §A.6.9 settles the architecture: **the pinned
+//! session is NOT pooled** — it is a single long-lived connection whose only
+//! recovery today is an explicit profile switch, and the field's P0-5 symptom
+//! ran on that path):
 //!
 //! - **pooled** (A4a, validate-on-checkout): a dead session must be replaced
 //!   transparently. The caller holds no session state, so silence is correct.
-//! - **pinned** (A4e, audited recycle): a dead session must NOT be swapped
-//!   underneath a caller that is mid-transaction. Silently rebinding a lease to
-//!   a fresh session is how a caller ends up issuing statements — and then a
-//!   COMMIT — in a transaction it did not start and cannot see.
+//! - **pinned** (A4e, audited recycle): covered at the dispatcher surface in
+//!   `crates/oraclemcp/tests/live_dispatcher_idle_kill.rs`, because the
+//!   production pinned session is `DispatcherState.conn`, not the deleted test
+//!   lease subsystem.
 //!
 //! Run against the rig: `bash scripts/rig/oracle_l1.sh up` then
 //! `cargo test -p oraclemcp-db --features live-xe --test live_idle_kill`,
@@ -21,10 +22,10 @@
 //!
 //! # The lane can fail on purpose
 //!
-//! `ORACLEMCP_D5_SKIP_KILL=1` runs everything EXCEPT the kill. Both halves must
-//! then FAIL — the pooled one because the same `(sid, serial#)` comes back, the
-//! pinned one because COMMIT succeeds. A lane whose kill silently stopped
-//! landing would otherwise go green forever while proving nothing.
+//! `ORACLEMCP_D5_SKIP_KILL=1` runs everything EXCEPT the kill. The pooled lane
+//! must then FAIL because the same `(sid, serial#)` comes back. A lane whose
+//! kill silently stopped landing would otherwise go green forever while proving
+//! nothing.
 //!
 //! # What this lane found on first run (XE21, 2026-07-21)
 //!
@@ -39,17 +40,9 @@
 //!   after the caller's statement has already failed once, which is only safe
 //!   for a replayable statement. A4a moves the check earlier; it does not
 //!   introduce recovery that was missing.
-//! - pinned: COMMIT was refused with
-//!   `Quarantined { outcome: CommitInDoubt, message: "commit failed; lease
-//!   discarded: Oracle connection lost: ..." }` — already a typed envelope, not
-//!   a raw driver leak, and the lease was discarded rather than rebound. The
-//!   same `is_uncertain_session_state` quarantine guards savepoint, preview_dml,
-//!   enable_dbms_output and apply_session_statement, so this is the pinned
-//!   path's general behaviour and not a commit special case.
-//!
-//! So the pinned half's value is forward-looking: it is the regression guard on
-//! A4e. The moment A4e adds a transparent reopen, this test fails unless the
-//! reopen refuses a caller that was mid-transaction.
+//! A prior version of this lane asserted the pinned half through the removed
+//! `LeaseManager` subsystem. That was vacuous because no production tool used
+//! that subsystem; keep pinned-session assertions on the real dispatcher state.
 
 #![cfg(feature = "live-xe")]
 #![forbid(unsafe_code)]
@@ -57,8 +50,7 @@
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
-    DbError, OracleBind, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings,
-    RustOracleConnection,
+    OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
 };
 
 /// Run an async body on a fresh current-thread runtime with a reactor, handing
@@ -117,29 +109,8 @@ impl SessionKey {
     }
 }
 
-const SESSION_BY_IDENTIFIER: &str = "SELECT sid AS s_id, serial# AS s_serial FROM v$session \
-     WHERE client_identifier = :1 AND status != 'KILLED'";
-
 const OWN_SESSION: &str = "SELECT sid AS s_id, serial# AS s_serial FROM v$session \
      WHERE sid = SYS_CONTEXT('USERENV', 'SID')";
-
-/// Locate a session by the CLIENT_IDENTIFIER the lease stamps on it
-/// (`session_tag_statements` sets it to the agent identity on every checkout).
-async fn session_by_identifier(
-    cx: &Cx,
-    admin: &RustOracleConnection,
-    identifier: &str,
-) -> Option<SessionKey> {
-    let rows = admin
-        .query_rows(cx, SESSION_BY_IDENTIFIER, &[OracleBind::from(identifier)])
-        .await
-        .expect("v$session lookup by client_identifier");
-    let row = rows.first()?;
-    Some(SessionKey::checked(
-        row.text("S_ID")?.to_owned(),
-        row.text("S_SERIAL")?.to_owned(),
-    ))
-}
 
 /// Kill a session from a SECOND connection, the way an DBA or a resource
 /// manager policy would. IMMEDIATE so the victim learns on its next use rather
