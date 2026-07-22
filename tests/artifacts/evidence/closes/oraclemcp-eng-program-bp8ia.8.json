@@ -1,0 +1,63 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T14:59:04Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.8",
+  "scope": {
+    "summary": "Cluster G is fully reconciled: G1-G5 children are already closed in history with explicit source SHAs, and no remaining in-scope children remain open.",
+    "in_scope": [
+      "docs/plan/PLAN_ENGINEERING_PROGRAM.md"
+    ],
+    "out_of_scope": [
+      "F-D/F-S implementation in code paths outside Cluster G and any open Cluster I work."
+    ]
+  },
+  "source": {
+    "sha": "def926b19acbb2004f9740863421805bc9285757",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "G1 closure ledger",
+        "kind": "cli",
+        "trace": "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.8.1.json confirms source=40ac3d3b5b3652b7d2c30584d318451407be019b, closing=89987636, and child closure SHA 4c0a5cc4 (harness mapping fix) with tracker close binding in oraclemcp-eng-program-bp8ia.8.1."
+      },
+      {
+        "name": "G2 closure ledger",
+        "kind": "cli",
+        "trace": "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.8.2.json confirms source=92ce5af0f38f80919e3fd1191b507938de272f66, closing=e5a9e6de, and live nightly streak proof for F-D2."
+      },
+      {
+        "name": "G3 closure ledger",
+        "kind": "cli",
+        "trace": "bead metadata close_reason for oraclemcp-eng-program-bp8ia.8.3 cites closing=bf4b2a17 and source=bf4b2a17, with evidence-less closure after typed SCN enforcement was implemented."
+      },
+      {
+        "name": "G4 closure ledger",
+        "kind": "cli",
+        "trace": "bead metadata close_reason for oraclemcp-eng-program-bp8ia.8.4 cites closing=9e2d1e4b and source=9e2d1e4b, with lane-health dashboard behavior corrected to async-only without block_on."
+      },
+      {
+        "name": "G5 closure ledger",
+        "kind": "cli",
+        "trace": "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.8.5.json confirms source=53c1050734908d01e4b4a21db088bacfe6350c59 and closing=55a7fe11fb3104533bb6f8a4bcf281f0d5ddd78d."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Cluster G is considered complete for code and CI-surface work; remaining items that depend on Cluster G are outside this scope."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
