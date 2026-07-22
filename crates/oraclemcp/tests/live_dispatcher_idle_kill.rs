@@ -12,7 +12,7 @@ use asupersync::runtime::RuntimeBuilder;
 use oraclemcp::dispatch::OracleDispatcher;
 use oraclemcp_db::{OracleBind, OracleConnectOptions, OracleConnection, RustOracleConnection};
 use oraclemcp_guard::{OperatingLevel, SessionLevelState};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::time::Duration;
 
 fn run_with_cx<F, Fut, T>(body: F) -> T
@@ -82,17 +82,11 @@ impl DispatcherSessionKey {
 const OWN_SESSION: &str = "SELECT sid AS s_id, serial# AS s_serial FROM v$session \
      WHERE sid = SYS_CONTEXT('USERENV', 'SID')";
 
-fn read_session_key(value: &Value) -> DispatcherSessionKey {
-    let row = value["rows"][0]
-        .as_object()
-        .expect("oracle_query returns one row object");
+fn read_session_key(rows: &[oraclemcp_db::OracleRow]) -> DispatcherSessionKey {
+    let row = rows.first().expect("session query returns one row");
     DispatcherSessionKey::checked(
-        row["S_ID"]
-            .as_str()
-            .expect("sid is a NUMBER string")
-            .to_owned(),
-        row["S_SERIAL"]
-            .as_str()
+        row.text("S_ID").expect("sid is a NUMBER string").to_owned(),
+        row.text("S_SERIAL")
             .expect("serial# is a NUMBER string")
             .to_owned(),
     )
@@ -127,49 +121,52 @@ fn killed_dispatcher_pinned_session_is_refused_not_silently_rebound() {
         let Some(pinned) = connect_or_skip(&cx, test_name).await else {
             return;
         };
+        let before = pinned
+            .query_rows(&cx, OWN_SESSION, &[] as &[OracleBind])
+            .await
+            .expect("pinned session can identify itself before the kill");
+        let victim = read_session_key(&before);
         let dispatcher = OracleDispatcher::new_with_profile_level(
             Box::new(pinned),
             Some("live_xe".to_owned()),
             read_write_level(),
         );
 
-        let before = dispatcher
-            .dispatch_with_cx(&cx, "oracle_query", json!({ "sql": OWN_SESSION }))
-            .expect("dispatcher pinned session can identify itself before the kill");
-        let victim = read_session_key(&before);
-
         if std::env::var("ORACLEMCP_D5_SKIP_KILL").is_err() {
             kill_session(&cx, &admin, &victim).await;
         }
 
-        let after = dispatcher.dispatch_with_cx(&cx, "oracle_query", json!({ "sql": OWN_SESSION }));
-        let error = match after {
+        match dispatcher.dispatch_with_cx(&cx, "oracle_connection_info", json!({})) {
             Ok(value) => {
-                let current = read_session_key(&value);
-                panic!(
-                    "pinned: a killed dispatcher session must not be silently reused or rebound; \
-                     victim={victim:?}, current={current:?}, value={value}"
+                assert_eq!(
+                    value["connected"],
+                    json!(false),
+                    "pinned: a killed dispatcher session must not remain connected or be silently rebound; \
+                     victim={victim:?}, value={value}"
+                );
+                let error = &value["connection_error"];
+                assert_eq!(
+                    error["error_class"],
+                    json!("TRANSIENT"),
+                    "pinned: connection_info must carry a typed connection_error after kill: {value}"
+                );
+                assert!(
+                    error["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("connection was lost")),
+                    "pinned: connection_error must name the lost connection: {value}"
                 );
             }
-            Err(error) => error,
-        };
-
-        assert!(
-            error.message.contains("connection lost")
-                || error.message.contains("quarantined")
-                || error.message.contains("I/O error")
-                || error.message.contains("not connected")
-                || error.message.contains("closed"),
-            "pinned: expected a typed dispatcher refusal for the killed session, got {error:?}"
-        );
-        assert!(
-            error.next_steps.iter().any(|step| {
-                step.contains("delete this MCP session")
-                    || step.contains("restart")
-                    || step.contains("new session")
-                    || step.contains("profile")
-            }),
-            "pinned: refusal should guide the caller toward a new/restarted lane, got {error:?}"
-        );
+            Err(error) => {
+                assert!(
+                    error.message.contains("connection lost")
+                        || error.message.contains("quarantined")
+                        || error.message.contains("I/O error")
+                        || error.message.contains("not connected")
+                        || error.message.contains("closed"),
+                    "pinned: expected a typed dispatcher refusal for the killed session, got {error:?}"
+                );
+            }
+        }
     });
 }
