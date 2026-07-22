@@ -1,0 +1,110 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:17:39Z",
+  "bead_id": "oraclemcp-091-b7a-logoff-hooks-k9jhg",
+  "scope": {
+    "summary": "Adds profile-owned session_release_statements and logoff_statements, validates and redacts them, executes release hooks before clean pooled idle reuse, and executes logoff hooks before thin logical close.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/types.rs",
+      "crates/oraclemcp-db/src/connection.rs",
+      "crates/oraclemcp-db/src/pool.rs",
+      "crates/oraclemcp-core/src/connect.rs",
+      "crates/oraclemcp-core/src/config_ops.rs",
+      "crates/oraclemcp-config/src",
+      "crates/oraclemcp-config/tests/discovery_writer_parity.rs",
+      "README.md",
+      "docs/configuration.md",
+      "oraclemcp.example.toml"
+    ],
+    "out_of_scope": [
+      "B7b live AFTER LOGOFF verification for clean exit and SIGTERM on pinned and pooled sessions"
+    ]
+  },
+  "source": {
+    "sha": "fae24cba29f134bf87b26819e90e9cf7f439d391",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "profile config to OracleConnectOptions",
+        "kind": "api",
+        "trace": "oraclemcp-core connect tests validate hook propagation, trimming, empty-entry rejection, and Debug redaction"
+      },
+      {
+        "name": "RustOracleConnection::close",
+        "kind": "api",
+        "trace": "oraclemcp-db session tests validate teardown hook error redaction; close path executes logoff hooks before consuming logical close"
+      },
+      {
+        "name": "OraclePool successful check-in",
+        "kind": "api",
+        "trace": "oraclemcp-db pool tests validate dirty discard invariants; implementation only runs release hooks after successful call and successful limit restore, and hook failure discards instead of idling"
+      },
+      {
+        "name": "cargo fmt --all -- --check",
+        "kind": "cli",
+        "trace": "Passed after the B7a hook implementation."
+      },
+      {
+        "name": "CARGO_TARGET_DIR=target cargo check -p oraclemcp-db",
+        "kind": "cli",
+        "trace": "Passed after the B7a DB hook implementation."
+      },
+      {
+        "name": "CARGO_TARGET_DIR=target cargo check -p oraclemcp-config",
+        "kind": "cli",
+        "trace": "Passed after the B7a profile schema changes."
+      },
+      {
+        "name": "CARGO_TARGET_DIR=target cargo check -p oraclemcp-core",
+        "kind": "cli",
+        "trace": "Passed after the B7a profile propagation changes."
+      },
+      {
+        "name": "CARGO_TARGET_DIR=target cargo test -p oraclemcp-db pool --lib",
+        "kind": "cli",
+        "trace": "Passed 23 focused pool-related unit tests."
+      },
+      {
+        "name": "CARGO_TARGET_DIR=target cargo test -p oraclemcp-db session_ --lib",
+        "kind": "cli",
+        "trace": "Passed 10 focused session/setup/teardown unit tests."
+      },
+      {
+        "name": "CARGO_TARGET_DIR=target cargo test -p oraclemcp-core connect --lib",
+        "kind": "cli",
+        "trace": "Passed 41 focused connect/profile propagation tests."
+      },
+      {
+        "name": "CARGO_TARGET_DIR=target cargo test -p oraclemcp-config --test discovery_writer_parity",
+        "kind": "cli",
+        "trace": "Passed 5 config discovery writer parity tests."
+      },
+      {
+        "name": "git diff --check -- <B7a scoped paths>",
+        "kind": "cli",
+        "trace": "Passed whitespace check for the B7a scoped diff."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No live AFTER LOGOFF trigger proof is claimed here; B7b is the queued verification bead for clean exit and SIGTERM across pinned and pooled sessions.",
+    "CARGO_TARGET_DIR=target cargo check -p oraclemcp was attempted but blocked by an unrelated dirty main.rs doctor initializer missing iam_token_source from another agent's in-flight work."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-b7b-logoff-verify-1w3pn"
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
