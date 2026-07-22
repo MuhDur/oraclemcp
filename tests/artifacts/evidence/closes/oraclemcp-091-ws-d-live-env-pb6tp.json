@@ -6,8 +6,7 @@
   "scope": {
     "summary": "WS-D parent close reconciles D1-D10 and finds every blocking live-environment child closed with committed evidence.",
     "in_scope": [
-      ".beads/issues.jsonl",
-      "tests/artifacts/evidence/closes/oraclemcp-091-ws-d-live-env-pb6tp.json"
+      ".beads/issues.jsonl"
     ],
     "out_of_scope": [
       "No new WS-D product code or live Oracle run is claimed by this parent close; child beads carry their own implementation and live-lane proof.",
