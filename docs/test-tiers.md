@@ -278,12 +278,18 @@ line coverage (90% for `oraclemcp-guard`, `oraclemcp-audit`, and
 Non-instrumentable lines, such as comments, do not inflate the denominator.
 
 For a safety-critical diff the report also requires review to name the invariant
-or negative test that pins the change. The second leg calls
-`scripts/mutation_safety_gate.sh check-floor-report` and requires independent,
-current mutation floors for `oraclemcp-guard`, `oraclemcp-audit`, and
-`oraclemcp-db`. Its committed seal is generated from the same complete,
-exact-SHA, OOM-honest shard integrity mechanism as D3, while D3's broader
-core/dispatch requirement remains independent. This is the anti-gaming guard,
-because a test that only executes the new line but asserts nothing can improve
-line coverage while still leaving a mutant alive. The workspace-wide D1 numbers
-remain trend evidence, not a never-decrease merge gate.
+or negative test that pins the change. The changed-line leg is the enforced
+push/PR gate, and since `efe8975c` it actually measures the diff rather than
+taking the "no changed crates" branch. The mutation-floor leg still calls
+`scripts/mutation_safety_gate.sh check-floor-report`, but it is advisory for
+this train under `ALLOW_STALE_MUTATION_SEAL` (operator ruling 2026-07-21, plan
+v8 §Z2): it reports `mutation-floor=deferred` and is attested as `SKIP`, never
+`PASS`, until the RC seal bead (`oraclemcp-091-rc-mutation-seal-5aqwf`) restores
+an enforcing, current floor. Per-leg truth lives in
+`COVERAGE_RATCHET_STATUS_FILE`, and `scripts/coverage_ratchet.sh
+attestation-outcomes` derives the CI attestation from that file instead of from
+workflow prose. The intended anti-gaming guard is still the same -- coverage
+proves the changed code ran, while mutation floors prove tests assert behavior
+-- but only the changed-line coverage leg is a required D2 gate during this
+train. The workspace-wide D1 numbers remain trend evidence, not a
+never-decrease merge gate.
