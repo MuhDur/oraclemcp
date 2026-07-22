@@ -4,17 +4,18 @@
   "generated_at": "2026-07-22T07:35:00Z",
   "bead_id": "oraclemcp-mqmo9",
   "scope": {
-    "summary": "Windows shipping_spool concurrency tests fixed by replacing Linux-calibrated wall-clock budgets with GateForwarder property assertions; Windows CI lane confirmed green.",
+    "summary": "Windows shipping_spool concurrency test failures: root-caused as Linux-calibrated wall-clock budgets measuring FlushFileBuffers latency (not flake, not the historical lost wakeup), fixed by asserting the non-blocking property with a gate instead of a stopwatch, and proven green on a hosted Windows CI run.",
     "in_scope": [
       "crates/oraclemcp-audit/src/shipping_spool.rs"
     ],
     "out_of_scope": [
-      "Oracle FREE 23ai matrix failure on the same CI run (unrelated)",
-      "E2/E3 e2e test suites"
+      "audit hash-chain e2e (E3, separate bead)",
+      "the unrelated Oracle FREE 23ai matrix job that is red on the same run",
+      "any change to the spool's enqueue/forward ordering (unchanged; the property under test held)"
     ]
   },
   "source": {
-    "sha": "2746b6c12347fd1a7bd8e899d2f0b7c9a1b0f1bf",
+    "sha": "d092a07cbd565028f0289a5508d28e67bda4e093",
     "tree_clean": true,
     "branch": "main"
   },
@@ -22,14 +23,14 @@
   "integration_evidence": {
     "entry_points": [
       {
-        "name": "cargo test -p oraclemcp-audit --lib shipping_spool",
+        "name": "cargo test -p oraclemcp-audit --lib shipping_spool (Windows lane)",
         "kind": "cli",
-        "trace": "Fix at 731b083a replaced 150ms/1000ms wall-clock budgets with GateForwarder: gate proves delivery=0 while appends return, gap-free 1..=8 preserved, 30s hang detector only. 244 audit tests pass on Linux; each targeted test passed 50 consecutive runs."
+        "trace": "GitHub Actions run 29899848208, head 40b1f032 (contains fix 731b083a), job 'Rust workspace (Windows)' databaseId 88858118843, conclusion=success. Job log shows both previously-failing tests passing: 'shipping_spool::tests::concurrent_local_chain_stays_gap_free_while_shipping_is_stalled ... ok' and 'shipping_spool::tests::slow_destination_does_not_delay_durable_local_append ... ok', within a lib result of 'test result: ok. 231 passed; 0 failed'. This is the green Windows workspace run the acceptance required, after the unrelated red-main failures cleared."
       },
       {
-        "name": "GitHub Actions Rust workspace (Windows) — run 29899848208",
-        "kind": "tool",
-        "trace": "gh run view 29899848208: head 40b1f032 (contains fix 731b083a as ancestor). Job 'Rust workspace (Windows)' conclusion=success. The two tests that failed on run 29831595915 (concurrent_local_chain_stays_gap_free_while_shipping_is_stalled, slow_destination_does_not_delay_durable_local_append) pass on Windows."
+        "name": "cargo test -p oraclemcp-audit --lib (local Linux stress)",
+        "kind": "cli",
+        "trace": "Fix commit 731b083a replaces 150ms/1000ms wall-clock budgets with a GateForwarder that blocks the destination until the test opens the gate, so an append returning while delivered_records is still 0 provably did not wait for it (true at any machine speed). Each named regression test passed 50 consecutive exact runs (100 total) on Linux; cargo test -p oraclemcp-audit --lib = 244 passed; cargo clippy -p oraclemcp-audit --lib -- -D warnings passed. Gap-free 1..=8 local-chain assertion unchanged; a 30s bound remains only as a hang detector, not a performance threshold."
       }
     ]
   },
@@ -38,7 +39,8 @@
     "artifacts": []
   },
   "limitations": [
-    "The overall CI run 29899848208 has an unrelated Oracle FREE 23ai matrix failure; only the Windows workspace lane is cited as green"
+    "The Windows acceptance is cited from a hosted GitHub Actions runner; the exact-SHA query for 731b083a is empty because CI ran on later heads, so the citation is bound to head 40b1f032 which git confirms contains 731b083a as an ancestor.",
+    "The Oracle FREE 23ai matrix job is red on the same run for unrelated reasons and is explicitly out of scope; it does not affect the shipping_spool result."
   ],
   "known_defects": [],
   "follow_ups": [],
