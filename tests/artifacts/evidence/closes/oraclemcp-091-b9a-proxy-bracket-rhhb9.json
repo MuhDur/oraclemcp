@@ -1,25 +1,29 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-07-21T15:08:06Z",
+  "generated_at": "2026-07-22T07:39:59Z",
   "bead_id": "oraclemcp-091-b9a-proxy-bracket-rhhb9",
   "scope": {
-    "summary": "Desugar Oracle proxy username shorthand at config load into typed proxy authentication and show the explicit proxy shape in setup output.",
+    "summary": "Config load desugars Oracle username proxy_user[target_schema] shorthand into typed proxy_auth or fails before Oracle with an actionable redacted error.",
     "in_scope": [
-      "crates/oraclemcp-config/src/lib.rs",
       "crates/oraclemcp-config/src/profile.rs",
-      "crates/oraclemcp-core/src/connect.rs",
-      "crates/oraclemcp/src/main_tests.rs",
+      "crates/oraclemcp-config/src/lib.rs",
+      "crates/oraclemcp-config/src/discovery/writer.rs",
+      "crates/oraclemcp-config/tests/golden/discovery_annotated.toml",
+      "oraclemcp.example.toml",
+      "README.md",
+      "docs/configuration.md",
       "crates/oraclemcp/src/robot_docs.rs",
-      "crates/oraclemcp/tests/cli.rs"
+      "crates/oraclemcp/src/main_tests.rs"
     ],
     "out_of_scope": [
-      "Driver-side bracket-syntax parity in rust-oracledb.",
-      "Live Oracle authentication with a field profile."
+      "Any sibling rust-oracledb driver change.",
+      "The current uncommitted core/connect.rs buffer, which mixes B9a test coverage with unrelated A1b/C5 and B16a edits.",
+      "A live Oracle proxy CONNECT THROUGH authentication run."
     ]
   },
   "source": {
-    "sha": "13a7e6fe4848b84efd9c6ab38eb25a52ba798f20",
+    "sha": "481e080badaef2cb1e61765225a1849d5cbf38ff",
     "tree_clean": true,
     "branch": "main"
   },
@@ -27,14 +31,19 @@
   "integration_evidence": {
     "entry_points": [
       {
-        "name": "configuration loader and typed connection options",
-        "kind": "config-gate",
-        "trace": "scripts/swarm_discipline.sh bounded-run --timeout 120 -- env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp-target/ws-b-b8c-evidence cargo test -p oraclemcp-config proxy_bracket and cargo test -p oraclemcp-core proxy_bracket_username_reaches_typed_connect_options: 3 config tests and 1 core test passed in the dedicated clean worktree at 13a7e6fe4848b84efd9c6ab38eb25a52ba798f20. They prove desugaring, quoted-identifier preservation, malformed/dual-form refusal, and typed proxy connection options."
+        "name": "strict config loader proxy-bracket normalization",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-config proxy_bracket -- --nocapture` exited 0 at 481e080b with 3 passed; it proves username = \"MCP_PROXY[APP_OWNER]\" desugars into typed proxy_auth before validation, quoted identifiers are preserved, brackets inside a quoted ordinary username are ignored, malformed/empty/proxy-only syntax fails before Oracle, duplicate bracket plus [profiles.proxy_auth] fails, and error text does not echo proxy identities."
       },
       {
-        "name": "setup templates and config-ops write path",
+        "name": "discovery/setup profile template parity",
         "kind": "cli",
-        "trace": "scripts/swarm_discipline.sh bounded-run --timeout 120 -- env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp-target/ws-b-b8c-evidence cargo test -p oraclemcp setup_payload_is_generic_and_client_ready and cargo test -p oraclemcp --test cli setup_write_round_trips_profiles_through_config_ops: 1 passed each in the clean worktree at 13a7e6fe4848b84efd9c6ab38eb25a52ba798f20. The generated setup shape exposes [profiles.proxy_auth] without leaking credentials."
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-config --test discovery_writer_parity -- --nocapture` exited 0 at 481e080b with 5 passed; it proves the generated annotated profile output includes the [profiles.proxy_auth] section and still round-trips through the strict loader."
+      },
+      {
+        "name": "example config parses with proxy-auth reference shape",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-config --test example_config_parses -- --nocapture` exited 0 at 481e080b with 1 passed; it proves oraclemcp.example.toml's proxy-auth documentation shape remains accepted by the strict loader."
       }
     ]
   },
@@ -43,7 +52,9 @@
     "artifacts": []
   },
   "limitations": [
-    "No live Oracle proxy authentication was run; this evidence covers config and typed-connect construction only."
+    "This close is config-load and documentation/template proof only; it does not claim a live Oracle proxy authentication run.",
+    "This close does not run a workspace-wide Cargo gate.",
+    "Dirty files outside this bead's source scope remain in the shared checkout; they are excluded from tree_clean by the close auditor."
   ],
   "known_defects": [],
   "follow_ups": [],
