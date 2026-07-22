@@ -1,20 +1,12 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-07-21T23:16:24Z",
+  "generated_at": "2026-07-22T10:31:48Z",
   "bead_id": "oraclemcp-20cw3",
   "scope": {
-    "summary": "Corroborates the reported pinned-plus-stateless footprint against an independent local-lab V$SESSION observation without recording connection or identity details.",
+    "summary": "Corroborates the reported pinned-plus-stateless footprint against an independent D-lane V$SESSION observation without recording connection or identity details.",
     "in_scope": [
-      "crates/oraclemcp-db/src/pool.rs",
-      "crates/oraclemcp-db/src/types.rs",
-      "crates/oraclemcp/src/dispatch/mod.rs",
-      "crates/oraclemcp/src/dispatch/tests.rs",
-      "crates/oraclemcp/src/main.rs",
-      "crates/oraclemcp/src/main_tests.rs",
-      "README.md",
-      "docs/configuration.md",
-      "docs/operations.md"
+      "tests/artifacts/evidence/live/oraclemcp-20cw3-p2-8-session-footprint.json"
     ],
     "out_of_scope": [
       "Pool sizing recommendations beyond the configured local-lab ceiling.",
@@ -22,7 +14,7 @@
     ]
   },
   "source": {
-    "sha": "2106de73bd2dfe581dde6005de2e49eb0dc0a11b",
+    "sha": "60c98cee92a764744046d8f345844660526f3b9f",
     "tree_clean": true,
     "branch": "main"
   },
@@ -32,12 +24,17 @@
       {
         "name": "oracle_connection_info",
         "kind": "tool",
-        "trace": "A real stdio server on an ephemeral read-only local XE21 profile reported connection_strategy=pinned_plus_stateless and a separate stateless_metadata_pool with pool_open_connections=2."
+        "trace": "A real stdio server on an ephemeral read-only Free23 D-lane profile reported connection_strategy=pinned_plus_stateless and a separate stateless_metadata_pool with pool_open_connections=2."
       },
       {
         "name": "[profiles.pool] min_idle startup",
         "kind": "config-gate",
-        "trace": "The same profile configured max_size=3 and min_idle=2; an independent SYSDBA observer counted exactly three sessions bearing the synthetic probe tag: one pinned primary plus two stateless pool sessions."
+        "trace": "The same profile configured max_size=3 and min_idle=2; an independent SYSTEM V$SESSION observer counted exactly three sessions bearing the synthetic probe tag: one pinned primary plus two stateless pool sessions."
+      },
+      {
+        "name": "understatement refusal",
+        "kind": "cli",
+        "trace": "The D-lane probe asserted reported_total_session_footprint=3 equals observed_tagged_vsession_count=3 and would fail if the reported footprint understated the independently counted tagged sessions."
       }
     ]
   },
@@ -45,20 +42,20 @@
     "claimed": true,
     "artifacts": [
       {
-        "kind": "local-xe21-vsession",
+        "kind": "local-free23-d-lane-vsession",
         "path": "tests/artifacts/evidence/live/oraclemcp-20cw3-p2-8-session-footprint.json",
-        "sha": "2106de73bd2dfe581dde6005de2e49eb0dc0a11b"
+        "sha": "60c98cee92a764744046d8f345844660526f3b9f"
       }
     ]
   },
   "limitations": [
-    "This is a local XE21 lab lane, not a production or customer target.",
+    "This is a local Free23 D-lane lab, not a production or customer target.",
     "The evidence reports the locally observed pool open_count and the tagged-session count at one startup configuration; unrelated database sessions are intentionally excluded."
   ],
   "known_defects": [],
   "follow_ups": [],
   "readiness": {
-    "claim": "not-ready",
+    "claim": "ready",
     "basis": "live-evidence"
   }
 }
