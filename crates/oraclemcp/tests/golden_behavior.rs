@@ -36,6 +36,11 @@ mod golden_support;
 /// name resolves. Returns `None` for the caller's own statement so the mock's
 /// fixed result rows are returned unchanged.
 fn resolver_dictionary_rows(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>> {
+    if sql.contains("policy_name FROM all_policies WHERE ROWNUM <= 1") {
+        return Some(vec![OracleRow {
+            columns: vec![("POLICY_NAME".to_owned(), resolver_text("SYNTHETIC"))],
+        }]);
+    }
     if sql.contains("SYS_CONTEXT('USERENV', 'SESSION_USER')") {
         return Some(vec![OracleRow {
             columns: vec![
