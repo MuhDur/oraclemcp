@@ -33,7 +33,7 @@ check_max_file_size_ratchet() {
   local path line_count
   declare -A path_limits=(
     [crates/oraclemcp/src/dispatch/tests.rs]=15676
-    [crates/oraclemcp/src/dispatch/mod.rs]=15623
+    [crates/oraclemcp/src/dispatch/mod.rs]=15167
     [web/src/app/App.tsx]=9708
     [crates/oraclemcp-db/src/connection.rs]=8812
     [crates/oraclemcp-guard/src/classifier.rs]=7678
