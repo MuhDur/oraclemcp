@@ -1,0 +1,64 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T16:39:34Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.4",
+  "scope": {
+    "summary": "Reconciles Cluster C: all janitor children C1..C6 are closed and no additional repo-disk janitor work remains for this cluster.",
+    "in_scope": [
+      ".beads/issues.jsonl",
+      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.2.json",
+      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.3.json",
+      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.5.json",
+      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.6.json",
+      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.6.3.json",
+      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.6.1.json"
+    ],
+    "out_of_scope": [
+      "Any additional janitor or cleanup work outside cluster C (workstreams A/B/D/E/G/F, release-plane tasks, or live-Oracle operations)."
+    ]
+  },
+  "source": {
+    "sha": "127dcedd5deed54036bbdfc0e3f443e6fde81af4",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Cluster C child closure status",
+        "kind": "cli",
+        "trace": "br show oraclemcp-eng-program-bp8ia.4 --json reported dependents 4.1, 4.2, 4.3, 4.4, 4.5, 4.6 all with status=closed."
+      },
+      {
+        "name": "C1 and C4 closure witness",
+        "kind": "cli",
+        "trace": "br show oraclemcp-eng-program-bp8ia.4.1 and br show oraclemcp-eng-program-bp8ia.4.4 show status=closed, and git log --oneline --all --grep='beads: close C1 worktree/branch cleanup + C4 disk reclaim' shows source commit dd672758."
+      },
+      {
+        "name": "C2/C3/C5/C6 closure witness",
+        "kind": "cli",
+        "trace": "br show for 4.2, 4.3, 4.5, 4.6 confirms each status=closed. Close reasons identify committed sources/evidence: 72258581.../008ff... for 4.2 (evidence close JSON exists), e664fa0c... for 4.3 (evidence close JSON exists), d2fa643c... for 4.5 (evidence close JSON exists), 0cdc76a2... for 4.6 (evidence close JSON exists)."
+      },
+      {
+        "name": "4.6 sub-child completion",
+        "kind": "cli",
+        "trace": "br show oraclemcp-eng-program-bp8ia.4.6 reports children 4.6.1-4.6.9 closed, ratchet passes, and closing source 0cdc76a217f867c3c77a3bae8addf62542f2cb55."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No live-Oracle or disk-janitor command output was rerun in this reconciliation close; this bead is a tracker/leaf-completion close against existing committed child close evidence and git history."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
