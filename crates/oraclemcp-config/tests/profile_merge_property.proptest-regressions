@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d6adfb77cffbadcb8a39441d0d8045267b6e512d2e9aab18c9a70b58d83d3b24 # shrinks to specs = [ProfileSpec { max_level: None, default_level: None, protected: false, base: None, connect_string: true }]
