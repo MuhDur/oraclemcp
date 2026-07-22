@@ -1,9 +1,11 @@
 {
   "bead": "oraclemcp-091-rfail-injection-lanes-ok400",
-  "installed_binary": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T104208Z/prefix/bin/oraclemcp",
+  "installed_binary": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T104710Z/prefix/bin/oraclemcp",
+  "lane": "R-fail failure-injection lanes",
   "proof_boundary": "Revoke, rotate, server/process restart, and OAuth expiry assertions use raw HTTP/MCP/operator requests against the installed artifact. The kill lane delegates to D10 because the public installed artifact redacts SID/SERIAL and exposes no deterministic kill hook. Database inputs are local synthetic Free23 only. Disruptive Docker container restart remains intentionally out of the default shared-checkout run.",
-  "runtime_artifact_dir": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T104208Z",
-  "source_sha": "4e7683a2a46d4c5d0e8fba25efe25b9b8a7cb1e5",
+  "run_id": "local-20260722T104710Z-rfail-failure-injection",
+  "runtime_artifact_dir": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T104710Z",
+  "source_sha": "57ec979f7a46eaec37072ed50e65dfb93eb14129",
   "status": "pass",
   "supplemental_assertions": [
     {
