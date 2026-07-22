@@ -69,8 +69,10 @@ Re-running the same one-liner is the update path. Re-running the same verified
 archive is a no-op for identical installed files; re-running with a newer target
 updates atomically after backing up the previous binary. A downgrade is refused unless you pass `--force`.
 
-Historical 0.8.0 operator notes (the coordinated 0.9.0 equivalents are tracked
-separately):
+Operator migration notes for the current field-hardening train:
+[`docs/oraclemcp-091-field-hardening-notes.md`](docs/oraclemcp-091-field-hardening-notes.md).
+
+Historical 0.8.0 operator notes:
 [`docs/upgrading-to-0.8.0.md`](docs/upgrading-to-0.8.0.md),
 [`docs/downgrading-0.8.0-to-0.7.2.md`](docs/downgrading-0.8.0-to-0.7.2.md),
 and [`docs/feature-rollout-0.8.0.md`](docs/feature-rollout-0.8.0.md).

@@ -131,9 +131,12 @@ signal even though this scheduled workflow is not a per-commit required check.
    and confirm every **required** gate in the table above is green. The advisory
    jobs (`fuzz-build`, `multi-nightly`) may be red without blocking.
 5. **Link the run as evidence.** Record the CI run URL for the RC commit in the
-   release notes / `CHANGELOG.md` entry for `vX.Y.Z`. That linked, green run on
-   the frozen SHA *is* the release-gate evidence — there is nothing to attest
-   beyond it.
+   release notes / `CHANGELOG.md` entry for `vX.Y.Z`. For the current
+   field-hardening train, also attach
+   [`oraclemcp-091-field-hardening-notes.md`](oraclemcp-091-field-hardening-notes.md)
+   and resolve the version-label ambiguity it records before tagging. That
+   linked, green run on the frozen SHA *is* the release-gate evidence — there is
+   nothing to attest beyond it.
 6. **Tag and publish.** Only after steps 4–5 hold, push the `vX.Y.Z` tag.
    `release.yml` is the single normal tag pipeline: it publishes crates.io,
    signed multi-platform GitHub assets, GHCR, and then the MCP registry entry.

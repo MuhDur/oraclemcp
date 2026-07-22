@@ -158,3 +158,66 @@ fn feature_rollout_doc_defaults_match_shipped_defaults() {
         "pipelining opt-in path",
     );
 }
+
+#[test]
+fn field_hardening_notes_pin_operator_migrations() {
+    let notes = read_repo_file("docs/oraclemcp-091-field-hardening-notes.md");
+    let readme = read_repo_file("README.md");
+    let checklist = read_repo_file("docs/release-checklist.md");
+
+    assert_mentions(
+        &notes,
+        "oraclemcp-091-train-root-jp5k9",
+        "field-hardening notes train identity",
+    );
+    assert_mentions(
+        &notes,
+        "Version label is not final",
+        "field-hardening notes version ambiguity",
+    );
+    assert_mentions(
+        &notes,
+        "catalog resolver now fails closed",
+        "A1a operator migration",
+    );
+    assert_mentions(
+        &notes,
+        "Preflight Flashback grants",
+        "A3a/A3b operator migration",
+    );
+    assert_mentions(
+        &notes,
+        "/dashboard/pair?ticket=...",
+        "A5 body-only pairing migration",
+    );
+    assert_mentions(
+        &notes,
+        "Dashboard-facing 403 responses are now structured",
+        "P-U3 dashboard envelope migration",
+    );
+    assert_mentions(
+        &notes,
+        "Rejected bearer responses stay public and uniform",
+        "SEC-6 operator migration",
+    );
+    assert_mentions(
+        &notes,
+        "Stored previews, grant records, and recovery state are evidence",
+        "SEC-1 operator migration",
+    );
+    assert_mentions(
+        &notes,
+        "refreshable driver `TokenSource`",
+        "B16 operator migration",
+    );
+    assert_mentions(
+        &readme,
+        "docs/oraclemcp-091-field-hardening-notes.md",
+        "README field-hardening notes link",
+    );
+    assert_mentions(
+        &checklist,
+        "oraclemcp-091-field-hardening-notes.md",
+        "release checklist field-hardening notes link",
+    );
+}
