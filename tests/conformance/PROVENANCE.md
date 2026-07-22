@@ -19,7 +19,27 @@ cross-references:
 `scripts/provenance_check.sh` enforces this file: it enumerates every committed
 (and every untracked, non-ignored) artifact under the in-scope roots and FAILS
 if any lacks a verbatim entry here. All committed inputs are **synthetic** — no
-real hostnames, OCIDs, customer identifiers, secrets, or PII.
+real hostnames, OCIDs, customer identifiers, secrets, or PII, with the single
+exception of the vendored MIT sample schemas below, which are third-party
+upstream source rather than fixtures we authored.
+
+### Vendored trees record provenance as data, not prose
+
+A third-party tree vendored with a `vendored-sample-schemas/v1` `MANIFEST.json`
+is exempt from needing one row per file, because the manifest already records
+strictly more than a row could: upstream repository, tag, commit, license,
+retrieval date, and a **git-blob-sha1 for every file**. Transcribing those into
+this table would create a second register with nothing keeping the two in
+agreement — and the transcription carries no hashes, so it would be weaker than
+the thing it duplicates and the first drift would be silent.
+
+The exemption is not free. `provenance_check.sh` re-hashes every file the
+manifest lists and fails if any byte has moved, so vendored upstream code gains
+tamper-detection that no prose row has ever provided. A file sitting inside a
+vendored tree that the manifest does **not** list is not covered and still needs
+its own row here — that is how something gets quietly added to a vendored
+directory. The manifest itself is registered below, so this table keeps pointing
+at the source of truth.
 
 ## In-scope roots
 
@@ -105,3 +125,6 @@ exact command + git-ref) and the check will fail until it does.
 | `tests/fixtures/coverage_ratchet/mutation-floor-low-guard.md.in` | Hand-authored D2 self-test fixture: guard kill-rate below floor (must FAIL the gate) | Hand-edit alongside `scripts/mutation_safety_gate.sh check-floor-report` self-test; synthetic |
 | `tests/fixtures/coverage_ratchet/mutation-floor-low-audit.md.in` | Hand-authored D2 self-test fixture: audit kill-rate below floor (must FAIL the gate) | Hand-edit alongside `scripts/mutation_safety_gate.sh check-floor-report` self-test; synthetic |
 | `tests/fixtures/coverage_ratchet/mutation-floor-low-db.md.in` | Hand-authored D2 self-test fixture: db kill-rate below floor (must FAIL the gate) | Hand-edit alongside `scripts/mutation_safety_gate.sh check-floor-report` self-test; synthetic |
+| `crates/oraclemcp-core/tests/fixtures/wallet/legacy_3des_p12/ewallet.p12` | Synthetic Oracle wallet (lab-only; `CN=oracle-test.invalid`), sealed with **legacy** PKCS#12 `pbeWithSHA1And3-KeyTripleDES-CBC` (OID `1.2.840.113549.1.12.1.3`) so the P-U4 doctor probe is proven against the shape still common in the field, not only modern PBES2. Cert + key only, no `cwallet.sso`, so the p12 is unambiguously primary. Fixture password `oracle-test-wallet-16` | OpenSSL 3.5.5 `pkcs12 -export -legacy -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1` over a self-signed 2048-bit key — full command, subject, and the "both bags must say TripleDES" verification in `crates/oraclemcp-core/tests/fixtures/wallet/PROVENANCE.md` § `legacy_3des_p12/`. PKCS#12 output is not byte-deterministic, so these bytes are committed once and asserted by decryption (`doctor_wallet_posture.rs::legacy_3des_p12_decrypts_through_the_server_wallet_path`), never by hash |
+| `tests/fixtures/sample_schemas/governance/governance_overlay.sql` | Hand-authored D9 rig governance layer, entirely ours. The MIT sample schemas ship realistic shape but no governance surface at all — no VPD/RLS, no proxy authentication, no logoff auditing — which is exactly what the guard, lease, and audit paths need to run against. Layered on top so the vendored SQL is never edited in place. **Synthetic only**: every identifier is invented, nothing is derived from a real or field-test environment | Hand-edit alongside the rig L2 scenarios; no generator. Rationale and the never-edit-vendored-SQL rule in `tests/fixtures/sample_schemas/PROVENANCE.md` |
+| `tests/fixtures/sample_schemas/upstream/MANIFEST.json` | Vendoring record for the MIT `oracle-samples/db-sample-schemas` tree (tag `v23.3`, commit `e3325a83e56c516815844025418a96ecaf219751`, MIT, `LICENSE.txt` retained), carrying a git-blob-sha1 for every vendored file. This is the source of truth for the 19 files it covers, which is why they carry no rows of their own | Hand-maintained at re-vendor time. `scripts/provenance_check.sh` re-hashes every listed file against it on each run, so an edit to vendored upstream source fails the gate |
