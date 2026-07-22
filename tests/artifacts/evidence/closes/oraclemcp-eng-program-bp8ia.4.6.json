@@ -1,0 +1,77 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T13:43:50Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.4.6",
+  "scope": {
+    "summary": "Reconciles and closes the C6 de-monolith parent: all nine child split beads are closed, and the committed architecture-fitness max-file-size ratchet passes without raising ceilings.",
+    "in_scope": [
+      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.6.json",
+      "crates/oraclemcp-core/src/server.rs",
+      "crates/oraclemcp-core/src/server/dispatch_context_tests.rs",
+      "crates/oraclemcp-core/src/server/resource_template_reads.rs",
+      "crates/oraclemcp-core/src/doctor.rs",
+      "crates/oraclemcp-core/src/doctor/iam_token_tests.rs",
+      "scripts/oraclemcp_arch_fitness_lint.sh"
+    ],
+    "out_of_scope": [
+      "Any behavioral change to dispatch, guard classification, dashboard, doctor diagnostics, service lifecycle, lane runtime, or operator APIs; this close is a reconciliation plus test-module split/ratchet repair only.",
+      "The unrelated untracked shared-checkout files docs/review/round1-p9.md, scripts/swarm_orchestrator_tick.sh, scripts/swarm_target_janitor.sh, and tests/artifacts/plan_graph/engineering-program-manifest.json."
+    ]
+  },
+  "source": {
+    "sha": "0cdc76a217f867c3c77a3bae8addf62542f2cb55",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "C6 close reconciliation",
+        "kind": "cli",
+        "trace": "br show for children 4.6.1 through 4.6.9 reported status=closed for all nine children before this parent close: .1 dispatch/mod.rs source c207ea436 evidence .4.6.1.json; .2 dispatch/tests.rs source 8f64f933 evidence .4.6.2.json; .3 App.tsx source 1a212501 evidence .4.6.3.json; .4 classifier.rs corrected source b233fff0 evidence .4.6.4.json; .5 main.rs source fbee1a24 evidence .4.6.5.json; .6 doctor.rs source b0833a8c evidence .4.6.6.json; .7 service_lifecycle.rs source fbee1a24 evidence .4.6.7.json; .8 lane.rs source b09d1cd0 evidence .4.6.8.json; .9 http/operator.rs source 3745e9c5 evidence .4.6.9.json."
+      },
+      {
+        "name": "Architecture fitness ratchet",
+        "kind": "cli",
+        "trace": "`CARGO_TARGET_DIR=target scripts/oraclemcp_arch_fitness_lint.sh` exited 0 at 0cdc76a217f867c3c77a3bae8addf62542f2cb55: OK[file-size]: tracked Rust/TS source files are within measured max-file-size ratchets; final line: oraclemcp-arch-fitness-lint: OK — workspace dependency graph points inward and file-size ratchets hold."
+      },
+      {
+        "name": "Ratchet lower than campaign scaffold",
+        "kind": "cli",
+        "trace": "`git show 61d4f2a1:scripts/oraclemcp_arch_fitness_lint.sh` versus current scripts/oraclemcp_arch_fitness_lint.sh shows lowered path limits: dispatch/tests.rs 16508->15676; dispatch/mod.rs 15829->15167; App.tsx 9892->9708; classifier.rs 7814->7678; main.rs 7722->7249; doctor.rs 5569->5400; service_lifecycle.rs 5538->5448; http/operator.rs 4290->4092. New seam caps were added for cli.rs=502, service_lifecycle/service_units.rs=97, and server.rs stayed at its original 4145 ceiling after the server test split brought the file down to 4110."
+      },
+      {
+        "name": "Current ratcheted line counts",
+        "kind": "cli",
+        "trace": "`wc -l ...` at 0cdc76a217f867c3c77a3bae8addf62542f2cb55: dispatch/tests.rs 15581 <= 15676; dispatch/mod.rs 15167 <= 15167; App.tsx 9708 <= 9708; connection.rs 8812 <= 8812; classifier.rs 7678 <= 7678; main.rs 7249 <= 7249; lane.rs 5471 <= 5510; service_lifecycle.rs 5448 <= 5448; doctor.rs 5300 <= 5400; http/operator.rs 4092 <= 4092; server.rs 4110 <= 4145."
+      },
+      {
+        "name": "Server test split isomorphic proof",
+        "kind": "cli",
+        "trace": "Clean detached worktree at 2d6cb29f7e6f4097afa022dbb5c7584d1383ae74: `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/c6-proof-2d6cb29 cargo test -p oraclemcp-core owned_dispatch_context_preserves_lane_time_and_caller_budget` passed 1/1; `... resource_template_reads_route_through_dispatch_with_transport_context` passed 1/1. The same focused filters also passed in the shared checkout before commit."
+      },
+      {
+        "name": "Doctor IAM-token test split isomorphic proof",
+        "kind": "cli",
+        "trace": "`CARGO_TARGET_DIR=target cargo test -p oraclemcp-core iam_token_check_` exited 0 after moving the IAM-token doctor test cluster: 6 passed, 0 failed, 689 filtered out."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No live Oracle evidence is claimed; C6 is a source-layout and ratchet reconciliation bead.",
+    "connection.rs remains at its original measured ratchet of 8812 because the operator's explicit C6 child set for this close contained children 4.6.1 through 4.6.9 and did not include a connection.rs child.",
+    "Some child close evidence was produced by other panes; this parent close reconciles tracker status and current git/ratchet state rather than re-running every child bead's full historical test matrix."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
