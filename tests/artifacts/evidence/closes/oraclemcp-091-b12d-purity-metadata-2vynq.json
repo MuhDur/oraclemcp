@@ -1,0 +1,62 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:19:55Z",
+  "bead_id": "oraclemcp-091-b12d-purity-metadata-2vynq",
+  "scope": {
+    "summary": "Oracle purity metadata remains advisory-only: no metadata channel can auto-admit a routine the independent oracle cannot already prove read-only.",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/purity.rs",
+      "crates/oraclemcp-guard/tests/purity_core_conformance.rs",
+      "docs/plan/PLAN_0_9_1_FIELD_HARDENING.md"
+    ],
+    "out_of_scope": [
+      "No runtime query of DETERMINISTIC, ALL_PROCEDURES, or USER_PROCEDURES was added.",
+      "No doctor candidate-review UX for Oracle purity metadata was added in this close."
+    ]
+  },
+  "source": {
+    "sha": "0090183f9e4b0a76da60ac6e3aaa658d511ad2fb",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "tightening-only purity restriction",
+        "kind": "api",
+        "trace": "crates/oraclemcp-guard/src/purity.rs OperatorPureFunctionRestriction returns ProvenReadOnly only when the independent SideEffectOracle already returned ProvenReadOnly and the exact routine identity is operator-allowlisted; Unknown and ProvenSideEffecting pass through unchanged."
+      },
+      {
+        "name": "B12d advisory invariant test",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-guard --test purity_core_conformance no_allowlist_state -- --nocapture passed: 1 passed, 0 failed."
+      },
+      {
+        "name": "default unknown oracle non-promotion test",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-guard --test purity_core_conformance operator_pure_function_allowlist_never_promotes_default_unknown_oracle -- --nocapture passed: 1 passed, 0 failed."
+      },
+      {
+        "name": "metadata remains non-authoritative",
+        "kind": "cli",
+        "trace": "rg over crates/oraclemcp-core/src, crates/oraclemcp/src, crates/oraclemcp-guard/src, and crates/oraclemcp-config/src found no DETERMINISTIC, ALL_PROCEDURES, or USER_PROCEDURES purity-admission channel; plan text records Oracle purity metadata is never consulted as proof."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped guard tests only; no full-workspace clippy/test gate is claimed from this shared dirty checkout.",
+    "This closes the tighten-only safety invariant, not a new operator-review UI."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
