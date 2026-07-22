@@ -2404,6 +2404,91 @@ fn connection_info_reports_stateless_read_strategy_when_configured() {
     );
 }
 
+/// P2-8 HONESTY INVARIANT: the reported connection footprint must never
+/// UNDERSTATE the number of physical Oracle sessions actually opened.
+///
+/// serve opens a pinned + stateless pair (two sessions) while an old build
+/// reported `connection_strategy: single_session`. That is not a leak, but a
+/// footprint report that names one session while two are live is a lie an
+/// operator capacity-plans against. So this test counts the DISTINCT physical
+/// connections that were actually touched (each observed via its own current
+/// round trip) and refuses any reported strategy whose implied session count is
+/// smaller. If a future change ever reports `single_session` while a second
+/// connection is provably live, this fails — which is exactly the regression
+/// the bead exists to catch.
+#[test]
+fn reported_footprint_never_understates_the_observable_session_count() {
+    let session_counts = Arc::new(TouchCounts::default());
+    let stateless_counts = Arc::new(TouchCounts::default());
+    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools_and_stateless(
+        Box::new(LabeledMock::new(
+            "session",
+            "single_session",
+            session_counts.clone(),
+        )),
+        Some("dev".to_owned()),
+        default_read_only_level(),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Err(DbError::Connect("unused".to_owned())) })
+        }),
+        StatelessReadStrategy::new(Some(Box::new(LabeledMock::new(
+            "pool",
+            "stateless_metadata_pool",
+            stateless_counts.clone(),
+        )))),
+        CustomToolCatalog::default(),
+        None,
+    );
+
+    let out = dispatcher
+        .dispatch("oracle_connection_info", json!({}))
+        .expect("connection info");
+
+    // Count the DISTINCT physical sessions that were actually observed, each by
+    // its own current round trip (a describe is the observation that proves a
+    // live session, not a cached claim about one).
+    let mut observed_sessions = 0usize;
+    if session_counts.describe.load(Ordering::SeqCst) > 0 {
+        observed_sessions += 1;
+    }
+    if stateless_counts.describe.load(Ordering::SeqCst) > 0 {
+        observed_sessions += 1;
+    }
+    assert_eq!(
+        observed_sessions, 2,
+        "the pinned + stateless pair must be two observable physical sessions: {out}"
+    );
+
+    // The reported strategy's implied session count must be >= what is observably
+    // live. `single_session` implies 1; the pinned_plus_stateless family implies
+    // 2. Reporting single_session here would understate the footprint.
+    let reported = out["connection"]["connection_strategy"]
+        .as_str()
+        .expect("connection_strategy is reported");
+    let implied = match reported {
+        "single_session" => 1,
+        "pinned_plus_stateless" | "pinned_plus_stateless_degraded" => 2,
+        other => panic!("unrecognized connection_strategy {other:?}: {out}"),
+    };
+    assert!(
+        implied >= observed_sessions,
+        "the reported footprint {reported:?} implies {implied} session(s) but \
+         {observed_sessions} physical sessions are observably live — the report \
+         understates the real footprint: {out}"
+    );
+    assert_ne!(
+        reported, "single_session",
+        "a second physical session is live, so single_session is a false footprint: {out}"
+    );
+
+    // And the second session must be surfaced in its own block, not folded away.
+    assert_eq!(
+        out["stateless_read_connection"]["connected"],
+        json!(true),
+        "the stateless session must be reported as its own connected block: {out}"
+    );
+}
+
 #[test]
 fn profile_switch_opens_one_connection_bundle() {
     let config = OracleMcpConfig::from_toml_str(
