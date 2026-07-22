@@ -1,0 +1,78 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T21:05:00Z",
+  "bead_id": "oraclemcp-091-ws-e-e2e-dcrif",
+  "scope": {
+    "summary": "Reconciles WS-E cross-repo e2e suite E1-E6: every child lane is closed with its own committed evidence, and no WS-E child scope remains open.",
+    "in_scope": [
+      "tests/",
+      "scripts/e2e/",
+      "scripts/rig/"
+    ],
+    "out_of_scope": [
+      "This epic close asserts child closure only. It does not itself re-run E1-E6, and it makes no readiness claim about the product beyond what each child's own evidence establishes.",
+      "Live OCI ADB validation is NOT covered here; it remains open under oraclemcp-091-f4-real-adb-b6-jm290."
+    ]
+  },
+  "source": {
+    "sha": "47e5fff32d380fe968bcc5a9adc9746c4f674cf1",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "WS-E child closure status",
+        "kind": "cli",
+        "trace": "br dep list oraclemcp-091-ws-e-e2e-dcrif reports 7 edges: 1 parent-child to the 0.10.0/0.9.0 train root, and 6 blocks-edges E1..E6 all [closed]."
+      },
+      {
+        "name": "E1 closure witness",
+        "kind": "cli",
+        "trace": "oraclemcp-091-e1-ladder-e2e-jel20 (operating-level ladder e2e: elevation, TTL, protected, scope-lowering) closed at closing=201a6477829a source=ddcdbc7c45ac"
+      },
+      {
+        "name": "E2 closure witness",
+        "kind": "cli",
+        "trace": "oraclemcp-091-e2-sec1-reclassify-64fpf (SEC-1: every recovery path re-classifies at apply) closed at closing=9dffe9f384e7 source=7d4314bf159c"
+      },
+      {
+        "name": "E3 closure witness",
+        "kind": "cli",
+        "trace": "oraclemcp-091-e3-audit-chain-e2e-69bbf (audit hash-chain e2e: record everything, detect truncation) closed at closing=d0263cb279a7 source=e0f319d08367"
+      },
+      {
+        "name": "E4 closure witness",
+        "kind": "cli",
+        "trace": "oraclemcp-091-e4-dashboard-e2e-sobjr (dashboard e2e implemented by R3's browser lane, wired not duplicated) closed at closing=b5b6ebf216cb source=79bba6c67b30"
+      },
+      {
+        "name": "E5 closure witness",
+        "kind": "cli",
+        "trace": "oraclemcp-091-e5-failure-recovery-e2e-bf1qa (kills, refusals, expiry, revocation) closed at closing=c3d37077e988 source=63ae7f5f6550; its live artifact records run_id=20260722T205332Z lane=local-rig/failure_recovery_e2e"
+      },
+      {
+        "name": "E6 closure witness",
+        "kind": "cli",
+        "trace": "oraclemcp-091-e6-e2e-attestations-ocqon (signed attestations for e2e runs) closed at closing=f1a4371595d8 source=ef3e6c8cfc21"
+      }
+    ]
+  },
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "An epic reconciliation inherits its strength from the children. E5's wire proof is a LOCAL lane (local-rig/failure_recovery_e2e), not a hosted scheduled lane, and its evidence records that distinction explicitly rather than borrowing CI provenance."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-f4-real-adb-b6-jm290 still carries the real-ADB validation this suite cannot reach without an Always-Free OCI ADB."
+  ]
+}
