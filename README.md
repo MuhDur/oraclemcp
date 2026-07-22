@@ -697,7 +697,9 @@ wallet_location = "/etc/oracle/wallet"
 wallet_password_ref = "env:WALLET_PASSWORD"
 ssl_server_dn_match = true
 ssl_server_cert_dn = "CN=dbhost.example.com"
-use_sni = true
+# Optional SNI override. Omit for the driver default; set true only when the
+# endpoint's routing name is a rustls-valid DNS name.
+# use_sni = true
 
 # Optional proxy authentication. If enabled, `credential_ref` belongs to
 # `proxy_user`; omit top-level `username` or set it to the same value.
@@ -825,9 +827,13 @@ A few further profile keys are optional:
 - `[profiles.oci]`: OCI-specific connection settings for the underlying driver.
   For TCPS/wallet connections, named fields are available for `wallet_location`,
   `wallet_password_ref`, `ssl_server_dn_match`, `ssl_server_cert_dn`, and
-  `use_sni`. Use the named fields for values that should inherit through
-  profiles, be redacted from diagnostics, or be validated by strict config
-  parsing.
+  `use_sni`. A wallet does not imply SNI; omit `use_sni` for the driver default
+  and opt in only when the endpoint's routing name is a rustls-valid DNS name.
+  Oracle's CPython driver can pass Oracle routing tokens through
+  `server_hostname`; rustls `ServerName` cannot, so host-as-SNI may skip that
+  one-negotiation routing fast path without breaking TCPS connectivity. Use the
+  named fields for values that should inherit through profiles, be redacted from
+  diagnostics, or be validated by strict config parsing.
 - `sdu = 32768`: optional thin driver Session Data Unit request size. Values are
   validated as `512..=65535`; omit it to keep the driver's negotiated default.
 - `[profiles.drcp]`: Database Resident Connection Pooling server routing.

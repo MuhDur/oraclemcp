@@ -218,7 +218,7 @@ field is unset after inheritance.
 | `wallet_password_ref` | string | none | Secret reference for an encrypted-wallet password. Use `env:`, `file:`, `keyring:`, or future `vault:` for production; `literal:` is dev-only and rejected when `protected = true`. |
 | `ssl_server_dn_match` | bool | none (driver default) | Override server-certificate DN matching. |
 | `ssl_server_cert_dn` | string | none | Exact expected server-certificate DN. |
-| `use_sni` | bool | none (driver default) | Override TCPS SNI behavior. |
+| `use_sni` | bool | none (driver default) | Override TCPS SNI behavior. A wallet does not imply SNI; set `true` only when the endpoint's routing name is a rustls-valid DNS name. Oracle routing tokens used by the CPython driver do not fit rustls `ServerName`, so host-as-SNI may skip Oracle's one-negotiation routing fast path without breaking TCPS connectivity. |
 | `use_iam_token` | bool | `false` | Authenticate with an OCI IAM database token. When set, a pre-fetched token (a JWT) is resolved at connect time from `token_env`/`token_file`/`token_exec` (or the built-in `ORACLEMCP_IAM_TOKEN`) and injected over TCPS — see [Auth modes](#auth-modes). |
 | `iam_config_profile` | string | none | `~/.oci/config` profile name for the IAM token. Parses; inert today (reserved for a future OCI-SDK token source). |
 | `token_env` | string | none | Name of an environment variable holding the pre-fetched IAM token (a *reference*, not the token). When unset, the built-in `ORACLEMCP_IAM_TOKEN` is read. Resolved fresh on every connect; never persisted or logged. |

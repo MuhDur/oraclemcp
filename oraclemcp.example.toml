@@ -260,7 +260,8 @@ ssl_server_dn_match = true
 # Exact expected server-certificate DN (ssl_server_cert_dn). Default: none.
 ssl_server_cert_dn = "CN=dbhost.example.com"
 # Override TCPS SNI behavior (use_sni). Default: none (driver default).
-use_sni = true
+# A wallet does not imply SNI; set true only for rustls-valid DNS routing names.
+# use_sni = true
 # Authenticate with an OCI IAM database token instead of a password. Default: false.
 # When true, the server resolves a pre-fetched database token (a JWT) at connect
 # time from ONE of the SIMPLE sources below and injects it over TCPS (a token on a

@@ -1995,8 +1995,6 @@ mod driver {
         }
         if let Some(use_sni) = opts.use_sni {
             connect_options = connect_options.with_use_sni(use_sni);
-        } else if opts.wallet_location.is_some() {
-            connect_options = connect_options.with_use_sni(true);
         }
         Ok(connect_options)
     }
@@ -7225,7 +7223,7 @@ mod tests {
     }
 
     #[test]
-    fn thin_connect_options_keep_wallet_sni_default() {
+    fn thin_connect_options_leave_wallet_sni_at_driver_default() {
         let opts = OracleConnectOptions {
             connect_string: "tcps://adb.example.com/service".to_owned(),
             username: Some("app".to_owned()),
@@ -7237,10 +7235,7 @@ mod tests {
         let connect = driver::to_connect_options(&opts).expect("connect options");
 
         assert_eq!(connect.wallet_location(), Some("/wallets/private"));
-        assert!(
-            connect.use_sni(),
-            "existing wallet profiles default to SNI on"
-        );
+        assert!(!connect.use_sni(), "wallets no longer force SNI on");
         assert!(connect.ssl_server_dn_match());
         assert_eq!(connect.wallet_password(), None);
         assert_eq!(connect.ssl_server_cert_dn(), None);

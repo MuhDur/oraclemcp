@@ -184,6 +184,31 @@ fn spawn_tcps_terminator_with_config(
     (port, rx, handle)
 }
 
+fn spawn_tcps_terminator_with_config_for(
+    config: Arc<ServerConfig>,
+    expected_connections: usize,
+) -> (
+    u16,
+    mpsc::Receiver<Result<Vec<TerminatorObservation>, String>>,
+    std::thread::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback TCPS terminator");
+    let port = listener.local_addr().expect("listener address").port();
+    let (tx, rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let outcome = (|| -> Result<Vec<TerminatorObservation>, String> {
+            let mut observations = Vec::with_capacity(expected_connections);
+            for _ in 0..expected_connections {
+                let (sock, peer) = listener.accept().map_err(|e| format!("accept: {e}"))?;
+                observations.push(observe_tcps_connection(sock, peer, Arc::clone(&config))?);
+            }
+            Ok(observations)
+        })();
+        let _ = tx.send(outcome);
+    });
+    (port, rx, handle)
+}
+
 fn spawn_tcps_terminator(
     material: SyntheticMaterial,
 ) -> (
@@ -192,6 +217,17 @@ fn spawn_tcps_terminator(
     std::thread::JoinHandle<()>,
 ) {
     spawn_tcps_terminator_with_config(server_config(&material))
+}
+
+fn spawn_tcps_terminator_for(
+    material: SyntheticMaterial,
+    expected_connections: usize,
+) -> (
+    u16,
+    mpsc::Receiver<Result<Vec<TerminatorObservation>, String>>,
+    std::thread::JoinHandle<()>,
+) {
+    spawn_tcps_terminator_with_config_for(server_config(&material), expected_connections)
 }
 
 fn spawn_tcps_terminator_without_client_auth(
@@ -322,6 +358,63 @@ fn profile(wallet: &Path, token_file: &Path) -> oraclemcp_config::ConnectionProf
     profile_with_sni(wallet, token_file, Some(false))
 }
 
+fn profile_with_token_exec(
+    wallet: &Path,
+    token_exec: &[String],
+) -> oraclemcp_config::ConnectionProfile {
+    let token_exec = token_exec
+        .iter()
+        .map(|arg| toml_string(arg))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let toml = format!(
+        r#"
+        [[profiles]]
+        name = "local-oci"
+        connect_string = "LOCAL_TCPS"
+        username = "OCITESTUSER"
+        default_level = "READ_ONLY"
+        max_level = "READ_ONLY"
+
+        [profiles.oci]
+        wallet_location = "{}"
+        ssl_server_cert_dn = "{}"
+        use_sni = false
+        use_iam_token = true
+        token_exec = [{token_exec}]
+        "#,
+        wallet.display(),
+        SYNTHETIC_DN,
+    );
+    OracleMcpConfig::from_toml_str(&toml)
+        .expect("synthetic OCI token_exec profile parses")
+        .profiles
+        .into_iter()
+        .next()
+        .expect("profile present")
+}
+
+fn toml_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn coreutil(name: &str) -> String {
+    #[cfg(windows)]
+    let (dirs, suffix): (&[&str], &str) = (
+        &[r"C:\Program Files\Git\usr\bin", r"C:\Program Files\Git\bin"],
+        ".exe",
+    );
+    #[cfg(not(windows))]
+    let (dirs, suffix): (&[&str], &str) = (&["/usr/bin", "/bin"], "");
+    for dir in dirs {
+        let candidate = std::path::Path::new(dir).join(format!("{name}{suffix}"));
+        if candidate.exists() {
+            return candidate.to_string_lossy().replace('\\', "/");
+        }
+    }
+    panic!("hermetic test requires `{name}` (looked in {dirs:?})");
+}
+
 fn child_env_path(name: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("{name} must be set")))
 }
@@ -450,6 +543,73 @@ fn profile_wallet_and_iam_token_reach_local_tcps_terminator() {
         "{{\"suite\":\"oci_tcps_e2e\",\"phase\":\"assert\",\"event\":\"tcps_observed\",\"peer_cert_count\":{},\"post_tls_bytes\":{}}}",
         observed.peer_cert_count, observed.post_tls_bytes
     );
+}
+
+#[test]
+fn token_exec_runs_once_per_physical_tcps_connect_attempt() {
+    let material = synthetic_material();
+    let (port, rx, server) = spawn_tcps_terminator_for(material.clone(), 2);
+    let lab_dir = unique_lab_dir();
+    let (wallet, _token_file) = write_lab_wallet(&lab_dir, port, &material);
+    let counter = lab_dir.join("token-exec-count.txt");
+    let counter_arg = counter.display().to_string().replace('\\', "/");
+    let sh = coreutil("sh");
+    let script = "count=$(cat \"$1\" 2>/dev/null || printf 0); count=$((count + 1)); printf '%s' \"$count\" > \"$1\"; printf 'header.payload.%s' \"$count\"";
+    let profile = profile_with_token_exec(
+        &wallet,
+        &[
+            sh,
+            "-c".to_owned(),
+            script.to_owned(),
+            "oraclemcp-token-counter".to_owned(),
+            counter_arg,
+        ],
+    );
+
+    let mut ctx =
+        build_session_context(&profile, None, None, false).expect("profile maps to options");
+    inject_iam_token(&profile, &mut ctx.options)
+        .expect("token_exec configures a refreshable source over wallet TCPS");
+    assert!(ctx.options.iam_token.is_none());
+    assert!(ctx.options.iam_token_source.is_some());
+    assert!(
+        !counter.exists(),
+        "config load must not run token_exec before a physical connect"
+    );
+
+    for attempt in 1..=2 {
+        let rendered = run_with_cx({
+            let options = ctx.options.clone();
+            async move {
+                let cx = Cx::current().expect("block_on installs a Cx");
+                match RustOracleConnection::connect(&cx, options).await {
+                    Ok(_) => panic!("terminator is not an Oracle protocol server"),
+                    Err(err) => err.to_string(),
+                }
+            }
+        });
+        assert!(
+            !rendered.contains("header.payload.")
+                && !rendered.contains(&wallet.display().to_string()),
+            "attempt {attempt} leaked token or wallet material: {rendered}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&counter).expect("counter written"),
+            attempt.to_string(),
+            "token_exec must run exactly once for physical connect attempt {attempt}"
+        );
+    }
+
+    let observations = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("terminator reports observations")
+        .expect("terminator completed TLS twice");
+    server.join().expect("terminator thread joins");
+    assert_eq!(observations.len(), 2);
+    for observed in observations {
+        assert!(observed.peer_cert_count > 0, "{observed:?}");
+        assert!(observed.post_tls_bytes > 0, "{observed:?}");
+    }
 }
 
 #[test]
@@ -584,7 +744,7 @@ fn b6_ssl_cert_dir_public_root_reaches_local_tcps_terminator() {
 }
 
 #[test]
-fn p2_4_wallet_profile_without_explicit_sni_records_current_default_red() {
+fn p2_4_wallet_profile_without_explicit_sni_reaches_local_tcps_terminator() {
     let material = synthetic_material();
     let (port, rx, server) =
         spawn_optional_tcps_terminator(material.clone(), Duration::from_millis(1500));
@@ -608,16 +768,16 @@ fn p2_4_wallet_profile_without_explicit_sni_records_current_default_red() {
         }
     });
     assert!(
-        rendered.contains("use_sni=true cannot be honored"),
-        "P2-4 current-red probe expected adapter-forced SNI failure, got: {rendered}"
+        !rendered.contains("use_sni=true cannot be honored"),
+        "wallet-only profiles must not force an unsupported SNI failure: {rendered}"
     );
     let observed = rx
         .recv_timeout(Duration::from_secs(3))
         .expect("terminator reports whether the driver dialed")
         .expect("terminator probe did not fail");
     server.join().expect("terminator thread joins");
-    assert!(
-        observed.is_none(),
-        "current P2-4 red condition should fail before dialing the local TCPS terminator: {observed:?}"
-    );
+    let observed =
+        observed.expect("wallet-only profile should reach the local TCPS terminator after P2-4");
+    assert!(observed.peer_cert_count > 0, "{observed:?}");
+    assert!(observed.post_tls_bytes > 0, "{observed:?}");
 }
