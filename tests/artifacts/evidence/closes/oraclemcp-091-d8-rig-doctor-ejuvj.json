@@ -1,0 +1,57 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T07:16:57Z",
+  "bead_id": "oraclemcp-091-d8-rig-doctor-ejuvj",
+  "scope": {
+    "summary": "Keeps the D8 rig doctor shellcheck-clean and verifies the local environment preflight refuses and passes through the script's own checks.",
+    "in_scope": [
+      "scripts/rig/rig_doctor.sh"
+    ],
+    "out_of_scope": [
+      "Changing the L1 rig lifecycle command itself.",
+      "Running a full workspace Cargo gate.",
+      "Changing any sibling driver repository or path-overriding the published driver dependency."
+    ]
+  },
+  "source": {
+    "sha": "681cbd53d48b43cb3df653c7ba92bc409380b0c0",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "rig doctor shell lint",
+        "kind": "cli",
+        "trace": "`shellcheck scripts/rig/rig_doctor.sh` exited 0 after the D8 shellcheck-clean repair."
+      },
+      {
+        "name": "rig doctor anti-vacuity selftest",
+        "kind": "cli",
+        "trace": "`bash scripts/rig/rig_doctor.sh --selftest` exited 0 and printed: rig_doctor selftest: OK (every check can refuse; coverage matches /home/durakovic/projects/oraclemcp/scripts/rig/oracle_l1.sh)."
+      },
+      {
+        "name": "local rig environment preflight",
+        "kind": "cli",
+        "trace": "`bash scripts/rig/rig_doctor.sh --lane all` exited 0 and reported PASS rig_doctor: 16 checks, 0 refusals across docker, timeout, state-dir, xe18, xe21, and free23 container/sqlplus checks."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This close proves the preflight against currently running local containers; it does not run the full L1 Oracle harness.",
+    "The full workspace Cargo gate was not run because this is a shell-only rig doctor repair and workspace-wide cargo is build-lease gated.",
+    "The shared checkout contains dirty files outside this bead's scope, so only the source-scoped tree cleanliness is claimed."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
