@@ -1,0 +1,78 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T11:18:00Z",
+  "bead_id": "oraclemcp-788nn",
+  "scope": {
+    "summary": "Renames the human-facing field-hardening train text from server 0.9.1 to server 0.10.0 while preserving Cargo version metadata and historical bead IDs.",
+    "in_scope": [
+      "docs/plan/PLAN_0_9_1_FIELD_HARDENING.md",
+      "docs/plan/PLAN_ENGINEERING_PROGRAM.md",
+      ".beads/issues.jsonl"
+    ],
+    "out_of_scope": [
+      "No Cargo.toml, Cargo.lock, package metadata, or release artifact version changes.",
+      "No raw edits to tombstone Beads records; br update refuses tombstones, so historical tombstone text remains immutable tracker history.",
+      "No renaming of 091-prefixed bead IDs; only human-facing train text and labels were corrected."
+    ]
+  },
+  "source": {
+    "sha": "f346d39c2474243dd198f022c8afff17c1975fbe",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "field-hardening plan train correction",
+        "kind": "cli",
+        "trace": "`git show --stat b3e4fe8d` showed docs/plan/PLAN_0_9_1_FIELD_HARDENING.md changed only as the v9 correction: server train renamed to 0.10.0 / driver 0.9.0, with no Cargo metadata touched."
+      },
+      {
+        "name": "engineering program train correction",
+        "kind": "cli",
+        "trace": "`git show --stat f346d39c` showed docs/plan/PLAN_ENGINEERING_PROGRAM.md updated for the server 0.10.0 / driver 0.9.0 train correction. The shared C5 janitor hunk was removed before this commit and restored after it, leaving C5 as the only remaining worktree diff in that file."
+      },
+      {
+        "name": "tracker export train correction",
+        "kind": "cli",
+        "trace": "`git show --stat 38356a4d` showed .beads/issues.jsonl changed by 6 insertions / 6 deletions for mutable bead train text and labels. `br show oraclemcp-788nn --json` reports title 'Rename release-train text to 0.10.0 across plan, beads and tracker root' and label 'train-0100'."
+      },
+      {
+        "name": "scoped whitespace check",
+        "kind": "cli",
+        "trace": "`git diff --check -- docs/plan/PLAN_0_9_1_FIELD_HARDENING.md docs/plan/PLAN_ENGINEERING_PROGRAM.md .beads/issues.jsonl` exited 0."
+      },
+      {
+        "name": "mutable tracker old-train scan",
+        "kind": "cli",
+        "trace": "`br list --all --deferred --limit 0 --json` scanned 1265 issues across title, description, notes, design, and acceptance_criteria. The only remaining mutable-field hit for 0.9.1/train-091 is oraclemcp-788nn.description, where the text intentionally explains why 0.9.1 was the wrong train name; train-091 count was 0."
+      },
+      {
+        "name": "plan residual old-train scan",
+        "kind": "cli",
+        "trace": "`rg -n '0\\.9\\.1|0\\.8\\.5|train-091' docs/plan/PLAN_0_9_1_FIELD_HARDENING.md docs/plan/PLAN_ENGINEERING_PROGRAM.md` found only three intentional references in PLAN_0_9_1_FIELD_HARDENING.md: the superseded operator decision and the v9 correction explaining 0.9.1 -> 0.10.0."
+      },
+      {
+        "name": "close scaffold scope cleanliness",
+        "kind": "cli",
+        "trace": "`python3 scripts/audit_bead_closes.py --template oraclemcp-788nn --scope docs/plan/PLAN_0_9_1_FIELD_HARDENING.md --scope docs/plan/PLAN_ENGINEERING_PROGRAM.md --scope .beads/issues.jsonl` reported source sha f346d39c2474243dd198f022c8afff17c1975fbe with tree_clean true for the claimed scope."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Documentation/tracker-only correction; no cargo build or test was run because no Rust source or package metadata changed.",
+    "The shared checkout still contains unrelated live peer work outside this bead, including C5 janitor hunks in docs/plan/PLAN_ENGINEERING_PROGRAM.md after the 788nn commit. Those hunks are deliberately excluded from this close evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
