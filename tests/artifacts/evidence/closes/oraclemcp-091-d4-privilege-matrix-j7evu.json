@@ -1,0 +1,77 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:25:00Z",
+  "bead_id": "oraclemcp-091-d4-privilege-matrix-j7evu",
+  "scope": {
+    "summary": "D4 privilege-matrix fixture wired into the rig: the `oracle_l1.sh privilege-matrix` command provisions the no-flashback + catalog-blind principals and emits the env the live test consumes; the two #[ignore]d test cases reproduce the recorded failing half through the wired command.",
+    "in_scope": [
+      "scripts/rig/oracle_l1.sh",
+      "scripts/rig/oracle_l1_privilege_matrix.sql",
+      "crates/oraclemcp-db/tests/privilege_matrix_live.rs"
+    ],
+    "out_of_scope": [
+      "The green half: A3a preflights missing DBMS_FLASHBACK EXECUTE before session-state cleanup, A3b keeps quarantine only for genuine teardown failures, and A1a requires positive catalog visibility before a read-only proof. Those fix beads own flipping the two tests green (delete their #[ignore]).",
+      "Wiring the lane into CI or the one-command `run` cycle — it is a standalone rig command, at parity with drcp-identity.",
+      "The sibling rust-oracledb driver repository."
+    ]
+  },
+  "source": {
+    "sha": "e0abfe2f11f5b0ec348492291e07817eac92dfd6",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "D4 rig command provisions the fixture and emits env",
+        "kind": "cli",
+        "trace": "`bash scripts/rig/oracle_l1.sh privilege-matrix --log` exited 0 on free23: loaded oracle_l1_privilege_matrix.sql as SYSDBA inside FREEPDB1, the fixture's catalog proof found exactly one enabled SELECT VPD policy and one virtual column on ORACLEMCP_D4_OWNER.ORACLEMCP_D4_GUARDED, and the command emitted ORACLEMCP_D4_DSN (//localhost:1522/FREEPDB1), both restricted principals, and ORACLEMCP_D4_CATALOG_OBJECT_ID (the rig-verified object id) on stdout with log events on stderr."
+      },
+      {
+        "name": "D4 no-flashback failing half (expected-red)",
+        "kind": "cli",
+        "trace": "With the emitted env exported, `CARGO_TARGET_DIR=target cargo test -p oraclemcp-db --features live-xe --test privilege_matrix_live -- --ignored --nocapture` ran d4_no_flashback_principal_gets_typed_refusal_and_connection_stays_usable: the initial request was typed FLASHBACK_CAPABILITY_UNAVAILABLE, then DBMS_FLASHBACK.DISABLE cleanup returned ORA-06550/PLS-00201 (identifier 'DBMS_FLASHBACK' must be declared) and the thin connection was quarantined as unknown_discarded, so the post-refusal usability assertion failed. This is the recorded failing half A3a/A3b flip green."
+      },
+      {
+        "name": "D4 catalog-blind failing half (expected-red)",
+        "kind": "cli",
+        "trace": "Same run, d4_catalog_blind_principal_cannot_prove_the_known_guarded_table_read_only: resolved_relations_read_purity returned ProvenReadOnly where the assertion requires Unknown — the catalog-blind principal's successful-empty ALL_POLICIES/ALL_TAB_COLS probes fall through to a read-only proof despite the known VPD policy + virtual column on the target. This is the fail-open A1a closes."
+      },
+      {
+        "name": "D4 script hygiene",
+        "kind": "cli",
+        "trace": "`bash -n scripts/rig/oracle_l1.sh` and `shellcheck -S warning scripts/rig/oracle_l1.sh` both exited 0 after the wiring."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The lane ran against the already-running local Free23 rig container and is recorded as scoped integration evidence, not as a committed live-evidence artifact.",
+    "The two test cases remain #[ignore]d; this close records the wired lane and the failing half per the closure convention. The green half is owned by A3a/A3b and A1a.",
+    "The lane is a standalone rig command, not yet part of the one-command `run` cycle or CI."
+  ],
+  "known_defects": [
+    {
+      "description": "A principal without EXECUTE ON DBMS_FLASHBACK is permanently quarantined (unknown_discarded) because read_query_as_of runs DBMS_FLASHBACK.DISABLE cleanup before any capability preflight, treating a predictable missing-privilege error like an unprovable teardown. A3a/A3b own the fix.",
+      "bead_id": "oraclemcp-091-a3a-flashback-preflight-dwbma"
+    },
+    {
+      "description": "The VPD-policy and virtual-column catalog gates treat a successful-empty probe as harmless, so a catalog-blind principal's dictionary responses fall through to ProvenReadOnly despite known hidden behavior on the target — a fail-open. A1a owns requiring positive catalog visibility before a read-only proof.",
+      "bead_id": "oraclemcp-091-a1a-catalog-gates-fail-open-59d9v"
+    }
+  ],
+  "follow_ups": [
+    "oraclemcp-091-a3a-flashback-preflight-dwbma",
+    "oraclemcp-091-a3b-refusal-vs-teardown-vl3w9",
+    "oraclemcp-091-a1a-catalog-gates-fail-open-59d9v"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
