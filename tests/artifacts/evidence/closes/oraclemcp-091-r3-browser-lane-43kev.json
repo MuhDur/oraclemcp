@@ -1,0 +1,83 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:14:35Z",
+  "bead_id": "oraclemcp-091-r3-browser-lane-43kev",
+  "scope": {
+    "summary": "R3 adds a live-serve Chromium lane that records the pre-A5 browser pairing failure, then proves authenticated operator action POST 200 and EventSource Last-Event-ID resume against the real listener.",
+    "in_scope": [
+      "scripts/rig/rig.sh",
+      "scripts/rig/rig_browser_lane.sh",
+      "web/e2e/live-serve-browser.spec.ts",
+      "web/playwright.live-serve.config.ts"
+    ],
+    "out_of_scope": [
+      "A5 dashboard fetch-first/product fix remains open; this close does not accept Origin:null or change dashboard security policy.",
+      "No Oracle schema/live database assertions are claimed; the action proof uses server-answered oracle_capabilities to isolate the browser/operator HTTP surface."
+    ]
+  },
+  "source": {
+    "sha": "6995c89b17163afbb370c64d05c8bd02c863ebbb",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "standalone R3 lane",
+        "kind": "cli",
+        "trace": "bash scripts/rig/rig_browser_lane.sh run --log builds oraclemcp through omcpb, runs web/playwright.live-serve.config.ts, and writes target/e2e/browser-lane/<run>/browser-lane-result.json."
+      },
+      {
+        "name": "Tier-3 rig wiring",
+        "kind": "cli",
+        "trace": "bash scripts/rig/rig.sh browser-lane runs the new lane under Tier A pseudo-home; bash scripts/rig/rig.sh run now includes the browser lane after L1."
+      },
+      {
+        "name": "latest live artifact",
+        "kind": "cli",
+        "trace": "target/e2e/browser-lane/run-1784711617436-a69b4e82-a4d7-45a2-94a9-92c6e2ba4c00/browser-lane-result.json recorded expected_pre_a5_failure=true, browser_pairing.status=403, browser_pairing.origin=null, action_status=200, action_tool=oracle_capabilities, and sse_event_ids=[operator/1, operator/2]."
+      },
+      {
+        "name": "scoped core compile",
+        "kind": "cli",
+        "trace": "env -u CARGO_TARGET_DIR cargo check -p oraclemcp-core passed: oraclemcp-db and oraclemcp-core checked successfully with the checkout target."
+      },
+      {
+        "name": "browser lane syntax and discovery",
+        "kind": "cli",
+        "trace": "bash -n scripts/rig/rig_browser_lane.sh and bash -n scripts/rig/rig.sh passed; npm --prefix web exec -- playwright test --config web/playwright.live-serve.config.ts --list passed and listed 1 Chromium live-serve browser test."
+      },
+      {
+        "name": "R3 live browser lane",
+        "kind": "cli",
+        "trace": "env -u CARGO_TARGET_DIR scripts/swarm_discipline.sh bounded-run --timeout 600 -- bash scripts/rig/rig_browser_lane.sh run --log passed: omcpb built oraclemcp, Playwright ran 1 Chromium test against live serve, and the rig completed with pass."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The lane is intentionally in pre-A5 expected-failure mode by default: real Chromium form pairing currently records 403 from Origin:null. Set OMCP_BROWSER_LANE_EXPECT_PRE_A5_FAILURE=0 after A5 lands to enforce POST -> 303 -> /.",
+    "The authenticated action and SSE resume proof run after a direct same-origin pairing bootstrap installs the dashboard cookie, because the current browser form pairing is the known A5 blocker.",
+    "No full-workspace cargo gate is claimed from this shared dirty checkout."
+  ],
+  "known_defects": [
+    {
+      "description": "A5 must flip browser pairing from the recorded Origin:null 403 to the green POST -> 303 -> / path without accepting literal Origin:null.",
+      "bead_id": "oraclemcp-091-a5-dashboard-fetch-first-d4tiv"
+    }
+  ],
+  "follow_ups": [
+    "oraclemcp-091-c4-dashboard-browser-flow-cw3e2",
+    "oraclemcp-091-e4-dashboard-e2e-sobjr",
+    "oraclemcp-091-a5-dashboard-fetch-first-d4tiv"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
