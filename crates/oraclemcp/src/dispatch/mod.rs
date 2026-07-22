@@ -5136,6 +5136,9 @@ use workspace::CheckpointWorkspace;
 mod metadata_cache_key;
 use metadata_cache_key::metadata_cache_key_json;
 
+mod tool_routing;
+use tool_routing::{canonical_tool_name, response_reports_terminal_effect};
+
 /// Map a JSON value to an [`OracleBind`]. Agent argument values are always
 /// bound, never interpolated. Unsupported JSON (arrays/objects) is an
 /// `InvalidArguments` error rather than a silent coercion.
@@ -11844,74 +11847,6 @@ async fn connection_strategy_json(cx: &Cx, conn: &dyn OracleConnection) -> Value
             "connected": false,
             "connection_error": err.into_envelope(),
         }),
-    }
-}
-
-fn canonical_tool_name(name: &str) -> &str {
-    match name {
-        "current_database" => "oracle_connection_info",
-        "switch_database" => "oracle_switch_profile",
-        "enable_writes" | "disable_writes" => "oracle_set_session_level",
-        "query" => "oracle_query",
-        "list_objects" => "oracle_schema_inspect",
-        "list_schemas" => "oracle_list_schemas",
-        "get_schema" => "oracle_schema_inspect",
-        "compile_object" | "compile_with_warnings" => "oracle_compile_object",
-        "create_or_replace" => "oracle_create_or_replace",
-        "patch_package" | "patch_view" => "oracle_patch_source",
-        "execute_approved" => "execute_approved",
-        "deploy_ddl" => "deploy_ddl",
-        "describe_table" => "oracle_describe",
-        "describe_index" => "oracle_describe_index",
-        "describe_trigger" => "oracle_describe_trigger",
-        "describe_view" => "oracle_describe_view",
-        "get_ddl" => "oracle_get_ddl",
-        "get_object_source" => "oracle_get_source",
-        "get_errors" => "oracle_compile_errors",
-        "get_clob" => "oracle_read_clob",
-        "preview_sql" => "oracle_preview_sql",
-        other => other,
-    }
-}
-
-/// Decide from the actual successful response, not just the tool name. The
-/// same mutation tools also serve previews, and those must remain cancellable.
-fn response_reports_terminal_effect(name: &str, value: &Value) -> bool {
-    let bool_field = |field| value.get(field).and_then(Value::as_bool) == Some(true);
-    match canonical_tool_name(name) {
-        "oracle_switch_profile" => true,
-        "oracle_set_session_level" => bool_field("changed"),
-        "oracle_compile_object" => bool_field("compiled"),
-        "oracle_patch_source" | "oracle_create_or_replace" | "deploy_ddl" => bool_field("applied"),
-        // F-DI6: a checkpoint or an undo that returned Ok has ALREADY changed
-        // transaction state on the pinned session — the SAVEPOINT exists, or the
-        // ROLLBACK has been taken. Judging it non-terminal lets a deadline that
-        // expires after Oracle answered report a retryable `Cancelled` for work
-        // that is done, and a caller who reasonably retries then re-establishes a
-        // savepoint or re-rolls-back a workspace that has already moved,
-        // duplicating or mis-sequencing transaction operations.
-        //
-        // Both undo shapes count. A full rollback reports `undone_to: null`
-        // because it targets no named checkpoint, and it is the case that
-        // discarded the MOST state — keying on `undone_to` being non-null would
-        // wave through exactly the largest effect.
-        "oracle_checkpoint" => value.get("checkpoint").is_some_and(Value::is_string),
-        "oracle_undo_to" => value.get("statement").is_some_and(Value::is_string),
-        "oracle_execute" | "execute_approved" => {
-            // F-DI1: a held statement (Arc I) already ran inside the open
-            // workspace transaction and its effect persists there — pending,
-            // but real — exactly like a committed or non-transactional
-            // effect. Judging it non-terminal would let a late client
-            // cancellation report `Cancelled` for a statement that already
-            // executed; a caller who reasonably retries after `Cancelled`
-            // would then apply the same held statement a second time on top
-            // of the still-pending first one.
-            bool_field("executed")
-                && (bool_field("committed")
-                    || bool_field("non_transactional_effect")
-                    || bool_field("held"))
-        }
-        _ => false,
     }
 }
 
