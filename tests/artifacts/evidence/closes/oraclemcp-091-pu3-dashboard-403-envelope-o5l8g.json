@@ -1,0 +1,68 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:18:12Z",
+  "bead_id": "oraclemcp-091-pu3-dashboard-403-envelope-o5l8g",
+  "scope": {
+    "summary": "P-U3 makes dashboard-facing 403 responses structured ErrorEnvelope JSON while keeping all dashboard auth 403s uniform and non-oracular.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/http/mod.rs",
+      "crates/oraclemcp-core/src/http/tests_dashboard.rs",
+      "web/e2e/live-serve-browser.spec.ts",
+      "scripts/rig/rig_browser_lane.sh"
+    ],
+    "out_of_scope": [
+      "OAuth bearer and non-dashboard HTTP guard response shapes are not changed.",
+      "Dashboard 401 responses retain their existing auth-required JSON shape; this bead closes the dashboard 403 envelope defect."
+    ]
+  },
+  "source": {
+    "sha": "79bba6c67b305853b5baa8c89558146bf393782c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "dashboard 403 response shaping",
+        "kind": "api",
+        "trace": "crates/oraclemcp-core/src/http/mod.rs now routes dashboard-facing guard/auth 403s through one ErrorEnvelope response: error_class=POLICY_DENIED, message=`dashboard request was refused`, and a generic next_steps entry. It deliberately omits cause-specific `error` labels."
+      },
+      {
+        "name": "dashboard no-auth-oracle unit pin",
+        "kind": "cli",
+        "trace": "`timeout 480 env CARGO_TARGET_DIR=target cargo test -p oraclemcp-core --lib malicious_page_cannot_trigger_dashboard_gated_action -- --nocapture` exited 0: 1 passed, 0 failed, 0 ignored. The test proves cross-origin and literal Origin:null dashboard POST refusals both return the same POLICY_DENIED envelope, do not reach dispatch, and do not contain dashboard_same_origin_required, Origin/Host header details, csrf, or action_ticket labels."
+      },
+      {
+        "name": "R3 live browser assertion",
+        "kind": "cli",
+        "trace": "`timeout 900 env NODE_PATH=/home/durakovic/projects/oraclemcp/web/node_modules bash scripts/rig/rig_browser_lane.sh run --log` exited 0. The Playwright R3 test asserted an unauthorized dashboard POST returns 403 application/json with isError=true, error_class=POLICY_DENIED, generic message, next_steps, and no cause-specific error field or leaked refusal substrings."
+      },
+      {
+        "name": "R3 browser artifact",
+        "kind": "cli",
+        "trace": "`target/e2e/browser-lane/run-1784715371087-ad678b13-a6cb-4368-87f8-1e7f70c50c96/browser-lane-result.json` records dashboard_403.status=403, dashboard_403.error_class=POLICY_DENIED, and dashboard_403.next_steps=1 alongside the positive pair/action/SSE evidence; sha256=89bac33611a2237bbc13b0123ca7f415a972b62415bb5b5e91edb4e3108fa350."
+      },
+      {
+        "name": "TypeScript, formatting, and script syntax",
+        "kind": "cli",
+        "trace": "`npm --prefix web exec -- tsc -p web/tsconfig.json --noEmit`, `cargo fmt --package oraclemcp-core --package oraclemcp --check`, `bash -n scripts/rig/rig_browser_lane.sh`, `bash -n scripts/e2e/run_all.sh`, and `git diff --check -- <touched paths>` all exited 0."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The live artifact is local under target/ and is not committed; the committed evidence records the exact artifact path, summarized fields, and SHA-256 digest in the trace.",
+    "No full workspace cargo gate is claimed from this shared checkout."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}

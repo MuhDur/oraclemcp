@@ -1,0 +1,69 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:18:12Z",
+  "bead_id": "oraclemcp-091-e4-dashboard-e2e-sobjr",
+  "scope": {
+    "summary": "E4 wires the operator/dashboard e2e acceptance to the existing R3 live browser lane and makes that lane first-class in the e2e orchestrator and inventory.",
+    "in_scope": [
+      "scripts/rig/rig_browser_lane.sh",
+      "scripts/e2e/run_all.sh",
+      "scripts/e2e/COVERAGE.md",
+      "web/e2e/live-serve-browser.spec.ts",
+      "crates/oraclemcp/tests/e2e_harness.rs"
+    ],
+    "out_of_scope": [
+      "No parallel dashboard browser harness was added; the coverage and orchestrator point at R3's existing rig lane.",
+      "No live Oracle schema or database behavior is claimed; this lane exercises the real HTTP listener, dashboard pairing, operator action POST, and SSE resume with oracle_capabilities."
+    ]
+  },
+  "source": {
+    "sha": "79bba6c67b305853b5baa8c89558146bf393782c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "R3 live browser lane",
+        "kind": "cli",
+        "trace": "`timeout 900 env NODE_PATH=/home/durakovic/projects/oraclemcp/web/node_modules bash scripts/rig/rig_browser_lane.sh run --log` exited 0: omcpb built oraclemcp, Playwright ran 2 Chromium tests, dashboard 403 returned a uniform ErrorEnvelope, Chromium paired via POST -> 303 -> /, browser action POST returned 200, and EventSource resumed with Last-Event-ID."
+      },
+      {
+        "name": "R3 browser artifact",
+        "kind": "cli",
+        "trace": "`target/e2e/browser-lane/run-1784715371087-ad678b13-a6cb-4368-87f8-1e7f70c50c96/browser-lane-result.json` records dashboard_403.status=403, dashboard_403.error_class=POLICY_DENIED, browser_pairing.status=303, action_status=200, action_tool=oracle_capabilities, and sse_event_ids=[operator/1, operator/2]; sha256=89bac33611a2237bbc13b0123ca7f415a972b62415bb5b5e91edb4e3108fa350."
+      },
+      {
+        "name": "e2e run-all registration",
+        "kind": "cli",
+        "trace": "`timeout 300 bash scripts/e2e/run_all.sh --log --dry-run` exited 0 and reported `e2e summary: pass=14 fail=0 skipped=16 total=30`; the additional pass is the R3 browser lane dispatched by run_all with its explicit `run` subcommand."
+      },
+      {
+        "name": "R3 fixture discovery",
+        "kind": "cli",
+        "trace": "`NODE_PATH=/home/durakovic/projects/oraclemcp/web/node_modules /home/durakovic/projects/oraclemcp/web/node_modules/.bin/playwright test --config web/playwright.live-serve.config.ts --list` exited 0 and listed the existing 2 Chromium R3/C4 tests."
+      },
+      {
+        "name": "E4 harness contract",
+        "kind": "cli",
+        "trace": "`timeout 480 env CARGO_TARGET_DIR=target cargo test -p oraclemcp --test e2e_harness dashboard_browser_lane_e2e_is_registered_without_parallel_harness -- --nocapture` exited 0: 1 passed, 0 failed, 0 ignored. The test asserts run_all dispatches scripts/rig/rig_browser_lane.sh, uses the explicit run subcommand, and does not add a parallel scripts/e2e/dashboard_browser harness."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The live artifact is local under target/ and is not committed; the committed evidence records the exact artifact path, summarized fields, and SHA-256 digest in the trace.",
+    "No full workspace cargo gate is claimed from this shared checkout."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}
