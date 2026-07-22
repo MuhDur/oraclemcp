@@ -1,0 +1,49 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T20:08:02Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.7.11.1",
+  "scope": {
+    "summary": "Driver-side verification evidence for FixedOffset sub-minute DC5 behavior remains valid and is not an oraclemcp-graph code change in this checkout.",
+    "in_scope": [
+      "README.md"
+    ],
+    "out_of_scope": [
+      "oraclemcp-side code changes, which are not part of this bead (already addressed via driver dependency pinning).",
+      "live Oracle e2e and release metadata paths."
+    ]
+  },
+  "source": {
+    "sha": "e4dbbb6c4b4c7d5cdd4c86236912295602c2876e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Driver acceptance assertions (chrono_from_and_to_sql)",
+        "kind": "cli",
+        "trace": "`cargo test -p oracledb --features chrono chrono_from_and_to_sql -- --nocapture` (rust-oracledb HEAD) passes: 1 passed, 0 failed. Exact acceptance lines in `crates/oracledb/src/sql_convert.rs`: +05:45 assertion at lines 2439-2450 (`expect(\"+05:45 must encode exactly\")`, `offset_minutes: 345`) and round-trip check at 2452-2464; -03:30 assertion at 2471-2484 (`expect(\"-03:30 must encode exactly\")`, `offset_minutes: -210`) with 10:38 round-trip 2465-2500; UTC assertion at 2503-2514 (`expect(\"UTC must encode exactly\")`, `offset_minutes: 0`) and from_sql round-trip at 2516-2528; sub-minute refusal loop at 2534-2555 (`expect_err(\"sub-minute FixedOffset must not emit a TimestampTz bind\")` and `ConversionError::OutOfRange { expected: \"Oracle TIMESTAMP WITH TIME ZONE offset\", detail ... }` for both +30 and -30)."
+      },
+      {
+        "name": "Driver baseline check for published 0.9.0",
+        "kind": "cli",
+        "trace": "`git show v0.9.0:crates/oracledb/src/sql_convert.rs | rg -n --fixed-strings -e 'DC5: sub-minute FixedOffset' -e 'offset_minutes: 0' -e 'offset_minutes: -1'` still shows +00:00:30 and -00:00:30 coercing into `TimestampTz` with offset_minutes 0/-1, confirming the typed OutOfRange guard is not in 0.9.0. The corrective behavior is in commit 8106e36 in rust-oracledb."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This bead is closed by acceptance in rust-oracledb; oraclemcp cannot execute these assertions locally, and the effective fix lands at driver HEAD 8106e36. published 0.9.0 does not include this behavior, so the guarded fix reaches consumers at 0.9.1 repin."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
