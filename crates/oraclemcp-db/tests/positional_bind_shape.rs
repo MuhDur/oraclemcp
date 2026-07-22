@@ -154,7 +154,11 @@ fn the_scanner_sees_the_defect_it_was_written_for() {
     let broken = "WHERE owner = :1 AND (:2 IS NULL OR name = :2) AND ROWNUM <= :3";
     let counts = positional_placeholders(broken);
     assert_eq!(counts.get(&2), Some(&2), "the reuse must be visible");
-    assert_eq!(counts.values().sum::<usize>(), 4, "four occurrences, four slots");
+    assert_eq!(
+        counts.values().sum::<usize>(),
+        4,
+        "four occurrences, four slots"
+    );
 
     // The corrected shape: one occurrence each, four slots, four values.
     let fixed = "WHERE owner = :1 AND (:2 IS NULL OR name = :3) AND ROWNUM <= :4";
