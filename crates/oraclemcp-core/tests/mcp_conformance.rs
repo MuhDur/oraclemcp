@@ -844,12 +844,6 @@ fn resources_and_prompts_are_advertised_and_served_without_unserved_arms() {
     assert!(templates.iter().any(|template| {
         template["uriTemplate"] == json!("oracle://object/{owner}/{type}/{name}")
     }));
-    assert!(
-        templates
-            .iter()
-            .all(|template| template["uriTemplate"] != json!("oracle://session/{lease_id}")),
-        "session resources stay unadvertised until a lease-backed handler exists"
-    );
 
     let read_capabilities = replies
         .iter()

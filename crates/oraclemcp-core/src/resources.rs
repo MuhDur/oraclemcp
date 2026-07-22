@@ -7,10 +7,10 @@
 //!
 //! This module owns the engine-free parts: the `oracle://` URI model + routing,
 //! the `resources/list` template surface, and the parameterized prompt catalog
-//! (pure recipe templates). Live resource *content* (object DDL, session state,
-//! schema listings) is produced by an injected [`ResourceProvider`] so the
-//! one-way boundary holds; `oracle://capabilities` and `oracle://tools` render
-//! from in-core documents.
+//! (pure recipe templates). Live resource *content* (object DDL and schema
+//! listings) is produced by an injected [`ResourceProvider`] so the one-way
+//! boundary holds; `oracle://capabilities` and `oracle://tools` render from
+//! in-core documents.
 
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use serde_json::Value;
@@ -31,11 +31,6 @@ pub enum ResourceUri {
         object_type: String,
         /// The object name.
         name: String,
-    },
-    /// `oracle://session/{lease_id}` — live session state for a lease.
-    Session {
-        /// The lease id.
-        lease_id: String,
     },
     /// `oracle://capabilities` — the capability report.
     Capabilities,
@@ -87,9 +82,6 @@ impl ResourceUri {
                 object_type: (*ty).to_owned(),
                 name: (*name).to_owned(),
             }),
-            ["session", lease] => Ok(ResourceUri::Session {
-                lease_id: (*lease).to_owned(),
-            }),
             _ => Err(bad()),
         }
     }
@@ -106,7 +98,6 @@ impl ResourceUri {
             } => {
                 format!("oracle://object/{owner}/{object_type}/{name}")
             }
-            ResourceUri::Session { lease_id } => format!("oracle://session/{lease_id}"),
             ResourceUri::Capabilities => "oracle://capabilities".to_owned(),
             ResourceUri::Tools => "oracle://tools".to_owned(),
             ResourceUri::Export { id } => format!("oracle-export://{id}"),
@@ -162,12 +153,6 @@ pub fn resource_templates() -> Vec<ResourceTemplate> {
             "DDL / source of a database object",
             "text/plain",
         ),
-        t(
-            "oracle://session/{lease_id}",
-            "session",
-            "Live session state for a lease",
-            "application/json",
-        ),
     ]
 }
 
@@ -183,7 +168,7 @@ pub struct ResourceContents {
     pub text: String,
 }
 
-/// Produces content for the live resources (schema/object/session). Injected so
+/// Produces content for the live resources (schema/object). Injected so
 /// this module stays engine-free; `capabilities`/`tools` render in-core.
 pub trait ResourceProvider: Send + Sync {
     /// Read a live resource.
@@ -389,7 +374,6 @@ mod tests {
             "oracle://tools",
             "oracle://schema/HR",
             "oracle://object/HR/PACKAGE/EMP_API",
-            "oracle://session/lease-1-7",
         ] {
             let parsed = ResourceUri::parse(uri).expect(uri);
             assert_eq!(parsed.to_uri(), uri);
@@ -404,9 +388,9 @@ mod tests {
     }
 
     #[test]
-    fn templates_cover_all_five_schemes() {
+    fn templates_cover_all_served_schemes() {
         let t = resource_templates();
-        assert_eq!(t.len(), 5);
+        assert_eq!(t.len(), 4);
         assert!(
             t.iter()
                 .any(|r| r.uri_template == "oracle://object/{owner}/{type}/{name}")

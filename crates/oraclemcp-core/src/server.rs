@@ -2012,13 +2012,6 @@ impl OracleMcpServer {
                         text: contents.text,
                     })
             }
-            ResourceUri::Session { lease_id } => Err(ErrorEnvelope::new(
-                ErrorClass::ObjectNotFound,
-                format!(
-                    "session resource {lease_id:?} is not served by the read-only oraclemcp binary"
-                ),
-            )
-            .with_next_step("Use oracle_connection_info for connection state in this release.")),
         }
     }
 
@@ -2547,7 +2540,6 @@ fn served_resources_json() -> Vec<Value> {
 fn served_resource_templates_json() -> Vec<Value> {
     resource_templates()
         .into_iter()
-        .filter(|template| template.uri_template != "oracle://session/{lease_id}")
         .map(|template| serde_json::to_value(template).unwrap_or(Value::Null))
         .collect()
 }
