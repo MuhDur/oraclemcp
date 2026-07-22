@@ -1,0 +1,45 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T17:49:16Z",
+  "bead_id": "oraclemcp-custom-tool-write-loader-contract-vq69v",
+  "scope": {
+    "summary": "Align custom-tool documentation with runtime behavior and add a regression test that confirms write-capable custom-tool invocations are refused at runtime before any DB call.",
+    "in_scope": [
+      "README.md",
+      "crates/oraclemcp/src/dispatch/tests.rs"
+    ],
+    "out_of_scope": [
+      "No runtime custom-tool privilege behavior was changed; only docs and regression coverage were updated."
+    ]
+  },
+  "source": {
+    "sha": "a8994f279231213ef693b31e74bf2304da7bafc6",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [
+  ],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "custom tool dispatch runtime path",
+        "kind": "cli",
+        "trace": "crates/oraclemcp/src/dispatch/tests.rs::custom_tool_write_uses_runtime_level_refusal_before_db exercises dispatch on a loaded write-capable tool with default read-only effective level."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Proof is scoped local regression coverage on mocked execution; no full-workspace gate or live Oracle run was re-executed as part of this close."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
