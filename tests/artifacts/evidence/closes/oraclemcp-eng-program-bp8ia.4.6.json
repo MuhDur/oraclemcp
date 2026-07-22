@@ -6,7 +6,6 @@
   "scope": {
     "summary": "Reconciles and closes the C6 de-monolith parent: all nine child split beads are closed, and the committed architecture-fitness max-file-size ratchet passes without raising ceilings.",
     "in_scope": [
-      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.6.json",
       "crates/oraclemcp-core/src/server.rs",
       "crates/oraclemcp-core/src/server/dispatch_context_tests.rs",
       "crates/oraclemcp-core/src/server/resource_template_reads.rs",
