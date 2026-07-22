@@ -1,0 +1,69 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:43:30Z",
+  "bead_id": "oraclemcp-091-a5-dashboard-fetch-first-d4tiv",
+  "scope": {
+    "summary": "A5 makes the script-free dashboard pairing form browser-compatible by serving only that secret-free page with Referrer-Policy: same-origin, while keeping literal Origin:null, query-secret replay, single-use ticket, CSRF, and route-action-ticket protections fail-closed.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/http/mod.rs",
+      "crates/oraclemcp-core/src/http/tests_dashboard.rs",
+      "scripts/rig/rig_browser_lane.sh",
+      "web/e2e/live-serve-browser.spec.ts"
+    ],
+    "out_of_scope": [
+      "P-U3 structured dashboard 403-envelope polish remains a separate follow-up; native HTTP Origin guard refusals still use the existing plain 403 body.",
+      "A5 security review narrative is owned by oraclemcp-091-a5-secreview-0sdpx.",
+      "No pane 5 A1e files or VPD/RLS catalog work are touched."
+    ]
+  },
+  "source": {
+    "sha": "9b127a2e347e6949546cc5e04425be41c2b2c555",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "clean-worktree dashboard unit contract",
+        "kind": "cli",
+        "trace": "`timeout 240 env CARGO_TARGET_DIR=target cargo test -p oraclemcp-core --lib dashboard -- --nocapture` exited 0 in /home/durakovic/projects/oraclemcp-cod6-a5: 20 passed, 0 failed, 0 ignored. Covered pairing query-secret refusal without consumption, body-only ticket exchange, single-use replay, 60s expiry, literal Origin:null pairing refusal without consumption, cross-origin action refusal, missing CSRF refusal, route action-ticket validation, and valid action dispatch."
+      },
+      {
+        "name": "clean-worktree R3 browser lane",
+        "kind": "cli",
+        "trace": "`timeout 900 env NODE_PATH=/home/durakovic/projects/oraclemcp/web/node_modules bash scripts/rig/rig_browser_lane.sh run --log` exited 0 in /home/durakovic/projects/oraclemcp-cod6-a5: omcpb built oraclemcp, Playwright ran 2 Chromium tests, Chromium paired via POST -> 303 -> /, authenticated browser action POST returned 200, and EventSource resumed with Last-Event-ID."
+      },
+      {
+        "name": "browser fixture discovery and TypeScript",
+        "kind": "cli",
+        "trace": "`NODE_PATH=/home/durakovic/projects/oraclemcp/web/node_modules /home/durakovic/projects/oraclemcp/web/node_modules/.bin/playwright test --config web/playwright.live-serve.config.ts --list` listed the 2 Chromium R3/C4 tests, and `npm --prefix web exec -- tsc -p web/tsconfig.json --noEmit` exited 0 in the clean A5 worktree."
+      },
+      {
+        "name": "format and rig syntax",
+        "kind": "cli",
+        "trace": "`cargo fmt --package oraclemcp-core --check` and `bash -n scripts/rig/rig_browser_lane.sh` exited 0."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Evidence was produced from the clean temporary worktree /home/durakovic/projects/oraclemcp-cod6-a5 because the shared checkout contained other agents' dirty work.",
+    "No workspace-wide cargo gate is claimed.",
+    "The change intentionally does not accept literal Origin:null; the native HTTP Origin guard still refuses that before dashboard dispatch."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-a5-secreview-0sdpx",
+    "oraclemcp-091-pu3-dashboard-403-envelope-o5l8g",
+    "oraclemcp-091-e4-dashboard-e2e-sobjr"
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}
