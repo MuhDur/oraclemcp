@@ -2854,8 +2854,14 @@ fn setup_payload_is_generic_and_client_ready() {
             "oracle",
             "--transport",
             "http",
-            "http://127.0.0.1:7070/mcp"
+            "http://127.0.0.1:7070/mcp",
+            "--header",
+            "Authorization: Bearer <bearer>"
         ])
+    );
+    assert_eq!(
+        render_command_value(&out["http_client_credentials"]["claude_mcp_add"]),
+        "claude mcp add oracle --transport http http://127.0.0.1:7070/mcp --header 'Authorization: Bearer <bearer>'"
     );
     assert!(
         out["http_client_credentials"]["secret_rule"]
@@ -4497,9 +4503,9 @@ fn client_credential_commands_distinguish_offline_and_live_revocation() {
             "oracle",
             "--transport",
             "http",
+            "http://127.0.0.1:7070/mcp",
             "--header",
             "Authorization: Bearer ocmcp_fixture_bearer",
-            "http://127.0.0.1:7070/mcp",
         ])
     );
 

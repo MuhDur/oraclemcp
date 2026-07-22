@@ -352,6 +352,7 @@ Or run it directly:
 oraclemcp serve                      # stdio (default); --allow-no-auth for local dev
 oraclemcp --json clients issue --label claude --scope oracle:read  # shown-once HTTP bearer
 oraclemcp serve --listen 127.0.0.1:7070 --client-credentials --profile db_ro
+claude mcp add oracle --transport http http://127.0.0.1:7070/mcp --header "Authorization: Bearer <bearer>"
 oraclemcp serve --listen 127.0.0.1:7070 --allow-no-auth   # local HTTP dev only
 oraclemcp --json setup --profile db_ro    # generic onboarding templates
 oraclemcp --json setup --write --profile db_ro  # write starter profiles via SCFG
@@ -485,6 +486,7 @@ per MCP client; the bearer is shown once by `oraclemcp clients issue` or
 ```sh
 oraclemcp --json clients issue --label claude --scope oracle:read
 oraclemcp serve --listen 127.0.0.1:7070 --client-credentials --profile db_ro
+claude mcp add oracle --transport http http://127.0.0.1:7070/mcp --header "Authorization: Bearer <bearer>"
 oraclemcp --json clients rotate <client_id>
 oraclemcp --json clients revoke <client_id>
 ```

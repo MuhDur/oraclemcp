@@ -4890,6 +4890,32 @@ fn toml_string_encode(value: &str) -> String {
     out
 }
 
+fn shell_word_encode(value: &str) -> String {
+    if !value.is_empty()
+        && value.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'_' | b'-' | b'.' | b'/' | b':' | b'@' | b'%' | b'+' | b'='
+                )
+        })
+    {
+        return value.to_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn render_command_value(value: &serde_json::Value) -> String {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.as_str())
+        .map(shell_word_encode)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn setup_payload(
     profile: &str,
     credential_env: &str,
@@ -4947,7 +4973,7 @@ fn setup_payload(
             "issue_once": ["oraclemcp", "clients", "issue", "--label", "Claude Desktop", "--scope", "oracle:read"],
             "serve_args": ["serve", "--listen", "127.0.0.1:7070", "--client-credentials", "--profile", profile],
             "service_install": ["oraclemcp", "service", "install", "--yes", "--client-credentials", "--profile", profile],
-            "claude_mcp_add": ["claude", "mcp", "add", "oracle", "--transport", "http", "http://127.0.0.1:7070/mcp"],
+            "claude_mcp_add": client_credential_client_command("<bearer>"),
             "secret_rule": "The issued bearer is shown once by the clients command; put it only in the MCP client's secret/header store, never in profiles.toml, audit, logs, or committed config.",
             "rotation": ["oraclemcp", "clients", "rotate", "<client_id>"],
             "revocation": ["oraclemcp", "clients", "revoke", "<client_id>"]
@@ -5266,33 +5292,15 @@ fn run_setup(
         output.push_str("\nHTTP per-client credentials:\n");
         output.push_str(&format!(
             "  issue: {}\n",
-            payload["http_client_credentials"]["issue_once"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|part| part.as_str())
-                .collect::<Vec<_>>()
-                .join(" ")
+            render_command_value(&payload["http_client_credentials"]["issue_once"])
         ));
         output.push_str(&format!(
             "  service: {}\n",
-            payload["http_client_credentials"]["service_install"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|part| part.as_str())
-                .collect::<Vec<_>>()
-                .join(" ")
+            render_command_value(&payload["http_client_credentials"]["service_install"])
         ));
         output.push_str(&format!(
             "  claude: {}\n",
-            payload["http_client_credentials"]["claude_mcp_add"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|part| part.as_str())
-                .collect::<Vec<_>>()
-                .join(" ")
+            render_command_value(&payload["http_client_credentials"]["claude_mcp_add"])
         ));
         output.push_str(&format!(
             "  note: {}\n",
@@ -5306,13 +5314,7 @@ fn run_setup(
             .into_iter()
             .flatten()
         {
-            let rendered = command
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|part| part.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
+            let rendered = render_command_value(command);
             output.push_str(&format!("  {rendered}\n"));
         }
         stdout_exit(write_stdout_text(&output), ExitCode::SUCCESS)
@@ -6523,9 +6525,9 @@ fn client_credential_client_command(bearer: &str) -> serde_json::Value {
         "oracle",
         "--transport",
         "http",
+        "http://127.0.0.1:7070/mcp",
         "--header",
         format!("Authorization: Bearer {bearer}"),
-        "http://127.0.0.1:7070/mcp",
     ])
 }
 

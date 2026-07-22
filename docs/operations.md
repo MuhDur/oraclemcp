@@ -399,7 +399,9 @@ surface. Everything below concerns the HTTP transport (`serve --listen`).
   only a salted hash under `$XDG_STATE_HOME/oraclemcp/clients.json`. Enable this
   mode with `serve --client-credentials` or `service install
   --client-credentials`. Rotate or revoke one `client_id` without changing the
-  others; issue/rotate print the new bearer once.
+  others; issue/rotate print the new bearer once. Claude HTTP clients must carry
+  it on the registered MCP URL, for example `claude mcp add oracle --transport
+  http http://127.0.0.1:7070/mcp --header "Authorization: Bearer <bearer>"`.
 - **Infra probes are intentionally small.** `/readyz`, `/healthz`, and
   `/metrics` are unauthenticated infrastructure surfaces and bypass OAuth/Host
   guards so supervisors can probe them. They must stay allow-list-first:
