@@ -7,8 +7,7 @@
     "summary": "Split the doctor authentication capability and IAM-source diagnostic seam into a private child module without changing rendered doctor output, redaction, or exit-code behavior.",
     "in_scope": [
       "crates/oraclemcp-core/src/doctor.rs",
-      "crates/oraclemcp-core/src/doctor/auth.rs",
-      "scripts/oraclemcp_arch_fitness_lint.sh"
+      "crates/oraclemcp-core/src/doctor/auth.rs"
     ],
     "out_of_scope": [
       "Other C6 splits, including dispatch/tests.rs, http/operator.rs, service_lifecycle.rs, classifier.rs, lane.rs, App.tsx, and main.rs",
