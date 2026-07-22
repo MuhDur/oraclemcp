@@ -172,7 +172,8 @@ pub(super) const OPERATOR_IDEMPOTENCY_MAX_ENTRIES: usize = 1024;
 /// grants or durable write-ahead intents.
 #[derive(Debug, Default)]
 pub struct OperatorIdempotencyLedger {
-    entries: Mutex<HashMap<String, OperatorIdempotencyEntry>>,
+    entries: Arc<Mutex<HashMap<String, OperatorIdempotencyEntry>>>,
+    next_generation: AtomicU64,
 }
 
 impl OperatorIdempotencyLedger {
@@ -222,31 +223,51 @@ impl OperatorIdempotencyLedger {
                 // the lookup, so it can never evict the entry for this key.
                 evict_completed_operator_idempotency_entries_to_capacity(&mut entries);
                 let storage_key = facts.storage_key.clone();
+                let generation = self
+                    .next_generation
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1);
                 entries.insert(
                     storage_key.clone(),
                     OperatorIdempotencyEntry {
                         facts,
                         response: None,
                         created_at: Instant::now(),
+                        generation,
                     },
                 );
-                OperatorIdempotencyBegin::Fresh(OperatorIdempotencyLease { storage_key })
+                OperatorIdempotencyBegin::Fresh(OperatorIdempotencyLease {
+                    storage_key,
+                    generation,
+                    entries: Arc::clone(&self.entries),
+                    disarmed: false,
+                })
             }
         }
     }
 
     pub(super) fn complete(
         &self,
-        lease: OperatorIdempotencyLease,
+        mut lease: OperatorIdempotencyLease,
         completed_facts: OperatorIdempotencyFacts,
         response: HttpResponse,
     ) -> HttpResponse {
-        let mut entries = self.entries.lock();
-        if let Some(entry) = entries.get_mut(&lease.storage_key) {
-            entry.facts = completed_facts;
-            entry.response = Some(response.clone());
+        {
+            let mut entries = lease.entries.lock();
+            if let Some(entry) = entries.get_mut(&lease.storage_key)
+                && entry.generation == lease.generation
+            {
+                entry.facts = completed_facts;
+                entry.response = Some(response.clone());
+            }
         }
+        lease.disarm();
         response
+    }
+
+    #[cfg(test)]
+    pub(super) fn insert_for_test(&self, key: String, entry: OperatorIdempotencyEntry) {
+        self.entries.lock().insert(key, entry);
     }
 }
 
@@ -296,11 +317,41 @@ pub(super) struct OperatorIdempotencyEntry {
     pub(super) facts: OperatorIdempotencyFacts,
     pub(super) response: Option<HttpResponse>,
     pub(super) created_at: Instant,
+    pub(super) generation: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(super) struct OperatorIdempotencyLease {
     storage_key: String,
+    generation: u64,
+    entries: Arc<Mutex<HashMap<String, OperatorIdempotencyEntry>>>,
+    disarmed: bool,
+}
+
+impl OperatorIdempotencyLease {
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+
+    #[cfg(test)]
+    pub(super) fn generation_for_test(&self) -> u64 {
+        self.generation
+    }
+}
+
+impl Drop for OperatorIdempotencyLease {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        let mut entries = self.entries.lock();
+        let still_own_in_progress = entries
+            .get(&self.storage_key)
+            .is_some_and(|entry| entry.generation == self.generation && entry.response.is_none());
+        if still_own_in_progress {
+            entries.remove(&self.storage_key);
+        }
+    }
 }
 
 pub(super) enum OperatorIdempotencyBegin {

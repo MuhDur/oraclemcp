@@ -2021,6 +2021,7 @@ fn idempotency_capacity_eviction_spares_in_progress_and_drops_completed() {
             facts: idempotency_fact("in-progress"),
             response: None,
             created_at: std::time::Instant::now(),
+            generation: 1,
         },
     );
     // Fill past the cap with newer, completed entries.
@@ -2032,6 +2033,7 @@ fn idempotency_capacity_eviction_spares_in_progress_and_drops_completed() {
                 facts: idempotency_fact(&key),
                 response: Some(empty_response(200)),
                 created_at: std::time::Instant::now(),
+                generation: (i + 2) as u64,
             },
         );
     }
@@ -2320,6 +2322,74 @@ fn operator_idempotency_ledger_reports_in_progress_before_completion() {
         _ => panic!("duplicate after completion must replay"),
     };
     assert_eq!(replay, original);
+}
+
+#[test]
+fn operator_idempotency_fresh_lease_drop_releases_panic_stranded_marker() {
+    let ledger = OperatorIdempotencyLedger::new();
+    let facts = idempotency_fact("panic-safe");
+
+    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _lease = match ledger.begin("/operator/v1/actions/execute", facts.clone()) {
+            OperatorIdempotencyBegin::Fresh(lease) => lease,
+            _ => panic!("first reservation must be fresh"),
+        };
+        panic!("synthetic operator unwind before completion");
+    }));
+    assert!(panic_result.is_err());
+
+    match ledger.begin("/operator/v1/actions/execute", facts) {
+        OperatorIdempotencyBegin::Fresh(_lease) => {}
+        other => panic!(
+            "panic-dropped lease must immediately permit a fresh retry, got {}",
+            operator_idempotency_begin_kind(&other)
+        ),
+    }
+}
+
+#[test]
+fn operator_idempotency_stale_lease_drop_cannot_remove_newer_generation() {
+    let ledger = OperatorIdempotencyLedger::new();
+    let facts = idempotency_fact("same-key");
+    let stale_lease = match ledger.begin("/operator/v1/actions/execute", facts.clone()) {
+        OperatorIdempotencyBegin::Fresh(lease) => lease,
+        _ => panic!("first reservation must be fresh"),
+    };
+    let newer_generation = stale_lease.generation_for_test().saturating_add(1);
+    ledger.insert_for_test(
+        facts.storage_key.clone(),
+        OperatorIdempotencyEntry {
+            facts: facts.clone(),
+            response: None,
+            created_at: std::time::Instant::now(),
+            generation: newer_generation,
+        },
+    );
+
+    drop(stale_lease);
+
+    match ledger.begin("/operator/v1/actions/execute", facts) {
+        OperatorIdempotencyBegin::InProgress(response) => {
+            assert_eq!(response.status, 409);
+            assert_eq!(
+                response_json(&response)["data"]["error"],
+                serde_json::json!("operator_idempotency_in_progress")
+            );
+        }
+        other => panic!(
+            "stale lease drop must leave the newer in-progress generation intact, got {}",
+            operator_idempotency_begin_kind(&other)
+        ),
+    }
+}
+
+fn operator_idempotency_begin_kind(begin: &OperatorIdempotencyBegin) -> &'static str {
+    match begin {
+        OperatorIdempotencyBegin::Fresh(_) => "fresh",
+        OperatorIdempotencyBegin::Replay(_) => "replay",
+        OperatorIdempotencyBegin::InProgress(_) => "in_progress",
+        OperatorIdempotencyBegin::Conflict(_) => "conflict",
+    }
 }
 
 #[test]
