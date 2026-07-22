@@ -69,16 +69,11 @@ OMCP_BIN="$build_target/debug/oraclemcp"
 [ -x "$OMCP_BIN" ] || e2e_finish_fail "could not locate the omcpb-built browser-lane binary"
 export OMCP_BIN
 export OMCP_BROWSER_LANE=1
-export OMCP_BROWSER_LANE_EXPECT_PRE_A5_FAILURE="${OMCP_BROWSER_LANE_EXPECT_PRE_A5_FAILURE:-1}"
 export OMCP_BROWSER_LANE_ARTIFACT_DIR="${OMCP_BROWSER_LANE_ARTIFACT_DIR:-$ORACLEMCP_E2E_ARTIFACT_DIR/browser-lane}"
 
 if ! e2e_run_command "act" npm --prefix web exec -- playwright test --config web/playwright.live-serve.config.ts; then
   e2e_finish_fail "browser lane failed"
 fi
 
-if [ "$OMCP_BROWSER_LANE_EXPECT_PRE_A5_FAILURE" = "1" ]; then
-  e2e_log_event "scenario_assert" "assert" "pass" 0 "recorded pre-A5 Chromium pairing 403 from Origin:null; C4 enforced browser pair+action remains expected-red; direct same-origin bootstrap enabled browser action POST 200 and EventSource Last-Event-ID resume"
-else
-  e2e_log_event "scenario_assert" "assert" "pass" 0 "Chromium paired via 303 redirect, browser action POST returned 200, and EventSource resumed with Last-Event-ID"
-fi
+e2e_log_event "scenario_assert" "assert" "pass" 0 "Chromium paired via 303 redirect, browser action POST returned 200, and EventSource resumed with Last-Event-ID"
 e2e_finish_pass

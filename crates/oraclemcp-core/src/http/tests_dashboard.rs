@@ -346,6 +346,37 @@ fn malicious_page_cannot_trigger_dashboard_gated_action() {
         "cross-origin dashboard POST must not reach dispatch"
     );
 
+    let null_origin = handle_http_request(
+        &server,
+        &cfg,
+        HttpRequest::new(
+            "POST",
+            "/operator/v1/actions/preview",
+            [
+                ("host", "127.0.0.1"),
+                ("origin", "null"),
+                ("sec-fetch-site", "same-origin"),
+                ("content-type", "application/json"),
+                ("accept", "application/json"),
+                ("cookie", cookie_pair),
+                (DASHBOARD_CSRF_HEADER, view.csrf_token.as_str()),
+                (DASHBOARD_ACTION_TICKET_HEADER, preview_ticket.as_str()),
+            ],
+            action_body.to_string().into_bytes(),
+        )
+        .with_peer_loopback(true),
+    );
+    assert_eq!(null_origin.status, 403);
+    assert_eq!(
+        String::from_utf8(null_origin.body.clone()).expect("origin guard body is UTF-8"),
+        "Forbidden: Origin header is not allowed"
+    );
+    assert_eq!(
+        calls.load(AtomicOrdering::SeqCst),
+        0,
+        "literal Origin:null must not reach dispatch"
+    );
+
     let missing_csrf = handle_http_request(
         &server,
         &cfg,
@@ -400,8 +431,10 @@ fn malicious_page_cannot_trigger_dashboard_gated_action() {
 ///
 /// The bootstrap secret never appears in a request target, so it cannot be
 /// recovered from browser history, an extension's `tabs`/`webNavigation` events,
-/// `Referer`, or an access log — while single-use, `no-store`, `no-referrer`,
-/// CSP, and the HttpOnly/SameSite=Strict cookie all still hold.
+/// `Referer`, or an access log. The secret-free form page deliberately uses
+/// `same-origin` so Chromium serializes the real Origin on the form POST; ticket
+/// use remains body-only, single-use, `no-store`, CSP-guarded, and backed by the
+/// HttpOnly/SameSite=Strict cookie.
 #[test]
 fn served_dashboard_pairing_keeps_the_bootstrap_secret_out_of_the_request_target() {
     use std::io::Write as _;
@@ -464,7 +497,8 @@ fn served_dashboard_pairing_keeps_the_bootstrap_secret_out_of_the_request_target
     assert!(form.starts_with("HTTP/1.1 200 "), "served form: {form}");
     assert!(!form.contains(&code), "the served form never carries the code");
     assert!(form.contains(&format!("name=\"{DASHBOARD_PAIRING_CODE_FIELD}\"")));
-    assert!(form.contains("referrer-policy: no-referrer"));
+    assert!(form.contains("referrer-policy: same-origin"));
+    assert!(form.contains(r#"<meta name="referrer" content="same-origin">"#));
     assert!(form.contains("frame-ancestors 'none'"));
     assert!(form.contains("cache-control: no-store"));
 
@@ -477,7 +511,11 @@ fn served_dashboard_pairing_keeps_the_bootstrap_secret_out_of_the_request_target
     assert!(paired.starts_with("HTTP/1.1 303 "), "pairing: {paired}");
     assert!(paired.contains("location: /"));
     assert!(paired.contains("cache-control: no-store"));
-    assert!(paired.contains("referrer-policy: no-referrer"));
+    assert!(
+        paired.contains("referrer-policy: no-referrer"),
+        "the POST/redirect response keeps the dashboard-wide no-referrer default; \
+         only the secret-free form page relaxes to same-origin"
+    );
     assert!(paired.contains("HttpOnly"));
     assert!(paired.contains("SameSite=Strict"));
     assert!(
@@ -586,6 +624,94 @@ fn served_dashboard_pairing_refuses_a_secret_in_the_query_without_consuming_it()
     assert!(
         paired.starts_with("HTTP/1.1 303 "),
         "the refused URL must not consume the ticket: {paired}"
+    );
+
+    shutdown.store(true, AtomicOrdering::SeqCst);
+    let _ = TcpStream::connect(addr);
+    handle.join().expect("pairing listener thread joins");
+}
+
+/// Literal `Origin: null` is never a workaround for the browser pairing issue:
+/// the server must refuse it before reading/exchanging the body code, so a
+/// subsequent same-origin POST still consumes the ticket exactly once.
+#[test]
+fn served_dashboard_pairing_refuses_origin_null_without_consuming_ticket() {
+    use std::io::Write as _;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::AtomicBool;
+
+    let dir = dashboard_test_dir("served-pairing-null-origin");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind pairing listener");
+    let addr = listener.local_addr().expect("pairing listener address");
+    let host = format!("127.0.0.1:{}", addr.port());
+    let audience = format!("http://{host}");
+    let auth = Arc::new(DashboardAuth::new(dir, &audience).expect("dashboard auth builds"));
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = Arc::clone(&shutdown);
+    let server_auth = Arc::clone(&auth);
+    let handle = std::thread::spawn(move || {
+        serve_http_until(
+            listener,
+            test_server(),
+            &HttpTransportConfig {
+                dashboard_auth: Some(server_auth),
+                ..Default::default()
+            },
+            server_shutdown,
+        )
+        .expect("pairing listener exits cleanly")
+    });
+
+    let send = |method: &str, target: &str, extra: &str, body: &str| -> String {
+        let request = format!(
+            "{method} {target} HTTP/1.1\r\nhost: {host}\r\nconnection: close\r\n{extra}content-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let mut stream = TcpStream::connect(addr).expect("connect pairing listener");
+        stream
+            .write_all(request.as_bytes())
+            .expect("write pairing request");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("read pairing response");
+        response
+    };
+
+    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
+        .expect("ticket mints");
+    let code = ticket.code.clone();
+    let body = format!("{DASHBOARD_PAIRING_CODE_FIELD}={code}");
+    let null_origin = send(
+        "POST",
+        DASHBOARD_PAIR_PATH,
+        "origin: null\r\nsec-fetch-site: same-origin\r\ncontent-type: application/x-www-form-urlencoded\r\n",
+        &body,
+    );
+    assert!(
+        null_origin.starts_with("HTTP/1.1 403 "),
+        "literal Origin:null must be refused: {null_origin}"
+    );
+    assert!(
+        !null_origin.to_ascii_lowercase().contains("set-cookie"),
+        "literal Origin:null never mints a session: {null_origin}"
+    );
+    assert!(
+        !null_origin.contains(&code),
+        "the refusal never echoes the body code"
+    );
+
+    let paired = send(
+        "POST",
+        DASHBOARD_PAIR_PATH,
+        &format!(
+            "origin: {audience}\r\nsec-fetch-site: same-origin\r\ncontent-type: application/x-www-form-urlencoded\r\n"
+        ),
+        &body,
+    );
+    assert!(
+        paired.starts_with("HTTP/1.1 303 "),
+        "refusing literal Origin:null must not consume the ticket: {paired}"
     );
 
     shutdown.store(true, AtomicOrdering::SeqCst);

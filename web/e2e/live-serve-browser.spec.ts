@@ -8,7 +8,6 @@ import { test, expect, type Page } from "@playwright/test";
 const BIN = process.env.OMCP_BIN ?? "";
 const ENABLED = process.env.OMCP_BROWSER_LANE === "1";
 const ARTIFACT_ROOT = process.env.OMCP_BROWSER_LANE_ARTIFACT_DIR ?? "../target/e2e/browser-lane";
-const EXPECT_PRE_A5_FAILURE = process.env.OMCP_BROWSER_LANE_EXPECT_PRE_A5_FAILURE !== "0";
 
 test.skip(!ENABLED, "set OMCP_BROWSER_LANE=1 to run the live serve browser lane");
 test.setTimeout(60_000);
@@ -138,9 +137,6 @@ function mintPairingTicket(): { url: string; pairing_code: string } {
 }
 
 async function pairBrowser(page: Page): Promise<PairingOutcome> {
-  if (!EXPECT_PRE_A5_FAILURE) {
-    return pairBrowserRequired(page);
-  }
   const ticket = mintPairingTicket();
   const pairingPost = page.waitForResponse(
     (response) =>
@@ -151,37 +147,10 @@ async function pairBrowser(page: Page): Promise<PairingOutcome> {
   await page.locator('input[name="pairing_code"]').fill(ticket.pairing_code);
   await page.locator('button[type="submit"]').click();
   const postResponse = await pairingPost;
-  const body = await postResponse.text();
   const headers = await postResponse.request().allHeaders();
-  expect(postResponse.status(), "pre-A5 browser form POST should record the known pairing failure").toBe(403);
-  expect(headers.origin, "pre-A5 Chromium serializes the form POST Origin as null").toBe("null");
-  expect(body, "pre-A5 pairing failure should be the transport origin guard").toContain(
-    "Forbidden: Origin header is not allowed"
-  );
-  return {
-    paired: false,
-    status: postResponse.status(),
-    origin: headers.origin,
-    body
-  };
-}
-
-async function pairBrowserRequired(page: Page): Promise<PairingOutcome> {
-  const ticket = mintPairingTicket();
-  const pairingPost = page.waitForResponse(
-    (response) =>
-      response.url() === ticket.url &&
-      response.request().method() === "POST"
-  );
-  await page.goto(ticket.url);
-  await page.locator('input[name="pairing_code"]').fill(ticket.pairing_code);
-  await page.locator('button[type="submit"]').click();
-  const postResponse = await pairingPost;
-  const body = await postResponse.text();
-  const headers = await postResponse.request().allHeaders();
-  expect(postResponse.status(), `pairing form POST should redirect after setting the session: body=${body}`).toBe(
-    303
-  );
+  const status = postResponse.status();
+  const body = status === 303 ? "" : await postResponse.text();
+  expect(status, `pairing form POST should redirect after setting the session: body=${body}`).toBe(303);
   await page.waitForURL(`${baseUrl}/`);
   return {
     paired: true,
@@ -189,41 +158,6 @@ async function pairBrowserRequired(page: Page): Promise<PairingOutcome> {
     origin: headers.origin,
     body
   };
-}
-
-async function pairDirectlyAndInstallCookie(page: Page): Promise<void> {
-  const ticket = mintPairingTicket();
-  const res = await fetch(ticket.url, {
-    method: "POST",
-    redirect: "manual",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-      origin: baseUrl,
-      "sec-fetch-site": "same-origin"
-    },
-    body: new URLSearchParams({ pairing_code: ticket.pairing_code }).toString()
-  });
-  const body = await res.text();
-  expect(res.status, `direct same-origin pairing bootstrap should redirect: body=${body}`).toBe(303);
-  const cookiePair = (res.headers.get("set-cookie") ?? "").split(";")[0];
-  const [name, value] = cookiePair.split("=");
-  expect(name, "direct pairing should set the dashboard session cookie").toBe(
-    "oraclemcp_dashboard_session"
-  );
-  expect(value, "dashboard session cookie value").toBeTruthy();
-  const url = new URL(baseUrl);
-  await page.context().addCookies([
-    {
-      name,
-      value,
-      domain: url.hostname,
-      path: "/",
-      httpOnly: true,
-      sameSite: "Strict",
-      secure: false
-    }
-  ]);
-  await page.goto(`${baseUrl}/`);
 }
 
 async function dashboardSession(page: Page): Promise<DashboardSession> {
@@ -322,9 +256,6 @@ test("Chromium pairs, performs an authenticated operator action, and resumes SSE
   page
 }) => {
   const pairing = await pairBrowser(page);
-  if (!pairing.paired) {
-    await pairDirectlyAndInstallCookie(page);
-  }
   const session = await dashboardSession(page);
 
   const action = await executeCapabilities(page, session);
@@ -340,7 +271,6 @@ test("Chromium pairs, performs an authenticated operator action, and resumes SSE
     join(runDir, "browser-lane-result.json"),
     JSON.stringify(
       {
-        expected_pre_a5_failure: EXPECT_PRE_A5_FAILURE,
         browser_pairing: pairing,
         action_status: action.status,
         action_tool: (action.body as { data?: { mcp_tool?: string } }).data?.mcp_tool,
@@ -354,11 +284,7 @@ test("Chromium pairs, performs an authenticated operator action, and resumes SSE
 });
 
 test("C4: Chromium pairing and authenticated action POST are enforced", async ({ page }) => {
-  test.fail(
-    EXPECT_PRE_A5_FAILURE,
-    "oraclemcp-091-c4-dashboard-browser-flow-cw3e2: expected red until A5 fetch-first flips the browser lane green"
-  );
-  const pairing = await pairBrowserRequired(page);
+  const pairing = await pairBrowser(page);
   const session = await dashboardSession(page);
 
   const action = await executeCapabilities(page, session);
@@ -368,7 +294,6 @@ test("C4: Chromium pairing and authenticated action POST are enforced", async ({
     join(runDir, "c4-browser-flow-result.json"),
     JSON.stringify(
       {
-        expected_pre_a5_failure: EXPECT_PRE_A5_FAILURE,
         browser_pairing: pairing,
         action_status: action.status,
         action_tool: (action.body as { data?: { mcp_tool?: string } }).data?.mcp_tool

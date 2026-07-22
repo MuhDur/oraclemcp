@@ -1326,7 +1326,10 @@ fn dashboard_pairing_code_from_body(request: &HttpRequest) -> Option<String> {
 
 /// The bootstrap form. Script-free by design: keeping JS out of the pairing
 /// boundary means no page script ever handles the code, and the page needs no
-/// CSP relaxation. Inline `style-src` is already permitted by [`dashboard_csp`].
+/// CSP relaxation. The page is secret-free, so it can use `same-origin`
+/// referrer policy: that lets browsers serialize the real same-origin `Origin`
+/// on the form POST while still refusing literal `Origin: null`.
+/// Inline `style-src` is already permitted by [`dashboard_csp`].
 fn dashboard_pairing_form_response() -> HttpResponse {
     let body = format!(
         r##"<!doctype html>
@@ -1334,7 +1337,7 @@ fn dashboard_pairing_form_response() -> HttpResponse {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
+<meta name="referrer" content="same-origin">
 <title>Pair the oraclemcp dashboard</title>
 <style>
   :root {{ color-scheme: light dark; }}
@@ -1372,7 +1375,7 @@ fn dashboard_pairing_form_response() -> HttpResponse {
         path = DASHBOARD_PAIR_PATH,
         field = DASHBOARD_PAIRING_CODE_FIELD,
     );
-    with_dashboard_security_headers(HttpResponse {
+    with_dashboard_pairing_form_security_headers(HttpResponse {
         status: 200,
         headers: vec![
             (
@@ -1533,10 +1536,21 @@ fn dashboard_pairing_auth_required_response() -> HttpResponse {
 }
 
 fn with_dashboard_security_headers(response: HttpResponse) -> HttpResponse {
+    with_dashboard_security_headers_referrer(response, "no-referrer")
+}
+
+fn with_dashboard_pairing_form_security_headers(response: HttpResponse) -> HttpResponse {
+    with_dashboard_security_headers_referrer(response, "same-origin")
+}
+
+fn with_dashboard_security_headers_referrer(
+    response: HttpResponse,
+    referrer_policy: &'static str,
+) -> HttpResponse {
     response
         .with_header("content-security-policy", dashboard_csp())
         .with_header("x-content-type-options", "nosniff")
-        .with_header("referrer-policy", "no-referrer")
+        .with_header("referrer-policy", referrer_policy)
         .with_header("x-frame-options", "DENY")
 }
 
