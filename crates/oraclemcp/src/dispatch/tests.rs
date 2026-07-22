@@ -1100,6 +1100,19 @@ impl OracleConnection for LabeledMock {
             return Ok(rows);
         }
         self.counts.query.fetch_add(1, Ordering::SeqCst);
+        let sql_lower = sql.to_ascii_lowercase();
+        if sql_lower.contains("get_system_change_number") || sql_lower.contains("timestamp_to_scn")
+        {
+            return Ok(vec![OracleRow {
+                columns: vec![(
+                    "OBSERVED_SCN".to_owned(),
+                    OracleCell::new("NUMBER", Some("424242".to_owned())),
+                )],
+            }]);
+        }
+        if catalog_extract_empty_rowset(&sql_lower) {
+            return Ok(Vec::new());
+        }
         let column = if sql.to_ascii_lowercase().contains("all_objects") {
             "SCHEMA_NAME"
         } else {
@@ -2484,6 +2497,226 @@ fn profile_switch_opens_one_connection_bundle() {
         .dispatch("oracle_list_schemas", json!({ "max_rows": 1 }))
         .expect("stateless bundle connection is active");
     assert_eq!(schemas["schemas"][0]["SCHEMA_NAME"], json!("bundle-pool"));
+}
+
+struct RecoverablePinnedReadMock {
+    calls: Arc<AtomicUsize>,
+    closes: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for RecoverablePinnedReadMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.closes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+            return Ok(rows);
+        }
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(DbError::Cancelled(
+            "injected recoverable pinned-session uncertainty".to_owned(),
+        ))
+    }
+
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        Ok(0)
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn recoverable_pinned_quarantine_recycles_switchable_session_on_retry() {
+    use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink, SigningKey};
+
+    struct SharedSink(Arc<MemoryAuditSink>);
+    impl AuditSink for SharedSink {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            self.0.append(record)
+        }
+
+        fn flush(&self) -> Result<(), AuditError> {
+            self.0.flush()
+        }
+    }
+
+    let config = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "dev"
+        connect_string = "dev:1521/svc"
+        "#,
+    )
+    .expect("config");
+    let state = ProfileDrainState::from_config(config);
+    let first_calls = Arc::new(AtomicUsize::new(0));
+    let first_closes = Arc::new(AtomicUsize::new(0));
+    let connector_calls = Arc::new(AtomicUsize::new(0));
+    let replacement_counts = Arc::new(TouchCounts::default());
+    let calls_for_connector = Arc::clone(&connector_calls);
+    let counts_for_connector = Arc::clone(&replacement_counts);
+    let sink = Arc::new(MemoryAuditSink::new());
+    let auditor = Arc::new(oraclemcp_audit::Auditor::new(
+        Box::new(SharedSink(Arc::clone(&sink))),
+        SigningKey::new("a4e-test-key", b"a4e-session-recycle-test-key-123".to_vec())
+            .expect("valid test key"),
+    ));
+    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools_and_stateless(
+        Box::new(RecoverablePinnedReadMock {
+            calls: Arc::clone(&first_calls),
+            closes: Arc::clone(&first_closes),
+        }),
+        Some("dev".to_owned()),
+        default_read_only_level(),
+        Arc::new(move |_cx, generation| {
+            assert_eq!(generation.profile(), "dev");
+            calls_for_connector.fetch_add(1, Ordering::SeqCst);
+            let counts = Arc::clone(&counts_for_connector);
+            Box::pin(async move {
+                Ok(session_bundle(LabeledMock::new(
+                    "recycled-session",
+                    "single_session",
+                    counts,
+                )))
+            })
+        }),
+        StatelessReadStrategy::none(),
+        CustomToolCatalog::default(),
+        None,
+    )
+    .with_profile_drain_state(state)
+    .with_auditor(auditor);
+
+    let first = dispatcher
+        .dispatch(
+            "oracle_sample_rows",
+            json!({ "owner": "APP", "table": "ORDERS", "max_rows": 1 }),
+        )
+        .expect_err("first uncertain pinned read records a recoverable quarantine");
+    assert_eq!(first.error_class, ErrorClass::Timeout);
+    assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+    let quarantine = dispatcher
+        .connection_quarantine()
+        .expect("quarantine lock")
+        .expect("uncertain pinned read records quarantine");
+    assert_eq!(quarantine.outcome, AuditOutcome::UnknownDiscarded);
+    assert!(
+        quarantine.recycle_allowed,
+        "recoverable pinned uncertainty must be eligible for audited reconnect"
+    );
+
+    let before_generation = catalog_generation(&dispatcher);
+    let second = dispatcher
+        .dispatch(
+            "oracle_sample_rows",
+            json!({ "owner": "APP", "table": "ORDERS", "max_rows": 1 }),
+        )
+        .expect("recoverable quarantine reconnects and retries on the replacement session");
+    assert_eq!(second["rows"][0]["LABEL"], json!("recycled-session"));
+    assert_eq!(connector_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        first_closes.load(Ordering::SeqCst),
+        1,
+        "the retired pinned session is logically closed after recycle"
+    );
+    assert_eq!(
+        replacement_counts.query.load(Ordering::SeqCst),
+        2,
+        "the replacement handles the generated read's SCN probe and row query"
+    );
+    assert_eq!(catalog_generation(&dispatcher), before_generation + 1);
+    assert!(
+        dispatcher
+            .connection_quarantine()
+            .expect("quarantine lock")
+            .is_none(),
+        "successful recycle clears the recoverable quarantine"
+    );
+    let records = sink.records();
+    let recycle_records = records
+        .iter()
+        .filter(|record| {
+            record.tool == "lane_lifecycle"
+                && record
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|cancel| cancel.reason == "session_recycle")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(recycle_records.len(), 1);
+    assert_eq!(recycle_records[0].outcome, AuditOutcome::UnknownDiscarded);
+    assert_eq!(
+        recycle_records[0]
+            .cancel
+            .as_ref()
+            .map(|cancel| cancel.reason.as_str()),
+        Some("session_recycle")
+    );
+    assert!(recycle_records[0].hash_is_valid());
+}
+
+#[test]
+fn nonrecoverable_pinned_quarantine_still_refuses_without_reconnect() {
+    let connector_calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_connector = Arc::clone(&connector_calls);
+    let counts = Arc::new(TouchCounts::default());
+    let dispatcher = OracleDispatcher::new_switchable(
+        Box::new(LabeledMock::new("old-session", "single_session", counts)),
+        Some("dev".to_owned()),
+        default_read_only_level(),
+        Arc::new(move |_cx, _generation| {
+            calls_for_connector.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Ok(session_bundle(OneRowMock)) })
+        }),
+    );
+    mark_connection_quarantined(
+        &dispatcher.quarantine,
+        AuditOutcome::UnknownDiscarded,
+        "teardown failed after database outcome became uncertain",
+    )
+    .expect("test quarantine");
+
+    let err = dispatcher
+        .dispatch(
+            "oracle_sample_rows",
+            json!({ "owner": "APP", "table": "ORDERS", "max_rows": 1 }),
+        )
+        .expect_err("hard quarantine must not reconnect implicitly");
+    assert_eq!(err.error_class, ErrorClass::RuntimeStateRequired);
+    assert_eq!(
+        connector_calls.load(Ordering::SeqCst),
+        0,
+        "nonrecoverable quarantine refuses before the connector can open a replacement"
+    );
 }
 
 #[test]

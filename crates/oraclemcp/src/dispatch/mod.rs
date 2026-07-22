@@ -577,6 +577,7 @@ struct DispatcherState {
 struct ConnectionQuarantine {
     outcome: AuditOutcome,
     message: String,
+    recycle_allowed: bool,
 }
 
 struct ExecuteApprovedGrant {
@@ -1985,6 +1986,210 @@ impl OracleDispatcher {
             )
         })?;
         *guard = None;
+        Ok(())
+    }
+
+    fn quarantined_connection_error(&self, quarantine: &ConnectionQuarantine) -> ErrorEnvelope {
+        ErrorEnvelope::new(
+            ErrorClass::RuntimeStateRequired,
+            format!(
+                "active Oracle connection is quarantined after {}: {}",
+                audit_outcome_label(quarantine.outcome),
+                quarantine.message
+            ),
+        )
+        .with_next_step("switch to a fresh profile connection or restart the server")
+        .with_next_step("do not retry non-idempotent work until the database outcome is verified")
+    }
+
+    async fn recycle_pinned_session_if_needed(
+        &self,
+        cx: &Cx,
+        request_budget: &RequestBudget,
+    ) -> Result<(), ErrorEnvelope> {
+        let Some(quarantine) = self.connection_quarantine()? else {
+            return Ok(());
+        };
+        if !quarantine.recycle_allowed {
+            return Err(self.quarantined_connection_error(&quarantine));
+        }
+        let Some(connector) = &self.connector else {
+            return Err(self.quarantined_connection_error(&quarantine));
+        };
+
+        let profile = {
+            let state = self.state.lock(cx).await.map_err(|_| {
+                ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
+            })?;
+            let Some(profile) = state.active_profile.clone() else {
+                return Ok(());
+            };
+            let Some(generation) = state.profile_generation.as_ref() else {
+                return Err(profile_generation_inactive_error(&profile));
+            };
+            if generation.is_draining() {
+                return Err(profile_draining_error(&profile));
+            }
+            profile
+        };
+        request_budget.enforce(cx).map_err(DbError::into_envelope)?;
+        let old_quarantine = self.connection_quarantine()?;
+        let old_quarantine = old_quarantine
+            .as_ref()
+            .filter(|quarantine| quarantine.recycle_allowed)
+            .cloned()
+            .ok_or_else(|| {
+                self.connection_quarantine()
+                    .ok()
+                    .flatten()
+                    .map(|quarantine| self.quarantined_connection_error(&quarantine))
+                    .unwrap_or_else(|| {
+                        ErrorEnvelope::new(
+                            ErrorClass::RuntimeStateRequired,
+                            "pinned session recycle lost its quarantine marker",
+                        )
+                    })
+            })?;
+
+        let profile_generation = match self
+            .profile_drain
+            .admit_mcp_profile(&profile, self.mcp_exposure.is_exposed(&profile))
+        {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            ProfileGenerationAdmission::NotExposed => return Err(profile_not_available(&profile)),
+            ProfileGenerationAdmission::Draining => return Err(profile_draining_error(&profile)),
+        };
+        let (conn, stateless_conn) = connector(cx, &profile_generation)
+            .await
+            .map_err(DbError::into_envelope)?
+            .into_parts();
+        let ProfileDispatchPolicy {
+            level,
+            request_timeout,
+            max_query_cost,
+            cumulative_query_cost_budget,
+            result_masking,
+            sql_policy,
+        } = profile_dispatch_policy(&profile_generation)?;
+        let new_custom_catalog = match &self.custom_loader {
+            Some(loader) => loader(&profile_generation, &level)?,
+            None => CustomToolCatalog::default(),
+        };
+        let generation = profile_generation.generation();
+        let mut pending_profile_generation = Some(profile_generation);
+        let mut retired_connections = None;
+        let mut retired_generation = None;
+        let mut state = self.state.lock(cx).await.map_err(|_| {
+            ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
+        })?;
+        let old_request_timeout = self.request_timeout()?;
+        let old_max_query_cost = self.max_query_cost()?;
+        let old_cumulative_query_cost_budget = self.cumulative_query_cost_budget()?;
+        let old_result_masking = self.result_masking_policy()?;
+        let old_sql_policy = self.sql_policy()?;
+        let custom_catalog = ActiveCustomCatalog::new(
+            state.custom_catalog.generation.saturating_add(1),
+            new_custom_catalog,
+        );
+        self.profile_drain
+            .commit_generation(&profile, generation, || {
+                self.set_request_timeout(request_timeout)?;
+                if let Err(err) = self.set_max_query_cost(max_query_cost) {
+                    let _ = self.set_request_timeout(old_request_timeout);
+                    return Err(err);
+                }
+                if let Err(err) =
+                    self.set_cumulative_query_cost_budget(cumulative_query_cost_budget)
+                {
+                    let _ = self.set_request_timeout(old_request_timeout);
+                    let _ = self.set_max_query_cost(old_max_query_cost);
+                    return Err(err);
+                }
+                if let Err(err) = self.set_result_masking_policy(result_masking) {
+                    let _ = self.set_request_timeout(old_request_timeout);
+                    let _ = self.set_max_query_cost(old_max_query_cost);
+                    let _ = self.set_cumulative_query_cost_budget(old_cumulative_query_cost_budget);
+                    return Err(err);
+                }
+                if let Err(err) = self.set_sql_policy(sql_policy) {
+                    let _ = self.set_request_timeout(old_request_timeout);
+                    let _ = self.set_max_query_cost(old_max_query_cost);
+                    let _ = self
+                        .set_cumulative_query_cost_budget(old_cumulative_query_cost_budget.clone());
+                    let _ = self.set_result_masking_policy(old_result_masking);
+                    return Err(err);
+                }
+                if let Err(err) = self.clear_connection_quarantine() {
+                    let _ = self.set_request_timeout(old_request_timeout);
+                    let _ = self.set_max_query_cost(old_max_query_cost);
+                    let _ = self.set_cumulative_query_cost_budget(old_cumulative_query_cost_budget);
+                    let _ = self.set_result_masking_policy(old_result_masking);
+                    let _ = self.set_sql_policy(old_sql_policy);
+                    return Err(err);
+                }
+                let profile_generation = pending_profile_generation.take().ok_or_else(|| {
+                    ErrorEnvelope::new(
+                        ErrorClass::Internal,
+                        "prepared profile generation was already consumed",
+                    )
+                })?;
+                let previous_conn = std::mem::replace(&mut state.conn, conn);
+                let previous_stateless =
+                    std::mem::replace(&mut state.stateless_conn, stateless_conn);
+                retired_connections = Some((previous_conn, previous_stateless));
+                retired_generation = state.profile_generation.replace(profile_generation);
+                state.current_schema = None;
+                state.level = level;
+                state.custom_catalog = custom_catalog;
+                state.grant_generation = state.grant_generation.saturating_add(1);
+                state.execute_grants.clear();
+                state.execute_approved_tokens.clear();
+                state.patch_previews.clear();
+                state
+                    .catalog_cache
+                    .invalidate(CatalogInvalidation::Reconnect);
+                state
+                    .orient_snapshots
+                    .lock()
+                    .map_err(|err| {
+                        ErrorEnvelope::new(
+                            ErrorClass::Internal,
+                            format!("oracle_orient snapshot cache lock failed: {err}"),
+                        )
+                    })?
+                    .clear();
+                state.read_only_backstop.reset();
+                state.checkpoints.clear();
+                Ok(())
+            })
+            .map_err(|()| profile_draining_error(&profile))??;
+        drop(retired_generation);
+        drop(state);
+
+        let recycle_evidence = DbEvidence::unavailable("pinned_session_recycle");
+        append_lifecycle_audit(
+            self.auditor.as_deref(),
+            &self.default_audit_subject,
+            Some(&recycle_evidence),
+            DispatchCloseReason::SessionRecycle,
+            old_quarantine.outcome,
+        )?;
+        if let Some((previous_conn, previous_stateless)) = retired_connections {
+            close_retired_connections(
+                cx,
+                previous_conn.as_ref(),
+                previous_stateless.as_deref(),
+                "session_recycle",
+            )
+            .await;
+        }
+        tracing::info!(
+            profile = profile.as_str(),
+            generation,
+            outcome = audit_outcome_label(old_quarantine.outcome),
+            reason = old_quarantine.message.as_str(),
+            "recycled pinned Oracle session after recoverable quarantine"
+        );
         Ok(())
     }
 
@@ -8099,7 +8304,7 @@ impl ReadUncertaintyConn<'_> {
         };
         if err.is_uncertain_session_state()
             && let Some(quarantine) = self.quarantine
-            && let Err(mark_err) = mark_connection_quarantined(
+            && let Err(mark_err) = mark_connection_quarantined_recoverable(
                 quarantine,
                 AuditOutcome::UnknownDiscarded,
                 format!("{operation} failed at an uncertain read boundary: {err}"),
@@ -8440,7 +8645,9 @@ fn close_reason_cancel(reason: DispatchCloseReason) -> AuditCancel {
     let kind = match reason {
         DispatchCloseReason::SessionDelete | DispatchCloseReason::OperatorCancel => "User",
         DispatchCloseReason::Timeout | DispatchCloseReason::RequestFinalizationTimeout => "Timeout",
-        DispatchCloseReason::ServerShutdown | DispatchCloseReason::RuntimeDrop => "Shutdown",
+        DispatchCloseReason::ServerShutdown
+        | DispatchCloseReason::RuntimeDrop
+        | DispatchCloseReason::SessionRecycle => "Shutdown",
     };
     AuditCancel::new(kind, reason.as_str())
 }
@@ -8598,6 +8805,23 @@ fn mark_connection_quarantined(
     outcome: AuditOutcome,
     message: impl Into<String>,
 ) -> Result<(), ErrorEnvelope> {
+    mark_connection_quarantined_with_recycle(quarantine, outcome, message, false)
+}
+
+fn mark_connection_quarantined_recoverable(
+    quarantine: &SyncMutex<Option<ConnectionQuarantine>>,
+    outcome: AuditOutcome,
+    message: impl Into<String>,
+) -> Result<(), ErrorEnvelope> {
+    mark_connection_quarantined_with_recycle(quarantine, outcome, message, true)
+}
+
+fn mark_connection_quarantined_with_recycle(
+    quarantine: &SyncMutex<Option<ConnectionQuarantine>>,
+    outcome: AuditOutcome,
+    message: impl Into<String>,
+    recycle_allowed: bool,
+) -> Result<(), ErrorEnvelope> {
     let mut guard = quarantine.lock().map_err(|err| {
         ErrorEnvelope::new(
             ErrorClass::Internal,
@@ -8616,13 +8840,18 @@ fn mark_connection_quarantined(
             _ => false,
         };
         if preserve_existing {
+            existing.recycle_allowed &= recycle_allowed;
             existing
                 .message
                 .push_str(&format!("; additional quarantine evidence: {message}"));
             return Ok(());
         }
     }
-    *guard = Some(ConnectionQuarantine { outcome, message });
+    *guard = Some(ConnectionQuarantine {
+        outcome,
+        message,
+        recycle_allowed,
+    });
     Ok(())
 }
 
@@ -12000,7 +12229,7 @@ impl OracleDispatcher {
         let uncertain = err.is_uncertain_session_state();
         let message = err.to_string();
         if uncertain
-            && let Err(envelope) = mark_connection_quarantined(
+            && let Err(envelope) = mark_connection_quarantined_recoverable(
                 &self.quarantine,
                 AuditOutcome::UnknownDiscarded,
                 message,
@@ -12546,19 +12775,10 @@ impl OracleDispatcher {
             return Ok(response);
         }
 
+        self.recycle_pinned_session_if_needed(cx, &request_budget)
+            .await?;
         if let Some(quarantine) = self.connection_quarantine()? {
-            return Err(ErrorEnvelope::new(
-                ErrorClass::RuntimeStateRequired,
-                format!(
-                    "active Oracle connection is quarantined after {}: {}",
-                    audit_outcome_label(quarantine.outcome),
-                    quarantine.message
-                ),
-            )
-            .with_next_step("switch to a fresh profile connection or restart the server")
-            .with_next_step(
-                "do not retry non-idempotent work until the database outcome is verified",
-            ));
+            return Err(self.quarantined_connection_error(&quarantine));
         }
 
         // The async mutex serializes dispatch over the single connection and is
@@ -15047,19 +15267,10 @@ impl OracleDispatcher {
             request_budget = request_budget.tighten_timeout(timeout);
             request_budget.enforce(cx).map_err(DbError::into_envelope)?;
         }
+        self.recycle_pinned_session_if_needed(cx, &request_budget)
+            .await?;
         if let Some(quarantine) = self.connection_quarantine()? {
-            return Err(ErrorEnvelope::new(
-                ErrorClass::RuntimeStateRequired,
-                format!(
-                    "database session is quarantined after an uncertain outcome ({outcome}): {message}",
-                    outcome = audit_outcome_label(quarantine.outcome),
-                    message = quarantine.message
-                ),
-            )
-            .with_next_step("switch to a fresh profile connection or restart the server")
-            .with_next_step(
-                "do not retry non-idempotent work until the database outcome is verified",
-            ));
+            return Err(self.quarantined_connection_error(&quarantine));
         }
 
         let delivery = {

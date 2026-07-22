@@ -383,6 +383,9 @@ pub enum DispatchCloseReason {
     /// finalization window. The lane must be discarded as outcome-unknown;
     /// rollback success cannot prove that a DDL or commit did not survive.
     RequestFinalizationTimeout,
+    /// The retained pinned Oracle session was recycled after a recoverable
+    /// connection-loss/poisoned-session signal.
+    SessionRecycle,
 }
 
 impl DispatchCloseReason {
@@ -396,6 +399,7 @@ impl DispatchCloseReason {
             Self::RuntimeDrop => "runtime_drop",
             Self::OperatorCancel => "operator_cancel",
             Self::RequestFinalizationTimeout => "request_finalization_timeout",
+            Self::SessionRecycle => "session_recycle",
         }
     }
 }
