@@ -1,0 +1,69 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:28:49Z",
+  "bead_id": "oraclemcp-091-pu2-get-source-range-9yvbk",
+  "scope": {
+    "summary": "P-U2 adds inclusive from_line/to_line range fetch for oracle_get_source, pairs the range with oracle_search_source line numbers, and discloses the returned line range.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/intelligence.rs",
+      "crates/oraclemcp-db/tests/positional_bind_shape.rs",
+      "crates/oraclemcp/src/dispatch/args.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp/src/registry.rs",
+      "tests/golden/stdio/main_tool_transcript.json",
+      "tests/golden/stdio/resource_subscribe_and_updated.json",
+      "crates/oraclemcp/tests/snapshots/golden_scrubber_framework__capabilities_serverinfo.snap"
+    ],
+    "out_of_scope": [
+      "No live Oracle source-range lane is claimed from this evidence.",
+      "No full-workspace gate is claimed from this shared dirty checkout.",
+      "This close does not alter oracle_search_source matching semantics; it only documents and exercises the handoff from search LINE values to oracle_get_source from_line/to_line."
+    ]
+  },
+  "source": {
+    "sha": "0e4821a46c0e08cad88870180bb61a9ec3928bc0",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_get_source range dispatch",
+        "kind": "cli",
+        "trace": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp get_source_reports_returned_line_range_and_refuses_outside_it -- --nocapture passed: from_line=40/to_line=48 returns range.returned 40..42, backwards ranges are InvalidArguments, and out-of-range requests suggest oracle_search_source."
+      },
+      {
+        "name": "dictionary bind-shape guard",
+        "kind": "cli",
+        "trace": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp-db --test positional_bind_shape -- --nocapture passed: dictionary SQL does not reuse positional placeholders, including the source range SQL's one bind per placeholder occurrence."
+      },
+      {
+        "name": "scoped crate checks",
+        "kind": "cli",
+        "trace": "env -u CARGO_TARGET_DIR cargo check -p oraclemcp-db and env -u CARGO_TARGET_DIR cargo check -p oraclemcp both passed."
+      },
+      {
+        "name": "tool-schema cross-reference",
+        "kind": "cli",
+        "trace": "rg confirmed oracle_get_source exposes from_line/to_line in crates/oraclemcp/src/registry.rs and golden capability artifacts, with from_line instructing callers to pair with oracle_search_source's LINE result and oracle_search_source max_line_chars pointing back to oracle_get_source from_line/to_line for exact ranges."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped local tests only; no hosted or full-workspace proof is claimed here.",
+    "The source SHA is the clean in-scope tree used for evidence generation, which already contained the previously landed P-U2 implementation."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
