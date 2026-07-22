@@ -14,7 +14,7 @@
     ]
   },
   "source": {
-    "sha": "9c9f857cc0e39e2493b11e004b8f5535f0468e3b",
+    "sha": "63ae7f5f6550b247c481d70fd174e1195975efb8",
     "tree_clean": true,
     "branch": "main"
   },
@@ -44,7 +44,7 @@
       {
         "kind": "e5-failure-recovery-e2e",
         "path": "tests/artifacts/evidence/e5-failure-recovery-e2e.json",
-        "sha": "9c9f857cc0e39e2493b11e004b8f5535f0468e3b"
+        "sha": "63ae7f5f6550b247c481d70fd174e1195975efb8"
       }
     ]
   },
