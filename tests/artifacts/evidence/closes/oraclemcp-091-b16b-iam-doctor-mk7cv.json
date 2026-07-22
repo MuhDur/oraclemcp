@@ -1,0 +1,63 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:15:24Z",
+  "bead_id": "oraclemcp-091-b16b-iam-doctor-mk7cv",
+  "scope": {
+    "summary": "Doctor reports IAM token source kind and explicitly marks source invocation as observed or not observed, instead of asserting a refresh happened.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/doctor.rs",
+      "crates/oraclemcp-core/src/lib.rs",
+      "crates/oraclemcp-core/tests/iam_token_source_physical.rs",
+      "crates/oraclemcp/src/main.rs"
+    ],
+    "out_of_scope": [
+      "No live Oracle IAM token lane is claimed.",
+      "No driver-side invocation timestamp store was added; doctor reports last_successful_invocation=not_observed_by_doctor unless a caller supplies an explicit observation."
+    ]
+  },
+  "source": {
+    "sha": "24dab42093e8a5f26b663504c144ef46750ef7cd",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oraclemcp-core compilation",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo check -p oraclemcp-core passed."
+      },
+      {
+        "name": "legacy IAM token doctor checks",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-core iam_token_check -- --nocapture passed: 6 passed, 0 failed."
+      },
+      {
+        "name": "B16a/B16b token_exec counter proof",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-core --test iam_token_source_physical token_exec_runs_once_per_physical_tcps_connect_attempt -- --nocapture passed: doctor reported source_kind=exec and last_successful_invocation=not_observed_by_doctor before the counter existed; two physical connect attempts advanced the counter to 1 and 2."
+      },
+      {
+        "name": "oraclemcp binary compilation",
+        "kind": "cli",
+        "trace": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo check -p oraclemcp passed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped local tests only; no full-workspace clippy/test gate is claimed from this shared dirty checkout.",
+    "Doctor reports the configured source kind and observed/not-observed invocation status; it does not fetch or inspect the token value for refreshable source profiles."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
