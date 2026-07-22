@@ -1,0 +1,79 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T11:43:18Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.4.6.3",
+  "scope": {
+    "summary": "Splits the CI lane health dashboard panel out of App.tsx as a presentation-only seam while preserving App.tsx re-export compatibility.",
+    "in_scope": [
+      "web/src/app/App.tsx",
+      "web/src/app/ci-lane-health-panel.tsx",
+      "scripts/oraclemcp_arch_fitness_lint.sh"
+    ],
+    "out_of_scope": [
+      "No dashboard route changes.",
+      "No new network calls or operator-client fetch paths.",
+      "No pairing, CSRF, action-ticket, credential, authentication, or one-time-code logic was moved or edited.",
+      "No rendered-output redesign; the moved JSX and CI lane health test contract remain isomorphic."
+    ]
+  },
+  "source": {
+    "sha": "1a2125017dd09e9569853d0d6c68f3b8352f9785",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "source commit",
+        "kind": "cli",
+        "trace": "`git show --stat 1a2125017dd09e9569853d0d6c68f3b8352f9785` showed a three-path source commit: web/src/app/App.tsx, web/src/app/ci-lane-health-panel.tsx, and scripts/oraclemcp_arch_fitness_lint.sh."
+      },
+      {
+        "name": "TypeScript package check",
+        "kind": "cli",
+        "trace": "`cd web && npx tsc --noEmit` exited 0."
+      },
+      {
+        "name": "CI lane health render contract",
+        "kind": "cli",
+        "trace": "`cd web && npx vitest run src/app/ci-lane-health.test.tsx` exited 0 with 1 file passed and 6 tests passed. The test still imports CiLaneHealthPanel from ./App, proving the App.tsx facade re-export remains compatible."
+      },
+      {
+        "name": "scoped whitespace check",
+        "kind": "cli",
+        "trace": "`git diff --check -- web/src/app/App.tsx web/src/app/ci-lane-health-panel.tsx scripts/oraclemcp_arch_fitness_lint.sh` exited 0."
+      },
+      {
+        "name": "App.tsx ratchet proof",
+        "kind": "cli",
+        "trace": "`wc -l web/src/app/App.tsx` reported 9708 lines, and the ratchet entry in scripts/oraclemcp_arch_fitness_lint.sh is [web/src/app/App.tsx]=9708; the shell comparison `test \"$app_lines\" -le \"$limit\"` exited 0."
+      },
+      {
+        "name": "security-sensitive seam scope check",
+        "kind": "cli",
+        "trace": "`rg -n 'pair|csrf|ticket|one-time|fetch|operator/v1|EventSource|credential|auth|POST|form|code' web/src/app/ci-lane-health-panel.tsx -i` found only CI health/status/formatting substrings such as posture, freshness, timestamp, and formatNumber; it found no pairing, CSRF, ticket, credential, auth, one-time code, operator endpoint, EventSource, POST, or fetch implementation."
+      },
+      {
+        "name": "close scaffold scope cleanliness",
+        "kind": "cli",
+        "trace": "`python3 scripts/audit_bead_closes.py --template oraclemcp-eng-program-bp8ia.4.6.3 --scope web/src/app/App.tsx --scope web/src/app/ci-lane-health-panel.tsx --scope scripts/oraclemcp_arch_fitness_lint.sh` reported source sha 1a2125017dd09e9569853d0d6c68f3b8352f9785 with tree_clean true for the claimed scope."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Full `bash scripts/oraclemcp_arch_fitness_lint.sh` is not used as close evidence because the shared checkout is currently red outside this bead: crates/oraclemcp/src/dispatch/tests.rs has 15703 lines over its 15676 ratchet. The App.tsx ratchet was checked directly and is green.",
+    "The first Vitest attempt was run from the repository root and incorrectly collected copied tests under target/ and .claude/worktrees; the valid proof reran from web/ and passed only the real package test."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
