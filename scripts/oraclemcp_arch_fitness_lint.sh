@@ -45,7 +45,7 @@ check_max_file_size_ratchet() {
     [crates/oraclemcp-core/src/http/tests_operator.rs]=4452
     [crates/oraclemcp-db/src/intelligence.rs]=4425
     [crates/oraclemcp-audit/src/record.rs]=4334
-    [crates/oraclemcp-core/src/http/operator.rs]=4290
+    [crates/oraclemcp-core/src/http/operator.rs]=4092
     [crates/oraclemcp-core/src/server.rs]=4145
     [crates/oraclemcp-config/src/lib.rs]=3756
     [web/src/app/operator-client.ts]=3278

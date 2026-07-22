@@ -251,6 +251,7 @@ impl std::fmt::Debug for OAuthEnforcement {
 mod ci_lanes;
 mod config;
 mod operator;
+mod operator_action_policy;
 mod request_target;
 mod serve;
 mod sse;
