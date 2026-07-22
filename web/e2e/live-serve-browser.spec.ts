@@ -138,6 +138,9 @@ function mintPairingTicket(): { url: string; pairing_code: string } {
 }
 
 async function pairBrowser(page: Page): Promise<PairingOutcome> {
+  if (!EXPECT_PRE_A5_FAILURE) {
+    return pairBrowserRequired(page);
+  }
   const ticket = mintPairingTicket();
   const pairingPost = page.waitForResponse(
     (response) =>
@@ -150,19 +153,32 @@ async function pairBrowser(page: Page): Promise<PairingOutcome> {
   const postResponse = await pairingPost;
   const body = await postResponse.text();
   const headers = await postResponse.request().allHeaders();
-  if (EXPECT_PRE_A5_FAILURE) {
-    expect(postResponse.status(), "pre-A5 browser form POST should record the known pairing failure").toBe(403);
-    expect(headers.origin, "pre-A5 Chromium serializes the form POST Origin as null").toBe("null");
-    expect(body, "pre-A5 pairing failure should be the transport origin guard").toContain(
-      "Forbidden: Origin header is not allowed"
-    );
-    return {
-      paired: false,
-      status: postResponse.status(),
-      origin: headers.origin,
-      body
-    };
-  }
+  expect(postResponse.status(), "pre-A5 browser form POST should record the known pairing failure").toBe(403);
+  expect(headers.origin, "pre-A5 Chromium serializes the form POST Origin as null").toBe("null");
+  expect(body, "pre-A5 pairing failure should be the transport origin guard").toContain(
+    "Forbidden: Origin header is not allowed"
+  );
+  return {
+    paired: false,
+    status: postResponse.status(),
+    origin: headers.origin,
+    body
+  };
+}
+
+async function pairBrowserRequired(page: Page): Promise<PairingOutcome> {
+  const ticket = mintPairingTicket();
+  const pairingPost = page.waitForResponse(
+    (response) =>
+      response.url() === ticket.url &&
+      response.request().method() === "POST"
+  );
+  await page.goto(ticket.url);
+  await page.locator('input[name="pairing_code"]').fill(ticket.pairing_code);
+  await page.locator('button[type="submit"]').click();
+  const postResponse = await pairingPost;
+  const body = await postResponse.text();
+  const headers = await postResponse.request().allHeaders();
   expect(postResponse.status(), `pairing form POST should redirect after setting the session: body=${body}`).toBe(
     303
   );
@@ -329,6 +345,33 @@ test("Chromium pairs, performs an authenticated operator action, and resumes SSE
         action_status: action.status,
         action_tool: (action.body as { data?: { mcp_tool?: string } }).data?.mcp_tool,
         sse_event_ids: resumed
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+});
+
+test("C4: Chromium pairing and authenticated action POST are enforced", async ({ page }) => {
+  test.fail(
+    EXPECT_PRE_A5_FAILURE,
+    "oraclemcp-091-c4-dashboard-browser-flow-cw3e2: expected red until A5 fetch-first flips the browser lane green"
+  );
+  const pairing = await pairBrowserRequired(page);
+  const session = await dashboardSession(page);
+
+  const action = await executeCapabilities(page, session);
+  expect(action.status, "authenticated browser action POST should return 200, not 403").toBe(200);
+  expect((action.body as { data?: { mcp_tool?: string } }).data?.mcp_tool).toBe("oracle_capabilities");
+  writeFileSync(
+    join(runDir, "c4-browser-flow-result.json"),
+    JSON.stringify(
+      {
+        expected_pre_a5_failure: EXPECT_PRE_A5_FAILURE,
+        browser_pairing: pairing,
+        action_status: action.status,
+        action_tool: (action.body as { data?: { mcp_tool?: string } }).data?.mcp_tool
       },
       null,
       2

@@ -77,7 +77,7 @@ if ! e2e_run_command "act" npm --prefix web exec -- playwright test --config web
 fi
 
 if [ "$OMCP_BROWSER_LANE_EXPECT_PRE_A5_FAILURE" = "1" ]; then
-  e2e_log_event "scenario_assert" "assert" "pass" 0 "recorded pre-A5 Chromium pairing 403 from Origin:null; direct same-origin bootstrap enabled browser action POST 200 and EventSource Last-Event-ID resume"
+  e2e_log_event "scenario_assert" "assert" "pass" 0 "recorded pre-A5 Chromium pairing 403 from Origin:null; C4 enforced browser pair+action remains expected-red; direct same-origin bootstrap enabled browser action POST 200 and EventSource Last-Event-ID resume"
 else
   e2e_log_event "scenario_assert" "assert" "pass" 0 "Chromium paired via 303 redirect, browser action POST returned 200, and EventSource resumed with Last-Event-ID"
 fi

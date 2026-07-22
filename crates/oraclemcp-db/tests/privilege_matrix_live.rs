@@ -93,10 +93,9 @@ fn guarded_fixture_table() -> ResolvedObject {
     }
 }
 
-/// This is deliberately an expected failure until A3a performs its capability
-/// check before `DBMS_FLASHBACK.DISABLE`.  The fixture executes the exact
-/// state-changing path, rather than a synthetic error mapper, and then proves
-/// whether the same physical connection remains usable.
+/// This fixture executes the exact flashback path, rather than a synthetic
+/// error mapper, and then proves that a clean pre-change capability refusal
+/// leaves the same physical connection usable.
 #[test]
 fn d4_no_flashback_principal_gets_typed_refusal_and_connection_stays_usable() {
     run_with_cx(|cx| async move {
