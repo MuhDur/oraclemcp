@@ -1,0 +1,63 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T20:45:22Z",
+  "bead_id": "oraclemcp-091-e5-failure-recovery-e2e-bf1qa",
+  "scope": {
+    "summary": "E5 harness now proves fixed-TTL grant expiry and commit-in-doubt interruption on a real installed artifact lane using public, non-intrusive failure paths only.",
+    "in_scope": [
+      "scripts/rig/failure_recovery_e2e.py"
+    ],
+    "out_of_scope": [
+      "Product runtime changes to add dedicated commit-in-doubt or grant-expiry test hooks.",
+      "Any behavior not covered by this harness test's live-wire assertions."
+    ]
+  },
+  "source": {
+    "sha": "9c9f857cc0e39e2493b11e004b8f5535f0468e3b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "python3 scripts/rig/failure_recovery_e2e.py",
+        "kind": "cli",
+        "trace": "Ran full wire-backed pass with ORACLEMCP_E5_GRANT_WAIT_SECONDS=312 and ORACLEMCP_E5_SKIP_GRANT_EXPIRY_CHECK=0 against installed artifact at source 9c9f857cc0e39e2493b11e004b8f5535f0468e3b."
+      },
+      {
+        "name": "PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/rig/failure_recovery_e2e.py",
+        "kind": "cli",
+        "trace": "Harness script compiles cleanly after scoped edits."
+      },
+      {
+        "name": "git show --stat HEAD",
+        "kind": "cli",
+        "trace": "Verified landed commit scope is only scripts/rig/failure_recovery_e2e.py and tests/artifacts/evidence/e5-failure-recovery-e2e.json."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "e5-failure-recovery-e2e",
+        "path": "tests/artifacts/evidence/e5-failure-recovery-e2e.json",
+        "sha": "9c9f857cc0e39e2493b11e004b8f5535f0468e3b"
+      }
+    ]
+  },
+  "limitations": [
+    "No runtime product hooks were added for commit-in-doubt kill or grant expiry. Inductions stay on public-facing admin and wire-confirmation paths.",
+    "Grant expiry is proven by waiting against fixed 300-second confirmation TTL; we did not add a configurable TTL knob in this pass."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "If stricter timing certainty is required for the 300-second wait window, add a deterministic scheduler-assisted grant-expiry test path in a separate bead and keep it out-of-band from product runtime behavior."
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}
