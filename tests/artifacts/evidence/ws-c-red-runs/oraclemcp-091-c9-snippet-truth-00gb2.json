@@ -1,0 +1,32 @@
+{
+  "bead_id": "oraclemcp-091-c9-snippet-truth-00gb2",
+  "source_sha": "0e4821a46c0e08cad88870180bb61a9ec3928bc0",
+  "artifact": "target/e2e/c9-snippet-truth-20260722T092745Z-2386573/summary.json",
+  "command": "env -u CARGO_TARGET_DIR scripts/swarm_discipline.sh bounded-run --timeout 900 -- bash scripts/rig/onboarding_snippet_truth.sh run --log",
+  "exit_status": 1,
+  "expected_red": true,
+  "extracted_from_real_setup_output": true,
+  "secure_stdio_snippet_present": false,
+  "checks": [
+    {
+      "name": "claude_mcp_json",
+      "status": "pass",
+      "assertion": "The command and args extracted from the printed Claude MCP JSON completed raw stdio MCP initialize and tools/list."
+    },
+    {
+      "name": "codex_config_toml",
+      "status": "pass",
+      "assertion": "The command and args extracted from the printed Codex TOML completed raw stdio MCP initialize and tools/list."
+    },
+    {
+      "name": "http_client_credentials.claude_mcp_add",
+      "status": "fail",
+      "assertion": "The exact printed claude mcp add command registered an HTTP MCP URL without bearer/header material; raw initialize against the client-credential server returned 401 client_credential_required."
+    }
+  ],
+  "confidentiality": {
+    "live_oci_or_customer_identifiers": false,
+    "bearer_output_committed": false,
+    "notes": "The runner writes clients-issue.stdout.redacted instead of storing the shown-once bearer. Profile material is the synthetic setup template for c9_ro."
+  }
+}
