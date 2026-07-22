@@ -1,0 +1,56 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T12:25:00Z",
+  "bead_id": "oraclemcp-ug2e1",
+  "scope": {
+    "summary": "Review fix: the C6 classifier-split close (bp8ia.4.6.4) had its evidence source.sha misbound to 984de104 (a later unrelated ratchet commit) instead of b233fff0 (the commit that actually contains the split). Corrected the binding and re-verified the underlying isomorphism claim before re-closing.",
+    "in_scope": [
+      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.6.4.json"
+    ],
+    "out_of_scope": [
+      "The classifier split code itself (b233fff0) — unchanged; only its evidence binding was wrong.",
+      "The shared ratchet script bookkeeping (documented in the corrected evidence's trace, not part of the isomorphism claim).",
+      "Any change to the guard, classifier, fuzz target, or test expectations."
+    ]
+  },
+  "source": {
+    "sha": "1fed082f7d5f5a9223954ed875df6d731f13ddca",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Diagnosis of the misbinding",
+        "kind": "cli",
+        "trace": "git show --stat b233fff0 confirms it is the split commit (5 paths: classifier.rs -140, classifier_grammar.rs +140, lib.rs +2, fuzz/Cargo.lock, arch_fitness_lint.sh). The original close bound source=984de104 ('chore: lower dispatch file-size ratchet'), a later unrelated commit. The evidence file's own limitations note had admitted the source was 'current reproducible HEAD after later unrelated pane commits' — the misbinding."
+      },
+      {
+        "name": "Re-verification that the split WAS isomorphic (the critical check)",
+        "kind": "cli",
+        "trace": "Before re-binding, re-ran the three isomorphism proofs on the split code, all passing unchanged: (1) CARGO_TARGET_DIR=target cargo test -p oraclemcp-guard --test adversarial_corpus = 15/15 (incl. strict_corpus_is_never_underclassified, corpus_is_never_underclassified, classifier_never_panics_on_arbitrary_input); (2) cargo test -p oraclemcp-guard = 319 unit + all integration tests, 0 failures; (3) cargo +nightly-2026-05-11 fuzz run classify_fuzz -runs=256 -seed=4001 = DONE, no crash/assertion. Additionally diffed the 4 guard-crate split files between b233fff0 and HEAD: byte-for-byte IDENTICAL (no drift). Conclusion: the split was isomorphic; only the evidence source binding was wrong — NOT a non-isomorphic split."
+      },
+      {
+        "name": "Binding correction + re-close",
+        "kind": "cli",
+        "trace": "Corrected evidence source.sha 984de104 -> b233fff0 (commit 1fed082f), moved the shared ratchet script out of the source-binding integrity surface (it drifts across sibling C6 splits) while keeping it verified in the trace, then ran scripts/bead_tracker_guard.sh correct-false-close --original-bead oraclemcp-eng-program-bp8ia.4.6.4 which reopened and re-closed with source=b233fff0. scripts/check_bead_close_evidence.sh now reports 0 hard findings for bp8ia.4.6.4 (was 3: CLOSE_REASON_SOURCE_MISMATCH, CLOSE_EVIDENCE_CHANGED_AFTER_CLOSE, SCOPE_CHANGED_AFTER_SOURCE)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is an evidence-honesty repair, not a code change. The classifier split code at b233fff0 was not modified.",
+    "The re-verification used the bounded local cargo-fuzz smoke (256 runs), matching the original evidence's basis; no hosted scheduled fuzz campaign is claimed."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
