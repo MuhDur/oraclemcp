@@ -246,6 +246,43 @@ pub struct DoctorAuthCapabilities {
     pub modes: Vec<DoctorAuthModeCapability>,
 }
 
+/// IAM token source kind observed from non-secret profile configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorIamTokenSourceKind {
+    /// Built-in fallback environment variable (`ORACLEMCP_IAM_TOKEN`).
+    BuiltinEnv,
+    /// Profile-named `token_env`.
+    Env,
+    /// Profile-named `token_file`.
+    File,
+    /// Profile `token_exec` command.
+    Exec,
+}
+
+impl DoctorIamTokenSourceKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            DoctorIamTokenSourceKind::BuiltinEnv => "builtin_env",
+            DoctorIamTokenSourceKind::Env => "env",
+            DoctorIamTokenSourceKind::File => "file",
+            DoctorIamTokenSourceKind::Exec => "exec",
+        }
+    }
+}
+
+/// What doctor can truthfully observe about the IAM token source.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DoctorIamTokenSourceObservation {
+    /// Non-secret source kind, derived from profile configuration.
+    pub source_kind: DoctorIamTokenSourceKind,
+    /// Last successful source invocation time, when the caller has an explicit
+    /// runtime observation. `None` means doctor did not observe an invocation and
+    /// must say so instead of implying the source was already fetched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_successful_invocation_unix: Option<i64>,
+}
+
 impl DoctorAuthCapabilities {
     /// Build the pinned thin-driver matrix with the supplied selected mode.
     #[must_use]
@@ -529,11 +566,15 @@ pub struct DoctorContext<'a> {
     /// password, the wallet path, or key material.
     pub wallet_password: Option<String>,
     /// The resolved OCI IAM database token (a JWT), if one is configured for this
-    /// profile. Used ONLY transiently by the IAM-token near-expiry check to read
-    /// the JWT `exp` claim (a diagnostic, no signature validation); it is never
-    /// rendered, serialized, or included in any doctor output. `DoctorContext` is
-    /// not `Serialize`, and the check reports only the seconds-to-expiry.
+    /// profile through the legacy static-token path. Used ONLY transiently by
+    /// the IAM-token near-expiry check to read the JWT `exp` claim (a diagnostic,
+    /// no signature validation); it is never rendered, serialized, or included
+    /// in any doctor output. Refreshable source profiles should leave this
+    /// unset and populate [`Self::iam_token_source`] instead.
     pub iam_token: Option<String>,
+    /// Non-secret IAM token-source observation for refreshable source profiles.
+    /// Doctor reports this as observation, not proof that a token was fetched.
+    pub iam_token_source: Option<DoctorIamTokenSourceObservation>,
     /// True if a `protected` profile has `max_level` above `READ_ONLY` — a
     /// misconfiguration the privilege check warns about (offline-detectable).
     pub protected_profile_writable: bool,
@@ -2827,14 +2868,34 @@ fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
     }
 }
 
-/// IAM database-token near-expiry check (B2.2a). Reads the JWT `exp` claim from
-/// the resolved token WITHOUT validating the signature (diagnostic only) and
-/// warns when the token is already expired or expires within
-/// [`crate::iam_token::IAM_TOKEN_EXPIRY_WARN_SECS`]. The token value is never rendered — only the
-/// seconds-to-expiry — and the check skips cleanly when no IAM token is
-/// configured (the common case).
+/// IAM database-token source check (B16b). Refreshable source profiles report
+/// only what doctor can observe: source kind and whether a successful source
+/// invocation was explicitly observed. Legacy static-token profiles keep the
+/// older near-expiry diagnostic.
 fn check_iam_token(ctx: &DoctorContext<'_>) -> CheckResult {
+    if let Some(source) = &ctx.iam_token_source {
+        return iam_token_source_observation_check(source);
+    }
     iam_token_expiry_check(ctx.iam_token.as_deref(), now_unix_seconds())
+}
+
+fn iam_token_source_observation_check(source: &DoctorIamTokenSourceObservation) -> CheckResult {
+    const ID: u8 = 14;
+    const NAME: &str = "IAM token";
+
+    let invocation = match source.last_successful_invocation_unix {
+        Some(ts) => format!("last_successful_invocation_unix={ts}"),
+        None => "last_successful_invocation=not_observed_by_doctor".to_owned(),
+    };
+    CheckResult::new(
+        ID,
+        NAME,
+        CheckStatus::Pass,
+        format!(
+            "OCI IAM database token source configured: source_kind={}; {invocation}; token_value=not_resolved_by_doctor",
+            source.source_kind.as_str()
+        ),
+    )
 }
 
 /// Pure core of [`check_iam_token`]: classify an IAM token against `now_unix`.

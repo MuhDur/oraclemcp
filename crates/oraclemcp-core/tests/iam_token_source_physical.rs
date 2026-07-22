@@ -15,7 +15,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_config::OracleMcpConfig;
-use oraclemcp_core::{build_session_context, inject_iam_token};
+use oraclemcp_core::{
+    DoctorContext, DoctorIamTokenSourceKind, DoctorIamTokenSourceObservation,
+    build_session_context, inject_iam_token, run_doctor,
+};
 use oraclemcp_db::RustOracleConnection;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -279,6 +282,46 @@ fn token_exec_runs_once_per_physical_tcps_connect_attempt() {
     assert!(
         !counter.exists(),
         "config load must not run token_exec before a physical connect"
+    );
+    let doctor_report = run_with_cx(async {
+        let cx = Cx::current().expect("block_on installs a Cx");
+        run_doctor(
+            &cx,
+            &DoctorContext {
+                iam_token_source: Some(DoctorIamTokenSourceObservation {
+                    source_kind: DoctorIamTokenSourceKind::Exec,
+                    last_successful_invocation_unix: None,
+                }),
+                ..DoctorContext::default()
+            },
+        )
+        .await
+    });
+    let iam_check = doctor_report
+        .checks
+        .iter()
+        .find(|check| check.id == 14)
+        .expect("IAM token check");
+    assert!(
+        iam_check.detail.contains("source_kind=exec"),
+        "{}",
+        iam_check.detail
+    );
+    assert!(
+        iam_check
+            .detail
+            .contains("last_successful_invocation=not_observed_by_doctor"),
+        "{}",
+        iam_check.detail
+    );
+    assert!(
+        !iam_check.detail.contains("re-read on every connect"),
+        "{}",
+        iam_check.detail
+    );
+    assert!(
+        !counter.exists(),
+        "doctor must report the source observation without invoking token_exec"
     );
 
     for attempt in 1..=2 {

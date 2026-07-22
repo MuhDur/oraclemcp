@@ -79,15 +79,16 @@ use oraclemcp_core::{
     ConfigOpsStatus, ConfigReloadApplier, ConfigReloadApplyReport, CustomToolCatalog,
     CustomToolDef, DASHBOARD_PAIRING_TTL_SECONDS, DEFAULT_REQUEST_TIMEOUT, DashboardAuth,
     DashboardAuthError, DispatchCloseReason, DispatchContext, DispatchFuture, DispatchOutcome,
-    DoctorAuditPosture, DoctorAuthCapabilities, DoctorAuthModeKind, DoctorContext, DoctorLevelCaps,
-    DoctorProfileCaps, DoctorStateLayout, EffectiveHttpScheme, ExportRegistry, FeatureTiers,
-    FileStore, HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory,
+    DoctorAuditPosture, DoctorAuthCapabilities, DoctorAuthModeKind, DoctorContext,
+    DoctorIamTokenSourceKind, DoctorIamTokenSourceObservation, DoctorLevelCaps, DoctorProfileCaps,
+    DoctorStateLayout, EffectiveHttpScheme, ExportRegistry, FeatureTiers, FileStore,
+    HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory,
     LaneDispatchFactoryBuilder, LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture,
     MtlsClientRegistry, OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy,
-    OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, PreparedLaneDispatch, ServiceOwner,
-    ServiceTransport, ShutdownCoordinator, SiemFormat, SiemHttpForwarder, SkippedCustomTool,
-    SourceHistoryStore, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig,
-    ToolDispatch, ToolStreamSender, WriteIntentLog, apply_legacy_state_migration,
+    OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, PreparedLaneDispatch, ServerIamTokenSource,
+    ServiceOwner, ServiceTransport, ShutdownCoordinator, SiemFormat, SiemHttpForwarder,
+    SkippedCustomTool, SourceHistoryStore, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial,
+    TlsServerConfig, ToolDispatch, ToolStreamSender, WriteIntentLog, apply_legacy_state_migration,
     build_server_config, classify_at_load, default_dashboard_ticket_dir, enforce_signature,
     mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file,
     prepare_dashboard_pairing, probe_dashboard_http_service, requires_mtls, run_doctor,
@@ -823,6 +824,7 @@ struct ResolvedProfile {
     cumulative_query_cost_budget: Option<CumulativeQueryCostBudgetConfig>,
     pool_settings: Option<PoolSettings>,
     doctor_caps: DoctorProfileCaps,
+    iam_token_source: Option<DoctorIamTokenSourceObservation>,
     connect_timeout_seconds: Option<u64>,
     inactivity_timeout_seconds: Option<u64>,
     keepalive_minutes: Option<u64>,
@@ -917,11 +919,12 @@ fn resolve_profile_options_from_config_with(
     )?;
 
     let mut ctx = oraclemcp_core::build_session_context(chosen, password, wallet_password, false)?;
-    // B2.2a: resolve the server-side OCI IAM database token (env/file source) at
-    // connect time and inject it into `options.iam_token`, so the B2 adapter
-    // wires it through `with_access_token` (TCPS-enforced). A no-op unless the
-    // profile enables `use_iam_token`; fail-closed on a non-TCPS transport or an
-    // empty/missing token. The token is never persisted, rendered, or logged.
+    let iam_token_source = doctor_iam_token_source_observation(chosen);
+    // B16a: configure the server-side OCI IAM database-token source at connect
+    // time, so the B2 adapter wires a refreshable source through the driver
+    // (TCPS-enforced). A no-op unless the profile enables `use_iam_token`;
+    // fail-closed on a non-TCPS transport or malformed source/key reference.
+    // The token is never fetched here, persisted, rendered, or logged.
     oraclemcp_core::inject_iam_token(chosen, &mut ctx.options)
         .map_err(|e| DbError::UnsupportedAuth(e.to_string()))?;
     let doctor_caps = doctor_profile_caps(chosen, &ctx.level_state);
@@ -934,6 +937,7 @@ fn resolve_profile_options_from_config_with(
         cumulative_query_cost_budget: chosen.cumulative_query_cost_budget.clone(),
         pool_settings: ctx.pool_settings,
         doctor_caps,
+        iam_token_source,
         connect_timeout_seconds: chosen.connect_timeout_seconds,
         inactivity_timeout_seconds: chosen.inactivity_timeout_seconds,
         keepalive_minutes: chosen.keepalive_minutes,
@@ -6844,6 +6848,9 @@ struct DoctorProfileContext {
     auth_capabilities: Option<DoctorAuthCapabilities>,
     sensitive_values: Vec<String>,
     credential_env_hint: Option<String>,
+    /// Non-secret IAM token source observation for doctor output. This does not
+    /// imply that the source has been invoked.
+    iam_token_source: Option<DoctorIamTokenSourceObservation>,
     /// Resolved OCI IAM database token (transient; used only for the doctor
     /// near-expiry diagnostic and never rendered). `None` unless the profile uses
     /// IAM-token auth and a token was resolved from its env/file source.
@@ -6873,6 +6880,7 @@ impl DoctorProfileContext {
             auth_capabilities: None,
             sensitive_values: Vec::new(),
             credential_env_hint: None,
+            iam_token_source: None,
             iam_token: None,
             wallet_password: None,
         }
@@ -6976,6 +6984,26 @@ fn doctor_auth_capabilities_for_profile(
     DoctorAuthCapabilities::thin(selected)
 }
 
+fn doctor_iam_token_source_observation(
+    profile: &oraclemcp_config::ConnectionProfile,
+) -> Option<DoctorIamTokenSourceObservation> {
+    let oci = profile.oci.as_ref()?;
+    if !oci.use_iam_token {
+        return None;
+    }
+    let source = ServerIamTokenSource::from_oci(oci).ok()??;
+    let source_kind = match source {
+        ServerIamTokenSource::Env { var: None } => DoctorIamTokenSourceKind::BuiltinEnv,
+        ServerIamTokenSource::Env { var: Some(_) } => DoctorIamTokenSourceKind::Env,
+        ServerIamTokenSource::File { .. } => DoctorIamTokenSourceKind::File,
+        ServerIamTokenSource::Exec { .. } => DoctorIamTokenSourceKind::Exec,
+    };
+    Some(DoctorIamTokenSourceObservation {
+        source_kind,
+        last_successful_invocation_unix: None,
+    })
+}
+
 fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
     let cfg = match OracleMcpConfig::load(None) {
         Ok(cfg) => cfg,
@@ -7028,6 +7056,7 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
         auth_capabilities: Some(doctor_auth_capabilities_for_profile(chosen)),
         sensitive_values: Vec::new(),
         credential_env_hint: doctor_credential_env_hint(chosen),
+        iam_token_source: doctor_iam_token_source_observation(chosen),
         // Offline metadata inspection never resolves a token (offline-no-secrets
         // invariant); the IAM near-expiry check runs on the --online path.
         iam_token: None,
@@ -7103,6 +7132,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             auth_capabilities: None,
             sensitive_values: Vec::new(),
             credential_env_hint: None,
+            iam_token_source: None,
             iam_token: None,
             wallet_password: None,
         },
@@ -7243,6 +7273,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
     );
     let profile_caps = Some(resolved.doctor_caps.clone());
     let auth_capabilities = Some(DoctorAuthCapabilities::from_connect_options(&resolved.opts));
+    let iam_token_source = resolved.iam_token_source.clone();
     // A profile carries only a refreshable source, never a resolved IAM token.
     // Doctor intentionally receives no token value: source diagnostics stay in
     // the operator log and client-facing doctor output cannot become an auth
@@ -7274,6 +7305,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
                 // Online: a live connection is attempted; the offline credential
                 // hint does not apply.
                 credential_env_hint: None,
+                iam_token_source,
                 iam_token,
                 wallet_password,
             }
@@ -7297,6 +7329,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
             auth_capabilities,
             sensitive_values,
             credential_env_hint: None,
+            iam_token_source,
             iam_token,
             wallet_password,
         },
@@ -7575,6 +7608,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
         },
         // Transient: only the JWT `exp` is read for the near-expiry diagnostic;
         // the token value is never rendered or serialized.
+        iam_token_source: profile_ctx.iam_token_source,
         iam_token: profile_ctx.iam_token,
         protected_profile_writable: profile_ctx.protected_profile_writable,
         connection_strategy: profile_ctx.connection_strategy,
