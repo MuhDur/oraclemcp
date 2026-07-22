@@ -1,0 +1,79 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:13:38Z",
+  "bead_id": "oraclemcp-091-a5-secreview-0sdpx",
+  "scope": {
+    "summary": "Closes A5-secreview by adding the dashboard-origin threat-model addendum and linking it from the README, threat model, and A5 plan entry.",
+    "in_scope": [
+      "docs/dashboard-origin-threat-model-addendum.md",
+      "docs/threat-model.md",
+      "docs/plan/PLAN_0_9_1_FIELD_HARDENING.md",
+      "README.md"
+    ],
+    "out_of_scope": [
+      "No dashboard authentication or operator-route implementation code was changed by this close.",
+      "No Beads deferral, promotion, or cross-repo tracker cleanup was performed.",
+      "Unrelated shared-checkout dirty files were not used as evidence."
+    ]
+  },
+  "source": {
+    "sha": "7103aef84a95fb0c0108b987238ef588e6b97b35",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "security review addendum",
+        "kind": "cli",
+        "trace": "`git show 7103aef84a95fb0c0108b987238ef588e6b97b35:docs/dashboard-origin-threat-model-addendum.md` contains the A5 fetch-first plus strict-Origin argument, the refusal of literal Origin:null, the JSON/CSRF/action-ticket/SameSite cookie layers, the unchanged body-only pairing contract, the secret-free same-origin pairing referrer policy, and the ambient-cookie-vs-bearer distinction from the agent-mail reference."
+      },
+      {
+        "name": "threat-model cross-reference",
+        "kind": "cli",
+        "trace": "`git show 7103aef84a95fb0c0108b987238ef588e6b97b35:docs/threat-model.md` links the addendum from companion documents and T12; T12 names same-origin JSON fetch, route-scoped tickets, and literal Origin:null refusal, with evidence test names for served pairing and malicious dashboard-origin cases."
+      },
+      {
+        "name": "A5 and README links",
+        "kind": "cli",
+        "trace": "`git show 7103aef84a95fb0c0108b987238ef588e6b97b35:README.md` and `git show 7103aef84a95fb0c0108b987238ef588e6b97b35:docs/plan/PLAN_0_9_1_FIELD_HARDENING.md` link docs/dashboard-origin-threat-model-addendum.md from the dashboard pairing contract and the A5 security-review requirement."
+      },
+      {
+        "name": "dashboard action origin test",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core malicious_page_cannot_trigger_dashboard_gated_action -- --nocapture` exited 0; the selected unit test passed and proves malicious/cross-origin and literal Origin:null dashboard action POSTs do not reach dispatch while a same-origin JSON POST with CSRF and action ticket succeeds."
+      },
+      {
+        "name": "served pairing origin and ticket tests",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core served_dashboard_pairing -- --nocapture` exited 0; 3 selected unit tests passed, covering secret-free served pairing URL/form, query ?ticket refusal without consumption, Origin:null refusal without consumption, one-time replay refusal, and the deliberate same-origin/no-referrer header split."
+      },
+      {
+        "name": "authenticated-principal origin test",
+        "kind": "cli",
+        "trace": "`env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core dashboard_operator_auth_enforces_origin_even_for_authenticated_principals -- --nocapture` exited 0; the selected unit test passed and proves browser Origin/Sec-Fetch checks run even when an authenticated principal is already present."
+      },
+      {
+        "name": "doc whitespace check",
+        "kind": "cli",
+        "trace": "`git diff --check -- README.md docs/threat-model.md docs/dashboard-origin-threat-model-addendum.md docs/plan/PLAN_0_9_1_FIELD_HARDENING.md` exited 0 before the documentation commit."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The first attempted scoped cargo test was refused by the repo guard because the inherited environment pointed CARGO_TARGET_DIR at /home/durakovic/.cache/cargo-target; all successful cargo evidence was rerun with CARGO_TARGET_DIR unset so it used the checkout target directory.",
+    "This is a written security review and cross-reference close; it relies on already-landed A5 implementation tests and does not assert a full workspace test run in the shared checkout."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
