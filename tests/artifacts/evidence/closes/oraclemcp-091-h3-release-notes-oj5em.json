@@ -1,0 +1,72 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T10:34:57Z",
+  "bead_id": "oraclemcp-091-h3-release-notes-oj5em",
+  "scope": {
+    "summary": "H3 adds version-neutral field-hardening release and migration notes for the current oraclemcp-091 train, with operator actions and an explicit unresolved-version warning.",
+    "in_scope": [
+      "docs/oraclemcp-091-field-hardening-notes.md",
+      "README.md",
+      "docs/release-checklist.md",
+      "crates/oraclemcp/tests/release_docs.rs"
+    ],
+    "out_of_scope": [
+      "No release tag, publication, version metadata change, or CHANGELOG version decision is made.",
+      "No live Oracle, browser, dashboard, IAM, OAuth, pool, or catalog code behavior is changed by this docs close.",
+      "Driver-side release notes remain dependent on the final driver release decision and are not authored from the sibling rust-oracledb checkout."
+    ]
+  },
+  "source": {
+    "sha": "454ed0fd2e732abf0f890e59548f56c9a3f1bc15",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "field-hardening release and migration notes",
+        "kind": "cli",
+        "trace": "docs/oraclemcp-091-field-hardening-notes.md covers the tracker train name `oraclemcp-091-train-root-jp5k9`, flags the unresolved 0.9.1-vs-0.10.0 version label and bead `788nn`, and records operator actions for A1a/A1e catalog visibility, A3a/A3b flashback preflight/quarantine asymmetry, A4a/A4e pool/session lifecycle, A5 dashboard fetch-first security contract, P-U3 dashboard 403 ErrorEnvelope behavior, B7c explicit close, B16a/B16b IAM TokenSource and doctor observation, SEC-6 uniform OAuth rejection, SEC-1 recovery reclassification, B11 response caps, and P-U5 wallet truth table."
+      },
+      {
+        "name": "release-surface links",
+        "kind": "cli",
+        "trace": "README.md links the field-hardening operator notes from the existing operator-note section, and docs/release-checklist.md requires attaching the notes while resolving their version-label ambiguity before tagging."
+      },
+      {
+        "name": "release-doc regression test",
+        "kind": "cli",
+        "trace": "`CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/cod_6_h3 cargo test -p oraclemcp --test release_docs` exited 0 after a fresh compile: 3 passed, 0 failed, 0 ignored. The first inherited-target attempt was refused by the build guard because CARGO_TARGET_DIR pointed at /home/durakovic/.cache/cargo-target; the passing run used a checkout-local target subdirectory."
+      },
+      {
+        "name": "format and staged discipline",
+        "kind": "cli",
+        "trace": "`cargo fmt --all -- --check`, `scripts/swarm_discipline.sh struct-atomicity --staged`, `scripts/swarm_discipline.sh stale-delete-check --staged`, and `git diff --cached --check` all exited 0 before commit."
+      },
+      {
+        "name": "landed source",
+        "kind": "cli",
+        "trace": "`git show --stat HEAD` for 454ed0fd reported exactly README.md, crates/oraclemcp/tests/release_docs.rs, docs/oraclemcp-091-field-hardening-notes.md, and docs/release-checklist.md changed: 247 insertions, 5 deletions."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is documentation and release-process evidence only; it does not re-run the live lanes closed by the beads it documents.",
+    "The version label remains intentionally unresolved; the notes direct the operator to resolve bead `788nn` before tagging or publishing.",
+    "No full workspace cargo gate is claimed from this shared checkout."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "Resolve bead `788nn` before release tagging so the final public version label is unambiguous."
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
