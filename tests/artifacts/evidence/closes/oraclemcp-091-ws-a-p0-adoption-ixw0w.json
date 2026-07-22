@@ -6,25 +6,7 @@
   "scope": {
     "summary": "WS-A parent close reconciles every child dependency and finds no remaining implementation blocker.",
     "in_scope": [
-      ".beads/issues.jsonl",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a1a-catalog-gates-fail-open-59d9v.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a1b-setup-ordering-1m9xr.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a1c-columns-describe-rvg64.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a1d-describe-notfound-q9e4v.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a1e-rls-visibility-lpect.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a1f-robot-docs-pool-setup-9y1bl.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a2a-error-collapse-quu5b.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a2b-revocation-command-meq5i.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a2c-lock-granularity-fmb0e.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a3a-flashback-preflight-dwbma.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a3b-refusal-vs-teardown-vl3w9.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a4a-validate-on-checkout-8knxx.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a4b-retry-unify-c6whb.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a4c-connection-honesty-wxq4k.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a4d-typed-envelopes-wr0o4.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a4e-session-recycle-uyujp.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a5-dashboard-fetch-first-d4tiv.json",
-      "tests/artifacts/evidence/closes/oraclemcp-091-a5-secreview-0sdpx.json"
+      ".beads/issues.jsonl"
     ],
     "out_of_scope": [
       "No new WS-A product code is claimed by this parent close; child beads carry their own implementation proof.",
