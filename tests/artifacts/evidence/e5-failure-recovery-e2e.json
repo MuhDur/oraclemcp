@@ -1,0 +1,53 @@
+{
+  "bead": "oraclemcp-091-e5-failure-recovery-e2e-bf1qa",
+  "client_id": "client-5be892a6847c827d601753d02c21ba40",
+  "installed_binary": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T101959Z/prefix/bin/oraclemcp",
+  "proof_boundary": "HTTP/session/auth/refusal/single-use-replay/teardown/revocation assertions are raw wire checks against the installed artifact. Grant expiry is not exercised because the public confirmation-grant TTL is fixed at 300s; commit_in_doubt remains a supplemental archived-source cargo test because the installed binary has no public commit-in-doubt fault injection hook.",
+  "runtime_artifact_dir": "/home/durakovic/projects/oraclemcp/target/e2e/failure_recovery_e2e/20260722T101959Z",
+  "source_sha": "4f016fea92044989ab1619db0efafb68543d707c",
+  "status": "pass",
+  "supplemental_assertions": [
+    {
+      "command": "cargo test -p oraclemcp execute_commit_in_doubt_leaves_durable_intent_unresolved -- --exact",
+      "id": "commit_in_doubt_unresolved",
+      "proof_boundary": "CommitInDoubtMock is test-only; no public installed-binary fault hook exists for a wire-level commit-in-doubt injection.",
+      "status": "pass",
+      "wire": false
+    }
+  ],
+  "wire_assertions": [
+    {
+      "id": "refusal_no_quarantine",
+      "post_refusal_read": "pass",
+      "refusal_error_class": "OPERATING_LEVEL_TOO_LOW",
+      "status": "pass",
+      "wire": true
+    },
+    {
+      "id": "single_use_grant_replay_refusal",
+      "post_replay_refusal_read": "pass",
+      "proof_boundary": "public wire grant expiry is fixed at 300s; this bounded rig proves single-use replay refusal but does not wait for expiry",
+      "replay_error_class": "CHALLENGE_REQUIRED",
+      "status": "pass",
+      "wire": true
+    },
+    {
+      "cancel_status": "terminated",
+      "fresh_lane_after_cancel": "pass",
+      "id": "operator_cancel_teardown_quarantines_session",
+      "lane_id": "http-lane-2",
+      "stale_replay_status": 404,
+      "stale_session_status": 404,
+      "status": "pass",
+      "wire": true
+    },
+    {
+      "closed_sessions": 1,
+      "fresh_lane_status": 401,
+      "id": "revoked_client_loses_sessions_buffers_and_fresh_lane",
+      "replay_after_revoke_status": 401,
+      "status": "pass",
+      "wire": true
+    }
+  ]
+}
