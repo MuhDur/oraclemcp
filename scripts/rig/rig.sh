@@ -26,6 +26,7 @@ RIG_L1="$ROOT/scripts/rig/oracle_l1.sh"
 RIG_DOCTOR="$ROOT/scripts/rig/rig_doctor.sh"
 RIG_BOUNDARY_LINT="$ROOT/scripts/rig/rig_boundary_lint.sh"
 RIG_IDLE_KILL="$ROOT/scripts/rig/rig_idle_kill.sh"
+RIG_FAILURE_INJECTION="$ROOT/scripts/rig/failure_injection_lanes.sh"
 RIG_BROWSER_LANE="$ROOT/scripts/rig/rig_browser_lane.sh"
 RIG_REPORT="$ROOT/scripts/rig/rig_report.sh"
 
@@ -39,6 +40,7 @@ Usage:
   bash scripts/rig/rig.sh run [--log|--dry-run]
   bash scripts/rig/rig.sh idle-kill [--log|--dry-run]
   bash scripts/rig/rig.sh idle-kill-failure-probe [--log|--dry-run]
+  bash scripts/rig/rig.sh failure-injection [--log|--dry-run]
   bash scripts/rig/rig.sh browser-lane [--log|--dry-run]
   bash scripts/rig/rig.sh report [--log|--dry-run]
   bash scripts/rig/rig.sh down [--log|--dry-run]
@@ -71,6 +73,7 @@ require_scaffold_tools() {
   [ -x "$RIG_L1" ] || e2e_finish_fail "rig L1 is not executable: $RIG_L1"
   [ -x "$RIG_BOUNDARY_LINT" ] || e2e_finish_fail "rig boundary lint is not executable: $RIG_BOUNDARY_LINT"
   [ -x "$RIG_IDLE_KILL" ] || e2e_finish_fail "rig idle-kill lane is not executable: $RIG_IDLE_KILL"
+  [ -x "$RIG_FAILURE_INJECTION" ] || e2e_finish_fail "rig failure-injection lane is not executable: $RIG_FAILURE_INJECTION"
   [ -x "$RIG_BROWSER_LANE" ] || e2e_finish_fail "rig browser lane is not executable: $RIG_BROWSER_LANE"
   [ -x "$RIG_REPORT" ] || e2e_finish_fail "rig report lane is not executable: $RIG_REPORT"
   command -v git >/dev/null 2>&1 || e2e_finish_fail "git is required for host-hygiene snapshots"
@@ -225,6 +228,14 @@ case "$cmd" in
     bash "$RIG_DOCTOR" "$@"
     prepare_tier_a
     run_tier_a bash "$RIG_IDLE_KILL" failure-probe "$@"
+    assert_host_hygiene
+    e2e_finish_pass
+    ;;
+  failure-injection)
+    snapshot_host before
+    bash "$RIG_DOCTOR" "$@"
+    prepare_tier_a
+    run_tier_a bash "$RIG_FAILURE_INJECTION" run "$@"
     assert_host_hygiene
     e2e_finish_pass
     ;;
