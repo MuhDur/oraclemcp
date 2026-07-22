@@ -328,6 +328,115 @@ fn an_anchor_forged_with_the_wrong_key_does_not_verify() {
     assert_eq!(real.seq, 3);
 }
 
+/// ACCEPTANCE: privileged-action inventory cross-checked against chain entries.
+///
+/// "Record everything" is not proven by appending N records and verifying the
+/// chain — a sink that silently dropped every other record would still produce
+/// a valid chain from what remained. The property under test is that an
+/// INDEPENDENT inventory of what the operator did (built outside the audit path)
+/// reconciles one-to-one with what the chain contains: every action is present,
+/// none is missing, none is extra, and the sequence is gap-free.
+#[test]
+fn privileged_action_inventory_reconciles_against_chain_entries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let audit_path = dir.path().join("audit.jsonl");
+    let anchor_path = anchor_path_for(&audit_path);
+
+    // Build an independent inventory of privileged actions BEFORE they enter the
+    // audit path — this is the operator's record of what they did.
+    let inventory: Vec<(&str, &str)> = vec![
+        ("oracle_execute", "DELETE FROM employees WHERE dept_id = 42"),
+        (
+            "oracle_compile_object",
+            "ALTER PACKAGE hr.emp_pkg COMPILE BODY",
+        ),
+        (
+            "oracle_create_or_replace",
+            "CREATE OR REPLACE VIEW v AS SELECT 1 FROM dual",
+        ),
+        (
+            "oracle_execute",
+            "UPDATE payroll SET amount = 0 WHERE emp_id = 7",
+        ),
+        (
+            "oracle_set_session_level",
+            "ALTER SESSION SET optimizer_mode = ALL_ROWS",
+        ),
+    ];
+
+    {
+        let sink = FileAuditSink::open(&audit_path).expect("open audit log");
+        let auditor = Auditor::new(Box::new(sink), key()).with_head_anchor(anchor_path.clone());
+        for (i, (tool, sql)) in inventory.iter().enumerate() {
+            let mut d = draft(sql);
+            d.tool = tool.to_string();
+            auditor
+                .append(&d, format!("2026-07-22T00:00:{i:02}Z"), true)
+                .expect("append");
+        }
+    }
+
+    // Read back the chain from disk — the state a verifier inspects.
+    let records = read_records(&audit_path);
+
+    // 1. Chain length matches inventory exactly: nothing dropped, nothing extra.
+    assert_eq!(
+        records.len(),
+        inventory.len(),
+        "every privileged action must produce exactly one chain entry; \
+         a silent drop or a phantom entry both break the audit guarantee"
+    );
+
+    // 2. Gap-free monotonic sequence: 1..=N with no holes.
+    for (i, rec) in records.iter().enumerate() {
+        assert_eq!(
+            rec.seq,
+            (i + 1) as u64,
+            "seq must be gap-free: a skipped seq means a record was lost \
+             without the chain noticing"
+        );
+    }
+
+    // 3. Every inventory item reconciles against exactly one chain entry by
+    //    tool + sql_sha256. The inventory was built outside the audit path, so
+    //    a mismatch means the audit path lost or corrupted an action.
+    for (tool, sql) in &inventory {
+        let expected_hash = oraclemcp_audit::sha256_hex(sql.as_bytes());
+        let matches: Vec<_> = records
+            .iter()
+            .filter(|r| r.tool == *tool && r.sql_sha256 == expected_hash)
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "inventory item ({tool}, sha256={expected_hash}) must appear \
+             exactly once in the chain; found {} entries",
+            matches.len()
+        );
+    }
+
+    // 4. The chain itself verifies — the inventory match is meaningless if the
+    //    entries could have been tampered with after writing.
+    assert_eq!(
+        verify_records(&records, &[key()]),
+        VerifyOutcome::Ok {
+            records: inventory.len()
+        },
+        "the reconciled chain must also be cryptographically intact"
+    );
+
+    // 5. The anchor names the full head — truncation would break reconciliation
+    //    above, but the anchor is the independent witness.
+    let anchor = load_anchor(&anchor_path)
+        .expect("load anchor")
+        .expect("anchor present");
+    assert_eq!(
+        check_anchor(&records, &anchor, &[key()]),
+        Ok(AnchorStatus::Match),
+        "anchor must confirm the full chain head after inventory reconciliation"
+    );
+}
+
 /// SEC-3: an audit write that cannot succeed must fail CLOSED. Opening the sink
 /// is the first place this is decidable, and it must refuse rather than hand
 /// back a writer that silently discards records — a "best effort" audit sink is
