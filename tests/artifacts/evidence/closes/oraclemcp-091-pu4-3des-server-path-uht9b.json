@@ -1,0 +1,69 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:55:20Z",
+  "bead_id": "oraclemcp-091-pu4-3des-server-path-uht9b",
+  "scope": {
+    "summary": "The synthetic legacy-3DES wallet fixture decrypts through the server wallet posture path and is exercised by the D6 TCPS rig lane.",
+    "in_scope": [
+      "scripts/rig/oracle_tcps_lane.sh",
+      "crates/oraclemcp-core/tests/doctor_wallet_posture.rs",
+      "crates/oraclemcp-core/tests/fixtures/wallet"
+    ],
+    "out_of_scope": [
+      "Any live OCI wallet, customer identifier, host name, tenancy, or certificate material.",
+      "Changing the sibling rust-oracledb driver; the server consumes the pinned driver only.",
+      "Fixing the known B5 UnknownIssuer timeout behavior, which remains tracked separately."
+    ]
+  },
+  "source": {
+    "sha": "113d9a55281a8004c87a36e707458dff1fb519b6",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "cargo test -p oraclemcp-core --test doctor_wallet_posture legacy_3des_p12_decrypts_through_the_server_wallet_path -- --nocapture",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22 with CARGO_TARGET_DIR unset so Cargo used the checkout target/. The test reported 1 passed, 0 failed, proving the committed legacy_3des_p12/ewallet.p12 fixture reaches DoctorWalletPosture::PrimaryUsable through the server wallet posture path."
+      },
+      {
+        "name": "cargo test -p oraclemcp-core --test doctor_wallet_posture the_legacy_3des_probe_actually_decrypts_rather_than_noticing_the_file -- --nocapture",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22 with 1 passed, 0 failed. The wrong-password control proves the server path is decrypting the synthetic legacy-3DES PKCS#12 contents rather than accepting the fixture by filename or presence alone."
+      },
+      {
+        "name": "bash scripts/rig/oracle_tcps_lane.sh run --log",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22 after updating the stale P2-4 selector to the committed p2_4_wallet_profile_without_explicit_sni_reaches_local_tcps_terminator test. The lane reported synthetic_material_scan pass, B5 current-red signature observed, B6 SSL_CERT_FILE pass, B6 SSL_CERT_DIR pass, P2-4 pass, P-U4 legacy 3DES server wallet path pass, and scenario_complete pass."
+      },
+      {
+        "name": "bash -n scripts/rig/oracle_tcps_lane.sh",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22; the D6 TCPS rig lane shell entrypoint parses after the P2-4 selector update."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The proof uses only committed synthetic wallet fixtures under crates/oraclemcp-core/tests/fixtures/wallet.",
+    "The D6 lane intentionally treats the known B5 UnknownIssuer timeout as current-red evidence; that driver gap is outside this P-U4 server-path close.",
+    "The full workspace Cargo gate was not run because this shared checkout has unrelated in-flight panes."
+  ],
+  "known_defects": [
+    {
+      "description": "B5 UnknownIssuer still burns the 20s call-timeout budget; this was observed by the D6 lane and remains outside the P-U4 server-path scope.",
+      "bead_id": "oraclemcp-u9ldz"
+    }
+  ],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}
