@@ -1,3 +1,37 @@
+use super::operator::config_error_value;
+
+#[test]
+fn config_preview_errors_keep_their_distinct_operator_codes() {
+    for (error, status, expected_code) in [
+        (ConfigOpsError::PreviewRequired, 400, "config_preview_required"),
+        (
+            ConfigOpsError::InvalidPreviewToken,
+            409,
+            "config_preview_token_invalid",
+        ),
+        (
+            ConfigOpsError::PreviewExpired,
+            409,
+            "config_preview_expired",
+        ),
+        (
+            ConfigOpsError::PreviewDraftChanged,
+            409,
+            "config_preview_draft_changed",
+        ),
+        (
+            ConfigOpsError::PreviewConfirmationRequired,
+            409,
+            "config_preview_confirmation_required",
+        ),
+    ] {
+        let (actual_status, body) = config_error_value(error);
+        assert_eq!(actual_status, status);
+        assert_eq!(body["error"], serde_json::json!(expected_code));
+        assert!(body["message"].as_str().is_some_and(|message| !message.is_empty()));
+    }
+}
+
 #[test]
 fn operator_api_routes_are_typed_json_404_and_parse_query() {
     let (auditor, sink) = operator_auditor();

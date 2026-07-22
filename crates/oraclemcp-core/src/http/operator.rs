@@ -2967,7 +2967,7 @@ fn operator_config_error_response(route: &str, error: ConfigOpsError) -> HttpRes
     operator_json_response(status, route, data)
 }
 
-fn config_error_value(error: ConfigOpsError) -> (u16, Value) {
+pub(super) fn config_error_value(error: ConfigOpsError) -> (u16, Value) {
     match error {
         ConfigOpsError::CurrentChanged {
             expected_sha256,
@@ -3016,13 +3016,27 @@ fn config_error_value(error: ConfigOpsError) -> (u16, Value) {
                 "message": "apply requires a live reviewed config preview",
             }),
         ),
-        ConfigOpsError::InvalidPreviewToken
-        | ConfigOpsError::PreviewExpired
-        | ConfigOpsError::PreviewDraftChanged => (
+        ConfigOpsError::InvalidPreviewToken => (
             409,
             json!({
-                "error": "config_preview_invalid",
-                "message": "the reviewed config preview is invalid, expired, consumed, or no longer matches",
+                "error": "config_preview_token_invalid",
+                "message": "the reviewed config preview token is invalid or already consumed",
+                "next_step": "preview the current draft again before applying",
+            }),
+        ),
+        ConfigOpsError::PreviewExpired => (
+            409,
+            json!({
+                "error": "config_preview_expired",
+                "message": "the reviewed config preview expired before apply",
+                "next_step": "preview the current draft again before applying",
+            }),
+        ),
+        ConfigOpsError::PreviewDraftChanged => (
+            409,
+            json!({
+                "error": "config_preview_draft_changed",
+                "message": "the config draft changed after preview",
                 "next_step": "preview the current draft again before applying",
             }),
         ),
