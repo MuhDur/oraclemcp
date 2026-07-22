@@ -8,8 +8,7 @@
     "in_scope": [
       "scripts/rig/failure_injection_lanes.py",
       "scripts/rig/failure_injection_lanes.sh",
-      "scripts/rig/rig.sh",
-      "tests/artifacts/evidence/rfail-failure-injection-lanes.json"
+      "scripts/rig/rig.sh"
     ],
     "out_of_scope": [
       "New product-only fault-injection hooks for commit_in_doubt or confirmation-grant TTL manipulation.",
@@ -17,7 +16,7 @@
     ]
   },
   "source": {
-    "sha": "a4f79ba3a320370c346e9e34ca55724a74cb3065",
+    "sha": "57ec979f7a46eaec37072ed50e65dfb93eb14129",
     "tree_clean": true,
     "branch": "main"
   },
@@ -32,7 +31,7 @@
       {
         "name": "bash scripts/rig/failure_injection_lanes.sh run --log",
         "kind": "cli",
-        "trace": "Full pass recorded in tests/artifacts/evidence/rfail-failure-injection-lanes.json with source_sha 4e7683a2a46d4c5d0e8fba25efe25b9b8a7cb1e5."
+        "trace": "Full pass recorded in tests/artifacts/evidence/rfail-failure-injection-lanes.json with source_sha 57ec979f7a46eaec37072ed50e65dfb93eb14129."
       },
       {
         "name": "scripts/swarm_discipline.sh bounded-run --timeout 1800 -- bash scripts/rig/failure_injection_lanes.sh run --log",
@@ -52,7 +51,7 @@
       {
         "kind": "rfail-failure-injection-lanes",
         "path": "tests/artifacts/evidence/rfail-failure-injection-lanes.json",
-        "sha": "a4f79ba3a320370c346e9e34ca55724a74cb3065"
+        "sha": "57ec979f7a46eaec37072ed50e65dfb93eb14129"
       }
     ]
   },
