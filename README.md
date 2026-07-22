@@ -1022,9 +1022,12 @@ description = "Customer id"
 
 Custom tool SQL uses named binds (`:id` above). Agent-supplied values are typed
 from `params` and bound by name; they are never interpolated into SQL text. The
-binary only loads definitions the classifier proves are `READ_ONLY`, even if a
-profile permits a higher ceiling. Write, DDL, PL/SQL block, and unproven package
-call definitions are rejected at load time.
+binary loads definitions the classifier deems safe for the profile ceiling,
+then executes them through a runtime gate that blocks unsupported privilege levels
+before Oracle sees them. In this release, write/DDL/PL/SQL custom tools can be
+loaded and advertised when the ceiling permits, but their invocation is refused
+with `OperatingLevelTooLow` before any live DB call. Unproven package call
+definitions are rejected by gate policy as forbidden.
 
 On protected profiles, every custom tool must carry a valid HMAC signature. Set
 `ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY` in the server environment to verify signed

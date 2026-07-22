@@ -4839,6 +4839,72 @@ fn custom_read_only_tool_dispatches_with_named_binds() {
 }
 
 #[test]
+fn custom_tool_write_uses_runtime_level_refusal_before_db() {
+    let defs = oraclemcp_core::parse_tools_file(
+        r#"
+            [[tool]]
+            name = "app_customer_set_name"
+            description = "Update a customer name"
+            sql = "UPDATE app_customers SET name = :name WHERE id = :id"
+            output_mode = "rows"
+
+            [[tool.params]]
+            name = "id"
+            type = "integer"
+            required = true
+            description = "Customer id"
+
+            [[tool.params]]
+            name = "name"
+            type = "string"
+            required = true
+            description = "Customer name"
+            "#,
+    )
+    .expect("custom tool parses");
+    let loaded = oraclemcp_core::load_tools(
+        &defs,
+        &Classifier::new(ClassifierConfig::new()),
+        OperatingLevel::ReadWrite,
+    )
+    .expect("write custom tool loads on writable profile ceiling");
+    assert_eq!(loaded[0].required_level, OperatingLevel::ReadWrite);
+
+    let state = std::sync::Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools(
+        Box::new(ExecRecordingMock {
+            state: std::sync::Arc::clone(&state),
+            rows_affected: 0,
+        }),
+        Some("dev".to_owned()),
+        default_read_only_level(),
+        std::sync::Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(session_bundle(OneRowMock)) })
+        }),
+        CustomToolCatalog::new(loaded),
+        None,
+    );
+
+    let err = dispatcher
+        .dispatch("app_customer_set_name", json!({ "id": 7, "name": "Acme" }))
+        .expect_err("write custom tool should not execute on read-only surface");
+    assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow);
+    assert!(
+        err.message.contains("requires READ_WRITE"),
+        "unexpected refusal message: {}",
+        err.message
+    );
+    assert!(
+        state.executed.lock().expect("executed mutex").is_empty(),
+        "refused custom write tool must not execute"
+    );
+    assert!(
+        state.queried.lock().expect("queried mutex").is_empty(),
+        "refused custom write tool must not query"
+    );
+}
+
+#[test]
 fn qa45_profile_switch_refreshes_every_discovery_surface_and_execution() {
     fn catalog(name: &str) -> CustomToolCatalog {
         let source = format!(
