@@ -110,3 +110,16 @@ Run result: `scripts/oraclemcp_honesty_grep.sh` reports `FAIL — 9 over-claimin
 9. docs/plan/PLAN_0_6_0_INTERACTIVE_ALWAYS_ON.md:824 — exact phrase: `"safe-by-default"`
    - Classification: (b)
    - Plan-side note in 0_6_0 for future doc/gate expectations, not current product framing.
+
+## [INVESTIGATION] Honesty-grep growth: counts + file list
+
+- Total occurrences now: 18
+- (a) product/README/code surfaces: 0
+- (b) historical plan docs: 9
+- (c) docs/review artifacts (quoted-analysis carryover): 9
+
+File list:
+
+- (a) product/README/code surfaces: none
+- (b) historical plan docs: `docs/plan/PLAN_0_4_0_PRODUCTION_HARDENING.md`, `docs/plan/PLAN_0_6_0_INTERACTIVE_ALWAYS_ON.md`
+- (c) docs/review artifacts: `docs/review/round1-p9.md`
