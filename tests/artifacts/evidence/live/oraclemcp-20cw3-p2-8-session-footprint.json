@@ -1,11 +1,11 @@
 {
   "schema": "oraclemcp-live-session-footprint/v1",
-  "generated_at": "2026-07-21T23:16:24Z",
-  "run_id": "local-20260721T231624Z-p2-footprint",
-  "lane": "local-xe21-lab",
-  "source_sha": "2106de73bd2dfe581dde6005de2e49eb0dc0a11b",
+  "generated_at": "2026-07-22T10:30:56Z",
+  "run_id": "d-lane-20260722T103055Z-p2-footprint",
+  "lane": "D-lane-free23",
+  "source_sha": "a6e5cea5d86248737b6439f464c5c4635f83b603",
   "lane_detail": {
-    "kind": "local-xe21-lab",
+    "kind": "local-free23-d-lane",
     "database_identity": "redacted"
   },
   "profile": {
@@ -15,16 +15,25 @@
   },
   "probe": {
     "session_tag": "synthetic-redacted",
-    "observer": "independent-local-sysdba-session"
+    "observer": "independent-system-vsession-query"
   },
   "observations": {
     "sessions_before_start": 0,
+    "sessions_after_start": 3,
     "connection_strategy": "pinned_plus_stateless",
     "stateless_strategy": "stateless_metadata_pool",
     "reported_pool_open_connections": 2,
     "observed_tagged_vsession_count": 3,
+    "reported_total_session_footprint": 3,
+    "configured_max_total_session_footprint": 4,
     "sessions_after_clean_stdio_shutdown": 0
   },
+  "assertions": {
+    "reported_total_equals_observed_tagged_sessions": true,
+    "reported_total_never_understates_observed": true,
+    "pool_open_connections_within_configured_max_size": true,
+    "clean_stdio_shutdown_returned_to_baseline": true
+  },
   "verdict": "pass",
-  "interpretation": "The reported pool count covers the two stateless pool sessions; the independent V$SESSION observer counted those plus the separate pinned main session. No connection endpoint, credential, database name, SID, serial number, or real client identity is recorded."
+  "interpretation": "The reported pool count covers stateless pool sessions, and the pinned primary session is accounted for separately as one additional Oracle session. The D-lane V$SESSION observer counted only the synthetic module/client identifier for this probe."
 }
