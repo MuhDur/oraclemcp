@@ -1251,11 +1251,29 @@ impl OracleConnection for RangeSourceMock {
             }]);
         }
 
+        // The range statement spends one placeholder per OCCURRENCE, so each
+        // bound arrives twice: [owner, name, type, from, from, to, to]. This
+        // mock stood in for Oracle and previously read 3 and 4 as from/to,
+        // which silently made `to` a second copy of `from`. Assert the pairing
+        // rather than just indexing past it — a stand-in that accepts a bind
+        // vector the real server would reject with ORA-01008 is worse than no
+        // stand-in, because it reports success.
+        assert_eq!(
+            binds.len(),
+            7,
+            "range source read binds one value per placeholder occurrence",
+        );
+        assert_eq!(
+            binds.get(3),
+            binds.get(4),
+            "the from bound is supplied twice"
+        );
+        assert_eq!(binds.get(5), binds.get(6), "the to bound is supplied twice");
         let from_line = match binds.get(3) {
             Some(OracleBind::I64(line)) => *line as usize,
             _ => 1,
         };
-        let to_line = match binds.get(4) {
+        let to_line = match binds.get(5) {
             Some(OracleBind::I64(line)) => *line as usize,
             _ => usize::MAX,
         };
