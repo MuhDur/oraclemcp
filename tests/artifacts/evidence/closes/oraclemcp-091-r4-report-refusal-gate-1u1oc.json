@@ -1,0 +1,77 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:34:35Z",
+  "bead_id": "oraclemcp-091-r4-report-refusal-gate-1u1oc",
+  "scope": {
+    "summary": "R4 adds a rig report lane that emits punch-list findings and mechanically gates refusal-corpus drift against a committed baseline.",
+    "in_scope": [
+      "scripts/rig/rig.sh",
+      "scripts/rig/rig_report.sh",
+      "scripts/rig/refusal_corpus_gate.py",
+      "tests/fixtures/rig/refusal_corpus_baseline.jsonl",
+      "tests/fixtures/rig/refusal_corpus_seeded_flip.jsonl",
+      "tests/artifacts/evidence/r4-report-refusal-gate.json"
+    ],
+    "out_of_scope": [
+      "Changing dispatcher refusal categories or the served refusal-corpus writer.",
+      "Producing a field/customer report from live artifacts; this close proves the local synthetic report/gate scaffold.",
+      "Running the full workspace gate in the shared checkout."
+    ]
+  },
+  "source": {
+    "sha": "f850ed7deda0de8b1ab55ad036d741876924dff4",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "bash -n scripts/rig/rig.sh scripts/rig/rig_report.sh && PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/rig/refusal_corpus_gate.py",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22. The rig entrypoint and report script parse, and the refusal-corpus diff helper compiles."
+      },
+      {
+        "name": "bash scripts/rig/rig_report.sh run --dry-run --log",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22. The dry run scheduled the committed baseline and seeded drift candidate without generating report artifacts."
+      },
+      {
+        "name": "bash scripts/rig/rig.sh report --dry-run --log",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22 after the report delegation was fixed to forward --dry-run and --log into scripts/rig/rig_report.sh."
+      },
+      {
+        "name": "env -u CARGO_TARGET_DIR scripts/swarm_discipline.sh bounded-run --timeout 300 -- bash scripts/rig/rig_report.sh run --log",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22 at source f8211f4175b8bf149571ca2180214e5a0c8db5a5. The seeded refusal diff emitted two findings in punch-list shape: one P1 category change and one P0 newly allowed construct; sensitive_scan_hits was empty."
+      },
+      {
+        "name": "env -u CARGO_TARGET_DIR scripts/swarm_discipline.sh bounded-run --timeout 300 -- bash scripts/rig/rig.sh report --log",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22 at source f8211f4175b8bf149571ca2180214e5a0c8db5a5. The existing rig report entrypoint emitted findings.jsonl, findings.md, and summary.json through the new R4 report lane."
+      },
+      {
+        "name": "tests/artifacts/evidence/r4-report-refusal-gate.json",
+        "kind": "artifact",
+        "trace": "Durable proof records source f8211f4175b8bf149571ca2180214e5a0c8db5a5, direct and integrated report artifact paths, finding_count=2, category_changed_count=1, newly_allowed_count=1, sensitive_scan_hits=[], and synthetic_only=true."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The committed baseline is synthetic and minimal. It proves the R4 report/diff mechanics and seeded drift detection, not exhaustive live refusal corpus coverage.",
+    "A real exported refusal corpus can be supplied to scripts/rig/rig_report.sh with --candidate; this close does not claim a live field export.",
+    "The full workspace gate was not run because this shared checkout has unrelated in-flight pane changes."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
