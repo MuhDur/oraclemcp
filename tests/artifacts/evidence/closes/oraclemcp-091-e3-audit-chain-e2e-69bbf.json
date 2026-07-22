@@ -40,7 +40,7 @@
   "known_defects": [],
   "follow_ups": [],
   "readiness": {
-    "claim": "ready",
+    "claim": "not-ready",
     "basis": "scoped-test"
   }
 }
