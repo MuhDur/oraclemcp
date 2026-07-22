@@ -1,0 +1,59 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T12:25:46Z",
+  "bead_id": "oraclemcp-8ul1t",
+  "scope": {
+    "summary": "Dispatch semantic-read fixtures now pass at current committed HEAD after the A1a fail-closed catalog proof change.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp/src/dispatch/tests/audit_wiring.rs",
+      "crates/oraclemcp/src/dispatch/tests/gate_refusal_reasons.rs"
+    ],
+    "out_of_scope": [
+      "Weakening the A1a fail-closed VPD/virtual-column catalog gate.",
+      "Restoring the old fail-open expectations or marking tests ignored.",
+      "Claiming hosted CI green for local HEAD; the latest GitHub CI evidence available during this close was still for older SHA 3e87e88."
+    ]
+  },
+  "source": {
+    "sha": "1fed082f7d5f5a9223954ed875df6d731f13ddca",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "dispatch fixture lane",
+        "kind": "cli",
+        "trace": "`cargo test -p oraclemcp --lib -- dispatch::tests::` exercises the stale semantic-read fixture surface directly, including audit_wiring, query/arrow, flashback/diff, query-cost, streaming, profile-switch, and semantic-search tests."
+      },
+      {
+        "name": "clean committed HEAD dispatch semantic-read lane",
+        "kind": "cli",
+        "trace": "`set -o pipefail; CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/8ul1t-fix cargo test -p oraclemcp --lib -- dispatch::tests:: 2>&1 | tee /tmp/8ul1t-dispatch-head.log` -> PASS: 303 passed; 0 failed; 0 ignored; 62 filtered out; finished in 1.35s."
+      },
+      {
+        "name": "original CI failure class confirmed on older hosted SHA",
+        "kind": "cli",
+        "trace": "`gh run view 29914338034 --log-failed` showed the older hosted CI run for 3e87e88 failed with the same dispatch::tests UnprovenSideEffect / unresolved semantic read dependency class reported in the bead."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "tree_clean is scoped to the dispatch fixture paths named above; the wider shared checkout still has other agents' dirty, unrelated files.",
+    "The latest hosted GitHub CI run inspected was for older SHA 3e87e88 and remains red. Local HEAD is 1fed082f and was 54 commits ahead of origin/main when this evidence was generated, so there was no hosted verdict for the proven HEAD.",
+    "This close proves the dispatch semantic-read lane that caused the bead. It does not claim workspace-wide CI green or repair unrelated CI failures from older hosted runs."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
