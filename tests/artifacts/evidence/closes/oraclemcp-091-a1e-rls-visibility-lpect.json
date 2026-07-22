@@ -1,0 +1,72 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:25:54Z",
+  "bead_id": "oraclemcp-091-a1e-rls-visibility-lpect",
+  "scope": {
+    "summary": "A1e surfaces RLS/VPD visibility in doctor and successful oracle_query results without treating catalog visibility as an absence proof.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/doctor.rs",
+      "crates/oraclemcp-db/src/catalog_resolver.rs",
+      "crates/oraclemcp-db/src/intelligence.rs",
+      "crates/oraclemcp-db/src/lib.rs",
+      "crates/oraclemcp-db/src/query.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/tests/rls_vpd_visibility.rs"
+    ],
+    "out_of_scope": [
+      "No claim is made that VPD/RLS policy absence can be proven from an empty ALL_POLICIES view.",
+      "No change is made to the SQL classifier admission invariant; the query result observation is metadata attached after the existing read gate admits the statement.",
+      "No live Oracle D3 lane result is claimed from this close evidence."
+    ]
+  },
+  "source": {
+    "sha": "5c7a15b150ba3bf909ce4b527c3636114214d722",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "doctor RLS/VPD visibility check",
+        "kind": "cli",
+        "trace": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core rls_vpd_visibility -- --nocapture passed: doctor names a visible ORACLEMCP_D3_VPD policy and warns when ALL_POLICIES returns zero visible rows."
+      },
+      {
+        "name": "catalog resolver VPD/RLS observation",
+        "kind": "cli",
+        "trace": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp-db --lib vpd_rls -- --nocapture passed: schema observation names visible policies and treats empty ALL_POLICIES as a catalog-blind risk."
+      },
+      {
+        "name": "oracle_query result metadata",
+        "kind": "cli",
+        "trace": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp --test rls_vpd_visibility -- --nocapture passed: a successful SELECT carries rls_vpd.status and all_policies_probe.visibility metadata paired to resolved relation line-of-sight."
+      },
+      {
+        "name": "scoped compile for touched crates",
+        "kind": "cli",
+        "trace": "env -u CARGO_TARGET_DIR cargo check -p oraclemcp-db, cargo check -p oraclemcp-core, and cargo check -p oraclemcp all passed against the rebased A1e work."
+      },
+      {
+        "name": "source binding",
+        "kind": "cli",
+        "trace": "git show --stat 5c7a15b1 confirmed the A1e implementation commit includes the seven in-scope paths while later pane commits advanced HEAD independently."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is scoped local evidence from the shared checkout; no full-workspace gate is claimed.",
+    "D3 live fixture agreement is not re-run here; this close records product surfacing and targeted mocked coverage only."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
