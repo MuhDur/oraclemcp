@@ -24,7 +24,7 @@
     "entry_points": [
       {
         "name": "LaneRuntimeRegistry debug lock-rank guard",
-        "kind": "rust-module",
+        "kind": "api",
         "trace": "crates/oraclemcp-core/src/lane.rs continues to import assert_no_lane_registry_lock, enter_lane_registry_lock, and exit_lane_registry_lock; the moved functions remain private to the lane module through crates/oraclemcp-core/src/lane/runtime_lock.rs pub(super) visibility."
       },
       {
@@ -59,10 +59,7 @@
   ],
   "known_defects": [],
   "follow_ups": [
-    {
-      "owner": "pane 5",
-      "summary": "Lower the C6 file-size ratchet for crates/oraclemcp-core/src/lane.rs in scripts/oraclemcp_arch_fitness_lint.sh once the shared script is no longer dirty/reserved."
-    }
+    "Pane 5 owns lowering the C6 file-size ratchet for crates/oraclemcp-core/src/lane.rs in scripts/oraclemcp_arch_fitness_lint.sh once the shared script is no longer dirty/reserved."
   ],
   "readiness": {
     "claim": "ready",
