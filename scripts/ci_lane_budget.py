@@ -33,6 +33,8 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
+import textwrap
 from datetime import datetime
 from pathlib import Path
 
@@ -41,6 +43,9 @@ ROOT = Path(__file__).resolve().parent.parent
 # A fuzz shard may sit on a runner this long. The point of sharding is that the
 # lane's wall clock is one shard, not the sum, so this is the lane budget too.
 DEFAULT_SHARD_CEILING_MINUTES = 120
+DIFFERENTIAL_FUZZ_TARGETS = {
+    ("oraclemcp-guard", "alter_session_parse"): 4,
+}
 
 
 def _fail(code: str, message: str) -> int:
@@ -84,6 +89,73 @@ def _job_text(job: dict) -> str:
     return json.dumps(job)
 
 
+def _matrix_entries(job: dict) -> list[dict]:
+    matrix = job.get("strategy", {}).get("matrix", {})
+    if not isinstance(matrix, dict):
+        return []
+    include = matrix.get("include")
+    if isinstance(include, list):
+        return [entry for entry in include if isinstance(entry, dict)]
+    return []
+
+
+def _validate_fuzz_shards(where: str, job: dict) -> list[str]:
+    findings: list[str] = []
+    entries = _matrix_entries(job)
+    if not entries:
+        findings.append(f"{where}: matrix.include is required so fuzz shards are explicit")
+        return findings
+
+    target_shards: dict[tuple[str, str], set[int]] = {}
+    target_declared_totals: dict[tuple[str, str], set[int]] = {}
+    target_seeds: dict[tuple[str, str], set[int]] = {}
+    for entry in entries:
+        crate = entry.get("crate")
+        target = entry.get("target")
+        shard = entry.get("shard")
+        shards = entry.get("shards")
+        seed = entry.get("seed")
+        row = f"{where}: {crate}/{target}"
+        if not isinstance(crate, str) or not isinstance(target, str):
+            findings.append(f"{row}: each fuzz matrix row must name crate and target")
+            continue
+        if not isinstance(shard, int) or not isinstance(shards, int) or shards < 1:
+            findings.append(f"{row}: each fuzz matrix row must carry integer shard/shards")
+            continue
+        if shard < 0 or shard >= shards:
+            findings.append(f"{row}: shard {shard} outside declared shard count {shards}")
+            continue
+        if not isinstance(seed, int) or seed <= 0:
+            findings.append(f"{row}: each fuzz matrix row must carry a positive integer seed")
+            continue
+        key = (crate, target)
+        target_shards.setdefault(key, set()).add(shard)
+        target_declared_totals.setdefault(key, set()).add(shards)
+        target_seeds.setdefault(key, set()).add(seed)
+
+    for key, required in DIFFERENTIAL_FUZZ_TARGETS.items():
+        crate, target = key
+        shards = target_shards.get(key, set())
+        totals = target_declared_totals.get(key, set())
+        expected = set(range(required))
+        if shards != expected or totals != {required}:
+            findings.append(
+                f"{where}: differential target {crate}/{target} must be exactly "
+                f"{required} shards ({sorted(expected)}), got shards={sorted(shards)} totals={sorted(totals)}"
+            )
+        if len(target_seeds.get(key, set())) != required:
+            findings.append(
+                f"{where}: differential target {crate}/{target} must use one distinct seed per shard"
+            )
+
+    text = _job_text(job)
+    if "-seed=${{ matrix.seed }}" not in text:
+        findings.append(f"{where}: cargo-fuzz run must pass -seed=${{ matrix.seed }}")
+    if "shard-${{ matrix.shard }}" not in text:
+        findings.append(f"{where}: crash artifact prefix/name must include matrix.shard")
+    return findings
+
+
 def fuzz_bound(workflows: list[Path], ceiling: int) -> int:
     findings: list[str] = []
     inspected = 0
@@ -114,6 +186,7 @@ def fuzz_bound(workflows: list[Path], ceiling: int) -> int:
                 findings.append(
                     f"{where}: no -max_total_time; libFuzzer would run until the job timeout"
                 )
+            findings.extend(_validate_fuzz_shards(where, job))
 
     if inspected == 0:
         return _fail("E_NO_FUZZ_JOB", "no fuzz job found in the given workflows")
@@ -366,6 +439,110 @@ def selftest() -> int:
     fuzz = ROOT / ".github" / "workflows" / "fuzz.yml"
     expect(fuzz_bound([fuzz], DEFAULT_SHARD_CEILING_MINUTES), 0, "this repo's fuzz lane is bounded")
     expect(fuzz_bound([fuzz], 1), 65, "a ceiling the lane exceeds is refused")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        accepted = tmp_path / "accepted-fuzz.yml"
+        accepted.write_text(
+            textwrap.dedent(
+                """
+                name: Fuzz
+                jobs:
+                  fuzz:
+                    timeout-minutes: 20
+                    strategy:
+                      matrix:
+                        include:
+                          - crate: oraclemcp-guard
+                            target: alter_session_parse
+                            shard: 0
+                            shards: 4
+                            seed: 101
+                          - crate: oraclemcp-guard
+                            target: alter_session_parse
+                            shard: 1
+                            shards: 4
+                            seed: 102
+                          - crate: oraclemcp-guard
+                            target: alter_session_parse
+                            shard: 2
+                            shards: 4
+                            seed: 103
+                          - crate: oraclemcp-guard
+                            target: alter_session_parse
+                            shard: 3
+                            shards: 4
+                            seed: 104
+                    steps:
+                      - run: cargo fuzz run alter_session_parse -- -max_total_time=300 -seed=${{ matrix.seed }} -artifact_prefix=artifacts/alter_session_parse/shard-${{ matrix.shard }}/
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        unsharded = tmp_path / "unsharded-fuzz.yml"
+        unsharded.write_text(
+            textwrap.dedent(
+                """
+                name: Fuzz
+                jobs:
+                  fuzz:
+                    timeout-minutes: 20
+                    strategy:
+                      matrix:
+                        include:
+                          - crate: oraclemcp-guard
+                            target: alter_session_parse
+                            shard: 0
+                            shards: 1
+                            seed: 101
+                    steps:
+                      - run: cargo fuzz run alter_session_parse -- -max_total_time=300 -seed=${{ matrix.seed }} -artifact_prefix=artifacts/alter_session_parse/shard-${{ matrix.shard }}/
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        no_seed = tmp_path / "no-seed-fuzz.yml"
+        no_seed.write_text(
+            textwrap.dedent(
+                """
+                name: Fuzz
+                jobs:
+                  fuzz:
+                    timeout-minutes: 20
+                    strategy:
+                      matrix:
+                        include:
+                          - crate: oraclemcp-guard
+                            target: alter_session_parse
+                            shard: 0
+                            shards: 4
+                            seed: 101
+                          - crate: oraclemcp-guard
+                            target: alter_session_parse
+                            shard: 1
+                            shards: 4
+                            seed: 102
+                          - crate: oraclemcp-guard
+                            target: alter_session_parse
+                            shard: 2
+                            shards: 4
+                            seed: 103
+                          - crate: oraclemcp-guard
+                            target: alter_session_parse
+                            shard: 3
+                            shards: 4
+                            seed: 104
+                    steps:
+                      - run: cargo fuzz run alter_session_parse -- -max_total_time=300 -artifact_prefix=artifacts/alter_session_parse/shard-${{ matrix.shard }}/
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        expect(fuzz_bound([accepted], DEFAULT_SHARD_CEILING_MINUTES), 0, "differential fuzz shard shape is accepted")
+        expect(fuzz_bound([unsharded], DEFAULT_SHARD_CEILING_MINUTES), 65, "unsharded differential fuzz target is refused")
+        expect(fuzz_bound([no_seed], DEFAULT_SHARD_CEILING_MINUTES), 65, "unseeded differential fuzz shards are refused")
 
     print(f"ci-lane-budget: self-test OK ({checks} checks)")
     return 0

@@ -20,7 +20,7 @@ env:
 
 jobs:
   fuzz:
-    name: fuzz ${{ matrix.crate }} / ${{ matrix.target }}
+    name: fuzz ${{ matrix.crate }} / ${{ matrix.target }} shard ${{ matrix.shard }}/${{ matrix.shards }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -29,14 +29,44 @@ jobs:
         include:
           - crate: oraclemcp-audit
             target: chain_verify
+            shard: 0
+            shards: 1
+            seed: 1001
           - crate: oraclemcp-auth
             target: oauth_token_validate
+            shard: 0
+            shards: 1
+            seed: 2001
           - crate: oraclemcp-guard
             target: alter_session_parse
+            shard: 0
+            shards: 4
+            seed: 3001
+          - crate: oraclemcp-guard
+            target: alter_session_parse
+            shard: 1
+            shards: 4
+            seed: 3002
+          - crate: oraclemcp-guard
+            target: alter_session_parse
+            shard: 2
+            shards: 4
+            seed: 3003
+          - crate: oraclemcp-guard
+            target: alter_session_parse
+            shard: 3
+            shards: 4
+            seed: 3004
           - crate: oraclemcp-guard
             target: classify_fuzz
+            shard: 0
+            shards: 1
+            seed: 4001
           - crate: oraclemcp-config
             target: config_toml
+            shard: 0
+            shards: 1
+            seed: 5001
     steps:
       - uses: actions/checkout@v7
         with:
@@ -59,16 +89,19 @@ jobs:
         # x86_64-unknown-linux-musl here, where ASan is incompatible with
         # statically linked libc ("sanitizer is incompatible with statically
         # linked libc"). Pin the gnu host triple explicitly.
-        run: >-
-          cargo +${{ env.RUST_TOOLCHAIN }} fuzz run
-          --target x86_64-unknown-linux-gnu ${{ matrix.target }} --
-          -max_total_time=${{ env.FUZZ_SECONDS }}
-          -rss_limit_mb=2048
-          -timeout=10
+        run: |
+          mkdir -p "artifacts/${{ matrix.target }}/shard-${{ matrix.shard }}"
+          cargo +${{ env.RUST_TOOLCHAIN }} fuzz run \
+          --target x86_64-unknown-linux-gnu ${{ matrix.target }} -- \
+          -max_total_time=${{ env.FUZZ_SECONDS }} \
+          -rss_limit_mb=2048 \
+          -timeout=10 \
+          -seed=${{ matrix.seed }} \
+          -artifact_prefix="artifacts/${{ matrix.target }}/shard-${{ matrix.shard }}/"
       - name: Upload crash and timeout artifacts
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-artifacts-${{ matrix.target }}
+          name: fuzz-artifacts-${{ matrix.target }}-shard-${{ matrix.shard }}
           path: crates/${{ matrix.crate }}/fuzz/artifacts/${{ matrix.target }}
           if-no-files-found: ignore
