@@ -1,0 +1,71 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:13:38Z",
+  "bead_id": "oraclemcp-091-r2-tool-sweep-nvxo4",
+  "scope": {
+    "summary": "The R2 rig adds a raw-wire tool-surface sweep that installs oraclemcp from HEAD and invokes every advertised tool across synthetic read-only, protected, proxy-auth, pooled, and DRCP profiles.",
+    "in_scope": [
+      "scripts/rig/tool_surface_sweep.sh",
+      "scripts/rig/tool_surface_sweep.py"
+    ],
+    "out_of_scope": [
+      "Browser/inspector reachability; R1/R3 own external client and browser lanes.",
+      "Field, live-OCI, customer, or production wallet/profile material.",
+      "Changing server dispatch behavior or the pinned rust-oracledb driver."
+    ]
+  },
+  "source": {
+    "sha": "9e468878c0fd72e9ef37fedb6ae5cd68e6fd7245",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "bash scripts/rig/tool_surface_sweep.sh --dry-run --log",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22. The dry run scheduled the installed-artifact and raw-wire sweep stages without running cargo or touching Oracle."
+      },
+      {
+        "name": "bash -n scripts/rig/tool_surface_sweep.sh && PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/rig/tool_surface_sweep.py",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22. The shell entrypoint parses and the independent Python raw JSON-RPC client compiles without emitting tracked files."
+      },
+      {
+        "name": "env -u CARGO_TARGET_DIR scripts/swarm_discipline.sh bounded-run --timeout 900 -- bash scripts/rig/tool_surface_sweep.sh --log",
+        "kind": "cli",
+        "trace": "Passed on 2026-07-22. The rig installed oraclemcp from git-archive source 9e468878 into target/e2e/r2-tool-surface-8w6sbbk_/prefix/bin/oraclemcp, then drove that installed binary over line-delimited JSON-RPC stdio with no server-side helpers. Summary artifact: target/e2e/r2-tool-surface-8w6sbbk_/summary.json."
+      },
+      {
+        "name": "R2 profile matrix wire counts",
+        "kind": "tool",
+        "trace": "The running server reported read_only/protected/proxy_auth surfaces at 43 wire tools each (26 oracle_* registry names, 16 aliases, plus oracle_capabilities). The pooled and DRCP profiles elevated through oracle_set_session_level preview -> confirmation-token apply to ADMIN, then swept the full 60-tool wire surface: 34 canonical registry tools, 25 compatibility aliases, plus oracle_capabilities."
+      },
+      {
+        "name": "R2 three wire-only assertions",
+        "kind": "tool",
+        "trace": "For every swept tools/call response, the raw client asserted a well-formed JSON-RPC/MCP envelope with known error classes, a serialized response byte budget of at most 1048576 bytes, and refusal grammar uniformity. The guard probe category was UNPROVEN_SIDE_EFFECT consistently across all five postures."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The matrix uses the local synthetic Free23/D9 rig fixtures only; no live OCI, customer, production, or field identifier is used.",
+    "The read_only, protected, and proxy_auth postures intentionally remain at READ_ONLY and therefore sweep their runtime-visible 43-tool surface, not the ADMIN-only write tools.",
+    "The pooled and DRCP postures prove the full registry count only after the real preview -> confirmation-token -> apply session elevation gate succeeds.",
+    "The full workspace gate was not run because this shared checkout has unrelated in-flight panes."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-r4-report-refusal-gate-1u1oc"
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}
