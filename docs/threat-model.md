@@ -19,7 +19,8 @@ Companion documents: the deployment-time controls checklist is
 [`hardening.md`](hardening.md); the reporting policy and supported versions are
 in the repo-root [`SECURITY.md`](../SECURITY.md); the architecture decisions are
 the [ADRs](adr/); release-blocking severity is defined in
-[`severity-policy.md`](severity-policy.md).
+[`severity-policy.md`](severity-policy.md); the A5 dashboard-origin review is in
+[`dashboard-origin-threat-model-addendum.md`](dashboard-origin-threat-model-addendum.md).
 
 ## Assets
 
@@ -355,8 +356,12 @@ a history entry neither pairs nor burns a live ticket. Native TLS and the explic
 limited to server-observed loopback HTTP, while remote plaintext requests never
 receive privileged browser cookies. Forwarded scheme headers are ignored, so
 they cannot forge the cookie policy. Dashboard GETs and POSTs
-enforce same-origin checks; POST actions also require a CSRF token and
-route-scoped action ticket. The Workbench exposes no PTY, SQLcl shell, or
+enforce same-origin checks; POST actions use same-origin JSON fetch and also
+require a CSRF token and route-scoped action ticket. Literal `Origin: null` is
+never accepted because it is an opaque-origin signal, not proof of the dashboard
+origin; the A5 rationale is recorded in
+[`dashboard-origin-threat-model-addendum.md`](dashboard-origin-threat-model-addendum.md).
+The Workbench exposes no PTY, SQLcl shell, or
 alternate SQL path: preview routes through `oracle_preview_sql`, reads through
 `oracle_query`, and guarded DML through `oracle_execute` with the same
 classifier, profile ceiling, rollback, confirmation, idempotency, and audit path
@@ -372,6 +377,9 @@ route, so a stale stored proposal verdict cannot authorize execution.
   `dashboard_pairing_uses_secure_cookie_on_effective_https`,
   `native_https_forces_secure_stateful_session_cookie`,
   `remote_plaintext_initialize_suppresses_cookie_despite_forwarding_headers`,
+  `served_dashboard_pairing_keeps_the_bootstrap_secret_out_of_the_request_target`,
+  `served_dashboard_pairing_refuses_a_secret_in_the_query_without_consuming_it`,
+  `served_dashboard_pairing_refuses_origin_null_without_consuming_ticket`,
   `malicious_page_cannot_trigger_dashboard_gated_action`,
   `dashboard_workbench_ddl_apply_is_release_gated`,
   `cp_apply_reclassifies_never_trusts_stored_verdict`, and

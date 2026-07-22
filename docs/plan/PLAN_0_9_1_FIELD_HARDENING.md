@@ -485,7 +485,8 @@ dashboard that pairs and then still cannot do anything.
      fetch-first (point 1) carries a real Origin regardless of referrer policy.
   4. `Sec-Fetch-Site` stays a positive-only, never-required signal.
   R3's browser lane asserts the whole matrix (form-vs-fetch, pairing, authenticated action POST);
-  the security review documents points 1–4.
+  the security review documents points 1–4 in
+  [`docs/dashboard-origin-threat-model-addendum.md`](../dashboard-origin-threat-model-addendum.md).
 - Either way, **all four check sites must agree**, and the tests asserting `no-referrer` must be updated
   deliberately with a recorded rationale — not silently.
 - **Security review required** (this is an auth surface): document why the chosen option does not weaken

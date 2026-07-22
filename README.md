@@ -433,7 +433,9 @@ limited to server-observed loopback HTTP. Forwarded scheme headers are ignored,
 and remote plaintext requests do not receive privileged browser cookies. The
 ticket expires in 60 seconds
 and is single-use; dashboard POSTs also require same-origin headers, a CSRF
-token, and a route-scoped action ticket.
+token, and a route-scoped action ticket. The dashboard origin threat-model
+addendum documents why the browser contract stays fail-closed:
+[`docs/dashboard-origin-threat-model-addendum.md`](docs/dashboard-origin-threat-model-addendum.md).
 
 The dashboard Workbench is not a terminal or SQL shell. Classify and preview
 actions forward to `oracle_preview_sql`, read execution forwards to
