@@ -1,7 +1,7 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-07-22T09:13:38Z",
+  "generated_at": "2026-07-22T09:16:44Z",
   "bead_id": "oraclemcp-091-r2-tool-sweep-nvxo4",
   "scope": {
     "summary": "The R2 rig adds a raw-wire tool-surface sweep that installs oraclemcp from HEAD and invokes every advertised tool across synthetic read-only, protected, proxy-auth, pooled, and DRCP profiles.",
@@ -16,7 +16,7 @@
     ]
   },
   "source": {
-    "sha": "9e468878c0fd72e9ef37fedb6ae5cd68e6fd7245",
+    "sha": "91e465057005b40544dbb65fba1957c791d812c6",
     "tree_clean": true,
     "branch": "main"
   },
@@ -36,7 +36,7 @@
       {
         "name": "env -u CARGO_TARGET_DIR scripts/swarm_discipline.sh bounded-run --timeout 900 -- bash scripts/rig/tool_surface_sweep.sh --log",
         "kind": "cli",
-        "trace": "Passed on 2026-07-22. The rig installed oraclemcp from git-archive source 9e468878 into target/e2e/r2-tool-surface-8w6sbbk_/prefix/bin/oraclemcp, then drove that installed binary over line-delimited JSON-RPC stdio with no server-side helpers. Summary artifact: target/e2e/r2-tool-surface-8w6sbbk_/summary.json."
+        "trace": "Passed on 2026-07-22. The rig installed oraclemcp from git-archive source 91e465057005b40544dbb65fba1957c791d812c6 into target/e2e/r2-tool-surface-w4dbc2em/prefix/bin/oraclemcp, then drove that installed binary over line-delimited JSON-RPC stdio with no server-side helpers. Summary artifact: target/e2e/r2-tool-surface-w4dbc2em/summary.json."
       },
       {
         "name": "R2 profile matrix wire counts",
