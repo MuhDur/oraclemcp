@@ -134,10 +134,15 @@ generate_dashboard() {
   raw="$raw_dir/$(basename "$output").raw"
   mkdir -p "$raw_dir" "$(dirname "$output")"
 
+  echo "release-sbom-check: ensuring dashboard frontend dependencies are freshly installed"
+  (cd "$ROOT/web" && npm ci --ignore-scripts --no-audit --no-fund) ||
+    fail "release-sbom-check prerequisite failed: npm ci could not install web dependencies"
+
   # npm 10.9.4 truncates `npm sbom` at 64 KiB when its stdout is a pipe on
   # some supported runtimes. Capture the complete raw document to a file before
   # normalizing it so generation cannot silently accept a partial stream.
-  (cd "$ROOT/web" && npm sbom --sbom-format cyclonedx --json >"$raw")
+  (cd "$ROOT/web" && npm sbom --sbom-format cyclonedx --json >"$raw") ||
+    fail "release-sbom-check failed to generate dashboard SBOM from package-lock.json and package.json"
   jq -S "$NORMALIZE_DASHBOARD_JQ" "$raw" >"$output"
   validate_schema "$output"
   check_closure "$output"
