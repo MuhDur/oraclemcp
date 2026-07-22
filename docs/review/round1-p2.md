@@ -117,3 +117,27 @@
 - Claim checked: Reading `oracle://schema/{owner}` or `oracle://object/{owner}/{type}/{name}` cannot bypass the guard; it must route through `oracle_schema_inspect`, `oracle_get_source`, or `oracle_get_ddl` with the same transport authorization context.
 - Method: Added `resource_template_reads_route_through_dispatch_with_transport_context`; ran env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core resource_template_reads_route_through_dispatch_with_transport_context -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core resource -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp discovery_resources_reflect_the_calling_session_level -- --nocapture; env -u CARGO_TARGET_DIR cargo clippy -p oraclemcp-core --lib --tests -- -D warnings.
 - Verdict: CLEAN.
+
+## [LOW] Signed audit chain detects tail truncation through the anchor sidecar
+- Where: README.md:652; README.md:767; crates/oraclemcp-audit/tests/e3_audit_chain_e2e.rs:240; crates/oraclemcp/src/main.rs:1610
+- Claim checked: The signed audit chain is append-only, hash-chained, HMAC-SHA256 signed, and `oraclemcp audit verify` detects a truncated tail against the `.anchor` sidecar.
+- Method: env -u CARGO_TARGET_DIR cargo test -p oraclemcp-audit concurrent_appends_keep_one_valid_chain -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp-audit hmac -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp-audit --test e3_audit_chain_e2e tail_truncation_is_invisible_to_the_chain_and_caught_by_the_anchor -- --nocapture.
+- Verdict: CLEAN.
+
+## [LOW] Unsigned refusal corpus is not accepted by signed audit verification
+- Where: README.md:667; README.md:770; crates/oraclemcp/src/main.rs:5380; crates/oraclemcp/src/main.rs:5391; crates/oraclemcp/src/main.rs:6690; crates/oraclemcp-guard/src/corpus.rs:146
+- Claim checked: The unsigned refusal trail is explicitly not tamper-evident and must never be presented as, or substituted for, the signed audit tier.
+- Method: Wrote a syntactically valid refusal-corpus JSONL line with `authenticity:"unsigned_not_tamper_evident"` to `/var/tmp/oraclemcp-refusal-audit-p2/refusals.jsonl`; ran `ORACLEMCP_AUDIT_KEY=0123456789abcdef0123456789abcdef target/debug/oraclemcp --json audit verify /var/tmp/oraclemcp-refusal-audit-p2/refusals.jsonl`; it exited 2 with `ORACLEMCP_AUDIT_MALFORMED` (`missing field seq`). Also ran env -u CARGO_TARGET_DIR cargo test -p oraclemcp refusal_corpus -- --nocapture.
+- Verdict: CLEAN.
+
+## [LOW] Startup and doctor keep the unsigned refusal floor below the signed tier
+- Where: crates/oraclemcp/src/main.rs:1515; crates/oraclemcp/src/main.rs:6690; crates/oraclemcp/src/main.rs:6751; crates/oraclemcp-core/src/doctor.rs:2709
+- Claim checked: `unsigned_refusal_log` defaults on only when no signed auditor exists because every reachable profile is READ_ONLY; a writable reachable profile without a signing key fails startup closed; doctor must not infer a signed auditor from the default path or from the unsigned trail.
+- Method: env -u CARGO_TARGET_DIR cargo test -p oraclemcp build_auditor_fails_closed_when_a_switchable_profile_can_write -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp audit_posture -- --nocapture.
+- Verdict: CLEAN.
+
+## [LOW] Refusal-trail observer cannot weaken guard refusal or replace audit-write failure
+- Where: crates/oraclemcp/src/dispatch/mod.rs:790; crates/oraclemcp/src/dispatch/mod.rs:801; crates/oraclemcp/src/dispatch/mod.rs:6798; crates/oraclemcp/src/dispatch/tests.rs:642; crates/oraclemcp-audit/tests/e3_audit_chain_e2e.rs:440
+- Claim checked: Refusal-corpus persistence is an unsigned observer only; disabling or failing that observer cannot alter the original guard refusal, while signed audit-write failure remains fail-closed (SEC-3).
+- Method: env -u CARGO_TARGET_DIR cargo test -p oraclemcp guard_refusal_appends_only_a_redacted_classifier_proven_corpus_record -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp explicit_refusal_trail_opt_out_keeps_the_guard_refusal_without_a_record -- --nocapture; env -u CARGO_TARGET_DIR cargo test -p oraclemcp-audit --test e3_audit_chain_e2e an_unwritable_audit_destination_fails_closed_at_open -- --nocapture.
+- Verdict: CLEAN.
