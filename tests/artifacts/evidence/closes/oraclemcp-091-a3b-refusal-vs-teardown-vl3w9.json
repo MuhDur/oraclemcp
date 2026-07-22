@@ -1,0 +1,61 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:15:49Z",
+  "bead_id": "oraclemcp-091-a3b-refusal-vs-teardown-vl3w9",
+  "scope": {
+    "summary": "A3b preserves the asymmetry between clean pre-change flashback capability refusals, which never quarantine, and post-window teardown failures, which remain structurally quarantined.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/query.rs",
+      "crates/oraclemcp-db/tests/privilege_matrix_live.rs"
+    ],
+    "out_of_scope": [
+      "Pinned-session recycle/reconnect behavior owned by A4e.",
+      "Workspace-wide gates in the shared dirty checkout.",
+      "A1e VPD/RLS visibility diagnostics."
+    ]
+  },
+  "source": {
+    "sha": "707ffbd28cf24214bfd44589d18c6bc73241b2c9",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "A3b asymmetry unit coverage",
+        "kind": "cli",
+        "trace": "`timeout 240 env CARGO_TARGET_DIR=target cargo test -p oraclemcp-db --lib query::tests -- --nocapture` exited 0 at source 707ffbd: 34 passed, including pre-window capability refusal tests and the existing read_error_plus_disable_error_is_structurally_quarantined / successful_read_plus_final_rollback_error_is_structurally_quarantined teardown-failure pins."
+      },
+      {
+        "name": "D4 no-quarantine live acceptance",
+        "kind": "cli",
+        "trace": "`timeout 240 env CARGO_TARGET_DIR=target ORACLEMCP_D4_* cargo test -p oraclemcp-db --features live-xe --test privilege_matrix_live -- --nocapture` exited 0 at source 707ffbd: d4_no_flashback_principal_gets_typed_refusal_and_connection_stays_usable passed repeated calls and post-refusal SELECT 42 probes, proving the clean refusal did not quarantine the connection."
+      },
+      {
+        "name": "DB package formatting and check",
+        "kind": "cli",
+        "trace": "`CARGO_TARGET_DIR=target cargo fmt --package oraclemcp-db --check` exited 0, and `timeout 240 env CARGO_TARGET_DIR=target cargo check -p oraclemcp-db` exited 0 at source 707ffbd."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Evidence was produced from the clean temporary worktree because the shared checkout contained other agents' dirty work.",
+    "No workspace-wide cargo gate is claimed.",
+    "No A4e session-recycle path was changed."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-a4e-session-recycle-uyujp",
+    "oraclemcp-091-h3-release-notes-oj5em"
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T09:15:49Z",
+  "bead_id": "oraclemcp-091-a3a-flashback-preflight-dwbma",
+  "scope": {
+    "summary": "A3a adds a DBMS_FLASHBACK capability preflight before rollback, defensive disable, enable, or caller read, so missing capability returns a typed refusal before session state changes.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/query.rs",
+      "crates/oraclemcp-db/tests/privilege_matrix_live.rs"
+    ],
+    "out_of_scope": [
+      "Pinned-session recycle/reconnect behavior owned by A4e.",
+      "Workspace-wide gates in the shared dirty checkout.",
+      "A1e VPD/RLS visibility diagnostics."
+    ]
+  },
+  "source": {
+    "sha": "707ffbd28cf24214bfd44589d18c6bc73241b2c9",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "A3a preflight unit coverage",
+        "kind": "cli",
+        "trace": "`timeout 240 env CARGO_TARGET_DIR=target cargo test -p oraclemcp-db --lib read_query_as_of -- --nocapture` exited 0 at source 707ffbd: 9 passed, including read_query_as_of_refuses_missing_dbms_flashback_before_opening_a_window, which now records only the CURRENT_SCN_SQL capability probe before refusal."
+      },
+      {
+        "name": "D4 privilege-matrix fixture",
+        "kind": "cli",
+        "trace": "`timeout 180 bash scripts/rig/oracle_l1.sh privilege-matrix --log` exited 0 and verified the free23 D4 fixture with ORACLEMCP_D4_CATALOG_OBJECT_ID=126293."
+      },
+      {
+        "name": "D4 no-flashback live acceptance",
+        "kind": "cli",
+        "trace": "`timeout 240 env CARGO_TARGET_DIR=target ORACLEMCP_D4_* cargo test -p oraclemcp-db --features live-xe --test privilege_matrix_live -- --nocapture` exited 0 at source 707ffbd: d4_no_flashback_principal_gets_typed_refusal_and_connection_stays_usable and d4_catalog_blind_principal_cannot_prove_the_known_guarded_table_read_only both passed, with 0 ignored."
+      },
+      {
+        "name": "DB package formatting and check",
+        "kind": "cli",
+        "trace": "`CARGO_TARGET_DIR=target cargo fmt --package oraclemcp-db --check` exited 0, and `timeout 240 env CARGO_TARGET_DIR=target cargo check -p oraclemcp-db` exited 0 at source 707ffbd."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Evidence was produced from the clean temporary worktree because the shared checkout contained other agents' dirty work.",
+    "No workspace-wide cargo gate is claimed.",
+    "No A4e session-recycle path was changed."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-091-a4e-session-recycle-uyujp",
+    "oraclemcp-091-h3-release-notes-oj5em"
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}
