@@ -1,0 +1,67 @@
+{
+  "run_id": "local-2026-07-22-d10-real-idle-kill-emeraldraven",
+  "lane": "D10 real idle-kill rig",
+  "source_sha": "332c2c658d259babcd976e32084313b045d3b8b7",
+  "clean_worktree": "/home/durakovic/projects/oraclemcp-d10-clean-332c2c65",
+  "container": "rust-oracledb-free",
+  "pdb": "FREEPDB1",
+  "host_port": 1522,
+  "positive": {
+    "command": "scripts/swarm_discipline.sh bounded-run --timeout 1200 -- bash scripts/rig/rig.sh idle-kill --log",
+    "result": "pass",
+    "doctor_checks": 16,
+    "readiness": "pass",
+    "pooled": {
+      "test": "a_killed_pooled_session_is_replaced_without_the_caller_seeing_it",
+      "result": "pass",
+      "victim": {
+        "sid": "202",
+        "serial": "12538"
+      },
+      "replacement": {
+        "sid": "202",
+        "serial": "45625"
+      }
+    },
+    "pinned": {
+      "test": "killed_dispatcher_pinned_session_is_refused_not_silently_rebound",
+      "result": "pass",
+      "passed_tests": 1
+    },
+    "raw_broken_pipe_seen": false,
+    "host_hygiene": "pass"
+  },
+  "failure_probe": {
+    "command": "scripts/swarm_discipline.sh bounded-run --timeout 1200 -- bash scripts/rig/rig.sh idle-kill-failure-probe --log",
+    "result": "pass",
+    "doctor_checks": 16,
+    "readiness": "pass",
+    "pooled_no_kill": {
+      "expected_failure_signature": "the kill never took effect",
+      "result": "expected-failure-observed",
+      "victim": {
+        "sid": "206",
+        "serial": "44270"
+      },
+      "replacement": {
+        "sid": "206",
+        "serial": "44270"
+      }
+    },
+    "pinned_no_kill": {
+      "expected_failure_signature": "must not remain connected or be silently rebound",
+      "result": "expected-failure-observed",
+      "victim": {
+        "sid": "231",
+        "serial": "22844"
+      }
+    },
+    "raw_broken_pipe_seen": false,
+    "host_hygiene": "pass"
+  },
+  "supporting_checks": [
+    "bash -n scripts/rig/rig_idle_kill.sh && bash -n scripts/rig/rig.sh",
+    "scripts/swarm_discipline.sh bounded-run --timeout 120 -- bash scripts/rig/rig.sh idle-kill --dry-run --log",
+    "scripts/swarm_discipline.sh bounded-run --timeout 120 -- bash scripts/rig/rig.sh idle-kill-failure-probe --dry-run --log"
+  ]
+}

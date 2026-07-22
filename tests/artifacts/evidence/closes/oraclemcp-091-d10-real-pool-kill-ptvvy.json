@@ -45,13 +45,8 @@
     "claimed": true,
     "artifacts": [
       {
-        "kind": "rig-log",
-        "path": "target/e2e/rig/20260722T100503Z-3488982",
-        "sha": "332c2c658d259babcd976e32084313b045d3b8b7"
-      },
-      {
-        "kind": "rig-log",
-        "path": "target/e2e/rig/20260722T101123Z-3658614",
+        "kind": "d10-real-idle-kill-transcript",
+        "path": "tests/artifacts/evidence/d10-real-idle-kill-2026-07-22.json",
         "sha": "332c2c658d259babcd976e32084313b045d3b8b7"
       }
     ]
