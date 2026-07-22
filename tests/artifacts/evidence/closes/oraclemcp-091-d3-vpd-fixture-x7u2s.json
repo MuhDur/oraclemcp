@@ -1,0 +1,67 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:05:00Z",
+  "bead_id": "oraclemcp-091-d3-vpd-fixture-x7u2s",
+  "scope": {
+    "summary": "D3 VPD/RLS fixture + mutation-controlled verify lane that catches a fail-open: policy-protected table (4 rows, 2 RESTRICTED), sighted principal (sees ALL_POLICIES), blind principal (view-only access, sees 0 policies/0 base tables), and a synonym over the protected base.",
+    "in_scope": [
+      "scripts/rig/oracle_l1_vpd_fixture.sql",
+      "scripts/rig/verify_vpd_fixture.sh"
+    ],
+    "out_of_scope": [
+      "The server-side half of the acceptance (pre-fix main silently returning empty through the MCP tool path, and doctor naming the policy) — owned by A1a/A1e and the E/R suites that depend on this lane.",
+      "The post-fix green half — owned by the A1a fix bead per the closure convention.",
+      "Wiring the lane into oracle_l1.sh's fixture command or CI — the lane is a standalone committed verify script, at parity with the closed D5 lane (verify_logoff_lane.sh, also unwired into the rig dispatch).",
+      "The sibling rust-oracledb driver repository."
+    ]
+  },
+  "source": {
+    "sha": "1edfbc69cef76baf46eced0d64a0a32696cb9245",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "D3 VPD lane on free23",
+        "kind": "cli",
+        "trace": "`bash scripts/rig/verify_vpd_fixture.sh --lane free23` exited 0 with all 6 assertions OK: ground truth (SYS, exempt) rows 1,2,3,4 exist; restricted rows ABSENT for the blind principal (saw '1,2'); policy survives the SYNONYM (sighted saw '1,2'); aggregates do not leak (COUNT=2 MAX=2); blind principal sees 0 policies and 0 base tables (the silent-empty A1a target); sighted principal NAMES the policy ORACLEMCP_D3_VPD (the A1e half). Side channel reproduced as the recorded failing half: inserting the PK of an unreadable row raises ORA-00001 (and ORA-03301 disclosing the value on 23ai) while a genuinely-absent id inserts cleanly."
+      },
+      {
+        "name": "D3 mutation control (proves the lane catches a fail-open)",
+        "kind": "cli",
+        "trace": "`bash scripts/rig/verify_vpd_fixture.sh --mutation-control` exited 0: swapping the policy predicate to '1=1' (D4's no-op shape, and exactly the fail-open shape) produced 3 findings (blind principal read 1,2,3,4; synonym path leaked; COUNT=4 MAX=4); restoring the real predicate produced 0. This is the whole point of D3 — a lane asserting 'query succeeded' or 'policy attached' would pass straight through a fail-open, which is how the field defect survived."
+      },
+      {
+        "name": "D3 fixture load",
+        "kind": "cli",
+        "trace": "scripts/rig/oracle_l1_vpd_fixture.sql loaded into FREEPDB1 of the running rust-oracledb-free container as SYSDBA; the fixture recreates ORACLEMCP_D3_OWNER/SIGHTED/BLIND, the policy-protected table, the real predicate (classification = 'PUBLIC'), the synonym, and the blinding view. Verified loaded via the lane's SYS ground-truth assertion (rows 1,2,3,4)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The lane ran against the already-running local Free23 rig container and is recorded as scoped integration evidence, not as a committed live-evidence artifact.",
+    "The lane is a standalone verify script; it is not yet invoked by oracle_l1.sh's fixture command or by CI. This matches the closed D5 lane's wiring level. A follow-up may wire D3/D4/D5 lanes into the rig dispatch.",
+    "The server-side acceptance half (MCP tool path returning empty; doctor naming the policy) is not driven here — it requires A1a/A1e and is owned by those beads and the dependent E/R suites."
+  ],
+  "known_defects": [
+    {
+      "description": "Recorded failing half (the point of the fixture): the blind principal cannot SELECT restricted rows but CAN infer hidden primary keys via ORA-00001/ORA-03301 on insert through the view — a read-vs-infer side channel. This is the field finding the fixture makes reproducible; A1a owns converting the silent-empty into a typed refusal.",
+      "bead_id": "oraclemcp-091-a1a-catalog-gates-fail-open-59d9v"
+    }
+  ],
+  "follow_ups": [
+    "oraclemcp-091-a1a-catalog-gates-fail-open-59d9v",
+    "oraclemcp-091-a1e-rls-visibility-lpect"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
