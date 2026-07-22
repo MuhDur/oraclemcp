@@ -1,0 +1,76 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T11:22:05Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.4.6.4",
+  "scope": {
+    "summary": "Splits the classifier vector-embedding grammar normalization seam into a private guard module without changing classifier verdicts, and lowers the classifier max-file-size ratchet.",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/classifier.rs",
+      "crates/oraclemcp-guard/src/classifier_grammar.rs",
+      "crates/oraclemcp-guard/src/lib.rs",
+      "crates/oraclemcp-guard/fuzz/Cargo.lock",
+      "scripts/oraclemcp_arch_fitness_lint.sh"
+    ],
+    "out_of_scope": [
+      "Changing classifier admission semantics, guard policy, fuzz-target logic, or any test expectations.",
+      "Splitting additional classifier regions beyond the vector-embedding parser-normalization grammar seam.",
+      "Claiming a hosted scheduled fuzz campaign or full workspace cargo gate."
+    ]
+  },
+  "source": {
+    "sha": "984de104106b285df6e665346da4507525a39d54",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "implementation commit",
+        "kind": "cli",
+        "trace": "`git show --stat HEAD` for b233fff05d323c66cbc07b46bcbef7732c778b64 reported exactly five paths: crates/oraclemcp-guard/src/classifier.rs, crates/oraclemcp-guard/src/classifier_grammar.rs, crates/oraclemcp-guard/src/lib.rs, crates/oraclemcp-guard/fuzz/Cargo.lock, and scripts/oraclemcp_arch_fitness_lint.sh. The split moves the vector-embedding parser-normalization helper and its private token helpers into a private module; no tests were edited."
+      },
+      {
+        "name": "scoped guard compile",
+        "kind": "cli",
+        "trace": "`env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo check -p oraclemcp-guard` exited 0 after the split."
+      },
+      {
+        "name": "differential adversarial corpus",
+        "kind": "cli",
+        "trace": "`env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-guard --test adversarial_corpus -- --nocapture` exited 0: 15 passed, 0 failed, 0 ignored, including `strict_corpus_is_never_underclassified`, `corpus_is_never_underclassified`, and `classifier_never_panics_on_arbitrary_input`."
+      },
+      {
+        "name": "full guard regression suite",
+        "kind": "cli",
+        "trace": "`env CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-guard` exited 0: 319 unit tests passed, all guard integration tests passed, and the profiling baseline remained ignored as before. The run includes the existing metamorphic, proptest, purity, policy-gate, certificate, and CTE-DML adversarial checks."
+      },
+      {
+        "name": "cargo-fuzz classifier target",
+        "kind": "cli",
+        "trace": "`env CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target/cod6-fuzz-classify timeout -k 10 240 scripts/build_lease.sh -- env CARGO_BUILD_JOBS=2 cargo +nightly-2026-05-11 fuzz run --target x86_64-unknown-linux-gnu classify_fuzz -- -runs=256 -rss_limit_mb=2048 -timeout=10 -seed=4001` exited 0. libFuzzer reported `DONE` after 256 runs with no crash or assertion failure."
+      },
+      {
+        "name": "ratchet and formatting",
+        "kind": "cli",
+        "trace": "`env CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target scripts/oraclemcp_arch_fitness_lint.sh` exited 0 after lowering `crates/oraclemcp-guard/src/classifier.rs` from 7814 to 7678 lines; `cargo fmt --all -- --check` also exited 0."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The cargo-fuzz proof is a bounded local smoke of the existing classify_fuzz target, not a hosted scheduled fuzz campaign.",
+    "No full workspace cargo clippy/test gate is claimed from this shared checkout.",
+    "The evidence source is current reproducible HEAD after later unrelated pane commits; the implementation commit for this bead is b233fff05d323c66cbc07b46bcbef7732c778b64."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "required-proof"
+  }
+}
