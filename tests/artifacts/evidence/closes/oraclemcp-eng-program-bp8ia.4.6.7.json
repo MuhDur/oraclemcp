@@ -1,0 +1,74 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T13:27:35Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.4.6.7",
+  "scope": {
+    "summary": "C6 service_lifecycle split: fbee1a24 extracted the service unit rendering seam into service_lifecycle/service_units.rs and lowered the service_lifecycle.rs max-file-size ratchet without changing service install/update/status behavior.",
+    "in_scope": [
+      "crates/oraclemcp/src/service_lifecycle.rs",
+      "crates/oraclemcp/src/service_lifecycle/service_units.rs"
+    ],
+    "out_of_scope": [
+      "The CLI extraction in the same source commit, which is already closed under bead oraclemcp-eng-program-bp8ia.4.6.5.",
+      "Other C6 splits and ratchet issues, including crates/oraclemcp-core/src/server.rs regrowth after fbee1a24.",
+      "Later edits to scripts/oraclemcp_arch_fitness_lint.sh after fbee1a24; the fbee1a24 ratchet lines were verified by blame but the file cannot be in close scope because it changed later.",
+      "Live service-manager mutation on systemd/launchd/Windows; this close uses focused CLI/e2e and compile evidence only."
+    ]
+  },
+  "source": {
+    "sha": "fbee1a24fb41f2e7ef8b0fcc61f405963adfa51b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "source split commit",
+        "kind": "cli",
+        "trace": "`git show --find-renames --stat --summary fbee1a24 -- crates/oraclemcp/src/service_lifecycle.rs crates/oraclemcp/src/service_lifecycle/service_units.rs scripts/oraclemcp_arch_fitness_lint.sh` shows 105 insertions, 96 deletions, create mode 100644 service_lifecycle/service_units.rs, service_lifecycle.rs reduced by 98 lines, and scripts/oraclemcp_arch_fitness_lint.sh updated in the same commit."
+      },
+      {
+        "name": "service unit seam isomorphism",
+        "kind": "cli",
+        "trace": "`git show fbee1a24 -- crates/oraclemcp/src/service_lifecycle.rs crates/oraclemcp/src/service_lifecycle/service_units.rs` shows systemd_unit, launchd_plist, windows_bin_path, systemd_quote, windows_quote, and xml_escape moved behind `mod service_units;` with unchanged bodies except visibility becoming pub(super)."
+      },
+      {
+        "name": "focused CLI and setup/service coverage",
+        "kind": "cli",
+        "trace": "`CARGO_TARGET_DIR=target cargo test -p oraclemcp --test cli` passed 27/27 on 2026-07-22. This suite covers setup/default wrapper paths, generated client snippet launch, consent/refusal paths, dashboard pairing, and command help/exit-code behavior that would expose command-surface drift from the split."
+      },
+      {
+        "name": "crate compile",
+        "kind": "cli",
+        "trace": "`CARGO_TARGET_DIR=target cargo check -p oraclemcp` passed on 2026-07-22 after reconciling fbee1a24 against current main."
+      },
+      {
+        "name": "service lifecycle ratchet",
+        "kind": "cli",
+        "trace": "`wc -l crates/oraclemcp/src/service_lifecycle.rs crates/oraclemcp/src/service_lifecycle/service_units.rs` reports 5448 and 97 lines respectively; `git blame -L 40,44 scripts/oraclemcp_arch_fitness_lint.sh` attributes those ratchet entries to fbee1a24."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The source commit fbee1a24 also extracted cli.rs and was already used to close oraclemcp-eng-program-bp8ia.4.6.5; this close deliberately reuses the same source SHA only for the service_lifecycle/service_units.rs seam.",
+    "`scripts/oraclemcp_arch_fitness_lint.sh` is currently red on out-of-scope crates/oraclemcp-core/src/server.rs: 4241 lines versus ratchet 4145. The in-scope service_lifecycle.rs and service_lifecycle/service_units.rs ratchet entries remain within their fbee1a24 limits.",
+    "No live systemd/launchd/Windows service mutation was run for this close."
+  ],
+  "known_defects": [
+    {
+      "description": "Current committed arch-fitness ratchet violation outside this bead: crates/oraclemcp-core/src/server.rs has 4241 lines versus measured ratchet 4145.",
+      "bead_id": "oraclemcp-eng-program-bp8ia.4.6"
+    }
+  ],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
