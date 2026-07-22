@@ -81,3 +81,33 @@
 - Claim checked: The unsigned refusal/security-event corpus must stay distinct from the signed HMAC audit tier.
 - Method: `cargo test -p oraclemcp refusal_corpus -- --nocapture`, `cargo test -p oraclemcp signature_rejection -- --nocapture`, and `ORACLEMCP_AUDIT_KEY=0123456789abcdef0123456789abcdef cargo run -q -p oraclemcp -- --json audit verify tests/fixtures/rig/refusal_corpus_baseline.jsonl`.
 - Verdict: CLEAN - refusal corpus tests passed; feeding the corpus to `audit verify` exited 2 as malformed audit JSONL rather than verifying as signed audit.
+
+## [HIGH] Doctor RLS/VPD check renders session user
+- Where: crates/oraclemcp-core/src/doctor.rs:2356
+- Claim checked: Doctor output must omit usernames and proxy identities because operators paste doctor output into agent sessions.
+- Method: Code read of `rls_vpd_check_from_observation` plus `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-core doctor_rls_vpd_visibility_names_visible_policy -- --nocapture`.
+- Verdict: CONFIRMED DEFECT - the passing test at crates/oraclemcp-core/src/doctor.rs:3734 asserts `session_user=ORACLEMCP_D3_SIGHTED` is present in doctor detail; the scrubber only removes values already present in `DoctorContext.sensitive_values`, so live observed session users can be rendered.
+
+## [LOW] Doctor connectivity/auth secret redaction
+- Where: crates/oraclemcp-core/src/doctor.rs:3871
+- Claim checked: Doctor connectivity and auth diagnostics must not leak connect strings, usernames, credential values, wallet paths/passwords, IAM tokens, server DNs, or proxy identities.
+- Method: `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-core connection_error_redacts_profile_sensitive_values wallet_decrypt_password_echo_is_redacted iam_token_refresh_failure_redacts_jwt iam_token_check_never_renders_the_token auth_capability_matrix_is_thin_and_redaction_safe -- --nocapture` run as exact per-test filters; also `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-core --test doctor_secret_golden -- --nocapture`.
+- Verdict: CLEAN - the targeted checks passed and the inspected code routes connectivity details through `sanitized_detail`.
+
+## [LOW] oracle_connection_info redacts identity/topology by default
+- Where: crates/oraclemcp/src/dispatch/mod.rs:11315
+- Claim checked: `oracle_connection_info` must not leak usernames, proxy identities, connect strings, credential refs, passwords, wallet paths/passwords, IAM tokens, or server DNs.
+- Method: Code read of `connection_info_json` / `connection_info_for_transport` plus `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp connection_info_reports_the_active_profile connection_info_keeps_schema_and_service_redacted_for_remote_transport connection_diagnostics_report_exact_generation_without_config_secrets -- --nocapture` run as exact per-test filters, and `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-db connection_info_debug_and_redacted_json_are_allowlist_first debug_redacts_connect_material debug_redacts_session_identity_values -- --nocapture`.
+- Verdict: CLEAN - the served tool serializes `OracleConnectionInfo::redacted()`, remote HTTP keeps schema/service redacted, and local transport exposes only `current_schema`/`service_name` while session/proxy/user fields remain absent and listed as redacted.
+
+## [LOW] list_profiles omits profile secrets and topology
+- Where: crates/oraclemcp-config/src/profile.rs:1142
+- Claim checked: `oracle_list_profiles` / CLI profile listing must not expose connect strings, usernames, credential refs, passwords, proxy identities, wallet passwords, IAM tokens, wallet paths, or server DNs.
+- Method: Code read of `ConnectionProfile::metadata`, `OracleMcpConfig::list_profiles`, `ProfileDrainState::mcp_profiles_snapshot`, and `profiles_json`; `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp profiles_json_reports_non_secret_metadata profile_response_omits_connection_and_secret_material doctor_profile_auth_capabilities_are_metadata_only resolved_secret_material_is_absent_from_rendered_surfaces profile_secret_resolution_errors_do_not_echo_secret_locators -- --nocapture` run as exact per-test filters.
+- Verdict: CLEAN - metadata deliberately omits raw connection/profile secret fields and the targeted tests passed.
+
+## [LOW] Auth and dashboard error envelopes avoid credential oracle detail
+- Where: crates/oraclemcp-core/src/http/tests_auth.rs:716
+- Claim checked: Error envelopes must not reveal why a credential was rejected and must not leak bearer tokens or dashboard pairing secrets.
+- Method: `CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target cargo test -p oraclemcp-core uniform_auth_errors_no_enumeration_oracle operator_config_draft_apply_and_rollback_are_redacted_and_audited mcp_post_rate_limit_returns_429_retry_after_and_redacts_principal operator_client_credentials_screen_lists_rotates_revokes_without_token_leak -- --nocapture` run as exact per-test filters; also inspected dashboard 403 assertions at crates/oraclemcp-core/src/http/tests_dashboard.rs:338.
+- Verdict: CLEAN - uniform missing/unknown/revoked credential responses match, dashboard config redaction passed, principal buckets are redacted, and credential list/rotate/revoke screens do not return stored bearer material.
