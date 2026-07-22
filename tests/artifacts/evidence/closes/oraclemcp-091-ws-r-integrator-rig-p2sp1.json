@@ -1,0 +1,81 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T17:18:29Z",
+  "bead_id": "oraclemcp-091-ws-r-integrator-rig-p2sp1",
+  "scope": {
+    "summary": "Reconciles WS-R Local Integrator Rig R0-R5: all child lanes are closed and no remaining WS-R child scope is open.",
+    "in_scope": [
+      ".beads/issues.jsonl",
+      "tests/artifacts/evidence/closes/oraclemcp-091-r0-rig-scaffold-zclvw.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-r1-external-client-tmc5j.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-r2-tool-sweep-nvxo4.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-r3-browser-lane-43kev.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-r4-report-refusal-gate-1u1oc.json",
+      "tests/artifacts/evidence/closes/oraclemcp-091-r5-lite-codex-session-7us13.json"
+    ],
+    "out_of_scope": [
+      "Any remaining work in the unresolved 0.10.0 train root (oraclemcp-091-train-root-jp5k9) and non-WS-R epics."
+    ]
+  },
+  "source": {
+    "sha": "99605595b80091d654ff3e560eb3865efdde99cc",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "WS-R child closure status",
+        "kind": "cli",
+        "trace": "br show oraclemcp-091-ws-r-integrator-rig-p2sp1 reported dependents R0..R5 closed; br show on each child confirms status=closed."
+      },
+      {
+        "name": "R0 closure witness",
+        "kind": "cli",
+        "trace": "oraclemcp-091-r0-rig-scaffold-zclvw close_reason is [closing=24f6eb001618d199f2d8e4509074bcb3a2f147c1 source=d6aafc64e02ec5b4b7e8e75a839328fd76e23ba5 evidence=tests/artifacts/evidence/closes/oraclemcp-091-r0-rig-scaffold-zclvw.json]"
+      },
+      {
+        "name": "R1 closure witness",
+        "kind": "cli",
+        "trace": "oraclemcp-091-r1-external-client-tmc5j close_reason is [closing=286e4f4e8710b8817396c4b7a4c5d4bbf84718ff source=b16c282b5f2574e5b91fe4f7d7df3336b6c818c9 evidence=tests/artifacts/evidence/closes/oraclemcp-091-r1-external-client-tmc5j.json]"
+      },
+      {
+        "name": "R2 closure witness",
+        "kind": "cli",
+        "trace": "oraclemcp-091-r2-tool-sweep-nvxo4 close_reason is [closing=c2f8b7dc9d5488cc0ab733b2a78641a54afa674e source=91e465057005b40544dbb65fba1957c791d812c6 evidence=tests/artifacts/evidence/closes/oraclemcp-091-r2-tool-sweep-nvxo4.json]"
+      },
+      {
+        "name": "R3 closure witness",
+        "kind": "cli",
+        "trace": "oraclemcp-091-r3-browser-lane-43kev close_reason is [closing=fb2705789df095e27bf526a1aa37d21be5e10935 source=71bd1065426d824eab05d4065dffcfb01aaf141f evidence=tests/artifacts/evidence/closes/oraclemcp-091-r3-browser-lane-43kev.json]"
+      },
+      {
+        "name": "R4 closure witness",
+        "kind": "cli",
+        "trace": "oraclemcp-091-r4-report-refusal-gate-1u1oc close_reason is [closing=fa372006ee229c52f442dc79b6bea51e7f8848bf source=f850ed7deda0de8b1ab55ad036d741876924dff4 evidence=tests/artifacts/evidence/closes/oraclemcp-091-r4-report-refusal-gate-1u1oc.json]"
+      },
+      {
+        "name": "R5-lite closure witness",
+        "kind": "cli",
+        "trace": "oraclemcp-091-r5-lite-codex-session-7us13 close_reason is [closing=99605595b80091d654ff3e560eb3865efdde99cc source=8e84062232c3cbe654073ad801e25839cb6c9ad8 evidence=tests/artifacts/evidence/closes/oraclemcp-091-r5-lite-codex-session-7us13.json]"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This reconciliation is parent-level only; it does not rerun WS-R lanes in this close transaction."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "Remaining open parent dependency is oraclemcp-091-train-root-jp5k9 (0.10.0 field-hardening train)."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
