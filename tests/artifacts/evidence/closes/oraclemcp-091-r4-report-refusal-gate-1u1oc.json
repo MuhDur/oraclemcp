@@ -54,7 +54,7 @@
       },
       {
         "name": "tests/artifacts/evidence/r4-report-refusal-gate.json",
-        "kind": "artifact",
+        "kind": "config-gate",
         "trace": "Durable proof records source f8211f4175b8bf149571ca2180214e5a0c8db5a5, direct and integrated report artifact paths, finding_count=2, category_changed_count=1, newly_allowed_count=1, sensitive_scan_hits=[], and synthetic_only=true."
       }
     ]
