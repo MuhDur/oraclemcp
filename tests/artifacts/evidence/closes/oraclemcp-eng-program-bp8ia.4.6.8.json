@@ -1,0 +1,71 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T11:38:29Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.4.6.8",
+  "scope": {
+    "summary": "Extracts the lane registry debug lock-rank runtime seam from lane.rs into a private lane/runtime_lock.rs module without changing lane behavior or public API.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/lane.rs",
+      "crates/oraclemcp-core/src/lane/runtime_lock.rs"
+    ],
+    "out_of_scope": [
+      "scripts/oraclemcp_arch_fitness_lint.sh ratchet update; that shared script remained dirty/reserved under pane 5 and is recorded as a follow-up boundary rather than claimed here.",
+      "No workspace-wide cargo test result is claimed for this close."
+    ]
+  },
+  "source": {
+    "sha": "b09d1cd034fb4d1625cf560a2ec4fde40c3b8c08",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "LaneRuntimeRegistry debug lock-rank guard",
+        "kind": "rust-module",
+        "trace": "crates/oraclemcp-core/src/lane.rs continues to import assert_no_lane_registry_lock, enter_lane_registry_lock, and exit_lane_registry_lock; the moved functions remain private to the lane module through crates/oraclemcp-core/src/lane/runtime_lock.rs pub(super) visibility."
+      },
+      {
+        "name": "CARGO_TARGET_DIR=target cargo test -p oraclemcp-core lane::tests",
+        "kind": "cli",
+        "trace": "Passed after the split: 45 lane tests passed, 0 failed."
+      },
+      {
+        "name": "cargo fmt --package oraclemcp-core -- --check",
+        "kind": "cli",
+        "trace": "Passed after the split."
+      },
+      {
+        "name": "bash scripts/oraclemcp_arch_fitness_lint.sh",
+        "kind": "cli",
+        "trace": "Passed before close with the current checkout script; this evidence does not claim a ratchet-script change."
+      },
+      {
+        "name": "git diff --check -- crates/oraclemcp-core/src/lane.rs crates/oraclemcp-core/src/lane/runtime_lock.rs",
+        "kind": "cli",
+        "trace": "Passed before commit b09d1cd034fb4d1625cf560a2ec4fde40c3b8c08."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The max-file-size ratchet was not lowered in scripts/oraclemcp_arch_fitness_lint.sh in this commit because the operator instructed this pane to exclude that dirty shared file and record the ratchet update as pane 5 follow-up work.",
+    "The close proof is scoped to the lane-runtime split. A broader CARGO_TARGET_DIR=target cargo test -p oraclemcp-core run was not used as close proof in this shared checkout because unrelated doctor/subscriptions tests failed earlier while lane::tests passed."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    {
+      "owner": "pane 5",
+      "summary": "Lower the C6 file-size ratchet for crates/oraclemcp-core/src/lane.rs in scripts/oraclemcp_arch_fitness_lint.sh once the shared script is no longer dirty/reserved."
+    }
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "scoped-test"
+  }
+}
