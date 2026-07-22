@@ -25,7 +25,8 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir as CapDir, DirBuilder as CapDirBuilder, OpenOptions as CapOpenOptions};
 use oraclemcp_db::{
     AuthAdapter, DRIVER_VERSION, DiagnosticsSource, OracleConnectOptions, OracleConnection,
-    canonical_nls_statements, detect_oracle_driver, detect_standby, preflight, probe_privileges,
+    OracleVpdRlsObservation, OracleVpdRlsObservationStatus, canonical_nls_statements,
+    detect_oracle_driver, detect_standby, observe_vpd_rls_for_schema, preflight, probe_privileges,
     probe_write_posture, supported_wallet_modes,
 };
 use oraclemcp_error::{ErrorClass, classify_ora_code, parse_ora_code};
@@ -1402,6 +1403,7 @@ pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
         check_iam_token(ctx),
         check_trio_stack(ctx),
         check_configuration(ctx),
+        check_rls_vpd_visibility(cx, ctx).await,
     ];
     DoctorReport {
         checks,
@@ -2486,6 +2488,102 @@ async fn check_privilege_tier(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     }
 }
 
+async fn check_rls_vpd_visibility(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
+    const ID: u8 = 17;
+    const NAME: &str = "RLS/VPD visibility";
+
+    if ctx.connection_error.is_some() {
+        return CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Skip,
+            "skipped because connectivity failed",
+        );
+    }
+    let Some(conn) = ctx.conn else {
+        return CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Skip,
+            "offline — requires a live connection to inspect SESSION_CONTEXT, SESSION_ROLES, and ALL_POLICIES",
+        );
+    };
+
+    let observation = observe_vpd_rls_for_schema(cx, conn, "").await;
+    rls_vpd_check_from_observation(ctx, observation)
+}
+
+fn rls_vpd_check_from_observation(
+    ctx: &DoctorContext<'_>,
+    observation: OracleVpdRlsObservation,
+) -> CheckResult {
+    let session = observation
+        .session
+        .as_ref()
+        .map(|session| {
+            format!(
+                "session_user={}, current_schema={}, edition={}, enabled_roles={}",
+                session.session_user,
+                session.current_schema,
+                session.edition_name.as_deref().unwrap_or("unknown"),
+                session.enabled_roles.len()
+            )
+        })
+        .unwrap_or_else(|| "session context unavailable".to_owned());
+    let named = observation
+        .policies
+        .iter()
+        .map(|policy| {
+            format!(
+                "{}.{}:{}",
+                policy.object_owner, policy.object_name, policy.policy_name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let visible = if named.is_empty() {
+        "visible_policies=none".to_owned()
+    } else {
+        format!("visible_policies={named}")
+    };
+    let detail = sanitized_detail(
+        ctx,
+        format!(
+            "{session}; {}; {}; {}",
+            observation.detail, observation.all_policies_probe.detail, visible
+        ),
+    );
+    match observation.status {
+        OracleVpdRlsObservationStatus::PoliciesObserved => CheckResult::new(
+            17,
+            "RLS/VPD visibility",
+            CheckStatus::Warn,
+            detail,
+        )
+        .with_fix("review the named DBMS_RLS policies; a filtered read may return fewer rows than the base table contains"),
+        OracleVpdRlsObservationStatus::NoVisibleMatchingPolicies => CheckResult::new(
+            17,
+            "RLS/VPD visibility",
+            CheckStatus::Pass,
+            detail,
+        ),
+        OracleVpdRlsObservationStatus::NoVisiblePolicyCatalogRows => CheckResult::new(
+            17,
+            "RLS/VPD visibility",
+            CheckStatus::Warn,
+            detail,
+        )
+        .with_fix("rerun doctor as a catalog-sighted principal or grant enough dictionary visibility to inspect ALL_POLICIES"),
+        OracleVpdRlsObservationStatus::VisibilityUnavailable => CheckResult::new(
+            17,
+            "RLS/VPD visibility",
+            CheckStatus::Warn,
+            detail,
+        )
+        .with_fix("grant policy catalog visibility or rerun with a principal that can read ALL_POLICIES"),
+    }
+}
+
 fn check_snapshot_freshness() -> CheckResult {
     CheckResult::new(
         7,
@@ -3200,6 +3298,99 @@ mod tests {
         }
     }
 
+    fn doctor_row(columns: &[(&str, Option<&str>)]) -> OracleRow {
+        OracleRow {
+            columns: columns
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        (*name).to_owned(),
+                        oraclemcp_db::OracleCell::new("VARCHAR2", value.map(str::to_owned)),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    struct VpdRlsDoctorMock {
+        policy_visible: bool,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for VpdRlsDoctorMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            let normalized = sql.to_ascii_lowercase();
+            if normalized.contains("sys_context('userenv', 'session_user')") {
+                return Ok(vec![doctor_row(&[
+                    ("SESSION_USER", Some("ORACLEMCP_D3_SIGHTED")),
+                    ("CURRENT_SCHEMA", Some("ORACLEMCP_D3_OWNER")),
+                    ("EDITION_NAME", Some("ORA$BASE")),
+                ])]);
+            }
+            if normalized.contains("from session_roles") {
+                return Ok(self
+                    .policy_visible
+                    .then(|| doctor_row(&[("ROLE", Some("SELECT_CATALOG_ROLE"))]))
+                    .into_iter()
+                    .collect());
+            }
+            if normalized.contains("count(*) as visible_policy_rows") {
+                return Ok(vec![doctor_row(&[(
+                    "VISIBLE_POLICY_ROWS",
+                    Some(if self.policy_visible { "1" } else { "0" }),
+                )])]);
+            }
+            if normalized.contains("from all_policies") {
+                return Ok(self
+                    .policy_visible
+                    .then(|| {
+                        doctor_row(&[
+                            ("OBJECT_OWNER", Some("ORACLEMCP_D3_OWNER")),
+                            ("OBJECT_NAME", Some("ORACLEMCP_D3_PROTECTED")),
+                            ("POLICY_NAME", Some("ORACLEMCP_D3_VPD")),
+                            ("PF_OWNER", Some("ORACLEMCP_D3_OWNER")),
+                            ("PACKAGE", None),
+                            ("FUNCTION", Some("ORACLEMCP_D3_VPD")),
+                            ("SEL", Some("YES")),
+                            ("INS", Some("NO")),
+                            ("UPD", Some("NO")),
+                            ("DEL", Some("NO")),
+                            ("ENABLE", Some("YES")),
+                        ])
+                    })
+                    .into_iter()
+                    .collect());
+            }
+            Ok(Vec::new())
+        }
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
     struct PoolPingFailMock;
 
     #[async_trait::async_trait(?Send)]
@@ -3387,9 +3578,9 @@ mod tests {
     }
 
     #[test]
-    fn report_has_sixteen_checks_and_classifier_self_test_passes() {
+    fn report_has_seventeen_checks_and_classifier_self_test_passes() {
         let report = doctor(&DoctorContext::default());
-        assert_eq!(report.checks.len(), 16);
+        assert_eq!(report.checks.len(), 17);
         let selftest = report.checks.iter().find(|c| c.id == 8).unwrap();
         assert_eq!(selftest.status, CheckStatus::Pass, "{}", selftest.detail);
         // The IAM-token near-expiry check (14) skips cleanly when no token is set.
@@ -3417,7 +3608,7 @@ mod tests {
         // Connectivity, role/standby, privilege-tier, snapshot, the DBA-suite
         // preflight (10), write posture (11), and call-timeout posture (12)
         // all skip offline/no-profile.
-        for id in [3u8, 4, 6, 7, 10, 11, 12] {
+        for id in [3u8, 4, 6, 7, 10, 11, 12, 17] {
             let c = report.checks.iter().find(|c| c.id == id).unwrap();
             assert_eq!(
                 c.status,
@@ -3689,6 +3880,47 @@ mod tests {
         assert_eq!(
             report.checks.iter().find(|c| c.id == 6).unwrap().status,
             CheckStatus::Pass
+        );
+    }
+
+    #[test]
+    fn doctor_rls_vpd_visibility_names_visible_policy() {
+        let conn = VpdRlsDoctorMock {
+            policy_visible: true,
+        };
+        let report = doctor(&DoctorContext {
+            conn: Some(&conn),
+            ..DoctorContext::default()
+        });
+        let check = check_by_id(&report, 17);
+        assert_eq!(check.status, CheckStatus::Warn, "{}", check.detail);
+        assert!(
+            check.detail.contains("ORACLEMCP_D3_VPD"),
+            "{}",
+            check.detail
+        );
+        assert!(
+            check.detail.contains("session_user=ORACLEMCP_D3_SIGHTED"),
+            "{}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn doctor_rls_vpd_visibility_warns_on_empty_policy_catalog() {
+        let conn = VpdRlsDoctorMock {
+            policy_visible: false,
+        };
+        let report = doctor(&DoctorContext {
+            conn: Some(&conn),
+            ..DoctorContext::default()
+        });
+        let check = check_by_id(&report, 17);
+        assert_eq!(check.status, CheckStatus::Warn, "{}", check.detail);
+        assert!(
+            check.detail.contains("zero visible rows"),
+            "empty ALL_POLICIES must not render as no RLS/VPD: {}",
+            check.detail
         );
     }
 

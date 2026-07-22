@@ -13,6 +13,7 @@ use oraclemcp_error::parse_ora_code;
 // `connection::db_checkpoint`, which is generic over the `Cx` capability row:
 // a read handler running under a narrowed `Cx<ReadPathCaps>` (A9) checkpoints
 // exactly like one under the full row — no `SPAWN`/`REMOTE`/`RANDOM` needed.
+use crate::catalog_resolver::OracleVpdRlsObservation;
 use crate::connection::{OracleConnection, db_checkpoint};
 use crate::error::{
     DbError, FlashbackRefusalKind, QuarantineOutcome, classify_flashback_refusal_message,
@@ -69,6 +70,11 @@ pub struct QueryResponse {
     /// so callers can replay the same snapshot without a lossy wall-clock hint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_scn: Option<u64>,
+    /// VPD/RLS catalog observation for the relations read by this page. Empty
+    /// or unavailable observations are explicit warning metadata, never an
+    /// absence certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rls_vpd: Option<OracleVpdRlsObservation>,
     /// Proof-carrying egress certificate for result masking, present only when
     /// the page's active masking policy transformed one or more columns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -570,6 +576,7 @@ impl QueryPageBuilder {
             next_cursor,
             total_bytes: self.total_bytes,
             observed_scn: None,
+            rls_vpd: None,
             mask_certificate: self.mask_certificate,
         })
     }

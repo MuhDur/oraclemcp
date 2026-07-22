@@ -94,8 +94,11 @@ pub use catalog_extract::{
     CatalogRowSetName, CatalogSchemaFilter, catalog_extract_rowsets, extract_catalog_rowsets,
 };
 pub use catalog_resolver::{
-    CatalogInvalidation, MAX_CATALOG_NAMES, OracleCatalogResolver, OracleCatalogResolverCache,
-    read_catalog_resolve_context, resolved_relations_read_purity,
+    CatalogInvalidation, MAX_CATALOG_NAMES, MAX_VPD_RLS_POLICY_ROWS, OracleCatalogResolver,
+    OracleCatalogResolverCache, OraclePolicyCatalogProbe, OraclePolicyCatalogVisibility,
+    OracleSessionSecurityContext, OracleVpdRlsObservation, OracleVpdRlsObservationStatus,
+    OracleVpdRlsPolicy, observe_vpd_rls_for_relations, observe_vpd_rls_for_schema,
+    read_catalog_resolve_context, read_session_security_context, resolved_relations_read_purity,
 };
 pub use connection::{
     CqnDriverNotification, CqnNotificationOutcome, CqnNotificationReceiver, CqnQueryRegistration,

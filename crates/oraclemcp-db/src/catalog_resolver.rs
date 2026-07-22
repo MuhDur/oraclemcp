@@ -66,6 +66,25 @@ const SELECT_POLICY_SQL: &str = "SELECT policy_name FROM all_policies \
     WHERE object_owner = :1 AND object_name = :2 \
     AND enable = 'YES' AND sel = 'YES' AND ROWNUM <= 1";
 
+const VPD_RLS_POLICY_BY_SCHEMA_SQL: &str = "SELECT object_owner, object_name, policy_name, \
+    pf_owner, package, function, sel, ins, upd, del, enable \
+    FROM (SELECT object_owner, object_name, policy_name, pf_owner, package, function, sel, ins, \
+                 upd, del, enable \
+          FROM all_policies WHERE object_owner = :1 \
+          ORDER BY object_owner, object_name, policy_name) \
+    WHERE ROWNUM <= :2";
+
+const VPD_RLS_POLICY_BY_OBJECT_SQL: &str = "SELECT object_owner, object_name, policy_name, \
+    pf_owner, package, function, sel, ins, upd, del, enable \
+    FROM (SELECT object_owner, object_name, policy_name, pf_owner, package, function, sel, ins, \
+                 upd, del, enable \
+          FROM all_policies WHERE object_owner = :1 AND object_name = :2 \
+          ORDER BY object_owner, object_name, policy_name) \
+    WHERE ROWNUM <= :3";
+
+const ALL_POLICIES_VISIBILITY_SQL: &str =
+    "SELECT COUNT(*) AS VISIBLE_POLICY_ROWS FROM (SELECT 1 FROM all_policies WHERE ROWNUM <= 1)";
+
 const POLICY_CATALOG_PROOF_SQL: &str = "SELECT policy_name FROM all_policies WHERE ROWNUM <= 1";
 
 const VIRTUAL_COLUMN_SQL: &str = "SELECT column_name FROM all_tab_cols \
@@ -74,6 +93,107 @@ const VIRTUAL_COLUMN_SQL: &str = "SELECT column_name FROM all_tab_cols \
 
 const TARGET_COLUMN_CATALOG_PROOF_SQL: &str = "SELECT column_name FROM all_tab_cols \
     WHERE owner = :1 AND table_name = :2 AND ROWNUM <= 1";
+
+/// Maximum VPD/RLS policy rows surfaced in one diagnostic observation.
+pub const MAX_VPD_RLS_POLICY_ROWS: usize = 64;
+
+/// Session-security context observed through Oracle's own `USERENV` and role
+/// catalog for VPD/RLS diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OracleSessionSecurityContext {
+    /// `SYS_CONTEXT('USERENV', 'SESSION_USER')`.
+    pub session_user: String,
+    /// `SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')`.
+    pub current_schema: String,
+    /// `SYS_CONTEXT('USERENV', 'CURRENT_EDITION_NAME')`, when Oracle reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edition_name: Option<String>,
+    /// Enabled roles visible in `SESSION_ROLES`, capped at the resolver role
+    /// bound.
+    pub enabled_roles: Vec<String>,
+}
+
+/// Visibility status for the `ALL_POLICIES` probe used by RLS/VPD diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OraclePolicyCatalogVisibility {
+    /// One or more policy rows are visible to the current principal.
+    PolicyRowsVisible,
+    /// `ALL_POLICIES` returned zero visible rows. This is not proof that no
+    /// policy exists; it may mean the principal is catalog-blind.
+    NoPolicyRowsVisible,
+    /// The probe itself could not be read.
+    Unavailable,
+}
+
+/// The cheap `ALL_POLICIES` visibility probe attached to VPD/RLS observations.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OraclePolicyCatalogProbe {
+    /// Probe result.
+    pub visibility: OraclePolicyCatalogVisibility,
+    /// Whether at least one row was visible, when the count probe succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_policy_rows_probe: Option<bool>,
+    /// Human-readable, non-secret explanation of the observation boundary.
+    pub detail: String,
+}
+
+/// One visible Oracle VPD/RLS policy row.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OracleVpdRlsPolicy {
+    /// Policy target owner.
+    pub object_owner: String,
+    /// Policy target object name.
+    pub object_name: String,
+    /// Policy name.
+    pub policy_name: String,
+    /// Policy function owner, when visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function_owner: Option<String>,
+    /// Policy package, when visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_name: Option<String>,
+    /// Policy function, when visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function_name: Option<String>,
+    /// Statement classes this policy applies to, as visible in `ALL_POLICIES`.
+    pub statement_types: Vec<String>,
+    /// Whether Oracle reports the policy enabled.
+    pub enabled: bool,
+}
+
+/// Overall status for a VPD/RLS diagnostic observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OracleVpdRlsObservationStatus {
+    /// One or more matching policies were observed and are named in `policies`.
+    PoliciesObserved,
+    /// Policy catalog rows are visible, but none matched the requested scope.
+    NoVisibleMatchingPolicies,
+    /// No policy rows are visible at all; this is explicitly not an absence
+    /// proof for protected objects.
+    NoVisiblePolicyCatalogRows,
+    /// The server could not inspect policy visibility.
+    VisibilityUnavailable,
+}
+
+/// VPD/RLS observation attached to doctor and query results.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OracleVpdRlsObservation {
+    /// Diagnostic status.
+    pub status: OracleVpdRlsObservationStatus,
+    /// Scope of the observation, such as `schema:APP` or `relations`.
+    pub scope: String,
+    /// Session-security context, when it could be observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<OracleSessionSecurityContext>,
+    /// Visibility probe for `ALL_POLICIES`.
+    pub all_policies_probe: OraclePolicyCatalogProbe,
+    /// Visible matching policies, capped at [`MAX_VPD_RLS_POLICY_ROWS`].
+    pub policies: Vec<OracleVpdRlsPolicy>,
+    /// Human-readable, non-secret explanation of the observation boundary.
+    pub detail: String,
+}
 
 /// Immutable set of live dictionary answers for one exact resolution context.
 #[derive(Debug, Clone)]
@@ -473,6 +593,23 @@ pub async fn read_catalog_resolve_context(
     generation: oraclemcp_guard::CatalogGeneration,
     statement_scope: StatementScope,
 ) -> Result<ResolveCtx, DbError> {
+    let session = read_session_security_context(cx, conn).await?;
+    Ok(ResolveCtx {
+        connected_schema: session.session_user,
+        current_schema: session.current_schema,
+        edition: session.edition_name,
+        enabled_roles: session.enabled_roles.into_iter().collect(),
+        statement_scope,
+        generation,
+    })
+}
+
+/// Read the live session security inputs that affect dictionary visibility and
+/// VPD/RLS diagnosis.
+pub async fn read_session_security_context(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+) -> Result<OracleSessionSecurityContext, DbError> {
     let rows = conn.query_rows(cx, SESSION_CONTEXT_SQL, &[]).await?;
     let [row] = rows.as_slice() else {
         return Err(DbError::Query(
@@ -507,24 +644,103 @@ pub async fn read_catalog_resolve_context(
             "catalog resolver enabled-role cap exceeded: more than {MAX_SESSION_ROLES}"
         )));
     }
-    let mut enabled_roles = BTreeSet::new();
+    let mut enabled_roles = Vec::new();
     for row in &role_rows {
         let Some(role) = required_text(row, "ROLE") else {
             return Err(DbError::Query(
                 "catalog resolver enabled-role row was incomplete".to_owned(),
             ));
         };
-        enabled_roles.insert(role);
+        enabled_roles.push(role);
     }
-
-    Ok(ResolveCtx {
-        connected_schema,
+    enabled_roles.sort();
+    enabled_roles.dedup();
+    Ok(OracleSessionSecurityContext {
+        session_user: connected_schema,
         current_schema,
-        edition: Some(edition),
+        edition_name: Some(edition),
         enabled_roles,
-        statement_scope,
-        generation,
     })
+}
+
+/// Observe VPD/RLS policies visible for a schema. Empty policy rows are reported
+/// as an observation boundary, not as proof that no protected objects exist.
+pub async fn observe_vpd_rls_for_schema(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    schema: &str,
+) -> OracleVpdRlsObservation {
+    let session = read_session_security_context(cx, conn).await.ok();
+    let schema = if schema.trim().is_empty() {
+        session
+            .as_ref()
+            .map(|session| session.current_schema.as_str())
+            .unwrap_or("")
+    } else {
+        schema
+    };
+    let schema = schema.to_ascii_uppercase();
+    let scope = format!("schema:{schema}");
+    let (policies, policy_error) = query_vpd_rls_policies(
+        cx,
+        conn,
+        VPD_RLS_POLICY_BY_SCHEMA_SQL,
+        &[
+            OracleBind::from(schema),
+            OracleBind::from((MAX_VPD_RLS_POLICY_ROWS + 1) as i64),
+        ],
+    )
+    .await;
+    let probe = query_policy_catalog_probe(cx, conn).await;
+    build_vpd_rls_observation(scope, session, probe, policies, policy_error)
+}
+
+/// Observe VPD/RLS policies visible for resolved query relations. Empty policy
+/// rows are reported as an observation boundary, not as proof of absence.
+pub async fn observe_vpd_rls_for_relations(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relations: &[ResolvedObject],
+) -> OracleVpdRlsObservation {
+    let session = read_session_security_context(cx, conn).await.ok();
+    let mut policies = Vec::new();
+    let mut policy_error = None;
+    let mut seen = BTreeSet::new();
+    for relation in relations {
+        if relation.db_link.is_some()
+            || !seen.insert((relation.owner.clone(), relation.name.clone()))
+        {
+            continue;
+        }
+        let (mut rows, error) = query_vpd_rls_policies(
+            cx,
+            conn,
+            VPD_RLS_POLICY_BY_OBJECT_SQL,
+            &[
+                OracleBind::from(relation.owner.as_str()),
+                OracleBind::from(relation.name.as_str()),
+                OracleBind::from((MAX_VPD_RLS_POLICY_ROWS + 1) as i64),
+            ],
+        )
+        .await;
+        policies.append(&mut rows);
+        if error.is_some() {
+            policy_error = error;
+            break;
+        }
+        if policies.len() > MAX_VPD_RLS_POLICY_ROWS {
+            policies.truncate(MAX_VPD_RLS_POLICY_ROWS);
+            break;
+        }
+    }
+    let probe = query_policy_catalog_probe(cx, conn).await;
+    build_vpd_rls_observation(
+        "relations".to_owned(),
+        session,
+        probe,
+        policies,
+        policy_error,
+    )
 }
 
 struct DictionaryLookup<'a> {
@@ -1384,6 +1600,142 @@ async fn target_column_catalog_has_visible_rows(
         .is_empty())
 }
 
+async fn query_policy_catalog_probe(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+) -> OraclePolicyCatalogProbe {
+    match conn.query_rows(cx, ALL_POLICIES_VISIBILITY_SQL, &[]).await {
+        Ok(rows) => {
+            let visible = rows
+                .first()
+                .and_then(|row| row.parse_i64("VISIBLE_POLICY_ROWS"))
+                .is_some_and(|count| count > 0);
+            if visible {
+                OraclePolicyCatalogProbe {
+                    visibility: OraclePolicyCatalogVisibility::PolicyRowsVisible,
+                    visible_policy_rows_probe: Some(true),
+                    detail: "ALL_POLICIES returned at least one row visible to this principal"
+                        .to_owned(),
+                }
+            } else {
+                OraclePolicyCatalogProbe {
+                    visibility: OraclePolicyCatalogVisibility::NoPolicyRowsVisible,
+                    visible_policy_rows_probe: Some(false),
+                    detail: "ALL_POLICIES returned zero visible rows; this may be a catalog-blind principal and is not proof that no policy exists".to_owned(),
+                }
+            }
+        }
+        Err(error) => OraclePolicyCatalogProbe {
+            visibility: OraclePolicyCatalogVisibility::Unavailable,
+            visible_policy_rows_probe: None,
+            detail: format!("ALL_POLICIES visibility probe failed: {error}"),
+        },
+    }
+}
+
+async fn query_vpd_rls_policies(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    sql: &str,
+    binds: &[OracleBind],
+) -> (Vec<OracleVpdRlsPolicy>, Option<String>) {
+    match conn.query_rows(cx, sql, binds).await {
+        Ok(rows) => (
+            rows.iter()
+                .take(MAX_VPD_RLS_POLICY_ROWS)
+                .filter_map(vpd_rls_policy_from_row)
+                .collect(),
+            None,
+        ),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    }
+}
+
+fn vpd_rls_policy_from_row(row: &OracleRow) -> Option<OracleVpdRlsPolicy> {
+    let object_owner = required_text(row, "OBJECT_OWNER")?;
+    let object_name = required_text(row, "OBJECT_NAME")?;
+    let policy_name = required_text(row, "POLICY_NAME")?;
+    Some(OracleVpdRlsPolicy {
+        object_owner,
+        object_name,
+        policy_name,
+        function_owner: optional_text(row, "PF_OWNER"),
+        package_name: optional_text(row, "PACKAGE"),
+        function_name: optional_text(row, "FUNCTION"),
+        statement_types: policy_statement_types(row),
+        enabled: is_yes(row.text("ENABLE")),
+    })
+}
+
+fn policy_statement_types(row: &OracleRow) -> Vec<String> {
+    [
+        ("SEL", "select"),
+        ("INS", "insert"),
+        ("UPD", "update"),
+        ("DEL", "delete"),
+    ]
+    .into_iter()
+    .filter_map(|(column, label)| is_yes(row.text(column)).then_some(label.to_owned()))
+    .collect()
+}
+
+fn is_yes(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.eq_ignore_ascii_case("YES") || value.eq_ignore_ascii_case("Y"))
+}
+
+fn build_vpd_rls_observation(
+    scope: String,
+    session: Option<OracleSessionSecurityContext>,
+    all_policies_probe: OraclePolicyCatalogProbe,
+    policies: Vec<OracleVpdRlsPolicy>,
+    policy_error: Option<String>,
+) -> OracleVpdRlsObservation {
+    let (status, detail) = if let Some(error) = policy_error {
+        (
+            OracleVpdRlsObservationStatus::VisibilityUnavailable,
+            format!("could not inspect VPD/RLS policies for {scope}: {error}"),
+        )
+    } else if !policies.is_empty() {
+        (
+            OracleVpdRlsObservationStatus::PoliciesObserved,
+            format!(
+                "{} visible VPD/RLS polic{} observed for {scope}",
+                policies.len(),
+                if policies.len() == 1 { "y" } else { "ies" }
+            ),
+        )
+    } else {
+        match all_policies_probe.visibility {
+            OraclePolicyCatalogVisibility::PolicyRowsVisible => (
+                OracleVpdRlsObservationStatus::NoVisibleMatchingPolicies,
+                format!(
+                    "ALL_POLICIES is readable, but no matching VPD/RLS policies were visible for {scope}; this is observed catalog evidence only"
+                ),
+            ),
+            OraclePolicyCatalogVisibility::NoPolicyRowsVisible => (
+                OracleVpdRlsObservationStatus::NoVisiblePolicyCatalogRows,
+                format!(
+                    "no ALL_POLICIES rows are visible to this principal while inspecting {scope}; a filtered read may still be silent"
+                ),
+            ),
+            OraclePolicyCatalogVisibility::Unavailable => (
+                OracleVpdRlsObservationStatus::VisibilityUnavailable,
+                format!(
+                    "ALL_POLICIES visibility is unavailable while inspecting {scope}; policy absence is not proven"
+                ),
+            ),
+        }
+    };
+    OracleVpdRlsObservation {
+        status,
+        scope,
+        session,
+        all_policies_probe,
+        policies,
+        detail,
+    }
+}
+
 fn cache_lock_error<T>(_error: std::sync::PoisonError<T>) -> DbError {
     DbError::Query("catalog resolver cache lock poisoned".to_owned())
 }
@@ -1510,12 +1862,90 @@ mod tests {
             COLUMN_CONFLICT_SQL,
             RELATION_COLUMN_SQL,
             SELECT_POLICY_SQL,
+            VPD_RLS_POLICY_BY_SCHEMA_SQL,
+            VPD_RLS_POLICY_BY_OBJECT_SQL,
+            ALL_POLICIES_VISIBILITY_SQL,
             POLICY_CATALOG_PROOF_SQL,
             VIRTUAL_COLUMN_SQL,
             TARGET_COLUMN_CATALOG_PROOF_SQL,
         ] {
             assert!(!sql.contains("{}"));
         }
+    }
+
+    #[test]
+    fn vpd_rls_schema_observation_names_visible_policy() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new([
+                vec![row(&[
+                    ("SESSION_USER", Some("ORACLEMCP_D3_SIGHTED")),
+                    ("CURRENT_SCHEMA", Some("ORACLEMCP_D3_OWNER")),
+                    ("EDITION_NAME", Some("ORA$BASE")),
+                ])],
+                vec![row(&[("ROLE", Some("SELECT_CATALOG_ROLE"))])],
+                vec![row(&[
+                    ("OBJECT_OWNER", Some("ORACLEMCP_D3_OWNER")),
+                    ("OBJECT_NAME", Some("ORACLEMCP_D3_PROTECTED")),
+                    ("POLICY_NAME", Some("ORACLEMCP_D3_VPD")),
+                    ("PF_OWNER", Some("ORACLEMCP_D3_OWNER")),
+                    ("PACKAGE", None),
+                    ("FUNCTION", Some("ORACLEMCP_D3_VPD")),
+                    ("SEL", Some("YES")),
+                    ("INS", Some("NO")),
+                    ("UPD", Some("NO")),
+                    ("DEL", Some("NO")),
+                    ("ENABLE", Some("YES")),
+                ])],
+                vec![row(&[("VISIBLE_POLICY_ROWS", Some("1"))])],
+            ]);
+            let observation = observe_vpd_rls_for_schema(&cx, &conn, "").await;
+            assert_eq!(
+                observation.status,
+                OracleVpdRlsObservationStatus::PoliciesObserved
+            );
+            assert_eq!(observation.scope, "schema:ORACLEMCP_D3_OWNER");
+            assert_eq!(
+                observation
+                    .session
+                    .as_ref()
+                    .map(|session| session.session_user.as_str()),
+                Some("ORACLEMCP_D3_SIGHTED")
+            );
+            assert_eq!(observation.policies.len(), 1);
+            assert_eq!(observation.policies[0].policy_name, "ORACLEMCP_D3_VPD");
+            assert_eq!(
+                observation.policies[0].statement_types,
+                vec!["select".to_owned()]
+            );
+        });
+    }
+
+    #[test]
+    fn vpd_rls_observation_treats_empty_all_policies_as_blind_risk() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new([
+                vec![row(&[
+                    ("SESSION_USER", Some("ORACLEMCP_D3_BLIND")),
+                    ("CURRENT_SCHEMA", Some("ORACLEMCP_D3_OWNER")),
+                    ("EDITION_NAME", Some("ORA$BASE")),
+                ])],
+                Vec::new(),
+                Vec::new(),
+                vec![row(&[("VISIBLE_POLICY_ROWS", Some("0"))])],
+            ]);
+            let observation = observe_vpd_rls_for_schema(&cx, &conn, "").await;
+            assert_eq!(
+                observation.status,
+                OracleVpdRlsObservationStatus::NoVisiblePolicyCatalogRows
+            );
+            assert!(
+                observation
+                    .detail
+                    .contains("filtered read may still be silent"),
+                "empty ALL_POLICIES must be a warning boundary: {observation:?}"
+            );
+            assert!(observation.policies.is_empty());
+        });
     }
 
     #[test]

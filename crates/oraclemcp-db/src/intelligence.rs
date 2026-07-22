@@ -2599,6 +2599,7 @@ mod tests {
             next_cursor: None,
             total_bytes: 0,
             observed_scn: None,
+            rls_vpd: None,
             mask_certificate: None,
         }
     }

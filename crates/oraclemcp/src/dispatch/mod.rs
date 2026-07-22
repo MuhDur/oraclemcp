@@ -65,12 +65,13 @@ use oraclemcp_db::{
     describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
     diff_query_responses, execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl,
     get_source, get_sources_by_name, incomparable_masked_columns, list_objects, list_objects_page,
-    list_schema_projection_page, list_schemas, orient_fks_page, orient_hot_objects_page,
-    orient_recent_ddl_page, orient_schema_page, paginated_sql, plan_cost_estimate,
-    plscope_identifiers, plscope_statements, primary_key_columns, probe_dependents, read_lob,
-    read_query, read_query_as_of, read_query_named, resolved_relations_read_purity, sample_rows,
-    search_objects, search_source, semantic_search_query, semantic_search_query_with_filter,
-    semantic_search_text_query, semantic_search_text_query_with_filter, serialize_row,
+    list_schema_projection_page, list_schemas, observe_vpd_rls_for_relations, orient_fks_page,
+    orient_hot_objects_page, orient_recent_ddl_page, orient_schema_page, paginated_sql,
+    plan_cost_estimate, plscope_identifiers, plscope_statements, primary_key_columns,
+    probe_dependents, read_lob, read_query, read_query_as_of, read_query_named,
+    resolved_relations_read_purity, sample_rows, search_objects, search_source,
+    semantic_search_query, semantic_search_query_with_filter, semantic_search_text_query,
+    semantic_search_text_query_with_filter, serialize_row,
 };
 use oraclemcp_db::{SearchDetailLevel, SourceText};
 use oraclemcp_error::{
@@ -1757,6 +1758,7 @@ impl OracleDispatcher {
                 next_cursor: None,
                 total_bytes: 0,
                 observed_scn: None,
+                rls_vpd: None,
                 mask_certificate: source_row.as_ref().and_then(|row| {
                     policy
                         .result_masking
@@ -5655,21 +5657,6 @@ async fn ensure_resolved_read_only(
     sql: &str,
 ) -> Result<GuardDecision, ErrorEnvelope> {
     resolve_read_only_relations(cx, conn, cache, sql)
-        .await
-        .map(|(_, decision)| decision)
-}
-
-/// The text-embedding tool reaches this only after it has proven the local
-/// 23ai capability and constructed the SQL itself. Raw `oracle_query` never
-/// invokes this path, so a caller cannot turn VECTOR_EMBEDDING into a generic
-/// read escape hatch.
-async fn ensure_resolved_read_only_with_verified_local_vector_embedding(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    cache: &OracleCatalogResolverCache,
-    sql: &str,
-) -> Result<GuardDecision, ErrorEnvelope> {
-    resolve_read_only_relations_with_verified_local_vector_embedding(cx, conn, cache, sql)
         .await
         .map(|(_, decision)| decision)
 }
@@ -12187,6 +12174,9 @@ struct QueryPrepared {
     /// classifier input or the executed SQL text — the proven `executed_sql`
     /// runs unchanged inside a `DBMS_FLASHBACK` session window when this is set.
     as_of: Option<AsOf>,
+    /// Resolved relation evidence from the same semantic gate that admitted the
+    /// read. Used only to attach VPD/RLS observation metadata to the result.
+    rls_vpd_relations: Vec<ResolvedObject>,
     /// Arc N: the proof of what the profile's policy took away, attached to the
     /// response so a client (and the operator console) can see that it applied.
     policy: Option<Value>,
@@ -13077,7 +13067,7 @@ impl OracleDispatcher {
                 let executed_sql =
                     with_audit_marker(&policy_sql, state.active_profile.as_deref(), audit_tool);
                 let classified = if verified_local_vector_embedding {
-                    ensure_resolved_read_only_with_verified_local_vector_embedding(
+                    resolve_read_only_relations_with_verified_local_vector_embedding(
                         cx,
                         state.conn.as_ref(),
                         &state.catalog_cache,
@@ -13085,7 +13075,7 @@ impl OracleDispatcher {
                     )
                     .await
                 } else {
-                    ensure_resolved_read_only(
+                    resolve_read_only_relations(
                         cx,
                         state.conn.as_ref(),
                         &state.catalog_cache,
@@ -13093,9 +13083,13 @@ impl OracleDispatcher {
                     )
                     .await
                 };
-                let (gate, verdict_certificate) = match classified {
-                    Ok(decision) => (Ok(()), Some(decision.verdict_certificate().clone())),
-                    Err(error) => (Err(error), None),
+                let (gate, verdict_certificate, rls_vpd_relations) = match classified {
+                    Ok((relations, decision)) => (
+                        Ok(()),
+                        Some(decision.verdict_certificate().clone()),
+                        relations,
+                    ),
+                    Err(error) => (Err(error), None, Vec::new()),
                 };
                 (
                     QueryPrepared {
@@ -13105,6 +13099,7 @@ impl OracleDispatcher {
                         gate,
                         verdict_certificate,
                         as_of,
+                        rls_vpd_relations,
                         policy: policy.attachment.clone(),
                     },
                     semantic_metadata,
@@ -14976,6 +14971,7 @@ impl OracleDispatcher {
             gate,
             verdict_certificate,
             as_of,
+            rls_vpd_relations,
             policy: _,
         } = prepared;
         let timeout_seconds = a.timeout_seconds;
@@ -15229,6 +15225,11 @@ impl OracleDispatcher {
                         return Err(DbError::into_envelope(error));
                     }
                 };
+                if !rls_vpd_relations.is_empty() {
+                    response.rls_vpd = Some(
+                        observe_vpd_rls_for_relations(cx, &read_conn, &rls_vpd_relations).await,
+                    );
+                }
                 if let Some(audit_certificate) = audit_certificate.as_ref() {
                     append_query_read_audit(
                         read_audit,
@@ -15359,6 +15360,7 @@ impl OracleDispatcher {
                     gate,
                     verdict_certificate,
                     as_of,
+                    rls_vpd_relations: Vec::new(),
                     policy: policy.attachment.clone(),
                 }
             };
@@ -15466,6 +15468,7 @@ impl OracleDispatcher {
             gate,
             verdict_certificate: _,
             as_of,
+            rls_vpd_relations: _,
             policy: _,
         } = prepared;
         dispatch_checkpoint(cx, "oraclemcp.dispatch.query.row_stream.before")?;
