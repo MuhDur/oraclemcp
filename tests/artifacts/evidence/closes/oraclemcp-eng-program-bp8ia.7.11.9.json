@@ -7,8 +7,7 @@
     "summary": "DI6 preserves successful oracle_checkpoint and oracle_undo_to responses across late deadline handling while leaving previews and effectless bodies cancellable.",
     "in_scope": [
       "crates/oraclemcp/src/dispatch/mod.rs",
-      "crates/oraclemcp/src/dispatch/tests.rs",
-      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.7.11.9.json"
+      "crates/oraclemcp/src/dispatch/tests.rs"
     ],
     "out_of_scope": [
       "No live Oracle deadline-injection lane is claimed; this close is pinned by the dispatcher unit tests that exercise the terminal-effect classifier directly.",

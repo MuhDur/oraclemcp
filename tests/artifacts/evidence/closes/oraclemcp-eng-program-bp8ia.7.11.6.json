@@ -8,8 +8,7 @@
     "in_scope": [
       "crates/oraclemcp/src/dispatch/mod.rs",
       "crates/oraclemcp/src/dispatch/tests.rs",
-      "crates/oraclemcp/src/registry.rs",
-      "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.7.11.6.json"
+      "crates/oraclemcp/src/registry.rs"
     ],
     "out_of_scope": [
       "No live Oracle preview_dml run is claimed; this close is pinned by the dispatcher/runtime clamp and registry schema unit tests.",
