@@ -1,0 +1,95 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-22T08:48:14Z",
+  "bead_id": "oraclemcp-091-p2-4-sni-default-flip-4hkt9",
+  "scope": {
+    "summary": "Server wallet profiles no longer imply SNI; explicit use_sni still passes through, and README/config docs describe the opt-in SNI contract and rustls ServerName limit.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/connection.rs",
+      "crates/oraclemcp-core/tests/oci_tcps_e2e.rs",
+      "README.md",
+      "docs/configuration.md",
+      "oraclemcp.example.toml"
+    ],
+    "out_of_scope": [
+      "real OCI ADB endpoint smoke F4, which remains an operator/live-environment gate",
+      "B7b session teardown and logoff verification paths owned by pane 3",
+      "repo-wide 0.9.1 to 0.10.0 train rename oraclemcp-788nn, held by operator sequencing"
+    ]
+  },
+  "source": {
+    "sha": "b21afa0f04d212278cb1d92f545b86b52eed8f97",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [
+    {
+      "command": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp-db thin_connect_options_leave_wallet_sni_at_driver_default -- --nocapture",
+      "result": "pass",
+      "summary": "Wallet-only connect options keep use_sni at the driver default instead of forcing true."
+    },
+    {
+      "command": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp-db thin_connect_options_apply_explicit_tls_fields -- --nocapture",
+      "result": "pass",
+      "summary": "Explicit wallet, DN, and use_sni=false fields still pass through to the driver."
+    },
+    {
+      "command": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp-config --test example_config_parses -- --nocapture",
+      "result": "pass",
+      "summary": "The updated annotated example config still parses and validates."
+    },
+    {
+      "command": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core --test oci_tcps_e2e p2_4_wallet_profile_without_explicit_sni_reaches_local_tcps_terminator -- --nocapture",
+      "result": "pass",
+      "summary": "The D6 synthetic wallet lane reaches the local TCPS terminator without an explicit use_sni value."
+    },
+    {
+      "command": "env -u CARGO_TARGET_DIR cargo test -p oraclemcp-core --test oci_tcps_e2e token_exec_runs_once_per_physical_tcps_connect_attempt -- --nocapture",
+      "result": "pass",
+      "summary": "Same-file pre-existing IAM token-exec TCPS addition was verified before committing oci_tcps_e2e.rs by explicit path."
+    },
+    {
+      "command": "env -u CARGO_TARGET_DIR cargo fmt --all -- --check",
+      "result": "pass",
+      "summary": "Formatting check passed after the code/test/docs patch."
+    },
+    {
+      "command": "git diff --check -- README.md docs/configuration.md oraclemcp.example.toml crates/oraclemcp-db/src/connection.rs crates/oraclemcp-core/tests/oci_tcps_e2e.rs",
+      "result": "pass",
+      "summary": "No whitespace errors in the touched paths."
+    }
+  ],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oraclemcp-db driver adapter",
+        "kind": "crate-test",
+        "trace": "thin_connect_options_leave_wallet_sni_at_driver_default"
+      },
+      {
+        "name": "D6 local TCPS lane",
+        "kind": "crate-test",
+        "trace": "p2_4_wallet_profile_without_explicit_sni_reaches_local_tcps_terminator"
+      },
+      {
+        "name": "profile documentation and example config",
+        "kind": "config-doc",
+        "trace": "example_config_parses_and_validates"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Proof is local synthetic TCPS plus scoped unit/config tests; no real ADB endpoint was contacted in this close."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "scoped-test"
+  }
+}
