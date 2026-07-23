@@ -173,7 +173,7 @@ pub trait CqnNotificationReceiver {
 /// name an `oracledb::` path — so consumers (e.g. `oraclemcp doctor`'s trio-stack
 /// provenance) can report the *driver's* version without reaching for
 /// `env!("CARGO_PKG_VERSION")`, which would resolve to the wrong crate. Because
-/// the whole workspace pins `oracledb = "=0.9.0"`, this is `"0.9.0"`.
+/// the whole workspace pins `oracledb = "=0.9.1"`, this is `"0.9.1"`.
 pub const DRIVER_VERSION: &str = oracledb::VERSION;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8499,25 +8499,25 @@ mod driver_seam {
     }
 
     #[test]
-    fn pin_is_0_9_0_and_seam_intact() {
+    fn pin_is_0_9_1_and_seam_intact() {
         let root = workspace_root();
         let manifest =
             std::fs::read_to_string(root.join("Cargo.toml")).expect("read workspace Cargo.toml");
         assert!(
-            manifest.contains(r#"oracledb = { version = "=0.9.0", default-features = false }"#),
-            "workspace Cargo.toml must keep the oracledb dependency exactly pinned at =0.9.0"
+            manifest.contains(r#"oracledb = { version = "=0.9.1", default-features = false }"#),
+            "workspace Cargo.toml must keep the oracledb dependency exactly pinned at =0.9.1"
         );
 
         let lock = std::fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");
         assert_eq!(
             lock_package_versions(&lock, "oracledb"),
-            vec!["0.9.0".to_owned()],
-            "Cargo.lock must resolve exactly one oracledb package at 0.9.0"
+            vec!["0.9.1".to_owned()],
+            "Cargo.lock must resolve exactly one oracledb package at 0.9.1"
         );
         assert_eq!(
             lock_package_versions(&lock, "oracledb-protocol"),
-            vec!["0.9.0".to_owned()],
-            "Cargo.lock must resolve the matching oracledb-protocol 0.9.0 package"
+            vec!["0.9.1".to_owned()],
+            "Cargo.lock must resolve the matching oracledb-protocol 0.9.1 package"
         );
 
         assert_eq!(

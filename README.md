@@ -243,7 +243,7 @@ pin is required, for two independent reasons: this checkout resolves
 `try_trait_v2_residual` inside asupersync (it is opt-in, but in asupersync's
 default feature set, and reaches us through the `oracledb` dependency), and on
 **Windows** `oraclemcp-core` additionally needs `windows_by_handle`. The pinned
-`oracledb` 0.9.0 driver's own source is stable-clean — it is its asupersync
+`oracledb` 0.9.1 driver's own source is stable-clean — it is its asupersync
 dependency declaration that pulls the nightly feature in.
 [`docs/toolchain.md`](docs/toolchain.md) has the exact mechanism. The
 repository's `rust-toolchain.toml` selects the pin for local builds. Use the release installer above when you want

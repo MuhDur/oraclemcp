@@ -25,7 +25,7 @@ homepage = "https://github.com/MuhDur/oraclemcp"
 # depends on asupersync WITHOUT opting out, and cargo unifies features. Nobody's
 # source uses the nightly syntax — it arrives transitively (bead oraclemcp-yi2z).
 # (2) Windows only: oraclemcp-core's windows_by_handle (see its lib.rs).
-# asupersync does not "require" nightly. The oracledb 0.9.0 driver's own source is stable-clean —
+# asupersync does not "require" nightly. The oracledb 0.9.1 driver's own source is stable-clean —
 # it is its dep declaration, not its source, that is the proximate cause. See docs/toolchain.md §1.
 keywords = ["oracle", "mcp", "database", "sql"]
 categories = ["database", "development-tools"]
@@ -56,7 +56,7 @@ oracledb = { version = "=0.9.1", default-features = false }
 # `TnsnamesReader` DIRECTLY via the `oracledb_protocol::` path — which does NOT
 # match the driver-seam pattern (`oracledb` + `::`) that
 # scripts/oraclemcp_driver_seam_lint.sh confines to connection.rs, because the
-# `_` breaks the adjacency. Pinned EXACTLY to the version `oracledb 0.9.0`
+# `_` breaks the adjacency. Pinned EXACTLY to the version `oracledb 0.9.1`
 # already resolves, so this direct edge never floats the graph; pure
 # encode/decode (no async runtime), so the engine-free boundary holds.
 oracledb-protocol = { version = "=0.9.1", default-features = false }
