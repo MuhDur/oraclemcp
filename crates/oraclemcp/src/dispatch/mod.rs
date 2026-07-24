@@ -45,12 +45,12 @@ use oraclemcp_config::{
     ProfileMetadata, ReloadProfileAction, ReloadProfileReason,
 };
 use oraclemcp_core::{
-    CLEANUP_POLL_QUOTA, ConnectionStatus, CustomToolCatalog, CustomToolExecutor,
-    DEFAULT_REQUEST_TIMEOUT, DispatchCloseFuture, DispatchCloseReason, DispatchContext,
-    DispatchFuture, McpSurfaceDetail, McpSurfaceFuture, McpSurfaceState, McpToolCatalogSnapshot,
-    RequestBudget, ToolBody, ToolDispatch, ToolRegistry, ToolStreamFrame, ToolStreamSender,
-    WriteIntent, WriteIntentDetails, WriteIntentError, WriteIntentLog, WriteIntentOutcome,
-    execute_custom_tool, narrow_to_read_path, sign_token, verify_token,
+    CLEANUP_POLL_QUOTA, ConnectionStatus, CustomToolCatalog, DEFAULT_REQUEST_TIMEOUT,
+    DispatchCloseFuture, DispatchCloseReason, DispatchContext, DispatchFuture, McpSurfaceDetail,
+    McpSurfaceFuture, McpSurfaceState, McpToolCatalogSnapshot, RequestBudget, ToolDispatch,
+    ToolRegistry, ToolStreamFrame, ToolStreamSender, WriteIntent, WriteIntentDetails,
+    WriteIntentError, WriteIntentLog, WriteIntentOutcome, execute_custom_tool, narrow_to_read_path,
+    sign_token, verify_token,
 };
 use oraclemcp_db::{
     AsOf, CatalogInvalidation, DbError, DbRequestQuota, DbmsOutput, DependentObject,
@@ -66,9 +66,9 @@ use oraclemcp_db::{
     get_source, get_sources_by_name, incomparable_masked_columns, list_objects, list_objects_page,
     list_schema_projection_page, list_schemas, observe_vpd_rls_for_relations, paginated_sql,
     plan_cost_estimate, plscope_identifiers, plscope_statements, primary_key_columns,
-    probe_dependents, read_lob, read_query, read_query_as_of, read_query_named,
-    resolved_relations_read_purity, sample_rows, search_objects, search_source,
-    semantic_search_query, semantic_search_query_with_filter, semantic_search_text_query,
+    probe_dependents, read_lob, read_query, read_query_as_of, resolved_relations_read_purity,
+    sample_rows, search_objects, search_source, semantic_search_query,
+    semantic_search_query_with_filter, semantic_search_text_query,
     semantic_search_text_query_with_filter, serialize_row,
 };
 use oraclemcp_db::{SearchDetailLevel, SourceText};
@@ -81,8 +81,8 @@ use oraclemcp_guard::{
     ExecGrantBinding, ExecGrantError, ExecGrantStore, GuardDecision, LevelDecision, ObjectRef,
     OperatingLevel, PolicyGate, PolicyGateAdmission, PolicyGateDenial, PolicyGateRequest, Purity,
     QuoteSemantics, RawName, Resolution, ResolvedObject, SessionLevelState, SideEffectOracle,
-    SqlPolicyConfig, VerdictCertificate, enforce_sql_policy, named_bind_placeholders,
-    parse_edition_lifecycle_sql, semantic_read_plan,
+    SqlPolicyConfig, VerdictCertificate, enforce_sql_policy, parse_edition_lifecycle_sql,
+    semantic_read_plan,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -458,6 +458,12 @@ struct PatchPreviewEntry {
 // items had inline, so no call site, tool surface, or behavior changes.
 mod orient;
 use orient::*;
+
+// Custom (operator-defined) tool execution family (C6 de-monolith). Extracted
+// isomorphically: `use custom_tool::*;` restores the exact effective visibility
+// these items had inline, so no call site, tool surface, or behavior changes.
+mod custom_tool;
+use custom_tool::*;
 
 /// The dispatcher: owns the live connection behind an Asupersync [`AsyncMutex`]
 /// so the now-async dispatch can hold the guard across a native-async DB round
@@ -11127,258 +11133,6 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
         map.insert("compatibility_tool".to_owned(), json!("deploy_ddl"));
     }
     Ok(out)
-}
-
-struct ReadOnlyCustomToolExecutor<'a> {
-    cx: &'a Cx,
-    conn: &'a dyn OracleConnection,
-    catalog_cache: &'a OracleCatalogResolverCache,
-}
-
-#[async_trait::async_trait(?Send)]
-impl CustomToolExecutor for ReadOnlyCustomToolExecutor<'_> {
-    async fn run(
-        &self,
-        body: ToolBody<'_>,
-        level: OperatingLevel,
-        binds: &[(String, OracleBind)],
-    ) -> Result<Value, ErrorEnvelope> {
-        if level > OperatingLevel::ReadOnly {
-            return Err(ErrorEnvelope::new(
-                ErrorClass::OperatingLevelTooLow,
-                format!(
-                    "custom tool requires {} but this server executes only READ_ONLY custom tools",
-                    level.as_str()
-                ),
-            )
-            .with_next_step(
-                "move write or DDL workflows behind a separate guarded execution service",
-            ));
-        }
-
-        // Only Form A reaches execution; Form B (`call = ...`) is rejected at
-        // catalog load, so the body is always inline SQL (QA100 .65).
-        let ToolBody::InlineSql(sql) = body;
-        let sql = sql.to_owned();
-        ensure_resolved_read_only(self.cx, self.conn, self.catalog_cache, &sql).await?;
-        // A9: operator-defined read tools also narrow the handler context to the
-        // read-path capability row. The cancellation checkpoint runs under the
-        // narrowed `read_cx`; only the locked, object-safe `OracleConnection`
-        // round trip takes the full `cx` (the one documented IO exception).
-        let read_cx = narrow_to_read_path(self.cx);
-        dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.custom_read.before")?;
-        read_query_named(
-            self.cx,
-            self.conn,
-            &sql,
-            binds,
-            QueryCaps::default(),
-            0,
-            &SerializeOptions::default(),
-        )
-        .await
-        .map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
-        .map_err(DbError::into_envelope)
-    }
-}
-
-fn consume_custom_tool_control_string(
-    args: &mut serde_json::Map<String, Value>,
-    canonical: &str,
-    keys: &[&str],
-) -> Result<Option<String>, ErrorEnvelope> {
-    let mut raw = None;
-    for key in keys {
-        if let Some(value) = args.remove(*key) {
-            if raw.is_some() {
-                return Err(invalid_args(format!(
-                    "invalid arguments for {canonical}: {key} and its aliases are mutually exclusive"
-                )));
-            }
-            let Some(value) = value.as_str().map(str::to_owned) else {
-                return Err(invalid_args(format!(
-                    "invalid arguments for {canonical}: {key} must be a string"
-                )));
-            };
-            raw = Some(value);
-        }
-    }
-    Ok(raw)
-}
-
-fn consume_custom_tool_control_bool(
-    args: &mut serde_json::Map<String, Value>,
-    canonical: &str,
-    keys: &[&str],
-) -> Result<bool, ErrorEnvelope> {
-    let mut value = None;
-    for key in keys {
-        if let Some(raw) = args.remove(*key) {
-            if value.is_some() {
-                return Err(invalid_args(format!(
-                    "invalid arguments for {canonical}: {key} and its aliases are mutually exclusive"
-                )));
-            }
-            let Some(raw) = raw.as_bool() else {
-                return Err(invalid_args(format!(
-                    "invalid arguments for {canonical}: {key} must be true/false"
-                )));
-            };
-            value = Some(raw);
-        }
-    }
-    Ok(value.unwrap_or(false))
-}
-
-fn consume_custom_tool_control_usize(
-    args: &mut serde_json::Map<String, Value>,
-    canonical: &str,
-    keys: &[&str],
-) -> Result<Option<usize>, ErrorEnvelope> {
-    let mut value = None;
-    for key in keys {
-        if let Some(raw) = args.remove(*key) {
-            if value.is_some() {
-                return Err(invalid_args(format!(
-                    "invalid arguments for {canonical}: {key} and its aliases are mutually exclusive"
-                )));
-            }
-            let Some(raw) = raw.as_u64() else {
-                return Err(invalid_args(format!(
-                    "invalid arguments for {canonical}: {key} must be a non-negative integer"
-                )));
-            };
-            let converted = usize::try_from(raw).map_err(|_| {
-                invalid_args(format!(
-                    "invalid arguments for {canonical}: {key} exceeds supported range"
-                ))
-            })?;
-            value = Some(converted);
-        }
-    }
-    Ok(value)
-}
-
-fn consume_custom_tool_control_u64(
-    args: &mut serde_json::Map<String, Value>,
-    canonical: &str,
-    keys: &[&str],
-) -> Result<Option<u64>, ErrorEnvelope> {
-    let mut value = None;
-    for key in keys {
-        if let Some(raw) = args.remove(*key) {
-            if value.is_some() {
-                return Err(invalid_args(format!(
-                    "invalid arguments for {canonical}: {key} and its aliases are mutually exclusive"
-                )));
-            }
-            let Some(raw) = raw.as_u64() else {
-                return Err(invalid_args(format!(
-                    "invalid arguments for {canonical}: {key} must be a non-negative integer"
-                )));
-            };
-            value = Some(raw);
-        }
-    }
-    Ok(value)
-}
-
-fn ordered_custom_tool_binds(
-    sql: &str,
-    bind_values: Vec<(String, OracleBind)>,
-) -> Result<Vec<Value>, ErrorEnvelope> {
-    let mut values = HashMap::new();
-    for (name, value) in bind_values {
-        values.insert(name.to_ascii_uppercase(), value);
-    }
-    named_bind_placeholders(sql)
-        .into_iter()
-        .map(|name| {
-            values.remove(&name).map(bind_to_json).ok_or_else(|| {
-                invalid_args(format!("custom tool body references missing bind :{name}"))
-            })
-        })
-        .collect()
-}
-
-fn bind_to_json(bind: OracleBind) -> Value {
-    match bind {
-        OracleBind::Null => Value::Null,
-        OracleBind::String(v) => Value::String(v),
-        OracleBind::I64(v) => Value::Number(v.into()),
-        OracleBind::F64(v) => serde_json::Number::from_f64(v).map_or(Value::Null, Value::Number),
-        OracleBind::Bool(v) => Value::Bool(v),
-        OracleBind::TimestampTz {
-            year,
-            month,
-            day,
-            hour,
-            minute,
-            second,
-            nanosecond,
-            offset_minutes,
-        } => json!({
-            "year": year,
-            "month": month,
-            "day": day,
-            "hour": hour,
-            "minute": minute,
-            "second": second,
-            "nanosecond": nanosecond,
-            "offset_minutes": offset_minutes
-        }),
-    }
-}
-
-fn custom_tool_execute_args(
-    canonical: &str,
-    tool: &oraclemcp_core::LoadedTool,
-    args: &Value,
-) -> Result<ExecuteArgs, ErrorEnvelope> {
-    let Some(args) = args.as_object() else {
-        return Err(invalid_args(format!(
-            "invalid arguments for {canonical}: expected an object"
-        )));
-    };
-    let mut args = args.clone();
-
-    let commit = consume_custom_tool_control_bool(&mut args, canonical, &["commit"])?;
-    let hold = consume_custom_tool_control_bool(&mut args, canonical, &["hold"])?;
-    let capture_dbms_output = consume_custom_tool_control_bool(
-        &mut args,
-        canonical,
-        &["capture_dbms_output", "dbms_output"],
-    )?;
-    let dbms_output_max_lines =
-        consume_custom_tool_control_usize(&mut args, canonical, &["max_dbms_output_lines"])?;
-    let dbms_output_max_chars =
-        consume_custom_tool_control_usize(&mut args, canonical, &["max_dbms_output_chars"])?;
-    let timeout_seconds =
-        consume_custom_tool_control_u64(&mut args, canonical, &["timeout_seconds"])?;
-    let confirm = consume_custom_tool_control_string(
-        &mut args,
-        canonical,
-        &["confirm", "token", "confirmation_token"],
-    )?;
-    let ToolBody::InlineSql(sql) = tool.def.body().map_err(|error| {
-        ErrorEnvelope::new(
-            ErrorClass::InvalidArguments,
-            format!("invalid tool body: {error}"),
-        )
-    })?;
-    let binds = oraclemcp_core::bind_params(&tool.def, &Value::Object(args))?;
-    let ordered_binds = ordered_custom_tool_binds(sql, binds)?;
-    Ok(ExecuteArgs {
-        sql: sql.to_owned(),
-        binds: ordered_binds,
-        commit,
-        hold,
-        confirm,
-        capture_dbms_output,
-        dbms_output_max_lines,
-        dbms_output_max_chars,
-        timeout_seconds,
-    })
 }
 
 fn preview_sql(

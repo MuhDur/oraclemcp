@@ -1590,7 +1590,12 @@ mod tests {
             use_iam_token = true
             token_exec = ["{touch}", "{marker}"]
             "#,
-            marker = marker.display(),
+            // Forward slashes: the marker path is embedded verbatim into the TOML
+            // profile, where Windows backslashes would be TOML string escapes
+            // (`\U...` in `C:\Users\...` is an invalid unicode escape). This
+            // mirrors `coreutil`; no-op on Unix. The `marker` PathBuf below keeps
+            // its native form for the `exists()` check.
+            marker = marker.display().to_string().replace('\\', "/"),
         ));
         let mut opts = connect_options_for(&profile);
         configure_iam_token_source_with(&profile, &mut opts, env_map(&[]))

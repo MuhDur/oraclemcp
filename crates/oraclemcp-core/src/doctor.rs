@@ -4182,7 +4182,7 @@ mod tests {
         assert!(text.contains("oraclemcp doctor"));
         assert!(text.contains("Classifier self-test"));
         let j = report.to_json();
-        assert_eq!(j["checks"].as_array().unwrap().len(), 16);
+        assert_eq!(j["checks"].as_array().unwrap().len(), 17);
         assert_eq!(j["exit_code"], json!(0));
     }
 

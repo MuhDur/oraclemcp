@@ -1375,18 +1375,37 @@ mod tests {
                 ])]);
             }
             if sql.contains("FROM all_policies") {
-                return Ok(if self.catalog_fixture.has_select_vpd_policy() {
-                    vec![catalog_row(&[("POLICY_NAME", Some("CQN_POLICY"))])]
-                } else {
-                    Vec::new()
-                });
+                // The object-specific VPD gate (SELECT_POLICY_SQL) binds
+                // object_owner/object_name; the blind-visibility proof
+                // (POLICY_CATALOG_PROOF_SQL) does not. The proof must return rows
+                // so this non-blind test principal is not treated as
+                // catalog-blind and failed closed.
+                if sql.contains("object_owner") {
+                    return Ok(if self.catalog_fixture.has_select_vpd_policy() {
+                        vec![catalog_row(&[("POLICY_NAME", Some("CQN_POLICY"))])]
+                    } else {
+                        Vec::new()
+                    });
+                }
+                return Ok(vec![catalog_row(&[(
+                    "POLICY_NAME",
+                    Some("VISIBLE_POLICY"),
+                )])]);
             }
-            if sql.contains("FROM all_tab_cols") && sql.contains("virtual_column = 'YES'") {
-                return Ok(if self.catalog_fixture.has_virtual_column() {
-                    vec![catalog_row(&[("COLUMN_NAME", Some("COMPUTED"))])]
-                } else {
-                    Vec::new()
-                });
+            if sql.contains("FROM all_tab_cols") {
+                // The virtual-column gate (VIRTUAL_COLUMN_SQL) filters
+                // virtual_column = 'YES'; the column-visibility proof
+                // (TARGET_COLUMN_CATALOG_PROOF_SQL) does not. The proof must
+                // return rows so the target relation is not treated as
+                // catalog-blind and failed closed.
+                if sql.contains("virtual_column = 'YES'") {
+                    return Ok(if self.catalog_fixture.has_virtual_column() {
+                        vec![catalog_row(&[("COLUMN_NAME", Some("COMPUTED"))])]
+                    } else {
+                        Vec::new()
+                    });
+                }
+                return Ok(vec![catalog_row(&[("COLUMN_NAME", Some("ID"))])]);
             }
             Err(DbError::Query("unexpected catalog query".to_owned()))
         }
