@@ -846,7 +846,7 @@ class Ladder:
                 "an OAuth read scope lowers the HTTP session from ADMIN to READ_ONLY",
                 narrowed,
             )
-            self.session.set_scope("oracle:admin")
+            self.session.set_scope("oracle:read oracle:admin")
             restored = structured(
                 self.session.call("oracle_set_session_level", {"action": "status"})
             )
