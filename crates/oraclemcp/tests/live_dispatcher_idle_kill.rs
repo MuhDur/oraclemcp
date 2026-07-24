@@ -10,10 +10,13 @@
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp::dispatch::OracleDispatcher;
+use oraclemcp_core::WriteIntentLog;
 use oraclemcp_db::{OracleBind, OracleConnectOptions, OracleConnection, RustOracleConnection};
 use oraclemcp_guard::{OperatingLevel, SessionLevelState};
 use serde_json::json;
-use std::time::Duration;
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tempfile::tempdir;
 
 fn run_with_cx<F, Fut, T>(body: F) -> T
 where

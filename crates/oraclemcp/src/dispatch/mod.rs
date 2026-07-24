@@ -12029,6 +12029,10 @@ impl OracleDispatcher {
                             json!(state.custom_catalog.generation),
                         );
                         map.insert("profile_generation".to_owned(), json!(generation));
+                        // The switched-to profile's session-level ceiling must be
+                        // visible in the response so callers (and the e2e ladder)
+                        // can verify a protected profile's immutable READ_ONLY cap.
+                        map.insert("session".to_owned(), session_level_view(&state.level));
                     }
                     Ok(response)
                 })

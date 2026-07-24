@@ -1591,7 +1591,10 @@ fn optional_text(row: &OracleRow, name: &str) -> Option<String> {
 /// blindness (the pre-fix behavior) refused every read on any database with no
 /// VPD policies; treating an error as absence would be a fail-open. This keeps
 /// the error=refuse path exactly as fail-closed as before.
-async fn prove_policy_catalog_readable(cx: &Cx, conn: &dyn OracleConnection) -> Result<(), DbError> {
+async fn prove_policy_catalog_readable(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+) -> Result<(), DbError> {
     conn.query_rows(cx, POLICY_CATALOG_PROOF_SQL, &[]).await?;
     Ok(())
 }

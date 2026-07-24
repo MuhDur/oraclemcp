@@ -3396,6 +3396,42 @@ fn profile_switch_reports_metadata_errors_after_switching() {
     assert_eq!(current["connected"], json!(false));
 }
 
+/// The switch response must carry the switched-to profile's session-level view
+/// so callers can verify a protected profile's immutable READ_ONLY ceiling
+/// without a second round-trip. Regression guard for the e2e ladder assertion
+/// "protected profile reports its immutable READ_ONLY ceiling".
+#[test]
+fn profile_switch_response_includes_session_level_view() {
+    let dispatcher = OracleDispatcher::new_switchable(
+        Box::new(OneRowMock),
+        Some("dev".to_owned()),
+        default_read_only_level(),
+        Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
+    );
+
+    let out = dispatcher
+        .dispatch("oracle_switch_profile", json!({ "profile": "other" }))
+        .expect("switch succeeds");
+    assert_eq!(out["active_profile"], json!("other"));
+    assert_eq!(out["connected"], json!(true));
+
+    let session = out
+        .get("session")
+        .expect("switch response must include a session field");
+    assert!(
+        session.get("max_level").is_some(),
+        "session view must report max_level"
+    );
+    assert!(
+        session.get("protected").is_some(),
+        "session view must report protected"
+    );
+    assert!(
+        session.get("current_level").is_some(),
+        "session view must report current_level"
+    );
+}
+
 /// E5 connection-scope isolation: a switchable dispatcher with an explicit
 /// allow-list containing only `agent_ro` (NOT `prod_admin`). Used by the
 /// adversarial isolation tests below.

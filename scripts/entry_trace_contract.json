@@ -326,9 +326,19 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/swarm_orchestrator_tick.sh",
+      "kind": "helper",
+      "excluded_reason": "swarm-orchestration-observer"
+    },
+    {
       "path": "scripts/swarm_spawn_preflight.sh",
       "kind": "entry_point",
       "trace": "required-quality"
+    },
+    {
+      "path": "scripts/swarm_target_janitor.sh",
+      "kind": "helper",
+      "excluded_reason": "swarm-disk-janitor"
     },
     {
       "path": "scripts/test_check_mutation_result.sh",
