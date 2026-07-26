@@ -6,8 +6,8 @@
 //! OTLP/OpenTelemetry exporter maps the same snapshot at deploy time; traces
 //! flow via the `tracing` layer (P1-8).
 
-use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,17 @@ const MAX_SERIES_PER_INSTRUMENT: usize = 512;
 /// silently dropped.
 const CARDINALITY_OVERFLOW_LABEL: &str = "__cardinality_limit__";
 
+/// The `tool` label substituted for any tool name that is not in the configured
+/// advertised-tool allowlist (see [`Metrics::set_advertised_tools`]). The MCP
+/// `tools/call` name reaches the metrics layer before any tool-registry check,
+/// so it is attacker-controlled free text. Collapsing every unadvertised name to
+/// this single sentinel bounds `tool`-keyed cardinality to *(advertised count +
+/// 1)* **regardless of the order** names arrive in — an attacker can neither grow
+/// the series map nor, by pre-filling it, displace a legitimate tool's series
+/// (the failure mode of a purely numeric cap, where the first N distinct junk
+/// names win the slots and real tools spill into the overflow bucket).
+const UNADVERTISED_TOOL_LABEL: &str = "<other>";
+
 /// Return `key` unless recording it under `map` would create a new series
 /// beyond [`MAX_SERIES_PER_INSTRUMENT`] distinct existing combinations, in
 /// which case return the bounded overflow key from `overflow` instead. An
@@ -100,6 +111,12 @@ pub struct Metrics {
     pool_wait_ms: Histogram,
     pool_active: AtomicU64,
     active_lanes: AtomicU64,
+    /// The set of advertised (canonical) tool names, configured once at startup
+    /// from the server's tool registry. When present, any recorded tool name not
+    /// in this set collapses to [`UNADVERTISED_TOOL_LABEL`]; when absent (the
+    /// default for a bare [`Metrics::new`]), the numeric
+    /// [`MAX_SERIES_PER_INSTRUMENT`] cap is the only cardinality backstop.
+    advertised_tools: OnceLock<BTreeSet<String>>,
 }
 
 impl Metrics {
@@ -109,14 +126,60 @@ impl Metrics {
         Self::default()
     }
 
+    /// Configure the advertised-tool allowlist once, at startup, from the
+    /// server's tool registry (canonical names plus every accepted alias and any
+    /// operator custom tools). Names are canonicalized (trimmed; empties
+    /// dropped). After this is set, every recorded `tool` label is either an
+    /// advertised name passed through verbatim or the single
+    /// [`UNADVERTISED_TOOL_LABEL`] sentinel — so an attacker sending thousands of
+    /// distinct `tools/call` names can create at most one extra series per
+    /// tool-keyed instrument, and can never displace a legitimate tool's series.
+    ///
+    /// Idempotent: the first call wins and later calls are ignored (the tool
+    /// surface is fixed at startup). Callers that never invoke this fall back to
+    /// the numeric [`MAX_SERIES_PER_INSTRUMENT`] cap, which still bounds growth
+    /// but is order-sensitive.
+    pub fn set_advertised_tools(&self, names: impl IntoIterator<Item = impl Into<String>>) {
+        let set: BTreeSet<String> = names
+            .into_iter()
+            .map(Into::into)
+            .map(|n| n.trim().to_owned())
+            .filter(|n| !n.is_empty())
+            .collect();
+        // First set wins; a redundant reconfigure is a no-op, never a panic.
+        let _ = self.advertised_tools.set(set);
+    }
+
+    /// Canonicalize a caller-supplied tool name into a bounded label. With an
+    /// allowlist configured, a trimmed advertised name passes through and
+    /// anything else becomes [`UNADVERTISED_TOOL_LABEL`]; with no allowlist, the
+    /// name is preserved and the numeric cap is relied on downstream.
+    fn tool_label(&self, tool: &str) -> String {
+        match self.advertised_tools.get() {
+            Some(allow) => {
+                let canonical = tool.trim();
+                if allow.contains(canonical) {
+                    canonical.to_owned()
+                } else {
+                    UNADVERTISED_TOOL_LABEL.to_owned()
+                }
+            }
+            None => tool.to_owned(),
+        }
+    }
+
     /// Record an MCP request outcome (`status` = `ok` / `error` / `busy` / …).
     ///
     /// `tool` reaches this call before any tool-registry validation (an MCP
     /// `tools/call` name is caller-supplied), so it is not itself a bounded
-    /// label; cardinality is capped here rather than trusted upstream.
+    /// label. It is first canonicalized against the advertised-tool allowlist
+    /// (unadvertised names → [`UNADVERTISED_TOOL_LABEL`]; see
+    /// [`Metrics::set_advertised_tools`]); the numeric [`MAX_SERIES_PER_INSTRUMENT`]
+    /// cap remains as a backstop for the no-allowlist path.
     pub fn record_request(&self, tool: &str, status: &str) {
+        let tool = self.tool_label(tool);
         let mut requests = self.requests.lock().expect("metrics mutex poisoned");
-        let key = bounded_key(&requests, (tool.to_owned(), status.to_owned()), || {
+        let key = bounded_key(&requests, (tool, status.to_owned()), || {
             (
                 CARDINALITY_OVERFLOW_LABEL.to_owned(),
                 CARDINALITY_OVERFLOW_LABEL.to_owned(),
@@ -135,10 +198,11 @@ impl Metrics {
         status: &str,
     ) {
         self.record_request(tool, status);
+        let tool = self.tool_label(tool);
         let mut lane_requests = self.lane_requests.lock().expect("metrics mutex poisoned");
         let key = bounded_key(
             &lane_requests,
-            LaneRequestKey::new(lane_id, subject_id_hash, tool, status),
+            LaneRequestKey::new(lane_id, subject_id_hash, &tool, status),
             LaneRequestKey::overflow,
         );
         *lane_requests.entry(key).or_insert(0) += 1;
@@ -152,13 +216,14 @@ impl Metrics {
         tool: &str,
         ms: u64,
     ) {
+        let tool = self.tool_label(tool);
         let mut histograms = self
             .lane_request_duration_ms
             .lock()
             .expect("metrics mutex poisoned");
         let key = bounded_key(
             &histograms,
-            LaneRequestDurationKey::new(lane_id, subject_id_hash, tool),
+            LaneRequestDurationKey::new(lane_id, subject_id_hash, &tool),
             LaneRequestDurationKey::overflow,
         );
         histograms.entry(key).or_default().observe(ms);
@@ -756,6 +821,100 @@ mod tests {
                 .any(|r| r.tool == CARDINALITY_OVERFLOW_LABEL),
             "overflow bucket must be visible once the cap is exceeded"
         );
+    }
+
+    #[test]
+    fn advertised_tools_pass_through_unknown_names_collapse_to_one_sentinel() {
+        // With the advertised-tool allowlist configured, cardinality is bounded
+        // by the allowlist size (+1 sentinel) *independently of arrival order*:
+        // an attacker flooding thousands of distinct unadvertised names — even
+        // ahead of any legitimate traffic — cannot grow the series map beyond
+        // the advertised set plus a single `<other>` bucket, and cannot displace
+        // a legitimate tool's own series.
+        let m = Metrics::new();
+        m.set_advertised_tools(["oracle_query", "oracle_execute", "query"]);
+
+        // Attacker traffic arrives FIRST (the order that defeats a purely
+        // numeric cap): thousands of distinct junk names, plus case/whitespace
+        // variants of a real tool that are not exactly advertised.
+        let attempted_junk = MAX_SERIES_PER_INSTRUMENT * 8;
+        for i in 0..attempted_junk {
+            let tool = format!("attacker-tool-{i}");
+            m.record_lane_request("lane-a", "subject-sha256:abc", &tool, "error");
+            m.record_lane_request_duration_ms("lane-a", "subject-sha256:abc", &tool, 1);
+        }
+        m.record_request("ORACLE_QUERY", "ok"); // wrong case → not advertised
+        m.record_request("  drop_everything  ", "error"); // junk → sentinel
+
+        // Legitimate, advertised traffic arrives AFTER the flood.
+        m.record_lane_request("lane-a", "subject-sha256:abc", "oracle_query", "ok");
+        m.record_lane_request("lane-a", "subject-sha256:abc", "oracle_execute", "ok");
+        m.record_request("  oracle_query  ", "ok"); // padded but canonicalizes
+
+        let s = m.snapshot();
+
+        // Global request series: advertised names present verbatim; every
+        // unknown/variant name collapsed into exactly one `<other>` series.
+        let request_tools: BTreeSet<&str> = s.requests.iter().map(|r| r.tool.as_str()).collect();
+        assert!(request_tools.contains("oracle_query"), "advertised passes through");
+        assert!(request_tools.contains("oracle_execute"));
+        assert!(request_tools.contains(UNADVERTISED_TOOL_LABEL), "sentinel present");
+        assert_eq!(
+            request_tools
+                .iter()
+                .filter(|t| **t == UNADVERTISED_TOOL_LABEL)
+                .count(),
+            1,
+            "unknown names must collapse to a SINGLE sentinel"
+        );
+        // The padded advertised name canonicalized onto the real series, not the
+        // sentinel: 2 (record_request "ORACLE_QUERY" is wrong case → sentinel;
+        // "  oracle_query  " trims → oracle_query; plus lane pass-throughs).
+        let oq = s.requests.iter().find(|r| r.tool == "oracle_query").unwrap();
+        assert_eq!(oq.count, 2, "padded + lane-derived advertised counts merge");
+
+        // Lane instruments are bounded to advertised set (+1) as well, no matter
+        // that thousands of distinct junk names were fired first.
+        let lane_tools: BTreeSet<&str> =
+            s.lane_requests.iter().map(|r| r.tool.as_str()).collect();
+        assert!(lane_tools.contains("oracle_query"));
+        assert!(lane_tools.contains("oracle_execute"));
+        assert!(lane_tools.contains(UNADVERTISED_TOOL_LABEL));
+        assert!(
+            s.lane_requests.len() <= 3 + 1,
+            "lane_requests bounded to advertised+sentinel, got {}",
+            s.lane_requests.len()
+        );
+        assert!(
+            s.lane_request_duration_ms.len() <= 3 + 1,
+            "durations bounded to advertised+sentinel, got {}",
+            s.lane_request_duration_ms.len()
+        );
+
+        // Nothing is dropped: the sentinel absorbed every junk observation.
+        let junk_lane_count: u64 = s
+            .lane_requests
+            .iter()
+            .filter(|r| r.tool == UNADVERTISED_TOOL_LABEL)
+            .map(|r| r.count)
+            .sum();
+        assert_eq!(junk_lane_count, attempted_junk as u64);
+    }
+
+    #[test]
+    fn set_advertised_tools_is_first_write_wins() {
+        let m = Metrics::new();
+        m.set_advertised_tools(["oracle_query"]);
+        // A later reconfigure is ignored (the tool surface is fixed at startup);
+        // it must not panic and must not change the effective allowlist.
+        m.set_advertised_tools(["something_else"]);
+        m.record_request("oracle_query", "ok");
+        m.record_request("something_else", "ok");
+        let s = m.snapshot();
+        let tools: BTreeSet<&str> = s.requests.iter().map(|r| r.tool.as_str()).collect();
+        assert!(tools.contains("oracle_query"));
+        assert!(tools.contains(UNADVERTISED_TOOL_LABEL));
+        assert!(!tools.contains("something_else"));
     }
 
     #[test]
