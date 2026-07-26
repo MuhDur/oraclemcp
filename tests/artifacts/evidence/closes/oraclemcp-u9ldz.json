@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-26T17:46:00Z",
+  "bead_id": "oraclemcp-u9ldz",
+  "scope": {
+    "summary": "B5 driver UnknownIssuer round-trip complete: the upstream rust-oracledb TCPS fast-fail fix (b929016 'fix(tcps): fail fast on untrusted certificate', paired latency-guard c84f482) shipped in oracledb 0.9.1, and oraclemcp repins oracledb / oracledb-protocol to =0.9.1 so the pinned consumer stack no longer burns the retry_count=20 (~20s) budget on an untrusted certificate.",
+    "in_scope": [
+      "Cargo.toml"
+    ],
+    "out_of_scope": [
+      "the local TCPS lane harness script/test (operator-gated live lane; not run in this close)",
+      "the upstream driver source (lives in the separate rust-oracledb repo)"
+    ]
+  },
+  "source": {
+    "sha": "6b27d31b82f79dbfa7472901fb7b6790cdfb1e6e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracledb / oracledb-protocol pin = 0.9.1",
+        "kind": "config",
+        "trace": "Cargo.toml pins oracledb = \"=0.9.1\" (line 53) and oracledb-protocol = \"=0.9.1\" (line 62). The repin landed in 2a075dff 'deps: repin oracledb 0.9.0 -> 0.9.1' (cites bead u9ldz: 'TCPS fails fast on an untrusted certificate') and provenance was synced in 6b27d31b; 0.9.1 carries upstream b929016. The B5 lane test crates/oraclemcp-core/tests/oci_tcps_e2e.rs::b5_unknown_issuer_with_retry_count_20_fails_inside_fast_budget is the operator-gated live proof for the flip from the call-timeout signature."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Close condition B in the bead is now satisfied: the upstream fix (rust-oracledb b929016) is published in oracledb 0.9.1 AND oraclemcp is repinned to =0.9.1, closing the differential-first driver-fix round-trip. source.sha is the last commit touching Cargo.toml (6b27d31b); the repin itself landed in ancestor 2a075dff. The B5 local TCPS lane is operator-gated and not executed in this code-free close."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

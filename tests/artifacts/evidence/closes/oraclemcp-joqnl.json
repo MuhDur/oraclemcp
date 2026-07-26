@@ -1,0 +1,46 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-26T17:46:00Z",
+  "bead_id": "oraclemcp-joqnl",
+  "scope": {
+    "summary": "Guard read-purity regression fixed: the ALL_POLICIES/ALL_TAB_COLS visibility proof now gates on Ok-vs-error rather than row count, so a successful empty catalog probe proves no VPD (no longer refuses all reads on VPD-less DBs like gvenzl free23) while a genuine catalog-blind error still fails closed; C8 pair updated to enshrine the corrected semantics.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/catalog_resolver.rs"
+    ],
+    "out_of_scope": [
+      "OLS / Real Application Security / Data Redaction row-filtering (tracked as pre-existing boundary bead nn3ne, kept open)",
+      "the CQN and OneRowMock test mocks (beads 1dtoq / 7iyp6)"
+    ]
+  },
+  "source": {
+    "sha": "d1732c5ecc1e816854f1f31b0dbfce3f18da15a9",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "resolved_relations_read_purity empty-success proof + C8 unit pair",
+        "kind": "test",
+        "trace": "crates/oraclemcp-db/src/catalog_resolver.rs: prove_policy_catalog_readable now treats a successful (even zero-row) ALL_POLICIES probe as positive proof of no VPD and an error as fail-closed blindness (see the Ok-vs-error comment ~line 504). The C8 pair (c8_a_catalog_blind_principal_must_not_yield_a_read_only_proof + the empty-success ProvenReadOnly case) enshrines it; cargo test -p oraclemcp-db. Fix landed in ancestor f7b1edc7 'fix(guard): recognize a successful empty catalog probe as proof of no VPD'; d1732c5e only reformatted the function signature."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is a deliberate, analyzed LOOSENING of the read-purity proof that does not re-open the fa93e169 fail-open (an unreadable catalog still errors and refuses). Object-scoped VPD, virtual columns, views, db-links and unresolved objects still fail closed. source.sha is the last commit touching catalog_resolver.rs (d1732c5e); the guard fix landed in ancestor f7b1edc7. Full-suite + live free23 ladder green is asserted by CI at HEAD f1d1d223, not re-run here."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-nn3ne (open, P3): OLS / RAS / Data Redaction row-filtering are outside the ALL_POLICIES VPD read-purity proof (pre-existing, orthogonal; future-hardening)."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-26T17:48:00Z",
+  "bead_id": "oraclemcp-avjqj",
+  "scope": {
+    "summary": "doctor text_and_json_render now asserts 17 checks (was a stale 16) after the A1e RLS/VPD visibility check (check_rls_vpd_visibility, landed 5c7a15b1) added a real 17th check; the count assertion matches the emitted checks.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/doctor.rs"
+    ],
+    "out_of_scope": [
+      "the A1e RLS/VPD check implementation itself (5c7a15b1); only the doctor render-count assertion is corrected here"
+    ]
+  },
+  "source": {
+    "sha": "bc061ae9d80d8f1c6ba69fa2faa8b4ac601713f2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "doctor::text_and_json_render check-count assertion",
+        "kind": "test",
+        "trace": "crates/oraclemcp-core/src/doctor.rs asserts report.checks.len() == 17 and j[\"checks\"].len() == 17 (was 16). Corrected in 4a53e1c4; still present at bc061ae9 (which only added OCID redaction to doctor prose). Exercised by cargo test -p oraclemcp-core doctor."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped regression proof only; full-suite green is asserted by CI. source.sha is the last commit touching doctor.rs (bc061ae9); the 16->17 correction landed in ancestor 4a53e1c4."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

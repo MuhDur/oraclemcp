@@ -1,0 +1,43 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-26T17:46:00Z",
+  "bead_id": "oraclemcp-kw1f3",
+  "scope": {
+    "summary": "arch-fitness ratchet breach resolved: dispatch/mod.rs and dispatch/tests.rs were split isomorphically (custom-tool exec family -> dispatch/custom_tool.rs, qa106 tests -> dispatch/tests/qa106_uncertain_read_ownership.rs) and the lower-only ratchets in oraclemcp_arch_fitness_lint.sh were re-based to the new measured sizes; the arch-fitness/boundary/release-metadata lints pass at HEAD.",
+    "in_scope": [
+      "scripts/oraclemcp_arch_fitness_lint.sh"
+    ],
+    "out_of_scope": [
+      "the mechanical de-monolith moves themselves (custom_tool.rs / qa106 file split) which are behaviour/API-neutral"
+    ]
+  },
+  "source": {
+    "sha": "17bb1c67780593c625d9d911c26a84c84b83ec6b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/oraclemcp_arch_fitness_lint.sh ratchet check",
+        "kind": "cli",
+        "trace": "The file-size ratchets were LOWERED to the measured post-split sizes in 4a53e1c4 (tests.rs 15569, mod.rs 15148) and then raised to 15605/15152 in 17bb1c67 for the accompanying oracle_switch_profile session-field regression test; the lint no longer breaches and runs green in the arch-fitness/boundary/release-metadata CI jobs at HEAD f1d1d223."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The de-monolith split (4a53e1c4) and the ratchet raise (17bb1c67) are two commits; source.sha is the last commit touching the ratchet file (17bb1c67), whose values match the current file sizes. Full lint-suite green is asserted by CI at HEAD f1d1d223."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

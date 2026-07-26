@@ -1,0 +1,43 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-26T17:46:00Z",
+  "bead_id": "oraclemcp-6jgpa",
+  "scope": {
+    "summary": "Windows iam_token test: the marker temp path embedded in a TOML basic string is forward-slashed so a Windows path (C:\\Users\\...) no longer parses as an invalid \\U unicode escape; mirrors coreutil() in the same file, no-op on Unix.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/iam_token.rs"
+    ],
+    "out_of_scope": [
+      "the runtime IAM token inject logic (unchanged; only the test-side TOML path rendering was corrected)"
+    ]
+  },
+  "source": {
+    "sha": "4a53e1c4b3c2f510732dc8f940500a93200073c0",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "iam_token TOML-embedded marker path rendering",
+        "kind": "test",
+        "trace": "crates/oraclemcp-core/src/iam_token.rs now renders the marker path with marker.display().to_string().replace('\\\\', \"/\") before embedding it in the TOML profile; the marker PathBuf keeps native form for the exists() check. Exercised by the inject/process-with-marker iam_token tests via cargo test -p oraclemcp-core (green on the Windows CI lane at HEAD f1d1d223)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped regression proof only; Windows-lane green is asserted by CI at HEAD f1d1d223, not re-run locally in this close."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

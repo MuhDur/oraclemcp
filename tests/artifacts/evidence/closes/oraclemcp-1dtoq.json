@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-26T17:46:00Z",
+  "bead_id": "oraclemcp-1dtoq",
+  "scope": {
+    "summary": "CQN subscription mock answers the fail-closed catalog-visibility probes so a non-blind principal proves read purity again after fa93e169's blind-catalog gate; refusal paths unchanged.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/subscriptions.rs"
+    ],
+    "out_of_scope": [
+      "the blind-catalog read-purity gate itself (bead joqnl / catalog_resolver.rs)",
+      "the OneRowMock dispatch-side narrowing (bead 7iyp6 / dispatch/tests.rs)"
+    ]
+  },
+  "source": {
+    "sha": "4a53e1c4b3c2f510732dc8f940500a93200073c0",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "CQN registration live read-only proof (prove_cqn_live_read_only)",
+        "kind": "test",
+        "trace": "crates/oraclemcp-core/src/subscriptions.rs mock now answers the ALL_TAB_COLS/ALL_POLICIES catalog-visibility probes so the cqn_emon registration tests no longer surface CqnRegistrationError::LiveReadProofUnavailable for a non-blind principal; exercised by cargo test -p oraclemcp-core (subscriptions cqn module)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped mock/regression proof only; full-suite green is asserted by CI at HEAD f1d1d223, not re-run in this close."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
