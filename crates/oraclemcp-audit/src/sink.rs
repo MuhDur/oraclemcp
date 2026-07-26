@@ -471,7 +471,7 @@ impl FileAuditSink {
         record: &AuditRecord,
         certificate: Option<&BoundAuditVerdictCertificate>,
     ) -> Result<(), AuditError> {
-        let mut line = if let Some(certificate) = certificate {
+        let serialized = if let Some(certificate) = certificate {
             let mut value =
                 serde_json::to_value(record).map_err(|e| AuditError::Io(e.to_string()))?;
             let object = value
@@ -487,6 +487,10 @@ impl FileAuditSink {
             // records so WORM mirrors remain byte-identical.
             serde_json::to_vec(record).map_err(|e| AuditError::Io(e.to_string()))?
         };
+        // Escape U+2028/U+2029 so a client-controlled field value cannot forge a
+        // line boundary for a line-oriented downstream reader. The WORM mirror
+        // applies the identical transform, so the two stay byte-identical.
+        let mut line = crate::record::escape_json_line_separators(serialized);
         line.push(b'\n');
         let mut file = self.file.lock();
         file.write_all(&line)
@@ -1239,6 +1243,52 @@ mod tests {
             .expect("append");
         assert_eq!(sink.records().len(), 1, "record written");
         assert_eq!(sink.flush_count(), 1, "fsynced before returning");
+    }
+
+    #[test]
+    fn durable_jsonl_escapes_unicode_line_separators_and_still_verifies() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        // A client-controlled field carrying the Unicode line separators: a
+        // line-oriented downstream reader must not be tricked into seeing two
+        // records where the log wrote one.
+        let mut poisoned = draft("SELECT 1 FROM dual", "SAFE");
+        poisoned.tool = "oracle\u{2028}query\u{2029}x".to_owned();
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open")),
+                test_key(),
+            );
+            auditor
+                .append(&poisoned, "t0".to_owned(), true)
+                .expect("append");
+        }
+
+        let raw = std::fs::read(&path).expect("read durable log");
+        // The durable bytes carry NO literal separator...
+        assert!(
+            !raw.windows(3)
+                .any(|w| w == [0xE2, 0x80, 0xA8] || w == [0xE2, 0x80, 0xA9]),
+            "no raw U+2028/U+2029 may reach the durable log"
+        );
+        let text = String::from_utf8(raw).expect("utf8");
+        assert!(
+            text.contains("\\u2028") && text.contains("\\u2029"),
+            "the separators are present in escaped form"
+        );
+        // ...yet it decodes back to the identical record and the chain verifies,
+        // so escaping does not disturb the hash-chain integrity.
+        let records = parse_jsonl(&text).expect("parse escaped log");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].tool, "oracle\u{2028}query\u{2029}x",
+            "the field value round-trips exactly"
+        );
+        assert!(records[0].hash_is_valid());
+        assert_eq!(
+            verify_records(&records, &[test_key()]),
+            VerifyOutcome::Ok { records: 1 }
+        );
     }
 
     #[test]

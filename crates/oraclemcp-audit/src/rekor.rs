@@ -700,6 +700,29 @@ mod tests {
     }
 
     #[test]
+    fn receipt_rejects_entry_body_with_fields_outside_the_pinned_schema() {
+        // The authoritative `spec.data.hash` is the correct manifest digest, but
+        // the entry also carries a field outside the pinned Rekor schema. Exact
+        // typed parsing (`deny_unknown_fields`) rejects the whole body rather
+        // than parsing it loosely and trusting the hash it happened to find, so
+        // an attacker cannot smuggle extra structure past the binding check.
+        let expected = head();
+        let manifest = expected.manifest_sha256();
+        let mut body: serde_json::Value =
+            serde_json::from_slice(&hashedrekord_body(&manifest[7..])).expect("valid JSON");
+        body["unexpectedTopLevel"] = serde_json::json!("smuggled");
+        let receipt = receipt_with_body(
+            expected,
+            serde_json::to_vec(&body).expect("fixture serializes"),
+        );
+        assert_eq!(
+            receipt.verify_offline(&TestCheckpointVerifier),
+            Err(RekorProofError::MalformedProof),
+            "a field outside the pinned schema must fail the exact typed parse"
+        );
+    }
+
+    #[test]
     fn receipt_rejects_a_valid_proof_bound_to_a_different_head() {
         let mut receipt = receipt_for(head());
         receipt.head = AuditChainHead {

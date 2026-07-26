@@ -223,11 +223,14 @@ impl ShippingForwarder for WormFileForwarder {
                 record.seq
             )));
         }
-        let line =
-            serde_json::to_string(record).map_err(|e| ShippingError::Transport(e.to_string()))?;
+        let serialized =
+            serde_json::to_vec(record).map_err(|e| ShippingError::Transport(e.to_string()))?;
+        // Identical U+2028/U+2029 escaping to the primary sink keeps the WORM
+        // mirror byte-for-byte identical to the primary JSONL.
+        let line = crate::record::escape_json_line_separators(serialized);
         state
             .file
-            .write_all(line.as_bytes())
+            .write_all(&line)
             .map_err(|e| ShippingError::Transport(e.to_string()))?;
         state
             .file
@@ -1024,6 +1027,48 @@ mod tests {
             verify_records(&parsed, &[key()]),
             VerifyOutcome::Ok { records: 4 },
             "the WORM mirror re-verifies under the signing key"
+        );
+    }
+
+    #[test]
+    fn worm_mirror_escapes_unicode_line_separators_and_stays_byte_identical() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary = dir.path().join("audit.jsonl");
+        let worm = dir.path().join("worm-mirror.jsonl");
+        {
+            let local = crate::sink::FileAuditSink::open(&primary).expect("open primary");
+            let forwarder =
+                WormFileForwarder::open_distinct(&worm, &local).expect("open distinct worm");
+            let sink = ShippingAuditSink::new(Box::new(local), Box::new(forwarder));
+            let auditor = Auditor::new(Box::new(sink), key());
+            // A client-controlled field carrying both separators.
+            let mut poisoned = draft("DELETE FROM t WHERE id=1", "DESTRUCTIVE");
+            poisoned.tool = "oracle\u{2028}execute\u{2029}z".to_owned();
+            auditor
+                .append(&poisoned, "t0".to_owned(), true)
+                .expect("append");
+        }
+        let primary_body = std::fs::read(&primary).expect("read primary");
+        let worm_body = std::fs::read(&worm).expect("read worm");
+        // Escaping is applied by BOTH writers, so they stay byte-identical...
+        assert_eq!(
+            primary_body, worm_body,
+            "primary and WORM mirror remain byte-identical after escaping"
+        );
+        // ...and neither carries a raw separator that could forge a line boundary.
+        assert!(
+            !primary_body
+                .windows(3)
+                .any(|w| w == [0xE2, 0x80, 0xA8] || w == [0xE2, 0x80, 0xA9]),
+            "no raw U+2028/U+2029 in the mirrored JSONL"
+        );
+        let text = String::from_utf8(worm_body).expect("utf8");
+        assert!(text.contains("\\u2028") && text.contains("\\u2029"));
+        let parsed = parse_jsonl(&text).expect("parse worm");
+        assert_eq!(parsed[0].tool, "oracle\u{2028}execute\u{2029}z");
+        assert_eq!(
+            verify_records(&parsed, &[key()]),
+            VerifyOutcome::Ok { records: 1 }
         );
     }
 

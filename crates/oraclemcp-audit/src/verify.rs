@@ -251,7 +251,7 @@ pub fn parse_jsonl(body: &str) -> Result<Vec<AuditRecord>, ParseError> {
         }
         let record: AuditRecord = serde_json::from_str(line).map_err(|e| ParseError {
             line: line_no + 1,
-            message: e.to_string(),
+            message: describe_json_error(&e),
         })?;
         records.push(record);
     }
@@ -329,7 +329,7 @@ impl<R: BufRead> JsonlReader<R> {
             let record: AuditRecord = serde_json::from_slice(slice).map_err(|e| {
                 JsonlError::Malformed(ParseError {
                     line: self.line_no,
-                    message: e.to_string(),
+                    message: describe_json_error(&e),
                 })
             })?;
             return Ok(Some(record));
@@ -376,12 +376,36 @@ impl<R: BufRead> JsonlReader<R> {
     }
 }
 
+/// A stable, non-echoing description of a JSON parse failure.
+///
+/// `serde_json::Error`'s own `Display` interpolates the offending input for the
+/// data-error categories — `invalid type: string "…"`, `` unknown field `…` ``,
+/// `` unknown variant `…` `` — and for an audit line that content can be
+/// attacker-influenced free text (a record's `tool`, subject id, or cancel
+/// reason). Reflecting it into a diagnostic that lands in operator logs is a
+/// content-leak / log-injection channel. This maps the failure to its serde
+/// *category* plus the byte column serde reports — enough to locate the fault —
+/// and never carries an input byte forward. (`line` is omitted: serde counts
+/// within the single physical line it was handed, so it is always `1` here and
+/// the meaningful one-based physical line is tracked separately in
+/// [`ParseError::line`].)
+fn describe_json_error(error: &serde_json::Error) -> String {
+    let kind = match error.classify() {
+        serde_json::error::Category::Io => "I/O error while reading the audit record",
+        serde_json::error::Category::Syntax => "malformed JSON syntax",
+        serde_json::error::Category::Data => "JSON does not match the audit record schema",
+        serde_json::error::Category::Eof => "unexpected end of the audit record",
+    };
+    format!("{kind} (at column {})", error.column())
+}
+
 /// A malformed JSONL line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
-    /// One-based line number of the malformed record.
+    /// One-based physical line number of the malformed record.
     pub line: usize,
-    /// The serde error message.
+    /// A non-echoing failure description: the JSON error *category* and column,
+    /// never any byte of the offending input (see [`describe_json_error`]).
     pub message: String,
 }
 
@@ -696,10 +720,61 @@ mod tests {
         let body = format!("\n{good}\n{{bad json}}\n");
         let err = parse_jsonl(&body).expect_err("third physical line is malformed");
         assert_eq!(err.line, 3);
-        assert!(err.message.contains("key must be a string"), "{err:?}");
+        assert!(err.message.contains("malformed JSON syntax"), "{err:?}");
         let msg = err.to_string();
         assert!(msg.contains("line 3"), "{msg}");
         assert!(msg.contains(&err.message), "{msg}");
+    }
+
+    #[test]
+    fn parse_error_never_echoes_input_bytes_into_the_message() {
+        // A malformed line whose offending token is a sentinel value: the record
+        // schema wants a `u64` seq, so a string there is a data error whose serde
+        // `Display` echoes the offending value verbatim. The hardened ParseError
+        // must report only the failure category + position, never the input byte
+        // content — otherwise a poisoned audit line injects attacker-controlled
+        // text into an operator-facing diagnostic.
+        const SENTINEL: &str = "LEAKED_SENTINEL_MUST_NOT_APPEAR";
+        let good = serde_json::to_string(&signed_chain(1)[0]).expect("serialize");
+        let mut value: serde_json::Value = serde_json::from_str(&good).expect("reparse");
+        value["seq"] = serde_json::Value::String(SENTINEL.to_owned());
+        let poisoned = serde_json::to_string(&value).expect("reserialize");
+        assert!(
+            poisoned.contains(SENTINEL),
+            "the sentinel is present in the input"
+        );
+
+        // Premise guard: serde's own message DOES echo the input value, which is
+        // exactly the leak this hardening removes.
+        let raw = serde_json::from_str::<AuditRecord>(&poisoned)
+            .expect_err("a string seq is a type error");
+        assert!(
+            raw.to_string().contains(SENTINEL),
+            "serde default Display echoes input: {raw}"
+        );
+
+        // The crate's slice parser must not carry the input forward.
+        let err = parse_jsonl(&format!("{poisoned}\n")).expect_err("poisoned line rejected");
+        assert!(
+            !err.message.contains(SENTINEL),
+            "message leaked input: {}",
+            err.message
+        );
+        assert!(
+            !err.to_string().contains(SENTINEL),
+            "display leaked input: {err}"
+        );
+
+        // Same guarantee on the streaming reader path.
+        let mut reader =
+            JsonlReader::new(io::BufReader::new(io::Cursor::new(format!("{poisoned}\n"))));
+        let stream_err = reader
+            .next_record()
+            .expect_err("poisoned line rejected by the reader");
+        assert!(
+            !stream_err.to_string().contains(SENTINEL),
+            "reader display leaked input: {stream_err}"
+        );
     }
 
     #[test]
@@ -735,7 +810,7 @@ mod tests {
         match malformed_reader.next_record() {
             Err(JsonlError::Malformed(e)) => {
                 assert_eq!(e.line, 2);
-                assert!(e.message.contains("key must be a string"), "{e:?}");
+                assert!(e.message.contains("malformed JSON syntax"), "{e:?}");
             }
             other => panic!("malformed line must be rejected, got {other:?}"),
         }

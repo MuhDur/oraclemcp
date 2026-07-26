@@ -19,6 +19,23 @@ const AUDIT_SCHEMA_V7: u16 = 7;
 const AUDIT_SCHEMA_V8: u16 = 8;
 const AUDIT_SCHEMA_V9: u16 = 9;
 const AUDIT_SCHEMA_V10: u16 = 10;
+const AUDIT_SCHEMA_V11: u16 = 11;
+
+/// Application-domain label prefixing every v11+ entry-hash preimage.
+///
+/// The pre-v11 preimages already length-frame every field and lead with the
+/// `u16` schema version, which separates one audit schema from another. What
+/// they lacked — unlike the verdict-certificate core and the key-identity MAC,
+/// which have carried labeled domains all along — was an explicit *application*
+/// domain, so the audit entry hash was not self-describing and shared the bare
+/// SHA-256 construction with any other producer that happened to start a
+/// message with the same version+seq bytes. v11 prepends this label so an audit
+/// entry preimage can never collide with, or be reinterpreted as, some other
+/// SHA-256 domain. It is versioned into the tag itself (`:v11`) so the migration
+/// is explicit: v1–v10 records keep verifying under their original,
+/// label-free computation, and only newly written records adopt the labeled
+/// form.
+const AUDIT_ENTRY_HASH_DOMAIN: &[u8] = b"oraclemcp:audit-entry-hash:v11\n";
 
 /// Stable, non-secret replacement for the historical raw-SQL preview field.
 ///
@@ -30,7 +47,7 @@ const AUDIT_SCHEMA_V10: u16 = 10;
 pub(crate) const REDACTED_SQL_PREVIEW: &str = "<sql text redacted; see sql_sha256>";
 
 /// Current on-disk audit record schema.
-pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V10;
+pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V11;
 
 /// The guard decision being audited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +113,50 @@ fn push_hex_byte(out: &mut String, byte: u8) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     out.push(HEX[(byte >> 4) as usize] as char);
     out.push(HEX[(byte & 0x0f) as usize] as char);
+}
+
+/// Escape the Unicode line separators U+2028 (LS) and U+2029 (PS) in serialized
+/// audit-record JSON so a field value carrying one cannot forge a line boundary
+/// for a line-oriented downstream reader (a SIEM, `jq -R`, a browser log viewer,
+/// a naive `split('\n')` that a JS runtime widened to Unicode newlines).
+/// `serde_json` emits these code points raw — valid JSON, but a literal line
+/// break to many consumers — and record fields such as `tool`, the subject ids,
+/// and a cancel reason are client-controlled free text.
+///
+/// The replacement `\u2028` / `\u2029` is still valid JSON that decodes to the
+/// identical string, so a re-read reproduces the exact record and the hash chain
+/// still verifies byte-for-byte (the entry-hash preimage hashes the decoded,
+/// length-framed field bytes, never this serialized form). UTF-8 is
+/// self-synchronizing: the three-byte sequences `E2 80 A8` / `E2 80 A9` occur
+/// only as those code points, and JSON structure is ASCII, so the byte-level
+/// substitution is unambiguous and only ever rewrites string contents.
+///
+/// Applied identically by every durable JSONL writer (the primary sink and the
+/// WORM mirror) so their outputs stay byte-identical.
+#[must_use]
+pub(crate) fn escape_json_line_separators(serialized: Vec<u8>) -> Vec<u8> {
+    const LS: [u8; 3] = [0xE2, 0x80, 0xA8];
+    const PS: [u8; 3] = [0xE2, 0x80, 0xA9];
+    // Fast path: the overwhelmingly common case has neither separator.
+    if !serialized.windows(3).any(|w| w == LS || w == PS) {
+        return serialized;
+    }
+    let mut out = Vec::with_capacity(serialized.len());
+    let mut i = 0;
+    while i < serialized.len() {
+        let rest = &serialized[i..];
+        if rest.starts_with(&LS) {
+            out.extend_from_slice(br"\u2028");
+            i += 3;
+        } else if rest.starts_with(&PS) {
+            out.extend_from_slice(br"\u2029");
+            i += 3;
+        } else {
+            out.push(serialized[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 fn legacy_schema_version() -> u16 {
@@ -1046,7 +1107,7 @@ impl AuditRecord {
         let sql_normalized_sha256 = normalized_sql_sha256(&draft.sql);
         let sql_preview = REDACTED_SQL_PREVIEW.to_owned();
         let agent_identity = draft.subject.legacy_agent_identity();
-        let entry_hash = compute_entry_hash_v10(
+        let entry_hash = compute_entry_hash_v11(
             seq,
             &timestamp,
             &agent_identity,
@@ -1264,6 +1325,28 @@ impl AuditRecord {
             )
         } else if self.schema_version == AUDIT_SCHEMA_V10 {
             compute_entry_hash_v10(
+                self.seq,
+                &self.timestamp,
+                &self.agent_identity,
+                &self.subject,
+                self.db_evidence.as_ref(),
+                self.cancel.as_ref(),
+                self.correlation.as_ref(),
+                self.result_masking.as_ref(),
+                self.observed_scn,
+                self.verdict_certificate_core_hash.as_deref(),
+                &self.tool,
+                &self.sql_sha256,
+                &self.sql_normalized_sha256,
+                &self.sql_preview,
+                &self.danger_level,
+                self.decision,
+                self.rows_affected,
+                self.outcome,
+                &self.prev_hash,
+            )
+        } else if self.schema_version == AUDIT_SCHEMA_V11 {
+            compute_entry_hash_v11(
                 self.seq,
                 &self.timestamp,
                 &self.agent_identity,
@@ -2108,6 +2191,62 @@ fn compute_entry_hash_v10(
     sha256_hex(&canonical)
 }
 
+/// Deterministically hash a v11 entry. Byte-for-byte the v10 preimage — same
+/// length-framed fields, same optional presence tags, same numeric enum tags —
+/// but prefixed with [`AUDIT_ENTRY_HASH_DOMAIN`], the explicit application-domain
+/// label. The label changes the digest, which is exactly why it is a new schema
+/// version: v1–v10 records still verify under their label-free computations
+/// (dispatched by `schema_version` in [`AuditRecord::hash_is_valid`]), so no
+/// existing chain is broken.
+#[allow(clippy::too_many_arguments)]
+fn compute_entry_hash_v11(
+    seq: u64,
+    timestamp: &str,
+    agent_identity: &str,
+    subject: &AuditSubject,
+    db_evidence: Option<&DbEvidence>,
+    cancel: Option<&AuditCancel>,
+    correlation: Option<&AuditCorrelation>,
+    result_masking: Option<&AuditResultMaskingCertificate>,
+    observed_scn: Option<u64>,
+    verdict_certificate_core_hash: Option<&str>,
+    tool: &str,
+    sql_sha256: &str,
+    sql_normalized_sha256: &str,
+    sql_preview: &str,
+    danger_level: &str,
+    decision: AuditDecision,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+    prev_hash: &str,
+) -> String {
+    let mut canonical = Vec::with_capacity(AUDIT_ENTRY_HASH_DOMAIN.len());
+    canonical.extend_from_slice(AUDIT_ENTRY_HASH_DOMAIN);
+    canonical.extend_from_slice(&canonical_entry(
+        AUDIT_SCHEMA_V11,
+        seq,
+        timestamp,
+        agent_identity,
+        subject,
+        db_evidence,
+        cancel,
+        tool,
+        sql_sha256,
+        sql_normalized_sha256,
+        sql_preview,
+        danger_level,
+        decision,
+        rows_affected,
+        outcome,
+        prev_hash,
+    ));
+    canonical_push_correlation(&mut canonical, correlation);
+    canonical_push_result_masking(&mut canonical, result_masking);
+    canonical_push_observed_scn(&mut canonical, observed_scn);
+    canonical_push_verdict_certificate_core_hash(&mut canonical, verdict_certificate_core_hash);
+    sha256_hex(&canonical)
+}
+
 /// The genesis prev-hash for the first entry.
 pub const GENESIS_HASH: &str = "genesis";
 
@@ -2420,6 +2559,27 @@ mod tests {
                 prev_hash,
             ),
             AUDIT_SCHEMA_V10 => compute_entry_hash_v10(
+                seq,
+                &timestamp,
+                &agent_identity,
+                &d.subject,
+                d.db_evidence.as_ref(),
+                d.cancel.as_ref(),
+                None,
+                d.result_masking.as_ref(),
+                None,
+                None,
+                &d.tool,
+                &sql_sha256,
+                &sql_normalized_sha256,
+                &sql_preview,
+                &d.danger_level,
+                d.decision,
+                d.rows_affected,
+                d.outcome,
+                prev_hash,
+            ),
+            AUDIT_SCHEMA_V11 => compute_entry_hash_v11(
                 seq,
                 &timestamp,
                 &agent_identity,
@@ -4223,6 +4383,82 @@ mod tests {
         );
     }
 
+    #[test]
+    fn v11_domain_label_changes_the_digest_and_old_chains_still_verify() {
+        let d = draft();
+        let k = key();
+        // A v10 and a v11 entry over byte-identical content and position.
+        let v10 = signed_record_for_schema_with_draft(&d, AUDIT_SCHEMA_V10, 7, GENESIS_HASH, &k);
+        let v11 = signed_record_for_schema_with_draft(&d, AUDIT_SCHEMA_V11, 7, GENESIS_HASH, &k);
+
+        // Each verifies under its own schema: the migration is real, the v10
+        // (pre-domain-label) computation is preserved, so historical chains are
+        // not silently broken.
+        assert!(v10.hash_is_valid(), "pre-v11 records still verify");
+        assert!(
+            v11.hash_is_valid(),
+            "v11 records verify under the labeled preimage"
+        );
+
+        // The explicit application-domain label makes the v11 preimage a
+        // different message, so identical content hashes to a different entry
+        // hash — that is domain separation being effective, not cosmetic.
+        assert_ne!(
+            v10.entry_hash, v11.entry_hash,
+            "the v11 domain label must change the digest of identical content"
+        );
+
+        // A record produced by the current constructor is v11 and verifies, and
+        // reproduces exactly the v11 entry hash for the same inputs.
+        let current = AuditRecord::chained_signed(&d, 7, GENESIS_HASH, "t7".to_owned(), &k);
+        assert_eq!(current.schema_version, AUDIT_SCHEMA_V11);
+        assert!(current.hash_is_valid());
+        assert!(current.signature_is_valid(&k));
+        assert_eq!(
+            current.entry_hash, v11.entry_hash,
+            "the constructor's v11 hash matches the versioned recomputation"
+        );
+
+        // A record tagged with an unknown future schema fails closed rather than
+        // being accepted under some nearest computation.
+        let mut future = current.clone();
+        future.schema_version = AUDIT_SCHEMA_V11 + 1;
+        assert!(
+            !future.hash_is_valid(),
+            "an unknown schema version must fail closed"
+        );
+    }
+
+    #[test]
+    fn escape_json_line_separators_replaces_only_ls_ps_and_roundtrips() {
+        // U+2028 / U+2029 embedded in a JSON string value are rewritten to their
+        // ASCII escapes; everything else (including the structural JSON and other
+        // multibyte UTF-8) is untouched, and the result decodes to the original.
+        let raw = "{\"tool\":\"a\u{2028}b\u{2029}c\u{00e9}\u{2030}\"}";
+        let escaped = escape_json_line_separators(raw.as_bytes().to_vec());
+        let text = String::from_utf8(escaped).expect("escaped output is valid UTF-8");
+        assert!(!text.contains('\u{2028}'), "raw LS must be gone: {text:?}");
+        assert!(!text.contains('\u{2029}'), "raw PS must be gone: {text:?}");
+        assert!(text.contains("\\u2028"), "LS replaced with ascii escape");
+        assert!(text.contains("\\u2029"), "PS replaced with ascii escape");
+        // U+2030 (PER MILLE) shares no bytes with the separators and stays raw;
+        // U+00E9 is a two-byte char that must not be disturbed either.
+        assert!(
+            text.contains('\u{2030}'),
+            "unrelated multibyte char preserved"
+        );
+        assert!(
+            text.contains('\u{00e9}'),
+            "unrelated multibyte char preserved"
+        );
+        // Still valid JSON that decodes to the identical value.
+        let value: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        assert_eq!(value["tool"], "a\u{2028}b\u{2029}c\u{00e9}\u{2030}");
+        // A payload with no separators is returned unchanged (fast path).
+        let plain = b"{\"tool\":\"ordinary\"}".to_vec();
+        assert_eq!(escape_json_line_separators(plain.clone()), plain);
+    }
+
     proptest! {
         #[test]
         fn v5_rows_affected_encoding_is_injective_before_hashing(
@@ -4299,9 +4535,11 @@ mod tests {
             &key(),
         );
         // Forge the redacted field and recompute the (unkeyed) hash so the
-        // bare-hash check would pass — but leave the old MAC in place.
+        // bare-hash check would pass — but leave the old MAC in place. Recompute
+        // under the record's current schema (v11) so the bare-hash check really
+        // would pass; the MAC is what still catches the forgery.
         forged.sql_preview = "SELECT 1".to_owned();
-        forged.entry_hash = compute_entry_hash_v10(
+        forged.entry_hash = compute_entry_hash_v11(
             forged.seq,
             &forged.timestamp,
             &forged.agent_identity,
