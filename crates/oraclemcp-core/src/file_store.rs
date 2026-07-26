@@ -801,7 +801,20 @@ fn write_service_lock_metadata(file: &mut File, owner: &str) -> std::io::Result<
 /// into a file of the attacker's choosing.
 fn open_append_private_file(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
-    options.append(true).create(true);
+    // Request read access alongside append. The caller never reads bytes, but
+    // [`authenticate_private_file`] inspects this very handle before the first
+    // write — and on Windows that inspection is exactly the `windows_by_handle`
+    // path: `number_of_links()` reads `FileStandardInfo` via
+    // `GetFileInformationByHandleEx`, which needs `FILE_READ_ATTRIBUTES`.
+    // Append-only maps to `FILE_GENERIC_WRITE & !FILE_WRITE_DATA` (no
+    // read-attributes right), so the metadata call fails `ERROR_ACCESS_DENIED`
+    // (os error 5) and every durable append in this store — the write-intent
+    // log, metrics, source history — fails on Windows. `GENERIC_READ` carries
+    // `FILE_READ_ATTRIBUTES`, restoring the inspection. On Unix `nlink()` comes
+    // from `fstat` on the fd regardless of access mode, so this only widens
+    // `O_WRONLY|O_APPEND` to `O_RDWR|O_APPEND` for a handle the caller writes
+    // to and never reads — behavior-identical.
+    options.read(true).append(true).create(true);
     #[cfg(unix)]
     {
         options.mode(0o600);
@@ -1375,6 +1388,34 @@ mod tests {
             store.append_jsonl(&lock, "write-intents", &id, b"{\"seq\":3}\n"),
             Err(FileStoreError::InvalidJsonlRecord)
         ));
+    }
+
+    /// An append-mode handle must still be authenticatable by inspecting the
+    /// descriptor itself. This is the Windows `windows_by_handle` regression
+    /// (bead oraclemcp-vzui): `authenticate_private_file` reads `metadata()` and
+    /// `number_of_links()` off this handle, and on Windows those need
+    /// `FILE_READ_ATTRIBUTES`. An append-only open lacks it (→ `ERROR_ACCESS_DENIED`,
+    /// os error 5), so `open_append_private_file` requests read access. The
+    /// assertion runs on every platform and pins the whole inspection path; it
+    /// is the durable-append surface (write-intent log, metrics, source history)
+    /// that fails on Windows when it regresses.
+    #[test]
+    fn append_handle_is_authenticatable_from_its_own_descriptor() {
+        let store = FileStore::open(test_root("append-authenticates")).expect("store");
+        let dir = store
+            .collection_dir("write-intents")
+            .expect("collection dir");
+        let path = dir.join("record.jsonl");
+
+        let file = open_append_private_file(&path).expect("open append handle");
+        // The inspection `append_jsonl` performs before its first write must
+        // succeed on this handle — this is precisely `metadata()` +
+        // `number_of_links()` that ERROR_ACCESS_DENIED on a read-attributes-less
+        // append handle on Windows.
+        authenticate_private_file(&file, &path)
+            .expect("an append handle must be authenticatable from its own descriptor");
+        file.metadata()
+            .expect("append handle metadata must be readable (FILE_READ_ATTRIBUTES)");
     }
 
     #[test]
