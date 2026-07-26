@@ -300,7 +300,22 @@ function Write-InstallPlan {
         Write-Output "  cosign_signature: $baseUrl/$asset.sig + $baseUrl/$asset.crt"
         Write-Output "  cosign_attestation: $baseUrl/$asset.attestation.sigstore.json"
     }
-    Write-Output "  sha256_note: checksum verifies transport integrity only; cosign verifies authenticity and provenance"
+    if ($VerifyPosture -eq "require") {
+        Write-Output "  sha256_note: checksum verifies transport integrity; cosign authenticity/provenance verification is required"
+    } elseif ($VerifyPosture -eq "checksum-only") {
+        Write-Output "  sha256_note: checksum verifies transport integrity only; cosign authenticity/provenance is intentionally skipped"
+    } else {
+        Write-Output "  sha256_note: checksum verifies transport integrity; cosign verifies authenticity/provenance when available"
+    }
+    # Keep the plan honest about what the real run will do: without cosign the
+    # run soft-skips the authenticity check (prefer) or fails closed (require).
+    if (-not (Test-CommandAvailable -Name "cosign")) {
+        if ($VerifyPosture -eq "require") {
+            Write-Output "  cosign: not installed - the real run will fail closed (ORACLEMCP_INSTALL_COSIGN_REQUIRED); install cosign before rerunning"
+        } elseif ($VerifyPosture -eq "prefer") {
+            Write-Output "  cosign: not installed - authenticity check will be skipped (SHA-256 still enforced); install cosign or use -Verify require to change this"
+        }
+    }
 
     Write-Output "  files:"
     Write-Output "    $(Join-Path -Path $BinDir -ChildPath "oraclemcp.exe")"
