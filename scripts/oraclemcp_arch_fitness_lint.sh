@@ -25,7 +25,24 @@ indent_text() {
 
 count_lines() {
   local path="$1"
-  wc -l <"$path" | tr -d ' '
+  # Count a file's UN-MODULARIZED body: content up to its first inline
+  # `#[cfg(test)]`. This bounds monolithic top-level code while excluding two
+  # things that are not the ratchet's target:
+  #   (a) a product file's inline test module -- test code is not product
+  #       complexity, and a single-file seam like connection.rs can neither
+  #       split its product nor move its tests behind the driver seam (they use
+  #       `oracledb::`), so its ratchet must measure product lines; and
+  #   (b) test code already factored behind a `#[cfg(test)]` submodule -- the
+  #       desired end state, since the fix for a monolith is to extract it.
+  # A file with no `#[cfg(test)]` (all product, or a test-body file whose tests
+  # are not yet behind a submodule) is counted in full and keeps its ratchet.
+  local marker
+  marker="$(grep -n '^#\[cfg(test)\]' "$path" | head -1 | cut -d: -f1)"
+  if [ -n "$marker" ]; then
+    echo $((marker - 1))
+  else
+    wc -l <"$path" | tr -d ' '
+  fi
 }
 
 check_max_file_size_ratchet() {
