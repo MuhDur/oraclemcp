@@ -23,7 +23,7 @@
     "entry_points": [
       {
         "name": "CQN registration live read-only proof (prove_cqn_live_read_only)",
-        "kind": "test",
+        "kind": "tool",
         "trace": "crates/oraclemcp-core/src/subscriptions.rs mock now answers the ALL_TAB_COLS/ALL_POLICIES catalog-visibility probes so the cqn_emon registration tests no longer surface CqnRegistrationError::LiveReadProofUnavailable for a non-blind principal; exercised by cargo test -p oraclemcp-core (subscriptions cqn module)."
       }
     ]

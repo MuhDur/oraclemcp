@@ -23,7 +23,7 @@
     "entry_points": [
       {
         "name": "oracledb / oracledb-protocol pin = 0.9.1",
-        "kind": "config",
+        "kind": "config-gate",
         "trace": "Cargo.toml pins oracledb = \"=0.9.1\" (line 53) and oracledb-protocol = \"=0.9.1\" (line 62). The repin landed in 2a075dff 'deps: repin oracledb 0.9.0 -> 0.9.1' (cites bead u9ldz: 'TCPS fails fast on an untrusted certificate') and provenance was synced in 6b27d31b; 0.9.1 carries upstream b929016. The B5 lane test crates/oraclemcp-core/tests/oci_tcps_e2e.rs::b5_unknown_issuer_with_retry_count_20_fails_inside_fast_budget is the operator-gated live proof for the flip from the call-timeout signature."
       }
     ]

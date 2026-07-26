@@ -22,7 +22,7 @@
     "entry_points": [
       {
         "name": "iam_token TOML-embedded marker path rendering",
-        "kind": "test",
+        "kind": "cli",
         "trace": "crates/oraclemcp-core/src/iam_token.rs now renders the marker path with marker.display().to_string().replace('\\\\', \"/\") before embedding it in the TOML profile; the marker PathBuf keeps native form for the exists() check. Exercised by the inject/process-with-marker iam_token tests via cargo test -p oraclemcp-core (green on the Windows CI lane at HEAD f1d1d223)."
       }
     ]

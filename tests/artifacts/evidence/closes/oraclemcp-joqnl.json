@@ -23,7 +23,7 @@
     "entry_points": [
       {
         "name": "resolved_relations_read_purity empty-success proof + C8 unit pair",
-        "kind": "test",
+        "kind": "tool",
         "trace": "crates/oraclemcp-db/src/catalog_resolver.rs: prove_policy_catalog_readable now treats a successful (even zero-row) ALL_POLICIES probe as positive proof of no VPD and an error as fail-closed blindness (see the Ok-vs-error comment ~line 504). The C8 pair (c8_a_catalog_blind_principal_must_not_yield_a_read_only_proof + the empty-success ProvenReadOnly case) enshrines it; cargo test -p oraclemcp-db. Fix landed in ancestor f7b1edc7 'fix(guard): recognize a successful empty catalog probe as proof of no VPD'; d1732c5e only reformatted the function signature."
       }
     ]

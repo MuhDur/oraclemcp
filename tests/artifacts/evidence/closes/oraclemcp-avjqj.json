@@ -22,7 +22,7 @@
     "entry_points": [
       {
         "name": "doctor::text_and_json_render check-count assertion",
-        "kind": "test",
+        "kind": "cli",
         "trace": "crates/oraclemcp-core/src/doctor.rs asserts report.checks.len() == 17 and j[\"checks\"].len() == 17 (was 16). Corrected in 4a53e1c4; still present at bc061ae9 (which only added OCID redaction to doctor prose). Exercised by cargo test -p oraclemcp-core doctor."
       }
     ]
