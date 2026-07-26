@@ -5079,12 +5079,9 @@ fn custom_tool_write_runs_with_confirmation_on_writable_profile() {
 /// argument-extraction helpers (C6 de-monolith).
 fn load_single_custom_tool(toml: &str, ceiling: OperatingLevel) -> oraclemcp_core::LoadedTool {
     let defs = oraclemcp_core::parse_tools_file(toml).expect("custom tool parses");
-    let mut loaded = oraclemcp_core::load_tools(
-        &defs,
-        &Classifier::new(ClassifierConfig::new()),
-        ceiling,
-    )
-    .expect("custom tool loads");
+    let mut loaded =
+        oraclemcp_core::load_tools(&defs, &Classifier::new(ClassifierConfig::new()), ceiling)
+            .expect("custom tool loads");
     assert_eq!(loaded.len(), 1, "fixture defines exactly one tool");
     loaded.remove(0)
 }
@@ -5202,7 +5199,10 @@ fn custom_tool_execute_args_rejects_malformed_control_arguments() {
 
     let cases: &[(Value, &str)] = &[
         (json!("not-an-object"), "expected an object"),
-        (json!({ "id": 1, "commit": "yes" }), "commit must be true/false"),
+        (
+            json!({ "id": 1, "commit": "yes" }),
+            "commit must be true/false",
+        ),
         (
             json!({ "id": 1, "capture_dbms_output": true, "dbms_output": false }),
             "mutually exclusive",
@@ -11155,7 +11155,13 @@ mod qa85_terminal_boundaries {
             .expect("asupersync test runtime builds");
         let (attempts, outcome) = runtime.block_on(async {
             let cx = Cx::current().expect("block_on installs a current Cx");
-            cancel_retry_loop(&dispatcher, &cx, "oracle_checkpoint", json!({ "name": "cp1" })).await
+            cancel_retry_loop(
+                &dispatcher,
+                &cx,
+                "oracle_checkpoint",
+                json!({ "name": "cp1" }),
+            )
+            .await
         });
 
         assert_eq!(
@@ -11163,7 +11169,9 @@ mod qa85_terminal_boundaries {
             "an established SAVEPOINT is terminal; the retry loop must stop after the first dispatch"
         );
         let Outcome::Ok(value) = outcome else {
-            panic!("an established SAVEPOINT must be reported Ok, not a retryable Cancelled: {outcome:?}");
+            panic!(
+                "an established SAVEPOINT must be reported Ok, not a retryable Cancelled: {outcome:?}"
+            );
         };
         // The checkpoint-name validator upper-cases the identifier, so the
         // response name and statement come back upper-cased.
