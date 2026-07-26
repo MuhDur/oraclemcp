@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-26T17:46:00Z",
+  "bead_id": "oraclemcp-7iyp6",
+  "scope": {
+    "summary": "PL/SQL matrix offline test: OneRowMock's broad ALL_TAB_COLS/ALL_POLICIES catalog branches are narrowed to the bounded ROWNUM live-read-proof probes so bulk catalog-extraction queries fall through to catalog_extract_empty_rowset instead of being shadowed (columns now carry OWNER).",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/tests.rs"
+    ],
+    "out_of_scope": [
+      "the CQN subscription mock (bead 1dtoq / subscriptions.rs)",
+      "the blind-catalog read-purity gate (bead joqnl / catalog_resolver.rs)"
+    ]
+  },
+  "source": {
+    "sha": "0aceec11b0bcb93aa28253ebd89721c6a47616aa",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "OneRowMock catalog branch narrowing",
+        "kind": "tool",
+        "trace": "crates/oraclemcp/src/dispatch/tests.rs: the mock now only answers `from all_policies`/`from all_tab_cols` probes that also contain `rownum` (lines 193/202); bulk extraction (no ROWNUM) falls through to catalog_extract_empty_rowset. The narrowing landed in 4a53e1c4 and is still present at source.sha 0aceec11 (the last commit touching this file, which added unrelated held-effect/custom_tool coverage); exercised by the PL/SQL feature-matrix offline dispatch tests via cargo test -p oraclemcp."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped mock/regression proof only; full-suite green is asserted by CI. source.sha is the last commit that touched dispatch/tests.rs (0aceec11); the narrowing itself landed in ancestor 4a53e1c4 and is unchanged at source.sha."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
