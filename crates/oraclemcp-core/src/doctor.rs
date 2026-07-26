@@ -1270,7 +1270,7 @@ fn check_oracle_driver() -> CheckResult {
 }
 
 fn sanitized_detail(ctx: &DoctorContext, detail: impl Into<String>) -> String {
-    crate::redacted::redact_exact_substrings(&detail.into(), &ctx.sensitive_values)
+    crate::redacted::redact_operator_text(&detail.into(), &ctx.sensitive_values)
 }
 
 fn sanitized_detail_with_extra_values(
@@ -1288,7 +1288,7 @@ fn sanitized_detail_with_extra_values(
             .filter(|value| !value.is_empty())
             .cloned(),
     );
-    crate::redacted::redact_exact_substrings(&detail.into(), &sensitive_values)
+    crate::redacted::redact_operator_text(&detail.into(), &sensitive_values)
 }
 
 fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
