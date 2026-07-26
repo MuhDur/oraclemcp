@@ -764,8 +764,6 @@ impl CustomToolCatalog {
         self.tools.is_empty()
     }
 
-    /// Look up a tool by name.
-    #[must_use]
     /// The advertised names of every loaded custom tool, in load order.
     /// Used e.g. to seed the metrics advertised-tool allowlist so custom tools
     /// keep their own metric series instead of collapsing to the sentinel.
@@ -773,6 +771,8 @@ impl CustomToolCatalog {
         self.tools.iter().map(|t| t.def.name.as_str())
     }
 
+    /// Look up a tool by name.
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&LoadedTool> {
         self.tools.iter().find(|t| t.def.name == name)
     }
