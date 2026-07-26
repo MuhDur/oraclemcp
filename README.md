@@ -47,7 +47,7 @@ exact `PATH` line plus next steps on stderr. Every install finishes with next
 steps on stderr: discover databases, run `doctor`, write the starter profile,
 and generate MCP client snippets.
 
-### Get started in minutes: zero-config onboarding
+### Zero-config onboarding
 
 `oraclemcp setup --discover` finds every database defined in your `tnsnames.ora`
 and writes one **read-only** connection profile per net-service — through the
@@ -71,11 +71,6 @@ updates atomically after backing up the previous binary. A downgrade is refused 
 
 Operator migration notes for the current field-hardening train:
 [`docs/oraclemcp-091-field-hardening-notes.md`](docs/oraclemcp-091-field-hardening-notes.md).
-
-Historical 0.8.0 operator notes:
-[`docs/upgrading-to-0.8.0.md`](docs/upgrading-to-0.8.0.md),
-[`docs/downgrading-0.8.0-to-0.7.2.md`](docs/downgrading-0.8.0-to-0.7.2.md),
-and [`docs/feature-rollout-0.8.0.md`](docs/feature-rollout-0.8.0.md).
 
 Use the dry-run command first when you want a preview: it prints the archive,
 verification inputs, files, service plan, client-registration plan, and
@@ -121,18 +116,13 @@ For air-gapped hosts, download the release archive plus its `.sha256`, `.sig`,
 of the installer:
 
 ```sh
-bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz --version 0.9.0
+bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz --version 0.10.0
 ```
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 `
-  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.9.0
+  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.10.0
 ```
-Historical 0.8.0 offline examples used `-Version 0.8.0`; use 0.9.0 for the
-current release above.
-The corresponding historical invocations were
-`bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz --version 0.8.0`
-and `-Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.8.0`.
 
 The release installer does not silently fall back from a missing release archive
 to a source build. Use `--source` explicitly when you want `cargo install`
@@ -274,6 +264,9 @@ Use `oraclemcp --json doctor` to verify the binary and offline setup,
 metadata without resolving secrets, and
 `oraclemcp --json doctor --online --profile <profile>` to add live
 connectivity, authentication, role/open-mode, standby, and privilege checks.
+`oraclemcp doctor oauth --token <JWT>` validates one supplied OAuth token against
+the local resource-server config before any live connection; the token is never
+logged, persisted, or rendered.
 Doctor output is safe to paste into agent sessions: it omits connect strings,
 usernames, `credential_ref` values, passwords, proxy identities, wallet
 passwords, IAM tokens, wallet paths, and server DNs while keeping structured
@@ -1065,7 +1058,7 @@ legacy `signature` value before restarting a protected profile.
 `oraclemcp` builds on a single **pinned Rust nightly** (`nightly-2026-05-11`,
 recorded in `rust-toolchain.toml`). Two independent things need it: asupersync 0.3.9's
 `nightly-outcome-try` feature (`try_trait_v2` + `try_trait_v2_residual`), which
-is opt-in but on by default and reaches us via the `oracledb` 0.9.0 dependency; and,
+is opt-in but on by default and reaches us via the `oracledb` 0.9.1 dependency; and,
 on Windows only, `windows_by_handle`. The pin is **build-time only**: the
 shipped binary has no runtime dependency on nightly. See
 [`docs/toolchain.md`](docs/toolchain.md) for the full rationale and the
@@ -1387,6 +1380,47 @@ If no profile is configured or Oracle is unreachable, `oraclemcp` falls back to
 a stub connection: `serve`, `capabilities`, and `doctor` all work, and any live
 tool call returns a structured error envelope rather than crashing. This makes
 the binary safe to install, inspect, and test anywhere, CI included.
+
+## Limitations
+
+Honest constraints, each documented in more detail in the sections above:
+
+- **Nightly-only build, no stable MSRV.** The workspace pins
+  `nightly-2026-05-11` (see [Source builds and runtime
+  requirements](#source-builds-and-runtime-requirements)). The pin is
+  build-time only; the shipped binary has no runtime dependency on nightly.
+- **Thin driver, not thick.** The adapter never silently falls back to thick
+  mode. External wallet auth without username/password, autonomous OCI
+  SDK/resource-principal token minting, and Kerberos/RADIUS auth are refused
+  with structured unsupported diagnostics rather than served.
+- **OCI IAM is pre-fetched tokens only.** Only pre-fetched JWT sources over
+  TCPS are supported (`token_env`, `token_file`, `token_exec`, or
+  `ORACLEMCP_IAM_TOKEN`); non-TCPS is refused before token use. Autonomous OCI
+  SDK minting/refresh and real-ADB acceptance remain separate gated work.
+- **Browser DDL apply is release-gated.** The dashboard Workbench can preview
+  DDL, but applying DDL/Admin requires a non-browser operator path until a
+  profile-level dashboard DDL opt-in exists.
+- **`oracle_explain_plan` is not a pure read.** `EXPLAIN PLAN` writes
+  `PLAN_TABLE`, so the tool refuses by default, refuses on a read-only standby,
+  and runs only at `READ_WRITE` with `allow_plan_table_write=true`.
+- **No npm/npx channel.** Install with the one-line installer, `cargo binstall`,
+  the GHCR image, or the Homebrew/winget channels once they resolve.
+
+## About Contributions
+
+Please don't take this the wrong way, but I do not accept outside contributions
+for any of my projects. I simply don't have the mental bandwidth to review
+anything, and it's my name on the thing, so I'm responsible for any problems it
+causes; thus, the risk-reward is highly asymmetric from my perspective. I'd also
+have to worry about other "stakeholders," which seems unwise for tools I mostly
+make for myself for free. Feel free to submit issues, and even PRs if you want to
+illustrate a proposed fix, but know I won't merge them directly. Instead, I'll
+have Claude or Codex review submissions via `gh` and independently decide whether
+and how to address them. Bug reports in particular are welcome. Sorry if this
+offends, but I want to avoid wasted time and hurt feelings. I understand this
+isn't in sync with the prevailing open-source ethos that seeks community
+contributions, but it's the only way I can move at this velocity and keep my
+sanity.
 
 ## License
 
