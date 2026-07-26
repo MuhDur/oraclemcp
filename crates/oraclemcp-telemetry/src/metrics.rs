@@ -7,8 +7,8 @@
 //! flow via the `tracing` layer (P1-8).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -856,9 +856,15 @@ mod tests {
         // Global request series: advertised names present verbatim; every
         // unknown/variant name collapsed into exactly one `<other>` series.
         let request_tools: BTreeSet<&str> = s.requests.iter().map(|r| r.tool.as_str()).collect();
-        assert!(request_tools.contains("oracle_query"), "advertised passes through");
+        assert!(
+            request_tools.contains("oracle_query"),
+            "advertised passes through"
+        );
         assert!(request_tools.contains("oracle_execute"));
-        assert!(request_tools.contains(UNADVERTISED_TOOL_LABEL), "sentinel present");
+        assert!(
+            request_tools.contains(UNADVERTISED_TOOL_LABEL),
+            "sentinel present"
+        );
         assert_eq!(
             request_tools
                 .iter()
@@ -870,13 +876,16 @@ mod tests {
         // The padded advertised name canonicalized onto the real series, not the
         // sentinel: 2 (record_request "ORACLE_QUERY" is wrong case → sentinel;
         // "  oracle_query  " trims → oracle_query; plus lane pass-throughs).
-        let oq = s.requests.iter().find(|r| r.tool == "oracle_query").unwrap();
+        let oq = s
+            .requests
+            .iter()
+            .find(|r| r.tool == "oracle_query")
+            .unwrap();
         assert_eq!(oq.count, 2, "padded + lane-derived advertised counts merge");
 
         // Lane instruments are bounded to advertised set (+1) as well, no matter
         // that thousands of distinct junk names were fired first.
-        let lane_tools: BTreeSet<&str> =
-            s.lane_requests.iter().map(|r| r.tool.as_str()).collect();
+        let lane_tools: BTreeSet<&str> = s.lane_requests.iter().map(|r| r.tool.as_str()).collect();
         assert!(lane_tools.contains("oracle_query"));
         assert!(lane_tools.contains("oracle_execute"));
         assert!(lane_tools.contains(UNADVERTISED_TOOL_LABEL));
