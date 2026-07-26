@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.10.0] — unreleased
+## [0.10.0] — 2026-07-26
 
 This line was planned as `0.9.1`. It is `0.10.0` because the work below removes
 public API, and on a `0.x` line the minor position is the breaking one — the
@@ -14,6 +14,13 @@ same call the driver made at `0.8.0`. `cargo semver-checks check-release` is the
 gate that forced it, and suppressing that report was never an option: a removed
 error variant and a reshaped dictionary signature are exactly what a downstream
 consumer needs to be told about.
+
+This is a large field-hardening release — 914 commits since 0.9.0 — weighted
+toward correctness fixes, a self-sufficient local integration rig that can catch
+real regressions without a hosted database, and supply-chain / audit hardening.
+It ships on the pure-Rust thin `oracledb` 0.9.1 driver; the fail-closed SQL
+guard and the `READ_ONLY < READ_WRITE < DDL < ADMIN` operating-level ladder are
+unchanged in contract.
 
 ### Breaking
 
@@ -30,6 +37,102 @@ consumer needs to be told about.
   redact-then-verify constructors; the attribute makes that a rule rather than
   a request, and stops a downstream crate assembling a corpus record around an
   unredacted statement the guard never proved safe.
+
+### Added
+
+- **Bounded, self-disclosing source reads.** `oracle_get_source` takes an
+  inclusive line range and reports the range it actually returned; source search
+  caps its line and fetch ranges. A large object can no longer return an
+  unbounded payload, and the caller is told exactly what slice it got. See
+  [b2623a51](https://github.com/MuhDur/oraclemcp/commit/b2623a51),
+  [d2a7190d](https://github.com/MuhDur/oraclemcp/commit/d2a7190d).
+- **A refusal audit trail.** Guard refusals now leave an unsigned, configurable
+  audit floor, so a denied statement is recorded even when full audit signing is
+  disabled. See
+  [db9c17f3](https://github.com/MuhDur/oraclemcp/commit/db9c17f3),
+  [f89e3e8b](https://github.com/MuhDur/oraclemcp/commit/f89e3e8b).
+- **Local OAuth diagnosis in `doctor`.** `oracle doctor` validates an OAuth
+  token's posture locally, before any live connection, so a misconfigured token
+  is caught at setup rather than at first use. See
+  [2354d915](https://github.com/MuhDur/oraclemcp/commit/2354d915).
+- **Explicit pure-function authority in the guard.** The classifier now declares
+  the exact set of built-ins it treats as side-effect-free instead of inferring
+  it. See [1365e0d1](https://github.com/MuhDur/oraclemcp/commit/1365e0d1).
+- **Oracle session teardown hooks** for deterministic cleanup when a lane is torn
+  down. See [fae24cba](https://github.com/MuhDur/oraclemcp/commit/fae24cba).
+- **A CI-heartbeat lane on the operator dashboard**, surfacing live CI lane
+  health. See [84c37d95](https://github.com/MuhDur/oraclemcp/commit/84c37d95).
+- **Verifiable test attestations.** The verifier emits signed test attestations,
+  and the web dashboard verifies them in-browser with WebCrypto — a released
+  build can prove which tests were signed. See
+  [0c115340](https://github.com/MuhDur/oraclemcp/commit/0c115340),
+  [3ca531e9](https://github.com/MuhDur/oraclemcp/commit/3ca531e9),
+  [4073d6e0](https://github.com/MuhDur/oraclemcp/commit/4073d6e0).
+- **A self-sufficient local integration rig** that catches real regressions
+  without a hosted database: an L1/L2 container harness, a synthetic TCPS lane, a
+  VPD/RLS lane that actually catches a fail-open, real idle-kill / AFTER-LOGOFF
+  lanes, an environment preflight that cannot report false health, and vendored
+  MIT sample schemas under enforced provenance. See
+  [91e46505](https://github.com/MuhDur/oraclemcp/commit/91e46505),
+  [d6aafc64](https://github.com/MuhDur/oraclemcp/commit/d6aafc64).
+
+### Security
+
+- **OAuth rejection reasons stay off the wire.** Token-rejection detail is no
+  longer returned to the client; the failure response is uniform. See
+  [dc092cdc](https://github.com/MuhDur/oraclemcp/commit/dc092cdc).
+- **A misconfigured custom tool refuses startup.** A custom tool whose declared
+  operating level exceeds the ceiling, or that names a forbidden operation, now
+  fails the server at boot instead of loading with a weakened signature. See
+  [ae3aed82](https://github.com/MuhDur/oraclemcp/commit/ae3aed82).
+- **Read-purity proofs are restricted by operator entries**, so the set of
+  constructs the guard treats as provably read-only cannot widen implicitly. See
+  [3eae7815](https://github.com/MuhDur/oraclemcp/commit/3eae7815).
+- **DRCP session identity is cleared before reuse**, so a pooled connection
+  cannot carry a prior principal's identity into the next lease. See
+  [e724338c](https://github.com/MuhDur/oraclemcp/commit/e724338c).
+
+### Fixed
+
+- **A shutdown lost-wakeup that hung the audit shipping-spool worker join.** The
+  server could deadlock on shutdown waiting on a worker that had already parked.
+  See [36765d83](https://github.com/MuhDur/oraclemcp/commit/36765d83).
+- **Audit hash-chain hardening.** The preimage, serialization, and error paths
+  were tightened, and every CEF record separator (not just CR/LF) is escaped, so
+  a crafted value cannot forge or split an audit record. See
+  [89536b02](https://github.com/MuhDur/oraclemcp/commit/89536b02),
+  [1dae5692](https://github.com/MuhDur/oraclemcp/commit/1dae5692).
+- **OCIDs are redacted in operator-facing prose and OTLP telemetry**, not only in
+  SQL. See
+  [bc061ae9](https://github.com/MuhDur/oraclemcp/commit/bc061ae9),
+  [6af082c6](https://github.com/MuhDur/oraclemcp/commit/6af082c6).
+- **Uncertain row-stream sessions are quarantined, not reused.** A streaming
+  query whose session state is in doubt is retired rather than handed to the next
+  caller. See
+  [312cbedc](https://github.com/MuhDur/oraclemcp/commit/312cbedc),
+  [89123bb9](https://github.com/MuhDur/oraclemcp/commit/89123bb9).
+- **Connection state is reported only as observed.** Liveness quarantine is
+  preserved and connectivity is never claimed beyond what was measured. See
+  [a7a19c80](https://github.com/MuhDur/oraclemcp/commit/a7a19c80),
+  [ea6fd1f0](https://github.com/MuhDur/oraclemcp/commit/ea6fd1f0),
+  [637ba0d0](https://github.com/MuhDur/oraclemcp/commit/637ba0d0).
+- **OAuth failures are actionable**, premature IAM-source wiring was withdrawn,
+  and IAM token profiles are configured as refreshable sources. See
+  [381c4703](https://github.com/MuhDur/oraclemcp/commit/381c4703),
+  [f5c4ec5f](https://github.com/MuhDur/oraclemcp/commit/f5c4ec5f),
+  [0829fde3](https://github.com/MuhDur/oraclemcp/commit/0829fde3).
+- **Windows can authenticate its own durable-append audit handle** — it is opened
+  readably so the file-identity check works on Windows. See
+  [1030b6dc](https://github.com/MuhDur/oraclemcp/commit/1030b6dc).
+- **Browser dashboard pairing sends its origin**, so origin-bound replay
+  protection works from the browser. See
+  [9b127a2e](https://github.com/MuhDur/oraclemcp/commit/9b127a2e).
+- **The server metrics site advertises only allowlisted tool labels**, bounding
+  metric cardinality. See
+  [8234ce5e](https://github.com/MuhDur/oraclemcp/commit/8234ce5e).
+- **Transitive `postcss` bumped `8.5.16 → 8.5.23`** to clear GHSA-r28c-9q8g-f849
+  (path traversal in source-map auto-loading) in the dashboard build. See
+  [92d391e9](https://github.com/MuhDur/oraclemcp/commit/92d391e9).
 
 ## [0.9.0] — 2026-07-18
 
