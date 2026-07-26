@@ -3732,6 +3732,16 @@ fn run_serve(
                 )
             };
             let metrics = Arc::new(Metrics::new());
+            // Bound metric-label cardinality (oraclemcp-met-bounded-tool-label):
+            // seed the allowlist with the advertised built-in + custom tools so
+            // an arbitrary client-supplied tool name collapses to one sentinel
+            // instead of minting an unbounded metric series.
+            metrics.set_advertised_tools(
+                registry::tool_names()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .chain(custom_catalog.names().map(str::to_owned)),
+            );
             let profile_drain = ProfileDrainState::from_config(full_config.clone());
             let built = build_server_with_lifecycle(
                 connections.session,
