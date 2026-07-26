@@ -71,6 +71,11 @@ updates atomically after backing up the previous binary. A downgrade is refused 
 
 Operator migration notes for the current field-hardening train:
 [`docs/oraclemcp-091-field-hardening-notes.md`](docs/oraclemcp-091-field-hardening-notes.md).
+Config-migration runbooks introduced in 0.8.0 still apply when upgrading from an
+older release:
+[`docs/upgrading-to-0.8.0.md`](docs/upgrading-to-0.8.0.md),
+[`docs/downgrading-0.8.0-to-0.7.2.md`](docs/downgrading-0.8.0-to-0.7.2.md),
+and [`docs/feature-rollout-0.8.0.md`](docs/feature-rollout-0.8.0.md).
 
 Use the dry-run command first when you want a preview: it prints the archive,
 verification inputs, files, service plan, client-registration plan, and

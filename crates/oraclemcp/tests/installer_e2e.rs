@@ -139,7 +139,7 @@ fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
         "powershell -ExecutionPolicy Bypass -File .\\install.ps1 -Update -NoService",
         "bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz",
         "powershell -ExecutionPolicy Bypass -File .\\install.ps1 `",
-        "-Offline .\\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.8.0",
+        "-Offline .\\oraclemcp-x86_64-pc-windows-msvc.zip",
         "Use the dry-run command first when you want a preview",
         "installer lock path",
         "exits before downloading, verifying, writing files, or",
