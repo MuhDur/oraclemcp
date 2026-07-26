@@ -2897,6 +2897,12 @@ mod driver {
         columns: Vec<String>,
         serialize_opts: SerializeOptions,
         limits: super::WireLimits,
+        /// Set once `next_row` fails in a way that leaves the pinned session in
+        /// an uncertain state (a dropped fetch poll on timeout, a cancellation,
+        /// or a connection-fatal driver error). When set, `recover` discards the
+        /// session by quarantining the slot instead of silently returning a
+        /// possibly mid-fetch connection to service.
+        session_uncertain: Option<String>,
     }
 
     /// One leading sign, absolute components — the canonical Oracle text form for
@@ -2994,6 +3000,21 @@ mod driver {
         }
 
         pub(super) async fn next_row(&mut self, cx: &Cx) -> Result<Option<OracleRow>, DbError> {
+            let result = self.next_row_inner(cx).await;
+            // A failure that leaves the session uncertain must not later let
+            // `recover` hand the pinned connection back for reuse: it was in the
+            // middle of a fetch (the timeout path drops the poll without an
+            // out-of-band cancel) or the driver reported a connection-fatal
+            // error. Remember the first such failure so `recover` quarantines.
+            if let Err(error) = &result
+                && self.session_uncertain.is_none()
+            {
+                self.session_uncertain = uncertain_stream_reason(error);
+            }
+            result
+        }
+
+        async fn next_row_inner(&mut self, cx: &Cx) -> Result<Option<OracleRow>, DbError> {
             super::db_checkpoint(cx, "oracle_db.query_row_stream.next.before")?;
             let timeout_ms = self
                 .limits
@@ -3027,6 +3048,15 @@ mod driver {
         }
 
         pub(super) async fn recover(mut self, cx: &Cx) -> Result<(), DbError> {
+            // A prior `next_row` that left the session uncertain forbids reuse:
+            // drop the driver stream (closing the connection so it can never be
+            // handed out again) and quarantine the slot. The next borrow then
+            // fails typed/fail-closed rather than resurfacing as a transient,
+            // retryable error on a session we cannot prove clean.
+            if let Some(reason) = self.session_uncertain.take() {
+                drop(self.stream.take());
+                return Err(super::quarantine_connection_slot(&self.inner, cx, reason).await);
+            }
             try_commit_section(cx, super::CLEANUP_MASKED_POLLS, async {
                 let stream = self.stream.take().ok_or_else(|| {
                     DbError::Internal("owned row stream has already been recovered".to_owned())
@@ -3051,6 +3081,21 @@ mod driver {
             })
             .await
         }
+    }
+
+    /// The reason to remember when a row-stream `next_row` failure leaves the
+    /// pinned session uncertain, or `None` when the failure kept a coherent
+    /// cursor that is safe to recover by returning the connection to its slot.
+    ///
+    /// The decision is taken from the error **kind** via
+    /// [`DbError::is_uncertain_session_state`] — never from message text — so a
+    /// cancelled or connection-fatal fetch quarantines while an ordinary Oracle
+    /// query error (a single row that failed to decode, a bad expression) still
+    /// permits reuse exactly as before.
+    fn uncertain_stream_reason(error: &DbError) -> Option<String> {
+        error.is_uncertain_session_state().then(|| {
+            format!("owned row stream left the session uncertain and cannot be reused: {error}")
+        })
     }
 
     fn owned_row_to_oracle_row(
@@ -4496,6 +4541,204 @@ mod driver {
                 DbError::NamedBindMismatch { missing, unexpected }
                     if missing.is_empty() && unexpected == [":unused"]
             ));
+        }
+
+        /// Bind permutation table: across reorderings, colon/case spelling,
+        /// duplicate placeholders, and surplus/absent names, an unmatched named
+        /// bind is NEVER silently appended into a positional slot — it is a hard
+        /// [`DbError::NamedBindMismatch`]. Each accepted row also proves the
+        /// emitted positional order matches first-appearance placeholder order.
+        #[test]
+        fn bind_permutation_table_never_appends_unmatched_names_positionally() {
+            fn n(value: &str) -> BindValue {
+                BindValue::Number(value.to_owned())
+            }
+            // (sql, supplied binds, expected accepted order OR None for a reject)
+            let accepted: &[(&str, &[(&str, &str)], &[&str])] = &[
+                // Straight order.
+                (
+                    "select :a, :b from dual",
+                    &[(":a", "1"), (":b", "2")],
+                    &["1", "2"],
+                ),
+                // Supplied out of order — result follows placeholder order.
+                (
+                    "select :a, :b, :c from dual",
+                    &[(":c", "3"), (":a", "1"), (":b", "2")],
+                    &["1", "2", "3"],
+                ),
+                // Colon-insensitive and case-insensitive name matching.
+                (
+                    "select :Alpha, :beta from dual",
+                    &[("alpha", "1"), (":BETA", "2")],
+                    &["1", "2"],
+                ),
+                // A duplicate placeholder binds once by name (driver reuses it),
+                // so the deduped order carries each unique name exactly once.
+                (
+                    "select :a, :b, :a from dual",
+                    &[(":b", "2"), (":a", "1")],
+                    &["1", "2"],
+                ),
+            ];
+            for (sql, binds, expected) in accepted {
+                let supplied = binds
+                    .iter()
+                    .map(|(name, v)| ((*name).to_owned(), n(v)))
+                    .collect();
+                let ordered = order_named_binds_for_driver(sql, supplied)
+                    .unwrap_or_else(|err| panic!("`{sql}` should accept its binds, got {err:?}"));
+                let rendered: Vec<&str> = ordered
+                    .iter()
+                    .map(|value| match value {
+                        BindValue::Number(text) => text.as_str(),
+                        other => panic!("unexpected bind kind for `{sql}`: {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(&rendered, expected, "positional order for `{sql}`");
+            }
+
+            // Every rejected row must fail typed, never bind incorrectly. A name
+            // that matches no placeholder is `unexpected`; a placeholder with no
+            // supplied name is `missing`. Neither is ever appended positionally.
+            let rejected: &[(&str, &[(&str, &str)], &[&str], &[&str])] = &[
+                // Surplus name amid otherwise-matched binds.
+                (
+                    "select :a, :b from dual",
+                    &[(":a", "1"), (":b", "2"), (":c", "3")],
+                    &[],
+                    &["c"],
+                ),
+                // Unmatched name sitting between matched ones.
+                (
+                    "select :a, :b from dual",
+                    &[(":a", "1"), (":x", "9"), (":b", "2")],
+                    &[],
+                    &["x"],
+                ),
+                // Missing placeholder.
+                (
+                    "select :a, :b, :c from dual",
+                    &[(":a", "1"), (":b", "2")],
+                    &["c"],
+                    &[],
+                ),
+                // No placeholders at all: a supplied name cannot become positional.
+                ("select 1 from dual", &[(":a", "1")], &[], &["a"]),
+                // Positional-looking SQL with a named bind supplied: `:1` is a
+                // distinct placeholder name, so the supplied `:a` is unexpected
+                // and `1` is missing — never a positional coincidence.
+                ("select :1 from dual", &[(":a", "1")], &["1"], &["a"]),
+            ];
+            for (sql, binds, want_missing, want_unexpected) in rejected {
+                let supplied = binds
+                    .iter()
+                    .map(|(name, v)| ((*name).to_owned(), n(v)))
+                    .collect();
+                let err = order_named_binds_for_driver(sql, supplied)
+                    .expect_err("an unmatched or missing name must never bind positionally");
+                match err {
+                    DbError::NamedBindMismatch {
+                        missing,
+                        unexpected,
+                    } => {
+                        let missing_names: Vec<String> = missing;
+                        let unexpected_bare: Vec<String> = unexpected
+                            .iter()
+                            .map(|name| name.trim_start_matches(':').to_owned())
+                            .collect();
+                        assert_eq!(missing_names, *want_missing, "missing for `{sql}`");
+                        assert_eq!(unexpected_bare, *want_unexpected, "unexpected for `{sql}`");
+                    }
+                    other => panic!("`{sql}` must reject with NamedBindMismatch, got {other:?}"),
+                }
+            }
+        }
+
+        /// The row-stream recover decision is taken from the error KIND: an
+        /// uncertain-session failure records a quarantine reason (so recover
+        /// refuses to reuse the connection), while an ordinary Oracle query
+        /// error keeps a coherent cursor and permits reuse (no reason recorded).
+        #[test]
+        fn uncertain_next_row_failure_records_a_quarantine_reason() {
+            // Cancelled (the fetch-loop timeout path) leaves the cursor uncertain.
+            let cancelled = DbError::Cancelled("owned row stream: call timeout".to_owned());
+            let reason = uncertain_stream_reason(&cancelled)
+                .expect("a cancelled fetch must force quarantine on recover");
+            assert!(reason.contains("cannot be reused"), "reason: {reason}");
+
+            // A connection-lost failure is likewise uncertain.
+            assert!(
+                uncertain_stream_reason(&DbError::ConnectionLost("socket reset".to_owned()))
+                    .is_some(),
+                "a lost connection must force quarantine"
+            );
+
+            // An ordinary Oracle query error (a single row that failed to decode,
+            // a bad expression) keeps the session usable — reuse stays allowed.
+            assert!(
+                uncertain_stream_reason(&DbError::Query(
+                    "ORA-00942: table or view does not exist".to_owned()
+                ))
+                .is_none(),
+                "a clean-cursor query error must NOT quarantine"
+            );
+        }
+
+        /// End-to-end recover: a stream whose `next_row` left the session
+        /// uncertain must quarantine its connection slot and report the typed
+        /// [`DbError::Quarantined`] — never silently return the pinned session to
+        /// service, and never surface as a transient/retryable error. The slot
+        /// stays quarantined for every later borrow.
+        #[test]
+        fn row_stream_recover_after_uncertain_next_row_quarantines_the_slot() {
+            use asupersync::runtime::RuntimeBuilder;
+            let runtime = RuntimeBuilder::current_thread()
+                .build()
+                .expect("current-thread runtime");
+            runtime.block_on(async {
+                let cx = Cx::current().expect("block_on installs a current Cx");
+                // The live start path takes the connection out of the slot while
+                // the stream owns it; model that with an empty-but-live slot.
+                let inner = Arc::new(AsyncMutex::new(super::super::RustOracleConnectionSlot {
+                    connection: None,
+                    quarantine_reason: None,
+                }));
+                let stream = RustOracleRowStream {
+                    inner: Arc::clone(&inner),
+                    opts: OracleConnectOptions::default(),
+                    stream: None,
+                    metadata: Vec::new(),
+                    columns: Vec::new(),
+                    serialize_opts: SerializeOptions::default(),
+                    limits: super::super::WireLimits::default(),
+                    session_uncertain: Some(
+                        "owned row stream left the session uncertain and cannot be reused: \
+                         owned row stream: call timeout"
+                            .to_owned(),
+                    ),
+                };
+                let err = stream.recover(&cx).await.expect_err(
+                    "an uncertain session must fail recovery, not reuse the connection",
+                );
+                match err {
+                    DbError::Quarantined { outcome, message } => {
+                        assert_eq!(outcome, crate::error::QuarantineOutcome::UnknownDiscarded);
+                        assert!(message.contains("cannot be reused"), "message: {message}");
+                    }
+                    other => panic!("recover must quarantine, got a transient {other:?}"),
+                }
+                // The slot is now poisoned: every later borrow stays fail-closed.
+                let guard = inner.lock(&cx).await.expect("slot lock");
+                assert!(
+                    guard.quarantine_reason.is_some(),
+                    "the slot must remain quarantined for future borrows"
+                );
+                assert!(
+                    guard.connection.is_none(),
+                    "the uncertain connection must be discarded, not reusable"
+                );
+            });
         }
 
         #[test]
@@ -6003,6 +6246,7 @@ mod driver {
                     columns,
                     serialize_opts: serialize_opts.clone(),
                     limits,
+                    session_uncertain: None,
                 },
             )))
         }
