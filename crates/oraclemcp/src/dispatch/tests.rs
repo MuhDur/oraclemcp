@@ -5074,6 +5074,168 @@ fn custom_tool_write_runs_with_confirmation_on_writable_profile() {
     assert!(state.queried.lock().expect("queried mutex").is_empty());
 }
 
+/// Load exactly one custom tool from inline TOML at a given profile ceiling — a
+/// focused, database-free fixture for unit-testing the moved `custom_tool`
+/// argument-extraction helpers (C6 de-monolith).
+fn load_single_custom_tool(toml: &str, ceiling: OperatingLevel) -> oraclemcp_core::LoadedTool {
+    let defs = oraclemcp_core::parse_tools_file(toml).expect("custom tool parses");
+    let mut loaded = oraclemcp_core::load_tools(
+        &defs,
+        &Classifier::new(ClassifierConfig::new()),
+        ceiling,
+    )
+    .expect("custom tool loads");
+    assert_eq!(loaded.len(), 1, "fixture defines exactly one tool");
+    loaded.remove(0)
+}
+
+/// C6 coverage: `custom_tool_execute_args` (moved to `dispatch/custom_tool.rs`)
+/// consumes every control key, then orders the remaining binds by the body's
+/// placeholder order and JSON-encodes each `OracleBind` kind through
+/// `bind_to_json`. One call exercises the success path of all four
+/// `consume_custom_tool_control_*` helpers, `ordered_custom_tool_binds`, and the
+/// String / F64 / Bool / Null / I64 arms of `bind_to_json` (the `TimestampTz`
+/// arm is unreachable from a custom tool — no timestamp param type exists).
+#[test]
+fn custom_tool_execute_args_extracts_all_controls_and_orders_every_bind_kind() {
+    let tool = load_single_custom_tool(
+        r#"
+            [[tool]]
+            name = "app_multi_bind"
+            description = "exercise every custom-tool bind conversion"
+            sql = "UPDATE app_rows SET name = :name, score = :score, active = :active, note = :note WHERE id = :id"
+            output_mode = "rows"
+
+            [[tool.params]]
+            name = "id"
+            type = "integer"
+            required = true
+
+            [[tool.params]]
+            name = "name"
+            type = "string"
+            required = true
+
+            [[tool.params]]
+            name = "score"
+            type = "number"
+            required = true
+
+            [[tool.params]]
+            name = "active"
+            type = "boolean"
+            required = true
+
+            [[tool.params]]
+            name = "note"
+            type = "string"
+            required = false
+        "#,
+        OperatingLevel::ReadWrite,
+    );
+
+    let args = json!({
+        "id": 7,
+        "name": "Acme",
+        "score": 3.5,
+        "active": true,
+        "note": null,
+        "commit": true,
+        "hold": false,
+        "capture_dbms_output": true,
+        "max_dbms_output_lines": 10,
+        "max_dbms_output_chars": 100,
+        "timeout_seconds": 5,
+        "confirm": "grant-token",
+    });
+
+    let execute = custom_tool_execute_args("app_multi_bind", &tool, &args)
+        .expect("well-formed custom-tool args extract");
+
+    assert_eq!(
+        execute.sql,
+        "UPDATE app_rows SET name = :name, score = :score, active = :active, note = :note WHERE id = :id"
+    );
+    assert!(execute.commit);
+    assert!(!execute.hold);
+    assert_eq!(execute.confirm.as_deref(), Some("grant-token"));
+    assert!(execute.capture_dbms_output);
+    assert_eq!(execute.dbms_output_max_lines, Some(10));
+    assert_eq!(execute.dbms_output_max_chars, Some(100));
+    assert_eq!(execute.timeout_seconds, Some(5));
+    // Binds are ordered by the body's placeholder order (:name, :score, :active,
+    // :note, :id), and each OracleBind kind is JSON-encoded by `bind_to_json`.
+    assert_eq!(
+        execute.binds,
+        vec![
+            json!("Acme"), // String
+            json!(3.5),    // F64
+            json!(true),   // Bool
+            Value::Null,   // Null (optional param supplied as null)
+            json!(7),      // I64
+        ]
+    );
+}
+
+/// C6 coverage: every rejection branch of the moved control-key consumers. Each
+/// case trips a different helper — a non-object payload, a non-bool control, a
+/// bool alias collision, a non-integer u64/usize control, a non-string confirm,
+/// and a confirm/alias collision — so the error arms of `custom_tool_execute_args`
+/// and the four `consume_custom_tool_control_*` helpers are all exercised.
+#[test]
+fn custom_tool_execute_args_rejects_malformed_control_arguments() {
+    let tool = load_single_custom_tool(
+        r#"
+            [[tool]]
+            name = "app_simple"
+            description = "one integer bind"
+            sql = "SELECT :id AS v FROM dual"
+            output_mode = "rows"
+
+            [[tool.params]]
+            name = "id"
+            type = "integer"
+            required = true
+        "#,
+        OperatingLevel::ReadOnly,
+    );
+
+    let cases: &[(Value, &str)] = &[
+        (json!("not-an-object"), "expected an object"),
+        (json!({ "id": 1, "commit": "yes" }), "commit must be true/false"),
+        (
+            json!({ "id": 1, "capture_dbms_output": true, "dbms_output": false }),
+            "mutually exclusive",
+        ),
+        (
+            json!({ "id": 1, "timeout_seconds": "soon" }),
+            "must be a non-negative integer",
+        ),
+        (
+            json!({ "id": 1, "max_dbms_output_lines": "lots" }),
+            "must be a non-negative integer",
+        ),
+        (json!({ "id": 1, "confirm": 123 }), "must be a string"),
+        (
+            json!({ "id": 1, "confirm": "a", "token": "b" }),
+            "mutually exclusive",
+        ),
+    ];
+    for (args, needle) in cases {
+        let err = match custom_tool_execute_args("app_simple", &tool, args) {
+            Err(err) => err,
+            Ok(_) => panic!("expected a refusal for {args}"),
+        };
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+        assert!(
+            err.message.contains(needle),
+            "message {:?} should contain {:?}",
+            err.message,
+            needle,
+        );
+    }
+}
+
 #[test]
 fn qa45_profile_switch_refreshes_every_discovery_surface_and_execution() {
     fn catalog(name: &str) -> CustomToolCatalog {
@@ -10803,6 +10965,214 @@ mod qa85_terminal_boundaries {
             state.rollbacks.load(Ordering::SeqCst),
             0,
             "holding must not end the transaction"
+        );
+    }
+
+    /// Model a naive MCP client that retries a tool call whenever it observes a
+    /// retryable `Cancelled`. The `attempts < 4` cap keeps a terminal-effect
+    /// regression from hanging the suite: if a call whose database effect had
+    /// already succeeded were (wrongly) reported `Cancelled`, this loop would
+    /// re-dispatch it — re-applying the effect on each pass — until the cap, and
+    /// the caller's execution-count assertion would then fail loudly. With the
+    /// DI1/DI6 terminal-effect recognition the succeeded effect is reported `Ok`,
+    /// so the loop stops after exactly one dispatch. Returns (attempts, final
+    /// outcome). This drives the SAME async boundary the server uses
+    /// (`ToolDispatch::dispatch`), where the `cx.is_cancel_requested() &&
+    /// !terminal_result` decision lives — the sync `dispatch` helper bypasses it.
+    async fn cancel_retry_loop(
+        dispatcher: &OracleDispatcher,
+        cx: &Cx,
+        name: &str,
+        args: Value,
+    ) -> (u32, Outcome<Value, ErrorEnvelope>) {
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            let outcome = ToolDispatch::dispatch(
+                dispatcher,
+                cx,
+                DispatchContext::default(),
+                name,
+                args.clone(),
+            )
+            .await;
+            if matches!(outcome, Outcome::Cancelled(_)) && attempts < 4 {
+                // The client clears its cancellation and retries — precisely the
+                // behavior the terminal-effect fix exists to make unnecessary.
+                cx.set_cancel_requested(false);
+                continue;
+            }
+            return (attempts, outcome);
+        }
+    }
+
+    /// F-DI1 double-apply regression guard, driven through the naive retry loop
+    /// the fix exists to stop. A held `oracle_execute` runs its DML on the wire,
+    /// then the request deadline elapses during finalization (`cancel_on_execute`
+    /// sets the cancel bit AFTER the wire effect returns, exactly as an outer
+    /// deadline would). A client that retries on `Cancelled` would re-apply the
+    /// held DML on top of the still-pending first one. Because the succeeded held
+    /// effect is TERMINAL, the first dispatch returns `Ok`, the loop stops at
+    /// attempt 1, and the DML is applied EXACTLY once. Were the terminal
+    /// recognition to regress, attempt 1 would be `Cancelled`, the loop would
+    /// retry, and `executed` would grow past the single held application.
+    #[test]
+    fn held_execute_deadline_boundary_retry_loop_applies_exactly_once() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+        dispatcher
+            .dispatch("oracle_checkpoint", json!({ "name": "before_change" }))
+            .expect("checkpoint opens the workspace");
+
+        // From here every execute reports success on the wire and THEN trips the
+        // request deadline — the finalization-window race the fix addresses.
+        state.cancel_on_execute.store(1, Ordering::SeqCst);
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("asupersync test runtime builds");
+        let (attempts, outcome) = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            cancel_retry_loop(
+                &dispatcher,
+                &cx,
+                "oracle_execute",
+                json!({
+                    "sql": "UPDATE employees SET salary = salary * 2 WHERE employee_id = :1",
+                    "binds": [100],
+                    "hold": true,
+                }),
+            )
+            .await
+        });
+
+        assert_eq!(
+            attempts, 1,
+            "a succeeded held effect is terminal; the retry loop must stop after the first dispatch"
+        );
+        let Outcome::Ok(value) = outcome else {
+            panic!(
+                "the terminal held effect must be reported Ok, not a retryable Cancelled: {outcome:?}"
+            );
+        };
+        assert_eq!(value["executed"], json!(true));
+        assert_eq!(value["held"], json!(true));
+        assert_eq!(value["committed"], json!(false));
+        assert_eq!(
+            state.executed.lock().expect("exec mutex").len(),
+            2,
+            "the checkpoint SAVEPOINT plus EXACTLY ONE held DML execution — no double-apply"
+        );
+        assert_eq!(
+            state.commits.load(Ordering::SeqCst),
+            0,
+            "holding never commits"
+        );
+        assert_eq!(
+            state.rollbacks.load(Ordering::SeqCst),
+            0,
+            "holding must not end the transaction"
+        );
+    }
+
+    /// F-DI6 double-apply regression guard for `oracle_undo_to`, the strongest of
+    /// the three: `ROLLBACK TO SAVEPOINT` KEEPS its savepoint (Oracle semantics,
+    /// mirrored by `commit_undo_to`), so a naive retry of the same undo genuinely
+    /// re-runs the rollback — a real double-apply, not merely a redundant call.
+    /// The rollback reaches Oracle and THEN the deadline trips. Because a taken
+    /// undo is TERMINAL, the first dispatch returns `Ok`, the loop stops, and the
+    /// `ROLLBACK TO SAVEPOINT` ran exactly once.
+    #[test]
+    fn undo_deadline_boundary_retry_loop_rolls_back_exactly_once() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+        dispatcher
+            .dispatch("oracle_checkpoint", json!({ "name": "cp1" }))
+            .expect("checkpoint opens the workspace");
+
+        // The undo's ROLLBACK reaches Oracle, then the deadline trips.
+        state.cancel_on_execute.store(1, Ordering::SeqCst);
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("asupersync test runtime builds");
+        let (attempts, outcome) = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            cancel_retry_loop(&dispatcher, &cx, "oracle_undo_to", json!({ "name": "cp1" })).await
+        });
+
+        assert_eq!(
+            attempts, 1,
+            "a taken ROLLBACK TO SAVEPOINT is terminal; the retry loop must not re-run it"
+        );
+        let Outcome::Ok(value) = outcome else {
+            panic!("a taken undo must be reported Ok, not a retryable Cancelled: {outcome:?}");
+        };
+        // Oracle identifiers are normalized to upper case by the checkpoint-name
+        // validator, so the round-tripped name and statement come back upper-cased.
+        assert_eq!(value["undone_to"], json!("CP1"));
+        assert_eq!(value["statement"], json!("ROLLBACK TO SAVEPOINT CP1"));
+        assert_eq!(
+            state.executed.lock().expect("exec mutex").len(),
+            2,
+            "the SAVEPOINT plus EXACTLY ONE ROLLBACK TO SAVEPOINT — the undo ran once"
+        );
+        assert_eq!(
+            state.commits.load(Ordering::SeqCst),
+            0,
+            "undo never commits"
+        );
+    }
+
+    /// F-DI6 double-apply regression guard for `oracle_checkpoint`: the SAVEPOINT
+    /// reaches Oracle and THEN the deadline trips. An established SAVEPOINT is
+    /// TERMINAL, so the first dispatch returns `Ok` and the retry loop stops — the
+    /// checkpoint is not re-established. (The duplicate-name guard is a second
+    /// line of defense, but the point proven here is that no `Cancelled` is
+    /// emitted for a savepoint Oracle already accepted.)
+    #[test]
+    fn checkpoint_deadline_boundary_retry_loop_establishes_savepoint_once() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+
+        // The SAVEPOINT reaches Oracle and THEN the deadline trips.
+        state.cancel_on_execute.store(1, Ordering::SeqCst);
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("asupersync test runtime builds");
+        let (attempts, outcome) = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            cancel_retry_loop(&dispatcher, &cx, "oracle_checkpoint", json!({ "name": "cp1" })).await
+        });
+
+        assert_eq!(
+            attempts, 1,
+            "an established SAVEPOINT is terminal; the retry loop must stop after the first dispatch"
+        );
+        let Outcome::Ok(value) = outcome else {
+            panic!("an established SAVEPOINT must be reported Ok, not a retryable Cancelled: {outcome:?}");
+        };
+        // The checkpoint-name validator upper-cases the identifier, so the
+        // response name and statement come back upper-cased.
+        assert_eq!(value["checkpoint"], json!("CP1"));
+        assert_eq!(value["statement"], json!("SAVEPOINT CP1"));
+        assert_eq!(
+            state.executed.lock().expect("exec mutex").len(),
+            1,
+            "exactly one SAVEPOINT reached Oracle — the checkpoint was not re-established"
         );
     }
 
