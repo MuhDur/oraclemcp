@@ -1,0 +1,43 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-26T18:10:00Z",
+  "bead_id": "oraclemcp-f-server-db2-db3-bind-recovery-i3kg",
+  "scope": {
+    "summary": "An uncertain owned row-stream session is quarantined instead of reused: on a next_row timeout (or any connection-fatal driver error) the pinned session is left mid-fetch with no out-of-band cancel, so recover no longer hands that connection back to the slot; the first uncertain-session failure is recorded and the session is discarded rather than silently returned to service. The DB2/DB3 bind-slot half (reject unmatched named binds before driver ordering) is pinned by a bind-permutation regression table.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/connection.rs"
+    ],
+    "out_of_scope": [
+      "the value-fidelity bind work tracked separately (db1-db4-value-fidelity)"
+    ]
+  },
+  "source": {
+    "sha": "8e579647e4d222753af99fae1ec33150b1bbe044",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "owned row-stream recover() quarantine + bind-permutation table",
+        "kind": "tool",
+        "trace": "crates/oraclemcp-db/src/connection.rs: the row-stream records the first uncertain-session failure and recover discards rather than returns the connection to the slot. Quarantine fix landed in 312cbedc; the clippy::type_complexity cleanup of the bind-permutation test table (AcceptedRow/RejectedRow aliases, no behavior change) landed in 8e579647, which is the source and last-touch of this file. cargo test -p oraclemcp-db."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped regression proof only; full gate green in CI at HEAD 5031d67e. source.sha is the last commit touching connection.rs (8e579647); the quarantine behavior landed in ancestor 312cbedc and is unchanged at source."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

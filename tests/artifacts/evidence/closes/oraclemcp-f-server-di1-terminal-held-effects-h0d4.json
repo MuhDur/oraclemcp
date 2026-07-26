@@ -1,0 +1,43 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-26T18:10:00Z",
+  "bead_id": "oraclemcp-f-server-di1-terminal-held-effects-h0d4",
+  "scope": {
+    "summary": "No product change was needed: the terminal-effect fix already ships (a succeeded held execute/checkpoint/undo is recognized as terminal so a late-deadline expiry never reports RETRYABLE for done work — DI1 2e54c6a9, DI6 124d62c1). What was missing and is added here is the end-to-end regression guard: three tests drive the SAME async boundary the server uses (ToolDispatch::dispatch, where cx.is_cancel_requested() && !terminal_result decides Cancelled vs Ok) through the naive client retry loop, inducing the finalization-window race and proving the effect is applied exactly once.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/tests.rs"
+    ],
+    "out_of_scope": [
+      "the terminal-effect production logic itself (already correct; DI1 2e54c6a9 / DI6 124d62c1, unchanged here)"
+    ]
+  },
+  "source": {
+    "sha": "5031d67edbc7f7e13ad7d309b0a7daf0a6a13f90",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "held-effect exactly-once regression at the deadline boundary",
+        "kind": "tool",
+        "trace": "crates/oraclemcp/src/dispatch/tests.rs: three tests induce the finalization-window race (cancel_on_execute trips the cancel bit AFTER the wire effect returns) through ToolDispatch::dispatch and prove no held-effect double-apply. Regression guard landed in 0aceec11 and was rustfmt-only touched at source 5031d67e; the exactly-once product behavior it guards is 2e54c6a9 / 124d62c1. Mutation-verified per the landing commit. cargo test -p oraclemcp dispatch."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This close adds a regression guard for behavior that was already correct in production; no dispatch product code changed. Scoped test proof; full gate green in CI at HEAD 5031d67e. source.sha is the last commit touching dispatch/tests.rs (5031d67e, rustfmt after the tests landed in 0aceec11)."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

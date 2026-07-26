@@ -1,0 +1,47 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-26T18:10:00Z",
+  "bead_id": "oraclemcp-f-server-au1-au4-audit-hardening-g6eg",
+  "scope": {
+    "summary": "Four audit-crate hardenings, each with a real versioned migration so existing chains keep verifying byte-for-byte: (AU1) schema v11 domain-separates the entry-hash preimage with an explicit application-domain label while v1-v10 records still verify under their original label-free computation; (AU2) U+2028/U+2029 are escaped in both serialization sinks; (AU3) the Rekor head binding is parsed structurally/exactly; (AU4) secrets are scrubbed from audit error messages.",
+    "in_scope": [
+      "crates/oraclemcp-audit/src/record.rs",
+      "crates/oraclemcp-audit/src/rekor.rs",
+      "crates/oraclemcp-audit/src/shipping.rs",
+      "crates/oraclemcp-audit/src/sink.rs",
+      "crates/oraclemcp-audit/src/verify.rs"
+    ],
+    "out_of_scope": [
+      "audit behavior unrelated to preimage/serialization/Rekor/error-scrubbing"
+    ]
+  },
+  "source": {
+    "sha": "89536b02853a06bb3dffe05804ccf484adc81be1",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "audit hash-chain preimage + serialization + Rekor + error scrubbing",
+        "kind": "cli",
+        "trace": "crates/oraclemcp-audit/{record,rekor,shipping,sink,verify}.rs: schema v11 domain-separated preimage with backward-compatible v1-v10 verification, U+2028/2029 escaping in both sinks, structural Rekor head parse, and secret scrubbing in errors — all landed in 89536b02 (the single source and last-touch for these files). Migration proven by old chains still verifying. cargo test -p oraclemcp-audit."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped regression proof only; full gate green in CI at HEAD 5031d67e. All five scope files' last-touch is source 89536b02; the migration keeps pre-v11 chains verifying byte-for-byte."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

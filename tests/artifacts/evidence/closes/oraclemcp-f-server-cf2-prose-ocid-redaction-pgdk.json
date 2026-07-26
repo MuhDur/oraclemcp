@@ -1,0 +1,43 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-26T18:10:00Z",
+  "bead_id": "oraclemcp-f-server-cf2-prose-ocid-redaction-pgdk",
+  "scope": {
+    "summary": "OCIDs embedded in operator-facing prose are now redacted: the doctor/error surface previously scrubbed only known-secret substrings (redact_exact_substrings), so an OCI/Oracle error quoting a tenant/resource OCID we never held to match exactly passed through into doctor detail/fix text and log lines. A narrow prose scanner (redact_ocids) mirrors the telemetry crate's proven recognizer — requires the documented ocid1.<type>.<realm> minimum, token-boundary anchored, trailing sentence punctuation excluded — and is composed into the surface scrub.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/redacted.rs"
+    ],
+    "out_of_scope": [
+      "the doctor.rs composition site (calls the new redact_ocids; the recognizer itself is the fix and lives in redacted.rs)"
+    ]
+  },
+  "source": {
+    "sha": "bc061ae9d80d8f1c6ba69fa2faa8b4ac601713f2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "redact_ocids prose scanner",
+        "kind": "cli",
+        "trace": "crates/oraclemcp-core/src/redacted.rs adds redact_ocids, a token-boundary-anchored ocid1.<type>.<realm> recognizer mirroring the telemetry recognizer, composed into the doctor/error prose scrub so quoted OCIDs no longer reach doctor detail/fix text or log lines. Landed in bc061ae9 (source and last-touch of redacted.rs). cargo test -p oraclemcp-core."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped regression proof only; full gate green in CI at HEAD 5031d67e. source.sha bc061ae9 is the last commit touching redacted.rs and where the recognizer landed."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

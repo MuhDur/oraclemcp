@@ -1,0 +1,43 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-26T18:10:00Z",
+  "bead_id": "oraclemcp-vzui",
+  "scope": {
+    "summary": "Windows durable-state 'Access is denied' (os error 5) fixed: every durable append (write-intent log, metrics, source history) is opened readably so authenticate_private_file can inspect the descriptor. On Windows the number_of_links read is the windows_by_handle path (GetFileInformationByHandleEx/FileStandardInfo), which needs FILE_READ_ATTRIBUTES; an append-only open (FILE_GENERIC_WRITE & !FILE_WRITE_DATA) lacked that right, so the pre-write inspection failed ERROR_ACCESS_DENIED. The append handle is now opened with the read-attributes right.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/file_store.rs"
+    ],
+    "out_of_scope": [
+      "the earlier feature-gate compile fix (a84b29d) that made the windows_by_handle path compile"
+    ]
+  },
+  "source": {
+    "sha": "1030b6dc05d44232b65a7ea06206d9bc9131fd70",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "durable-append handle open + authenticate_private_file",
+        "kind": "cli",
+        "trace": "crates/oraclemcp-core/src/file_store.rs: open_append_private_file now opens the durable-append handle with FILE_READ_ATTRIBUTES so authenticate_private_file's metadata()/number_of_links() inspection succeeds before the first write. Fix landed in 1030b6dc. The os-error-5 only reproduces on Windows; the Windows CI lane is the authoritative verifier."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No local Windows repro exists; the Windows CI lane is the authoritative verifier per the bead's acceptance (Windows durable-state operations succeed, no os error 5). Linux side is fully green. This close records the delivered fix at source 1030b6dc; the Windows-lane green is asserted by CI, not attached here as a machine artifact."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

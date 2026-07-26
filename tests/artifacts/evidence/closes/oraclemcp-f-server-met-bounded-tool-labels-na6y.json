@@ -1,0 +1,45 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-26T18:10:00Z",
+  "bead_id": "oraclemcp-f-server-met-bounded-tool-labels-na6y",
+  "scope": {
+    "summary": "Tool metric label cardinality is bounded order-independently: an injectable advertised-tool allowlist (OnceLock, set once at startup) collapses every unadvertised tools/call name to a single <other> sentinel, replacing the order-sensitive numeric cap an attacker could pre-fill to displace legitimate series. The allowlist is seeded at the one production Metrics::new() site with the built-in registry tool names chained with the loaded custom tools.",
+    "in_scope": [
+      "crates/oraclemcp-telemetry/src/metrics.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp-core/src/custom_tools.rs"
+    ],
+    "out_of_scope": [
+      "the prior numeric 512-series overflow cap (retained as a secondary bound, not the primary defense)"
+    ]
+  },
+  "source": {
+    "sha": "bc0f97c5d148ff332a48df3980a53ae850f1070e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "tools/call metric label canonicalization",
+        "kind": "tool",
+        "trace": "crates/oraclemcp-telemetry/src/metrics.rs defines UNADVERTISED_TOOL_LABEL \"<other>\" and set_advertised_tools (OnceLock allowlist); the label mechanism landed in c436e5cc. main.rs seeds it at the production Arc::new(Metrics::new()) site from registry::tool_names chained with CustomToolCatalog::names (new, custom_tools.rs:770), landed in 8234ce5e and left in delivered state at source bc0f97c5. Advertised built-in and custom tools keep their own series; arbitrary client names collapse to one sentinel. cargo test -p oraclemcp-telemetry / -p oraclemcp."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Scoped regression proof only; full-workspace gate green in CI at HEAD 5031d67e. source.sha bc0f97c5 is the commit that leaves all three scope files in their delivered state (metrics.rs last touched 09447852, main.rs 8234ce5e, custom_tools.rs bc0f97c5); the mechanism/wiring landed in c436e5cc + 8234ce5e."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
