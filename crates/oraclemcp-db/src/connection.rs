@@ -4553,8 +4553,16 @@ mod driver {
             fn n(value: &str) -> BindValue {
                 BindValue::Number(value.to_owned())
             }
-            // (sql, supplied binds, expected accepted order OR None for a reject)
-            let accepted: &[(&str, &[(&str, &str)], &[&str])] = &[
+            // (sql, supplied name→value binds, expected accepted positional order).
+            type AcceptedRow<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
+            // (sql, supplied binds, expected `missing`, expected bare `unexpected`).
+            type RejectedRow<'a> = (
+                &'a str,
+                &'a [(&'a str, &'a str)],
+                &'a [&'a str],
+                &'a [&'a str],
+            );
+            let accepted: &[AcceptedRow<'_>] = &[
                 // Straight order.
                 (
                     "select :a, :b from dual",
@@ -4601,7 +4609,7 @@ mod driver {
             // Every rejected row must fail typed, never bind incorrectly. A name
             // that matches no placeholder is `unexpected`; a placeholder with no
             // supplied name is `missing`. Neither is ever appended positionally.
-            let rejected: &[(&str, &[(&str, &str)], &[&str], &[&str])] = &[
+            let rejected: &[RejectedRow<'_>] = &[
                 // Surplus name amid otherwise-matched binds.
                 (
                     "select :a, :b from dual",
