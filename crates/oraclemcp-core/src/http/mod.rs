@@ -1308,7 +1308,7 @@ fn handle_dashboard_pairing_route(
         if let Some(response) = enforce_dashboard_get_headers(request) {
             return response;
         }
-        return dashboard_pairing_form_response();
+        return dashboard_pairing_form_response(false);
     }
     if let Some(response) = enforce_dashboard_post_headers(request) {
         return response;
@@ -1352,7 +1352,23 @@ fn dashboard_pairing_code_from_body(request: &HttpRequest) -> Option<String> {
 /// referrer policy: that lets browsers serialize the real same-origin `Origin`
 /// on the form POST while still refusing literal `Origin: null`.
 /// Inline `style-src` is already permitted by [`dashboard_csp`].
-fn dashboard_pairing_form_response() -> HttpResponse {
+fn dashboard_pairing_form_response(show_error: bool) -> HttpResponse {
+    let error = if show_error {
+        r#"<p class="error" id="pairing-error" role="alert">Pairing failed. The code may be invalid, expired, or already used. Run <code>oraclemcp dashboard</code> to request a new code.</p>"#
+    } else {
+        ""
+    };
+    let autofocus = if show_error { "" } else { " autofocus" };
+    let described_by = if show_error {
+        "pairing-error pairing-hint"
+    } else {
+        "pairing-hint"
+    };
+    let aria_invalid = if show_error {
+        r#" aria-invalid="true""#
+    } else {
+        ""
+    };
     let body = format!(
         r##"<!doctype html>
 <html lang="en">
@@ -1362,19 +1378,33 @@ fn dashboard_pairing_form_response() -> HttpResponse {
 <meta name="referrer" content="same-origin">
 <title>Pair the oraclemcp dashboard</title>
 <style>
-  :root {{ color-scheme: light dark; }}
+  :root {{ color-scheme: dark; background: #0c0b09; color: #e9e2d0; }}
+  * {{ box-sizing: border-box; }}
   body {{ margin: 0; min-height: 100vh; display: grid; place-items: center;
+         padding: 1.25rem; background: #0c0b09; color: #e9e2d0;
          font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; }}
-  main {{ width: min(28rem, 90vw); }}
-  h1 {{ font-size: 1.25rem; margin: 0 0 .5rem; }}
-  p {{ margin: 0 0 1.25rem; opacity: .8; }}
-  label {{ display: block; font-weight: 600; margin-bottom: .375rem; }}
-  input, button {{ font: inherit; width: 100%; box-sizing: border-box;
-                   padding: .625rem .75rem; border-radius: .5rem; }}
-  input {{ border: 1px solid currentColor; letter-spacing: .05em; }}
-  button {{ margin-top: .75rem; border: 0; font-weight: 600; cursor: pointer;
-            background: currentColor; }}
-  button span {{ mix-blend-mode: difference; filter: invert(1); }}
+  main {{ width: min(30rem, 100%); padding: clamp(1.25rem, 5vw, 2rem);
+          border: 1px solid #6b6048; border-radius: .75rem; background: #1e1913;
+          box-shadow: 0 1.25rem 3rem rgb(0 0 0 / .35); }}
+  h1 {{ margin: 0 0 .75rem; color: #f7f1e2; font-size: clamp(1.4rem, 4vw, 1.75rem);
+        line-height: 1.2; }}
+  p {{ margin: 0 0 1.25rem; color: #d8cfbb; }}
+  code {{ color: #f1cf78; }}
+  label {{ display: block; margin-bottom: .5rem; color: #f7f1e2; font-weight: 700; }}
+  input, button {{ width: 100%; min-height: 3rem; border-radius: .5rem;
+                   font: inherit; }}
+  input {{ border: 1px solid #918770; padding: .625rem .75rem; background: #0c0b09;
+           color: #f7f1e2; caret-color: #f1cf78; letter-spacing: .05em; }}
+  input:hover {{ border-color: #b9aa87; }}
+  input:focus-visible, button:focus-visible {{ outline: 3px solid #f1cf78;
+                                               outline-offset: 3px; }}
+  button {{ margin-top: .875rem; border: 1px solid #e8c45f; padding: .625rem .75rem;
+            background: #c7a34a; color: #0c0b09; font-weight: 800; cursor: pointer; }}
+  button:hover {{ background: #dfbb5c; }}
+  button:active {{ background: #b18e3d; transform: translateY(1px); }}
+  .hint {{ margin: .5rem 0 0; color: #bfb49d; font-size: .875rem; }}
+  .error {{ margin: 0 0 1rem; border-left: .25rem solid #e47865; padding: .75rem;
+            background: #3b1d18; color: #ffd9d0; font-weight: 650; }}
 </style>
 </head>
 <body>
@@ -1382,23 +1412,30 @@ fn dashboard_pairing_form_response() -> HttpResponse {
   <h1>Pair the oraclemcp dashboard</h1>
   <p>Paste the one-time code printed by <code>oraclemcp dashboard</code>. It expires
      {ttl} seconds after it was issued and works once.</p>
+  {error}
   <form method="post" action="{path}">
     <label for="{field}">One-time pairing code</label>
-    <input id="{field}" name="{field}" type="password" autocomplete="off"
-           autocapitalize="off" autocorrect="off" spellcheck="false" autofocus
+    <input id="{field}" name="{field}" type="password" autocomplete="one-time-code"
+           aria-describedby="{described_by}"{aria_invalid}
+           autocapitalize="off" autocorrect="off" spellcheck="false"{autofocus}
            required>
-    <button type="submit"><span>Pair this browser</span></button>
+    <p class="hint" id="pairing-hint">The code stays in this form submission and is never placed in the URL.</p>
+    <button type="submit">Pair this browser</button>
   </form>
 </main>
 </body>
 </html>
 "##,
         ttl = DASHBOARD_PAIRING_TTL_SECONDS,
+        error = error,
         path = DASHBOARD_PAIR_PATH,
         field = DASHBOARD_PAIRING_CODE_FIELD,
+        autofocus = autofocus,
+        described_by = described_by,
+        aria_invalid = aria_invalid,
     );
     with_dashboard_pairing_form_security_headers(HttpResponse {
-        status: 200,
+        status: if show_error { 401 } else { 200 },
         headers: vec![
             (
                 "content-type".to_owned(),
@@ -1564,7 +1601,7 @@ fn dashboard_auth_required_response() -> HttpResponse {
 }
 
 fn dashboard_pairing_auth_required_response() -> HttpResponse {
-    dashboard_auth_error_response(401, "dashboard_pairing_required")
+    dashboard_pairing_form_response(true)
 }
 
 fn with_dashboard_security_headers(response: HttpResponse) -> HttpResponse {

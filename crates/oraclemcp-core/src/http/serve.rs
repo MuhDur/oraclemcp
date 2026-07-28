@@ -328,6 +328,8 @@ fn listener_config(
     config: &HttpTransportConfig,
     native_scheme: EffectiveHttpScheme,
 ) -> HttpTransportConfig {
+    // Clone every transport policy, including the browser Workbench gate;
+    // listener setup may add runtime stores but must not reset release gates.
     let mut config = config.clone();
     if native_scheme.is_https() {
         config.effective_scheme = EffectiveHttpScheme::Https;

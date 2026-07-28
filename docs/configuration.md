@@ -180,7 +180,7 @@ field is unset after inheritance.
 | `allow_change_notification` | bool | `false` | no | Explicitly permit CQN registration for this profile. It does not widen SQL admission: each registration still requires a classifier-proven query, an active confirmed `READ_WRITE` step-up, and durable audit evidence; protected and standby profiles remain ineligible, and OBJECT-level registration is refused. |
 | `max_subscriptions` | integer | `4` | no | Per-principal live-subscription cap. Each admitted subscription reserves one EMON notification connection from the profile's database connection ceiling; `0` disables new subscriptions fail-closed. This resource bound does not authorize CQN. |
 | `mcp_exposed` | bool | `true` | no | E5 per-profile MCP exposure (opt-out). See [The `mcp_exposed` opt-out](#the-mcp_exposed-opt-out). |
-| `dashboard_ddl_workbench` | bool | `false` | no | Browser dashboard DDL/Admin apply opt-in for this profile. Still capped by `max_level`, `protected`, `read_only_standby`, confirmation, rollback, and audit controls. |
+| `dashboard_ddl_workbench` | bool | `false` | no | Reserved profile metadata. The current browser action policy refuses DDL/Admin apply even when this is `true`; use a non-browser operator path. It never raises `max_level`. |
 
 ### Session and routing
 
@@ -519,14 +519,14 @@ of browser storage. Dashboard-originated `/operator/v1` POSTs additionally
 require exact same-origin headers, a CSRF token, and a route-scoped action
 ticket.
 
-The dashboard Workbench uses those same action routes. It forwards classify
-requests to `oracle_preview_sql`, read execution to `oracle_query`, and guarded
-DML to `oracle_execute`; it does not expose a PTY, SQLcl shell, or alternate SQL
-path. Browser-originated DDL/Admin apply is release-gated in this line: DDL can
-be previewed, and applying it through the dashboard requires both
-`[http].dashboard_workbench = true` and `dashboard_ddl_workbench = true` on the
-active profile. Those flags do not raise the profile ceiling or bypass
-confirmation, rollback, idempotency, or audit.
+The dashboard Workbench uses those same action routes and is absent unless
+`[http].dashboard_workbench = true`. It forwards classify requests to
+`oracle_preview_sql`, read execution to `oracle_query`, and guarded DML to
+`oracle_execute`; it does not expose a PTY, SQLcl shell, or alternate SQL path.
+Browser-originated DDL/Admin can be previewed but cannot be applied in this
+release, including when the reserved profile field `dashboard_ddl_workbench`
+is true. Use a non-browser operator path; no dashboard setting raises the
+profile ceiling or bypasses confirmation, rollback, idempotency, or audit.
 
 The Reviews board uses `/operator/v1/change-proposals`,
 `/operator/v1/change-proposals/draft`, and

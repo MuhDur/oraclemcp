@@ -161,13 +161,16 @@ pub(super) fn force_preview_mode(tool: &str, arguments: &mut Value) {
 }
 
 pub(super) fn dashboard_workbench_release_gate(
+    dashboard_workbench_enabled: bool,
     route: OperatorRouteKind,
     tool: &str,
     arguments: &Value,
 ) -> Option<Value> {
     if !matches!(
         route,
-        OperatorRouteKind::ActionConfirm | OperatorRouteKind::ActionExecute
+        OperatorRouteKind::ActionPreview
+            | OperatorRouteKind::ActionConfirm
+            | OperatorRouteKind::ActionExecute
     ) {
         return None;
     }
@@ -179,7 +182,7 @@ pub(super) fn dashboard_workbench_release_gate(
         }));
     };
     let required_level = match policy.browser_apply {
-        BrowserApplyPolicy::Allow => return None,
+        BrowserApplyPolicy::Allow => None,
         BrowserApplyPolicy::DdlMutation => Some(oraclemcp_guard::OperatingLevel::Ddl),
         BrowserApplyPolicy::ClassifySql => {
             let Some(sql) = ["sql", "ddl", "source_code"]
@@ -197,13 +200,32 @@ pub(super) fn dashboard_workbench_release_gate(
                 .required_level
         }
     };
-    if required_level.is_some_and(|level| level >= oraclemcp_guard::OperatingLevel::Ddl) {
+    if matches!(
+        route,
+        OperatorRouteKind::ActionConfirm | OperatorRouteKind::ActionExecute
+    ) && required_level.is_some_and(|level| level >= oraclemcp_guard::OperatingLevel::Ddl)
+    {
         Some(json!({
             "error": "dashboard_ddl_workbench_disabled",
             "message": "browser dashboard DDL/Admin apply is release-gated; preview remains available",
             "tool": tool,
             "required_level": required_level,
             "next_step": "use /operator/v1/actions/preview to inspect the action, or use a non-browser operator path with the normal profile ceiling",
+        }))
+    } else if !dashboard_workbench_enabled
+        && matches!(
+            tool,
+            "oracle_preview_sql" | "oracle_query" | "oracle_execute"
+        )
+    {
+        Some(json!({
+            "source": "dashboard_workbench",
+            "error": "dashboard_workbench_disabled",
+            "message": "browser SQL Workbench actions are disabled by server configuration",
+            "tool": tool,
+            "enabled": false,
+            "configuration": "http.dashboard_workbench",
+            "next_step": "ask the service operator to set [http].dashboard_workbench = true after reviewing the browser SQL access policy",
         }))
     } else {
         None

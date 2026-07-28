@@ -345,6 +345,11 @@ pub struct HttpTransportConfig {
     /// same-origin dashboard session in addition to per-request operator
     /// authority.
     pub dashboard_auth: Option<Arc<DashboardAuth>>,
+    /// Explicit release gate for SQL submitted through the same-origin browser
+    /// dashboard. False by default; dictionary/connection actions and
+    /// authenticated non-browser operator clients are not governed by this
+    /// browser-only switch.
+    pub dashboard_workbench: bool,
     /// Signed audit sink for OAuth rejection security events and authorized
     /// operator API actions. OAuth failures remain denied if it is unavailable;
     /// operator API actions additionally fail closed rather than running
@@ -353,18 +358,17 @@ pub struct HttpTransportConfig {
     /// Optional audit JSONL path used by `/operator/v1/audit-tail`. The route
     /// summarizes records and never exposes bind values or raw identities.
     pub operator_audit_tail_path: Option<PathBuf>,
-    /// Optional path to a durably stored `/operator/v1/ci-lanes` snapshot:
-    /// either the native `ci-lane-snapshot/v1` format or the CI heartbeat
-    /// notifier's `ci-heartbeat/v1` output (`scripts/ci_heartbeat.sh`, default
-    /// `$XDG_STATE_HOME/oraclemcp/ci-heartbeat.json` — `oraclemcp serve` wires
-    /// that default). Unset, missing, malformed, or stale renders the tile as
-    /// an honest `"unavailable"`/`unknown` catalog listing rather than a
-    /// fabricated green.
+    /// Optional path to a durably stored `/operator/v1/ci-lanes` snapshot for
+    /// maintainer-facing library embeddings. `oraclemcp serve` does not wire a
+    /// default because repository CI is unrelated to an end user's Oracle
+    /// service. Unset, missing, malformed, or stale remains honestly
+    /// `"unavailable"`/`unknown`.
     pub ci_lane_snapshot_path: Option<PathBuf>,
     /// Start the bounded CI-lane background poller with the ordinary HTTP(S)
-    /// listener. Off by default for library embedders; `oraclemcp serve`
-    /// enables it after resolving the service-owned snapshot path. The poller
-    /// uses a fixed public GitHub API origin and never runs on request threads.
+    /// listener. Off by default and not enabled by `oraclemcp serve`; a library
+    /// embedder must opt in together with an explicit snapshot path. The
+    /// poller uses a fixed public GitHub API origin and never runs on request
+    /// threads.
     pub ci_lane_polling_enabled: bool,
     /// Safe config draft/apply backend for `/operator/v1/config/*`.
     pub config_ops: Option<Arc<ConfigOpsService>>,
@@ -419,6 +423,7 @@ impl std::fmt::Debug for HttpTransportConfig {
             )
             .field("operator_authority", &self.operator_authority)
             .field("dashboard_auth", &self.dashboard_auth.is_some())
+            .field("dashboard_workbench", &self.dashboard_workbench)
             .field("operator_auditor", &self.operator_auditor.is_some())
             .field(
                 "operator_audit_tail_path",
@@ -464,6 +469,7 @@ impl Default for HttpTransportConfig {
             single_principal_guard: None,
             operator_authority: OperatorAuthorityPolicy::default(),
             dashboard_auth: None,
+            dashboard_workbench: false,
             operator_auditor: None,
             operator_audit_tail_path: None,
             ci_lane_snapshot_path: None,

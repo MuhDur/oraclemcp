@@ -187,7 +187,7 @@ one-line help string using the exact serde name.
 | `allow_change_notification` | **COMMENTED** | Explicit CQN-registration opt-in; default false, with proven query, confirmed step-up, and durable audit still required. |
 | `max_subscriptions` | **COMMENTED** | Per-principal live-subscription cap (default 4); each admitted subscription reserves one EMON notification connection against the database ceiling. |
 | `mcp_exposed` | **COMMENTED** | Per-profile MCP exposure; default is exposed (opt-out), set `false` to hide this profile from the agent surface. |
-| `dashboard_ddl_workbench` | **COMMENTED** | Browser dashboard DDL/Admin apply opt-in; never raises `max_level` or bypasses preview/confirm/rollback/audit. |
+| `dashboard_ddl_workbench` | **COMMENTED** | Reserved metadata; current browser policy still refuses DDL/Admin apply. Never raises `max_level`. |
 | `session_identity` | **COMMENTED** | `[profiles.session_identity]` end-to-end Oracle session identity (program/machine/module/action/client_identifier/…). |
 | `pool` | **COMMENTED** | `[profiles.pool]` local client-side connection pool for stateless catalog/metadata reads. |
 | `oci` | **COMMENTED** | `[profiles.oci]` OCI / Autonomous DB fields (wallet_location, wallet_password_ref, DN matching, SNI, IAM token). |

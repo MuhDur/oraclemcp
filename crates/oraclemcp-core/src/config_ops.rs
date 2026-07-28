@@ -229,6 +229,8 @@ pub struct ConfigOpsStatus {
     pub current_sha256: String,
     /// Configured default profile, if any.
     pub default_profile: Option<String>,
+    /// Whether the browser SQL Workbench is explicitly enabled.
+    pub dashboard_workbench: bool,
     /// Redacted, agent-safe profile metadata.
     pub profiles: Vec<ProfileMetadata>,
 }
@@ -521,6 +523,7 @@ impl ConfigOpsService {
             target_exists: self.target_path.exists(),
             current_sha256: oraclemcp_audit::sha256_hex(&current_bytes),
             default_profile: current.default_profile,
+            dashboard_workbench: current.http.dashboard_workbench,
             profiles,
         })
     }
@@ -1480,6 +1483,34 @@ mod tests {
             default_level = "READ_ONLY"
             "#
         )
+    }
+
+    #[test]
+    fn status_exposes_the_browser_workbench_gate_without_secrets() {
+        let (backend, target) = backend("status-workbench-gate");
+        write_atomic_path(
+            &target,
+            br#"
+                [http]
+                dashboard_workbench = true
+
+                [[profiles]]
+                name = "prod"
+                connect_string = "database.internal:1521/service"
+                username = "PRIVATE_USER"
+                credential_ref = "env:PRIVATE_PASSWORD"
+            "#,
+        )
+        .expect("seed config");
+        let service = ConfigOpsService::new(backend, target, None);
+
+        let status = service.status().expect("status loads");
+        assert!(status.dashboard_workbench);
+        let rendered = serde_json::to_string(&status).expect("status serializes");
+        assert!(rendered.contains("\"dashboard_workbench\":true"));
+        for secret in ["database.internal", "PRIVATE_USER", "PRIVATE_PASSWORD"] {
+            assert!(!rendered.contains(secret), "status leaked {secret}");
+        }
     }
 
     #[test]

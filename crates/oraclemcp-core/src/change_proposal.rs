@@ -745,9 +745,12 @@ impl ChangeProposalStatement {
     ) -> Result<Self, ChangeProposalError> {
         let sql_template = normalize_non_empty(draft.sql_template, "sql_template")?;
         let decision = Classifier::default().classify(&sql_template);
-        let unit = draft
-            .unit
-            .unwrap_or_else(|| unit_for_required_level(decision.required_level));
+        let unit = unit_for_required_level(decision.required_level);
+        if draft.unit.is_some_and(|requested| requested != unit) {
+            return Err(ChangeProposalError::Invalid(
+                "statement unit does not match the classifier-required level",
+            ));
+        }
         let commit = draft
             .commit
             .unwrap_or(matches!(unit, ChangeProposalApplyUnit::Ddl));
@@ -1058,6 +1061,36 @@ mod tests {
             )
             .expect("draft")
             .proposal
+    }
+
+    #[test]
+    fn draft_rejects_a_caller_unit_that_disagrees_with_the_classifier() {
+        let store = ChangeProposalStore::open(store_root("unit-mismatch")).expect("store");
+        let error = store
+            .draft(
+                ChangeProposalDraftRequest {
+                    profile: "prod".to_owned(),
+                    author: ChangeProposalAuthorKind::Human,
+                    title: Some("Mislabelled write".to_owned()),
+                    statements: vec![ChangeProposalStatementDraft {
+                        sql_template: "UPDATE accounts SET status = 'HOLD'".to_owned(),
+                        binds: Vec::new(),
+                        unit: Some(ChangeProposalApplyUnit::Read),
+                        commit: None,
+                        capture_dbms_output: None,
+                        stored_verdict: None,
+                    }],
+                    stored_verdict: None,
+                },
+                "subject-sha256:test".to_owned(),
+            )
+            .expect_err("DML must not be saved as a read operation");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unit does not match the classifier-required level")
+        );
     }
 
     #[test]

@@ -1205,6 +1205,7 @@ fn operator_active_lanes_data(config: &HttpTransportConfig) -> Value {
         .collect::<Vec<_>>();
     json!({
         "source": if config.session_lifecycle.is_some() { "self_lane" } else { "unavailable" },
+        "stateful": config.stateful,
         "lanes": lanes,
     })
 }
@@ -3812,7 +3813,8 @@ fn handle_operator_action_route(
         force_preview_mode(tool, &mut arguments);
     }
     if request_context.dashboard_browser
-        && let Some(data) = dashboard_workbench_release_gate(route, tool, &arguments)
+        && let Some(data) =
+            dashboard_workbench_release_gate(config.dashboard_workbench, route, tool, &arguments)
     {
         return operator_json_response(403, &request.path, data);
     }

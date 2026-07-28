@@ -437,12 +437,14 @@ token, and a route-scoped action ticket. The dashboard origin threat-model
 addendum documents why the browser contract stays fail-closed:
 [`docs/dashboard-origin-threat-model-addendum.md`](docs/dashboard-origin-threat-model-addendum.md).
 
-The dashboard Workbench is not a terminal or SQL shell. Classify and preview
-actions forward to `oracle_preview_sql`, read execution forwards to
-`oracle_query`, and guarded DML forwards to `oracle_execute` with the same
-single-use confirmation grant and audit path agents use. Browser-originated
-DDL/Admin apply is release-gated; DDL can be previewed, but applying it requires
-a non-browser operator path until a profile-level dashboard DDL opt-in exists.
+The dashboard Workbench is not a terminal or SQL shell. It is disabled unless
+`[http].dashboard_workbench = true`; the Database Explorer remains available
+for governed metadata browsing when it is off. Classify and preview actions
+forward to `oracle_preview_sql`, read execution forwards to `oracle_query`, and
+guarded DML forwards to `oracle_execute` with the same single-use confirmation
+grant and audit path agents use. Browser-originated DDL/Admin apply remains
+blocked; DDL can be previewed, but applying it requires a non-browser operator
+path.
 When compiled with `plsql-intelligence`, the Workbench IDE panel also exposes
 the static `oracle_plsql_parse`, `oracle_plsql_analyze`,
 `oracle_plsql_lineage`, `oracle_plsql_sast`, `oracle_plsql_doc`, and
@@ -466,15 +468,6 @@ The Reviews page can also compare two supplied schema snapshots and export a
 reviewable migration script. The diff view omits raw DDL and shows hashes/counts;
 any executable export step must be drafted into the normal Change Proposal board
 before apply, where the server re-classifies and re-checks the statement.
-
-The Ground Control CI-lane tile is refreshed outside request handling by one
-bounded background poller. It reads the repository's generated scheduled and
-advisory lane taxonomy, polls the fixed public GitHub Actions API immediately
-and every 30 minutes, and atomically stores a local snapshot. Missing, stale,
-contradictory, or unavailable evidence renders `unknown`, never green. The
-separate CI Heartbeat workflow remains the notification path for required-lane
-red/unknown transitions; the dashboard does not depend on manually copying its
-ephemeral artifact onto the service host.
 
 The Streamable HTTP transport (`--listen`) fails closed. It starts only when
 service-owned per-client credentials, OAuth bearer enforcement, mTLS

@@ -126,41 +126,6 @@ fn target_tmp_file(name: &str) -> PathBuf {
 }
 
 #[test]
-fn ci_lane_snapshot_default_never_overwrites_an_explicit_transport_path() {
-    let explicit = PathBuf::from("/operator/configured/ci-lanes.json");
-    let mut transport = HttpTransportConfig {
-        ci_lane_snapshot_path: Some(explicit.clone()),
-        ..Default::default()
-    };
-
-    apply_ci_lane_snapshot_default(&mut transport, || {
-        panic!("the default resolver must not run when an explicit path exists")
-    });
-
-    assert_eq!(transport.ci_lane_snapshot_path.as_ref(), Some(&explicit));
-    assert!(transport.ci_lane_polling_enabled);
-}
-
-#[test]
-fn ci_lane_snapshot_default_fills_only_an_unconfigured_transport() {
-    let fallback = PathBuf::from("/state/oraclemcp/ci-heartbeat.json");
-    let mut transport = HttpTransportConfig::default();
-
-    apply_ci_lane_snapshot_default(&mut transport, || Some(fallback.clone()));
-
-    assert_eq!(transport.ci_lane_snapshot_path.as_ref(), Some(&fallback));
-    assert!(transport.ci_lane_polling_enabled);
-}
-
-#[test]
-fn ci_lane_polling_stays_disabled_without_a_resolvable_snapshot_path() {
-    let mut transport = HttpTransportConfig::default();
-    apply_ci_lane_snapshot_default(&mut transport, || None);
-    assert!(transport.ci_lane_snapshot_path.is_none());
-    assert!(!transport.ci_lane_polling_enabled);
-}
-
-#[test]
 fn runtime_profile_selection_does_not_resolve_secret_refs() {
     let cfg = OracleMcpConfig::from_toml_str(
         r#"
@@ -1221,6 +1186,28 @@ fn http_cli_oauth_builds_enforced_transport_config() {
     assert!(cfg.transport.stateful);
     assert!(cfg.transport.single_principal_guard.is_some());
     assert!(cfg.tls.is_none());
+}
+
+#[test]
+fn dashboard_workbench_gate_is_carried_from_merged_http_config() {
+    let default_cfg =
+        http_transport_config_from_merged(HttpConfig::default(), false, &SystemSecretResolver)
+            .expect("default HTTP transport resolves");
+    assert!(
+        !default_cfg.transport.dashboard_workbench,
+        "browser SQL Workbench must remain disabled by default"
+    );
+
+    let enabled_cfg = http_transport_config_from_merged(
+        HttpConfig {
+            dashboard_workbench: true,
+            ..Default::default()
+        },
+        false,
+        &SystemSecretResolver,
+    )
+    .expect("explicitly enabled HTTP transport resolves");
+    assert!(enabled_cfg.transport.dashboard_workbench);
 }
 
 #[test]

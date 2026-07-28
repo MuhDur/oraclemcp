@@ -88,12 +88,9 @@ doctor refuses to merge them.
 
 ## Dashboard workbench
 
-The dashboard Workbench remains off by default. Read/classify paths do not need
-the DDL flag, but browser-originated DDL/Admin apply requires both:
-
-- `[http].dashboard_workbench = true`
-- `dashboard_ddl_workbench = true` on the active profile
-
-Those flags are release gates for the browser surface only. They do not bypass
-profile ceilings, confirmation grants, rollback behavior, idempotency, or the
-signed audit chain.
+The dashboard Workbench remains off by default and is exposed only when
+`[http].dashboard_workbench = true`. Browser-originated DDL/Admin can be
+previewed but cannot be applied in this release, even when the reserved profile
+field `dashboard_ddl_workbench` is true. Use a non-browser operator path. No
+dashboard setting bypasses profile ceilings, confirmation grants, rollback
+behavior, idempotency, or the signed audit chain.

@@ -35,10 +35,21 @@ fn dashboard_pairing_sets_strict_cookie_and_session_view() {
 
     let replay = handle_http_request(&test_server(), &cfg, pairing_post(token));
     assert_eq!(replay.status, 401, "pairing ticket is single-use");
+    assert_eq!(
+        replay.header("content-type"),
+        Some("text/html; charset=utf-8")
+    );
     assert!(
         replay.header("set-cookie").is_none(),
         "a replayed code mints no second session"
     );
+    let replay_html = String::from_utf8_lossy(&replay.body);
+    assert!(replay_html.contains("role=\"alert\""));
+    assert!(replay_html.contains("invalid, expired, or already used"));
+    assert!(!replay_html.contains("autofocus"));
+    assert!(replay_html.contains("aria-invalid=\"true\""));
+    assert!(replay_html.contains("aria-describedby=\"pairing-error pairing-hint\""));
+    assert!(!replay_html.contains(token.as_str()));
 
     let unauth_shell = handle_http_request(
         &test_server(),
@@ -526,6 +537,11 @@ fn served_dashboard_pairing_keeps_the_bootstrap_secret_out_of_the_request_target
     assert!(form.starts_with("HTTP/1.1 200 "), "served form: {form}");
     assert!(!form.contains(&code), "the served form never carries the code");
     assert!(form.contains(&format!("name=\"{DASHBOARD_PAIRING_CODE_FIELD}\"")));
+    assert!(form.contains("autocomplete=\"one-time-code\""));
+    assert!(form.contains("background: #c7a34a; color: #0c0b09"));
+    assert!(form.contains("input:focus-visible, button:focus-visible"));
+    assert!(!form.contains("mix-blend-mode"));
+    assert!(!form.contains("background: currentColor"));
     assert!(form.contains("referrer-policy: same-origin"));
     assert!(form.contains(r#"<meta name="referrer" content="same-origin">"#));
     assert!(form.contains("frame-ancestors 'none'"));
@@ -555,6 +571,11 @@ fn served_dashboard_pairing_keeps_the_bootstrap_secret_out_of_the_request_target
     // Replay fails closed and mints no second session.
     let replay = send("POST", DASHBOARD_PAIR_PATH, &form_headers, &submit);
     assert!(replay.starts_with("HTTP/1.1 401 "), "replay: {replay}");
+    assert!(replay.contains("content-type: text/html; charset=utf-8"));
+    assert!(replay.contains("role=\"alert\""));
+    assert!(replay.contains("invalid, expired, or already used"));
+    assert!(!replay.contains("autofocus"));
+    assert!(replay.contains("aria-invalid=\"true\""));
     assert!(
         !replay.to_ascii_lowercase().contains("set-cookie"),
         "exactly one session mint: {replay}"

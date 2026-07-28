@@ -196,9 +196,9 @@ require_signed_tools = true
 # `prod_admin` profile below for the opt-out (= false). This is a
 # visibility/scoping convenience, NOT an access control.
 mcp_exposed = true
-# Browser dashboard DDL/Admin apply opt-in. Default: false. This never raises
-# max_level and never bypasses protected/read-only, preview/confirm, rollback,
-# or audit requirements.
+# Reserved browser DDL metadata. Default: false. The current browser action
+# policy refuses DDL/Admin apply even when true; use a non-browser operator path.
+# This never raises max_level.
 dashboard_ddl_workbench = false
 # Optional Oracle call timeout and total request-budget ceiling, in seconds.
 # Default: 30 when omitted. Set 0 only to disable the driver call timeout

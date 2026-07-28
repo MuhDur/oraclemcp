@@ -1,11 +1,12 @@
-//! `/operator/v1/ci-lanes`: the Ground Control CI-lane-health tile.
+//! Optional maintainer-facing `/operator/v1/ci-lanes` evidence endpoint.
 //!
 //! Every `scheduled` and `advisory` job in `docs/ci_taxonomy.json` (the
-//! generated, single-source-of-truth CI taxonomy) is a "lane" this tile
-//! watches. The point is the plan's own framing: **the operator must never
-//! discover a red lane first** — a scheduled nightly or an advisory check that
-//! goes red should be visible on the dashboard, not only in a GitHub Actions
-//! inbox nobody is watching.
+//! generated, single-source-of-truth CI taxonomy) is represented as a lane.
+//! This endpoint is repository-maintainer tooling, not Oracle database status:
+//! the shipped `oraclemcp serve` command does not configure its snapshot or
+//! start its poller, and the end-user dashboard does not request or render it.
+//! Library embedders may explicitly opt in when they are building a maintainer
+//! console around this crate.
 //!
 //! # Three parts
 //!
@@ -16,8 +17,8 @@
 //!    produces a [`CiLaneSnapshot`]. Every step is `.await`-driven; this file
 //!    constructs no reactor, no runtime, and calls `block_on` nowhere in
 //!    production code.
-//! 2. [`start_ci_lane_poller`] owns one dedicated background thread for the
-//!    production service. It creates one bounded current-thread runtime, polls
+//! 2. [`start_ci_lane_poller`] owns one dedicated background thread for an
+//!    explicitly configured embedding. It creates one bounded current-thread runtime, polls
 //!    immediately and every 30 minutes, and atomically replaces the durable
 //!    snapshot. The API origin is the fixed public GitHub endpoint; there is
 //!    no token, secret, redirect, cookie store, or operator-controlled URL.
@@ -39,9 +40,9 @@
 //!    like every other operator route reads its own file-backed state
 //!    (`source_history`, `change_proposals`, the audit tail).
 //!
-//! # Production evidence source: the CI heartbeat snapshot (E4 follow-up)
+//! # Optional evidence source: the CI heartbeat snapshot (E4 follow-up)
 //!
-//! The production service now polls GitHub itself and writes the native
+//! An opted-in embedding can poll GitHub and write the native
 //! `ci-lane-snapshot/v1` schema. The E4 CI heartbeat notifier
 //! (`scripts/ci_heartbeat.sh`, driven every 30 minutes by
 //! `.github/workflows/ci-heartbeat.yml`) remains the independent notification
@@ -55,7 +56,7 @@
 //!   workflow-level observations are accepted only for a single-job scheduled
 //!   workflow. A workflow verdict is never spread across multiple jobs.
 //!   Advisory jobs and the heartbeat's own self-excluded lane stay `unknown`
-//!   in heartbeat documents; the production poller observes those directly.
+//!   in heartbeat documents; an enabled poller observes those directly.
 //! - The heartbeat's exit-code semantics are untouched and not re-derived
 //!   here: required lanes drive its exit code, scheduled lanes are
 //!   advisory-only. Its `blocked` flag is surfaced as a tile error so a red or
@@ -67,7 +68,7 @@
 //!   (repository-scoped run URL, 40-hex SHA, completed conclusion, state and
 //!   conclusion in agreement) before it may render at all.
 //!
-//! The crate's test suite drives both the async fetch and the production
+//! The crate's test suite drives both the async fetch and the opt-in
 //! scheduler against local mock GitHub servers (see `tests_ci_lanes.rs`).
 use super::*;
 use asupersync::http::h1::http_client::HttpClient;
