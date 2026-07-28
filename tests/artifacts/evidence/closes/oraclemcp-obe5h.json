@@ -1,0 +1,61 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-28T08:10:05Z",
+  "bead_id": "oraclemcp-obe5h",
+  "scope": {
+    "summary": "Replaced scheduler-sensitive Rekor outage stopwatches with gated state proofs that directly verify enqueue and durable audit append return while the external submitter remains blocked.",
+    "in_scope": [
+      "crates/oraclemcp-audit/src/rekor.rs"
+    ],
+    "out_of_scope": [
+      "production Rekor queue behavior, which was unchanged",
+      "live submission to a public Rekor service"
+    ]
+  },
+  "source": {
+    "sha": "31dbd391cd29ef489ff309a07ca826882496b0d8",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "gated Rekor outage regression tests",
+        "kind": "cli",
+        "trace": "Both focused Rekor outage tests passed, followed by all 250 oraclemcp-audit unit tests. The closed gate makes an unfinished external submission observable, so returned enqueue and durable append results prove isolation without a micro-latency proxy."
+      },
+      {
+        "name": "full local pre-push qualification",
+        "kind": "cli",
+        "trace": "Pinned fmt, workspace all-target clippy and tests, cargo deny, architecture fitness, honesty, workflow supply-chain, Node 22 dashboard checks, production bundle/SBOM, and all 3 Chromium workflows passed. Changed-line coverage against d90bd808204726acd699982aec465fc490af8d1a covered 30/30 changed oraclemcp-audit lines; the mutation leg remained explicitly deferred under the existing train policy, not claimed as passed."
+      },
+      {
+        "name": "exact-SHA hosted CI",
+        "kind": "api",
+        "trace": "GitHub Actions CI run 30340105460 on source 31dbd391cd29ef489ff309a07ca826882496b0d8 completed success with 23/23 jobs and zero failures. Both pinned cargo test and floating-nightly workspace all-target tests passed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "github-actions-ci-run",
+        "path": "tests/artifacts/evidence/live/oraclemcp-obe5h-ci-30340105460.json",
+        "sha": "31dbd391cd29ef489ff309a07ca826882496b0d8"
+      }
+    ]
+  },
+  "limitations": [
+    "The repair changes test synchronization only; it does not claim a new production Rekor capability.",
+    "Hosted CI exercises the bounded asynchronous worker with deterministic test submitters, not a public Rekor endpoint."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}
