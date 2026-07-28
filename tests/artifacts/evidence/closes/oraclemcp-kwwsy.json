@@ -1,0 +1,75 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-28T04:29:07Z",
+  "bead_id": "oraclemcp-kwwsy",
+  "scope": {
+    "summary": "Reoriented the browser operator dashboard around governed Oracle workflows, removed all routed repository-development surfaces and the Orrery implementation/dependencies/wiring, repaired pairing visibility and recovery, and tightened browser action gates and UI truthfulness.",
+    "in_scope": [
+      "web",
+      "crates/oraclemcp-core/src/change_proposal.rs",
+      "crates/oraclemcp-core/src/config_ops.rs",
+      "crates/oraclemcp-core/src/http",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/main_tests.rs",
+      "crates/oraclemcp/tests/dashboard_e2e.rs",
+      "README.md",
+      "docs/configuration.md",
+      "docs/tns-discovery-onboarding.md",
+      "docs/upgrading-to-0.6.0.md",
+      "oraclemcp.example.toml",
+      "scripts/dashboard_skin_lint.sh"
+    ],
+    "out_of_scope": [
+      "live Oracle database qualification",
+      "whole-workspace Rust clippy/test/deny qualification",
+      "maintainer-only CI-lane API support for external library embedders"
+    ]
+  },
+  "source": {
+    "sha": "084ab1d6d7d054fad52745cd117623a0643b5509",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oraclemcp dashboard pairing form and one-time handshake",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp-core dashboard_pairing: 6 passed; pairing form tests cover secure cookies, query-secret refusal, null-Origin refusal, and one-time code handling."
+      },
+      {
+        "name": "served dashboard end-user routes and browser Workbench release gate",
+        "kind": "route",
+        "trace": "cd web && npm run check passed TypeScript, production build/SBOM/bundle checks, and 160 tests; npm run test:e2e passed 3 shipped-dashboard browser flows with 2 explicitly live-server-gated skips."
+      },
+      {
+        "name": "browser SQL action policy and change-proposal classification",
+        "kind": "route",
+        "trace": "cargo test -p oraclemcp-core dashboard_workbench: 4 passed; status gate propagation tests passed; classifier/unit mismatch test passed."
+      },
+      {
+        "name": "dashboard source-level acceptance contracts",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp --test dashboard_e2e: 12 passed; dashboard skin lint, sensitive-data lint, cargo fmt check, and oraclemcp honesty grep passed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No live Oracle service was used; this evidence is scoped to browser, source-contract, and focused Rust tests.",
+    "The two Playwright tests that require an explicitly configured live oraclemcp server were skipped; all three self-contained shipped-dashboard browser tests passed.",
+    "React Doctor improved from 48 to 74 with no errors and 40 remaining warnings; the two cache-invalidation warnings are on-demand read operations, while the remainder is legacy file-size/export/performance maintainability debt rather than a newly asserted green gate.",
+    "Repository Rule 1 forbids deleting a tracked file without an exact deletion command, so web/src/app/orrery-renderer.tsx remains as an inert three-line module; the renderer implementation, imports, dependencies, skin registry, and view-model wiring are absent and lint-gated."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
