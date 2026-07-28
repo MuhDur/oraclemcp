@@ -17,6 +17,8 @@
 # evidence and are NEVER promoted to confirmed-test-failure kills.
 #
 # Subcommands:
+#   plan-shard   list the current scope's mutants and choose one scheduled
+#                one-based evidence shard from a zero-based rotation counter.
 #   run-shard     run one deterministic shard:
 #                 --scope guard|audit|core|db|dispatch --shard I/N
 #   check-report  cheap: parse the committed report (docs/quality/mutation-safety.md)
@@ -53,6 +55,7 @@ REPORT="${MUTATION_REPORT:-$ROOT/docs/quality/mutation-safety.md}"
 FLOOR_REPORT="${MUTATION_FLOOR_REPORT:-$ROOT/docs/quality/mutation-safety-d2.md}"
 SCOPE=""
 SHARD=""
+ROTATION=""
 
 die() { echo "mutation-gate: $*" >&2; exit 1; }
 
@@ -102,12 +105,56 @@ scope_file() {
   esac
 }
 
+plan_shard_from_count() { # <population> <zero-based-rotation> <max-mutants>
+  local population_text="$1" rotation_text="$2" max_text="$3"
+  [[ "$population_text" =~ ^[1-9][0-9]*$ ]] ||
+    die "mutant population must be a positive integer (got '$population_text')"
+  [[ "$rotation_text" =~ ^(0|[1-9][0-9]*)$ ]] ||
+    die "rotation must be a non-negative integer (got '$rotation_text')"
+  [[ "$max_text" =~ ^[1-9][0-9]*$ ]] ||
+    die "max mutants per shard must be a positive integer (got '$max_text')"
+
+  local population=$((10#$population_text))
+  local rotation=$((10#$rotation_text))
+  local max_mutants=$((10#$max_text))
+  local total=$(((population + max_mutants - 1) / max_mutants))
+  local index=$((rotation % total + 1))
+  printf '%s/%s\n' "$index" "$total"
+}
+
 parse_shard() {
   [[ "$SHARD" =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] ||
     die "--shard must be I/N with positive integers (got '$SHARD')"
   SHARD_INDEX="${BASH_REMATCH[1]}"
   SHARD_TOTAL="${BASH_REMATCH[2]}"
   [ "$SHARD_INDEX" -le "$SHARD_TOTAL" ] || die "shard index exceeds total: $SHARD"
+  # Integrity evidence is intentionally one-based (1..N). cargo-mutants 27.1.0
+  # accepts a zero-based k/N and rejects N/N, so translate only at this boundary.
+  CARGO_SHARD="$((SHARD_INDEX - 1))/$SHARD_TOTAL"
+}
+
+cmd_plan_shard() {
+  command -v cargo-mutants >/dev/null 2>&1 ||
+    die "cargo-mutants not installed (cargo install cargo-mutants --version 27.1.0 --locked)"
+  command -v jq >/dev/null 2>&1 || die "jq is required"
+  [ -n "$SCOPE" ] || die "plan-shard requires --scope"
+  [ -n "$ROTATION" ] || die "plan-shard requires --rotation"
+
+  local package file population shard index total chunk start selected
+  package="$(scope_package "$SCOPE")"
+  file="$(scope_file "$SCOPE")"
+  population="$(cargo mutants -p "$package" --file "$file" --list --json --no-shuffle | jq 'length')"
+  shard="$(plan_shard_from_count "$population" "$ROTATION" "$MAX_MUTANTS")"
+  IFS=/ read -r index total <<<"$shard"
+  chunk=$(((population + total - 1) / total))
+  start=$(((index - 1) * chunk))
+  selected=$((population - start))
+  [ "$selected" -gt "$chunk" ] && selected="$chunk"
+  [ "$selected" -gt 0 ] || die "planned shard $shard selected zero of $population mutants"
+  [ "$selected" -le "$MAX_MUTANTS" ] ||
+    die "planned shard $shard selects $selected mutants, above deterministic budget $MAX_MUTANTS"
+  echo "mutation-gate: plan scope=$SCOPE population=$population max=$MAX_MUTANTS rotation=$ROTATION shard=$shard cargo_shard=$((index - 1))/$total selected=$selected" >&2
+  printf '%s\n' "$shard"
 }
 
 scope_state() { # <scope-csv> [git-ref] -> "count digest"
@@ -282,14 +329,14 @@ cmd_run_shard() {
 
   cargo mutants -p "$package" --file "$file" --list --json --no-shuffle >"$full_inventory"
   cargo mutants -p "$package" --file "$file" --list --json --no-shuffle \
-    --shard "$SHARD" >"$inventory"
+    --sharding slice --shard "$CARGO_SHARD" >"$inventory"
   local selected
   selected="$(jq 'length' "$inventory")"
   [ "$selected" -gt 0 ] || die "$SCOPE shard $SHARD selected zero mutants"
   [ "$selected" -le "$MAX_MUTANTS" ] ||
     die "$SCOPE shard $SHARD selects $selected mutants, above deterministic budget $MAX_MUTANTS; increase N"
 
-  echo "mutation-gate: scope=$SCOPE shard=$SHARD mutants=$selected max=$MAX_MUTANTS j=1 timeout=${TIMEOUT}s memory=$MEMMAX tasks=$TASKSMAX scratch_fs=$scratch_fs" >&2
+  echo "mutation-gate: scope=$SCOPE shard=$SHARD cargo_shard=$CARGO_SHARD mutants=$selected max=$MAX_MUTANTS j=1 timeout=${TIMEOUT}s memory=$MEMMAX tasks=$TASKSMAX scratch_fs=$scratch_fs" >&2
   set +e
   systemd-run --user --scope --quiet --collect \
     -p "MemoryMax=$MEMMAX" -p MemorySwapMax=0 -p "TasksMax=$TASKSMAX" \
@@ -297,7 +344,7 @@ cmd_run_shard() {
     "$ROOT/scripts/mutation_safety_gate.sh" __capped "$cgroup_status" \
     env -u CARGO_TARGET_DIR RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= \
       SCCACHE_DISABLE=1 TMPDIR="$scratch" CARGO_BUILD_JOBS=2 cargo mutants -p "$package" \
-      --file "$file" --no-shuffle --shard "$SHARD" -j 1 \
+      --file "$file" --no-shuffle --sharding slice --shard "$CARGO_SHARD" -j 1 \
       --copy-target=false --timeout "$TIMEOUT" --no-times --output "$out" \
       >"$run_log" 2>&1
   local wrapper_rc=$?
@@ -564,6 +611,40 @@ PY
 
 cmd_self_test() {
   local work state files hash source good bad stale_output fixture output scope valid_output
+  local population planned planned_total chunk terminal_selected
+
+  # Pin the scheduled planner without invoking cargo-mutants. The 4,103 case is
+  # the hosted regression: fixed N=128 selected 33, while the derived N=129
+  # keeps every slice at <=32. Boundary populations prove the terminal slice is
+  # non-empty as well as bounded.
+  for population in 1 32 33 1280 1281 4096 4103; do
+    planned="$(plan_shard_from_count "$population" 0 32)"
+    planned_total="${planned#*/}"
+    chunk=$(((population + planned_total - 1) / planned_total))
+    terminal_selected=$((population - (planned_total - 1) * chunk))
+    [ "$chunk" -le 32 ] ||
+      die "self-test: population $population planned an over-budget chunk of $chunk"
+    [ "$terminal_selected" -gt 0 ] && [ "$terminal_selected" -le 32 ] ||
+      die "self-test: population $population planned invalid terminal size $terminal_selected"
+  done
+  [ "$(plan_shard_from_count 4103 0 32)" = 1/129 ] ||
+    die "self-test: 4,103 mutants did not expand the stale 128-way plan to 129 shards"
+  [ "$(plan_shard_from_count 1280 39 32)" = 40/40 ] ||
+    die "self-test: terminal one-based shard was not selected"
+  [ "$(plan_shard_from_count 1280 40 32)" = 1/40 ] ||
+    die "self-test: scheduled rotation did not wrap"
+  SHARD=40/40
+  parse_shard
+  [ "$CARGO_SHARD" = 39/40 ] ||
+    die "self-test: one-based evidence shard 40/40 did not map to cargo-mutants 39/40"
+  grep -Fq "plan-shard --scope \"\$SCOPE\" --rotation \"\$rotation\"" \
+    "$ROOT/.github/workflows/mutation-safety.yml" ||
+    die "self-test: scheduled workflow does not derive its shard from plan-shard"
+  if grep -Eq '^[[:space:]]+total:[[:space:]]+[0-9]+' \
+      "$ROOT/.github/workflows/mutation-safety.yml"; then
+    die "self-test: scheduled workflow still hard-codes a mutation shard total"
+  fi
+
   work="$(mktemp -d /var/tmp/oraclemcp-mutation-gate-self-test.XXXXXX)"
   state="$(scope_state guard,audit,core,db,dispatch)"
   files="${state%% *}"
@@ -648,7 +729,7 @@ cmd_self_test() {
         die "lowered $scope fixture failed for the wrong reason: $stale_output"
     fi
   done
-  echo "mutation-gate: self-test OK (D3 stale-hash rejection + D2 valid pass and lowered guard/audit/db failures; fixtures=$work)"
+  echo "mutation-gate: self-test OK (scheduled shard planning/index translation + D3 stale-hash rejection + D2 valid pass and lowered guard/audit/db failures; fixtures=$work)"
 }
 
 sub="${1:-check-report}"; shift || true
@@ -664,6 +745,7 @@ while [ "$#" -gt 0 ]; do
     --floor-report) FLOOR_REPORT="$2"; shift ;;
     --scope) SCOPE="$2"; shift ;;
     --shard) SHARD="$2"; shift ;;
+    --rotation) ROTATION="$2"; shift ;;
     --max-mutants) MAX_MUTANTS="$2"; shift ;;
     *) die "unknown argument: $1" ;;
   esac
@@ -671,6 +753,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$sub" in
+  plan-shard) cmd_plan_shard ;;
   run-shard) cmd_run_shard ;;
   check-report) cmd_check_report ;;
   check-floor-report)
@@ -678,5 +761,5 @@ case "$sub" in
     cmd_check_floor_report
     ;;
   self-test) cmd_self_test ;;
-  *) die "unknown subcommand '$sub' (expected: run-shard | check-report | check-floor-report | self-test)" ;;
+  *) die "unknown subcommand '$sub' (expected: plan-shard | run-shard | check-report | check-floor-report | self-test)" ;;
 esac

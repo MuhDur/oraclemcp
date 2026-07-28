@@ -11,7 +11,7 @@ on:
         type: choice
         options: [guard, audit, core, db, dispatch]
       shard:
-        description: Deterministic shard as I/N (N must keep the shard at <=32 mutants)
+        description: One-based deterministic shard as I/N (N must keep the shard at <=32 mutants)
         required: true
         type: string
 
@@ -32,11 +32,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Two <=32-mutant shards per scope per night. Each scope's fixed N is sized
-  # from the current population; the runner refuses if source growth makes a
-  # selected shard exceed the budget. `(run_number-1)*2 + offset` rotates every
-  # index deterministically, completing the longest (core, N=128) cycle in 64
-  # nights while artifacts remain available for 90 days.
+  # Two <=32-mutant shards per scope per night. Each job derives N from the
+  # current exact-SHA mutant population, so source growth cannot silently make
+  # a formerly safe shard exceed the budget. `(run_number-1)*2 + offset`
+  # rotates every one-based evidence index deterministically; the gate converts
+  # it to cargo-mutants' zero-based k/N only at the tool boundary.
   scheduled-shard:
     if: github.event_name == 'schedule'
     name: ${{ matrix.scope }} shard offset ${{ matrix.offset }}
@@ -54,34 +54,24 @@ jobs:
       matrix:
         include:
           - scope: guard
-            total: 40
             offset: 0
           - scope: guard
-            total: 40
             offset: 1
           - scope: audit
-            total: 24
             offset: 0
           - scope: audit
-            total: 24
             offset: 1
           - scope: core
-            total: 128
             offset: 0
           - scope: core
-            total: 128
             offset: 1
           - scope: db
-            total: 72
             offset: 0
           - scope: db
-            total: 72
             offset: 1
           - scope: dispatch
-            total: 40
             offset: 0
           - scope: dispatch
-            total: 40
             offset: 1
     steps:
       - uses: actions/checkout@v7
@@ -100,15 +90,15 @@ jobs:
         id: mutation
         env:
           SCOPE: ${{ matrix.scope }}
-          TOTAL: ${{ matrix.total }}
           OFFSET: ${{ matrix.offset }}
         run: |
-          index=$(( ((GITHUB_RUN_NUMBER - 1) * 2 + OFFSET) % TOTAL + 1 ))
-          shard="${index}/${TOTAL}"
+          rotation=$(( (GITHUB_RUN_NUMBER - 1) * 2 + OFFSET ))
+          shard="$(bash scripts/mutation_safety_gate.sh plan-shard --scope "$SCOPE" --rotation "$rotation")"
+          IFS=/ read -r index total <<<"$shard"
           echo "mutation shard: scope=${SCOPE} shard=${shard}"
           bash scripts/mutation_safety_gate.sh run-shard --scope "$SCOPE" --shard "$shard"
           echo "shard=$shard" >> "$GITHUB_OUTPUT"
-          echo "shard_dir=shard-${index}of${TOTAL}" >> "$GITHUB_OUTPUT"
+          echo "shard_dir=shard-${index}of${total}" >> "$GITHUB_OUTPUT"
       - name: Record mutation-lane attestation status
         # A VOID shard (MUTATION_OOM_POLICY=warn resource kill) exits 0 but did
         # NOT complete — never attest complete=PASS for it.
