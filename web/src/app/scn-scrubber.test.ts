@@ -34,15 +34,37 @@ describe("as-of read", () => {
     const data: WorkbenchActionData = {
       status: "ok",
       mcp_tool: "oracle_query",
-      mcp_response: { row_count: 41, truncated: false, columns: ["ID"], rows: [] }
+      mcp_response: {
+        jsonrpc: "2.0",
+        id: "operator-v1",
+        result: {
+          isError: false,
+          structuredContent: { row_count: 41, truncated: false, columns: ["ID"], rows: [] }
+        }
+      }
     };
     expect(parseQueryAsOf(data)).toEqual({ rowCount: 41, truncated: false });
     // The response carries no SCN — the console must not invent one.
-    expect(Object.keys(data.mcp_response as object)).not.toContain("observed_scn");
+    expect(
+      Object.keys(
+        ((data.mcp_response as { result: { structuredContent: object } }).result
+          .structuredContent)
+      )
+    ).not.toContain("observed_scn");
   });
 
   it("reports no row count when nothing came back", () => {
     expect(parseQueryAsOf(null)).toEqual({ rowCount: null, truncated: false });
+  });
+
+  it("fails soft instead of treating an undocumented flattened response as tool data", () => {
+    expect(
+      parseQueryAsOf({
+        status: "forwarded",
+        mcp_tool: "oracle_query",
+        mcp_response: { row_count: 99, truncated: true }
+      })
+    ).toEqual({ rowCount: null, truncated: false });
   });
 });
 

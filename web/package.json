@@ -15,7 +15,6 @@
     "sbom": "bash ../scripts/release_sbom_check.sh --generate-dashboard dist/oraclemcp-dashboard.cyclonedx.json",
     "test": "vitest run",
     "test:e2e": "playwright test --config playwright.config.ts",
-    "test:e2e:k2": "playwright test e2e/test-attestation-verifier.spec.ts --config playwright.config.ts",
     "contract": "npm run build && vitest run",
     "check": "tsc --noEmit && npm run build && vitest run"
   },
@@ -25,7 +24,6 @@
     "@types/node": "^22.20.0",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
-    "@types/three": "^0.180.0",
     "@vitejs/plugin-react": "6.0.3",
     "tailwindcss": "4.3.2",
     "typescript": "6.0.3",
@@ -35,14 +33,12 @@
   "dependencies": {
     "@tanstack/react-query": "5.101.2",
     "@tanstack/react-router": "1.170.16",
-    "@tanstack/react-table": "8.21.3",
     "@tanstack/react-virtual": "3.14.6",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "lucide-react": "1.22.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",
-    "tailwind-merge": "3.6.0",
-    "three": "^0.180.0"
+    "tailwind-merge": "3.6.0"
   }
 }

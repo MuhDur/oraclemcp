@@ -119,7 +119,9 @@ describe("the Explorer object list windows only when it is worth it", () => {
   });
 
   it("keeps every row's accessible name and count honest at both sizes", () => {
-    expect(explorerMarkup(100)).toContain('aria-label="Select OBJ_0"');
+    expect(explorerMarkup(100)).toContain(
+      'aria-label="View details for HR.OBJ_0 (TABLE)"'
+    );
     // The header always states the true total, windowed or not.
     expect(explorerMarkup(1000)).toContain("1000 objects");
   });

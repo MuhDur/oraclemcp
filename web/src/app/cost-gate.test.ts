@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { toCostBadgeViewModel } from "./presentation-model";
 import {
   OperatorOutcomeError,
+  parseActiveProfile,
   parseCostEstimate,
   parseQueryCostRefusal,
   profileCostCeiling,
@@ -120,7 +121,11 @@ describe("explain-plan cost estimate", () => {
   const action = (mcp: Record<string, unknown>): WorkbenchActionData => ({
     status: "ok",
     mcp_tool: "oracle_explain_plan",
-    mcp_response: mcp
+    mcp_response: {
+      jsonrpc: "2.0",
+      id: "operator-v1",
+      result: { isError: false, structuredContent: mcp }
+    }
   });
 
   it("reads total_cost and the plan rows", () => {
@@ -176,6 +181,22 @@ describe("configured cost ceiling (the ceiling is on the wire)", () => {
       default_profile: defaultProfile,
       profiles
     }
+  });
+
+  it("reads the lane profile from the real operator JSON-RPC envelope", () => {
+    const data: WorkbenchActionData = {
+      status: "forwarded",
+      mcp_tool: "oracle_connection_info",
+      mcp_response: {
+        jsonrpc: "2.0",
+        id: "operator-v1",
+        result: {
+          isError: false,
+          structuredContent: { connection: { profile: "staging" } }
+        }
+      }
+    };
+    expect(parseActiveProfile(data)).toBe("staging");
   });
 
   it("reads the active profile's ceiling straight from the config", () => {

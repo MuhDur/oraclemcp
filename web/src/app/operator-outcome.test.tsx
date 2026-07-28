@@ -19,6 +19,7 @@ import {
   decodeOperatorOutcome,
   executeWorkbenchSql,
   explorerMetadataCacheSummary,
+  fetchOperatorHealth,
   type AuditTailRecord,
   type DashboardSession,
   type ExplorerMetadataCacheKey,
@@ -468,6 +469,71 @@ describe("audit timeline action correlation", () => {
 });
 
 describe("success-only side effects", () => {
+  it("turns a bounded plain-text GET failure into an operator outcome", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(`upstream gateway failure ${"x".repeat(20_000)}`, {
+          status: 502,
+          statusText: "Bad Gateway",
+          headers: { "content-type": "text/plain" }
+        })
+      )
+    );
+
+    const error = await fetchOperatorHealth().catch((candidate: unknown) => candidate);
+    expect(error).toMatchObject({
+      httpStatus: 502,
+      outcome: {
+        state: "failed",
+        message: expect.stringContaining("upstream gateway failure")
+      }
+    });
+    expect(error).toBeInstanceOf(OperatorOutcomeError);
+    expect((error as OperatorOutcomeError).message).toContain("[truncated]");
+    expect((error as OperatorOutcomeError).message.length).toBeLessThan(700);
+  });
+
+  it("reports an empty POST failure without leaking a JSON parser exception", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(null, {
+          status: 503,
+          statusText: "Service Unavailable"
+        })
+      )
+    );
+
+    await expect(cancelLane(session, "lane-a")).rejects.toMatchObject({
+      httpStatus: 503,
+      outcome: {
+        state: "failed",
+        message: "operator request failed with HTTP 503: Service Unavailable"
+      }
+    });
+  });
+
+  it("reports a non-JSON HTTP-200 body as an invalid operator response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response("not json", {
+          status: 200,
+          headers: { "content-type": "text/plain" }
+        })
+      )
+    );
+
+    await expect(cancelLane(session, "lane-a")).rejects.toMatchObject({
+      httpStatus: 200,
+      outcome: {
+        state: "failed",
+        message: "operator returned an empty or non-JSON response with HTTP 200"
+      }
+    });
+  });
+
   it("sends the lane kill switch with its scoped ticket and CSRF header", async () => {
     const fetchMock = vi.fn(async () =>
       jsonResponse(

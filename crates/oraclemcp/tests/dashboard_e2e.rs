@@ -151,20 +151,18 @@ fn read_only_dashboard_surface_contracts_are_registered() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");
     let skin = read_repo_file("web/src/app/skin.tsx");
-    let presentation = read_repo_file("web/src/app/presentation-model.ts");
 
     for label in [
-        "Overview",
-        "Sessions",
-        "Health",
-        "Capacity",
-        "Config",
-        "Clients",
-        "Explorer",
-        "Reviews",
-        "Workbench",
-        "Audit",
-        "Doctor",
+        "Dashboard",
+        "Agent sessions",
+        "Connection",
+        "Database Explorer",
+        "SQL Workbench",
+        "Change review",
+        "Audit trail",
+        "Resource limits",
+        "Profiles & settings",
+        "MCP clients",
     ] {
         assert!(
             app.contains(&format!("label: \"{label}\"")),
@@ -182,7 +180,6 @@ fn read_only_dashboard_surface_contracts_are_registered() {
         "function ReviewsPage",
         "function WorkbenchPage",
         "function AuditPage",
-        "function DoctorPage",
     ] {
         assert!(
             app.contains(component),
@@ -195,9 +192,9 @@ fn read_only_dashboard_surface_contracts_are_registered() {
         "aria-label=\"overview metrics\"",
         "aria-label=\"connection health\"",
         "aria-label=\"capacity metrics\"",
-        "aria-label=\"ground control\"",
-        "aria-label=\"big board\"",
-        "aria-label=\"big board table\"",
+        "aria-label=\"Database objects\"",
+        "aria-label=\"Object detail level\"",
+        "aria-label=\"Audit timeline\"",
     ] {
         assert!(
             app.contains(aria_label) || skin.contains(aria_label),
@@ -222,37 +219,27 @@ fn read_only_dashboard_surface_contracts_are_registered() {
         "dashboard client must not persist operator tokens in browser storage"
     );
 
-    assert!(
-        skin.contains("defaultBigBoard: \"orrery3d\""),
-        "dashboard hero defaults to the orrery renderer (mandatory 2D board/table fallback asserted below)"
-    );
-    // WD-RULE: the Orrery is only the hero when it can be; the 2D board must stay
-    // resolvable and be auto-selected on reduced-motion / no-WebGL clients, and
-    // the table on forced-colors / high-contrast. Assert the selection SEMANTICS,
-    // not just that a 2D renderer exists.
-    assert!(
-        presentation.contains("capabilities.webgl && !capabilities.reducedMotion")
-            && presentation.contains("rendererAvailable(\"orrery3d\")")
-            && presentation.contains(": \"board2d\""),
-        "orrery hero must auto-resolve to the 2D board on reduced-motion / no-WebGL clients"
-    );
-    assert!(
-        presentation.contains("capabilities.preferTable || capabilities.forcedColors"),
-        "forced-colors / high-contrast clients must auto-resolve to the table fallback"
-    );
-    assert!(
-        skin.contains("board2d:") && skin.contains("requiresWebGl: false"),
-        "dashboard skin must include a no-WebGL 2D renderer"
-    );
-    assert!(
-        skin.contains("table:") && skin.contains("requiresWebGl: false"),
-        "dashboard skin must include a no-WebGL table fallback"
-    );
-    assert!(
-        presentation.contains("\"board2d\"")
-            && presentation.contains("\"table\"")
-            && presentation.contains("\"orrery3d\""),
-        "presentation grammar must keep all required big-board renderer slots"
+    for developer_surface in [
+        "label: \"Doctor\"",
+        "label: \"Attestations\"",
+        "label: \"Ground Control\"",
+        "label: \"CI\"",
+        "BigBoardSurface",
+    ] {
+        assert!(
+            !app.contains(developer_surface),
+            "developer-only dashboard surface must not be routed: {developer_surface}"
+        );
+    }
+    assert_contains_all(
+        "production skin end-user renderers",
+        &skin,
+        &[
+            "VerdictProof:",
+            "MaskBadge:",
+            "PolicyBadge:",
+            "EditionTimeline:",
+        ],
     );
 }
 
@@ -339,10 +326,10 @@ fn wd_search_global_explorer_uses_guarded_dictionary_tools() {
         &app,
         &[
             "function ExplorerGlobalSearchPanel",
-            "Global Search",
+            "Search names and source",
             "All visible schemas",
-            "Object Matches",
-            "Source Matches",
+            "Object matches",
+            "Source matches",
             "explorerSourceSearchTypes",
             "fetchExplorerObjects(session.data",
             "fetchExplorerSourceSearch(session.data",
@@ -394,7 +381,8 @@ fn wd_ide_workbench_uses_static_plsql_tools() {
         &app,
         &[
             "function WorkbenchIdePanel",
-            "PL/SQL IDE",
+            "Optional PL/SQL analysis",
+            "PL/SQL analysis",
             "workbenchIdeRequest",
             "plsqlDefinitionsFromResponse",
             "identifierOccurrences",
@@ -508,7 +496,7 @@ fn w8b_proof_bundle_is_redacted_and_exportable() {
         &[
             "exportProofBundle: boolean",
             "params.set(\"export\", \"proof-bundle\")",
-            "fetch(`/operator/v1/audit-tail",
+            "operatorGet(`/operator/v1/audit-tail",
             "credentials: \"same-origin\"",
         ],
     );
@@ -602,14 +590,14 @@ fn w10_client_credentials_screen_is_redacted_and_isolated() {
         "dashboard client credential UI",
         &app,
         &[
-            "label: \"Clients\"",
+            "label: \"MCP clients\"",
             "function ClientsPage",
             "function ClientCredentialTable",
             "function ClientCredentialBearerPanel",
             "fetchClientCredentials",
             "rotateClientCredential",
             "revokeClientCredential",
-            "Rotated Bearer",
+            "New one-time client bearer",
             "bearer_shown_once",
             "last_source_addr",
         ],
@@ -677,8 +665,8 @@ fn wd_history_source_snapshots_and_revert_are_review_gated() {
             "SourceHistoryPanel",
             "fetchSourceHistory",
             "draftSourceHistoryRevert",
-            "Source History",
-            "Draft revert proposal",
+            "Source history",
+            "Create restore plan",
         ],
     );
     assert_contains_all(
@@ -824,8 +812,9 @@ fn dashboard_per_view_acceptance_suite_is_accounted() {
             "function SessionsPage",
             "function HealthPage",
             "function CapacityPage",
+            "function ConfigPage",
+            "function ClientsPage",
             "function AuditPage",
-            "function DoctorPage",
             "function ExplorerPage",
             "function ReviewsPage",
             "function WorkbenchPage",
@@ -836,7 +825,6 @@ fn dashboard_per_view_acceptance_suite_is_accounted() {
             "ClientCredentialTable",
             "SourceHistoryPanel",
             "SchemaDiffPanel",
-            "BigBoardSurface capabilities={capabilities}",
         ],
     );
     assert_contains_all(
@@ -903,6 +891,9 @@ fn skin_conformance_2d_fallback_a11y() {
     let client = read_repo_file("web/src/app/operator-client.ts");
     let skin = read_repo_file("web/src/app/skin.tsx");
     let presentation = read_repo_file("web/src/app/presentation-model.ts");
+    let retired_renderer = read_repo_file("web/src/app/orrery-renderer.tsx");
+    let package = read_repo_file("web/package.json");
+    let package_lock = read_repo_file("web/package-lock.json");
 
     assert_contains_all(
         "dashboard accessibility anchors",
@@ -913,37 +904,49 @@ fn skin_conformance_2d_fallback_a11y() {
             "aria-label=\"connection health\"",
             "aria-label=\"capacity metrics\"",
             "aria-label=\"Config draft TOML\"",
-            "aria-label=\"proposal author\"",
-            "aria-label=\"proposal unit\"",
+            "aria-label=\"Object detail level\"",
+            "aria-label=\"Database objects\"",
             "aria-label=\"workbench mode\"",
+            "aria-label=\"Audit timeline\"",
         ],
     );
     assert_contains_all(
         "dashboard skin",
         &skin,
         &[
-            "defaultBigBoard: \"orrery3d\"",
-            "board2d:",
-            "requiresWebGl: false",
-            "table:",
-            "orrery3d:",
-            "requiresWebGl: true",
-            "lazy: true",
-            "React.lazy(() => import(\"./orrery-renderer\"))",
+            "VerdictProof: VerdictProofInspector",
+            "MaskBadge: MaskBadgeRenderer",
+            "PolicyBadge: PolicyBadgeRenderer",
+            "EditionTimeline: EditionTimelineRenderer",
             "assertDashboardSkinConformance(OMCP_SKIN)",
         ],
     );
-    assert_contains_all(
-        "presentation grammar",
-        &presentation,
-        &[
-            "export type BigBoardRendererKind = \"orrery3d\" | \"board2d\" | \"table\"",
-            "REQUIRED_BIG_BOARD_RENDERERS",
-            "normalizeRendererChoice",
-            "return capabilities.webgl && !capabilities.reducedMotion",
-            "return rendererAvailable(\"board2d\") ? \"board2d\" : \"table\"",
-        ],
+    for retired in [
+        "orrery3d",
+        "OrreryRenderer",
+        "requiresWebGl",
+        "webglUniforms",
+        "WebGL",
+    ] {
+        assert!(
+            !skin.contains(retired)
+                && !presentation.contains(retired)
+                && !retired_renderer.contains(retired),
+            "retired renderer marker `{retired}` must not remain in dashboard source"
+        );
+    }
+    assert!(
+        retired_renderer.contains("export {};") && !retired_renderer.contains("import "),
+        "the retained legacy path must be an inert module"
     );
+    for manifest in [&package, &package_lock] {
+        assert!(
+            !manifest.contains("\"three\"")
+                && !manifest.contains("\"@types/three\"")
+                && !manifest.contains("node_modules/three"),
+            "retired rendering dependencies must not remain in package metadata"
+        );
+    }
 
     for forbidden in [
         "localStorage",

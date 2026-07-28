@@ -10,7 +10,15 @@ import { parseColumnLineage, type WorkbenchActionData } from "./operator-client"
 // when the lineage surface projected nothing.
 
 function action(mcp: Record<string, unknown>): WorkbenchActionData {
-  return { status: "ok", mcp_tool: "oracle_lineage", mcp_response: mcp };
+  return {
+    status: "ok",
+    mcp_tool: "oracle_lineage",
+    mcp_response: {
+      jsonrpc: "2.0",
+      id: "operator-v1",
+      result: { isError: false, structuredContent: mcp }
+    }
+  };
 }
 
 describe("column lineage parsing", () => {

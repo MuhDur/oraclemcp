@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { CiLaneHealthPanel } from "./App";
+import { CiLaneHealthPanel } from "./ci-lane-health-panel";
 import { normalizeCiLaneHealthData } from "./operator-client";
 
 function lane(checkName: string, conclusion: string, runId: number): Record<string, unknown> {

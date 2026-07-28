@@ -3,8 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { OperatorOutcomeNotice } from "./App";
 import { decodeOperatorOutcome } from "./operator-client";
-import { skinContractFixture } from "./presentation-model";
-import { ChainStrip, OMCP_SKIN } from "./skin";
+import { ChainStrip } from "./skin";
 
 // uc3z: the console's live, safety-critical status signals must be announced to
 // assistive tech. Each carries an aria-live region so a screen-reader operator
@@ -12,15 +11,6 @@ import { ChainStrip, OMCP_SKIN } from "./skin";
 // without the per-second clock ticking into the same region.
 
 describe("live status regions are announced", () => {
-  it("announces the Ground Control GO/NO-GO verdict via an aria-live region", () => {
-    const GroundControl = OMCP_SKIN.renderers.GroundControl;
-    const markup = renderToStaticMarkup(
-      <GroundControl model={skinContractFixture().groundControl} />
-    );
-    expect(markup).toContain('aria-live="polite"');
-    expect(markup).toContain('role="status"');
-  });
-
   it("announces an audit-chain tamper via an aria-live region", () => {
     const markup = renderToStaticMarkup(
       <ChainStrip

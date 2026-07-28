@@ -15,7 +15,15 @@ const SEQUENCE_REASON =
   "sequence.NEXTVAL: the sequence is advanced outside the transaction, so a rollback does not restore it";
 
 function action(mcp: Record<string, unknown>): WorkbenchActionData {
-  return { status: "ok", mcp_tool: "oracle_execute", mcp_response: mcp };
+  return {
+    status: "ok",
+    mcp_tool: "oracle_execute",
+    mcp_response: {
+      jsonrpc: "2.0",
+      id: "operator-v1",
+      result: { isError: false, structuredContent: mcp }
+    }
+  };
 }
 
 function checkpointEntry(name: string): UndoTreeEntry {

@@ -1,18 +1,19 @@
 @import "tailwindcss";
 
 /*
- * OMCP — Carved Light design tokens (Appendix G.3 / G.2).
- * The single theme shipped in 0.7.3: a near-black "carved light" palette with
- * a warm gold/copper accent set, classical serif + monospace type. Every color
- * and type value lives here; surfaces read the tokens, never raw hex.
+ * OMCP operator design tokens.
+ * The dashboard uses a near-black palette with warm gold/copper accents and
+ * classical serif + monospace type. Every color and type value lives here;
+ * surfaces read the tokens, never raw hex.
  */
 @theme {
-  /* Palette — Carved Light (Appendix G.3) */
+  /* Palette — dark operator theme */
   --color-base: #0c0b09;
   --color-surface: #1e1913;
   --color-surface-2: #282119;
   --color-surface-3: #2b261b;
   --color-hairline: #4a4230;
+  --color-control-border: #786d53;
   --color-text-bright: #f2ecdc;
   --color-text: #e9e2d0;
   --color-text-2: #c9c0ac;
@@ -21,7 +22,7 @@
   --color-muted-2: #918770;
   --color-gold: #c7a34a;
   --color-copper: #d97748;
-  --color-rust: #c25048;
+  --color-rust: #d8665e;
   --color-sage: #8ea98c;
 
   /* Type — self-hosted faces (Appendix G.2); @font-face lives in styles.css */
@@ -112,10 +113,9 @@
 }
 
 /*
- * Semantic --om-* variables consumed by the skin/layout seam and the view-model
- * renderers. Mapped onto the Carved Light palette above; the clearance ramp
- * follows the grammar: sage = read-only nominal, gold = read-write, copper =
- * DDL, rust = ADMIN / destructive.
+ * Semantic --om-* variables consumed by the skin/layout seam and view-model
+ * renderers. The clearance ramp follows the grammar: sage = read-only nominal,
+ * gold = read-write, copper = DDL, rust = ADMIN / destructive.
  */
 :root {
   color-scheme: dark;
@@ -128,7 +128,9 @@
   --om-surface: var(--color-surface);
   --om-surface-muted: var(--color-surface-2);
   --om-surface-elevated: var(--color-surface-3);
+  /* Structural dividers stay quiet; interactive controls need a 3:1 boundary. */
   --om-border: var(--color-hairline);
+  --om-control-border: var(--color-control-border);
   --om-focus: var(--color-gold);
   --om-gold: var(--color-gold);
   --om-copper: var(--color-copper);
@@ -158,7 +160,9 @@
     --om-surface-muted: Canvas;
     --om-surface-elevated: Canvas;
     --om-border: CanvasText;
+    --om-control-border: CanvasText;
     --om-focus: Highlight;
+    --om-rust: CanvasText;
     --om-clearance-read-only: CanvasText;
     --om-clearance-read-write: LinkText;
     --om-clearance-ddl: Mark;
@@ -166,6 +170,27 @@
     --om-activity: Highlight;
     --om-grid: CanvasText;
   }
+}
+
+:where(input:not([type="range"]), select, textarea) {
+  border-color: var(--om-control-border);
+}
+
+:where(input, textarea)::placeholder {
+  color: var(--om-text-muted);
+  opacity: 1;
+}
+
+:where(
+  a[href],
+  button:not(:disabled),
+  input:not(:disabled),
+  select:not(:disabled),
+  textarea:not(:disabled),
+  [tabindex]:not([tabindex="-1"])
+):focus-visible {
+  outline: 2px solid var(--om-focus);
+  outline-offset: 3px;
 }
 
 @media (prefers-reduced-motion: reduce) {

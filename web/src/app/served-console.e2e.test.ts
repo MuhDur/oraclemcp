@@ -70,18 +70,26 @@ async function mcp(name: string, args: Record<string, unknown>): Promise<Workben
     { "mcp-protocol-version": "2025-06-18" }
   );
   const json = (await res.json()) as {
+    jsonrpc?: string;
+    id?: unknown;
     result?: { structuredContent?: Record<string, unknown>; isError?: boolean };
+    error?: Record<string, unknown>;
   };
-  // The console never sees the raw JSON-RPC envelope: the operator action
-  // forwarder hands its WorkbenchActionData.mcp_response the tool's structured
-  // payload. Mirror that exactly, so the real parsers consume what they consume
-  // in the browser. `isError` is preserved so a refusal is still legible.
-  const structured = json.result?.structuredContent ?? {};
+  // The operator action forwarder preserves the full JSON-RPC reply under
+  // WorkbenchActionData.mcp_response. Keep that exact shape here even though
+  // this harness obtains it directly from /mcp.
   return {
     status: "ok",
     mcp_tool: name,
-    mcp_response: { ...structured, isError: json.result?.isError === true }
+    mcp_response: json
   } as WorkbenchActionData;
+}
+
+function structuredPayload(response: WorkbenchActionData): Record<string, unknown> {
+  const mcp = response.mcp_response as {
+    result?: { structuredContent?: Record<string, unknown> };
+  };
+  return mcp.result?.structuredContent ?? {};
 }
 
 let server: ChildProcess | undefined;
@@ -249,10 +257,10 @@ describe.runIf(ENABLED)("shipped console affordances against a served backend", 
   it("the guard REALLY refuses a DDL statement at READ_ONLY", async () => {
     const drop = ["DROP", "TABLE", "hr.employees"].join(" ");
     const response = await mcp("oracle_execute", { sql: drop, commit: false });
-    const payload = response.mcp_response as { error_class?: string };
+    const payload = structuredPayload(response);
     // A real refusal from the real classifier + level gate — no cost refusal here.
     expect(payload.error_class).toBe("OPERATING_LEVEL_TOO_LOW");
-    expect(parseQueryCostRefusal(response.mcp_response)).toBeNull();
+    expect(parseQueryCostRefusal(response)).toBeNull();
   });
 
   it("verdict-proof inspector renders a real governed row as verified evidence", async () => {
@@ -260,10 +268,9 @@ describe.runIf(ENABLED)("shipped console affordances against a served backend", 
       sql: 'SELECT 1 AS "SYNTHETIC_MASKED" FROM dual',
       max_rows: 1
     });
-    const page = read.mcp_response as { isError?: boolean; row_count?: number; rows?: unknown[] };
-    expect(page.isError).not.toBe(true);
+    const page = structuredPayload(read);
     expect(page.row_count).toBe(1);
-    expect(page.rows).toHaveLength(1);
+    expect(page.rows as unknown[]).toHaveLength(1);
 
     // The completed read was executed against the live lab, so the audit tail
     // carries real certificate and chain bytes. The console must render them as
@@ -331,7 +338,7 @@ describe.runIf(ENABLED)("shipped console affordances against a served backend", 
     // refusal, so the badge must not manufacture a reassuring policy state.
     const drop = ["DROP", "TABLE", "hr.employees"].join(" ");
     const response = await mcp("oracle_execute", { sql: drop, commit: false });
-    const badge = toPolicyBadgeViewModel(parsePolicyTightening(response.mcp_response));
+    const badge = toPolicyBadgeViewModel(parsePolicyTightening(response));
     expect(["not_reported", "evaluated"]).toContain(badge.status);
     if (badge.status === "not_reported") {
       expect(badge.detail).toContain("not a statement that no policy applied");

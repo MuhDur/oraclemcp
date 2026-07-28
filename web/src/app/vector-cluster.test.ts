@@ -10,7 +10,15 @@ import { parseVectorCluster, type WorkbenchActionData } from "./operator-client"
 // and used_index=null when the server did not inspect a plan — and nothing more.
 
 function action(mcp: Record<string, unknown>): WorkbenchActionData {
-  return { status: "ok", mcp_tool: "oracle_semantic_search", mcp_response: mcp };
+  return {
+    status: "ok",
+    mcp_tool: "oracle_semantic_search",
+    mcp_response: {
+      jsonrpc: "2.0",
+      id: "operator-v1",
+      result: { isError: false, structuredContent: mcp }
+    }
+  };
 }
 
 const MASK_CERT = {

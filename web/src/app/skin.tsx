@@ -10,22 +10,16 @@ import {
   Users
 } from "lucide-react";
 
-import { Badge, Surface } from "../components/ui/primitives";
+import { Badge } from "../components/ui/primitives";
 import { cn } from "../lib/utils";
 import {
   CLEARANCE_LADDER,
   DASHBOARD_GRAMMAR,
-  REQUIRED_BIG_BOARD_RENDERERS,
   REQUIRED_THEME_MODES,
-  type BigBoardRendererKind,
   type ClearanceLevel,
   type DashboardTone,
-  type FleetSessionViewModel,
-  type FleetViewModel,
-  type GoNoGoVerdict,
   type GroundControlChain,
   type GroundControlViewModel,
-  type HealthPosture,
   type CostBadgeViewModel,
   type FleetMapViewModel,
   type MaskBadgeViewModel,
@@ -36,65 +30,25 @@ import {
   type PolicyBadgeViewModel,
   type ScnScrubberViewModel,
   type SignatureId,
-  type SkinCapability,
   type UndoTreeViewModel,
-  type VerdictProofViewModel,
-  defaultSkinCapabilities,
-  normalizeRendererChoice,
-  skinContractFixture
+  type VerdictProofViewModel
 } from "./presentation-model";
 
 export type DashboardTheme = {
   name: string;
   modes: readonly string[];
   cssVars: Readonly<Record<`--om-${string}`, string>>;
-  webglUniforms: Readonly<Record<ClearanceLevel, readonly [number, number, number]>>;
-};
-
-export type BigBoardRendererProps = {
-  model: FleetViewModel;
-  renderer: BigBoardRendererDefinition;
-};
-
-export type BigBoardRendererDefinition = {
-  kind: BigBoardRendererKind;
-  label: string;
-  requiresWebGl: boolean;
-  available: boolean;
-  lazy: boolean;
-  component:
-    | React.ComponentType<BigBoardRendererProps>
-    | React.LazyExoticComponent<React.ComponentType<BigBoardRendererProps>>;
 };
 
 export type DashboardSkin = {
   name: string;
   grammarVersion: typeof DASHBOARD_GRAMMAR.grammarVersion;
   theme: DashboardTheme;
-  defaultBigBoard: BigBoardRendererKind;
-  bigBoardRenderers: Readonly<Record<BigBoardRendererKind, BigBoardRendererDefinition>>;
   renderers: {
-    GroundControl: React.ComponentType<{ model: GroundControlViewModel }>;
     VerdictProof: React.ComponentType<{ model: VerdictProofViewModel }>;
-    CostBadge: React.ComponentType<{ model: CostBadgeViewModel }>;
     MaskBadge: React.ComponentType<{ model: MaskBadgeViewModel }>;
-    FleetMap: React.ComponentType<{ model: FleetMapViewModel }>;
     PolicyBadge: React.ComponentType<{ model: PolicyBadgeViewModel }>;
-    VectorCluster: React.ComponentType<{ model: VectorClusterViewModel }>;
     EditionTimeline: React.ComponentType<{ model: EditionTimelineViewModel }>;
-    CqnChangeFeed: React.ComponentType<{ model: CqnChangeFeedViewModel }>;
-    ColumnLineage: React.ComponentType<{ model: ColumnLineageViewModel }>;
-    ScnScrubber: React.ComponentType<{
-      model: ScnScrubberViewModel;
-      onScrub?: (scn: number) => void;
-    }>;
-    UndoTree: React.ComponentType<{
-      model: UndoTreeViewModel;
-      // Offered only for a plainly reversible checkpoint; a partial rollback is a
-      // separate, explicitly-labeled action, never a plain Undo.
-      onUndo?: (checkpoint: string) => void;
-      onPartialRollback?: (checkpoint: string) => void;
-    }>;
   };
   layout: {
     appShell: string;
@@ -107,8 +61,6 @@ export type DashboardSkin = {
     skipLink: string;
   };
 };
-
-const orreryRenderer = React.lazy(() => import("./orrery-renderer"));
 
 export const CARVED_LIGHT_THEME: DashboardTheme = {
   name: "carved-light",
@@ -126,65 +78,20 @@ export const CARVED_LIGHT_THEME: DashboardTheme = {
     "--om-clearance-admin": "#c25048",
     "--om-activity": "#d97748",
     "--om-grid": "#2b261b"
-  },
-  webglUniforms: {
-    READ_ONLY: [0.557, 0.663, 0.549],
-    READ_WRITE: [0.78, 0.639, 0.29],
-    DDL: [0.851, 0.467, 0.282],
-    ADMIN: [0.761, 0.314, 0.282]
   }
 };
 
-// The OMCP operator console ships exactly one theme (Carved Light) over the
-// view-model / skin / theme / renderer seam. The seam (DashboardSkin,
-// assertDashboardSkinConformance, the board2d/table/orrery3d renderer set,
-// REQUIRED_THEME_MODES) stays open for future skins; 0.7.3 wires just this one.
+// The production skin names only renderers mounted by the end-user dashboard.
+// Keeping retired experiments out of this object lets Rollup discard their
+// implementation code even while repository policy keeps that source in place.
 export const OMCP_SKIN: DashboardSkin = {
   name: "omcp-carved-light",
   grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
   theme: CARVED_LIGHT_THEME,
-  // The Orrery is the hero when WebGL is present and motion is allowed;
-  // normalizeRendererChoice drops to the 2D board otherwise, so a reduced-motion
-  // or low-power client still boots instantly on the mandatory fallback.
-  defaultBigBoard: "orrery3d",
-  bigBoardRenderers: {
-    board2d: {
-      kind: "board2d",
-      label: "2D Board",
-      requiresWebGl: false,
-      available: true,
-      lazy: false,
-      component: Board2DBigBoardRenderer
-    },
-    table: {
-      kind: "table",
-      label: "Table",
-      requiresWebGl: false,
-      available: true,
-      lazy: false,
-      component: TableBigBoardRenderer
-    },
-    orrery3d: {
-      kind: "orrery3d",
-      label: "Orrery 3D",
-      requiresWebGl: true,
-      available: true,
-      lazy: true,
-      component: orreryRenderer
-    }
-  },
   renderers: {
-    GroundControl: GroundControl2DRenderer,
     VerdictProof: VerdictProofInspector,
-    UndoTree: UndoTreeRenderer,
-    CostBadge: CostBadgeRenderer,
-    ScnScrubber: ScnScrubberRenderer,
     MaskBadge: MaskBadgeRenderer,
-    FleetMap: FleetMapRenderer,
-    VectorCluster: VectorClusterRenderer,
     EditionTimeline: EditionTimelineRenderer,
-    CqnChangeFeed: CqnChangeFeedRenderer,
-    ColumnLineage: ColumnLineageRenderer,
     PolicyBadge: PolicyBadgeRenderer
   },
   layout: {
@@ -194,85 +101,15 @@ export const OMCP_SKIN: DashboardSkin = {
       "flex shrink-0 flex-col gap-4 border-b border-[var(--om-border)] pb-4 lg:w-64 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-4",
     logoMark:
       "flex size-10 items-center justify-center rounded-lg bg-[var(--om-clearance-read-only)] text-[var(--om-bg)]",
-    nav: "flex gap-2 overflow-x-auto lg:flex-col",
+    nav: "grid grid-cols-2 gap-2 sm:grid-cols-3 lg:flex lg:flex-col",
     navLink:
-      "inline-flex min-h-10 items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold text-[var(--om-text)] hover:bg-[var(--om-surface)] hover:text-[var(--om-text-bright)] [&.active]:bg-[var(--om-surface)] [&.active]:text-[var(--om-gold)] [&.active]:shadow-sm",
+      "inline-flex min-h-11 items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold text-[var(--om-text)] hover:bg-[var(--om-surface)] hover:text-[var(--om-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--om-focus)] [&[data-status=active]]:bg-[var(--om-surface)] [&[data-status=active]]:text-[var(--om-gold)] [&[data-status=active]]:shadow-sm",
     skipLink:
       "sr-only focus-visible:not-sr-only focus-visible:absolute focus-visible:left-4 focus-visible:top-4 focus-visible:z-50 focus-visible:inline-flex focus-visible:min-h-10 focus-visible:items-center focus-visible:rounded-md focus-visible:bg-[var(--om-surface)] focus-visible:px-4 focus-visible:py-2 focus-visible:text-sm focus-visible:font-semibold focus-visible:text-[var(--om-gold)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
   }
 };
 
 assertDashboardSkinConformance(OMCP_SKIN);
-
-export function useDashboardCapabilities(): SkinCapability {
-  const [capabilities, setCapabilities] = React.useState<SkinCapability>(() =>
-    detectDashboardCapabilities()
-  );
-
-  React.useEffect(() => {
-    const reducedMotion = mediaQuery("(prefers-reduced-motion: reduce)");
-    const highContrast = mediaQuery("(prefers-contrast: more)");
-    const forcedColors = mediaQuery("(forced-colors: active)");
-    const update = (): void => setCapabilities(detectDashboardCapabilities());
-
-    reducedMotion?.addEventListener("change", update);
-    highContrast?.addEventListener("change", update);
-    forcedColors?.addEventListener("change", update);
-    return () => {
-      reducedMotion?.removeEventListener("change", update);
-      highContrast?.removeEventListener("change", update);
-      forcedColors?.removeEventListener("change", update);
-    };
-  }, []);
-
-  return capabilities;
-}
-
-export function BigBoardSurface({
-  capabilities,
-  model,
-  skin
-}: {
-  capabilities: SkinCapability;
-  model: FleetViewModel;
-  skin: DashboardSkin;
-}): React.ReactElement {
-  const renderer = selectBigBoardRenderer(skin, capabilities);
-  const Renderer = renderer.component;
-  return (
-    <React.Suspense fallback={<BigBoardFallback model={model} renderer={renderer} />}>
-      <Renderer model={model} renderer={renderer} />
-    </React.Suspense>
-  );
-}
-
-export function selectBigBoardRenderer(
-  skin: DashboardSkin,
-  capabilities: SkinCapability
-): BigBoardRendererDefinition {
-  const kind = normalizeRendererChoice(
-    skin.defaultBigBoard,
-    capabilities,
-    (candidate) => skin.bigBoardRenderers[candidate]?.available === true
-  );
-  return skin.bigBoardRenderers[kind];
-}
-
-export function detectDashboardCapabilities(): SkinCapability {
-  if (typeof window === "undefined") {
-    return defaultSkinCapabilities();
-  }
-  const forcedColors = window.matchMedia("(forced-colors: active)").matches;
-  const highContrast = window.matchMedia("(prefers-contrast: more)").matches;
-  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  return {
-    webgl: detectWebGl(),
-    reducedMotion,
-    highContrast,
-    forcedColors,
-    preferTable: forcedColors || highContrast
-  };
-}
 
 /**
  * The verdict-proof inspector (Arc B1).
@@ -347,9 +184,9 @@ export function VerdictProofInspector({
           Derivation
         </p>
         <ol className="flex flex-col gap-1">
-          {model.derivation.map((step, index) => (
+          {model.derivation.map((step) => (
             <li
-              key={`${step.ruleId}:${step.construct}:${index}`}
+              key={`${step.ruleId}:${step.construct}`}
               className="flex items-center gap-2 rounded-md border border-[var(--om-border)] px-2 py-1"
               data-rule-id={step.ruleId}
               data-construct={step.construct}
@@ -1233,163 +1070,11 @@ export function UndoTreeRenderer({
 }
 
 export function assertDashboardSkinConformance(skin: DashboardSkin): void {
-  const fixture = skinContractFixture();
-  // A skip link is part of the grammar, not one skin's styling choice: it must
-  // exist and must reveal itself on focus, or keyboard users are stranded
-  // behind the sidebar nav on every route.
   if (!skin.layout.skipLink.trim()) {
     throw new Error(`skin ${skin.name} must provide a skip-to-main-content link class`);
   }
   if (!skin.layout.skipLink.includes("focus-visible:not-sr-only")) {
     throw new Error(`skin ${skin.name} skip link must become visible on keyboard focus`);
-  }
-  if (typeof skin.renderers.CostBadge !== "function") {
-    throw new Error(`skin ${skin.name} must provide a cost-badge renderer`);
-  }
-  if (typeof skin.renderers.ScnScrubber !== "function") {
-    throw new Error(`skin ${skin.name} must provide an SCN-scrubber renderer`);
-  }
-  if (typeof skin.renderers.MaskBadge !== "function") {
-    throw new Error(`skin ${skin.name} must provide an egress-mask renderer`);
-  }
-  if (typeof skin.renderers.FleetMap !== "function") {
-    throw new Error(`skin ${skin.name} must provide a fleet-map renderer`);
-  }
-  if (typeof skin.renderers.PolicyBadge !== "function") {
-    throw new Error(`skin ${skin.name} must provide a policy-narrowing renderer`);
-  }
-  if (typeof skin.renderers.VectorCluster !== "function") {
-    throw new Error(`skin ${skin.name} must provide a vector-cluster renderer`);
-  }
-  if (typeof skin.renderers.EditionTimeline !== "function") {
-    throw new Error(`skin ${skin.name} must provide an edition-timeline renderer`);
-  }
-  if (typeof skin.renderers.CqnChangeFeed !== "function") {
-    throw new Error(`skin ${skin.name} must provide a CQN change-feed renderer`);
-  }
-  if (typeof skin.renderers.ColumnLineage !== "function") {
-    throw new Error(`skin ${skin.name} must provide a column-lineage renderer`);
-  }
-  // Every one of the four typed edge statuses must render, and a drift edge must
-  // never be reported as verified.
-  const lineage = fixture.columnLineage;
-  const statuses = new Set(lineage.edges.map((edge) => edge.status));
-  for (const required of ["verified", "drift-missing", "drift-type-mismatch", "partial"] as const) {
-    if (!statuses.has(required)) {
-      throw new Error(`column-lineage fixture must include a ${required} edge`);
-    }
-  }
-  // A change scope is always a resource URI (the proven query), never an
-  // object-level scope, and repeat callbacks for one scope must coalesce.
-  const feed = fixture.cqnChangeFeed;
-  if (feed.events.some((event) => !event.scopeIsResource)) {
-    throw new Error("a CQN change scope must be a resource URI, never object-level");
-  }
-  if (!feed.events.some((event) => event.coalesced)) {
-    throw new Error("the change-feed fixture must show a coalesced batch");
-  }
-  // A linear chain: every stage after the root names its single parent, and the
-  // linear order is a strict 0..n sequence — never a branch/graph node.
-  const timeline = fixture.editionTimeline;
-  if (!timeline.linear || timeline.branchedFrom.length > 0) {
-    throw new Error("edition-timeline fixture must be a linear chain");
-  }
-  timeline.stages.forEach((stage, index) => {
-    if (stage.order !== index) {
-      throw new Error("edition stages must be in strict linear order");
-    }
-    if (index > 0 && stage.parentEdition === null) {
-      throw new Error("every non-root edition stage must name its single parent");
-    }
-  });
-  // The neighbor distances (ranks) must be monotonic non-decreasing, and the
-  // panel must never claim a numeric distance the server does not emit.
-  const vector = fixture.vectorCluster;
-  if (vector.distanceReported !== false) {
-    throw new Error("the vector panel must not report a distance the server does not emit");
-  }
-  for (let i = 1; i < vector.neighbors.length; i++) {
-    if (vector.neighbors[i].rank < vector.neighbors[i - 1].rank) {
-      throw new Error("vector neighbor distances (ranks) must be monotonic non-decreasing");
-    }
-  }
-  // Policy is monotone: a narrowing may only raise the level it started from.
-  const policy = fixture.policyBadge;
-  if (policy.effect !== "Narrow" || !policy.narrowedFrom || !policy.narrowedTo) {
-    throw new Error("policy-badge fixture must be a narrowing that names both levels");
-  }
-  if (
-    CLEARANCE_LADDER.findIndex((step) => step.level === policy.narrowedTo) <
-    CLEARANCE_LADDER.findIndex((step) => step.level === policy.narrowedFrom)
-  ) {
-    throw new Error("a policy narrowing must never lower the required level");
-  }
-  // The fleet map must render every lane the server typed, including the ones it
-  // could not read, and must never claim drift for a lane it never compared.
-  const fleet = fixture.fleetMap;
-  if (fleet.nodes.length !== fleet.profileCount) {
-    throw new Error("fleet-map fixture drops a database node");
-  }
-  if (!fleet.nodes.some((node) => node.status === "unreachable")) {
-    throw new Error("fleet-map fixture must keep an unreachable database on the map");
-  }
-  if (fleet.nodes.some((node) => node.status !== "reachable" && node.drift !== null)) {
-    throw new Error("an unread lane must carry no drift verdict");
-  }
-  // A certified page must name the policy that made every decision, and a
-  // transformed column must never render as passed-through.
-  const mask = fixture.maskBadge;
-  if (mask.status !== "certified" || !mask.policyId || mask.maskedColumns === 0) {
-    throw new Error("mask-badge fixture must be a certified page with a transformed column");
-  }
-  if (mask.columns.some((column) => column.masked !== (column.action !== "pass"))) {
-    throw new Error("a mask decision's action and masked flag disagree");
-  }
-  // The scrubbed SCN must always sit inside the confirmed range, and the range
-  // must be built only from snapshots the server actually served.
-  const scrubber = fixture.scnScrubber;
-  if (
-    scrubber.min === null ||
-    scrubber.max === null ||
-    scrubber.current === null ||
-    scrubber.current < scrubber.min ||
-    scrubber.current > scrubber.max
-  ) {
-    throw new Error("scn-scrubber fixture must clamp the current SCN inside its confirmed range");
-  }
-  if (scrubber.marks.some((mark) => mark.status === "refused" && mark.scn === scrubber.max)) {
-    throw new Error("a refused snapshot must never define the scrubber range");
-  }
-  // A refused statement must carry BOTH numbers the server disclosed; a badge
-  // that shows a verdict without its evidence is the failure mode here.
-  if (
-    fixture.costBadge.verdict !== "refused" ||
-    fixture.costBadge.estimate === null ||
-    fixture.costBadge.ceiling === null
-  ) {
-    throw new Error("cost-badge fixture must be a refusal carrying its estimate and ceiling");
-  }
-  if (typeof skin.renderers.UndoTree !== "function") {
-    throw new Error(`skin ${skin.name} must provide an undo-tree renderer`);
-  }
-  // The undo-tree fixture pins the Arc I honesty rule: the sequence-touching
-  // node is not undoable and says why, and the checkpoint above it degrades to
-  // a partial rollback rather than promising a plain Undo.
-  const escaped = fixture.undoTree.nodes.filter((node) => node.status === "escaped");
-  if (escaped.length === 0 || escaped.some((node) => node.undoable || !node.cannotUndoReason)) {
-    throw new Error("undo-tree fixture must carry a non-undoable node with a stated reason");
-  }
-  if (fixture.undoTree.nodes.some((node) => node.undoable && node.cannotUndoReason)) {
-    throw new Error("an undoable node must not also carry a cannot-undo reason");
-  }
-  if (typeof skin.renderers.VerdictProof !== "function") {
-    throw new Error(`skin ${skin.name} must provide a verdict-proof renderer`);
-  }
-  if (fixture.verdictProof.proofStatus !== "verified") {
-    throw new Error("verdict-proof fixture must verify against its own registry and binding");
-  }
-  if (fixture.verdictProof.derivation.some((step) => !step.registered)) {
-    throw new Error("verdict-proof fixture carries an unregistered rule id");
   }
   if (skin.grammarVersion !== DASHBOARD_GRAMMAR.grammarVersion) {
     throw new Error(`skin ${skin.name} has an unsupported grammar version`);
@@ -1399,25 +1084,29 @@ export function assertDashboardSkinConformance(skin: DashboardSkin): void {
     skin.theme.modes,
     `skin ${skin.name} theme mode coverage`
   );
-  assertSameSet(
-    REQUIRED_BIG_BOARD_RENDERERS,
-    Object.keys(skin.bigBoardRenderers),
-    `skin ${skin.name} big-board renderer coverage`
-  );
-  if (!skin.bigBoardRenderers.board2d.available || !skin.bigBoardRenderers.table.available) {
-    throw new Error(`skin ${skin.name} must provide both 2D and table fallback renderers`);
+  const requiredRenderers = ["EditionTimeline", "MaskBadge", "PolicyBadge", "VerdictProof"];
+  assertSameSet(requiredRenderers, Object.keys(skin.renderers), `skin ${skin.name} renderer coverage`);
+  for (const renderer of requiredRenderers) {
+    if (typeof skin.renderers[renderer as keyof DashboardSkin["renderers"]] !== "function") {
+      throw new Error(`skin ${skin.name} must provide the ${renderer} renderer`);
+    }
   }
-  if (skin.bigBoardRenderers.orrery3d.available && !skin.bigBoardRenderers.orrery3d.lazy) {
-    throw new Error(`skin ${skin.name} must lazy-load the Orrery renderer`);
+  if (!skin.layout.navLink.includes("focus-visible")) {
+    throw new Error(`skin ${skin.name} navigation links must expose a keyboard focus indicator`);
   }
-  if (
-    fixture.groundControl.clearanceLadder.map((step) => step.level).join(">") !==
-    "READ_ONLY>READ_WRITE>DDL>ADMIN"
-  ) {
-    throw new Error("clearance ladder grammar changed");
-  }
-  if (fixture.fleet.sessions.some((session) => session.clearance !== "READ_ONLY")) {
-    throw new Error("skin fixture must stay protected/read-only");
+  const requiredThemeTokens = [
+    "--om-bg",
+    "--om-text",
+    "--om-focus",
+    "--om-clearance-read-only",
+    "--om-clearance-read-write",
+    "--om-clearance-ddl",
+    "--om-clearance-admin"
+  ] as const;
+  for (const token of requiredThemeTokens) {
+    if (!/^#[0-9a-f]{6}$/i.test(skin.theme.cssVars[token] ?? "")) {
+      throw new Error(`skin ${skin.name} must provide the ${token} color token`);
+    }
   }
 }
 
@@ -1499,7 +1188,7 @@ function StatusCount({
   );
 }
 
-function GroundControl2DRenderer({
+export function GroundControl2DRenderer({
   model
 }: {
   model: GroundControlViewModel;
@@ -1711,196 +1400,6 @@ function SignatureCell({
   );
 }
 
-function Board2DBigBoardRenderer({
-  model,
-  renderer
-}: BigBoardRendererProps): React.ReactElement {
-  return (
-    <Surface
-      className="overflow-hidden border-[var(--om-border)]"
-      aria-label="big board"
-      data-renderer={renderer.kind}
-      data-grammar-version={model.grammarVersion}
-    >
-      <div className="grid gap-4 p-4 xl:grid-cols-[minmax(260px,0.45fr)_minmax(0,1.55fr)]">
-        <div className="min-w-0 rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] p-4">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="text-xs font-bold uppercase text-[var(--om-text-muted)]">Big Board</p>
-              <h2 className="mt-2 font-mono text-3xl font-bold leading-none text-[var(--om-text-bright)]">
-                {model.verdict}
-              </h2>
-            </div>
-            <Badge tone={verdictTone(model.verdict)}>{renderer.label}</Badge>
-          </div>
-          <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-            <BoardFact icon={Users} label="Active" value={model.totals.activeLanes} />
-            <BoardFact icon={Activity} label="Requests" value={model.totals.requests} />
-            <BoardFact icon={AlertTriangle} label="Blocked" value={model.totals.blocked} />
-            <BoardFact icon={Gauge} label="Latency" value={`${model.totals.meanLatencyMs} ms`} />
-          </div>
-        </div>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {model.sessions.length === 0 ? (
-            <div className="rounded-md border border-dashed border-[var(--om-border)] bg-[var(--om-surface)] p-4">
-              <p className="font-mono text-sm font-bold text-[var(--om-text-bright)]">NO ACTIVE LANES</p>
-              <p className="mt-2 text-sm font-semibold text-[var(--om-text-muted)]">idle</p>
-            </div>
-          ) : (
-            model.sessions.map((session) => (
-              <SessionBoardTile key={`${session.laneId}:${session.subjectIdHash}`} session={session} />
-            ))
-          )}
-        </div>
-      </div>
-    </Surface>
-  );
-}
-
-function TableBigBoardRenderer({
-  model,
-  renderer
-}: BigBoardRendererProps): React.ReactElement {
-  return (
-    <Surface
-      className="overflow-hidden border-[var(--om-border)]"
-      aria-label="big board table"
-      data-renderer={renderer.kind}
-      data-grammar-version={model.grammarVersion}
-    >
-      <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
-        <div>
-          <h2 className="text-base font-bold text-[var(--om-text-bright)]">Big Board</h2>
-          <p className="mt-1 text-sm text-[var(--om-text-muted)]">{renderer.label}</p>
-        </div>
-        <Badge tone={verdictTone(model.verdict)}>{model.verdict}</Badge>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[760px] border-collapse text-left">
-          <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
-            <tr>
-              <th className="px-4 py-3 font-bold">Lane</th>
-              <th className="px-4 py-3 font-bold">State</th>
-              <th className="px-4 py-3 font-bold">Clearance</th>
-              <th className="px-4 py-3 font-bold">Activity</th>
-              <th className="px-4 py-3 font-bold">Requests</th>
-              <th className="px-4 py-3 font-bold">Blocked</th>
-              <th className="px-4 py-3 font-bold">Latency</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-[var(--om-border)]">
-            {model.sessions.length === 0 ? (
-              <tr>
-                <td className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]" colSpan={7}>
-                  No active lanes
-                </td>
-              </tr>
-            ) : (
-              model.sessions.map((session) => (
-                <tr key={`${session.laneId}:${session.subjectIdHash}`} className="bg-[var(--om-surface)]">
-                  <td className="px-4 py-4 align-top">
-                    <p className="font-mono text-sm font-semibold text-[var(--om-text-bright)]">{session.laneId}</p>
-                    <p className="mt-1 break-all font-mono text-xs text-[var(--om-text-muted)]">
-                      {session.subjectIdHash}
-                    </p>
-                  </td>
-                  <td className="px-4 py-4 align-top">
-                    <Badge tone={healthTone(session.status)}>{session.status}</Badge>
-                  </td>
-                  <td className="px-4 py-4 align-top">
-                    <span
-                      className={cn(
-                        "inline-flex rounded-md border px-2 py-1 font-mono text-xs font-bold",
-                        clearanceClass(session.clearance)
-                      )}
-                    >
-                      {session.clearance}
-                    </span>
-                  </td>
-                  <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
-                    {Math.round(session.activity * 100)}%
-                  </td>
-                  <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
-                    {session.requests}
-                  </td>
-                  <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
-                    {session.blocked}
-                  </td>
-                  <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
-                    {session.latencyMs} ms
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-    </Surface>
-  );
-}
-
-function BigBoardFallback({ model, renderer }: BigBoardRendererProps): React.ReactElement {
-  return <TableBigBoardRenderer model={model} renderer={{ ...renderer, kind: "table", label: "Table" }} />;
-}
-
-function SessionBoardTile({ session }: { session: FleetSessionViewModel }): React.ReactElement {
-  return (
-    <div
-      className="min-w-0 rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] p-4"
-      data-clearance-level={session.clearance}
-      data-health={session.status}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate font-mono text-sm font-bold text-[var(--om-text-bright)]">{session.laneId}</p>
-          <p className="mt-1 break-all font-mono text-xs text-[var(--om-text-muted)]">{session.subjectIdHash}</p>
-        </div>
-        <Badge tone={healthTone(session.status)}>{session.status}</Badge>
-      </div>
-      <div className="mt-4 h-2 rounded-full bg-[var(--om-surface-elevated)]" aria-hidden="true">
-        <div
-          className="h-2 rounded-full bg-[var(--om-activity)]"
-          style={{ width: `${Math.round(session.activity * 100)}%` }}
-        />
-      </div>
-      <div className="mt-4 flex flex-wrap gap-2">
-        <span
-          className={cn(
-            "rounded-md border px-2 py-1 font-mono text-xs font-bold",
-            clearanceClass(session.clearance)
-          )}
-        >
-          {session.clearance}
-        </span>
-        <Badge tone={session.blocked > 0 ? "warn" : "ok"}>{session.blocked} blocked</Badge>
-        <Badge tone="info">{session.latencyMs} ms</Badge>
-      </div>
-    </div>
-  );
-}
-
-function BoardFact({
-  icon: Icon,
-  label,
-  value
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  value: number | string;
-}): React.ReactElement {
-  return (
-    <div className="flex items-center gap-3">
-      <div className="flex size-9 shrink-0 items-center justify-center rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] text-[var(--om-text)]">
-        <Icon className="size-4" aria-hidden="true" />
-      </div>
-      <div>
-        <p className="text-xs font-bold uppercase text-[var(--om-text-muted)]">{label}</p>
-        <p className="mt-1 font-mono text-sm font-bold text-[var(--om-text-bright)]">{value}</p>
-      </div>
-    </div>
-  );
-}
-
 // Color IS clearance (Appendix G grammar): every level reads its own --om
 // clearance token — sage READ_ONLY, gold READ_WRITE, copper DDL, rust ADMIN —
 // so the ramp is identical in Carved Light and the forced-colors fallback.
@@ -1928,43 +1427,6 @@ function signatureIcon(id: SignatureId): React.ComponentType<{ className?: strin
     case "logbook":
       return FileClock;
   }
-}
-
-function healthTone(health: HealthPosture): DashboardTone {
-  switch (health) {
-    case "nominal":
-    case "working":
-      return "ok";
-    case "blocked":
-      return "warn";
-    case "syncing":
-      return "info";
-    case "idle":
-      return "off";
-  }
-}
-
-function verdictTone(verdict: GoNoGoVerdict): DashboardTone {
-  switch (verdict) {
-    case "GO":
-      return "ok";
-    case "NO-GO":
-      return "warn";
-    case "SYNC":
-      return "info";
-  }
-}
-
-function mediaQuery(query: string): MediaQueryList | null {
-  return typeof window === "undefined" ? null : window.matchMedia(query);
-}
-
-function detectWebGl(): boolean {
-  if (typeof document === "undefined") {
-    return false;
-  }
-  const canvas = document.createElement("canvas");
-  return Boolean(canvas.getContext("webgl2") ?? canvas.getContext("webgl"));
 }
 
 function assertSameSet(expected: readonly string[], actual: readonly string[], label: string): void {

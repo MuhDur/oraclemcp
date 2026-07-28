@@ -15,19 +15,11 @@ import {
   QueryClient,
   QueryClientProvider,
   useMutation,
-  useQueries,
   useQuery
 } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
-  type ColumnDef,
-  flexRender,
-  getCoreRowModel,
-  useReactTable
-} from "@tanstack/react-table";
-import {
   Activity,
-  Link2,
   AlertTriangle,
   Ban,
   BarChart3,
@@ -35,7 +27,6 @@ import {
   Code2,
   Database,
   Download,
-  FileCheck2,
   FileClock,
   Gauge,
   GitPullRequest,
@@ -48,7 +39,6 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   SquarePen,
-  Stethoscope,
   Timer,
   Users,
   Wifi
@@ -56,42 +46,17 @@ import {
 
 import { Badge, Button, Surface } from "../components/ui/primitives";
 import { cn } from "../lib/utils";
-import {
-  BigBoardSurface,
-  ChainStrip,
-  OMCP_SKIN,
-  useDashboardCapabilities
-} from "./skin";
+import { OMCP_SKIN } from "./skin";
 import {
   CLEARANCE_LADDER,
-  DASHBOARD_GRAMMAR,
-  clampActivity,
-  toCostBadgeViewModel,
-  toFleetMapViewModel,
   toMaskBadgeViewModel,
   toPolicyBadgeViewModel,
-  toVectorClusterViewModel,
   toEditionTimelineViewModel,
-  toCqnChangeFeedViewModel,
-  toColumnLineageViewModel,
-  toScnScrubberViewModel,
-  toUndoTreeViewModel,
   toVerdictProofViewModel,
-  type ScnMarkViewModel,
-  type UndoTreeEntry,
-  type VectorMetric,
-  type FleetViewModel,
   type DashboardTone,
-  type GoNoGoVerdict,
-  type GroundControlChain,
-  type GroundControlViewModel,
-  type HealthPosture,
-  type SignatureViewModel
 } from "./presentation-model";
 import {
-  auditProbes,
   applyChangeProposal,
-  doctorProbes,
   draftSourceHistoryRevert,
   draftChangeProposal,
   executeWorkbenchSql,
@@ -99,35 +64,13 @@ import {
   cancelLane,
   coalesceAuditTimelineRecords,
   parseClassifierLadder,
-  parseCostEstimate,
-  parseQueryCostRefusal,
-  profileCostCeiling,
-  parseFleetMap,
-  parseActiveProfile,
   parseMaskCertificate,
   parsePolicyTightening,
-  parseVectorCluster,
   parseEditionProposals,
-  parseCqnChangeFeed,
-  parseColumnLineage,
-  parseQueryAsOf,
-  parseUndoOutcome,
-  fetchFleetMap,
-  fetchVectorCluster,
+  parseVerdictProofs,
   fetchEditionProposals,
-  fetchColumnLineage,
-  fetchQueryAsOf,
-  fetchQueryCostEstimate,
-  fetchVerdictProofs,
-  type AsOfTarget,
-  fetchWorkspaceHistory,
-  establishCheckpoint,
-  holdWorkbenchSql,
-  undoToCheckpoint,
   type VerdictProofData,
-  type WorkspaceView,
   fetchActiveLanes,
-  fetchCiLaneHealth,
   fetchClientCredentials,
   fetchDashboardSession,
   fetchChangeProposals,
@@ -136,9 +79,6 @@ import {
   fetchOperatorConfig,
   fetchOperatorHealth,
   fetchOperatorMetrics,
-  fetchProbe,
-  overviewProbes,
-  pendingProbe,
   previewConfigDraft,
   previewSchemaDiff,
   previewWorkbenchSql,
@@ -149,15 +89,11 @@ import {
   rollbackConfigDraft,
   setSessionLevel,
   type OperatorResponse,
-  type ProbeDefinition,
-  type ProbeResult,
   type AuditTailData,
   type AuditTailFilters,
   type AuditTailRecord,
   type ActiveLane,
   type CapacityLimitSource,
-  type ChangeProposalApplyUnit,
-  type ChangeProposalAuthorKind,
   type ChangeProposalListView,
   type ChangeProposalView,
   type DashboardSession,
@@ -186,7 +122,6 @@ import {
   type ConfigFieldChange,
   type ConfigOpsStatusData,
   type ConfigProfileMetadata,
-  sessionsProbes,
   cachedExplorerMetadata,
   clearExplorerMetadataCache,
   decodeOperatorOutcome,
@@ -198,7 +133,6 @@ import {
   fetchExplorerSource,
   fetchExplorerSourceSearch,
   fetchLaneCapabilities,
-  explorerMetadataCacheSummary,
   operatorOutcomeFromError,
   operatorResponseFromError,
   ORACLE_METADATA_SERIALIZATION_CONTRACT_VERSION,
@@ -208,10 +142,6 @@ import {
   type WorkbenchMode,
   type WorkbenchPlsqlTool
 } from "./operator-client";
-import { CiLaneHealthPanel } from "./ci-lane-health-panel";
-import { TestAttestationVerifier } from "./test-attestation-verifier";
-
-export { CiLaneHealthPanel } from "./ci-lane-health-panel";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -223,6 +153,10 @@ const queryClient = new QueryClient({
   }
 });
 
+const WHOLE_NUMBER_FORMATTER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+const EMPTY_ACTIVE_LANES: ActiveLane[] = [];
+const EMPTY_CHANGE_PROPOSALS: ChangeProposalListView[] = [];
+
 type NavItem = {
   to: string;
   label: string;
@@ -230,18 +164,16 @@ type NavItem = {
 };
 
 const navItems: NavItem[] = [
-  { to: "/", label: "Overview", icon: Activity },
-  { to: "/sessions", label: "Sessions", icon: Database },
-  { to: "/health", label: "Health", icon: CheckCircle2 },
-  { to: "/attestations", label: "Attestations", icon: FileCheck2 },
-  { to: "/capacity", label: "Capacity", icon: Gauge },
-  { to: "/config", label: "Config", icon: SlidersHorizontal },
-  { to: "/clients", label: "Clients", icon: KeyRound },
-  { to: "/explorer", label: "Explorer", icon: Search },
-  { to: "/reviews", label: "Reviews", icon: GitPullRequest },
-  { to: "/workbench", label: "Workbench", icon: SquarePen },
-  { to: "/audit", label: "Audit", icon: FileClock },
-  { to: "/doctor", label: "Doctor", icon: Stethoscope }
+  { to: "/", label: "Dashboard", icon: Activity },
+  { to: "/sessions", label: "Agent sessions", icon: Database },
+  { to: "/health", label: "Connection", icon: CheckCircle2 },
+  { to: "/explorer", label: "Database Explorer", icon: Search },
+  { to: "/workbench", label: "SQL Workbench", icon: SquarePen },
+  { to: "/reviews", label: "Change review", icon: GitPullRequest },
+  { to: "/audit", label: "Audit trail", icon: FileClock },
+  { to: "/capacity", label: "Resource limits", icon: Gauge },
+  { to: "/config", label: "Profiles & settings", icon: SlidersHorizontal },
+  { to: "/clients", label: "MCP clients", icon: KeyRound }
 ];
 
 const rootRoute = createRootRoute({
@@ -277,12 +209,6 @@ const healthRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/health",
   component: HealthPage
-});
-
-const attestationsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/attestations",
-  component: TestAttestationsPage
 });
 
 const capacityRoute = createRoute({
@@ -321,7 +247,7 @@ const explorerRoute = createRoute({
 const workbenchRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/workbench",
-  component: WorkbenchPage
+  component: WorkbenchRoutePage
 });
 
 const reviewsRoute = createRoute({
@@ -333,26 +259,18 @@ const reviewsRoute = createRoute({
   })
 });
 
-const doctorRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/doctor",
-  component: DoctorPage
-});
-
 const router = createRouter({
   routeTree: rootRoute.addChildren([
     overviewRoute,
     sessionsRoute,
     healthRoute,
-    attestationsRoute,
     capacityRoute,
     configRoute,
     clientsRoute,
     explorerRoute,
     reviewsRoute,
     workbenchRoute,
-    auditRoute,
-    doctorRoute
+    auditRoute
   ])
 });
 
@@ -374,6 +292,21 @@ export function bootstrapDashboard(element: HTMLElement): void {
 
 function RootLayout(): React.ReactElement {
   const skin = OMCP_SKIN;
+  const activeLanes = useQuery({
+    queryKey: ["active-lanes"],
+    queryFn: fetchActiveLanes,
+    refetchInterval: 5_000
+  });
+  const stateful = activeLanes.data?.data.stateful ?? true;
+  const operatorConfig = useQuery({
+    queryKey: ["operator-config"],
+    queryFn: fetchOperatorConfig,
+    staleTime: 30_000
+  });
+  const workbenchEnabled = operatorConfig.data?.data.status.dashboard_workbench === true;
+  const visibleNavItems = navItems.filter(
+    (item) => (stateful || item.to !== "/sessions") && (workbenchEnabled || item.to !== "/workbench")
+  );
   return (
     <div
       className={skin.layout.appShell}
@@ -393,22 +326,62 @@ function RootLayout(): React.ReactElement {
             </div>
             <div>
               <p className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
-                ORACLEMCP · OPERATOR CONSOLE
+                Oracle MCP
               </p>
-              <h1 className="font-serif text-xl font-semibold text-[var(--om-text-bright)]">◇ OMCP</h1>
+              <h1 className="font-serif text-xl font-semibold text-[var(--om-text-bright)]">Operator dashboard</h1>
             </div>
           </div>
           <nav className={skin.layout.nav} aria-label="dashboard">
-            {navItems.map((item) => (
+            {visibleNavItems.map((item) => (
               <NavLink key={item.to} item={item} skin={skin} />
             ))}
           </nav>
         </aside>
         <main id="main" tabIndex={-1} className="min-w-0 flex-1 space-y-4">
-          <GroundControlStrip />
+          <DashboardSessionBanner />
           <Outlet />
         </main>
       </div>
+    </div>
+  );
+}
+
+function DashboardSessionBanner(): React.ReactElement | null {
+  const session = useQuery({
+    queryKey: ["dashboard-session"],
+    queryFn: fetchDashboardSession,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    retry: 1
+  });
+  if (session.isError) {
+    return (
+      <div
+        className="rounded-lg border border-[var(--om-rust)] bg-[color-mix(in_srgb,var(--om-rust)_12%,transparent)] p-4"
+        role="alert"
+      >
+        <p className="font-semibold text-[var(--om-text-bright)]">Dashboard session unavailable</p>
+        <p className="mt-1 text-sm leading-6 text-[var(--om-text-muted)]">
+          Run <code className="font-mono text-[var(--om-gold)]">oraclemcp dashboard</code> on the server, open the new pairing page, and enter its one-time code.
+        </p>
+      </div>
+    );
+  }
+  if (!session.data) {
+    return null;
+  }
+  const remainingSeconds = Math.max(0, session.data.expires_unix - Math.floor(Date.now() / 1_000));
+  if (remainingSeconds > 15 * 60) {
+    return null;
+  }
+  return (
+    <div
+      className="rounded-lg border border-[var(--om-copper)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] p-3 text-sm text-[var(--om-text)]"
+      role={remainingSeconds === 0 ? "alert" : "status"}
+    >
+      {remainingSeconds === 0
+        ? "This dashboard session has expired. Pair this browser again before continuing."
+        : `This dashboard session expires in about ${Math.ceil(remainingSeconds / 60)} minute(s). Finish or save your work, then pair again.`}
     </div>
   );
 }
@@ -429,15 +402,7 @@ function NavLink({
   );
 }
 
-const logbookFilters: AuditTailFilters = {
-  limit: 1,
-  subjectIdHash: "",
-  tool: "",
-  dangerLevel: "",
-  exportProofBundle: false
-};
-
-function GroundControlStrip(): React.ReactElement {
+function OverviewPage(): React.ReactElement {
   const health = useQuery({
     queryKey: ["operator-health"],
     queryFn: fetchOperatorHealth,
@@ -448,111 +413,10 @@ function GroundControlStrip(): React.ReactElement {
     queryFn: fetchOperatorMetrics,
     refetchInterval: 5_000
   });
-  const logbook = useQuery({
-    queryKey: ["audit-tail", "logbook"],
-    queryFn: () => fetchAuditTail(logbookFilters),
-    refetchInterval: 15_000
-  });
-  const readiness = health.data?.data.readiness;
-  const go = readiness?.ready === true && readiness.db_reachable !== false;
-  const snapshot = metrics.data?.data.snapshot ?? null;
-  const activeLanes = snapshot?.active_lanes ?? 0;
-  const prodConnections = snapshot?.pool_active_connections ?? 0;
-  const blocked = sumCounts(snapshot?.lane_blocked ?? []);
-  const chainStatus =
-    nestedString(logbook.data?.data.proof, ["verification", "hash_chain", "status"]) ??
-    logbook.data?.data.source ??
-    "unavailable";
-  const chainHeight =
-    nestedNumber(logbook.data?.data.proof, ["verification", "hash_chain", "last_seq"]) ??
-    nestedNumber(logbook.data?.data.proof, ["verification", "hash_chain", "records"]);
-  const chainState: GroundControlChain["status"] =
-    chainStatus === "ok"
-      ? "intact"
-      : chainStatus === "broken"
-        ? "broken"
-        : logbook.isFetching && !logbook.data
-          ? "syncing"
-          : "unavailable";
-  const chain: GroundControlChain = {
-    status: chainState,
-    label:
-      chainState === "intact"
-        ? "verified"
-        : chainState === "broken"
-          ? "tamper"
-          : chainState,
-    height: chainHeight,
-    verifiedAtMs: logbook.data ? logbook.dataUpdatedAt : null
-  };
-  const goValue: GoNoGoVerdict = health.isFetching && !health.data ? "SYNC" : go ? "GO" : "NO-GO";
-  const model: GroundControlViewModel = {
-    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
-    verdict: goValue,
-    health: healthPosture(goValue, blocked),
-    clearanceLadder: CLEARANCE_LADDER,
-    clearanceStatus: {
-      blocked,
-      label: blocked > 0 ? "blocked" : "clear",
-      tone: blocked > 0 ? "warn" : "ok"
-    },
-    counts: {
-      lanes: activeLanes,
-      prod: prodConnections,
-      held: blocked
-    },
-    signatures: [
-      {
-        id: "go_no_go",
-        label: "GO/NO-GO",
-        value: goValue,
-        detail: readiness?.status ?? "unavailable",
-        tone: go ? "ok" : health.isFetching ? "info" : "warn",
-        activity: go ? 1 : 0
-      },
-      {
-        id: "countdown",
-        label: "Countdown",
-        value: "idle",
-        detail: `${formatNumber(activeLanes)} lanes`,
-        tone: activeLanes > 0 ? "info" : "off",
-        activity: activeLanes > 0 ? 0.5 : 0
-      },
-      {
-        id: "logbook",
-        label: "Logbook",
-        value: chainStatus,
-        detail: logbook.isFetching && !logbook.data ? "sync" : "audit",
-        tone: chainStatus === "ok" ? "ok" : chainStatus === "broken" ? "warn" : "info",
-        activity: logbook.isFetching ? 0.5 : 0
-      }
-    ] satisfies readonly SignatureViewModel[],
-    chain
-  };
-  const GroundControl = OMCP_SKIN.renderers.GroundControl;
-  return (
-    <div className="space-y-3">
-      <GroundControl model={model} />
-      <ChainStrip chain={chain} />
-    </div>
-  );
-}
-
-function OverviewPage(): React.ReactElement {
-  const metrics = useQuery({
-    queryKey: ["operator-metrics"],
-    queryFn: fetchOperatorMetrics,
-    refetchInterval: 5_000
-  });
   const activeLanes = useQuery({
     queryKey: ["active-lanes"],
     queryFn: fetchActiveLanes,
     refetchInterval: 5_000
-  });
-  const ciLanes = useQuery({
-    queryKey: ["ci-lanes"],
-    queryFn: fetchCiLaneHealth,
-    refetchInterval: 30_000
   });
   const reviews = useQuery({
     queryKey: ["change-proposals"],
@@ -561,60 +425,100 @@ function OverviewPage(): React.ReactElement {
   });
   const eventLog = useOperatorEventLog("operator");
   const snapshot = metrics.data?.data.snapshot ?? null;
-  const lanes = activeLanes.data?.data.lanes ?? [];
-  const pending = metrics.isFetching || activeLanes.isFetching;
-  const capabilities = useDashboardCapabilities();
-  const summary = overviewSummary(snapshot, lanes);
-  const laneRows = laneMetricRows(snapshot, lanes);
-  const fleet = fleetViewModel(summary, laneRows, pending);
+  const lanes = activeLanes.data?.data.lanes ?? EMPTY_ACTIVE_LANES;
+  const stateful = activeLanes.data?.data.stateful ?? true;
+  const pending = health.isFetching || metrics.isFetching || activeLanes.isFetching;
+  const dataError = firstQueryError(health.error, metrics.error, activeLanes.error);
 
   return (
     <PageFrame
-      title="Overview"
-      eyebrow="Mission Control"
-      description="Runtime and operator protocol posture from the active service."
+      title="Dashboard"
+      eyebrow="Service overview"
+      description="Current Oracle connection, active MCP clients, governed activity, and service counters."
     >
       <div className="space-y-4">
-        <BigBoardSurface capabilities={capabilities} model={fleet} skin={OMCP_SKIN} />
-        <FleetMapPanel />
+        <OverviewServiceStatus
+          health={health.data?.data ?? null}
+          lanes={lanes}
+          stateful={stateful}
+          snapshot={snapshot}
+          pending={pending}
+          error={dataError}
+          checkedAt={Math.max(health.dataUpdatedAt, metrics.dataUpdatedAt, activeLanes.dataUpdatedAt)}
+        />
+        {dataError ? <QueryErrorNotice title="Dashboard data is unavailable" error={dataError} /> : null}
         <OverviewMetricTiles
           snapshot={snapshot}
           lanes={lanes}
+          stateful={stateful}
           pending={pending}
         />
-        <CiLaneHealthPanel
-          data={ciLanes.data?.data ?? null}
-          pending={ciLanes.isFetching}
-          error={ciLanes.error}
-        />
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
-          <LaneMetricsPanel snapshot={snapshot} lanes={lanes} />
-          <OperatorEventLogPanel status={eventLog.status} events={eventLog.events} />
-        </div>
-        <CqnChangeFeedPanel events={eventLog.events} />
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,0.85fr)_minmax(360px,1.15fr)]">
-          <ToolMetricsPanel snapshot={snapshot} />
+          <LaneMetricsPanel snapshot={snapshot} lanes={lanes} stateful={stateful} />
           <OverviewReviewsPanel
             proposals={reviews.data?.data.proposals ?? []}
             pending={reviews.isFetching}
+            error={reviews.error}
           />
         </div>
         <div className="grid gap-4 xl:grid-cols-[minmax(0,0.85fr)_minmax(360px,1.15fr)]">
-          <ProbeDashboard probes={overviewProbes} compact />
-          <Surface className="min-h-32 p-4">
-            <div className="flex items-start justify-between gap-3">
-              <p className="text-sm font-semibold text-[var(--om-text-muted)]">Review Source</p>
-              <Badge tone={reviews.isError ? "warn" : reviews.data ? "ok" : "info"}>
-                {reviews.isError ? "blocked" : reviews.data ? "ready" : "sync"}
-              </Badge>
-            </div>
-            <strong className="mt-5 block break-all font-mono text-sm leading-5 text-[var(--om-text-bright)]">
-              /operator/v1/change-proposals
-            </strong>
-          </Surface>
+          <ToolMetricsPanel snapshot={snapshot} />
+          <OperatorEventLogPanel status={eventLog.status} events={eventLog.events} />
         </div>
       </div>
     </PageFrame>
+  );
+}
+
+function OverviewServiceStatus({
+  health,
+  lanes,
+  stateful,
+  snapshot,
+  pending,
+  error,
+  checkedAt
+}: {
+  health: OperatorHealthData | null;
+  lanes: ActiveLane[];
+  stateful: boolean;
+  snapshot: MetricsSnapshot | null;
+  pending: boolean;
+  error: Error | null;
+  checkedAt: number;
+}): React.ReactElement {
+  const readiness = health?.readiness;
+  const serviceReady = readiness?.ready === true;
+  const databaseReachable = readiness?.db_reachable === true;
+  const state = error ? "unavailable" : pending && !health ? "checking" : serviceReady ? "ready" : "attention";
+  return (
+    <Surface className="overflow-hidden" aria-busy={pending}>
+      <PanelHeader
+        icon={Activity}
+        title="Service status"
+        meta={checkedAt > 0 ? `checked ${formatRelativeAge(checkedAt)}` : "not checked"}
+        tone={error || (!pending && !serviceReady) ? "warn" : pending ? "info" : "ok"}
+      />
+      <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-5">
+        <CapacityFact label="Service" value={state} />
+        <CapacityFact
+          label="Oracle database"
+          value={error ? "unavailable" : databaseReachable ? "connected" : pending ? "checking" : "not reachable"}
+        />
+        <CapacityFact
+          label={stateful ? "Active agent sessions" : "Connection mode"}
+          value={stateful ? lanes.length : "direct (stateless)"}
+        />
+        <CapacityFact
+          label="Open pool connections"
+          value={snapshot ? snapshot.pool_active_connections : "unavailable"}
+        />
+        <CapacityFact
+          label="Policy refusals since start"
+          value={snapshot ? sumCounts(snapshot.lane_blocked ?? []) : "unavailable"}
+        />
+      </div>
+    </Surface>
   );
 }
 
@@ -638,7 +542,6 @@ function SessionsPage(): React.ReactElement {
   const [lastResult, setLastResult] = React.useState<SessionLevelResult | null>(null);
   const [cancelNotice, setCancelNotice] = React.useState<string | null>(null);
   const [pendingCancelLaneId, setPendingCancelLaneId] = React.useState<string | null>(null);
-  const capabilities = useDashboardCapabilities();
   const session = useQuery({
     queryKey: ["dashboard-session"],
     queryFn: fetchDashboardSession,
@@ -656,7 +559,7 @@ function SessionsPage(): React.ReactElement {
     queryFn: fetchOperatorMetrics,
     refetchInterval: 5_000
   });
-  const lanes = activeLanes.data?.data.lanes ?? [];
+  const lanes = activeLanes.data?.data.lanes ?? EMPTY_ACTIVE_LANES;
   const selectedLane = lanes.find((lane) => lane.lane_id === selectedLaneId) ?? lanes[0] ?? null;
   const selectedLaneKey = selectedLane?.lane_id ?? "";
   const eventLog = useOperatorEventLog(selectedLaneKey || "operator");
@@ -788,8 +691,6 @@ function SessionsPage(): React.ReactElement {
     selectedCapabilities.data,
     selectedConnection.data
   );
-  const fleet = fleetViewModel(summary, laneRows, pending);
-  const groundControl = sessionGroundControlModel(summary, eventLog.status, pending);
   const selectedDetail = selectedLaneDetail(
     selectedLane,
     laneRows,
@@ -800,46 +701,64 @@ function SessionsPage(): React.ReactElement {
     eventLog.events
   );
 
+  if (activeLanes.data?.data.stateful === false) {
+    return (
+      <PageFrame
+        title="Agent sessions"
+        eyebrow="Stateful HTTP is off"
+        description="This server uses direct stateless requests, so it does not retain per-client sessions or temporary session controls."
+      >
+        <ConsolePanel className="p-4">
+          <p className="text-sm leading-6 text-[var(--om-text)]" role="status">
+            Session tracking is not applicable in stateless mode. Use Dashboard for service activity or SQL Workbench for the direct server profile.
+          </p>
+        </ConsolePanel>
+      </PageFrame>
+    );
+  }
+
   return (
     <PageFrame
-      title="Sessions"
-      eyebrow="Mission Control"
-      description="Live lane state, activity, and per-lane clearance."
+      title="Agent sessions"
+      eyebrow="Connected MCP clients"
+      description="Inspect active client sessions, their database profile, and temporary permission level."
     >
       <div className="space-y-4">
         {pendingCancelLaneId ? (
           <ConfirmDialog
             id="lane-cancel"
-            title="Cancel lane"
+            title="End agent session"
             body={
               <>
-                Cancel lane{" "}
+                End session{" "}
                 <span className="font-mono font-semibold text-[var(--om-text-bright)]">
                   {pendingCancelLaneId}
                 </span>
-                ? This kills its Oracle session and grants.
+                ? This closes its Oracle connection and revokes temporary grants.
               </>
             }
-            confirmLabel="Cancel lane"
+            confirmLabel="End session"
             busy={cancelMutation.isPending}
             onCancel={() => setPendingCancelLaneId(null)}
             onConfirm={confirmCancelLane}
           />
         ) : null}
         <SessionMissionHeader
-          model={groundControl}
           summary={summary}
           eventStatus={eventLog.status}
           source={activeLanes.data?.data.source ?? "unavailable"}
           pending={pending}
         />
-        <BigBoardSurface capabilities={capabilities} model={fleet} skin={OMCP_SKIN} />
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
           <SessionLaneTable
             rows={laneRows}
             selectedLaneId={selectedLane?.lane_id ?? selectedLaneId}
             pending={pending}
-            onSelect={(laneId) => setSelectedLaneId(laneId)}
+            onSelect={(laneId) => {
+              setConfirm("");
+              setLastResult(null);
+              setSelectedLaneId(laneId);
+            }}
             onCancel={requestCancelLane}
             cancelPendingLaneId={cancelMutation.isPending ? cancelMutation.variables ?? null : null}
             cancelNotice={cancelNotice}
@@ -855,17 +774,26 @@ function SessionsPage(): React.ReactElement {
               sessionTone={sessionTone}
               targetLevel={targetLevel}
               ttlSeconds={ttlSeconds}
-              onConfirmChange={setConfirm}
-              onLevelChange={setTargetLevel}
-              onTtlChange={setTtlSeconds}
-              onAction={(action) => levelMutation.mutate(action)}
+              onLevelChange={(level) => {
+                setConfirm("");
+                setLastResult(null);
+                setTargetLevel(level);
+              }}
+              onTtlChange={(ttl) => {
+                setConfirm("");
+                setLastResult(null);
+                setTtlSeconds(ttl);
+              }}
+              onAction={(action) => {
+                if (action === "preview") {
+                  setConfirm("");
+                }
+                levelMutation.mutate(action);
+              }}
             />
           </div>
         </div>
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.8fr)]">
-          <OperatorEventLogPanel status={eventLog.status} events={eventLog.events} />
-          <ProbeDashboard probes={sessionsProbes} compact />
-        </div>
+        <OperatorEventLogPanel status={eventLog.status} events={eventLog.events} />
       </div>
     </PageFrame>
   );
@@ -926,38 +854,32 @@ type SessionCapabilitiesSummary = {
 };
 
 function SessionMissionHeader({
-  model,
   summary,
   eventStatus,
   source,
   pending
 }: {
-  model: GroundControlViewModel;
   summary: OverviewSummary;
   eventStatus: EventStreamStatus;
   source: string;
   pending: boolean;
 }): React.ReactElement {
-  const GroundControl = OMCP_SKIN.renderers.GroundControl;
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(360px,0.9fr)_minmax(0,1.1fr)]">
-      <GroundControl model={model} />
-      <Surface className="overflow-hidden">
+      <Surface className="overflow-hidden" aria-busy={pending}>
         <PanelHeader
           icon={Radio}
-          title="Live Sessions"
-          meta={pending ? "sync" : source}
+          title="Active agent sessions"
+          meta={pending ? "checking" : source}
           tone={pending ? "info" : summary.activeLanes > 0 ? "ok" : "off"}
         />
         <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-5">
-          <CapacityFact label="Lanes" value={summary.activeLanes} />
-          <CapacityFact label="Requests" value={summary.totalRequests} />
-          <CapacityFact label="Blocked" value={summary.blocked} />
-          <CapacityFact label="Errors" value={summary.errors} />
-          <CapacityFact label="Events" value={eventStatus} mono />
+          <CapacityFact label="Sessions" value={summary.activeLanes} />
+          <CapacityFact label="Requests since start" value={summary.totalRequests} />
+          <CapacityFact label="Policy refusals since start" value={summary.blocked} />
+          <CapacityFact label="Errors since start" value={summary.errors} />
+          <CapacityFact label="Live updates" value={eventStatus} mono />
         </div>
       </Surface>
-    </div>
   );
 }
 
@@ -982,8 +904,8 @@ function SessionLaneTable({
     <ConsolePanel>
       <ConsolePanelHeader
         icon={Database}
-        title="Active Lanes"
-        meta={pending ? "sync" : `${rows.length} lanes`}
+        title="Active agent sessions"
+        meta={pending ? "checking" : `${rows.length} sessions`}
         tone={pending ? "info" : rows.length > 0 ? "ok" : "off"}
       />
       {cancelNotice ? (
@@ -995,16 +917,21 @@ function SessionLaneTable({
           {cancelNotice}
         </p>
       ) : null}
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[1040px] border-collapse text-left">
+      <div
+        className="overflow-x-auto"
+        role="region"
+        aria-label="Active MCP client sessions"
+        tabIndex={0}
+      >
+        <table className="w-full min-w-[920px] border-collapse text-left">
+          <caption className="sr-only">Active MCP client sessions</caption>
           <thead className="bg-[var(--om-surface-muted)] text-2xs uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
             <tr>
-              <th className="px-4 py-3 font-semibold">Lane</th>
-              <th className="px-4 py-3 font-semibold">Agent</th>
-              <th className="px-4 py-3 font-semibold">Profile</th>
-              <th className="px-4 py-3 font-semibold">Level</th>
+              <th className="px-4 py-3 font-semibold">Session</th>
+              <th className="px-4 py-3 font-semibold">Client identity</th>
+              <th className="px-4 py-3 font-semibold">Database profile</th>
+              <th className="px-4 py-3 font-semibold">Permission</th>
               <th className="px-4 py-3 font-semibold">Activity</th>
-              <th className="px-4 py-3 font-semibold">Generation</th>
               <th className="px-4 py-3 font-semibold">Actions</th>
             </tr>
           </thead>
@@ -1013,9 +940,9 @@ function SessionLaneTable({
               <tr>
                 <td
                   className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]"
-                  colSpan={7}
+                  colSpan={6}
                 >
-                  No active lanes
+                  No active agent sessions. Connect an MCP client to begin.
                 </td>
               </tr>
             ) : (
@@ -1067,29 +994,29 @@ function SessionLaneTable({
                         {formatNumber(row.blocked)} blocked · {Math.round(row.meanLatencyMs)} ms
                       </p>
                     </td>
-                    <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
-                      {formatNumber(row.generation)}
-                    </td>
                     <td className="px-4 py-4 align-top">
                       <div className="flex flex-wrap gap-2">
                         <Button
                           type="button"
                           variant={selected ? "primary" : "secondary"}
+                          aria-label={`View details for session ${row.laneId}`}
+                          aria-pressed={selected}
                           onClick={() => onSelect(row.laneId)}
                         >
                           <SlidersHorizontal className="size-4" aria-hidden="true" />
-                          Expand
+                          View details
                         </Button>
                         <Button
                           type="button"
                           variant="secondary"
                           className="border-[color-mix(in_srgb,var(--om-rust)_55%,transparent)] text-[var(--om-rust)] hover:bg-[color-mix(in_srgb,var(--om-rust)_14%,transparent)]"
                           disabled={!row.active || cancelPendingLaneId === row.laneId}
-                          title="Kill this lane (guarded cancel)"
+                          title="End this agent session"
+                          aria-label={`${cancelPendingLaneId === row.laneId ? "Ending" : "End"} session ${row.laneId}`}
                           onClick={() => onCancel(row.laneId)}
                         >
                           <Ban className="size-4" aria-hidden="true" />
-                          {cancelPendingLaneId === row.laneId ? "Killing…" : "Kill"}
+                          {cancelPendingLaneId === row.laneId ? "Ending…" : "End session"}
                         </Button>
                       </div>
                     </td>
@@ -1113,17 +1040,17 @@ function SessionLaneDetailPanel({
     <ConsolePanel>
       <ConsolePanelHeader
         icon={Activity}
-        title="Lane Detail"
-        meta={detail?.laneId ?? "no lane"}
+        title="Session details"
+        meta={detail?.laneId ?? "no session"}
         tone={detail ? "ok" : "off"}
       />
       <div className="grid gap-3 p-4 sm:grid-cols-2">
-        <ConsoleFact label="Lane" value={detail?.laneId ?? "none"} mono />
-        <ConsoleFact label="Agent" value={detail?.subjectIdHash ?? "none"} mono />
+        <ConsoleFact label="Session" value={detail?.laneId ?? "none"} mono />
+        <ConsoleFact label="Client identity" value={detail?.subjectIdHash ?? "none"} mono />
         <ConsoleFact label="Profile" value={detail?.activeProfile ?? "unknown"} mono />
         <ConsoleFact label="DB" value={detail?.dbFingerprint ?? "unknown"} mono />
-        <ConsoleFact label="Level" value={detail?.currentLevel ?? "unknown"} mono />
-        <ConsoleFact label="Ceiling" value={detail?.maxLevel ?? "unknown"} mono />
+        <ConsoleFact label="Current permission" value={detail?.currentLevel ?? "unknown"} mono />
+        <ConsoleFact label="Maximum permission" value={detail?.maxLevel ?? "unknown"} mono />
         <ConsoleFact label="Protected" value={detail?.protectedProfile ?? "unknown"} mono />
         <ConsoleFact label="Schema" value={detail?.visibleSchema ?? "unknown"} mono />
         <ConsoleFact label="Connected" value={detail?.connected ?? "unknown"} mono />
@@ -1136,7 +1063,7 @@ function SessionLaneDetailPanel({
         <ConsoleFact label="Mean Latency" value={`${Math.round(detail?.meanLatencyMs ?? 0)} ms`} mono />
         <ConsoleFact label="Max Latency" value={`${Math.round(detail?.maxLatencyMs ?? 0)} ms`} mono />
         <ConsoleFact label="Last Event" value={detail?.lastEvent ?? "none"} mono />
-        <ConsoleFact label="Detail State" value={detail?.detailState ?? "unknown"} mono />
+        <ConsoleFact label="Detail status" value={detail?.detailState ?? "unknown"} mono />
       </div>
     </ConsolePanel>
   );
@@ -1151,7 +1078,6 @@ function SessionLevelControlPanel({
   sessionTone,
   targetLevel,
   ttlSeconds,
-  onConfirmChange,
   onLevelChange,
   onTtlChange,
   onAction
@@ -1164,7 +1090,6 @@ function SessionLevelControlPanel({
   sessionTone: "neutral" | "ok" | "warn" | "off" | "info";
   targetLevel: OperatingLevel;
   ttlSeconds: number;
-  onConfirmChange: (value: string) => void;
   onLevelChange: (value: OperatingLevel) => void;
   onTtlChange: (value: number) => void;
   onAction: (action: SessionLevelControlAction) => void;
@@ -1174,26 +1099,26 @@ function SessionLevelControlPanel({
       ? sessionLevelSummary(result.response)
       : null;
   const inputClass =
-    "h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 text-sm text-[var(--om-text)] outline-none focus-visible:border-[var(--om-gold)] focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
+    "min-h-11 w-full rounded-md border border-[var(--om-control-border)] bg-[var(--om-surface-muted)] px-3 text-sm text-[var(--om-text)] outline-none focus-visible:border-[var(--om-gold)] focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
   const labelClass = "mb-2 block text-sm font-semibold text-[var(--om-text)]";
   return (
     <ConsolePanel>
       <ConsolePanelHeader
         icon={ShieldCheck}
-        title="Guarded Action"
-        meta={selectedLane?.lane_id ?? "no lane"}
+        title="Temporary permissions"
+        meta={selectedLane?.lane_id ?? "no session"}
         tone={pending ? "info" : selectedLane ? sessionTone : "off"}
       />
       <div className="space-y-4 p-4">
         <div className="grid gap-3 sm:grid-cols-2">
-          <ConsoleFact label="Lane" value={selectedLane?.lane_id ?? "none"} mono />
-          <ConsoleFact label="Generation" value={selectedLane?.generation ?? 0} />
-          <ConsoleFact label="Current" value={summary?.currentLevel ?? "unknown"} mono />
-          <ConsoleFact label="Ceiling" value={summary?.profileCeiling ?? "unknown"} mono />
+          <ConsoleFact label="Session" value={selectedLane?.lane_id ?? "none"} mono />
+          <ConsoleFact label="Current permission" value={summary?.currentLevel ?? "read from session details"} mono />
+          <ConsoleFact label="Maximum permission" value={summary?.profileCeiling ?? "read from profile"} mono />
+          <ConsoleFact label="Confirmation" value={confirm ? "ready for this request" : "preview required"} />
         </div>
         <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_140px]">
           <label className="block">
-            <span className={labelClass}>Target</span>
+            <span className={labelClass}>Requested permission</span>
             <select
               className={inputClass}
               value={targetLevel}
@@ -1207,7 +1132,7 @@ function SessionLevelControlPanel({
             </select>
           </label>
           <label className="block">
-            <span className={labelClass}>TTL</span>
+            <span className={labelClass}>Duration (seconds)</span>
             <input
               className={inputClass}
               type="number"
@@ -1218,19 +1143,13 @@ function SessionLevelControlPanel({
             />
           </label>
         </div>
-        <label className="block">
-          <span className={labelClass}>Confirm</span>
-          <input
-            className={cn(inputClass, "font-mono")}
-            value={confirm}
-            onChange={(event) => onConfirmChange(event.target.value)}
-            placeholder="e.g. xgrant-4821-7.9f3c…"
-          />
-        </label>
+        <p className="text-sm leading-6 text-[var(--om-text-muted)]">
+          Review the requested level first. The server returns a short-lived confirmation bound to this session, level, and duration; it is never editable here.
+        </p>
         <div className="flex flex-wrap gap-2">
           <Button type="button" variant="secondary" disabled={!canAct} onClick={() => onAction("preview")}>
             <Search className="size-4" aria-hidden="true" />
-            Preview
+            Review elevation
           </Button>
           <Button
             type="button"
@@ -1239,11 +1158,11 @@ function SessionLevelControlPanel({
             onClick={() => onAction("apply")}
           >
             <CheckCircle2 className="size-4" aria-hidden="true" />
-            Elevate
+            Apply temporary elevation
           </Button>
           <Button type="button" variant="secondary" disabled={!canAct} onClick={() => onAction("drop")}>
             <RotateCcw className="size-4" aria-hidden="true" />
-            Drop
+            Return to read-only
           </Button>
         </div>
         {summary ? <ElevationCountdown summary={summary} /> : null}
@@ -1334,12 +1253,12 @@ function SessionLevelSummaryPanel({
       <ConsoleFact label="Target" value={summary.targetLevel} mono />
       <ConsoleFact label="TTL" value={summary.ttlSeconds} mono />
       <ConsoleFact label="Gate" value={summary.gateDecision} mono />
-      <ConsoleFact label="Confirm" value={summary.confirm} mono />
     </div>
   );
 }
 
 function HealthPage(): React.ReactElement {
+  const [laneId, setLaneId] = React.useState("");
   const health = useQuery({
     queryKey: ["operator-health"],
     queryFn: fetchOperatorHealth,
@@ -1357,15 +1276,28 @@ function HealthPage(): React.ReactElement {
     refetchInterval: 60_000,
     retry: 1
   });
+  const activeLanes = useQuery({
+    queryKey: ["active-lanes"],
+    queryFn: fetchActiveLanes,
+    refetchInterval: 5_000
+  });
+  const lanes = activeLanes.data?.data.lanes ?? EMPTY_ACTIVE_LANES;
+  const stateful = activeLanes.data?.data.stateful ?? true;
+  const connectionReady = activeLanes.status === "success" && (!stateful || Boolean(laneId));
+  React.useEffect(() => {
+    if (stateful && !laneId && lanes.length === 1) {
+      setLaneId(lanes[0].lane_id);
+    }
+  }, [laneId, lanes, stateful]);
   const connection = useQuery({
-    queryKey: ["health", "connection"],
+    queryKey: ["health", "connection", stateful ? laneId : "stateless"],
     queryFn: async () => {
       if (!session.data) {
         throw new Error("dashboard session is not ready");
       }
-      return fetchExplorerConnection(session.data);
+      return fetchExplorerConnection(session.data, laneId || undefined);
     },
-    enabled: session.status === "success",
+    enabled: session.status === "success" && connectionReady,
     refetchInterval: 10_000,
     retry: 1
   });
@@ -1375,19 +1307,51 @@ function HealthPage(): React.ReactElement {
     connection.data,
     connection.error instanceof Error
       ? connection.error.message
+      : activeLanes.error instanceof Error
+        ? activeLanes.error.message
       : session.error instanceof Error
         ? session.error.message
         : null
   );
-  const pending = health.isFetching || metrics.isFetching || connection.isFetching;
+  const pending =
+    health.isFetching || metrics.isFetching || activeLanes.isFetching || connection.isFetching;
 
   return (
     <PageFrame
-      title="Health"
-      eyebrow="Connection"
-      description="Process readiness, pool latency, and redacted live database posture."
+      title="Connection health"
+      eyebrow="Service and Oracle database"
+      description="See whether the server is ready, which database profile is connected, and where connection time is being spent."
     >
       <div className="space-y-4">
+        <ConsolePanel className="p-4">
+          {stateful ? (
+            <label className="block max-w-xl">
+              <span className={OM_LABEL}>Agent session to inspect</span>
+              <select
+                className={cn(OM_INPUT, "font-mono")}
+                value={laneId}
+                onChange={(event) => setLaneId(event.target.value)}
+                disabled={activeLanes.isFetching || lanes.length === 0}
+              >
+                <option value="">Select a session</option>
+                {lanes.map((lane) => (
+                  <option key={lane.lane_id} value={lane.lane_id}>
+                    {lane.lane_id}
+                  </option>
+                ))}
+              </select>
+              {lanes.length === 0 && !activeLanes.isFetching ? (
+                <span className="mt-2 block text-sm text-[var(--om-text-muted)]">
+                  Connect an MCP client to inspect its session profile. Service readiness remains visible below.
+                </span>
+              ) : null}
+            </label>
+          ) : (
+            <p className="text-sm text-[var(--om-text)]" role="status">
+              Connection mode: <strong>direct server profile</strong>
+            </p>
+          )}
+        </ConsolePanel>
         <HealthStatusTiles model={model} pending={pending} />
         <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
           <ServiceReadinessPanel model={model} />
@@ -1471,7 +1435,7 @@ function HealthStatusTiles({
       />
       <HealthStatusTile
         icon={Database}
-        label="DB native"
+        label="Oracle database"
         value={model.db.connected ? "connected" : "degraded"}
         meta={model.db.source}
         tone={model.db.connected ? "ok" : "info"}
@@ -1479,7 +1443,7 @@ function HealthStatusTiles({
       />
       <HealthStatusTile
         icon={ShieldCheck}
-        label="Write posture"
+        label="Database write mode"
         value={model.db.writePosture}
         meta={model.db.openMode}
         tone={model.db.writePosture === "database_read_only" ? "ok" : "info"}
@@ -1565,8 +1529,9 @@ function HealthSourcePanel({
         meta={`${rows.length} sources`}
         tone={rows.some((row) => row.status === "monitoring_unavailable") ? "info" : "ok"}
       />
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto" role="region" aria-label="Health data sources" tabIndex={0}>
         <table className="w-full min-w-[680px] border-collapse text-left">
+          <caption className="sr-only">Status of database and server health data sources</caption>
           <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
             <tr>
               <th className="px-4 py-3 font-bold">Source</th>
@@ -1636,27 +1601,41 @@ function CapacityPage(): React.ReactElement {
   });
   const snapshot = metrics.data?.data.snapshot ?? null;
   const capacity = metrics.data?.data.capacity ?? null;
-  const lanes = activeLanes.data?.data.lanes ?? [];
+  const lanes = activeLanes.data?.data.lanes ?? EMPTY_ACTIVE_LANES;
   const pending = metrics.isFetching || activeLanes.isFetching;
-  const model = capacityModel(capacity, snapshot, lanes);
+  const model = capacity ? capacityModel(capacity, snapshot, lanes) : null;
+  const error = firstQueryError(metrics.error, activeLanes.error);
 
   return (
     <PageFrame
-      title="Capacity"
-      eyebrow="Admission"
-      description="Effective read-pool and stateful-lane ceilings from the operator service."
+      title="Resource limits"
+      eyebrow="Concurrency and admission"
+      description="Understand current usage, configured ceilings, and when new database work will wait or be refused."
     >
-      <div className="space-y-4">
-        <CapacityMetricTiles model={model} pending={pending} />
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-          <ReadPoolCapacityPanel model={model} />
-          <StatefulCapacityPanel model={model} />
+      {model ? (
+        <div className="space-y-4">
+          {error ? <QueryErrorNotice title="Some resource-limit data is unavailable" error={error} /> : null}
+          <CapacityMetricTiles model={model} pending={pending} />
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <ReadPoolCapacityPanel model={model} />
+            <StatefulCapacityPanel model={model} />
+          </div>
+          <div className="grid gap-4 xl:grid-cols-[minmax(320px,0.6fr)_minmax(0,1.4fr)]">
+            <AtCapacityPanel model={model} />
+            <CapacityLimitSourcesPanel rows={model.limitRows} />
+          </div>
         </div>
-        <div className="grid gap-4 xl:grid-cols-[minmax(320px,0.6fr)_minmax(0,1.4fr)]">
-          <AtCapacityPanel model={model} />
-          <CapacityLimitSourcesPanel rows={model.limitRows} />
-        </div>
-      </div>
+      ) : (
+        <ConsolePanel className="p-4" aria-busy={pending}>
+          {error ? (
+            <QueryErrorNotice title="Resource limits are unavailable" error={error} />
+          ) : (
+            <p className="text-sm text-[var(--om-text-muted)]" role="status">
+              Loading resource limits…
+            </p>
+          )}
+        </ConsolePanel>
+      )}
     </PageFrame>
   );
 }
@@ -1856,11 +1835,16 @@ function ConfigPage(): React.ReactElement {
   const [draftToml, setDraftToml] = React.useState("");
   const [preview, setPreview] = React.useState<ConfigDraftPreview | null>(null);
   const [applyOutcome, setApplyOutcome] = React.useState<ConfigApplyData | null>(null);
+  const [appliedDraft, setAppliedDraft] = React.useState("");
   const [lastError, setLastError] = React.useState<string | null>(null);
   const [previewConfirmed, setPreviewConfirmed] = React.useState(false);
   const [rollbackPending, setRollbackPending] = React.useState(false);
-  // A drafted-but-unapplied TOML edit is unsaved work; once applied it is not.
-  const draftGuard = useUnsavedChangesGuard(draftToml.trim().length > 0 && !applyOutcome);
+  // Only the exact TOML that produced the last successful apply is saved.
+  // Editing afterward must restore navigation protection even while the old
+  // rollback receipt remains available.
+  const draftGuard = useUnsavedChangesGuard(
+    draftToml.trim().length > 0 && draftToml !== appliedDraft
+  );
   const session = useQuery({
     queryKey: ["dashboard-session"],
     queryFn: fetchDashboardSession,
@@ -1910,6 +1894,7 @@ function ConfigPage(): React.ReactElement {
     },
     onSuccess: (response) => {
       setApplyOutcome(response.data);
+      setAppliedDraft(draftToml);
       setPreview(null);
       setPreviewConfirmed(false);
       setLastError(null);
@@ -1919,6 +1904,7 @@ function ConfigPage(): React.ReactElement {
       setLastError(error instanceof Error ? error.message : "apply failed");
     }
   });
+
   const rollbackMutation = useMutation({
     mutationFn: async (rollbackId: string) => {
       if (!session.data) {
@@ -1928,6 +1914,7 @@ function ConfigPage(): React.ReactElement {
     },
     onSuccess: () => {
       setApplyOutcome(null);
+      setAppliedDraft("");
       setPreview(null);
       setPreviewConfirmed(false);
       setLastError(null);
@@ -1947,9 +1934,9 @@ function ConfigPage(): React.ReactElement {
 
   return (
     <PageFrame
-      title="Config"
-      eyebrow="Profiles"
-      description="Redacted draft/apply workflow for the service profile file."
+      title="Profiles & settings"
+      eyebrow="Database profiles"
+      description="Review profile safety limits and preview any redacted configuration change before it is applied."
     >
       <div className="space-y-4">
         {draftGuard.status === "blocked" ? (
@@ -1980,7 +1967,7 @@ function ConfigPage(): React.ReactElement {
                 setPreviewConfirmed(false);
               }}
               spellCheck={false}
-              className="min-h-72 w-full resize-y rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] p-3 font-mono text-sm leading-6 text-[var(--om-text-bright)] outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
+              className={cn(OM_TEXTAREA, "min-h-72 font-mono leading-6")}
               aria-label="Config draft TOML"
             />
             <div className="flex flex-wrap items-center gap-2">
@@ -2003,8 +1990,9 @@ function ConfigPage(): React.ReactElement {
                 Apply
               </Button>
               {activePreview?.confirmation_required ? (
-                <label className="flex items-center gap-2 text-sm text-[var(--om-text-muted)]">
+                <label className={OM_CHECK_LABEL}>
                   <input
+                    className={OM_CHECKBOX}
                     type="checkbox"
                     checked={previewConfirmed}
                     onChange={(event) => setPreviewConfirmed(event.target.checked)}
@@ -2078,11 +2066,15 @@ function ConfigStatusPanel({
         meta={status?.target_exists ? "configured" : "new file"}
         tone={pending ? "info" : status ? "ok" : "warn"}
       />
-      <div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-5">
         <CapacityFact label="Target" value={status?.target_path ?? "unavailable"} mono />
         <CapacityFact label="Current SHA" value={shortHash(status?.current_sha256 ?? null)} mono />
         <CapacityFact label="Default" value={status?.default_profile ?? "none"} mono />
         <CapacityFact label="Profiles" value={status?.profiles.length ?? 0} />
+        <CapacityFact
+          label="Browser SQL"
+          value={status?.dashboard_workbench ? "enabled" : "disabled"}
+        />
       </div>
     </Surface>
   );
@@ -2102,8 +2094,9 @@ function ConfigDiffPanel({
         meta={`${changes.length} changes`}
         tone={changes.length > 0 ? "info" : "off"}
       />
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto" role="region" aria-label="Redacted configuration changes" tabIndex={0}>
         <table className="w-full min-w-[720px] border-collapse text-left">
+          <caption className="sr-only">Redacted configuration changes in this preview</caption>
           <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
             <tr>
               <th className="px-4 py-3 font-bold">Path</th>
@@ -2176,8 +2169,9 @@ function ConfigApplyPanel({
             ) : (
               <Badge tone="ok">hot_reloadable</Badge>
             )}
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto" role="region" aria-label="Profile reload plan" tabIndex={0}>
               <table className="w-full min-w-[420px] border-collapse text-left">
+                <caption className="sr-only">Reload action and reason for each database profile</caption>
                 <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
                   <tr>
                     <th className="px-3 py-2 font-bold">Profile</th>
@@ -2217,6 +2211,7 @@ function ClientsPage(): React.ReactElement {
   const [rotated, setRotated] = React.useState<ClientCredentialRotateData | null>(null);
   const [lastError, setLastError] = React.useState<string | null>(null);
   const [lastNotice, setLastNotice] = React.useState<string | null>(null);
+  const [lastWarning, setLastWarning] = React.useState<string | null>(null);
   const [pendingAction, setPendingAction] = React.useState<ClientCredentialPendingAction | null>(
     null
   );
@@ -2244,6 +2239,7 @@ function ClientsPage(): React.ReactElement {
       setRotated(response.data);
       setLastError(null);
       setLastNotice(null);
+      setLastWarning(null);
       queryClient.invalidateQueries({ queryKey: ["client-credentials"] });
     },
     onError: (error) => {
@@ -2260,6 +2256,10 @@ function ClientsPage(): React.ReactElement {
     onSuccess: (_response, client) => {
       setLastError(null);
       setLastNotice(`Client ${client.client_id} revoked.`);
+      setLastWarning(_response.data.durability_warning ?? null);
+      setRotated((current) =>
+        current?.client.client_id === client.client_id ? null : current
+      );
       queryClient.invalidateQueries({ queryKey: ["client-credentials"] });
     },
     onError: (error) => {
@@ -2277,6 +2277,7 @@ function ClientsPage(): React.ReactElement {
     }
     setLastError(null);
     setLastNotice(null);
+    setLastWarning(null);
     setTypedClientId("");
     setPendingAction({ kind, client });
   };
@@ -2297,9 +2298,9 @@ function ClientsPage(): React.ReactElement {
 
   return (
     <PageFrame
-      title="Clients"
-      eyebrow="HTTP Auth"
-      description="Service-owned MCP client credentials and their current lifecycle state."
+      title="MCP clients"
+      eyebrow="Client authentication"
+      description="Rotate or revoke credentials used by MCP clients that connect to this server."
     >
       <div className="space-y-4">
         <ClientCredentialSummary
@@ -2333,7 +2334,12 @@ function ClientsPage(): React.ReactElement {
           onRotate={(client) => requestAction("rotate", client)}
           onRevoke={(client) => requestAction("revoke", client)}
         />
-        {lastNotice ? <Badge tone="ok">{lastNotice}</Badge> : null}
+        {lastNotice ? <Badge tone="ok" role="status">{lastNotice}</Badge> : null}
+        {lastWarning ? (
+          <Badge tone="warn" role="alert" className="max-w-full whitespace-normal">
+            Credential change completed, but durability needs review: {lastWarning}
+          </Badge>
+        ) : null}
         {lastError || clients.isError ? (
           <Badge tone="warn" role="alert" className="max-w-full whitespace-normal break-all">
             {lastError ?? (clients.error instanceof Error ? clients.error.message : "client credentials unavailable")}
@@ -2373,43 +2379,67 @@ function ClientCredentialBearerPanel({
   rotated: ClientCredentialRotateData;
   onDismiss: () => void;
 }): React.ReactElement {
-  const [copied, setCopied] = React.useState(false);
+  const [copyState, setCopyState] = React.useState<"idle" | "copied" | "failed">("idle");
+  const copyBearer = async (): Promise<void> => {
+    try {
+      if (typeof navigator === "undefined" || !navigator.clipboard) {
+        throw new Error("clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(rotated.bearer);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+  };
   return (
     <Surface className="overflow-hidden">
       <PanelHeader
         icon={KeyRound}
-        title="Rotated Bearer"
+        title="New one-time client bearer"
         meta={rotated.client.client_id}
         tone={rotated.bearer_shown_once ? "ok" : "warn"}
       />
       <div className="space-y-3 p-4">
+        <p className="text-sm text-[var(--om-text)]" role="status" aria-live="polite">
+          A new client credential was created. Its bearer is shown once below; copy it before clearing this panel.
+        </p>
+        {rotated.durability_warning ? (
+          <p className="rounded-md border border-[var(--om-copper)] bg-[color-mix(in_srgb,var(--om-copper)_14%,transparent)] p-3 text-sm font-semibold text-[var(--om-text-bright)]" role="alert">
+            Durability needs review: {rotated.durability_warning}
+          </p>
+        ) : null}
         <div className="grid gap-3 sm:grid-cols-3">
           <CapacityFact label="Generation" value={rotated.client.generation} />
           <CapacityFact label="Closed" value={rotated.closed_sessions} />
-          <CapacityFact label="Subject" value={shortHash(rotated.closed_principal.subject_id_hash)} mono />
+          <CapacityFact label="Durability" value={rotated.durability} mono />
         </div>
-        <pre className="max-h-32 overflow-auto rounded-md bg-[var(--om-surface-elevated)] p-3 font-mono text-xs leading-5 text-[var(--om-text-bright)]">
-          {rotated.bearer}
-        </pre>
-        <p className="text-xs font-semibold text-[var(--om-text-muted)]">
-          This replacement bearer is shown once. Save it before acknowledging.
+        <textarea
+          className={cn(OM_TEXTAREA, "min-h-24 font-mono text-xs")}
+          aria-label="New client bearer"
+          readOnly
+          value={rotated.bearer}
+          onFocus={(event) => event.currentTarget.select()}
+        />
+        <p className="text-sm font-semibold text-[var(--om-text-muted)]">
+          This replacement bearer is shown once. Copy it into the client configuration before clearing it from this screen.
         </p>
+        {copyState === "failed" ? (
+          <p className="text-sm text-[var(--om-rust)]" role="alert">
+            Automatic copy is unavailable. Select the bearer field and copy it manually.
+          </p>
+        ) : null}
         <div className="flex flex-wrap gap-2">
           <Button
             type="button"
             variant="secondary"
-            onClick={() => {
-              if (typeof navigator !== "undefined" && navigator.clipboard) {
-                void navigator.clipboard.writeText(rotated.bearer).then(() => setCopied(true));
-              }
-            }}
+            onClick={() => void copyBearer()}
           >
             <KeyRound className="size-4" aria-hidden="true" />
-            {copied ? "Copied" : "Copy bearer"}
+            {copyState === "copied" ? "Copied" : "Copy bearer"}
           </Button>
           <Button type="button" variant="secondary" onClick={onDismiss}>
-          <Ban className="size-4" aria-hidden="true" />
-            I saved it — clear
+            <Ban className="size-4" aria-hidden="true" />
+            Clear from screen
           </Button>
         </div>
       </div>
@@ -2570,9 +2600,6 @@ function ModalShell({
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-[color-mix(in_srgb,var(--om-bg)_80%,transparent)] p-4"
       data-omcp-dialog-backdrop={id}
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !busy) onCancel();
-      }}
     >
       <div
         ref={dialogRef}
@@ -2685,8 +2712,9 @@ function ClientCredentialTable({
         meta={`${rows.length} clients`}
         tone={pending ? "info" : rows.length > 0 ? "ok" : "off"}
       />
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto" role="region" aria-label="Registered MCP clients" tabIndex={0}>
         <table className="w-full min-w-[940px] border-collapse text-left">
+          <caption className="sr-only">Registered MCP client credentials and actions</caption>
           <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
             <tr>
               <th className="px-4 py-3 font-bold">Client</th>
@@ -2776,6 +2804,7 @@ function ClientCredentialRow({
             type="button"
             variant="secondary"
             disabled={disabled}
+            aria-label={`${rotating ? "Rotating credential for" : "Rotate credential for"} ${client.client_id}`}
             onClick={() => onRotate(client)}
           >
             <RotateCcw className="size-4" aria-hidden="true" />
@@ -2785,6 +2814,7 @@ function ClientCredentialRow({
             type="button"
             variant="secondary"
             disabled={disabled}
+            aria-label={`${revoking ? "Revoking credential for" : "Revoke credential for"} ${client.client_id}`}
             onClick={() => onRevoke(client)}
           >
             <Ban className="size-4" aria-hidden="true" />
@@ -2859,7 +2889,7 @@ function CapacityMetricTiles({
     <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4" aria-label="capacity metrics">
       <MetricTile
         icon={Database}
-        label="Read active"
+        label="Read connections"
         value={model.read.active}
         suffix={`/${formatNumber(model.read.effective)}`}
         tone={capacityUsageTone(model.read.active, model.read.effective)}
@@ -2867,7 +2897,7 @@ function CapacityMetricTiles({
       />
       <MetricTile
         icon={Radio}
-        label="Lane active"
+        label="Agent sessions"
         value={model.stateful.active}
         suffix={`/${formatNumber(model.stateful.effectiveRegular)}`}
         tone={capacityUsageTone(model.stateful.active, model.stateful.effectiveRegular)}
@@ -2883,7 +2913,7 @@ function CapacityMetricTiles({
       />
       <MetricTile
         icon={AlertTriangle}
-        label="AtCapacity"
+        label="Capacity refusals"
         value={model.atCapacityEvents}
         suffix=""
         tone={model.atCapacityEvents > 0 ? "warn" : "ok"}
@@ -2898,7 +2928,7 @@ function ReadPoolCapacityPanel({ model }: { model: CapacityUiModel }): React.Rea
     <Surface className="overflow-hidden">
       <PanelHeader
         icon={Database}
-        title="Read Pool"
+        title="Read connections"
         meta={`${formatNumber(model.read.active)}/${formatNumber(model.read.effective)} active`}
         tone={capacityUsageTone(model.read.active, model.read.effective)}
       />
@@ -2924,7 +2954,7 @@ function StatefulCapacityPanel({ model }: { model: CapacityUiModel }): React.Rea
     <Surface className="overflow-hidden">
       <PanelHeader
         icon={Radio}
-        title="Stateful Lanes"
+        title="Agent sessions"
         meta={`${formatNumber(model.stateful.regularInUse)}/${formatNumber(model.stateful.effectiveRegular)} regular`}
         tone={capacityUsageTone(model.stateful.regularInUse, model.stateful.effectiveRegular)}
       />
@@ -2938,12 +2968,12 @@ function StatefulCapacityPanel({ model }: { model: CapacityUiModel }): React.Rea
         <div className="grid gap-3 sm:grid-cols-3">
           <CapacityFact label="Configured" value={model.stateful.configuredGlobal} />
           <CapacityFact label="Effective" value={model.stateful.effectiveGlobal} />
-          <CapacityFact label="Cfg subject" value={model.stateful.configuredPerSubject} />
+          <CapacityFact label="Per-client configured" value={model.stateful.configuredPerSubject} />
           <CapacityFact label="Available" value={model.stateful.regularAvailable} />
-          <CapacityFact label="Subject cap" value={model.stateful.perSubjectCap} />
-          <CapacityFact label="Subject avail" value={model.stateful.perSubjectAvailable} />
-          <CapacityFact label="Operator" value={model.stateful.operatorReserve} />
-          <CapacityFact label="Doctor" value={model.stateful.doctorReserve} />
+          <CapacityFact label="Per-client cap" value={model.stateful.perSubjectCap} />
+          <CapacityFact label="Per-client available" value={model.stateful.perSubjectAvailable} />
+          <CapacityFact label="Dashboard reserve" value={model.stateful.operatorReserve} />
+          <CapacityFact label="Diagnostics reserve" value={model.stateful.doctorReserve} />
           <CapacityFact label="Source" value={model.stateful.source} mono />
         </div>
       </div>
@@ -2986,8 +3016,9 @@ function CapacityLimitSourcesPanel({
         meta={`${rows.length} checks`}
         tone={rows.some((row) => row.source.status === "monitoring_unavailable") ? "info" : "ok"}
       />
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto" role="region" aria-label="Resource limit sources" tabIndex={0}>
         <table className="w-full min-w-[760px] border-collapse text-left">
+          <caption className="sr-only">Configured and effective database resource limits</caption>
           <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
             <tr>
               <th className="px-4 py-3 font-bold">Surface</th>
@@ -3101,6 +3132,7 @@ function useOperatorEventLog(laneId: string): {
   React.useEffect(() => {
     let mounted = true;
     setStatus("connecting");
+    setEvents([]);
     const source = new EventSource(
       `/operator/v1/events?lane_id=${encodeURIComponent(laneId)}`,
       { withCredentials: true }
@@ -3127,6 +3159,10 @@ function useOperatorEventLog(laneId: string): {
     };
     return () => {
       mounted = false;
+      source.removeEventListener("operator.snapshot", handleSnapshot);
+      source.removeEventListener("operator.stream_gap", handleSnapshot);
+      source.onmessage = null;
+      source.onerror = null;
       source.close();
     };
   }, [laneId]);
@@ -3137,61 +3173,65 @@ function useOperatorEventLog(laneId: string): {
 function OverviewMetricTiles({
   snapshot,
   lanes,
+  stateful,
   pending
 }: {
   snapshot: MetricsSnapshot | null;
   lanes: ActiveLane[];
+  stateful: boolean;
   pending: boolean;
 }): React.ReactElement {
   const summary = overviewSummary(snapshot, lanes);
   return (
     <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-6" aria-label="overview metrics">
-      <MetricTile
-        icon={Users}
-        label="Active lanes"
-        value={summary.activeLanes}
-        suffix=""
-        tone={summary.activeLanes > 0 ? "ok" : "off"}
-        pending={pending}
-      />
+      {stateful ? (
+        <MetricTile
+          icon={Users}
+          label="Active agent sessions"
+          value={summary.activeLanes}
+          suffix=""
+          tone={summary.activeLanes > 0 ? "ok" : "off"}
+          pending={pending}
+        />
+      ) : null}
       <MetricTile
         icon={BarChart3}
-        label="Tool calls"
-        value={summary.totalRequests}
+        label="Tool calls since start"
+        value={snapshot ? summary.totalRequests : "unavailable"}
         suffix=""
-        tone="info"
+        tone={snapshot ? "info" : "off"}
         pending={pending}
       />
       <MetricTile
         icon={AlertTriangle}
-        label="Blocked"
-        value={summary.blocked}
+        label="Policy refusals since start"
+        value={snapshot ? summary.blocked : "unavailable"}
         suffix=""
-        tone={summary.blocked > 0 ? "warn" : "ok"}
+        tone={snapshot ? (summary.blocked > 0 ? "warn" : "ok") : "off"}
         pending={pending}
       />
       <MetricTile
         icon={Timer}
         label="MCP latency"
-        value={summary.meanLatencyMs}
-        suffix="ms"
-        tone={summary.meanLatencyMs > 500 ? "warn" : "neutral"}
+        value={snapshot ? summary.meanLatencyMs : "unavailable"}
+        suffix={snapshot ? "ms" : ""}
+        tone={snapshot ? (summary.meanLatencyMs > 500 ? "warn" : "neutral") : "off"}
         pending={pending}
       />
       <MetricTile
         icon={Gauge}
-        label="DB errors"
-        value={summary.errors}
+        label="DB errors since start"
+        value={snapshot ? summary.errors : "unavailable"}
         suffix=""
-        tone={summary.errors > 0 ? "warn" : "ok"}
+        tone={snapshot ? (summary.errors > 0 ? "warn" : "ok") : "off"}
         pending={pending}
       />
       <MetricTile
         icon={Database}
         label="Pool active"
-        value={summary.poolActive}
+        value={snapshot ? summary.poolActive : "unavailable"}
         suffix=""
-        tone="neutral"
+        tone={snapshot ? "neutral" : "off"}
         pending={pending}
       />
     </section>
@@ -3200,10 +3240,12 @@ function OverviewMetricTiles({
 
 function OverviewReviewsPanel({
   proposals,
-  pending
+  pending,
+  error
 }: {
   proposals: ChangeProposalListView[];
   pending: boolean;
+  error: unknown;
 }): React.ReactElement {
   const visible = proposals.slice(0, 3);
   return (
@@ -3212,10 +3254,10 @@ function OverviewReviewsPanel({
         <div className="min-w-0">
           <h3 className="flex items-center gap-2 text-base font-bold text-[var(--om-text-bright)]">
             <GitPullRequest className="size-4" aria-hidden="true" />
-            Reviews
+            Saved change plans
           </h3>
           <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">
-            {pending ? "sync" : `${formatNumber(proposals.length)} open`}
+            {pending ? "checking" : error ? "unavailable" : `${formatNumber(proposals.length)} saved`}
           </p>
         </div>
         <Link
@@ -3227,15 +3269,21 @@ function OverviewReviewsPanel({
         </Link>
       </div>
       <div className="divide-y divide-[var(--om-border)]">
-        {visible.length === 0 ? (
-          <div className="px-4 py-6 text-sm font-semibold text-[var(--om-text-muted)]">No proposals</div>
+        {error ? (
+          <div className="px-4 py-6 text-sm font-semibold text-[var(--om-rust)]" role="alert">
+            Could not load saved change plans.
+          </div>
+        ) : visible.length === 0 ? (
+          <div className="px-4 py-6 text-sm font-semibold text-[var(--om-text-muted)]">
+            {pending ? "Loading saved change plans…" : "No saved change plans"}
+          </div>
         ) : (
           visible.map((proposal) => (
             <div key={proposal.id} className="grid gap-2 px-4 py-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="min-w-0 truncate text-sm font-bold text-[var(--om-text-bright)]">{proposal.title}</p>
-                <Badge tone={proposal.stored_verdict_present ? "warn" : "ok"}>
-                  {proposal.stored_verdict_present ? "stale verdict" : "fresh"}
+                <Badge tone={proposal.stored_verdict_present ? "warn" : "neutral"}>
+                  {proposal.stored_verdict_present ? "preview must be refreshed" : "not yet previewed"}
                 </Badge>
               </div>
               <div className="flex flex-wrap gap-2 text-xs font-semibold text-[var(--om-text-muted)]">
@@ -3261,7 +3309,7 @@ function MetricTile({
 }: {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
-  value: number;
+  value: number | string;
   suffix: string;
   tone: "neutral" | "ok" | "warn" | "off" | "info";
   pending: boolean;
@@ -3275,8 +3323,13 @@ function MetricTile({
         <Badge tone={pending ? "info" : tone}>{pending ? "sync" : tone}</Badge>
       </div>
       <p className="mt-4 text-sm font-semibold text-[var(--om-text-muted)]">{label}</p>
-      <strong className="mt-2 block text-3xl leading-none text-[var(--om-text-bright)]">
-        {formatNumber(value)}
+      <strong
+        className={cn(
+          "mt-2 block leading-none text-[var(--om-text-bright)]",
+          typeof value === "number" ? "text-3xl" : "text-lg"
+        )}
+      >
+        {typeof value === "number" ? formatNumber(value) : value}
         {suffix ? <span className="ml-1 text-base text-[var(--om-text-muted)]">{suffix}</span> : null}
       </strong>
     </Surface>
@@ -3285,27 +3338,30 @@ function MetricTile({
 
 function LaneMetricsPanel({
   snapshot,
-  lanes
+  lanes,
+  stateful
 }: {
   snapshot: MetricsSnapshot | null;
   lanes: ActiveLane[];
+  stateful: boolean;
 }): React.ReactElement {
   const rows = laneMetricRows(snapshot, lanes);
   return (
     <Surface className="overflow-hidden">
       <PanelHeader
         icon={Radio}
-        title="Lane Metrics"
-        meta={`${rows.length} lanes`}
-        tone={rows.length > 0 ? "ok" : "off"}
+        title="Agent session activity"
+        meta={snapshot ? `${rows.length} sessions` : "activity unavailable"}
+        tone={snapshot && rows.length > 0 ? "ok" : "off"}
       />
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto" role="region" aria-label="Agent session activity" tabIndex={0}>
         <table className="w-full min-w-[780px] border-collapse text-left">
+          <caption className="sr-only">Activity and policy refusals for active MCP sessions</caption>
           <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
             <tr>
-              <th className="px-4 py-3 font-bold">Lane</th>
+              <th className="px-4 py-3 font-bold">Session</th>
               <th className="px-4 py-3 font-bold">Requests</th>
-              <th className="px-4 py-3 font-bold">Blocked</th>
+              <th className="px-4 py-3 font-bold">Policy refusals</th>
               <th className="px-4 py-3 font-bold">Latency</th>
               <th className="px-4 py-3 font-bold">State</th>
             </tr>
@@ -3314,7 +3370,9 @@ function LaneMetricsPanel({
             {rows.length === 0 ? (
               <tr>
                 <td className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]" colSpan={5}>
-                  No lane metrics
+                  {stateful
+                    ? "No active agent sessions. Connect an MCP client to begin."
+                    : "Per-session activity is available only when stateful HTTP is enabled."}
                 </td>
               </tr>
             ) : (
@@ -3327,23 +3385,29 @@ function LaneMetricsPanel({
                     </p>
                   </td>
                   <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
-                    {formatNumber(row.requests)}
+                    {snapshot ? formatNumber(row.requests) : "unavailable"}
                   </td>
                   <td className="px-4 py-4 align-top">
-                    <Badge tone={row.blocked > 0 ? "warn" : "ok"}>{formatNumber(row.blocked)}</Badge>
+                    <Badge tone={snapshot ? (row.blocked > 0 ? "warn" : "ok") : "off"}>
+                      {snapshot ? formatNumber(row.blocked) : "unavailable"}
+                    </Badge>
                   </td>
                   <td className="px-4 py-4 align-top">
-                    <div className="w-full max-w-[180px]">
-                      <div className="h-2 rounded-full bg-[var(--om-surface-elevated)]">
-                        <div
-                          className="h-2 rounded-full bg-sky-600"
-                          style={{ width: `${latencyBarWidth(row.meanLatencyMs)}%` }}
-                        />
+                    {snapshot ? (
+                      <div className="w-full max-w-[180px]">
+                        <div className="h-2 rounded-full bg-[var(--om-surface-elevated)]">
+                          <div
+                            className="h-2 rounded-full bg-sky-600"
+                            style={{ width: `${latencyBarWidth(row.meanLatencyMs)}%` }}
+                          />
+                        </div>
+                        <p className="mt-2 font-mono text-xs text-[var(--om-text)]">
+                          {formatMs(row.meanLatencyMs)} avg · {formatMs(row.maxLatencyMs)} max
+                        </p>
                       </div>
-                      <p className="mt-2 font-mono text-xs text-[var(--om-text)]">
-                        {formatMs(row.meanLatencyMs)} avg · {formatMs(row.maxLatencyMs)} max
-                      </p>
-                    </div>
+                    ) : (
+                      <span className="text-sm text-[var(--om-text-muted)]">unavailable</span>
+                    )}
                   </td>
                   <td className="px-4 py-4 align-top">
                     <Badge tone={row.active ? "ok" : "off"}>{row.active ? "active" : "idle"}</Badge>
@@ -3369,12 +3433,14 @@ function ToolMetricsPanel({
       <PanelHeader
         icon={Activity}
         title="Tool Metrics"
-        meta={`${rows.length} series`}
-        tone={rows.length > 0 ? "info" : "off"}
+        meta={snapshot ? `${rows.length} series` : "unavailable"}
+        tone={snapshot && rows.length > 0 ? "info" : "off"}
       />
       <div className="divide-y divide-[var(--om-border)]">
         {rows.length === 0 ? (
-          <p className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]">No tool metrics</p>
+          <p className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]">
+            {snapshot ? "No tool calls recorded." : "Tool metrics are unavailable."}
+          </p>
         ) : (
           rows.map((row) => (
             <div key={`${row.tool}:${row.status}`} className="grid gap-3 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_92px_72px] sm:items-center">
@@ -3400,8 +3466,8 @@ function ToolMetricsPanel({
 // The most recent classifier ladder snapshot carried on the events stream
 // (server-derived from the redacted audit tail; no SQL text or bind values).
 function latestClassifierLadder(events: OperatorEventEnvelope[]): ClassifierLadderData | null {
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const ladder = parseClassifierLadder(events[i]);
+  for (const event of events) {
+    const ladder = parseClassifierLadder(event);
     if (ladder) {
       return ladder;
     }
@@ -3433,21 +3499,21 @@ function OperatorEventLogPanel({
     <ConsolePanel>
       <ConsolePanelHeader
         icon={Wifi}
-        title="Classifier · Live"
-        meta={verdicts.length > 0 ? `${verdicts.length} verdicts · ${status}` : status}
+        title="Recent governed activity"
+        meta={verdicts.length > 0 ? `${verdicts.length} recent decisions · ${status}` : status}
         tone={eventStatusTone(status)}
       />
       <div className="border-b border-[var(--om-border)] px-4 py-3">
         <div className="flex items-center justify-between gap-3">
           <p className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
-            Operating-level spine
+            Permission levels
           </p>
           <span className="text-2xs font-semibold text-[var(--om-text-muted)]">
-            every statement gated
+            Every statement is checked by the server
           </span>
         </div>
-        <div className="mt-2 flex items-stretch gap-1" role="img" aria-label="clearance spine">
-          {CLEARANCE_LADDER.map((step, index) => (
+        <div className="mt-2 flex items-stretch gap-1" aria-label="Permission levels">
+          {CLEARANCE_LADDER.map((step) => (
             <div
               key={step.level}
               className={cn(
@@ -3455,10 +3521,9 @@ function OperatorEventLogPanel({
                 sessionClearanceClass(step.level)
               )}
               data-clearance-level={step.level}
-              data-clearance-ordinal={index}
+              data-clearance-ordinal={step.ordinal}
             >
-              <span className="font-mono text-xs font-bold">{CEILING_ROMAN[index]}</span>
-              <span className="hidden font-mono text-2xs sm:inline">{step.label}</span>
+              <span className="font-mono text-xs font-bold">{step.label}</span>
             </div>
           ))}
         </div>
@@ -3467,7 +3532,7 @@ function OperatorEventLogPanel({
         className="max-h-[460px] divide-y divide-[var(--om-border)] overflow-auto"
         role="log"
         aria-live="polite"
-        aria-label="classifier verdict feed"
+        aria-label="recent governed activity"
       >
         {verdicts.length > 0 ? (
           verdicts.map((verdict) => (
@@ -3485,35 +3550,28 @@ function OperatorEventLogPanel({
                       {verdict.tool}
                     </span>
                   </div>
-                  <p className="mt-1 break-all font-mono text-xs text-[var(--om-text-muted)]">
-                    {verdict.subject_id_hash}
+                  <p className="mt-1 text-sm text-[var(--om-text-muted)]">
+                    {verdict.decision} · {verdict.outcome} · {verdict.danger_level}
                   </p>
                 </div>
-                <span className="shrink-0 font-mono text-2xs text-[var(--om-text-muted)]">
-                  #{verdict.seq}
-                </span>
               </div>
-              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 font-mono text-2xs text-[var(--om-text-muted)]">
-                <span>danger {verdict.danger_level}</span>
-                <span>decision {verdict.decision}</span>
-                <span>outcome {verdict.outcome}</span>
-              </div>
+              <details className="mt-2 text-xs text-[var(--om-text-muted)]">
+                <summary className="cursor-pointer font-semibold">Technical details</summary>
+                <p className="mt-2 break-all font-mono">Client {verdict.subject_id_hash} · audit sequence {verdict.seq}</p>
+              </details>
             </div>
           ))
         ) : events.length === 0 ? (
           <p className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]">
-            No verdicts yet
+            No governed activity has arrived yet.
           </p>
         ) : (
           events.map((event) => (
             <div key={event.event_id} className="px-4 py-3">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="font-mono text-sm font-semibold text-[var(--om-text-bright)]">
-                    {event.event_id}
-                  </p>
-                  <p className="mt-1 break-all font-mono text-xs text-[var(--om-text-muted)]">
-                    {event.subject_id_hash}
+                  <p className="text-sm font-semibold text-[var(--om-text-bright)]">
+                    Service status update
                   </p>
                 </div>
                 <Badge tone={event.event_type === "operator.stream_gap" ? "warn" : "info"}>
@@ -3521,9 +3579,9 @@ function OperatorEventLogPanel({
                 </Badge>
               </div>
               <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                <EventFact label="Lane" value={event.lane_id} />
-                <EventFact label="Active" value={eventMetric(event, "active_lanes")} />
-                <EventFact label="Seq" value={event.event_seq} />
+                <EventFact label="Session" value={event.lane_id} />
+                <EventFact label="Active sessions" value={eventMetric(event, "active_lanes")} />
+                <EventFact label="Update" value={event.event_seq} />
               </div>
             </div>
           ))
@@ -3642,11 +3700,11 @@ function ConsoleFact({
 // zinc/emerald defaults the rest of the console still uses.
 const OM_LABEL = "mb-2 block text-sm font-semibold text-[var(--om-text)]";
 const OM_INPUT =
-  "h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 text-sm text-[var(--om-text)] outline-none focus-visible:border-[var(--om-gold)] focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
+  "min-h-11 w-full rounded-md border border-[var(--om-control-border)] bg-[var(--om-surface-muted)] px-3 text-sm text-[var(--om-text)] outline-none focus-visible:border-[var(--om-gold)] focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
 const OM_TEXTAREA =
-  "w-full resize-y rounded-md border border-[var(--om-border)] bg-[var(--om-bg)] p-3 font-mono text-sm leading-6 text-[var(--om-text)] outline-none focus-visible:border-[var(--om-gold)] focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
-const OM_CHECKBOX = "size-4 rounded border-[var(--om-border)] accent-[var(--om-gold)]";
-const OM_CHECK_LABEL = "flex min-h-9 items-center gap-2 text-sm font-semibold text-[var(--om-text)]";
+  "w-full resize-y rounded-md border border-[var(--om-control-border)] bg-[var(--om-bg)] p-3 font-mono text-sm leading-6 text-[var(--om-text)] outline-none focus-visible:border-[var(--om-gold)] focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
+const OM_CHECKBOX = "size-5 rounded border-[var(--om-control-border)] accent-[var(--om-gold)]";
+const OM_CHECK_LABEL = "flex min-h-11 items-center gap-2 text-sm font-semibold text-[var(--om-text)]";
 const OM_CODE = "overflow-auto rounded-md bg-[var(--om-bg)] p-3 text-xs leading-5 text-[var(--om-text)]";
 
 function EventFact({ label, value }: { label: string; value: unknown }): React.ReactElement {
@@ -4037,52 +4095,6 @@ function sessionCapabilitiesSummary(
   };
 }
 
-function sessionGroundControlModel(
-  summary: OverviewSummary,
-  eventStatus: EventStreamStatus,
-  pending: boolean
-): GroundControlViewModel {
-  const verdict: GoNoGoVerdict =
-    pending ? "SYNC" : summary.blocked > 0 || summary.errors > 0 ? "NO-GO" : "GO";
-  return {
-    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
-    verdict,
-    health: healthPosture(verdict, summary.blocked),
-    clearanceLadder: CLEARANCE_LADDER,
-    clearanceStatus: {
-      blocked: summary.blocked,
-      label: summary.blocked > 0 ? "blocked" : "clear",
-      tone: summary.blocked > 0 ? "warn" : "ok"
-    },
-    signatures: [
-      {
-        id: "go_no_go",
-        label: "GO/NO-GO",
-        value: verdict,
-        detail: summary.errors > 0 ? `${formatNumber(summary.errors)} errors` : "session board",
-        tone: verdict === "GO" ? "ok" : verdict === "SYNC" ? "info" : "warn",
-        activity: verdict === "GO" ? 1 : 0.25
-      },
-      {
-        id: "countdown",
-        label: "Countdown",
-        value: summary.activeLanes > 0 ? "live" : "idle",
-        detail: `${formatNumber(summary.activeLanes)} lanes`,
-        tone: summary.activeLanes > 0 ? "info" : "off",
-        activity: clampActivity(summary.activeLanes / 8)
-      },
-      {
-        id: "logbook",
-        label: "Logbook",
-        value: eventStatus,
-        detail: "SSE",
-        tone: eventStatusTone(eventStatus),
-        activity: eventStatus === "live" ? 1 : eventStatus === "connecting" ? 0.5 : 0
-      }
-    ] satisfies readonly SignatureViewModel[]
-  };
-}
-
 function clearanceLevel(value: string): OperatingLevel {
   return value === "READ_WRITE" || value === "DDL" || value === "ADMIN" ? value : "READ_ONLY";
 }
@@ -4140,58 +4152,6 @@ function sumCounts(rows: Array<{ count: number }>): number {
 
 function atCapacityCountFromSnapshot(snapshot: MetricsSnapshot | null): number {
   return sumCounts((snapshot?.requests ?? []).filter((row) => row.status === "at_capacity"));
-}
-
-function healthPosture(verdict: GoNoGoVerdict, blocked: number): HealthPosture {
-  if (verdict === "SYNC") {
-    return "syncing";
-  }
-  if (verdict === "NO-GO" || blocked > 0) {
-    return "blocked";
-  }
-  return "nominal";
-}
-
-function fleetViewModel(
-  summary: OverviewSummary,
-  rows: LaneMetricRow[],
-  pending: boolean
-): FleetViewModel {
-  const verdict: GoNoGoVerdict =
-    pending ? "SYNC" : summary.blocked > 0 || summary.errors > 0 ? "NO-GO" : "GO";
-  const maxRequests = Math.max(1, ...rows.map((row) => row.requests));
-  const activeRows = rows.filter((row) => row.active).length;
-  return {
-    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
-    verdict,
-    health:
-      verdict === "SYNC"
-        ? "syncing"
-        : verdict === "NO-GO"
-          ? "blocked"
-          : activeRows > 0
-            ? "working"
-            : "idle",
-    activity: clampActivity(activeRows > 0 ? activeRows / Math.max(1, rows.length) : 0),
-    totals: {
-      activeLanes: summary.activeLanes,
-      requests: summary.totalRequests,
-      blocked: summary.blocked,
-      errors: summary.errors,
-      meanLatencyMs: summary.meanLatencyMs,
-      poolActive: summary.poolActive
-    },
-    sessions: rows.slice(0, 9).map((row) => ({
-      laneId: row.laneId,
-      subjectIdHash: row.subjectIdHash,
-      status: row.blocked > 0 ? "blocked" : row.active ? "working" : "idle",
-      clearance: "READ_ONLY",
-      activity: clampActivity(row.requests / maxRequests),
-      requests: row.requests,
-      blocked: row.blocked,
-      latencyMs: Math.round(row.meanLatencyMs)
-    }))
-  };
 }
 
 function parseOperatorEvent(raw: string): OperatorEventEnvelope | null {
@@ -4345,10 +4305,39 @@ function formatMs(ms: number): string {
 }
 
 function formatNumber(value: number): string {
-  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
+  return WHOLE_NUMBER_FORMATTER.format(value);
+}
+
+function firstQueryError(...errors: unknown[]): Error | null {
+  const error = errors.find((value): value is Error => value instanceof Error);
+  return error ?? null;
+}
+
+function formatRelativeAge(timestampMs: number): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - timestampMs) / 1_000));
+  if (seconds < 5) {
+    return "just now";
+  }
+  if (seconds < 60) {
+    return `${seconds}s ago`;
+  }
+  return `${Math.floor(seconds / 60)}m ago`;
 }
 
 const explorerDetailLevels: ExplorerDetailLevel[] = ["names", "summary", "standard", "full"];
+
+function explorerDetailLevelLabel(level: ExplorerDetailLevel): string {
+  switch (level) {
+    case "names":
+      return "Names only";
+    case "summary":
+      return "Overview";
+    case "standard":
+      return "Columns";
+    case "full":
+      return "Columns + indexes";
+  }
+}
 
 const explorerObjectTypes = [
   "",
@@ -4469,13 +4458,15 @@ function ExplorerPage(): React.ReactElement {
     queryFn: fetchActiveLanes,
     refetchInterval: 5_000
   });
-  const lanes = activeLanes.data?.data.lanes ?? [];
+  const lanes = activeLanes.data?.data.lanes ?? EMPTY_ACTIVE_LANES;
+  const stateful = activeLanes.data?.data.stateful ?? true;
+  const connectionReady = activeLanes.status === "success" && (!stateful || Boolean(laneId));
 
   React.useEffect(() => {
-    if (!laneId && lanes.length === 1) {
+    if (stateful && !laneId && lanes.length === 1) {
       setLaneId(lanes[0].lane_id);
     }
-  }, [laneId, lanes]);
+  }, [laneId, lanes, setLaneId, stateful]);
 
   React.useEffect(() => {
     clearExplorerMetadataCache();
@@ -4491,14 +4482,14 @@ function ExplorerPage(): React.ReactElement {
   }, [detailLevel, nameLike, objectType, owner]);
 
   const connection = useQuery({
-    queryKey: ["explorer", "connection", laneId],
+    queryKey: ["explorer", "connection", stateful ? laneId : "stateless"],
     queryFn: async () => {
       if (!session.data) {
         throw new Error("dashboard session is not ready");
       }
-      return fetchExplorerConnection(session.data, laneId);
+      return fetchExplorerConnection(session.data, laneId || undefined);
     },
-    enabled: session.status === "success",
+    enabled: session.status === "success" && connectionReady,
     retry: 1
   });
 
@@ -4718,10 +4709,13 @@ function ExplorerPage(): React.ReactElement {
   const globalSourceRows = globalSearchRequest?.includeSource
     ? sourceRowsFromResponse(globalSourceQuery.data?.value)
     : [];
+  const schemaLimit = explorerLimitFromResponse(schemasQuery.data?.value);
+  const objectLimit = explorerLimitFromResponse(objectsQuery.data?.value);
+  const globalObjectLimit = explorerLimitFromResponse(globalObjectsQuery.data?.value);
+  const globalSourceLimit = explorerLimitFromResponse(globalSourceQuery.data?.value);
   const selectedRow = selectedRef
     ? objectRows.find((row) => objectRefKey(rowRef(row)) === objectRefKey(selectedRef)) ?? null
     : null;
-  const cacheSummary = explorerMetadataCacheSummary();
   const connected = connectedFromResponse(connection.data);
   const sessionTone =
     session.status === "success" ? "ok" : session.status === "error" ? "warn" : "info";
@@ -4761,30 +4755,38 @@ function ExplorerPage(): React.ReactElement {
 
   return (
     <PageFrame
-      title="Explorer"
-      eyebrow="Schema Metadata"
-      description="Schema and object metadata through the guarded dictionary tools and bounded browser metadata cache."
+      title="Database Explorer"
+      eyebrow="Your Oracle database"
+      description="Browse visible schemas, find objects and source, and inspect definitions through the governed server connection."
     >
       <div className="space-y-4">
         <ConsolePanel className="p-4">
           <div className="grid gap-3 xl:grid-cols-[minmax(180px,0.9fr)_minmax(140px,0.7fr)_minmax(140px,0.7fr)_minmax(140px,0.7fr)_minmax(140px,0.7fr)_110px_auto] xl:items-end">
+            {stateful ? (
+              <label className="block">
+                <span className={OM_LABEL}>Agent session</span>
+                <select
+                  className={cn(OM_INPUT, "font-mono")}
+                  value={laneId}
+                  onChange={(event) => setLaneId(event.target.value)}
+                  disabled={activeLanes.isFetching || lanes.length === 0}
+                >
+                  <option value="">Select a session</option>
+                  {lanes.map((lane) => (
+                    <option key={lane.lane_id} value={lane.lane_id}>
+                      {lane.lane_id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <div>
+                <span className={OM_LABEL}>Connection mode</span>
+                <p className={cn(OM_INPUT, "flex items-center font-semibold")}>Direct server profile</p>
+              </div>
+            )}
             <label className="block">
-              <span className={OM_LABEL}>Lane</span>
-              <input
-                className={cn(OM_INPUT, "font-mono")}
-                value={laneId}
-                onChange={(event) => setLaneId(event.target.value)}
-                list="explorer-lanes"
-                placeholder={lanes[0]?.lane_id ?? "operator"}
-              />
-              <datalist id="explorer-lanes">
-                {lanes.map((lane) => (
-                  <option key={lane.lane_id} value={lane.lane_id} />
-                ))}
-              </datalist>
-            </label>
-            <label className="block">
-              <span className={OM_LABEL}>Schema Filter</span>
+              <span className={OM_LABEL}>Find schema</span>
               <input
                 className={cn(OM_INPUT, "font-mono")}
                 value={schemaFilter}
@@ -4823,7 +4825,7 @@ function ExplorerPage(): React.ReactElement {
               </select>
             </label>
             <label className="block">
-              <span className={OM_LABEL}>Name Like</span>
+              <span className={OM_LABEL}>Object name pattern</span>
               <input
                 className={cn(OM_INPUT, "font-mono")}
                 value={nameLike}
@@ -4832,7 +4834,7 @@ function ExplorerPage(): React.ReactElement {
               />
             </label>
             <label className="block">
-              <span className={OM_LABEL}>Rows</span>
+              <span className={OM_LABEL}>Maximum results</span>
               <input
                 className={OM_INPUT}
                 min={1}
@@ -4847,31 +4849,34 @@ function ExplorerPage(): React.ReactElement {
               Refresh
             </Button>
           </div>
-          <div className="mt-4 flex flex-wrap items-center gap-2">
+          <div
+            className="mt-4 flex flex-wrap items-center gap-2"
+            role="group"
+            aria-label="Object detail level"
+          >
             {explorerDetailLevels.map((level) => (
               <Button
                 key={level}
                 type="button"
                 variant={detailLevel === level ? "primary" : "secondary"}
+                aria-pressed={detailLevel === level}
                 onClick={() => setDetailLevel(level)}
               >
-                {level}
+                {explorerDetailLevelLabel(level)}
               </Button>
             ))}
             <Badge tone={sessionTone}>
               {session.status === "success" ? "paired" : session.status === "error" ? "blocked" : "pairing"}
             </Badge>
-            <Badge tone={connected ? "ok" : connection.isError ? "warn" : "info"}>
-              {connected ? "connected" : connection.isError ? "blocked" : "sync"}
+            <Badge tone={connected ? "ok" : connection.isError || connection.data ? "warn" : "info"}>
+              {connected ? "database connected" : connection.isError ? "connection failed" : connection.data ? "not connected" : connectionReady ? "checking connection" : stateful ? "select a session" : "checking transport"}
             </Badge>
-            <Badge tone={cacheStatusTone(objectsQuery.data?.status ?? schemasQuery.data?.status)}>
-              {objectsQuery.data?.status ?? schemasQuery.data?.status ?? "cold"}
-            </Badge>
-            <span className="font-mono text-xs font-semibold text-[var(--om-text-muted)]">
-              {cacheSummary.entries} entries · {formatBytes(cacheSummary.bytes)}
-            </span>
           </div>
-          {connection.error instanceof Error ? (
+          {stateful && lanes.length === 0 && !activeLanes.isFetching ? (
+            <p className="mt-3 rounded-md border border-[var(--om-control-border)] bg-[var(--om-surface-muted)] p-3 text-sm text-[var(--om-text)]" role="status">
+              No active MCP sessions. Connect a client to this server, then return here to browse its database profile.
+            </p>
+          ) : connection.error instanceof Error ? (
             <p className="mt-3 rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] p-3 text-sm font-semibold text-[var(--om-copper)]">
               {connection.error.message}
             </p>
@@ -4895,10 +4900,11 @@ function ExplorerPage(): React.ReactElement {
           sourceError={
             globalSourceQuery.error instanceof Error ? globalSourceQuery.error.message : null
           }
-          objectCacheStatus={globalObjectsQuery.data?.status}
-          sourceCacheStatus={globalSourceQuery.data?.status}
+          objectLimit={globalObjectLimit}
+          sourceLimit={globalSourceLimit}
           canSearch={
             session.status === "success" &&
+            connected &&
             globalSearchText.trim().length > 0 &&
             (globalIncludeObjects || globalIncludeSource)
           }
@@ -4918,6 +4924,7 @@ function ExplorerPage(): React.ReactElement {
             selectedOwner={owner}
             pending={schemasQuery.isFetching}
             error={schemasQuery.error instanceof Error ? schemasQuery.error.message : null}
+            limit={schemaLimit}
             onSelect={setOwner}
           />
           <ExplorerObjectsPanel
@@ -4925,6 +4932,7 @@ function ExplorerPage(): React.ReactElement {
             selectedRef={selectedRef}
             pending={objectsQuery.isFetching}
             error={objectsQuery.error instanceof Error ? objectsQuery.error.message : null}
+            limit={objectLimit}
             onSelect={selectRow}
           />
         </div>
@@ -4940,221 +4948,9 @@ function ExplorerPage(): React.ReactElement {
           onReadSource={(ref) => detailMutation.mutate({ kind: "source", ref })}
         />
 
-        <VectorClusterPanel session={session.data ?? null} laneId={laneId} owner={owner} />
-
-        <ColumnLineagePanel session={session.data ?? null} laneId={laneId} owner={owner} />
       </div>
     </PageFrame>
   );
-}
-
-/**
- * The column-lineage / drift view (Arc K) in Explorer.
- *
- * Runs oracle_lineage for a column and renders its source-derived edges with the
- * typed drift markers the backend assigns after cross-checking the live catalog.
- * When the lineage surface emits no edges (the Arc K backend is not yet wired),
- * the panel says "not reported" rather than implying a clean graph.
- */
-function ColumnLineagePanel({
-  session,
-  laneId,
-  owner
-}: {
-  session: DashboardSession | null;
-  laneId: string;
-  owner: string;
-}): React.ReactElement {
-  const ColumnLineage = OMCP_SKIN.renderers.ColumnLineage;
-  const [object, setObject] = React.useState("");
-  const [column, setColumn] = React.useState("");
-
-  const lineage = useMutation({
-    mutationFn: async () => {
-      if (!session) {
-        throw new Error("dashboard session is not ready");
-      }
-      return fetchColumnLineage(session, {
-        laneId,
-        owner: owner.trim() || undefined,
-        object: object.trim(),
-        column: column.trim()
-      });
-    }
-  });
-
-  const model = toColumnLineageViewModel(parseColumnLineage(lineage.data?.data ?? null));
-
-  return (
-    <Surface className="space-y-3 p-4" data-testid="column-lineage-panel">
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="block">
-          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Object</span>
-          <input
-            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
-            value={object}
-            onChange={(event) => setObject(event.target.value)}
-            placeholder="V_PAID"
-          />
-        </label>
-        <label className="block">
-          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Column</span>
-          <input
-            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
-            value={column}
-            onChange={(event) => setColumn(event.target.value)}
-            placeholder="AMOUNT"
-          />
-        </label>
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={!session || lineage.isPending || object.trim().length === 0 || column.trim().length === 0}
-          onClick={() => lineage.mutate()}
-        >
-          <Link2 className="size-4" aria-hidden="true" />
-          Trace lineage
-        </Button>
-      </div>
-      {lineage.data || lineage.error ? <ColumnLineage model={model} /> : null}
-    </Surface>
-  );
-}
-
-/**
- * The vector cluster panel (Arc F).
- *
- * Runs a guarded 23ai vector search (`oracle_semantic_search`) and renders the
- * nearest neighbors through the console's parser. The search is vector-only —
- * the console never sends a `filter`, because the guarded surface refuses an
- * unproven predicate as a data-egress bypass; if the server refuses for any
- * reason the panel shows the refusal rather than an empty cluster. Masked cells
- * from the result's mask certificate are reflected, never shown as real values.
- */
-function VectorClusterPanel({
-  session,
-  laneId,
-  owner
-}: {
-  session: DashboardSession | null;
-  laneId: string;
-  owner: string;
-}): React.ReactElement {
-  const VectorCluster = OMCP_SKIN.renderers.VectorCluster;
-  const [table, setTable] = React.useState("");
-  const [column, setColumn] = React.useState("");
-  const [vectorText, setVectorText] = React.useState("");
-  const [metric, setMetric] = React.useState<VectorMetric>("COSINE");
-  const [k, setK] = React.useState(10);
-
-  const search = useMutation({
-    mutationFn: async () => {
-      if (!session) {
-        throw new Error("dashboard session is not ready");
-      }
-      const queryVector = vectorText
-        .split(/[,\s]+/)
-        .map((token) => Number(token.trim()))
-        .filter((value) => Number.isFinite(value));
-      return fetchVectorCluster(session, {
-        laneId,
-        owner: owner.trim() || undefined,
-        table: table.trim(),
-        column: column.trim(),
-        queryVector,
-        k,
-        metric
-      });
-    }
-  });
-
-  const outcome = search.error
-    ? operatorOutcomeFromError(search.error, "vector search failed")
-    : search.data
-      ? decodeOperatorOutcome(200, search.data)
-      : null;
-  const model = toVectorClusterViewModel(
-    parseVectorCluster(search.data?.data ?? null, outcome)
-  );
-  const parsedVectorLength = vectorText
-    .split(/[,\s]+/)
-    .map((token) => Number(token.trim()))
-    .filter((value) => Number.isFinite(value)).length;
-  const canSearch =
-    Boolean(session) &&
-    !search.isPending &&
-    table.trim().length > 0 &&
-    column.trim().length > 0 &&
-    parsedVectorLength > 0;
-
-  return (
-    <Surface className="space-y-3 p-4" data-testid="vector-cluster-panel">
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="block">
-          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Table</span>
-          <input
-            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
-            value={table}
-            onChange={(event) => setTable(event.target.value)}
-            placeholder="DOCUMENTS"
-          />
-        </label>
-        <label className="block">
-          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Vector column</span>
-          <input
-            className="h-10 w-40 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
-            value={column}
-            onChange={(event) => setColumn(event.target.value)}
-            placeholder="EMBEDDING"
-          />
-        </label>
-        <label className="block">
-          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Metric</span>
-          <select
-            className="h-10 rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
-            value={metric}
-            onChange={(event) => setMetric(event.target.value as VectorMetric)}
-          >
-            <option value="COSINE">COSINE</option>
-            <option value="EUCLIDEAN">EUCLIDEAN</option>
-            <option value="DOT">DOT</option>
-          </select>
-        </label>
-        <label className="block">
-          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">k</span>
-          <input
-            className="h-10 w-20 rounded-md border border-[var(--om-border)] px-3 text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
-            type="number"
-            min={1}
-            max={1000}
-            value={k}
-            onChange={(event) => setK(clampVectorK(event.target.valueAsNumber))}
-          />
-        </label>
-        <Button type="button" variant="secondary" disabled={!canSearch} onClick={() => search.mutate()}>
-          <Activity className="size-4" aria-hidden="true" />
-          Search
-        </Button>
-      </div>
-      <label className="block">
-        <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Query vector</span>
-        <input
-          className="h-10 w-full rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
-          value={vectorText}
-          onChange={(event) => setVectorText(event.target.value)}
-          placeholder="0.12, -0.44, 0.9, …"
-        />
-      </label>
-      {search.data || search.error ? <VectorCluster model={model} /> : null}
-    </Surface>
-  );
-}
-
-function clampVectorK(value: number): number {
-  if (!Number.isFinite(value)) {
-    return 10;
-  }
-  return Math.min(1000, Math.max(1, Math.trunc(value)));
 }
 
 function ExplorerGlobalSearchPanel({
@@ -5170,8 +4966,8 @@ function ExplorerGlobalSearchPanel({
   sourcePending,
   objectError,
   sourceError,
-  objectCacheStatus,
-  sourceCacheStatus,
+  objectLimit,
+  sourceLimit,
   canSearch,
   onSearchTextChange,
   onIncludeObjectsChange,
@@ -5194,8 +4990,8 @@ function ExplorerGlobalSearchPanel({
   sourcePending: boolean;
   objectError: string | null;
   sourceError: string | null;
-  objectCacheStatus: ExplorerCacheStatus | undefined;
-  sourceCacheStatus: ExplorerCacheStatus | undefined;
+  objectLimit: number | null;
+  sourceLimit: number | null;
   canSearch: boolean;
   onSearchTextChange: (value: string) => void;
   onIncludeObjectsChange: (value: boolean) => void;
@@ -5209,8 +5005,6 @@ function ExplorerGlobalSearchPanel({
   const pending = objectPending || sourcePending;
   const totalHits = objectRows.length + sourceRows.length;
   const tone = pending ? "info" : request ? (totalHits > 0 ? "ok" : "off") : "neutral";
-  const objectCache = objectCacheStatus ?? "cold";
-  const sourceCache = sourceCacheStatus ?? "cold";
   // Both hit lists take the same up-to-5000 bound as the object table.
   const objectHitsRef = React.useRef<HTMLDivElement>(null);
   const sourceHitsRef = React.useRef<HTMLDivElement>(null);
@@ -5221,14 +5015,14 @@ function ExplorerGlobalSearchPanel({
     <ConsolePanel>
       <ConsolePanelHeader
         icon={Search}
-        title="Global Search"
-        meta={pending ? "sync" : request ? `${totalHits} hits` : "idle"}
+        title="Search names and source"
+        meta={pending ? "searching" : request ? `${totalHits} matches` : "enter a search term"}
         tone={tone}
       />
-      <div className="space-y-4 p-4">
+      <div className="space-y-4 p-4" aria-busy={pending}>
         <div className="grid gap-3 xl:grid-cols-[minmax(260px,1fr)_180px_auto] xl:items-end">
           <label className="block">
-            <span className={OM_LABEL}>Needle</span>
+            <span className={OM_LABEL}>Search term</span>
             <input
               className={cn(OM_INPUT, "font-mono")}
               value={searchText}
@@ -5242,7 +5036,7 @@ function ExplorerGlobalSearchPanel({
             />
           </label>
           <label className="block">
-            <span className={OM_LABEL}>Source Type</span>
+            <span className={OM_LABEL}>Source object type</span>
             <select
               className={cn(OM_INPUT, "disabled:opacity-50")}
               value={sourceType}
@@ -5289,16 +5083,26 @@ function ExplorerGlobalSearchPanel({
             />
             All visible schemas
           </label>
-          <Badge tone={cacheStatusTone(objectCache)}>{`objects ${objectCache}`}</Badge>
-          <Badge tone={cacheStatusTone(sourceCache)}>{`source ${sourceCache}`}</Badge>
         </div>
         {objectError ? <ErrorNotice message={objectError} /> : null}
         {sourceError ? <ErrorNotice message={sourceError} /> : null}
+        {objectLimit || sourceLimit ? (
+          <p
+            className="rounded-md border border-[var(--om-control-border)] bg-[var(--om-surface-muted)] p-3 text-sm font-semibold text-[var(--om-text)]"
+            role="status"
+          >
+            The server result limit was reached
+            {objectLimit && sourceLimit && objectLimit !== sourceLimit
+              ? ` (${objectLimit} objects, ${sourceLimit} source matches)`
+              : ` (${objectLimit ?? sourceLimit})`}
+            . Narrow the search or raise Maximum results before treating this list as complete.
+          </p>
+        ) : null}
         <div className="grid gap-4 xl:grid-cols-2">
           <div className="overflow-hidden rounded-md border border-[var(--om-border)]">
             <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 py-2">
               <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
-                Object Matches
+                Object matches
               </span>
               <Badge tone={includeObjects ? "ok" : "off"}>{objectRows.length}</Badge>
             </div>
@@ -5306,10 +5110,19 @@ function ExplorerGlobalSearchPanel({
               ref={objectHitsRef}
               className="max-h-[360px] overflow-auto"
               data-omcp-virtualized={objectHits.virtualize ? "object-hits" : undefined}
+              role="region"
+              aria-label="Object search matches"
+              tabIndex={0}
             >
               {objectRows.length === 0 ? (
                 <p className="px-3 py-6 text-sm font-semibold text-[var(--om-text-muted)]">
-                  No objects
+                  {pending
+                    ? "Searching objects…"
+                    : objectError
+                      ? "Object search failed."
+                      : request
+                        ? "No object names matched this search."
+                        : "Run a search to find visible objects."}
                 </p>
               ) : (
                 <>
@@ -5322,7 +5135,7 @@ function ExplorerGlobalSearchPanel({
                       ref={objectHits.measure}
                       data-index={index}
                       type="button"
-                      className="block w-full border-b border-[var(--om-border)] px-3 py-3 text-left hover:bg-[var(--om-surface-muted)]"
+                      className="block min-h-11 w-full border-b border-[var(--om-border)] px-3 py-3 text-left hover:bg-[var(--om-surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--om-focus)]"
                       onClick={() => onSelectObject(row)}
                     >
                       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -5346,7 +5159,7 @@ function ExplorerGlobalSearchPanel({
           <div className="overflow-hidden rounded-md border border-[var(--om-border)]">
             <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 py-2">
               <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
-                Source Matches
+                Source matches
               </span>
               <Badge tone={includeSource ? "ok" : "off"}>{sourceRows.length}</Badge>
             </div>
@@ -5354,10 +5167,19 @@ function ExplorerGlobalSearchPanel({
               ref={sourceHitsRef}
               className="max-h-[360px] overflow-auto"
               data-omcp-virtualized={sourceHits.virtualize ? "source-hits" : undefined}
+              role="region"
+              aria-label="Source search matches"
+              tabIndex={0}
             >
               {sourceRows.length === 0 ? (
                 <p className="px-3 py-6 text-sm font-semibold text-[var(--om-text-muted)]">
-                  No source hits
+                  {pending
+                    ? "Searching source…"
+                    : sourceError
+                      ? "Source search failed."
+                      : request
+                        ? "No source text matched this search."
+                        : "Run a search to find text in visible PL/SQL source."}
                 </p>
               ) : (
                 <>
@@ -5370,7 +5192,7 @@ function ExplorerGlobalSearchPanel({
                       ref={sourceHits.measure}
                       data-index={index}
                       type="button"
-                      className="block w-full border-b border-[var(--om-border)] px-3 py-3 text-left hover:bg-[var(--om-surface-muted)]"
+                      className="block min-h-11 w-full border-b border-[var(--om-border)] px-3 py-3 text-left hover:bg-[var(--om-surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--om-focus)]"
                       onClick={() => onSelectSource(row)}
                     >
                       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -5405,12 +5227,14 @@ function ExplorerSchemasPanel({
   selectedOwner,
   pending,
   error,
+  limit,
   onSelect
 }: {
   rows: ExplorerSchemaRow[];
   selectedOwner: string;
   pending: boolean;
   error: string | null;
+  limit: number | null;
   onSelect: (owner: string) => void;
 }): React.ReactElement {
   return (
@@ -5418,14 +5242,15 @@ function ExplorerSchemasPanel({
       <ConsolePanelHeader
         icon={Database}
         title="Schemas"
-        meta={pending ? "sync" : `${rows.length} visible`}
+        meta={pending ? "loading" : `${rows.length} visible`}
         tone={pending ? "info" : rows.length > 0 ? "ok" : "off"}
       />
       {error ? <ErrorNotice message={error} /> : null}
-      <div className="max-h-[520px] divide-y divide-[var(--om-border)] overflow-auto">
+      {limit ? <ExplorerLimitNotice limit={limit} noun="schemas" /> : null}
+      <div className="max-h-[520px] divide-y divide-[var(--om-border)] overflow-auto" aria-busy={pending}>
         {rows.length === 0 ? (
           <p className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]">
-            No schemas
+            {pending ? "Loading schemas…" : error ? "Schema list unavailable." : "No visible schemas match this filter."}
           </p>
         ) : (
           rows.map((row) => {
@@ -5435,11 +5260,12 @@ function ExplorerSchemasPanel({
                 key={row.schemaName}
                 type="button"
                 className={cn(
-                  "grid w-full grid-cols-[minmax(0,1fr)_80px] gap-3 px-4 py-3 text-left hover:bg-[var(--om-surface-muted)]",
+                  "grid min-h-11 w-full grid-cols-[minmax(0,1fr)_80px] gap-3 px-4 py-3 text-left hover:bg-[var(--om-surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--om-focus)]",
                   selected
                     ? "bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)]"
                     : "bg-transparent"
                 )}
+                aria-pressed={selected}
                 onClick={() => onSelect(row.schemaName)}
               >
                 <span className="truncate font-mono text-sm font-semibold text-[var(--om-text-bright)]">
@@ -5521,26 +5347,22 @@ function ExplorerObjectTableRow({
     <tr
       ref={measure}
       data-index={index}
+      aria-rowindex={index + 2}
       className={cn(
-        "cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--om-gold)]",
+        "",
         selected ? "bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)]" : "bg-transparent"
       )}
-      role="button"
-      tabIndex={0}
-      aria-pressed={selected}
-      aria-label={`Select ${row.objectName}`}
-      onClick={() => onSelect(row)}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onSelect(row);
-        }
-      }}
     >
       <td className="px-4 py-4 align-top">
-        <p className="font-mono text-sm font-semibold text-[var(--om-text-bright)]">
+        <button
+          type="button"
+          className="min-h-11 rounded px-2 text-left font-mono text-sm font-semibold text-[var(--om-text-bright)] hover:bg-[var(--om-surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--om-focus)]"
+          aria-label={`View details for ${row.owner}.${row.objectName} (${row.objectType})`}
+          aria-pressed={selected}
+          onClick={() => onSelect(row)}
+        >
           {row.objectName}
-        </p>
+        </button>
         <p className="mt-1 font-mono text-xs text-[var(--om-text-muted)]">{row.owner}</p>
       </td>
       <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
@@ -5548,7 +5370,7 @@ function ExplorerObjectTableRow({
       </td>
       <td className="px-4 py-4 align-top">
         <Badge tone={row.status === "INVALID" ? "warn" : row.status ? "ok" : "off"}>
-          {row.status || "…"}
+          {row.status || "Not reported"}
         </Badge>
       </td>
       <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">{row.numRows}</td>
@@ -5570,12 +5392,14 @@ export function ExplorerObjectsPanel({
   selectedRef,
   pending,
   error,
+  limit = null,
   onSelect
 }: {
   rows: ExplorerObjectRow[];
   selectedRef: ExplorerObjectRef | null;
   pending: boolean;
   error: string | null;
+  limit?: number | null;
   onSelect: (row: ExplorerObjectRow) => void;
 }): React.ReactElement {
   const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -5593,22 +5417,33 @@ export function ExplorerObjectsPanel({
       <ConsolePanelHeader
         icon={Search}
         title="Objects"
-        meta={pending ? "sync" : `${rows.length} objects`}
+        meta={
+          pending ? "loading" : `${rows.length} ${rows.length === 1 ? "object" : "objects"}`
+        }
         tone={pending ? "info" : rows.length > 0 ? "ok" : "off"}
       />
       {error ? <ErrorNotice message={error} /> : null}
+      {limit ? <ExplorerLimitNotice limit={limit} noun="objects" /> : null}
       <div
         ref={scrollRef}
         className={cn("overflow-x-auto", virtualize && "max-h-[70vh] overflow-y-auto")}
         data-omcp-virtualized={virtualize ? "objects" : undefined}
+        aria-busy={pending}
+        role="region"
+        aria-label="Database objects"
+        tabIndex={0}
       >
-        <table className="w-full min-w-[980px] border-collapse text-left">
+        <table
+          className="w-full min-w-[980px] border-collapse text-left"
+          aria-rowcount={rows.length + 1}
+        >
+          <caption className="sr-only">Objects visible through the selected MCP session</caption>
           <thead className="bg-[var(--om-surface-muted)] text-2xs uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
             <tr>
               <th className="px-4 py-3 font-semibold">Object</th>
               <th className="px-4 py-3 font-semibold">Type</th>
               <th className="px-4 py-3 font-semibold">Status</th>
-              <th className="px-4 py-3 font-semibold">Rows</th>
+              <th className="px-4 py-3 font-semibold">Estimated rows</th>
               <th className="px-4 py-3 font-semibold">Columns</th>
               <th className="px-4 py-3 font-semibold">Analyzed</th>
               <th className="px-4 py-3 font-semibold">Comment</th>
@@ -5621,7 +5456,7 @@ export function ExplorerObjectsPanel({
                   className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]"
                   colSpan={7}
                 >
-                  No objects
+                  {pending ? "Loading objects…" : error ? "Object list unavailable." : "No objects match the current filters."}
                 </td>
               </tr>
             ) : (
@@ -5680,32 +5515,20 @@ function ExplorerObjectDetailPanel({
 }): React.ReactElement {
   const sourceAllowed = selectedRef ? canReadSource(selectedRef.objectType) : false;
   const detail = result?.state === "ok" ? mcpResult(result.response.data.mcp_response) : null;
+  const detailText = explorerDetailText(detail, result?.state === "ok" ? result.kind : null);
   return (
     <ConsolePanel>
       <div className="flex flex-col gap-3 border-b border-[var(--om-border)] px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0">
           <h3 className="flex items-center gap-2 text-base font-semibold text-[var(--om-text-bright)]">
             <Code2 className="size-4" aria-hidden="true" />
-            Object Detail
+            Object details
           </h3>
           <p className="mt-1 break-all font-mono text-sm text-[var(--om-text-muted)]">
-            {selectedRef ? objectRefKey(selectedRef) : "idle"}
+            {selectedRef ? objectRefKey(selectedRef) : "Select an object to inspect it"}
           </p>
         </div>
         <div className="flex flex-wrap items-end gap-2">
-          <label className="block">
-            <span className="mb-1 block text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
-              Chars
-            </span>
-            <input
-              className={cn(OM_INPUT, "h-9 w-28")}
-              min={1000}
-              max={1000000}
-              type="number"
-              value={maxChars}
-              onChange={(event) => onMaxCharsChange(clampChars(event.target.valueAsNumber))}
-            />
-          </label>
           <Button
             type="button"
             variant="secondary"
@@ -5713,7 +5536,7 @@ function ExplorerObjectDetailPanel({
             onClick={() => selectedRef && onReadDdl(selectedRef)}
           >
             <Database className="size-4" aria-hidden="true" />
-            DDL
+            View creation DDL
           </Button>
           <Button
             type="button"
@@ -5722,13 +5545,27 @@ function ExplorerObjectDetailPanel({
             onClick={() => selectedRef && onReadSource(selectedRef)}
           >
             <Code2 className="size-4" aria-hidden="true" />
-            Source
+            View source
           </Button>
           <Badge tone={pending ? "info" : result?.state === "error" ? "warn" : result ? "ok" : "off"}>
             {pending ? "loading" : result?.state ?? "empty"}
           </Badge>
         </div>
       </div>
+      <details className="border-b border-[var(--om-border)] px-4 py-3">
+        <summary className="cursor-pointer text-sm font-semibold text-[var(--om-text)]">Source options</summary>
+        <label className="mt-3 block max-w-56">
+          <span className={OM_LABEL}>Maximum source characters</span>
+          <input
+            className={OM_INPUT}
+            min={1000}
+            max={1000000}
+            type="number"
+            value={maxChars}
+            onChange={(event) => onMaxCharsChange(clampChars(event.target.valueAsNumber))}
+          />
+        </label>
+      </details>
       <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,0.65fr)_minmax(360px,1.35fr)]">
         <div className="space-y-3">
           <ExplorerFact label="Owner" value={selectedRef?.owner ?? "…"} />
@@ -5736,27 +5573,75 @@ function ExplorerObjectDetailPanel({
           <ExplorerFact label="Type" value={selectedRef?.objectType ?? "…"} />
           <ExplorerFact label="Status" value={row?.status || "…"} />
           <ExplorerFact label="Columns" value={row?.columnCount ?? "…"} />
-          <ExplorerFact label="Rows" value={row?.numRows ?? "…"} />
-          {result?.state === "ok" ? (
-            <ExplorerFact
-              label="Cache"
-              value={`${result.cacheStatus} · ${formatBytes(result.bytes)}`}
-            />
-          ) : null}
+          <ExplorerFact label="Estimated rows" value={row?.numRows ?? "Not analyzed"} />
         </div>
         {result?.state === "error" ? (
           <ErrorNotice message={result.message} />
+        ) : detailText ? (
+          <div className="min-w-0 space-y-3">
+            <pre className={cn(OM_CODE, "max-h-[620px] whitespace-pre-wrap")}>{detailText}</pre>
+            <details className="rounded-md border border-[var(--om-border)] p-3">
+              <summary className="cursor-pointer text-sm font-semibold text-[var(--om-text)]">Technical metadata</summary>
+              <pre className={cn(OM_CODE, "mt-3 max-h-[360px]")}>{prettyJson(detail)}</pre>
+            </details>
+          </div>
         ) : (
-          <pre className={cn(OM_CODE, "max-h-[620px]")}>{detail ? prettyJson(detail) : "{}"}</pre>
+          <div className="rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] p-4 text-sm text-[var(--om-text-muted)]">
+            {selectedRef
+              ? pending
+                ? "Loading object definition…"
+                : "Choose View creation DDL or View source."
+              : "Select an object from the table to view its definition."}
+          </div>
         )}
       </div>
     </ConsolePanel>
   );
 }
 
+function explorerDetailText(detail: unknown, kind: "ddl" | "source" | null): string | null {
+  if (!isRecord(detail) || !kind) {
+    return null;
+  }
+  const candidates =
+    kind === "ddl"
+      ? [detail["ddl"], detail["definition"], detail["text"]]
+      : [detail["source"], detail["source_text"], detail["text"]];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate;
+    }
+    if (Array.isArray(candidate)) {
+      const lines = candidate.filter((line): line is string => typeof line === "string");
+      if (lines.length > 0) {
+        return lines.join("\n");
+      }
+    }
+  }
+  return null;
+}
+
+function ExplorerLimitNotice({
+  limit,
+  noun
+}: {
+  limit: number;
+  noun: string;
+}): React.ReactElement {
+  return (
+    <p
+      className="border-b border-[var(--om-control-border)] bg-[var(--om-surface-muted)] px-4 py-3 text-sm font-semibold text-[var(--om-text)]"
+      role="status"
+    >
+      Server limit reached at {formatNumber(limit)} {noun}. Narrow the filters or raise Maximum
+      results before treating this list as complete.
+    </p>
+  );
+}
+
 function ErrorNotice({ message }: { message: string }): React.ReactElement {
   return (
-    <p className="m-4 rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] p-3 text-sm font-semibold text-[var(--om-copper)]">
+    <p className="m-4 rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] p-3 text-sm font-semibold text-[var(--om-text-bright)]" role="alert">
       {message}
     </p>
   );
@@ -5817,6 +5702,17 @@ function cacheScopeToken(scope: ExplorerMetadataCacheKey | null): string {
 function connectedFromResponse(response: OperatorResponse<WorkbenchActionData> | undefined): boolean {
   const result = mcpResult(response?.data.mcp_response);
   return isRecord(result) && result["connected"] === true;
+}
+
+function explorerLimitFromResponse(
+  response: OperatorResponse<WorkbenchActionData> | undefined
+): number | null {
+  const result = mcpResult(response?.data.mcp_response);
+  if (!isRecord(result) || result["truncated"] !== true) {
+    return null;
+  }
+  const maxRows = result["max_rows"];
+  return typeof maxRows === "number" && Number.isFinite(maxRows) ? maxRows : 0;
 }
 
 function schemaRowsFromResponse(
@@ -5904,33 +5800,6 @@ function canReadSource(objectType: string): boolean {
   ].includes(objectType.toUpperCase());
 }
 
-function cacheStatusTone(
-  status: ExplorerCacheStatus | "cold" | undefined
-): "neutral" | "ok" | "warn" | "off" | "info" {
-  switch (status) {
-    case "hit":
-      return "ok";
-    case "stale":
-    case "bypass":
-      return "warn";
-    case "miss":
-      return "info";
-    case "cold":
-    case undefined:
-      return "off";
-  }
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${Math.round(value / 1024)} KiB`;
-  }
-  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
 function clampChars(value: number): number {
   if (!Number.isFinite(value)) {
     return 40_000;
@@ -5938,54 +5807,7 @@ function clampChars(value: number): number {
   return Math.min(1_000_000, Math.max(1_000, Math.trunc(value)));
 }
 
-const reviewUnits: Array<{ id: ChangeProposalApplyUnit; label: string }> = [
-  { id: "dml", label: "DML" },
-  { id: "ddl", label: "DDL" },
-  { id: "read", label: "Read" }
-];
-
-const schemaDiffBeforeFixture = JSON.stringify(
-  {
-    objects: [
-      {
-        object_type: "TABLE",
-        name: "APP_SETTINGS",
-        ddl: "create table app_settings (id number primary key, value varchar2(100))"
-      },
-      {
-        object_type: "VIEW",
-        name: "APP_SETTINGS_V",
-        ddl: "create or replace view app_settings_v as select id, value from app_settings"
-      }
-    ]
-  },
-  null,
-  2
-);
-
-const schemaDiffAfterFixture = JSON.stringify(
-  {
-    objects: [
-      {
-        object_type: "TABLE",
-        name: "APP_SETTINGS",
-        ddl: "create table app_settings (id number primary key, value varchar2(200), updated_at timestamp)"
-      },
-      {
-        object_type: "VIEW",
-        name: "APP_SETTINGS_V",
-        ddl: "create or replace view app_settings_v as select id, value, updated_at from app_settings"
-      },
-      {
-        object_type: "PACKAGE",
-        name: "APP_SETTINGS_API",
-        ddl: "create or replace package app_settings_api as procedure refresh_cache; end app_settings_api;"
-      }
-    ]
-  },
-  null,
-  2
-);
+const EMPTY_SCHEMA_SNAPSHOT = JSON.stringify({ objects: [] }, null, 2);
 
 type ReviewResult = {
   state: OperatorOutcomeState;
@@ -6020,19 +5842,16 @@ function ReviewsPage(): React.ReactElement {
     },
     [reviewsNavigate]
   );
-  const [profile, setProfile] = React.useState("prod");
-  const [author, setAuthor] = React.useState<ChangeProposalAuthorKind>("agent");
-  const [title, setTitle] = React.useState("Change proposal");
-  const [unit, setUnit] = React.useState<ChangeProposalApplyUnit>("dml");
+  const [profile, setProfile] = React.useState("");
+  const [title, setTitle] = React.useState("Inspect database time");
   const [sqlTemplate, setSqlTemplate] = React.useState(
-    "UPDATE accounts SET status = :1 WHERE id = :2"
+    "SELECT CURRENT_TIMESTAMP AS database_time FROM dual"
   );
-  const [bindsJson, setBindsJson] = React.useState('[\"HOLD\", 42]');
+  const [bindsJson, setBindsJson] = React.useState("[]");
   const [draftCommit, setDraftCommit] = React.useState(false);
   const [captureDbmsOutput, setCaptureDbmsOutput] = React.useState(false);
   const [laneId, setLaneId] = React.useState("");
   const [confirm, setConfirm] = React.useState("");
-  const [applyCommit, setApplyCommit] = React.useState(true);
   const [applyAcknowledged, setApplyAcknowledged] = React.useState(false);
   const [lastResult, setLastResult] = React.useState<ReviewResult | null>(null);
   const [proposalsCursor, setProposalsCursor] = React.useState<string | undefined>(undefined);
@@ -6050,12 +5869,25 @@ function ReviewsPage(): React.ReactElement {
     queryFn: () => fetchChangeProposals(proposalsCursor),
     refetchInterval: 10_000
   });
+  const config = useQuery({
+    queryKey: ["operator-config"],
+    queryFn: fetchOperatorConfig,
+    staleTime: 30_000
+  });
+  const activeLanes = useQuery({
+    queryKey: ["active-lanes"],
+    queryFn: fetchActiveLanes,
+    refetchInterval: 5_000
+  });
+  const lanes = activeLanes.data?.data.lanes ?? EMPTY_ACTIVE_LANES;
+  const stateful = activeLanes.data?.data.stateful ?? true;
+  const laneReady = activeLanes.status === "success" && (!stateful || Boolean(laneId));
   const sourceHistoryQuery = useQuery({
     queryKey: ["source-history", historyCursor ?? "start"],
     queryFn: () => fetchSourceHistory(historyCursor),
     refetchInterval: 15_000
   });
-  const proposals = proposalsQuery.data?.data.proposals ?? [];
+  const proposals = proposalsQuery.data?.data.proposals ?? EMPTY_CHANGE_PROPOSALS;
   const proposalsNextCursor = proposalsQuery.data?.data.nextCursor ?? null;
   const snapshots = sourceHistoryQuery.data?.data.snapshots ?? [];
   const historyNextCursor = sourceHistoryQuery.data?.data.nextCursor ?? null;
@@ -6069,7 +5901,6 @@ function ReviewsPage(): React.ReactElement {
   const selected =
     proposals.find((proposal) => proposal.id === selectedId) ?? filtered[0] ?? proposals[0] ?? null;
   const selectedProposalId = selected?.id ?? null;
-  const needsConfirm = selected?.statements.some((statement) => statement.unit !== "read") ?? false;
 
   // The polled list omits sql_template bodies; fetch the full detail (with SQL
   // text) for the selected proposal on demand.
@@ -6080,6 +5911,25 @@ function ReviewsPage(): React.ReactElement {
     refetchInterval: 10_000
   });
   const selectedDetail = detailQuery.data?.data.proposal ?? null;
+  const writeStatements = selectedDetail?.statements.filter((statement) => statement.unit !== "read") ?? [];
+  const needsConfirm = writeStatements.length > 0;
+  const hasDdl = selectedDetail?.statements.some((statement) => statement.unit === "ddl") ?? false;
+  const hasHiddenBinds = selectedDetail?.statements.some((statement) => statement.bind_count > 0) ?? false;
+  const laneCapabilities = useQuery({
+    queryKey: ["reviews", "capabilities", stateful ? laneId : "stateless"],
+    queryFn: async () => {
+      if (!session.data || !laneReady) {
+        throw new Error("database connection is not ready");
+      }
+      return fetchLaneCapabilities(session.data, laneId || undefined);
+    },
+    enabled: session.status === "success" && laneReady,
+    retry: 1
+  });
+  const selectedLaneProfile = laneCapabilities.data
+    ? sessionCapabilitiesSummary(laneCapabilities.data).activeProfile
+    : "unknown";
+  const profileMatches = Boolean(selectedDetail) && selectedLaneProfile === selectedDetail?.profile;
 
   // No auto-select effect: `selected` above already falls back to the first
   // proposal for display, so mirroring that into the URL would put a proposal
@@ -6089,7 +5939,8 @@ function ReviewsPage(): React.ReactElement {
   // to the next one the operator selects.
   React.useEffect(() => {
     setApplyAcknowledged(false);
-  }, [selectedProposalId]);
+    setConfirm("");
+  }, [selectedProposalId, laneId]);
 
   // Cursors are bound to the board revision; if the store changed under a held
   // cursor the server rejects it, so fall back to the first page.
@@ -6112,13 +5963,12 @@ function ReviewsPage(): React.ReactElement {
       const binds = parseBindsJson(bindsJson);
       return draftChangeProposal(session.data, {
         profile: profile.trim(),
-        author,
+        author: "human",
         title: title.trim() || undefined,
         statements: [
           {
             sql_template: sqlTemplate.trim(),
             binds,
-            unit,
             commit: draftCommit,
             capture_dbms_output: captureDbmsOutput
           }
@@ -6147,8 +5997,7 @@ function ReviewsPage(): React.ReactElement {
       return applyChangeProposal(session.data, {
         proposalId: selected.id,
         laneId,
-        confirm,
-        commit: applyCommit
+        confirm
       });
     },
     onSuccess: (response) => {
@@ -6157,9 +6006,35 @@ function ReviewsPage(): React.ReactElement {
       queryClient.invalidateQueries({ queryKey: ["explorer"] });
       queryClient.invalidateQueries({ queryKey: ["operator-metrics"] });
       queryClient.invalidateQueries({ queryKey: ["audit-tail"] });
+      queryClient.invalidateQueries({ queryKey: ["change-proposals"] });
     },
     onError: (error) => {
       setLastResult(reviewFailure("Apply", error, "proposal apply failed"));
+    }
+  });
+
+  const previewSelectedMutation = useMutation({
+    mutationFn: async () => {
+      if (!session.data || !selectedDetail || !laneReady) {
+        throw new Error("select a loaded change plan and ready database connection");
+      }
+      if (writeStatements.length !== 1 || writeStatements[0].unit !== "dml") {
+        throw new Error("browser preview supports exactly one DML statement");
+      }
+      return previewWorkbenchSql(session.data, {
+        laneId,
+        mode: "dml_preview_confirm",
+        sql: writeStatements[0].sql_template
+      });
+    },
+    onSuccess: (response) => {
+      setConfirm(confirmationFromResponse(response) ?? "");
+      setApplyAcknowledged(false);
+      setLastResult(reviewSuccess("Preview selected change", response));
+    },
+    onError: (error) => {
+      setConfirm("");
+      setLastResult(reviewFailure("Preview selected change", error, "change preview failed"));
     }
   });
 
@@ -6190,23 +6065,36 @@ function ReviewsPage(): React.ReactElement {
   // what the operator is agreeing to rather than "are you sure?".
   const applyDangerSummary = React.useMemo(() => {
     const units = new Set(
-      (selected?.statements ?? [])
+      (selectedDetail?.statements ?? [])
         .filter((statement) => statement.unit !== "read")
         .map((statement) => statement.unit.toUpperCase())
     );
     return units.size > 0 ? Array.from(units).sort().join(" + ") : "non-read";
-  }, [selected]);
+  }, [selectedDetail]);
+  const canPreviewSelected =
+    session.status === "success" &&
+    laneReady &&
+    profileMatches &&
+    !hasHiddenBinds &&
+    writeStatements.length === 1 &&
+    writeStatements[0]?.unit === "dml" &&
+    !previewSelectedMutation.isPending;
   const canApply =
     session.status === "success" &&
-    Boolean(selected) &&
+    Boolean(selected && selectedDetail) &&
+    laneReady &&
+    profileMatches &&
+    !hasHiddenBinds &&
+    !hasDdl &&
+    writeStatements.length <= 1 &&
     !applyMutation.isPending &&
     (!needsConfirm || (confirm.trim().length > 0 && applyAcknowledged));
 
   return (
     <PageFrame
-      title="Reviews"
-      eyebrow="Change Review"
-      description="Profile-scoped SQL proposals with apply-time guard checks."
+      title="Change review"
+      eyebrow="Saved database changes"
+      description="Inspect exact SQL, target the matching database profile, and let the server re-check every statement at apply time."
     >
       <div className="grid gap-4 xl:grid-cols-[minmax(320px,0.8fr)_minmax(0,1.2fr)]">
         <div className="space-y-4">
@@ -6216,14 +6104,14 @@ function ReviewsPage(): React.ReactElement {
                 <div className="min-w-0">
                   <h3 className="flex items-center gap-2 text-base font-semibold text-[var(--om-text-bright)]">
                     <GitPullRequest className="size-4" aria-hidden="true" />
-                    Proposals
+                    Saved change plans
                   </h3>
                   <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">
-                    {proposalsQuery.isFetching ? "sync" : `${formatNumber(filtered.length)} visible`}
+                    {proposalsQuery.isFetching ? "loading" : `${formatNumber(filtered.length)} visible`}
                   </p>
                 </div>
                 <Badge tone={proposalsQuery.isError ? "warn" : proposalsQuery.data ? "ok" : "info"}>
-                  {proposalsQuery.isError ? "blocked" : proposalsQuery.data ? "ready" : "sync"}
+                  {proposalsQuery.isError ? "unavailable" : proposalsQuery.data ? "loaded" : "loading"}
                 </Badge>
               </div>
               <label className="mt-4 block">
@@ -6232,14 +6120,20 @@ function ReviewsPage(): React.ReactElement {
                   className={OM_INPUT}
                   value={filter}
                   onChange={(event) => setFilter(event.target.value)}
-                  placeholder="profile, title, SQL"
+                  placeholder="profile, title, author, or digest"
                 />
               </label>
             </div>
             <div className="max-h-[560px] overflow-auto">
               {filtered.length === 0 ? (
                 <div className="px-4 py-8 text-sm font-semibold text-[var(--om-text-muted)]">
-                  No proposals
+                  {proposalsQuery.isFetching
+                    ? "Loading saved change plans…"
+                    : proposalsQuery.isError
+                      ? "Saved change plans are unavailable."
+                      : filter.trim()
+                        ? "No plans match this filter."
+                        : "No saved change plans."}
                 </div>
               ) : (
                 filtered.map((proposal) => (
@@ -6247,11 +6141,12 @@ function ReviewsPage(): React.ReactElement {
                     key={proposal.id}
                     type="button"
                     className={cn(
-                      "block w-full border-b border-[var(--om-border)] px-4 py-3 text-left transition-colors hover:bg-[var(--om-surface-muted)]",
+                      "block min-h-11 w-full border-b border-[var(--om-border)] px-4 py-3 text-left transition-colors hover:bg-[var(--om-surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--om-focus)]",
                       selected?.id === proposal.id
                         ? "bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)]"
                         : "bg-transparent"
                     )}
+                    aria-pressed={selected?.id === proposal.id}
                     onClick={() => setSelectedId(proposal.id)}
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -6308,6 +6203,12 @@ function ReviewsPage(): React.ReactElement {
 
         <div className="space-y-4">
           <ConsolePanel className="p-4">
+            <div className="mb-4">
+              <h3 className="text-base font-semibold text-[var(--om-text-bright)]">Create a saved change plan</h3>
+              <p className="mt-1 text-sm leading-6 text-[var(--om-text-muted)]">
+                Plans created in this browser are recorded as human-authored. Saving a plan does not run SQL.
+              </p>
+            </div>
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_180px]">
               <label className="block">
                 <span className={OM_LABEL}>Title</span>
@@ -6319,31 +6220,22 @@ function ReviewsPage(): React.ReactElement {
               </label>
               <label className="block">
                 <span className={OM_LABEL}>Profile</span>
-                <input
+                <select
                   className={OM_INPUT}
                   value={profile}
                   onChange={(event) => setProfile(event.target.value)}
-                />
+                >
+                  <option value="">Select a profile</option>
+                  {(config.data?.data.status.profiles ?? []).map((item) => (
+                    <option key={item.name} value={item.name}>
+                      {item.name}{item.is_default ? " (default)" : ""}
+                    </option>
+                  ))}
+                </select>
               </label>
             </div>
-            {/* A toggle group, not tabs: these buttons control no tabpanel, so
-                claiming role=tablist would promise arrow-key/roving-tabindex
-                semantics we do not implement. aria-pressed states the choice. */}
-            <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="proposal author">
-              {(["agent", "human"] as ChangeProposalAuthorKind[]).map((item) => (
-                <Button
-                  key={item}
-                  type="button"
-                  variant={author === item ? "primary" : "secondary"}
-                  aria-pressed={author === item}
-                  onClick={() => setAuthor(item)}
-                >
-                  {item}
-                </Button>
-              ))}
-            </div>
             <label className="mt-4 block">
-              <span className={OM_LABEL}>SQL Template</span>
+              <span className={OM_LABEL}>SQL</span>
               <textarea
                 className={cn(OM_TEXTAREA, "min-h-[220px]")}
                 spellCheck={false}
@@ -6352,7 +6244,7 @@ function ReviewsPage(): React.ReactElement {
               />
             </label>
             <label className="mt-4 block">
-              <span className={OM_LABEL}>Binds</span>
+              <span className={OM_LABEL}>Bind values (JSON array)</span>
               <textarea
                 className={cn(OM_TEXTAREA, "min-h-[92px] leading-5")}
                 spellCheck={false}
@@ -6361,19 +6253,10 @@ function ReviewsPage(): React.ReactElement {
               />
             </label>
             <div className="mt-4 flex flex-wrap items-center gap-3">
-              <div className="flex flex-wrap gap-2" role="group" aria-label="proposal unit">
-                {reviewUnits.map((item) => (
-                  <Button
-                    key={item.id}
-                    type="button"
-                    variant={unit === item.id ? "primary" : "secondary"}
-                    aria-pressed={unit === item.id}
-                    onClick={() => setUnit(item.id)}
-                  >
-                    {item.label}
-                  </Button>
-                ))}
-              </div>
+              <p className="max-w-xl text-sm leading-6 text-[var(--om-text-muted)]">
+                The server classifies the SQL and assigns Read, DML, or DDL. This cannot be
+                overridden in the browser.
+              </p>
               <label className={OM_CHECK_LABEL}>
                 <input
                   className={OM_CHECKBOX}
@@ -6381,7 +6264,7 @@ function ReviewsPage(): React.ReactElement {
                   checked={draftCommit}
                   onChange={(event) => setDraftCommit(event.target.checked)}
                 />
-                Commit
+                Commit when applied
               </label>
               <label className={OM_CHECK_LABEL}>
                 <input
@@ -6399,31 +6282,46 @@ function ReviewsPage(): React.ReactElement {
                 onClick={() => draftMutation.mutate()}
               >
                 <GitPullRequest className="size-4" aria-hidden="true" />
-                Draft
+                Save plan
               </Button>
             </div>
           </ConsolePanel>
 
           <ConsolePanel className="p-4">
-            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-              <label className="block">
-                <span className={OM_LABEL}>Lane</span>
-                <input
-                  className={OM_INPUT}
-                  value={laneId}
-                  onChange={(event) => setLaneId(event.target.value)}
-                  placeholder="operator"
-                />
-              </label>
-              <label className="block">
-                <span className={OM_LABEL}>Confirm</span>
-                <input
-                  className={cn(OM_INPUT, "font-mono")}
-                  value={confirm}
-                  onChange={(event) => setConfirm(event.target.value)}
-                  placeholder="e.g. xgrant-4821-7.9f3c…"
-                />
-              </label>
+            <div>
+              <h3 className="text-base font-semibold text-[var(--om-text-bright)]">Review and apply</h3>
+              <p className="mt-1 text-sm leading-6 text-[var(--om-text-muted)]">
+                Apply is bound to a database connection whose active profile matches the saved plan.
+              </p>
+            </div>
+            <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              {stateful ? (
+                <label className="block">
+                  <span className={OM_LABEL}>Agent session</span>
+                  <select
+                    className={OM_INPUT}
+                    value={laneId}
+                    onChange={(event) => setLaneId(event.target.value)}
+                    disabled={activeLanes.isFetching || lanes.length === 0}
+                  >
+                    <option value="">Select a session</option>
+                    {lanes.map((lane) => (
+                      <option key={lane.lane_id} value={lane.lane_id}>
+                        {lane.lane_id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <div>
+                  <span className={OM_LABEL}>Connection mode</span>
+                  <p className={cn(OM_INPUT, "flex items-center font-semibold")}>Direct server profile</p>
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-2">
+                <ConsoleFact label="Plan profile" value={selectedDetail?.profile ?? "none"} mono />
+                <ConsoleFact label="Connection profile" value={laneReady ? selectedLaneProfile : "select a session"} mono />
+              </div>
             </div>
             {selected ? (
               selectedDetail ? (
@@ -6435,6 +6333,25 @@ function ReviewsPage(): React.ReactElement {
                     : "loading statement detail…"}
                 </p>
               )
+            ) : null}
+            {!selected ? (
+              <p className="mt-4 text-sm text-[var(--om-text-muted)]">Select a saved change plan to review it.</p>
+            ) : detailQuery.isError ? (
+              <ErrorNotice message="The exact statement detail is unavailable, so this plan cannot be applied." />
+            ) : null}
+            {laneId && laneCapabilities.data && !profileMatches ? (
+              <ErrorNotice
+                message={`This plan targets ${selectedDetail?.profile ?? "an unknown profile"}, but the selected session uses ${selectedLaneProfile}. Choose a matching session.`}
+              />
+            ) : null}
+            {hasDdl ? (
+              <ErrorNotice message="DDL plans are preview/export only in the browser. Apply them through an approved non-browser client with the required profile level." />
+            ) : null}
+            {hasHiddenBinds ? (
+              <ErrorNotice message="This plan contains bind values that the redacted review record does not expose. Browser apply is disabled because those values cannot be reviewed here." />
+            ) : null}
+            {writeStatements.length > 1 ? (
+              <ErrorNotice message="This plan contains multiple writes. Browser apply is disabled because confirmations are single-use and sequential execution could partially commit." />
             ) : null}
             {needsConfirm ? (
               // The grant auto-fills from the preview, so a non-empty confirm
@@ -6448,20 +6365,21 @@ function ReviewsPage(): React.ReactElement {
                   checked={applyAcknowledged}
                   onChange={(event) => setApplyAcknowledged(event.target.checked)}
                 />
-                I reviewed this {applyDangerSummary} change against {selected?.profile ?? "this profile"}
-                {applyCommit ? " and intend to commit it" : ""}
+                I reviewed the full {applyDangerSummary} statement, bind count, and saved commit setting for {selected?.profile ?? "this profile"}
               </label>
             ) : null}
             <div className="mt-4 flex flex-wrap items-center gap-3">
-              <label className={OM_CHECK_LABEL}>
-                <input
-                  className={OM_CHECKBOX}
-                  type="checkbox"
-                  checked={applyCommit}
-                  onChange={(event) => setApplyCommit(event.target.checked)}
-                />
-                Commit
-              </label>
+              {needsConfirm ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={!canPreviewSelected}
+                  onClick={() => previewSelectedMutation.mutate()}
+                >
+                  <Search className="size-4" aria-hidden="true" />
+                  Preview selected change
+                </Button>
+              ) : null}
               <Button
                 type="button"
                 variant="primary"
@@ -6469,39 +6387,31 @@ function ReviewsPage(): React.ReactElement {
                 onClick={() => applyMutation.mutate()}
               >
                 <CheckCircle2 className="size-4" aria-hidden="true" />
-                Apply
+                Apply selected plan
               </Button>
+              <Badge tone={confirm ? "ok" : needsConfirm ? "off" : "neutral"}>
+                {confirm ? "confirmation ready" : needsConfirm ? "preview required" : "read-only plan"}
+              </Badge>
               <Badge tone={session.status === "success" ? "ok" : session.status === "error" ? "warn" : "info"}>
                 {session.status === "success" ? "paired" : session.status === "error" ? "blocked" : "pairing"}
               </Badge>
             </div>
           </ConsolePanel>
 
-          <ReviewResultPanel result={lastResult} pending={draftMutation.isPending || applyMutation.isPending} />
+          <ReviewResultPanel
+            result={lastResult}
+            pending={draftMutation.isPending || applyMutation.isPending || previewSelectedMutation.isPending}
+          />
 
-          <EditionTimelinePanel />
+          <details className="rounded-lg border border-[var(--om-border)] bg-[var(--om-surface)] p-4">
+            <summary className="cursor-pointer font-semibold text-[var(--om-text-bright)]">
+              Edition-based redefinition
+            </summary>
+            <div className="mt-4"><EditionTimelinePanel /></div>
+          </details>
         </div>
       </div>
     </PageFrame>
-  );
-}
-
-/**
- * The live CQN change feed (Arc C1).
- *
- * CQN change events ride the operator event stream carrying only the bound
- * resource scope (the proven query) — never row data. This panel coalesces the
- * latest event's change feed into changed scopes; when the operator surface
- * projects no feed it reports "not reported", not a quiet healthy stream.
- */
-function CqnChangeFeedPanel({ events }: { events: OperatorEventEnvelope[] }): React.ReactElement {
-  const CqnChangeFeed = OMCP_SKIN.renderers.CqnChangeFeed;
-  const latest = events.length > 0 ? events[events.length - 1] : null;
-  const model = toCqnChangeFeedViewModel(parseCqnChangeFeed(latest));
-  return (
-    <Surface className="space-y-3 p-4" data-testid="cqn-change-feed-panel">
-      <CqnChangeFeed model={model} />
-    </Surface>
   );
 }
 
@@ -6521,16 +6431,22 @@ function EditionTimelinePanel(): React.ReactElement {
   });
   const model = toEditionTimelineViewModel(parseEditionProposals(editions.data?.data ?? null));
   return (
-    <Surface className="space-y-3 p-4" data-testid="edition-timeline-panel">
-      <h2 className="text-sm font-bold text-[var(--om-text-bright)]">Edition Timeline</h2>
+    <div className="space-y-3" data-testid="edition-timeline-panel">
+      <p className="text-sm leading-6 text-[var(--om-text-muted)]">
+        Optional Oracle Edition-Based Redefinition proposals for profiles that use editions.
+      </p>
       {editions.data ? (
         <EditionTimeline model={model} />
       ) : (
-        <p className="text-xs text-[var(--om-text-muted)]">
-          {editions.isFetching ? "Loading edition proposals…" : "No edition proposals loaded."}
+        <p className="text-sm text-[var(--om-text-muted)]">
+          {editions.isFetching
+            ? "Loading edition proposals…"
+            : editions.isError
+              ? "Edition proposals are unavailable."
+              : "No edition proposals are available."}
         </p>
       )}
-    </Surface>
+    </div>
   );
 }
 
@@ -6564,14 +6480,20 @@ function ListPager({
 
 function ProposalStatementTable({ proposal }: { proposal: ChangeProposalView }): React.ReactElement {
   return (
-    <div className="mt-4 overflow-hidden rounded-md border border-[var(--om-border)]">
-      <table className="w-full border-collapse text-sm">
+    <div
+      className="mt-4 overflow-x-auto rounded-md border border-[var(--om-border)]"
+      role="region"
+      aria-label="Statements in selected change plan"
+      tabIndex={0}
+    >
+      <table className="w-full min-w-[760px] border-collapse text-sm">
+        <caption className="sr-only">Exact statements in the selected saved change plan</caption>
         <thead className="bg-[var(--om-surface-muted)] text-left text-2xs uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
           <tr>
             <th className="px-3 py-2 font-semibold">Unit</th>
-            <th className="px-3 py-2 font-semibold">Template</th>
-            <th className="px-3 py-2 font-semibold">Level</th>
-            <th className="px-3 py-2 font-semibold">Binds</th>
+            <th className="px-3 py-2 font-semibold">Exact SQL and digest</th>
+            <th className="px-3 py-2 font-semibold">Required permission</th>
+            <th className="px-3 py-2 font-semibold">Saved behavior</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-[var(--om-border)]">
@@ -6582,14 +6504,17 @@ function ProposalStatementTable({ proposal }: { proposal: ChangeProposalView }):
                   {statement.unit}
                 </Badge>
               </td>
-              <td className="max-w-[360px] truncate px-3 py-2 font-mono text-xs text-[var(--om-text-bright)]">
-                {statement.sql_template}
+              <td className="max-w-[520px] px-3 py-2">
+                <pre className="whitespace-pre-wrap break-words font-mono text-xs text-[var(--om-text-bright)]">{statement.sql_template}</pre>
+                <p className="mt-2 break-all font-mono text-xs text-[var(--om-text-muted)]">SHA-256 {statement.sql_sha256}</p>
               </td>
               <td className="px-3 py-2 font-semibold text-[var(--om-text)]">
                 {statement.draft_verdict.required_level ?? "none"}
               </td>
-              <td className="px-3 py-2 font-semibold text-[var(--om-text)]">
-                {formatNumber(statement.bind_count)}
+              <td className="px-3 py-2 text-xs text-[var(--om-text)]">
+                <p>{formatNumber(statement.bind_count)} bind value(s)</p>
+                <p className="mt-1">{statement.commit ? "commit" : "rollback after execution"}</p>
+                <p className="mt-1">{statement.capture_dbms_output ? "capture DBMS_OUTPUT" : "no DBMS_OUTPUT"}</p>
               </td>
             </tr>
           ))}
@@ -6624,10 +6549,10 @@ function SourceHistoryPanel({
         <div className="min-w-0">
           <h3 className="flex items-center gap-2 text-base font-semibold text-[var(--om-text-bright)]">
             <FileClock className="size-4" aria-hidden="true" />
-            Source History
+            Source history
           </h3>
           <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">
-            {pending ? "sync" : `${formatNumber(snapshots.length)} snapshots`}
+            {pending ? "loading" : `${formatNumber(snapshots.length)} snapshots`}
           </p>
         </div>
         <Badge tone={blocked ? "warn" : snapshots.length ? "ok" : "off"}>
@@ -6637,7 +6562,7 @@ function SourceHistoryPanel({
       <div className="max-h-[320px] overflow-auto">
         {snapshots.length === 0 ? (
           <div className="px-4 py-6 text-sm font-semibold text-[var(--om-text-muted)]">
-            No source snapshots
+            {pending ? "Loading source snapshots…" : blocked ? "Source history is unavailable." : "No source snapshots have been recorded."}
           </div>
         ) : (
           snapshots.map((snapshot) => (
@@ -6654,6 +6579,7 @@ function SourceHistoryPanel({
                     <span>{snapshot.object_type}</span>
                     <span>{snapshot.profile}</span>
                     <span>{formatNumber(snapshot.source_lines)} lines</span>
+                    <span>{snapshot.created_at}</span>
                   </div>
                 </div>
                 <Button
@@ -6661,10 +6587,10 @@ function SourceHistoryPanel({
                   variant="secondary"
                   disabled={pending}
                   onClick={() => onDraftRevert(snapshot)}
-                  title="Draft revert proposal"
+                  title="Create a restore plan without changing the database"
                 >
                   <RotateCcw className="size-4" aria-hidden="true" />
-                  Revert
+                  Create restore plan
                 </Button>
               </div>
               <p className="truncate font-mono text-xs text-[var(--om-text-muted)]">
@@ -6710,9 +6636,9 @@ function SchemaDiffPanel({
   profile: string;
   onDrafted: (proposal: ChangeProposalView, response: unknown) => void;
 }): React.ReactElement {
-  const [title, setTitle] = React.useState("Schema diff migration");
-  const [beforeJson, setBeforeJson] = React.useState(schemaDiffBeforeFixture);
-  const [afterJson, setAfterJson] = React.useState(schemaDiffAfterFixture);
+  const [title, setTitle] = React.useState("Schema snapshot comparison");
+  const [beforeJson, setBeforeJson] = React.useState(EMPTY_SCHEMA_SNAPSHOT);
+  const [afterJson, setAfterJson] = React.useState(EMPTY_SCHEMA_SNAPSHOT);
   const [previewBinding, setPreviewBinding] = React.useState<
     SchemaDiffPreviewBinding<SchemaDiffExportData> | null
   >(null);
@@ -6755,7 +6681,7 @@ function SchemaDiffPanel({
         throw new Error("no executable migration steps to draft");
       }
       return draftChangeProposal(session, {
-        profile: profile.trim() || "prod",
+        profile: profile.trim(),
         author: "human",
         title: preview.title,
         statements: preview.proposal_statements
@@ -6763,6 +6689,7 @@ function SchemaDiffPanel({
     },
     onSuccess: (response) => {
       setLastError(null);
+      queryClient.invalidateQueries({ queryKey: ["change-proposals"] });
       onDrafted(response.data.proposal, response);
     },
     onError: (error) => {
@@ -6772,7 +6699,8 @@ function SchemaDiffPanel({
 
   const busy = previewMutation.isPending || draftMutation.isPending;
   const canPreview = Boolean(session) && !busy;
-  const canDraft = Boolean(session && preview && preview.proposal_statements.length > 0) && !busy;
+  const canDraft =
+    Boolean(session && profile.trim() && preview && preview.proposal_statements.length > 0) && !busy;
 
   return (
     <ConsolePanel>
@@ -6780,10 +6708,10 @@ function SchemaDiffPanel({
         <div className="min-w-0">
           <h3 className="flex items-center gap-2 text-base font-semibold text-[var(--om-text-bright)]">
             <SquarePen className="size-4" aria-hidden="true" />
-            Schema Diff
+            Compare schema snapshots
           </h3>
           <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">
-            {preview ? `${formatNumber(preview.summary.migration_steps)} steps` : "snapshot compare"}
+            {preview ? `${formatNumber(preview.summary.migration_steps)} steps` : "pasted JSON snapshots"}
           </p>
         </div>
         <Badge tone={preview ? "ok" : lastError ? "warn" : "off"}>
@@ -6791,6 +6719,9 @@ function SchemaDiffPanel({
         </Badge>
       </div>
       <div className="grid gap-3 p-4">
+        <p className="text-sm leading-6 text-[var(--om-text-muted)]">
+          Paste exported snapshots to compare them. This does not read either snapshot from the database. Generated DDL is preview/export only in the browser.
+        </p>
         <label className="block">
           <span className={OM_LABEL}>Title</span>
           <input
@@ -6801,7 +6732,7 @@ function SchemaDiffPanel({
         </label>
         <div className="grid gap-3 lg:grid-cols-2">
           <label className="block">
-            <span className={OM_LABEL}>Before</span>
+            <span className={OM_LABEL}>Current snapshot JSON</span>
             <textarea
               className={cn(OM_TEXTAREA, "min-h-[180px] text-xs leading-5")}
               aria-label="schema diff before snapshot"
@@ -6811,7 +6742,7 @@ function SchemaDiffPanel({
             />
           </label>
           <label className="block">
-            <span className={OM_LABEL}>After</span>
+            <span className={OM_LABEL}>Desired snapshot JSON</span>
             <textarea
               className={cn(OM_TEXTAREA, "min-h-[180px] text-xs leading-5")}
               aria-label="schema diff after snapshot"
@@ -6831,7 +6762,7 @@ function SchemaDiffPanel({
             }
           >
             <RefreshCcw className="size-4" aria-hidden="true" />
-            Preview
+            Compare snapshots
           </Button>
           <Button
             type="button"
@@ -6844,11 +6775,11 @@ function SchemaDiffPanel({
             }
           >
             <Download className="size-4" aria-hidden="true" />
-            Export
+            Export SQL
           </Button>
           <Button type="button" variant="primary" disabled={!canDraft} onClick={() => draftMutation.mutate()}>
             <GitPullRequest className="size-4" aria-hidden="true" />
-            Draft
+            Save DDL plan
           </Button>
           {lastError ? (
             <Badge tone="warn" role="alert" className="max-w-full whitespace-normal break-all">
@@ -6930,8 +6861,9 @@ function SchemaDiffStepTable({ steps }: { steps: SchemaDiffStepView[] }): React.
       <div className="border-b border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 py-2 text-sm font-semibold text-[var(--om-text)]">
         Migration Steps
       </div>
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto" role="region" aria-label="Migration steps" tabIndex={0}>
         <table className="w-full min-w-[560px] border-collapse text-left text-sm">
+          <caption className="sr-only">Migration steps generated from the schema comparison</caption>
           <thead className="bg-[var(--om-surface)] text-2xs uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
             <tr>
               <th className="px-3 py-2 font-semibold">#</th>
@@ -7041,7 +6973,7 @@ function ReviewResultPanel({
         <div className="min-w-0">
           <h3 className="flex items-center gap-2 text-base font-semibold text-[var(--om-text-bright)]">
             <Code2 className="size-4" aria-hidden="true" />
-            Result
+            Latest action
           </h3>
           <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">
             {pending ? "request in flight" : result ? result.label : "idle"}
@@ -7053,9 +6985,14 @@ function ReviewResultPanel({
       </div>
       <div className="space-y-3 p-4">
         {result ? <OperatorOutcomeNotice outcome={result.outcome} /> : null}
-        <pre className={cn(OM_CODE, "max-h-[560px]")}>
-          {result?.response ? prettyJson(result.response) : "{}"}
-        </pre>
+        {result?.response ? (
+          <details className="rounded-md border border-[var(--om-border)] p-3">
+            <summary className="cursor-pointer text-sm font-semibold text-[var(--om-text)]">Technical response</summary>
+            <pre className={cn(OM_CODE, "mt-3 max-h-[560px]")}>{prettyJson(result.response)}</pre>
+          </details>
+        ) : (
+          <p className="text-sm text-[var(--om-text-muted)]">No review action has run yet.</p>
+        )}
       </div>
     </ConsolePanel>
   );
@@ -7153,13 +7090,24 @@ function proposalLevelTone(
 }
 
 const workbenchModes: Array<{ id: WorkbenchMode; label: string }> = [
-  { id: "classify_only", label: "Classify" },
-  { id: "read_query", label: "Read" },
-  { id: "dml_preview_confirm", label: "DML" },
-  { id: "ddl_plan_confirm", label: "DDL" }
+  { id: "classify_only", label: "Classify only" },
+  { id: "read_query", label: "Read query" },
+  { id: "dml_preview_confirm", label: "DML change" },
+  { id: "ddl_plan_confirm", label: "DDL plan" }
 ];
 
 type WorkbenchAction = "preview" | "read" | "rollback_preview" | "commit";
+
+type WorkbenchSubmission = {
+  kind: WorkbenchAction;
+  identity: string;
+  sql: string;
+  mode: WorkbenchMode;
+  laneId: string;
+  maxRows: number;
+  confirm: string;
+  captureDbmsOutput: boolean;
+};
 
 type WorkbenchIdeAction = "parse" | "analyze" | "lineage" | "lint" | "docs" | "impact";
 
@@ -7219,8 +7167,54 @@ type RefactorPreview = {
   error: string | null;
 };
 
+function WorkbenchRoutePage(): React.ReactElement {
+  const config = useQuery({
+    queryKey: ["operator-config"],
+    queryFn: fetchOperatorConfig,
+    staleTime: 30_000,
+    retry: 1
+  });
+  const enabled = config.data?.data.status.dashboard_workbench === true;
+
+  if (!enabled) {
+    return (
+      <PageFrame
+        title="SQL Workbench"
+        eyebrow="Browser SQL"
+        description="The server keeps browser-submitted SQL behind an explicit opt-in."
+      >
+        <Surface className="space-y-3 p-5" aria-busy={config.isFetching}>
+          <Badge tone={config.isError ? "warn" : config.isFetching ? "info" : "off"}>
+            {config.isError ? "setting unavailable" : config.isFetching ? "checking setting" : "disabled"}
+          </Badge>
+          <h3 className="text-lg font-semibold text-[var(--om-text-bright)]">
+            {config.isFetching
+              ? "Checking whether browser SQL is enabled…"
+              : "Browser SQL is disabled on this server"}
+          </h3>
+          <p className="max-w-3xl text-sm leading-6 text-[var(--om-text)]">
+            {config.isError
+              ? "The dashboard could not verify the Workbench setting, so it is failing closed. Database Explorer remains available for governed metadata reads."
+              : "Set [http].dashboard_workbench = true in Profiles & settings and restart the HTTP service to expose read, preview, and guarded DML controls. DDL and ADMIN actions remain blocked in the browser."}
+          </p>
+          {!config.isFetching ? (
+            <Link
+              to="/config"
+              className="inline-flex min-h-11 items-center rounded-md border border-[var(--om-control-border)] px-4 py-2 text-sm font-semibold text-[var(--om-text-bright)] hover:bg-[var(--om-surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--om-focus)]"
+            >
+              Open Profiles &amp; settings
+            </Link>
+          ) : null}
+        </Surface>
+      </PageFrame>
+    );
+  }
+
+  return <WorkbenchPage />;
+}
+
 function WorkbenchPage(): React.ReactElement {
-  const [mode, setMode] = React.useState<WorkbenchMode>("classify_only");
+  const [mode, setMode] = React.useState<WorkbenchMode>("read_query");
   const [sql, setSql] = React.useState(WORKBENCH_SQL_SEED);
   const [laneId, setLaneId] = React.useState("");
   const [confirm, setConfirm] = React.useState("");
@@ -7228,6 +7222,7 @@ function WorkbenchPage(): React.ReactElement {
   const [captureDbmsOutput, setCaptureDbmsOutput] = React.useState(false);
   const [lastResult, setLastResult] = React.useState<WorkbenchResult | null>(null);
   const [lastIdeResult, setLastIdeResult] = React.useState<WorkbenchResult | null>(null);
+  const [showPlsqlTools, setShowPlsqlTools] = React.useState(false);
   const [projectRoot, setProjectRoot] = React.useState("");
   const [plsqlTarget, setPlsqlTarget] = React.useState("");
   const [lineageDirection, setLineageDirection] = React.useState<
@@ -7241,11 +7236,15 @@ function WorkbenchPage(): React.ReactElement {
     sql.trim().length > 0 && sql.trim() !== WORKBENCH_SQL_SEED
   );
   const [commitAcknowledged, setCommitAcknowledged] = React.useState(false);
+  const requestIdentity = JSON.stringify([sql.trim(), laneId, mode]);
+  const requestIdentityRef = React.useRef(requestIdentity);
   // An acknowledgement is about this exact statement on this exact lane. Edit
   // either and it must be re-earned, never inherited by different SQL.
   React.useEffect(() => {
+    requestIdentityRef.current = requestIdentity;
     setCommitAcknowledged(false);
-  }, [sql, laneId, mode]);
+    setConfirm("");
+  }, [requestIdentity]);
   const [changesetJson, setChangesetJson] = React.useState(
     '{\n  "objects": [],\n  "unclassified_files": []\n}'
   );
@@ -7258,41 +7257,75 @@ function WorkbenchPage(): React.ReactElement {
     refetchInterval: 60_000,
     retry: 1
   });
+  const activeLanes = useQuery({
+    queryKey: ["active-lanes"],
+    queryFn: fetchActiveLanes,
+    refetchInterval: 5_000
+  });
+  const lanes = activeLanes.data?.data.lanes ?? EMPTY_ACTIVE_LANES;
+  const stateful = activeLanes.data?.data.stateful ?? true;
+  const laneReady = activeLanes.status === "success" && (!stateful || Boolean(laneId));
 
   const action = useMutation({
-    mutationFn: async (kind: WorkbenchAction) => {
+    mutationFn: async (submission: WorkbenchSubmission) => {
       if (!session.data) {
         throw new Error("dashboard session is not ready");
       }
-      const request = { sql: sql.trim(), mode, laneId };
-      if (kind === "preview") {
+      const request = {
+        sql: submission.sql,
+        mode: submission.mode,
+        laneId: submission.laneId
+      };
+      if (submission.kind === "preview") {
         return previewWorkbenchSql(session.data, request);
       }
-      if (kind === "read") {
-        return readWorkbenchSql(session.data, { ...request, maxRows });
+      if (submission.kind === "read") {
+        return readWorkbenchSql(session.data, { ...request, maxRows: submission.maxRows });
       }
       return executeWorkbenchSql(session.data, {
         ...request,
-        commit: kind === "commit",
-        confirm,
-        captureDbmsOutput
+        commit: submission.kind === "commit",
+        confirm: submission.confirm,
+        captureDbmsOutput: submission.captureDbmsOutput
       });
     },
-    onSuccess: (response, kind) => {
-      setLastResult(workbenchSuccess(actionLabel(kind), response));
-      if (kind === "commit") {
+    onSuccess: (response, submission) => {
+      setLastResult(workbenchSuccess(actionLabel(submission.kind), response));
+      if (submission.kind === "commit") {
         clearExplorerMetadataCache();
         queryClient.invalidateQueries({ queryKey: ["explorer"] });
       }
       const nextConfirm = confirmationFromResponse(response);
-      if (nextConfirm) {
+      if (
+        submission.kind === "preview" &&
+        nextConfirm &&
+        submission.identity === requestIdentityRef.current
+      ) {
         setConfirm(nextConfirm);
+      } else if (submission.kind === "rollback_preview" || submission.kind === "commit") {
+        setConfirm("");
+        setCommitAcknowledged(false);
       }
     },
-    onError: (error, kind) => {
-      setLastResult(workbenchFailure(actionLabel(kind), error, "operator action failed"));
+    onError: (error, submission) => {
+      setLastResult(
+        workbenchFailure(actionLabel(submission.kind), error, "operator action failed")
+      );
     }
   });
+
+  const submitAction = (kind: WorkbenchAction): void => {
+    action.mutate({
+      kind,
+      identity: requestIdentity,
+      sql: sql.trim(),
+      mode,
+      laneId,
+      maxRows,
+      confirm,
+      captureDbmsOutput
+    });
+  };
 
   const ideAction = useMutation({
     mutationFn: async (kind: WorkbenchIdeAction) => {
@@ -7318,9 +7351,16 @@ function WorkbenchPage(): React.ReactElement {
     }
   });
 
-  const canSubmit = sql.trim().length > 0 && session.status === "success" && !action.isPending;
+  const canSubmit =
+    sql.trim().length > 0 &&
+    laneReady &&
+    session.status === "success" &&
+    !action.isPending;
   const canRunIde =
-    sql.trim().length > 0 && session.status === "success" && !ideAction.isPending;
+    sql.trim().length > 0 &&
+    laneReady &&
+    session.status === "success" &&
+    !ideAction.isPending;
   const confirmReady = confirm.trim().length > 0;
   const sessionTone = session.status === "success" ? "ok" : session.status === "error" ? "warn" : "info";
   const definitions =
@@ -7358,9 +7398,9 @@ function WorkbenchPage(): React.ReactElement {
 
   return (
     <PageFrame
-      title="Workbench"
-      eyebrow="Guarded SQL"
-      description="Human-in-the-loop SQL through the same classifier, lane gate, confirmation, and audit path as MCP tools."
+      title="SQL Workbench"
+      eyebrow="Guarded database access"
+      description="Classify and run SQL through the same profile limits, confirmation grants, masking, and audit path as MCP clients."
     >
       {sqlGuard.status === "blocked" ? (
         <ConfirmDialog
@@ -7372,7 +7412,7 @@ function WorkbenchPage(): React.ReactElement {
           onConfirm={sqlGuard.proceed}
         />
       ) : null}
-      <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.6fr)_minmax(360px,0.75fr)]">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
         <ConsolePanel className="p-4">
           <div className="flex flex-col gap-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -7406,17 +7446,31 @@ function WorkbenchPage(): React.ReactElement {
             </label>
 
             <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_160px_180px]">
+              {stateful ? (
+                <label className="block">
+                  <span className={OM_LABEL}>Agent session</span>
+                  <select
+                    className={OM_INPUT}
+                    value={laneId}
+                    onChange={(event) => setLaneId(event.target.value)}
+                    disabled={activeLanes.isFetching || lanes.length === 0}
+                  >
+                    <option value="">Select a session</option>
+                    {lanes.map((lane) => (
+                      <option key={lane.lane_id} value={lane.lane_id}>
+                        {lane.lane_id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <div>
+                  <span className={OM_LABEL}>Connection mode</span>
+                  <p className={cn(OM_INPUT, "flex items-center font-semibold")}>Direct server profile</p>
+                </div>
+              )}
               <label className="block">
-                <span className={OM_LABEL}>Lane</span>
-                <input
-                  className={OM_INPUT}
-                  value={laneId}
-                  onChange={(event) => setLaneId(event.target.value)}
-                  placeholder="operator"
-                />
-              </label>
-              <label className="block">
-                <span className={OM_LABEL}>Rows</span>
+                <span className={OM_LABEL}>Maximum rows</span>
                 <input
                   className={OM_INPUT}
                   min={1}
@@ -7437,43 +7491,48 @@ function WorkbenchPage(): React.ReactElement {
               </label>
             </div>
 
-            <label className="block">
-              <span className={OM_LABEL}>Confirm</span>
-              <input
-                className={cn(OM_INPUT, "font-mono")}
-                value={confirm}
-                onChange={(event) => setConfirm(event.target.value)}
-                placeholder="e.g. xgrant-4821-7.9f3c…"
-              />
-            </label>
+            {stateful && lanes.length === 0 && !activeLanes.isFetching ? (
+              <p className="rounded-md border border-[var(--om-control-border)] bg-[var(--om-surface-muted)] p-3 text-sm text-[var(--om-text)]">
+                No active MCP sessions. Connect a client before running database work.
+              </p>
+            ) : null}
+            <p className="text-sm leading-6 text-[var(--om-text-muted)]">
+              {confirmReady
+                ? "A short-lived confirmation is ready for this exact SQL and session. It cannot be edited."
+                : mode === "dml_preview_confirm"
+                  ? "Preview this exact DML to obtain its short-lived confirmation."
+                  : mode === "ddl_plan_confirm"
+                    ? "Browser DDL is preview only. Apply through an approved non-browser client."
+                    : "The server will classify this SQL again when it runs."}
+            </p>
 
             <div className="flex flex-wrap gap-2">
               <Button
                 type="button"
                 variant="secondary"
                 disabled={!canSubmit}
-                onClick={() => action.mutate("preview")}
+                onClick={() => submitAction("preview")}
               >
                 <Search className="size-4" aria-hidden="true" />
-                Preview
+                Preview SQL
               </Button>
               <Button
                 type="button"
                 variant="secondary"
                 disabled={!canSubmit || mode !== "read_query"}
-                onClick={() => action.mutate("read")}
+                onClick={() => submitAction("read")}
               >
                 <Play className="size-4" aria-hidden="true" />
-                Run Read
+                Run query
               </Button>
               <Button
                 type="button"
                 variant="secondary"
-                disabled={!canSubmit || mode !== "dml_preview_confirm"}
-                onClick={() => action.mutate("rollback_preview")}
+                disabled={!canSubmit || mode !== "dml_preview_confirm" || !confirmReady}
+                onClick={() => submitAction("rollback_preview")}
               >
                 <RotateCcw className="size-4" aria-hidden="true" />
-                Rollback Preview
+                Execute without commit
               </Button>
               <Button
                 type="button"
@@ -7484,10 +7543,10 @@ function WorkbenchPage(): React.ReactElement {
                   !confirmReady ||
                   !commitAcknowledged
                 }
-                onClick={() => action.mutate("commit")}
+                onClick={() => submitAction("commit")}
               >
                 <CheckCircle2 className="size-4" aria-hidden="true" />
-                Commit
+                Commit change
               </Button>
             </div>
             {mode === "dml_preview_confirm" ? (
@@ -7502,116 +7561,60 @@ function WorkbenchPage(): React.ReactElement {
                   onChange={(event) => setCommitAcknowledged(event.target.checked)}
                 />
                 I reviewed this DML and intend to commit it durably to{" "}
-                {laneId || "the selected lane"}
+                {laneId || "the direct server connection"}
               </label>
             ) : null}
           </div>
         </ConsolePanel>
 
-        <WorkbenchIdePanel
-          canRun={canRunIde}
-          changesetJson={changesetJson}
-          definitions={definitions}
-          identifier={identifier}
-          lineageDepth={lineageDepth}
-          lineageDirection={lineageDirection}
-          onJump={jumpToRange}
-          onRun={(kind) => ideAction.mutate(kind)}
-          onUseSelection={useSelectionAsIdentifier}
-          pending={ideAction.isPending}
-          projectRoot={projectRoot}
-          refactorPreview={refactorPreview}
-          replacement={replacement}
-          result={lastIdeResult}
-          target={plsqlTarget}
-          usageRows={usageRows}
-          setChangesetJson={setChangesetJson}
-          setIdentifier={setIdentifier}
-          setLineageDepth={setLineageDepth}
-          setLineageDirection={setLineageDirection}
-          setProjectRoot={setProjectRoot}
-          setReplacement={setReplacement}
-          setTarget={setPlsqlTarget}
-        />
-
-        <CostGatePanel session={session.data ?? null} laneId={laneId} sql={sql} />
-
-        <ScnScrubberPanel
-          session={session.data ?? null}
-          laneId={laneId}
-          sql={sql}
-          maxRows={maxRows}
-        />
-
-        <UndoTreePanel session={session.data ?? null} laneId={laneId} sql={sql} />
-
         <WorkbenchResultPanel result={lastResult} pending={action.isPending} />
+        <div className="space-y-4 xl:col-span-2">
+          <Surface className="flex flex-wrap items-center justify-between gap-3 p-4">
+            <div>
+              <h3 className="font-semibold text-[var(--om-text-bright)]">Optional PL/SQL analysis</h3>
+              <p className="mt-1 text-sm text-[var(--om-text-muted)]">
+                Parse and analyze the editor contents when the server was built with PL/SQL intelligence.
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              aria-expanded={showPlsqlTools}
+              onClick={() => setShowPlsqlTools((shown) => !shown)}
+            >
+              {showPlsqlTools ? "Hide PL/SQL tools" : "Show PL/SQL tools"}
+            </Button>
+          </Surface>
+          {showPlsqlTools ? (
+            <WorkbenchIdePanel
+              canRun={canRunIde}
+              changesetJson={changesetJson}
+              definitions={definitions}
+              identifier={identifier}
+              lineageDepth={lineageDepth}
+              lineageDirection={lineageDirection}
+              onJump={jumpToRange}
+              onRun={(kind) => ideAction.mutate(kind)}
+              onUseSelection={useSelectionAsIdentifier}
+              pending={ideAction.isPending}
+              projectRoot={projectRoot}
+              refactorPreview={refactorPreview}
+              replacement={replacement}
+              result={lastIdeResult}
+              target={plsqlTarget}
+              usageRows={usageRows}
+              setChangesetJson={setChangesetJson}
+              setIdentifier={setIdentifier}
+              setLineageDepth={setLineageDepth}
+              setLineageDirection={setLineageDirection}
+              setProjectRoot={setProjectRoot}
+              setReplacement={setReplacement}
+              setTarget={setPlsqlTarget}
+            />
+          ) : null}
+        </div>
       </div>
     </PageFrame>
-  );
-}
-
-/**
- * The fleet map (Arc H).
- *
- * `oracle_orient fleet=true` reads every MCP-visible profile independently, so
- * one dead database never blanks the map: an UNREACHABLE or FAIL_CLOSED lane
- * comes back as its own typed node, and this panel renders it as such. Before
- * the first successful call there is nothing to show — and the panel says the
- * fleet has not been mapped rather than drawing an empty, healthy-looking one.
- */
-function FleetMapPanel(): React.ReactElement {
-  const FleetMap = OMCP_SKIN.renderers.FleetMap;
-  const session = useQuery({
-    queryKey: ["dashboard-session"],
-    queryFn: fetchDashboardSession,
-    staleTime: 60_000,
-    retry: 1
-  });
-  const fleet = useQuery({
-    queryKey: ["fleet-map"],
-    queryFn: async () => {
-      if (!session.data) {
-        throw new Error("dashboard session is not ready");
-      }
-      return fetchFleetMap(session.data);
-    },
-    enabled: Boolean(session.data),
-    refetchInterval: 30_000,
-    retry: false
-  });
-
-  const input = fleet.data ? parseFleetMap(fleet.data.data) : null;
-  const outcome = fleet.error ? operatorOutcomeFromError(fleet.error, "fleet orient failed") : null;
-
-  return (
-    <Surface className="space-y-3 p-4" data-testid="fleet-map-panel">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs text-[var(--om-text-muted)]">
-          Every MCP-visible profile, oriented independently. A lane that cannot be reached stays on
-          the map.
-        </p>
-        <Button
-          type="button"
-          variant="ghost"
-          disabled={!session.data || fleet.isFetching}
-          onClick={() => void fleet.refetch()}
-        >
-          <RefreshCcw className="size-4" aria-hidden="true" />
-          Re-map
-        </Button>
-      </div>
-      {outcome ? <OperatorOutcomeNotice outcome={outcome} /> : null}
-      {input ? (
-        <FleetMap model={toFleetMapViewModel(input)} />
-      ) : (
-        <p className="text-xs text-[var(--om-text-muted)]">
-          {fleet.isFetching
-            ? "Orienting every visible profile…"
-            : "The fleet has not been mapped yet."}
-        </p>
-      )}
-    </Surface>
   );
 }
 
@@ -7625,432 +7628,8 @@ function FleetMapPanel(): React.ReactElement {
  * allowed to define the range. A timestamp pin is recorded as such, because
  * Oracle resolves it to an SCN the response never echoes.
  */
-function ScnScrubberPanel({
-  session,
-  laneId,
-  sql,
-  maxRows
-}: {
-  session: DashboardSession | null;
-  laneId: string;
-  sql: string;
-  maxRows: number;
-}): React.ReactElement {
-  const ScnScrubber = OMCP_SKIN.renderers.ScnScrubber;
-  const [scnInput, setScnInput] = React.useState("");
-  const [timestampInput, setTimestampInput] = React.useState("");
-  const [current, setCurrent] = React.useState<number | null>(null);
-  const [refusal, setRefusal] = React.useState<string | null>(null);
-  const [marks, setMarks] = React.useState<ScnMarkViewModel[]>([]);
-
-  const replay = useMutation({
-    mutationFn: async (target: AsOfTarget) => {
-      if (!session) {
-        throw new Error("dashboard session is not ready");
-      }
-      const response = await fetchQueryAsOf(session, {
-        laneId,
-        sql: sql.trim(),
-        maxRows,
-        target
-      });
-      return { target, response };
-    },
-    onSuccess: ({ target, response }) => {
-      const read = parseQueryAsOf(response.data);
-      setRefusal(null);
-      if (target.kind === "scn") {
-        setCurrent(target.scn);
-        setMarks((existing) => [
-          ...existing.filter((mark) => mark.scn !== target.scn),
-          {
-            id: `scn-${target.scn}`,
-            scn: target.scn,
-            label: `SCN ${target.scn}`,
-            status: "confirmed",
-            detail: `${read.rowCount ?? 0} row(s)${read.truncated ? ", truncated" : ""}`,
-            tone: "ok"
-          }
-        ]);
-        return;
-      }
-      setMarks((existing) => [
-        ...existing,
-        {
-          id: `ts-${target.timestamp}-${existing.length}`,
-          scn: null,
-          label: target.timestamp,
-          status: "timestamp",
-          detail: "Oracle resolved this timestamp to an SCN it does not report back",
-          tone: "info"
-        }
-      ]);
-    },
-    onError: (error, target) => {
-      const outcome = operatorOutcomeFromError(error, "flashback read failed");
-      setRefusal(outcome.message);
-      if (target.kind === "scn") {
-        setMarks((existing) => [
-          ...existing.filter((mark) => mark.scn !== target.scn),
-          {
-            id: `scn-${target.scn}`,
-            scn: target.scn,
-            label: `SCN ${target.scn}`,
-            status: "refused",
-            detail: outcome.message,
-            tone: "warn"
-          }
-        ]);
-      }
-    }
-  });
-
-  const model = toScnScrubberViewModel({ current, marks, refusal });
-  const parsedScn = Number.parseInt(scnInput.trim(), 10);
-  const canReplayScn =
-    Boolean(session) && !replay.isPending && Number.isFinite(parsedScn) && parsedScn > 0;
-
-  return (
-    <Surface className="space-y-3 p-4" data-testid="scn-scrubber-panel">
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="block">
-          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">SCN</span>
-          <input
-            className="h-10 w-48 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
-            value={scnInput}
-            inputMode="numeric"
-            onChange={(event) => setScnInput(event.target.value)}
-            placeholder="15200400"
-          />
-        </label>
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={!canReplayScn || sql.trim().length === 0}
-          onClick={() => replay.mutate({ kind: "scn", scn: parsedScn })}
-        >
-          Read as of SCN
-        </Button>
-        <label className="block">
-          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Timestamp</span>
-          <input
-            className="h-10 w-56 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
-            value={timestampInput}
-            onChange={(event) => setTimestampInput(event.target.value)}
-            placeholder="2026-07-13 09:00:00"
-          />
-        </label>
-        <Button
-          type="button"
-          variant="ghost"
-          disabled={!session || replay.isPending || timestampInput.trim().length === 0}
-          onClick={() => replay.mutate({ kind: "timestamp", timestamp: timestampInput.trim() })}
-        >
-          Read as of time
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          disabled={current === null}
-          onClick={() => {
-            setCurrent(null);
-            setRefusal(null);
-          }}
-        >
-          Back to live
-        </Button>
-      </div>
-      <ScnScrubber
-        model={model}
-        onScrub={(scn) => replay.mutate({ kind: "scn", scn })}
-      />
-    </Surface>
-  );
-}
-
-/**
- * The cost/gas badge (Arc G).
- *
- * `oracle_explain_plan` is the only pre-execution price the server will give,
- * and it is itself governed (it writes PLAN_TABLE, so it needs READ_WRITE plus
- * allow_plan_table_write). The ceiling is disclosed only by a cost refusal, so
- * this panel shows a ceiling exactly when the server has stated one — never a
- * default, never an inferred budget.
- */
-function CostGatePanel({
-  session,
-  laneId,
-  sql
-}: {
-  session: DashboardSession | null;
-  laneId: string;
-  sql: string;
-}): React.ReactElement {
-  const CostBadge = OMCP_SKIN.renderers.CostBadge;
-
-  // The ceiling in force is published: /operator/v1/config carries every
-  // profile's max_query_cost. Read it from there rather than waiting for the
-  // gate to refuse something — by then the number is too late to be useful.
-  const config = useQuery({
-    queryKey: ["operator-config"],
-    queryFn: fetchOperatorConfig,
-    staleTime: 30_000
-  });
-  const connection = useQuery({
-    queryKey: ["workbench-connection", laneId],
-    queryFn: async () => {
-      if (!session) {
-        throw new Error("dashboard session is not ready");
-      }
-      return fetchExplorerConnection(session, laneId);
-    },
-    enabled: Boolean(session),
-    retry: false
-  });
-  const activeProfile = connection.data ? parseActiveProfile(connection.data.data) : null;
-  const configured = profileCostCeiling(config.data?.data ?? null, activeProfile);
-
-  const estimate = useQuery({
-    queryKey: ["query-cost-estimate", laneId, sql],
-    queryFn: async () => {
-      if (!session) {
-        throw new Error("dashboard session is not ready");
-      }
-      return fetchQueryCostEstimate(session, { laneId, sql: sql.trim() });
-    },
-    enabled: false,
-    retry: false
-  });
-
-  const refusal = React.useMemo(
-    () => parseQueryCostRefusal(estimate.error ?? estimate.data ?? null),
-    [estimate.data, estimate.error]
-  );
-
-  const read = estimate.data ? parseCostEstimate(estimate.data.data) : null;
-  const outcome = estimate.error
-    ? operatorOutcomeFromError(estimate.error, "cost estimate failed")
-    : null;
-  const model = toCostBadgeViewModel({
-    refusal,
-    estimate: read?.totalCost ?? null,
-    // A refused explain-plan (for example READ_ONLY, where PLAN_TABLE may not be
-    // written) is a truthful "cost unavailable", not a missing badge.
-    estimateUnavailable: read?.unavailable ?? (outcome && !refusal ? outcome.message : null),
-    note: read?.note ?? null,
-    planRows: read?.planRows ?? [],
-    // The refusal's ceiling wins when there is one: the server has already met
-    // the profile ceiling with any per-call one via min(), so its number is the
-    // effective ceiling and can legitimately be lower than the configured one.
-    ceiling: configured.ceiling,
-    ceilingSource: configured.source,
-    ungated: configured.ungated
-  });
-
-  return (
-    <Surface className="space-y-3 p-4" data-testid="cost-gate-panel">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs text-[var(--om-text-muted)]">
-          Price this statement with the optimizer before it runs. EXPLAIN PLAN writes PLAN_TABLE, so
-          the estimate itself is governed.
-        </p>
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={!session || estimate.isFetching || sql.trim().length === 0}
-          onClick={() => void estimate.refetch()}
-        >
-          <Gauge className="size-4" aria-hidden="true" />
-          Estimate cost
-        </Button>
-      </div>
-      <CostBadge model={model} />
-    </Surface>
-  );
-}
-
-/**
- * The reversible undo-tree (Arc I).
- *
- * The workspace lives on the pinned lane session, so its truth is whatever the
- * lane's own tool responses say: the `workspace` view names the checkpoints
- * Oracle still holds, and `cannot_undo` names the effects a rollback will not
- * take back. This panel walks that tree and refuses to offer a plain Undo for
- * anything the server did not call reversible. The audit query alongside is the
- * durable, hash-chained evidence for the same statements.
- */
-function UndoTreePanel({
-  session,
-  laneId,
-  sql
-}: {
-  session: DashboardSession | null;
-  laneId: string;
-  sql: string;
-}): React.ReactElement {
-  const UndoTree = OMCP_SKIN.renderers.UndoTree;
-  const [checkpointName, setCheckpointName] = React.useState("");
-  const [workspace, setWorkspace] = React.useState<WorkspaceView | null>(null);
-  const [entries, setEntries] = React.useState<UndoTreeEntry[]>([]);
-  const [notice, setNotice] = React.useState<string | null>(null);
-  const [discardPending, setDiscardPending] = React.useState(false);
-  const nextId = React.useRef(0);
-
-  const history = useQuery({
-    queryKey: ["workspace-history"],
-    queryFn: () => fetchWorkspaceHistory(25),
-    refetchInterval: 15_000
-  });
-
-  const absorb = (data: WorkbenchActionData | null, entry: Omit<UndoTreeEntry, "id"> | null) => {
-    const outcome = parseUndoOutcome(data);
-    setWorkspace(outcome.workspace);
-    if (outcome.cannotUndo.length > 0) {
-      setNotice(`Cannot undo: ${outcome.cannotUndo.join(" · ")}`);
-    } else {
-      setNotice(null);
-    }
-    if (entry) {
-      nextId.current += 1;
-      const id = `node-${nextId.current}`;
-      setEntries((current) => [
-        ...current,
-        { ...entry, id, cannotUndo: outcome.cannotUndo, fullyReverted: outcome.fullyReverted }
-      ]);
-    }
-    if (outcome.undoneTo !== null || (outcome.workspace && !outcome.workspace.open)) {
-      // Oracle released savepoints; drop every node the workspace no longer holds
-      // rather than keep rendering an undo target that no longer exists.
-      const live = new Set(outcome.workspace?.checkpoints ?? []);
-      setEntries((current) =>
-        current.filter((node) => node.checkpointName !== null && live.has(node.checkpointName))
-      );
-    }
-    void history.refetch();
-  };
-
-  const checkpoint = useMutation({
-    mutationFn: async () => {
-      if (!session) {
-        throw new Error("dashboard session is not ready");
-      }
-      return establishCheckpoint(session, { laneId, name: checkpointName });
-    },
-    onSuccess: (response) => {
-      const name = parseUndoOutcome(response.data).checkpoint ?? checkpointName.toUpperCase();
-      absorb(response.data, {
-        kind: "checkpoint",
-        checkpointName: name,
-        label: name,
-        cannotUndo: [],
-        fullyReverted: null
-      });
-    }
-  });
-
-  const hold = useMutation({
-    mutationFn: async () => {
-      if (!session) {
-        throw new Error("dashboard session is not ready");
-      }
-      return holdWorkbenchSql(session, { sql: sql.trim(), mode: "dml_preview_confirm", laneId });
-    },
-    onSuccess: (response) => {
-      absorb(response.data, {
-        kind: "statement",
-        checkpointName: workspace?.checkpoints.at(-1) ?? null,
-        label: sql.trim().slice(0, 120),
-        cannotUndo: [],
-        fullyReverted: null
-      });
-    }
-  });
-
-  const undo = useMutation({
-    mutationFn: async (name: string | undefined) => {
-      if (!session) {
-        throw new Error("dashboard session is not ready");
-      }
-      return undoToCheckpoint(session, { laneId, name });
-    },
-    onSuccess: (response) => absorb(response.data, null)
-  });
-
-  const model = toUndoTreeViewModel({ workspace, entries });
-  const pending = checkpoint.isPending || hold.isPending || undo.isPending;
-  const error = [checkpoint.error, hold.error, undo.error].find(
-    (candidate): candidate is Error => candidate instanceof Error
-  );
-
-  return (
-    <Surface className="space-y-3 p-4" data-testid="undo-tree-panel">
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="block">
-          <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Checkpoint</span>
-          <input
-            className="h-10 w-56 rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
-            value={checkpointName}
-            onChange={(event) => setCheckpointName(event.target.value)}
-            placeholder="SP_BEFORE_BACKFILL"
-          />
-        </label>
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={!session || pending || checkpointName.trim().length === 0}
-          onClick={() => checkpoint.mutate()}
-        >
-          Establish checkpoint
-        </Button>
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={!session || pending || !model.open || sql.trim().length === 0}
-          onClick={() => hold.mutate()}
-        >
-          Hold statement
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          disabled={!session || pending || !model.open}
-          onClick={() => setDiscardPending(true)}
-        >
-          Discard workspace
-        </Button>
-      </div>
-      {discardPending ? (
-        <ConfirmDialog
-          id="workbench-discard"
-          title="Discard workspace"
-          body="This drops all held, uncommitted statements in the workspace."
-          confirmLabel="Discard workspace"
-          busy={pending}
-          onCancel={() => setDiscardPending(false)}
-          onConfirm={() => {
-            setDiscardPending(false);
-            undo.mutate(undefined);
-          }}
-        />
-      ) : null}
-      {error ? <p className="text-xs text-[var(--om-copper)]">{error.message}</p> : null}
-      {notice ? (
-        <p className="text-xs font-semibold text-[var(--om-copper)]">{notice}</p>
-      ) : null}
-      <UndoTree
-        model={model}
-        onUndo={(name) => undo.mutate(name)}
-        onPartialRollback={(name) => undo.mutate(name)}
-      />
-      <p className="text-2xs text-[var(--om-text-muted)]">
-        {history.data?.data.source === "self_lane"
-          ? `${history.data.data.entries.filter((entry) => entry.outcome === "HELD_UNCOMMITTED").length} statement(s) recorded HELD_UNCOMMITTED in the audit chain.`
-          : (history.data?.data.reason ?? "Audit evidence unavailable.")}
-      </p>
-    </Surface>
-  );
-}
-
+// Deliberately not mounted: the current response projection exposes only a row
+// count, not the flashback result set a user would need to review.
 function WorkbenchIdePanel({
   canRun,
   changesetJson,
@@ -8110,7 +7689,7 @@ function WorkbenchIdePanel({
         <div className="min-w-0">
           <h3 className="flex items-center gap-2 text-base font-semibold text-[var(--om-text-bright)]">
             <Code2 className="size-4" aria-hidden="true" />
-            PL/SQL IDE
+            PL/SQL analysis
           </h3>
           <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">
             {pending ? "analysis in flight" : result ? result.label : "idle"}
@@ -8124,7 +7703,7 @@ function WorkbenchIdePanel({
       <div className="space-y-4 p-4">
         <div className="grid gap-3">
           <label className="block">
-            <span className={OM_LABEL}>Project Root</span>
+            <span className={OM_LABEL}>Project path on the server host</span>
             <input
               className={cn(OM_INPUT, "font-mono")}
               value={projectRoot}
@@ -8235,9 +7814,9 @@ function WorkbenchIdePanel({
                 No parsed definitions
               </p>
             ) : (
-              definitions.map((definition, index) => (
+              definitions.map((definition) => (
                 <button
-                  key={`${definition.name}-${definition.kind}-${index}`}
+                  key={`${definition.name}:${definition.kind}:${definition.span?.start.offset ?? "none"}:${definition.span?.end.offset ?? "none"}`}
                   className="flex w-full items-center justify-between gap-3 rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 py-2 text-left text-sm hover:bg-[var(--om-surface-elevated)] disabled:cursor-not-allowed disabled:opacity-60"
                   type="button"
                   disabled={!definition.span}
@@ -8353,25 +7932,22 @@ function AuditPage(): React.ReactElement {
     queryKey: ["audit-tail", filters],
     queryFn: () => fetchAuditTail(filters)
   });
-  const verdictProofs = useQuery({
-    queryKey: ["verdict-proofs", filters],
-    queryFn: () => fetchVerdictProofs(filters)
-  });
   const data = auditTail.data?.data ?? null;
+  const verdictProofs = React.useMemo(() => parseVerdictProofs(data), [data]);
 
   return (
     <PageFrame
-      title="Audit"
-      eyebrow="Hash Chain"
-      description="Signed audit-chain timeline, DB evidence, filters, and redacted proof export."
+      title="Audit trail"
+      eyebrow="Governed activity"
+      description="Review redacted database actions, guard decisions, and hash-chain verification."
     >
       <div className="space-y-4">
-        <Surface className="p-4">
+        <Surface className="p-4" aria-busy={auditTail.isFetching}>
           <div className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_180px_160px_120px_auto_auto] lg:items-end">
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Subject Hash</span>
+              <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Client identity hash</span>
               <input
-                className="h-10 w-full rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
+                className="min-h-11 w-full rounded-md border border-[var(--om-control-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
                 value={subjectIdHash}
                 onChange={(event) => setSubjectIdHash(event.target.value)}
                 placeholder="subject-sha256:"
@@ -8380,7 +7956,7 @@ function AuditPage(): React.ReactElement {
             <label className="block">
               <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Tool</span>
               <select
-                className="h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
+                className="min-h-11 w-full rounded-md border border-[var(--om-control-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
                 value={tool}
                 onChange={(event) => setTool(event.target.value)}
               >
@@ -8396,7 +7972,7 @@ function AuditPage(): React.ReactElement {
             <label className="block">
               <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Level</span>
               <select
-                className="h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
+                className="min-h-11 w-full rounded-md border border-[var(--om-control-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
                 value={dangerLevel}
                 onChange={(event) => setDangerLevel(event.target.value)}
               >
@@ -8410,7 +7986,7 @@ function AuditPage(): React.ReactElement {
             <label className="block">
               <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Limit</span>
               <input
-                className="h-10 w-full rounded-md border border-[var(--om-border)] px-3 text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
+                className="min-h-11 w-full rounded-md border border-[var(--om-control-border)] px-3 text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
                 min={1}
                 max={200}
                 type="number"
@@ -8421,10 +7997,11 @@ function AuditPage(): React.ReactElement {
             <Button
               type="button"
               variant={exportProofBundle ? "primary" : "secondary"}
+              aria-pressed={exportProofBundle}
               onClick={() => setExportProofBundle((enabled) => !enabled)}
             >
               <Download className="size-4" aria-hidden="true" />
-              Bundle
+              {exportProofBundle ? "Hide proof bundle" : "Include proof bundle"}
             </Button>
             <Button type="button" variant="ghost" onClick={() => auditTail.refetch()}>
               <RefreshCcw className="size-4" aria-hidden="true" />
@@ -8440,12 +8017,11 @@ function AuditPage(): React.ReactElement {
         />
         <AuditTimelineTable records={data?.records ?? []} />
         <VerdictProofInspectorPanel
-          data={verdictProofs.data?.data ?? null}
-          pending={verdictProofs.isFetching}
-          error={verdictProofs.error instanceof Error ? verdictProofs.error.message : null}
+          data={verdictProofs}
+          pending={auditTail.isFetching}
+          error={auditTail.error instanceof Error ? auditTail.error.message : null}
         />
         {exportProofBundle ? <AuditProofBundlePanel bundle={data?.export ?? null} /> : null}
-        <ProbeDashboard probes={auditProbes} compact />
       </div>
     </PageFrame>
   );
@@ -8473,14 +8049,14 @@ function VerdictProofInspectorPanel({
         <div>
           <h2 className="text-sm font-bold text-[var(--om-text-bright)]">Verdict Proofs</h2>
           <p className="text-xs text-[var(--om-text-muted)]">
-            Redacted verdict certificates, re-checked in the browser against the audit chain.
+            Redacted certificate fields and binding checks reported with the audit tail. Signing-key verification still requires the CLI.
           </p>
         </div>
         <Badge tone={proofs.length > 0 ? "ok" : "off"}>
           {proofs.length} {proofs.length === 1 ? "proof" : "proofs"}
         </Badge>
       </div>
-      {error ? <p className="text-xs text-[var(--om-copper)]">{error}</p> : null}
+      {error ? <p className="text-xs text-[var(--om-text-bright)]" role="alert">{error}</p> : null}
       {proofs.length === 0 ? (
         <p className="text-xs text-[var(--om-text-muted)]">
           {pending
@@ -8512,6 +8088,7 @@ function AuditProofSummary({
   const chainStatus = nestedString(data?.proof, ["verification", "hash_chain", "status"]);
   const macStatus = nestedString(data?.proof, ["verification", "keyed_mac", "status"]);
   const chainTone = chainStatus === "ok" ? "ok" : chainStatus === "broken" ? "warn" : "off";
+  const macTone = macStatus === "ok" ? "ok" : macStatus === "not_checked" ? "info" : "off";
   return (
     <Surface className="p-4">
       <div className="grid gap-3 md:grid-cols-4">
@@ -8523,7 +8100,7 @@ function AuditProofSummary({
         <AuditFactTile
           label="MAC"
           value={macStatus ?? "not checked"}
-          tone={macStatus === "not_checked" ? "info" : "ok"}
+          tone={macTone}
         />
         <AuditFactTile
           label="Scanned"
@@ -8537,7 +8114,7 @@ function AuditProofSummary({
         />
       </div>
       {error ? (
-        <p className="mt-3 rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_14%,transparent)] p-3 text-sm font-semibold text-[var(--om-copper)]">
+        <p className="mt-3 rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_14%,transparent)] p-3 text-sm font-semibold text-[var(--om-text-bright)]" role="alert">
           {error}
         </p>
       ) : null}
@@ -8578,8 +8155,9 @@ function AuditTimelineTable({ records }: { records: AuditTailRecord[] }): React.
         </div>
         <Badge tone={actions.length > 0 ? "ok" : "off"}>{actions.length > 0 ? "ready" : "empty"}</Badge>
       </div>
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto" role="region" aria-label="Audit timeline" tabIndex={0}>
         <table className="w-full min-w-[1080px] border-collapse text-left">
+          <caption className="sr-only">Redacted governed database actions and proof status</caption>
           <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
             <tr>
               <th className="px-4 py-3 font-bold">Seq</th>
@@ -8735,17 +8313,6 @@ function nestedString(value: unknown, path: string[]): string | null {
   return typeof current === "string" ? current : null;
 }
 
-function nestedNumber(value: unknown, path: string[]): number | null {
-  let current = value;
-  for (const segment of path) {
-    if (!isRecord(current)) {
-      return null;
-    }
-    current = current[segment];
-  }
-  return typeof current === "number" && Number.isFinite(current) ? current : null;
-}
-
 function shortHash(value: string | null): string {
   if (!value) {
     return "hash unavailable";
@@ -8763,30 +8330,6 @@ function clampAuditLimit(value: number): number {
   return Math.min(200, Math.max(1, Math.trunc(value)));
 }
 
-function DoctorPage(): React.ReactElement {
-  return (
-    <PageFrame
-      title="Doctor"
-      eyebrow="Diagnostics"
-      description="Service readiness and operator health."
-    >
-      <ProbeDashboard probes={doctorProbes} compact />
-    </PageFrame>
-  );
-}
-
-function TestAttestationsPage(): React.ReactElement {
-  return (
-    <PageFrame
-      title="Test attestations"
-      eyebrow="Independent verification"
-      description="Re-verify signed CI evidence locally with an independently trusted HMAC key."
-    >
-      <TestAttestationVerifier />
-    </PageFrame>
-  );
-}
-
 function PageFrame({
   eyebrow,
   title,
@@ -8798,87 +8341,34 @@ function PageFrame({
   description: string;
   children: React.ReactNode;
 }): React.ReactElement {
+  const headingRef = React.useRef<HTMLHeadingElement | null>(null);
+  React.useEffect(() => {
+    document.title = `${title} · Oracle MCP`;
+    headingRef.current?.focus();
+  }, [title]);
   return (
     <div className="space-y-4">
-      <header className="flex flex-col gap-3 border-b border-[var(--om-border)] pb-4 md:flex-row md:items-end md:justify-between">
+      <header className="border-b border-[var(--om-border)] pb-4">
         <div className="min-w-0">
           <p className="text-xs font-bold uppercase text-[var(--om-gold)]">{eyebrow}</p>
-          <h2 className="mt-1 text-3xl font-bold tracking-normal text-[var(--om-text-bright)]">{title}</h2>
+          <h2 ref={headingRef} tabIndex={-1} className="mt-1 text-3xl font-bold tracking-normal text-[var(--om-text-bright)]">{title}</h2>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--om-text-muted)]">{description}</p>
         </div>
-        <Badge tone="info">operator.v1</Badge>
       </header>
       {children}
     </div>
   );
 }
 
-function ProbeDashboard({
-  probes,
-  compact = false
-}: {
-  probes: ProbeDefinition[];
-  compact?: boolean;
-}): React.ReactElement {
-  const results = useProbeResults(probes);
-  const summary = summarize(results);
-
+function QueryErrorNotice({ title, error }: { title: string; error: Error }): React.ReactElement {
   return (
-    <div className="space-y-4">
-      <section
-        className={cn(
-          "grid gap-3",
-          compact ? "grid-cols-1 md:grid-cols-3" : "grid-cols-1 md:grid-cols-2 xl:grid-cols-4"
-        )}
-        aria-label="service summary"
-      >
-        <SummaryTile label="Healthy" value={summary.ok} tone="ok" />
-        <SummaryTile label="Attention" value={summary.warn} tone="warn" />
-        <SummaryTile label="Unmounted" value={summary.off} tone="off" />
-        <SummaryTile label="Checking" value={summary.loading} tone="info" />
-      </section>
-      <EndpointTable rows={results} />
+    <div
+      className="rounded-lg border border-[var(--om-rust)] bg-[color-mix(in_srgb,var(--om-rust)_12%,transparent)] p-4"
+      role="alert"
+    >
+      <p className="font-semibold text-[var(--om-text-bright)]">{title}</p>
+      <p className="mt-1 text-sm text-[var(--om-text-muted)]">{error.message}</p>
     </div>
-  );
-}
-
-function useProbeResults(probes: ProbeDefinition[]): ProbeResult[] {
-  const queries = useQueries({
-    queries: probes.map((probe) => ({
-      queryKey: ["operator-probe", probe.id],
-      queryFn: () => fetchProbe(probe)
-    }))
-  });
-  return queries.map((query, index) => query.data ?? pendingProbe(probes[index]));
-}
-
-function summarize(rows: ProbeResult[]): Record<ProbeResult["state"], number> {
-  return rows.reduce<Record<ProbeResult["state"], number>>(
-    (totals, row) => {
-      totals[row.state] += 1;
-      return totals;
-    },
-    { loading: 0, ok: 0, off: 0, warn: 0 }
-  );
-}
-
-function SummaryTile({
-  label,
-  value,
-  tone
-}: {
-  label: string;
-  value: number;
-  tone: "ok" | "warn" | "off" | "info";
-}): React.ReactElement {
-  return (
-    <Surface className="min-h-28 p-4">
-      <div className="flex items-start justify-between gap-3">
-        <p className="text-sm font-semibold text-[var(--om-text-muted)]">{label}</p>
-        <Badge tone={tone}>{tone}</Badge>
-      </div>
-      <strong className="mt-5 block text-3xl leading-none text-[var(--om-text-bright)]">{value}</strong>
-    </Surface>
   );
 }
 
@@ -8889,17 +8379,17 @@ function WorkbenchResultPanel({
   result: WorkbenchResult | null;
   pending: boolean;
 }): React.ReactElement {
-  const successfulResponse = result?.state === "success" ? result.response : null;
-  const confirm = successfulResponse ? confirmationFromResponse(successfulResponse) : null;
-  const facts = successfulResponse ? factsFromResponse(successfulResponse) : [];
-  const verdict = successfulResponse ? workbenchVerdictFromAction(successfulResponse.data) : null;
+  const response = result?.response ?? null;
+  const confirm = response ? confirmationFromResponse(response) : null;
+  const facts = response ? factsFromResponse(response) : [];
+  const verdict = response ? workbenchVerdictFromAction(response.data) : null;
   // Arc M: only a row-returning read has an egress decision to certify. On any
   // other tool there is nothing to say, so the badge is not rendered at all
   // rather than reporting a misleading "no certificate".
   const MaskBadge = OMCP_SKIN.renderers.MaskBadge;
   const maskBadge =
-    successfulResponse?.data.mcp_tool === "oracle_query"
-      ? toMaskBadgeViewModel(parseMaskCertificate(successfulResponse.data))
+    response?.data.mcp_tool === "oracle_query"
+      ? toMaskBadgeViewModel(parseMaskCertificate(response.data))
       : null;
   // Arc N: the policy verdict rides on whatever the server answered — the page
   // itself, or the refusal envelope. When no verdict is attached the badge says
@@ -8908,13 +8398,14 @@ function WorkbenchResultPanel({
   const policyBadge = result
     ? toPolicyBadgeViewModel(parsePolicyTightening(result.response))
     : null;
+  const queryResult = response ? workbenchQueryResult(response) : null;
   return (
     <ConsolePanel className="min-h-[520px]">
       <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
         <div className="min-w-0">
           <h3 className="flex items-center gap-2 text-base font-semibold text-[var(--om-text-bright)]">
             <Code2 className="size-4" aria-hidden="true" />
-            Result
+            Query or change result
           </h3>
           <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">
             {pending ? "request in flight" : result ? result.label : "idle"}
@@ -8928,6 +8419,7 @@ function WorkbenchResultPanel({
         {verdict ? <WorkbenchVerdictBlock verdict={verdict} /> : null}
         {policyBadge ? <PolicyBadge model={policyBadge} /> : null}
         {maskBadge ? <MaskBadge model={maskBadge} /> : null}
+        {queryResult ? <WorkbenchQueryTable result={queryResult} /> : null}
         {facts.length > 0 ? (
           <div className="grid gap-2 sm:grid-cols-2">
             {facts.map((fact) => (
@@ -8947,17 +8439,114 @@ function WorkbenchResultPanel({
         ) : null}
         {confirm ? (
           <div className="rounded-md border border-[color-mix(in_srgb,var(--om-sage)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-sage)_12%,transparent)] p-3">
-            <p className="text-sm font-semibold text-[var(--om-sage)]">Execution Grant</p>
-            <p className="mt-2 break-all font-mono text-xs text-[var(--om-sage)]">{confirm}</p>
+            <p className="text-sm font-semibold text-[var(--om-sage)]">Confirmation ready for this exact request</p>
           </div>
         ) : null}
         {result ? <OperatorOutcomeNotice outcome={result.outcome} /> : null}
-        <pre className={cn(OM_CODE, "max-h-[620px]")}>
-          {result?.response ? prettyJson(result.response) : "{}"}
-        </pre>
+        {result?.response ? (
+          <details className="rounded-md border border-[var(--om-border)] p-3">
+            <summary className="cursor-pointer text-sm font-semibold text-[var(--om-text)]">Technical response</summary>
+            <pre className={cn(OM_CODE, "mt-3 max-h-[620px]")}>{prettyJson(result.response)}</pre>
+          </details>
+        ) : (
+          <p className="text-sm text-[var(--om-text-muted)]">Preview or run SQL to see its governed result.</p>
+        )}
       </div>
     </ConsolePanel>
   );
+}
+
+type WorkbenchQueryView = {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  rowCount: number;
+  truncated: boolean;
+};
+
+function workbenchQueryResult(
+  response: OperatorResponse<WorkbenchActionData>
+): WorkbenchQueryView | null {
+  const payload = mcpResult(response.data.mcp_response);
+  if (!isRecord(payload) || !Array.isArray(payload["rows"])) {
+    return null;
+  }
+  const rows = payload["rows"].filter(isRecord);
+  const reportedColumns = Array.isArray(payload["columns"])
+    ? payload["columns"].filter((column): column is string => typeof column === "string")
+    : [];
+  const columns = reportedColumns.length > 0 ? reportedColumns : Object.keys(rows[0] ?? {});
+  return {
+    columns,
+    rows,
+    rowCount: typeof payload["row_count"] === "number" ? payload["row_count"] : rows.length,
+    truncated: payload["truncated"] === true
+  };
+}
+
+function WorkbenchQueryTable({ result }: { result: WorkbenchQueryView }): React.ReactElement {
+  const visibleRows = keyedWorkbenchRows(result.rows.slice(0, 200));
+  return (
+    <div className="overflow-hidden rounded-md border border-[var(--om-border)]">
+      <div className="border-b border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 py-2 text-sm text-[var(--om-text)]">
+        {formatNumber(result.rowCount)} row(s)
+        {result.truncated ? " · server limit reached" : ""}
+        {result.rows.length > visibleRows.length ? ` · showing first ${visibleRows.length}` : ""}
+      </div>
+      <div
+        className="max-h-[480px] overflow-auto"
+        role="region"
+        aria-label="Query results"
+        tabIndex={0}
+      >
+        <table className="w-full min-w-max border-collapse text-left text-sm">
+          <caption className="sr-only">Query results returned by Oracle after masking</caption>
+          <thead className="sticky top-0 bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
+            <tr>
+              {result.columns.map((column) => (
+                <th key={column} className="border-b border-[var(--om-border)] px-3 py-2 font-semibold">{column}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[var(--om-border)]">
+            {visibleRows.map(({ key, row }) => (
+              <tr key={key}>
+                {result.columns.map((column) => (
+                  <td key={column} className="max-w-[28rem] whitespace-pre-wrap break-words px-3 py-2 font-mono text-xs text-[var(--om-text)]">
+                    {displayCell(row[column])}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function keyedWorkbenchRows(
+  rows: Record<string, unknown>[]
+): Array<{ key: string; row: Record<string, unknown> }> {
+  const seen = new Map<string, number>();
+  return rows.map((row) => {
+    const serialized = JSON.stringify(row);
+    const occurrence = (seen.get(serialized) ?? 0) + 1;
+    seen.set(serialized, occurrence);
+    return { key: `${serialized}:${occurrence}`, row };
+  });
+}
+
+function displayCell(value: unknown): string {
+  if (value === null) {
+    return "NULL";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return JSON.stringify(value);
 }
 
 // The honest admission the guard proved for a workbench statement.
@@ -9181,13 +8770,13 @@ function addFact(facts: WorkbenchFact[], label: string, value: unknown): void {
 function actionLabel(action: WorkbenchAction): string {
   switch (action) {
     case "preview":
-      return "Preview";
+      return "Preview SQL";
     case "read":
-      return "Run Read";
+      return "Run query";
     case "rollback_preview":
-      return "Rollback Preview";
+      return "Execute without commit";
     case "commit":
-      return "Commit";
+      return "Commit change";
   }
 }
 
@@ -9603,106 +9192,4 @@ function clampTtl(value: number): number {
     return 900;
   }
   return Math.min(3600, Math.max(1, Math.trunc(value)));
-}
-
-const columns: ColumnDef<ProbeResult>[] = [
-  {
-    header: "Endpoint",
-    accessorKey: "label",
-    cell: ({ row }) => (
-      <div>
-        <p className="font-semibold text-[var(--om-text-bright)]">{row.original.label}</p>
-        <p className="mt-1 break-all text-xs text-[var(--om-text-muted)]">{row.original.path}</p>
-      </div>
-    )
-  },
-  {
-    header: "Group",
-    accessorKey: "group",
-    cell: ({ row }) => <span className="text-[var(--om-text)]">{row.original.group}</span>
-  },
-  {
-    header: "State",
-    accessorKey: "state",
-    cell: ({ row }) => <StateBadge state={row.original.state} />
-  },
-  {
-    header: "Status",
-    accessorKey: "summary",
-    cell: ({ row }) => (
-      <div>
-        <p className="font-semibold text-[var(--om-text-bright)]">{row.original.summary}</p>
-        <p className="mt-1 line-clamp-2 text-xs text-[var(--om-text-muted)]">{row.original.detail}</p>
-      </div>
-    )
-  },
-  {
-    header: "Latency",
-    accessorKey: "latencyMs",
-    cell: ({ row }) => (
-      <span className="font-mono text-sm text-[var(--om-text)]">
-        {row.original.latencyMs === null ? "…" : `${row.original.latencyMs}ms`}
-      </span>
-    )
-  }
-];
-
-function EndpointTable({ rows }: { rows: ProbeResult[] }): React.ReactElement {
-  const table = useReactTable({
-    data: rows,
-    columns,
-    getCoreRowModel: getCoreRowModel()
-  });
-
-  return (
-    <Surface className="overflow-hidden">
-      <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
-        <div>
-          <h3 className="text-base font-bold text-[var(--om-text-bright)]">Endpoint Matrix</h3>
-          <p className="mt-1 text-sm text-[var(--om-text-muted)]">Public and operator routes</p>
-        </div>
-        <Button variant="ghost" onClick={() => queryClient.invalidateQueries()}>
-          <RefreshCcw className="size-4" aria-hidden="true" />
-          Refresh
-        </Button>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[760px] border-collapse text-left">
-          <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
-            {table.getHeaderGroups().map((headerGroup) => (
-              <tr key={headerGroup.id}>
-                {headerGroup.headers.map((header) => (
-                  <th key={header.id} className="px-4 py-3 font-bold">
-                    {flexRender(header.column.columnDef.header, header.getContext())}
-                  </th>
-                ))}
-              </tr>
-            ))}
-          </thead>
-          <tbody className="divide-y divide-[var(--om-border)]">
-            {table.getRowModel().rows.map((row) => (
-              <tr key={row.id} className="bg-[var(--om-surface)]">
-                {row.getVisibleCells().map((cell) => (
-                  <td key={cell.id} className="px-4 py-4 align-top text-sm">
-                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </Surface>
-  );
-}
-
-function StateBadge({ state }: { state: ProbeResult["state"] }): React.ReactElement {
-  const toneByState = {
-    loading: "info",
-    ok: "ok",
-    off: "off",
-    warn: "warn"
-  } as const;
-
-  return <Badge tone={toneByState[state]}>{state}</Badge>;
 }

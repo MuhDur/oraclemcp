@@ -3,11 +3,9 @@ import { describe, expect, it } from "vitest";
 
 import { ExplorerObjectsPanel, type ExplorerObjectRow } from "./App";
 
-// 8fn2: Explorer object rows must be operable without a mouse. Each selectable
-// row carries role=button, is focusable (tabindex=0), exposes its selection
-// state (aria-pressed) and a label, and activates on Enter/Space. The DOM-event
-// behavior is not unit-testable in this SSR/node harness, so this pins the
-// accessible-name and focusability wiring the keyboard handler depends on.
+// Explorer objects must be operable without a mouse. Keep the table semantic:
+// a real button inside the object cell owns selection, focus, and keyboard
+// activation instead of turning the whole row into a counterfeit control.
 
 const row: ExplorerObjectRow = {
   owner: "HR",
@@ -21,8 +19,8 @@ const row: ExplorerObjectRow = {
   raw: {}
 };
 
-describe("Explorer object rows are keyboard-operable", () => {
-  it("marks each selectable row as a focusable button with an accessible name", () => {
+describe("Explorer object controls are keyboard-operable", () => {
+  it("uses a native button with an unambiguous accessible name", () => {
     const markup = renderToStaticMarkup(
       <ExplorerObjectsPanel
         rows={[row]}
@@ -32,10 +30,10 @@ describe("Explorer object rows are keyboard-operable", () => {
         onSelect={() => {}}
       />
     );
-    expect(markup).toContain('role="button"');
-    expect(markup).toContain('tabindex="0"');
-    expect(markup).toContain('aria-label="Select EMPLOYEES"');
+    expect(markup).toContain('<button type="button"');
+    expect(markup).toContain('aria-label="View details for HR.EMPLOYEES (TABLE)"');
     expect(markup).toContain('aria-pressed="false"');
+    expect(markup).not.toContain('<tr role="button"');
   });
 
   it("reflects the selected row via aria-pressed", () => {

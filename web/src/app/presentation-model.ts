@@ -15,11 +15,9 @@ export type ThemeMode =
   | "high-contrast"
   | "reduced-motion";
 
-export type BigBoardRendererKind = "orrery3d" | "board2d" | "table";
+export type BigBoardRendererKind = "board2d" | "table";
 
 export type SkinCapability = {
-  webgl: boolean;
-  reducedMotion: boolean;
   highContrast: boolean;
   forcedColors: boolean;
   preferTable: boolean;
@@ -1869,8 +1867,7 @@ export const REQUIRED_THEME_MODES: readonly ThemeMode[] = [
 
 export const REQUIRED_BIG_BOARD_RENDERERS: readonly BigBoardRendererKind[] = [
   "board2d",
-  "table",
-  "orrery3d"
+  "table"
 ];
 
 export function clampActivity(value: number): number {
@@ -1882,8 +1879,6 @@ export function clampActivity(value: number): number {
 
 export function defaultSkinCapabilities(): SkinCapability {
   return {
-    webgl: false,
-    reducedMotion: false,
     highContrast: false,
     forcedColors: false,
     preferTable: false
@@ -1897,11 +1892,6 @@ export function normalizeRendererChoice(
 ): BigBoardRendererKind {
   if (capabilities.preferTable || capabilities.forcedColors) {
     return "table";
-  }
-  if (preferred === "orrery3d") {
-    return capabilities.webgl && !capabilities.reducedMotion && rendererAvailable("orrery3d")
-      ? "orrery3d"
-      : "board2d";
   }
   if (preferred === "table") {
     return "table";

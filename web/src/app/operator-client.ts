@@ -491,6 +491,7 @@ export type ConfigOpsStatus = {
   current_sha256: string;
   default_profile?: string | null;
   profiles: ConfigProfileMetadata[];
+  dashboard_workbench?: boolean;
 };
 
 export type ConfigFieldChange = {
@@ -591,6 +592,7 @@ export type ActiveLane = {
 
 export type ActiveLanesData = {
   source: string;
+  stateful: boolean;
   lanes: ActiveLane[];
 };
 
@@ -1421,6 +1423,8 @@ export type ClientCredentialRotateData = {
   bearer_shown_once: boolean;
   closed_principal: ClientCredentialLifecycle;
   closed_sessions: number;
+  durability: "durable" | "reconciled_after_write_error";
+  durability_warning?: string | null;
   redaction: string;
 };
 
@@ -1430,6 +1434,8 @@ export type ClientCredentialRevokeData = {
   client?: ClientCredentialView | null;
   closed_principal: ClientCredentialLifecycle;
   closed_sessions: number;
+  durability: "durable" | "reconciled_after_write_error";
+  durability_warning?: string | null;
   redaction: string;
 };
 
@@ -2153,16 +2159,7 @@ export async function fetchAuditTail(
     params.set("export", "proof-bundle");
   }
   const suffix = params.toString();
-  const response = await fetch(`/operator/v1/audit-tail${suffix ? `?${suffix}` : ""}`, {
-    headers: { accept: "application/json" },
-    cache: "no-store",
-    credentials: "same-origin"
-  });
-  const parsed = (await response.json()) as unknown;
-  if (!response.ok) {
-    throw new Error(errorMessage(parsed, response.status));
-  }
-  return parsed as OperatorResponse<AuditTailData>;
+  return operatorGet(`/operator/v1/audit-tail${suffix ? `?${suffix}` : ""}`);
 }
 
 // ── Policy narrowing (Arc N) ─────────────────────────────────────────────────
@@ -2654,10 +2651,19 @@ export type UndoOutcome = {
   discardedStatements: number | null;
 };
 
-/** The MCP tool payload an operator action wraps. */
+/**
+ * The structured MCP tool payload an operator action wraps.
+ *
+ * `/operator/v1/actions/*` preserves the JSON-RPC response under
+ * `mcp_response`; successful and tool-error payloads both live at
+ * `result.structuredContent`. Keep this extraction narrow so a malformed or
+ * undocumented envelope fails soft to `null` instead of being mistaken for a
+ * real tool result.
+ */
 function mcpPayload(data: WorkbenchActionData | null | undefined): Record<string, unknown> | null {
-  const response = data?.mcp_response;
-  return response && typeof response === "object" ? (response as Record<string, unknown>) : null;
+  const response = recordValue(data?.mcp_response);
+  const result = recordValue(response?.["result"]);
+  return recordValue(result?.["structuredContent"]);
 }
 
 export function parseWorkspaceView(data: WorkbenchActionData | null): WorkspaceView | null {
@@ -3004,17 +3010,13 @@ export function parseVerdictProofs(data: AuditTailData | null): VerdictProofData
   return { source: "self_lane", uncertified, proofs };
 }
 
-export async function fetchVerdictProofs(
-  filters: AuditTailFilters
-): Promise<OperatorResponse<VerdictProofData>> {
-  const response = await fetchAuditTail(filters);
-  return { ...response, data: parseVerdictProofs(response.data) };
-}
-
 // Per-path conditional-request cache. A polled GET revalidates with the
 // last-seen ETag; an unchanged endpoint answers 304 and we reuse the cached,
 // referentially-stable response so React skips re-rendering.
 const operatorGetCache = new Map<string, { etag: string; value: unknown }>();
+
+const MAX_OPERATOR_ERROR_BODY_BYTES = 16 * 1024;
+const MAX_OPERATOR_ERROR_DETAIL_CHARS = 512;
 
 async function operatorGet<T extends Record<string, unknown>>(
   path: string
@@ -3032,7 +3034,7 @@ async function operatorGet<T extends Record<string, unknown>>(
   if (response.status === 304 && cached) {
     return cached.value as OperatorResponse<T>;
   }
-  const parsed = (await response.json()) as unknown;
+  const parsed = await parseOperatorHttpResponse(response);
   const result = requireSuccessfulOperatorResponse<T>(response.status, parsed);
   const etag = response.headers.get("etag");
   if (etag) {
@@ -3131,8 +3133,100 @@ async function operatorPost<T extends Record<string, unknown>>(
     credentials: "same-origin",
     body: JSON.stringify(body)
   });
-  const parsed = (await response.json()) as unknown;
+  const parsed = await parseOperatorHttpResponse(response);
   return requireSuccessfulOperatorResponse<T>(response.status, parsed);
+}
+
+/**
+ * Decode an operator response without leaking a raw `Response.json()` syntax
+ * error when a proxy or failed server returns HTML, plain text, or no body.
+ * Successful operator payloads retain the normal JSON path. Error bodies are
+ * read through a byte cap because their contents are untrusted diagnostics,
+ * not API data.
+ */
+async function parseOperatorHttpResponse(response: Response): Promise<unknown> {
+  if (response.ok) {
+    try {
+      return (await response.json()) as unknown;
+    } catch {
+      return {
+        error: "invalid_operator_response",
+        message: `operator returned an empty or non-JSON response with HTTP ${response.status}`
+      };
+    }
+  }
+
+  const { text, truncated } = await boundedResponseText(
+    response,
+    MAX_OPERATOR_ERROR_BODY_BYTES
+  );
+  const trimmed = text.trim();
+  if (trimmed) {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (recordValue(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // Fall through to a bounded plain-text diagnostic.
+    }
+  }
+
+  const normalized = trimmed.replace(/\s+/g, " ").slice(0, MAX_OPERATOR_ERROR_DETAIL_CHARS);
+  const statusDetail = response.statusText.trim();
+  const detail = normalized || statusDetail || "empty response";
+  return {
+    error: "operator_http_error",
+    message: `operator request failed with HTTP ${response.status}: ${detail}${truncated ? " [truncated]" : ""}`
+  };
+}
+
+async function boundedResponseText(
+  response: Response,
+  maxBytes: number
+): Promise<{ text: string; truncated: boolean }> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    return { text: "", truncated: false };
+  }
+
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  let truncated = false;
+  while (true) {
+    const next = await reader.read();
+    if (next.done) {
+      break;
+    }
+    const remaining = maxBytes - bytes;
+    if (next.value.byteLength > remaining) {
+      if (remaining > 0) {
+        chunks.push(next.value.subarray(0, remaining));
+        bytes += remaining;
+      }
+      truncated = true;
+      await reader.cancel().catch(() => undefined);
+      break;
+    }
+    chunks.push(next.value);
+    bytes += next.value.byteLength;
+    if (bytes === maxBytes) {
+      const beyondLimit = await reader.read();
+      truncated = !beyondLimit.done;
+      if (truncated) {
+        await reader.cancel().catch(() => undefined);
+      }
+      break;
+    }
+  }
+
+  const combined = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { text: new TextDecoder().decode(combined), truncated };
 }
 
 function requireSuccessfulOperatorResponse<T extends Record<string, unknown>>(

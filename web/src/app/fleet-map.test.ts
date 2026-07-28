@@ -11,7 +11,11 @@ import { parseFleetMap, type WorkbenchActionData } from "./operator-client";
 const action = (mcp: Record<string, unknown>): WorkbenchActionData => ({
   status: "ok",
   mcp_tool: "oracle_orient",
-  mcp_response: mcp
+  mcp_response: {
+    jsonrpc: "2.0",
+    id: "operator-v1",
+    result: { isError: false, structuredContent: mcp }
+  }
 });
 
 const FLEET = {
