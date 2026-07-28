@@ -1294,6 +1294,31 @@ mod tests {
         }
     }
 
+    fn wait_for_blocked_outage(started: &AtomicBool) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !started.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "background Rekor worker did not reach the gated submitter"
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn open_outage_gate(gate: &Arc<(StdMutex<bool>, Condvar)>) {
+        let (lock, wake) = &**gate;
+        *lock.lock().expect("test gate lock") = true;
+        wake.notify_all();
+    }
+
+    struct OutageGateRelease(Arc<(StdMutex<bool>, Condvar)>);
+
+    impl Drop for OutageGateRelease {
+        fn drop(&mut self) {
+            open_outage_gate(&self.0);
+        }
+    }
+
     #[test]
     fn outage_enqueue_returns_without_waiting_for_the_background_submitter() {
         let started = Arc::new(AtomicBool::new(false));
@@ -1306,19 +1331,19 @@ mod tests {
             1,
         )
         .expect("worker starts");
+        let _release = OutageGateRelease(Arc::clone(&gate));
 
-        let began = Instant::now();
         anchor.enqueue(head());
-        assert!(
-            began.elapsed() < Duration::from_millis(50),
-            "enqueue must not wait for a Rekor outage"
-        );
-        while !started.load(Ordering::Acquire) {
-            thread::yield_now();
-        }
-        let (lock, wake) = &*gate;
-        *lock.lock().expect("test gate lock") = true;
-        wake.notify_all();
+        wait_for_blocked_outage(&started);
+
+        // The submitter cannot finish until this test opens the gate. Observing
+        // the accepted head while that gate is still closed proves enqueue did
+        // not wait for the outage, without a scheduler-sensitive stopwatch.
+        let status = anchor.status();
+        assert_eq!(status.enqueued, 1);
+        assert_eq!(status.anchored, 0);
+        assert_eq!(status.failed, 0);
+        open_outage_gate(&gate);
     }
 
     #[test]
@@ -1333,6 +1358,8 @@ mod tests {
             1,
         )
         .expect("worker starts");
+        let status_anchor = anchor.clone();
+        let _release = OutageGateRelease(Arc::clone(&gate));
         let auditor = Auditor::new(
             Box::new(MemoryAuditSink::new()),
             SigningKey::new("test", b"0123456789abcdef0123456789abcdef".to_vec())
@@ -1352,27 +1379,20 @@ mod tests {
             outcome: AuditOutcome::Pending,
         };
 
-        let began = Instant::now();
         let record = auditor
             .append(&draft, "t0".to_owned(), true)
             .expect("durable append must not depend on Rekor availability");
-        assert!(
-            began.elapsed() < Duration::from_millis(250),
-            "a Rekor outage must not delay a durable audit append"
-        );
         assert_eq!(record.seq, 1);
 
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while !started.load(Ordering::Acquire) {
-            assert!(
-                Instant::now() < deadline,
-                "background Rekor worker did not receive the durable head"
-            );
-            thread::yield_now();
-        }
-        let (lock, wake) = &*gate;
-        *lock.lock().expect("test gate lock") = true;
-        wake.notify_all();
+        wait_for_blocked_outage(&started);
+        // The record is already durable while the external submitter is
+        // provably unable to complete. That is the safety property; elapsed
+        // wall time only measured CI runner contention.
+        let status = status_anchor.status();
+        assert_eq!(status.enqueued, 1);
+        assert_eq!(status.anchored, 0);
+        assert_eq!(status.failed, 0);
+        open_outage_gate(&gate);
     }
 
     fn hex_of(value: [u8; 32]) -> String {
