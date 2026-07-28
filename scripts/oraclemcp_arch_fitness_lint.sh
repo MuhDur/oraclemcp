@@ -51,7 +51,7 @@ check_max_file_size_ratchet() {
   declare -A path_limits=(
     [crates/oraclemcp/src/dispatch/tests.rs]=15605
     [crates/oraclemcp/src/dispatch/mod.rs]=15152
-    [web/src/app/App.tsx]=9708
+    [web/src/app/App.tsx]=9195
     [crates/oraclemcp-db/src/connection.rs]=8812
     [crates/oraclemcp-guard/src/classifier.rs]=7678
     [crates/oraclemcp/src/main.rs]=7249
@@ -61,7 +61,7 @@ check_max_file_size_ratchet() {
     [crates/oraclemcp/src/service_lifecycle/service_units.rs]=97
     [crates/oraclemcp-core/src/lane.rs]=5510
     [crates/oraclemcp/src/main_tests.rs]=4690
-    [crates/oraclemcp-core/src/http/tests_operator.rs]=4452
+    [crates/oraclemcp-core/src/http/tests_operator.rs]=4337
     [crates/oraclemcp-db/src/intelligence.rs]=4425
     [crates/oraclemcp-audit/src/record.rs]=4334
     [crates/oraclemcp-core/src/http/operator.rs]=4092

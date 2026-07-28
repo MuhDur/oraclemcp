@@ -303,6 +303,7 @@ fn malicious_page_cannot_trigger_dashboard_gated_action() {
     );
     let cfg = HttpTransportConfig {
         dashboard_auth: Some(Arc::clone(&auth)),
+        dashboard_workbench: true,
         operator_auditor: Some(auditor),
         ..Default::default()
     };

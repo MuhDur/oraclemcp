@@ -15,6 +15,7 @@
     "sbom": "bash ../scripts/release_sbom_check.sh --generate-dashboard dist/oraclemcp-dashboard.cyclonedx.json",
     "test": "vitest run",
     "test:e2e": "playwright test --config playwright.config.ts",
+    "test:e2e:dashboard": "playwright test e2e/test-attestation-verifier.spec.ts --config playwright.config.ts",
     "contract": "npm run build && vitest run",
     "check": "tsc --noEmit && npm run build && vitest run"
   },

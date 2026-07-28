@@ -815,9 +815,13 @@ fn uniform_auth_errors_no_enumeration_oracle() {
         auth_fingerprint(&missing_pairing)
     );
     assert_eq!(
-        response_json(&missing_pairing)["error"],
-        serde_json::json!("dashboard_pairing_required")
+        missing_pairing.header("content-type"),
+        Some("text/html; charset=utf-8")
     );
+    let pairing_error = String::from_utf8_lossy(&missing_pairing.body);
+    assert!(pairing_error.contains("role=\"alert\""));
+    assert!(pairing_error.contains("invalid, expired, or already used"));
+    assert!(pairing_error.contains("aria-invalid=\"true\""));
 
     let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
         .expect("ticket mints");

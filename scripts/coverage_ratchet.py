@@ -46,12 +46,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SRC_FILE_RE = re.compile(r"^crates/(?P<crate>[^/]+)/src/.+\.rs$")
 # `#[cfg(test)]` test-module files live under src/ by Rust convention (a sibling
-# `tests.rs` module file, or files inside a `tests/` submodule directory). They
+# `tests.rs` / `tests_*.rs` / `*_tests.rs` module, or files in a `tests/` directory). They
 # are TEST CODE, not product source: llvm-cov emits no lcov records for them and
 # has no --include-tests flag, so demanding a coverage record for a changed test
 # module is a category error that fails closed on non-instrumentable code. Skip
 # exactly those; every real product .rs still fails closed on a missing record.
-TEST_MODULE_RE = re.compile(r"^crates/[^/]+/src/(?:.+/)?tests(?:\.rs$|/.+\.rs$)")
+TEST_MODULE_RE = re.compile(
+    r"^crates/[^/]+/src/(?:.+/)?(?:tests(?:_[^/]+)?\.rs|[^/]+_tests\.rs|tests/.+\.rs)$"
+)
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,(?P<count>\d+))? @@")
 # Stricter floor + review notice for the fail-closed safety core (plan
 # §30.2 item 2: "per-crate mutation floor on guard/audit/db"; the same
@@ -289,6 +291,8 @@ end_of_record
     for tm_path in (
         "crates/oraclemcp/src/dispatch/tests.rs",
         "crates/oraclemcp/src/dispatch/tests/qa106_uncertain_read_ownership.rs",
+        "crates/oraclemcp-core/src/http/tests_operator_workbench.rs",
+        "crates/oraclemcp/src/main_tests.rs",
     ):
         tm_diff = f"+++ b/{tm_path}\n@@ -1,0 +5,1 @@\n+    fn added_test() {{}}\n"
         ok, lines = evaluate(tm_diff, "", 80.0, 90.0, file_exists=exists)
