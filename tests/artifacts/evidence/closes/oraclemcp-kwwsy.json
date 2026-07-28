@@ -1,10 +1,10 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-07-28T04:29:07Z",
+  "generated_at": "2026-07-28T07:25:25Z",
   "bead_id": "oraclemcp-kwwsy",
   "scope": {
-    "summary": "Reoriented the browser operator dashboard around governed Oracle workflows, removed all routed repository-development surfaces and the Orrery implementation/dependencies/wiring, repaired pairing visibility and recovery, and tightened browser action gates and UI truthfulness.",
+    "summary": "Reoriented the browser operator dashboard around governed Oracle workflows, removed routed repository-development surfaces and the Orrery implementation/dependencies/wiring, repaired pairing visibility and recovery, tightened browser action gates and UI truthfulness, and repaired every regression exposed by the full hosted CI gate.",
     "in_scope": [
       "web",
       "crates/oraclemcp-core/src/change_proposal.rs",
@@ -18,16 +18,20 @@
       "docs/tns-discovery-onboarding.md",
       "docs/upgrading-to-0.6.0.md",
       "oraclemcp.example.toml",
-      "scripts/dashboard_skin_lint.sh"
+      "scripts/dashboard_skin_lint.sh",
+      ".github/workflows/ci.yml",
+      "crates/oraclemcp-guard/src/classifier.rs",
+      "scripts/coverage_ratchet.py",
+      "scripts/oraclemcp_arch_fitness_lint.sh"
     ],
     "out_of_scope": [
-      "live Oracle database qualification",
-      "whole-workspace Rust clippy/test/deny qualification",
+      "production Oracle services and versions beyond the hosted Oracle FREE 23ai lane",
+      "a live browser-to-Oracle pairing/action/SSE run against an operator-supplied database",
       "maintainer-only CI-lane API support for external library embedders"
     ]
   },
   "source": {
-    "sha": "084ab1d6d7d054fad52745cd117623a0643b5509",
+    "sha": "ed362594cad77298eea4784d8fd704f2b73d9d24",
     "tree_clean": true,
     "branch": "main"
   },
@@ -37,31 +41,37 @@
       {
         "name": "oraclemcp dashboard pairing form and one-time handshake",
         "kind": "cli",
-        "trace": "cargo test -p oraclemcp-core dashboard_pairing: 6 passed; pairing form tests cover secure cookies, query-secret refusal, null-Origin refusal, and one-time code handling."
+        "trace": "The final cargo test --workspace --all-targets gate passed, including the pairing form, uniform pairing-error HTML, one-time handshake, browser-origin, Workbench fail-closed, and quoted-source identity tests."
       },
       {
         "name": "served dashboard end-user routes and browser Workbench release gate",
         "kind": "route",
-        "trace": "cd web && npm run check passed TypeScript, production build/SBOM/bundle checks, and 160 tests; npm run test:e2e passed 3 shipped-dashboard browser flows with 2 explicitly live-server-gated skips."
+        "trace": "With Node 22.17.0 and npm 10.9.4 after npm ci, npm run check passed TypeScript, production build/SBOM/bundle checks, 20 test files and 160 tests; npm run test:e2e:dashboard passed all 3 Chromium workflows, and the full e2e command passed those 3 with 2 explicitly live-server-gated skips."
       },
       {
         "name": "browser SQL action policy and change-proposal classification",
         "kind": "route",
-        "trace": "cargo test -p oraclemcp-core dashboard_workbench: 4 passed; status gate propagation tests passed; classifier/unit mismatch test passed."
+        "trace": "The final pinned and floating-nightly workspace all-target tests passed. The classifier regression suite pins comment-tolerant EDITIONABLE/NONEDITIONABLE stored-unit prefixes at DDL while edition-qualified VIEW stays pure DDL and dangerous bodies remain Forbidden."
       },
       {
-        "name": "dashboard source-level acceptance contracts",
+        "name": "full local and hosted qualification",
         "kind": "cli",
-        "trace": "cargo test -p oraclemcp --test dashboard_e2e: 12 passed; dashboard skin lint, sensitive-data lint, cargo fmt check, and oraclemcp honesty grep passed."
+        "trace": "Local fmt, workspace clippy -D warnings, workspace all-target tests, cargo deny, architecture fitness, honesty, workflow supply-chain, dashboard bundle, and changed-line coverage gates passed. Coverage against d90bd808204726acd699982aec465fc490af8d1a was oraclemcp 1/1 (100.0%), core 91/92 (98.9%), and guard 35/35 (100.0%); the mutation leg was explicitly deferred under the existing train policy, not claimed as passed. Hosted CI run 30336523033 on the exact source SHA completed success with 23/23 jobs and zero failures."
       }
     ]
   },
   "live_evidence": {
-    "claimed": false,
-    "artifacts": []
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "github-actions-ci-run",
+        "path": "tests/artifacts/evidence/live/oraclemcp-kwwsy-ci-30336523033.json",
+        "sha": "ed362594cad77298eea4784d8fd704f2b73d9d24"
+      }
+    ]
   },
   "limitations": [
-    "No live Oracle service was used; this evidence is scoped to browser, source-contract, and focused Rust tests.",
+    "Hosted CI exercised Oracle FREE 23ai and VECTOR smoke, but did not connect the browser dashboard itself to an operator-supplied live Oracle service.",
     "The two Playwright tests that require an explicitly configured live oraclemcp server were skipped; all three self-contained shipped-dashboard browser tests passed.",
     "React Doctor improved from 48 to 74 with no errors and 40 remaining warnings; the two cache-invalidation warnings are on-demand read operations, while the remainder is legacy file-size/export/performance maintainability debt rather than a newly asserted green gate.",
     "Repository Rule 1 forbids deleting a tracked file without an exact deletion command, so web/src/app/orrery-renderer.tsx remains as an inert three-line module; the renderer implementation, imports, dependencies, skin registry, and view-model wiring are absent and lint-gated."
@@ -69,7 +79,7 @@
   "known_defects": [],
   "follow_ups": [],
   "readiness": {
-    "claim": "not-ready",
-    "basis": "scoped-test"
+    "claim": "ready",
+    "basis": "live-evidence"
   }
 }
