@@ -173,6 +173,7 @@ done < <(
     | select(.source == null)
     | .name as $package
     | .dependencies[]
+    | select(.source == null)
     | [$package, .name, (.kind // "normal")]
     | @tsv
   ' <<<"$metadata"
