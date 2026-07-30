@@ -1,0 +1,84 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-30T23:18:34Z",
+  "bead_id": "oraclemcp-driver-cx-oracle-dual-backend-nhteq.2",
+  "scope": {
+    "summary": "Repin oraclemcp to the immutable driver-cx 0.9.2 family and qualify the exact consumer graph at the existing adapter boundary.",
+    "in_scope": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "crates/oraclemcp-db",
+      "crates/oraclemcp-core",
+      "crates/oraclemcp/tests/installer_e2e.rs",
+      "scripts/oraclemcp_driver_seam_lint.sh",
+      "scripts/oraclemcp_arch_fitness_lint.sh",
+      "scripts/release_preflight.sh",
+      "scripts/release_surface_sync_check.sh",
+      ".github/workflows/ci.yml",
+      "README.md",
+      "AGENTS.md",
+      "docs/adr/0001-pinned-nightly-toolchain.md",
+      "docs/adr/0002-driver-adapter-seam.md",
+      "docs/behavior-inventory.md",
+      "docs/operations.md",
+      "docs/toolchain.md",
+      "rust-toolchain.toml",
+      "tests/artifacts/evidence/releases/driver-cx-0.9.2-consumer-receipt.json"
+    ],
+    "out_of_scope": [
+      "Implementing or qualifying Oracle's future Rust driver backend",
+      "Adding automatic cross-driver fallback or changing backend-selection policy",
+      "Transferring crates.io ownership without Oracle's verified crates.io username",
+      "Running live Oracle database lanes",
+      "Changing VPD/RLS or SODA capability policy"
+    ]
+  },
+  "source": {
+    "sha": "4394006b67d973db0e6018a5b98c92cef2c746c4",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "OracleConnection driver-cx adapter",
+        "kind": "api",
+        "trace": "The exact-SHA clean-worktree workspace suite exercised query, execute, LOB, cancellation, quarantine, reuse, wallet/TNS, CQN, and VPD/RLS paths; the driver seam lint confined main-driver calls to crates/oraclemcp-db/src/connection.rs."
+      },
+      {
+        "name": "release dependency gate",
+        "kind": "config-gate",
+        "trace": "The release surface and preflight contracts now require the exact published oraclemcp-driver-cx 0.9.2 family, and the consumer receipt records registry checksums and the resolved graph."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": [
+      {
+        "kind": "registry-consumer-receipt",
+        "path": "tests/artifacts/evidence/releases/driver-cx-0.9.2-consumer-receipt.json",
+        "sha": "4394006b67d973db0e6018a5b98c92cef2c746c4"
+      }
+    ]
+  },
+  "limitations": [
+    "Registry publication was externally verified, but live Oracle behavior is not claimed by this close.",
+    "Oracle's future driver API and Tokio runtime behavior remain separate qualification work.",
+    "The Asupersync nightly feature-unification issue remains tracked separately."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-driver-cx-oracle-dual-backend-nhteq.3",
+    "oraclemcp-driver-cx-oracle-dual-backend-nhteq.4",
+    "oraclemcp-driver-cx-oracle-dual-backend-nhteq.5",
+    "oraclemcp-driver-cx-oracle-dual-backend-nhteq.6",
+    "oraclemcp-yi2z"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

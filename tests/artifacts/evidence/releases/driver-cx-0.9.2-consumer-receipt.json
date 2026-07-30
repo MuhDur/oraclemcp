@@ -1,0 +1,98 @@
+{
+  "schema": "driver-cx-consumer-receipt/v1",
+  "generated_at": "2026-07-30T23:18:34Z",
+  "repository": "oraclemcp",
+  "source": {
+    "sha": "4394006b67d973db0e6018a5b98c92cef2c746c4",
+    "branch": "main",
+    "clean_worktree": "/home/durakovic/projects/oraclemcp-drivercx-evidence-4394006b",
+    "tree_clean": true
+  },
+  "driver_release": {
+    "version": "0.9.2",
+    "tag": "v0.9.2",
+    "source_sha": "2d8d3257cfca13b47c72a4ca9e21f8d684e9eadc",
+    "github_release_workflow_run": 30584920482,
+    "github_release_workflow_conclusion": "success",
+    "crates": [
+      {
+        "name": "oraclemcp-driver-cx",
+        "checksum": "8aaaa3ead5f0244103960b5f817fdac23a6b3ebdab8a2ecf50965ef50b86fdc4",
+        "resolved_in_server_lock": true
+      },
+      {
+        "name": "oraclemcp-driver-cx-protocol",
+        "checksum": "5538d814d0e009aebb614bc04679aa96054022ceed754d959fe015f16c3338ca",
+        "resolved_in_server_lock": true
+      },
+      {
+        "name": "oraclemcp-driver-cx-derive",
+        "checksum": "986bb4fb1bc1f3c0e588d636fca5d8ea37742964063c4aece392aedff333e032",
+        "resolved_in_server_lock": false,
+        "note": "Published and verified, but intentionally absent from the server graph because the exact driver dependency disables default features."
+      }
+    ],
+    "docs_rs_builds": [3995622, 3995623, 3995655],
+    "docs_rs_conclusion": "success"
+  },
+  "consumer_graph": {
+    "oraclemcp-driver-cx": "0.9.2",
+    "oraclemcp-driver-cx-protocol": "0.9.2",
+    "asupersync": "0.3.9",
+    "tokio_present": false,
+    "legacy_oracledb_package_present": false,
+    "legacy_oracledb_protocol_package_present": false
+  },
+  "verification": [
+    {
+      "command": "cargo test --workspace",
+      "location": "/home/durakovic/projects/oraclemcp-drivercx-evidence-4394006b",
+      "result": "pass",
+      "bounded_timeout_seconds": 900
+    },
+    {
+      "command": "cargo fmt --all -- --check",
+      "location": "/home/durakovic/projects/oraclemcp-drivercx-evidence-4394006b",
+      "result": "pass"
+    },
+    {
+      "command": "scripts/oraclemcp_driver_seam_lint.sh",
+      "location": "/home/durakovic/projects/oraclemcp-drivercx-evidence-4394006b",
+      "result": "pass"
+    },
+    {
+      "command": "scripts/release_surface_sync_check.sh",
+      "location": "/home/durakovic/projects/oraclemcp-drivercx-evidence-4394006b",
+      "result": "pass"
+    },
+    {
+      "command": "cargo tree -p oraclemcp --edges normal",
+      "location": "/home/durakovic/projects/oraclemcp-drivercx-evidence-4394006b",
+      "result": "pass: exact driver-cx family present; Tokio and legacy packages absent"
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "location": "/home/durakovic/projects/oraclemcp",
+      "result": "pass before commit against the committed source bytes"
+    },
+    {
+      "command": "cargo deny check",
+      "location": "/home/durakovic/projects/oraclemcp",
+      "result": "pass before commit against the committed dependency graph"
+    }
+  ],
+  "focused_coverage": {
+    "database_library_tests": "450 passed",
+    "driver_contract_tests": "25 passed",
+    "cancellation_tests": "passed",
+    "wallet_and_tcps_tests": "passed",
+    "cqn_tests": "passed",
+    "vpd_rls_visibility_test": "passed",
+    "query_execute_lob_quarantine_and_session_reuse": "covered by the database and workspace suites"
+  },
+  "limitations": [
+    "No live Oracle database lane was claimed or run for this consumer repin.",
+    "This receipt does not qualify or implement Oracle's future Rust driver backend.",
+    "The driver-cx dependency still enables Asupersync's default nightly outcome feature through Cargo feature unification; the server remains on its pinned nightly toolchain."
+  ]
+}
