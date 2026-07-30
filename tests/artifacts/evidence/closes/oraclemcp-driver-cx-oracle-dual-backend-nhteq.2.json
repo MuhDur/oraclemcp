@@ -1,7 +1,7 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-07-30T23:18:34Z",
+  "generated_at": "2026-07-30T23:32:09Z",
   "bead_id": "oraclemcp-driver-cx-oracle-dual-backend-nhteq.2",
   "scope": {
     "summary": "Repin oraclemcp to the immutable driver-cx 0.9.2 family and qualify the exact consumer graph at the existing adapter boundary.",
@@ -34,7 +34,7 @@
     ]
   },
   "source": {
-    "sha": "4394006b67d973db0e6018a5b98c92cef2c746c4",
+    "sha": "9f21829d4d7348c52c222cca2de3680b7dce49b4",
     "tree_clean": true,
     "branch": "main"
   },
@@ -44,7 +44,7 @@
       {
         "name": "OracleConnection driver-cx adapter",
         "kind": "api",
-        "trace": "The exact-SHA clean-worktree workspace suite exercised query, execute, LOB, cancellation, quarantine, reuse, wallet/TNS, CQN, and VPD/RLS paths; the driver seam lint confined main-driver calls to crates/oraclemcp-db/src/connection.rs."
+        "trace": "The corrected exact-SHA clean-worktree workspace suite exercised query, execute, LOB, cancellation, quarantine, reuse, wallet/TNS, CQN, and VPD/RLS paths; the driver seam lint confined main-driver calls to crates/oraclemcp-db/src/connection.rs."
       },
       {
         "name": "release dependency gate",
@@ -59,7 +59,7 @@
       {
         "kind": "registry-consumer-receipt",
         "path": "tests/artifacts/evidence/releases/driver-cx-0.9.2-consumer-receipt.json",
-        "sha": "4394006b67d973db0e6018a5b98c92cef2c746c4"
+        "sha": "9f21829d4d7348c52c222cca2de3680b7dce49b4"
       }
     ]
   },

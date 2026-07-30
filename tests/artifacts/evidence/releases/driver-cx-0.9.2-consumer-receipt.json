@@ -1,9 +1,9 @@
 {
   "schema": "driver-cx-consumer-receipt/v1",
-  "generated_at": "2026-07-30T23:18:34Z",
+  "generated_at": "2026-07-30T23:32:09Z",
   "repository": "oraclemcp",
   "source": {
-    "sha": "4394006b67d973db0e6018a5b98c92cef2c746c4",
+    "sha": "9f21829d4d7348c52c222cca2de3680b7dce49b4",
     "branch": "main",
     "clean_worktree": "/home/durakovic/projects/oraclemcp-drivercx-evidence-4394006b",
     "tree_clean": true
@@ -61,6 +61,11 @@
       "result": "pass"
     },
     {
+      "command": "scripts/oraclemcp_arch_fitness_lint.sh",
+      "location": "/home/durakovic/projects/oraclemcp-drivercx-evidence-4394006b",
+      "result": "pass: registry driver-cx packages are excluded by Cargo metadata source while workspace dependency direction remains enforced"
+    },
+    {
       "command": "scripts/release_surface_sync_check.sh",
       "location": "/home/durakovic/projects/oraclemcp-drivercx-evidence-4394006b",
       "result": "pass"
@@ -81,6 +86,18 @@
       "result": "pass before commit against the committed dependency graph"
     }
   ],
+  "hosted_correction": {
+    "initial_ci_run": 30590241849,
+    "initial_source_sha": "e5ba1bf3f17fd03fabe3cfed792e46764c90f8ee",
+    "initial_conclusion": "failure",
+    "failed_jobs": [
+      "engine-free boundary + surface + driver-seam + honesty + conformance accounting",
+      "release metadata sync"
+    ],
+    "root_cause": "The architecture lint treated every dependency whose name began with oraclemcp as a workspace crate, including the newly published registry driver-cx packages.",
+    "targeted_fix_sha": "9f21829d4d7348c52c222cca2de3680b7dce49b4",
+    "targeted_fix": "Filter Cargo metadata dependencies to source == null before applying the workspace inward-dependency allowlist."
+  },
   "focused_coverage": {
     "database_library_tests": "450 passed",
     "driver_contract_tests": "25 passed",
