@@ -23,8 +23,7 @@
       "docs/behavior-inventory.md",
       "docs/operations.md",
       "docs/toolchain.md",
-      "rust-toolchain.toml",
-      "tests/artifacts/evidence/releases/driver-cx-0.9.2-consumer-receipt.json"
+      "rust-toolchain.toml"
     ],
     "out_of_scope": [
       "Implementing or qualifying Oracle's future Rust driver backend",
