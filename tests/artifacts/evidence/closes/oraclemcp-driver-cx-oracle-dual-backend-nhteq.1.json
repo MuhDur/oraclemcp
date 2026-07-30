@@ -6,11 +6,7 @@
   "scope": {
     "summary": "Persist the dual-driver contract at the OracleConnection boundary without weakening oraclemcp safety policy.",
     "in_scope": [
-      "driver-cx as the default pure-Rust, Tokio-free, Asupersync Cx backend",
-      "Oracle's driver as a separately qualified and explicitly selected backend",
-      "Capability reporting, connection ownership, cancellation, quarantine, transaction cleanup, and no-cross-driver-fallback requirements",
-      "Fail-closed classifier, elevation, protected-profile, OAuth, rollback, and audit invariants above both backends",
-      "Direct driver-cx protocol utility inventory for wallet inspection, wallet handling, and TNS parsing"
+      "docs/adr/0002-driver-adapter-seam.md"
     ],
     "out_of_scope": [
       "Publishing or repinning the driver-cx crate family",
@@ -26,8 +22,13 @@
   },
   "proofs": [],
   "integration_evidence": {
-    "entry_points": [],
-    "entry_points_excluded_reason": "architecture-decision-no-runtime-surface"
+    "entry_points": [
+      {
+        "name": "OracleConnection backend architecture contract",
+        "kind": "config-gate",
+        "trace": "ADR 0002 names driver-cx as the default Cx-native backend, requires separate qualification and explicit selection for Oracle's driver, prohibits automatic cross-driver fallback, defines connection/cancellation/cleanup ownership, preserves fail-closed policy above both backends, and inventories the direct wallet/TNS protocol utility paths."
+      }
+    ]
   },
   "live_evidence": {
     "claimed": false,
