@@ -1,0 +1,52 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-07-30T21:36:58Z",
+  "bead_id": "oraclemcp-driver-cx-oracle-dual-backend-nhteq.1",
+  "scope": {
+    "summary": "Persist the dual-driver contract at the OracleConnection boundary without weakening oraclemcp safety policy.",
+    "in_scope": [
+      "driver-cx as the default pure-Rust, Tokio-free, Asupersync Cx backend",
+      "Oracle's driver as a separately qualified and explicitly selected backend",
+      "Capability reporting, connection ownership, cancellation, quarantine, transaction cleanup, and no-cross-driver-fallback requirements",
+      "Fail-closed classifier, elevation, protected-profile, OAuth, rollback, and audit invariants above both backends",
+      "Direct driver-cx protocol utility inventory for wallet inspection, wallet handling, and TNS parsing"
+    ],
+    "out_of_scope": [
+      "Publishing or repinning the driver-cx crate family",
+      "Qualifying or implementing Oracle's driver",
+      "Adding backend selection configuration or changing the default backend",
+      "Running live database tests"
+    ]
+  },
+  "source": {
+    "sha": "5f9e2c8b360c2afaa9251ac9e3935e824845cf0f",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "architecture-decision-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Oracle's driver API and runtime contract are not yet available for qualification; bead oraclemcp-driver-cx-oracle-dual-backend-nhteq.3 owns that evidence.",
+    "The driver-cx repin remains gated on the renamed 0.9.2 crate family being published and consumer-visible."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-driver-cx-oracle-dual-backend-nhteq.2",
+    "oraclemcp-driver-cx-oracle-dual-backend-nhteq.3",
+    "oraclemcp-driver-cx-oracle-dual-backend-nhteq.4",
+    "oraclemcp-driver-cx-oracle-dual-backend-nhteq.5",
+    "oraclemcp-driver-cx-oracle-dual-backend-nhteq.6"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
