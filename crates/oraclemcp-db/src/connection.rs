@@ -1,5 +1,5 @@
 //! The backend-independent [`OracleConnection`] trait and the thin
-//! [`oracledb`]-backed [`RustOracleConnection`].
+//! `oraclemcp-driver-cx`-backed [`RustOracleConnection`].
 //!
 //! The trait is `async` and `Cx`-first (B1): every method takes an explicit
 //! `&asupersync::Cx`, so cancellation and the deadline/budget travel with the
@@ -9,20 +9,20 @@
 //! # Driver-adapter seam (B2; plan §8 release gate)
 //!
 //! This file is **the adapter** — the single, enforced isolation boundary for
-//! the `oracledb` driver. Every real `oracledb::` call (connect, the
+//! the `oraclemcp-driver-cx` driver. Every real `oraclemcp_driver_cx::` call (connect, the
 //! `execute_raw` execute path, fetch, LOB, REF CURSOR, auth, commit/rollback,
 //! ping, error sanitization) lives here and nowhere else. The rest of the
 //! workspace talks to Oracle exclusively through the [`OracleConnection`] trait
 //! and the `oraclemcp-db` public surface; no other crate or module names an
-//! `oracledb::` path. References to `oracledb` elsewhere are intentionally only
+//! `oraclemcp_driver_cx::` path. References elsewhere are intentionally only
 //! doc-links and human-readable driver descriptions (no driver calls).
 //!
-//! Isolating the driver here meant the `oracledb` 0.2.2 -> 0.5.x cut-over touched
+//! Isolating the driver here meant the 0.2.2 -> 0.5.x cut-over touched
 //! exactly this one file: the removed `execute_query*` initial-execute family
 //! collapsed onto the retained low-level `Connection::execute_raw` (same
 //! `QueryResult`, same prefetch + optional per-call timeout, still composing with
 //! the fetch primitives below); `QueryValue`/`BindValue` became
-//! `#[non_exhaustive]`; and `oracledb::ConnectOptions` field reads moved to
+//! `#[non_exhaustive]`; and `oraclemcp_driver_cx::ConnectOptions` field reads moved to
 //! getters. Error classification stays string-based
 //! (`oraclemcp_error::parse_ora_code`) and the driver `Error` type is consumed
 //! generically via [`Display`](std::fmt::Display) in `sanitize_driver_error`, so
@@ -32,12 +32,12 @@
 //!
 //! The seam is mechanically enforced two ways, both of which must keep passing:
 //! - `scripts/oraclemcp_driver_seam_lint.sh` (wired into `.github/workflows/ci.yml`)
-//!   fails if an `oracledb::` driver path appears outside this file.
+//!   fails if an `oraclemcp_driver_cx::` driver path appears outside this file.
 //! - the `driver_seam` test module below greps the crate sources for the same
 //!   invariant, so `cargo test` catches a leak even without the shell script.
 //!
 //! Both enforcers share one allowlist: this file is the only adapter site. If a
-//! new legitimate `oracledb::` site is ever needed, it must be added to both the
+//! new legitimate `oraclemcp_driver_cx::` site is ever needed, it must be added to both the
 //! shell lint's `ADAPTER_ALLOWLIST` and the test's `ADAPTER_ALLOWLIST`, with an
 //! inline justification.
 
@@ -167,14 +167,14 @@ pub trait CqnNotificationReceiver {
     async fn next_notification(&mut self, cx: &Cx) -> Result<CqnNotificationOutcome, DbError>;
 }
 
-/// The pinned thin `oracledb` driver's own version string, read from the driver
-/// crate's [`oracledb::VERSION`] const (its `CARGO_PKG_VERSION`, resolved at the
+/// The pinned thin `oraclemcp-driver-cx` driver's own version string, read from the driver
+/// crate's [`oraclemcp_driver_cx::VERSION`] const (its `CARGO_PKG_VERSION`, resolved at the
 /// driver's compile). Re-exported from this adapter — the ONE seam allowed to
-/// name an `oracledb::` path — so consumers (e.g. `oraclemcp doctor`'s trio-stack
+/// name an `oraclemcp_driver_cx::` path — so consumers (e.g. `oraclemcp doctor`'s trio-stack
 /// provenance) can report the *driver's* version without reaching for
 /// `env!("CARGO_PKG_VERSION")`, which would resolve to the wrong crate. Because
-/// the whole workspace pins `oracledb = "=0.9.1"`, this is `"0.9.1"`.
-pub const DRIVER_VERSION: &str = oracledb::VERSION;
+/// the whole workspace pins `oraclemcp-driver-cx = "=0.9.2"`, this is `"0.9.2"`.
+pub const DRIVER_VERSION: &str = oraclemcp_driver_cx::VERSION;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ResolvedConnectTarget {
@@ -231,7 +231,7 @@ fn resolve_selected_connect_target(
     opts: &OracleConnectOptions,
 ) -> Result<ResolvedConnectTarget, DbError> {
     let connect_string = resolve_tns_connect_string(opts)?;
-    let descriptor = oracledb_protocol::net::connectstring::parse(&connect_string)
+    let descriptor = oraclemcp_driver_cx_protocol::net::connectstring::parse(&connect_string)
         .map_err(|err| DbError::Connect(err.to_string()))?
         .ok_or_else(|| {
             DbError::Connect(
@@ -255,7 +255,7 @@ fn resolve_selected_connect_target(
 ///
 /// Bare aliases are resolved through `TNS_ADMIN` or the configured wallet
 /// directory first. The connect string is then parsed by the same
-/// `oracledb-protocol` parser used by the pinned driver, and the first usable
+/// `oraclemcp-driver-cx-protocol` parser used by the pinned driver, and the first usable
 /// address supplies the transport protocol. Wallet and certificate settings
 /// are trust material only; they never turn a TCP address into TCPS.
 ///
@@ -270,7 +270,7 @@ pub fn selected_endpoint_uses_tcps(opts: &OracleConnectOptions) -> Result<bool, 
 
 /// The X.509 validity window of a single wallet certificate, in Unix-epoch
 /// seconds (K1; iec3.6.6). Server-owned mirror of the driver's
-/// [`oracledb_protocol::tls::wallet::CertMetadata`] so no driver type crosses
+/// [`oraclemcp_driver_cx_protocol::tls::wallet::CertMetadata`] so no driver type crosses
 /// the adapter seam. Both fields are seconds since 1970-01-01T00:00:00Z (UTC),
 /// the form the certificate's `notBefore`/`notAfter` decode to — plain seconds
 /// keep this trivially comparable against the current time.
@@ -286,8 +286,8 @@ pub struct WalletCertValidity {
 /// wallet directory `dir` and return each certificate's validity window.
 ///
 /// This is the adapter seam for the driver's
-/// [`WalletContents::certificate_metadata()`](oracledb_protocol::tls::wallet::WalletContents::certificate_metadata):
-/// it maps every driver [`CertMetadata`](oracledb_protocol::tls::wallet::CertMetadata)
+/// [`WalletContents::certificate_metadata()`](oraclemcp_driver_cx_protocol::tls::wallet::WalletContents::certificate_metadata):
+/// it maps every driver [`CertMetadata`](oraclemcp_driver_cx_protocol::tls::wallet::CertMetadata)
 /// onto the server-owned [`WalletCertValidity`], so no driver type leaks past
 /// this file. The wallet's own auto-login/primary precedence is honoured — the
 /// first wallet file that parses end to end (`ewallet.pem` → password-bearing
@@ -304,8 +304,8 @@ pub fn wallet_certificate_validity(
     dir: &std::path::Path,
     password: Option<&str>,
 ) -> Vec<WalletCertValidity> {
-    use oracledb_protocol::tls::sso::parse_cwallet_sso;
-    use oracledb_protocol::tls::wallet::{
+    use oraclemcp_driver_cx_protocol::tls::sso::parse_cwallet_sso;
+    use oraclemcp_driver_cx_protocol::tls::wallet::{
         p12_wallet_path, parse_ewallet_p12, parse_ewallet_pem, pem_wallet_path, sso_wallet_path,
     };
 
@@ -345,7 +345,7 @@ pub fn wallet_certificate_validity(
 }
 
 /// Which wallet file in a wallet directory won the precedence chain. Server-owned
-/// mirror of the driver's [`oracledb::WalletFile`] so no driver type crosses the
+/// mirror of the driver's [`oraclemcp_driver_cx::WalletFile`] so no driver type crosses the
 /// adapter seam (iec3.2.35).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -362,7 +362,7 @@ impl WalletFileChoice {
     /// The on-disk file name of this wallet file.
     #[must_use]
     pub fn file_name(self) -> &'static str {
-        use oracledb_protocol::tls::wallet::{
+        use oraclemcp_driver_cx_protocol::tls::wallet::{
             P12_WALLET_FILE_NAME, PEM_WALLET_FILE_NAME, SSO_WALLET_FILE_NAME,
         };
         match self {
@@ -374,7 +374,7 @@ impl WalletFileChoice {
 }
 
 /// The authoritative wallet-precedence outcome the driver's resolver returns
-/// (iec3.2.35). Server-owned mirror of the driver's [`oracledb::WalletResolution`]
+/// (iec3.2.35). Server-owned mirror of the driver's [`oraclemcp_driver_cx::WalletResolution`]
 /// — the drift-free source of truth the doctor's own posture inference is
 /// cross-checked against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,7 +393,7 @@ pub struct WalletResolutionReport {
 }
 
 /// Secret-free class of a wallet-resolution failure (iec3.2.35). Mirrors the
-/// driver's [`oracledb_protocol::tls::wallet::WalletError`] variant that
+/// driver's [`oraclemcp_driver_cx_protocol::tls::wallet::WalletError`] variant that
 /// [`resolve_wallet_choice`] surfaced on the error path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -424,7 +424,7 @@ pub enum WalletResolveError {
 }
 
 /// Resolve which wallet file in `dir` wins the driver's precedence chain, via
-/// the driver's public [`oracledb::resolve_wallet`] (iec3.2.35).
+/// the driver's public [`oraclemcp_driver_cx::resolve_wallet`] (iec3.2.35).
 ///
 /// This is the adapter seam over the driver's own resolver — the same decision a
 /// live connection makes, without the parsed key material. The doctor's offline
@@ -436,22 +436,22 @@ pub enum WalletResolveError {
 ///
 /// Purely offline — the driver's resolver reads and parses the wallet files but
 /// opens no connection. The `Err` path maps the typed driver
-/// [`WalletError`](oracledb_protocol::tls::wallet::WalletError) onto the
+/// [`WalletError`](oraclemcp_driver_cx_protocol::tls::wallet::WalletError) onto the
 /// secret-free [`WalletResolveError`]; no wallet path, password, or key material
 /// is ever surfaced.
 pub fn resolve_wallet_choice(
     dir: &std::path::Path,
     password: Option<&str>,
 ) -> Result<WalletResolutionReport, WalletResolveError> {
-    fn map_file(file: oracledb::WalletFile) -> WalletFileChoice {
+    fn map_file(file: oraclemcp_driver_cx::WalletFile) -> WalletFileChoice {
         match file {
-            oracledb::WalletFile::Pem => WalletFileChoice::Pem,
-            oracledb::WalletFile::P12 => WalletFileChoice::P12,
-            oracledb::WalletFile::Sso => WalletFileChoice::Sso,
+            oraclemcp_driver_cx::WalletFile::Pem => WalletFileChoice::Pem,
+            oraclemcp_driver_cx::WalletFile::P12 => WalletFileChoice::P12,
+            oraclemcp_driver_cx::WalletFile::Sso => WalletFileChoice::Sso,
         }
     }
-    fn map_err(err: &oracledb_protocol::tls::wallet::WalletError) -> WalletResolveError {
-        use oracledb_protocol::tls::wallet::WalletError;
+    fn map_err(err: &oraclemcp_driver_cx_protocol::tls::wallet::WalletError) -> WalletResolveError {
+        use oraclemcp_driver_cx_protocol::tls::wallet::WalletError;
         match err {
             WalletError::FileMissing(_) => WalletResolveError::FileMissing,
             WalletError::Io { .. } => WalletResolveError::Io,
@@ -468,14 +468,14 @@ pub fn resolve_wallet_choice(
         }
     }
 
-    match oracledb::resolve_wallet(dir, password) {
+    match oraclemcp_driver_cx::resolve_wallet(dir, password) {
         Ok(res) => Ok(WalletResolutionReport {
             chosen: map_file(res.chosen),
             attempted_primary: res.attempted_primary.map(map_file),
             fell_through: res.fell_through,
             fallthrough_eligible: res.fallthrough_eligible,
         }),
-        Err(oracledb::Error::Wallet(w)) => Err(map_err(&w)),
+        Err(oraclemcp_driver_cx::Error::Wallet(w)) => Err(map_err(&w)),
         Err(_) => Err(WalletResolveError::Other),
     }
 }
@@ -619,7 +619,7 @@ pub struct DbmsOutput {
 /// public API.
 #[derive(Clone, PartialEq)]
 pub struct OracleRoutineArg {
-    bind: oracledb::protocol::thin::BindValue,
+    bind: oraclemcp_driver_cx::protocol::thin::BindValue,
 }
 
 impl OracleRoutineArg {
@@ -636,7 +636,7 @@ impl OracleRoutineArg {
     #[must_use]
     pub fn output(ora_type_num: u8, csfrm: u8, buffer_size: u32) -> Self {
         Self {
-            bind: oracledb::protocol::thin::BindValue::Output {
+            bind: oraclemcp_driver_cx::protocol::thin::BindValue::Output {
                 ora_type_num,
                 csfrm,
                 buffer_size,
@@ -653,7 +653,7 @@ impl OracleRoutineArg {
     #[must_use]
     pub fn return_output(ora_type_num: u8, csfrm: u8, buffer_size: u32) -> Self {
         Self {
-            bind: oracledb::protocol::thin::BindValue::Output {
+            bind: oraclemcp_driver_cx::protocol::thin::BindValue::Output {
                 ora_type_num,
                 csfrm,
                 buffer_size,
@@ -700,7 +700,7 @@ impl OracleRoutineArg {
         is_return: bool,
     ) -> Self {
         Self {
-            bind: oracledb::protocol::thin::BindValue::ObjectOutput {
+            bind: oraclemcp_driver_cx::protocol::thin::BindValue::ObjectOutput {
                 schema,
                 type_name,
                 oid,
@@ -711,16 +711,16 @@ impl OracleRoutineArg {
         }
     }
 
-    pub(crate) fn into_driver_bind(self) -> oracledb::protocol::thin::BindValue {
+    pub(crate) fn into_driver_bind(self) -> oraclemcp_driver_cx::protocol::thin::BindValue {
         self.bind
     }
 
     fn is_output_bind(&self) -> bool {
         matches!(
             self.bind,
-            oracledb::protocol::thin::BindValue::Output { .. }
-                | oracledb::protocol::thin::BindValue::ReturnOutput { .. }
-                | oracledb::protocol::thin::BindValue::ObjectOutput { .. }
+            oraclemcp_driver_cx::protocol::thin::BindValue::Output { .. }
+                | oraclemcp_driver_cx::protocol::thin::BindValue::ReturnOutput { .. }
+                | oraclemcp_driver_cx::protocol::thin::BindValue::ObjectOutput { .. }
         )
     }
 }
@@ -734,15 +734,21 @@ impl std::fmt::Debug for OracleRoutineArg {
     }
 }
 
-fn oracle_bind_to_driver(bind: &OracleBind) -> oracledb::protocol::thin::BindValue {
+fn oracle_bind_to_driver(bind: &OracleBind) -> oraclemcp_driver_cx::protocol::thin::BindValue {
     match bind {
-        OracleBind::Null => oracledb::protocol::thin::BindValue::Null,
-        OracleBind::String(value) => oracledb::protocol::thin::BindValue::Text(value.clone()),
-        OracleBind::I64(value) => oracledb::protocol::thin::BindValue::Number(value.to_string()),
-        OracleBind::F64(value) => oracledb::protocol::thin::BindValue::BinaryDouble(*value),
-        OracleBind::Bool(value) => {
-            oracledb::protocol::thin::BindValue::Number(if *value { "1" } else { "0" }.to_owned())
+        OracleBind::Null => oraclemcp_driver_cx::protocol::thin::BindValue::Null,
+        OracleBind::String(value) => {
+            oraclemcp_driver_cx::protocol::thin::BindValue::Text(value.clone())
         }
+        OracleBind::I64(value) => {
+            oraclemcp_driver_cx::protocol::thin::BindValue::Number(value.to_string())
+        }
+        OracleBind::F64(value) => {
+            oraclemcp_driver_cx::protocol::thin::BindValue::BinaryDouble(*value)
+        }
+        OracleBind::Bool(value) => oraclemcp_driver_cx::protocol::thin::BindValue::Number(
+            if *value { "1" } else { "0" }.to_owned(),
+        ),
         OracleBind::TimestampTz {
             year,
             month,
@@ -752,7 +758,7 @@ fn oracle_bind_to_driver(bind: &OracleBind) -> oracledb::protocol::thin::BindVal
             second,
             nanosecond,
             offset_minutes,
-        } => oracledb::protocol::thin::BindValue::TimestampTz {
+        } => oraclemcp_driver_cx::protocol::thin::BindValue::TimestampTz {
             year: *year,
             month: *month,
             day: *day,
@@ -828,7 +834,7 @@ pub enum QueryRowStreamStart {
 
 /// Server-owned row stream facade over the driver-owned stream.
 ///
-/// This type deliberately hides `oracledb::OwnedRowStream` outside this file:
+/// This type deliberately hides `oraclemcp_driver_cx::OwnedRowStream` outside this file:
 /// callers get serialized `OracleRow`s and an explicit recovery method, never
 /// the driver stream itself.
 pub struct QueryRowStream {
@@ -918,7 +924,7 @@ impl QueryRowStream {
 /// An async, `Cx`-first Oracle connection (B1).
 ///
 /// Every method is `async` and takes an explicit `&Cx` so cancellation and the
-/// deadline/budget travel with the call: the native-async `oracledb` driver
+/// deadline/budget travel with the call: the native-async driver-cx backend
 /// checkpoints `cx` on every round trip, and this trait adds explicit
 /// before/after `db_checkpoint` boundaries so a cancelled call is mapped to
 /// the timeout-class [`DbError::Cancelled`] and never silently completes.
@@ -1244,7 +1250,7 @@ pub trait OracleConnection: Send + Sync {
 pub(crate) const DBMS_FLASHBACK_DISABLE: &str = "BEGIN DBMS_FLASHBACK.DISABLE; END;";
 
 /// Thin pure-Rust Oracle connection wrapper over the native-async
-/// [`oracledb::Connection`] (B1).
+/// [`oraclemcp_driver_cx::Connection`] (B1).
 ///
 /// The driver connection lives behind an Asupersync [`AsyncMutex`] so its
 /// `&mut self` round trips can be driven by `&self` trait methods while
@@ -1320,7 +1326,7 @@ impl WireLimits {
 }
 
 struct RustOracleConnectionSlot {
-    connection: Option<oracledb::Connection>,
+    connection: Option<oraclemcp_driver_cx::Connection>,
     quarantine_reason: Option<String>,
 }
 
@@ -1370,7 +1376,7 @@ async fn quarantine_connection_slot(
 }
 
 impl std::ops::Deref for RustOracleConnectionGuard<'_> {
-    type Target = oracledb::Connection;
+    type Target = oraclemcp_driver_cx::Connection;
 
     fn deref(&self) -> &Self::Target {
         self.guard
@@ -1435,7 +1441,7 @@ impl RustOracleConnection {
         driver::run_session_release_statements(cx, self).await
     }
 
-    async fn take_connection(&self, cx: &Cx) -> Result<oracledb::Connection, DbError> {
+    async fn take_connection(&self, cx: &Cx) -> Result<oraclemcp_driver_cx::Connection, DbError> {
         let mut guard = self
             .inner
             .lock(cx)
@@ -1455,7 +1461,7 @@ impl RustOracleConnection {
     async fn replace_connection(
         &self,
         cx: &Cx,
-        connection: oracledb::Connection,
+        connection: oraclemcp_driver_cx::Connection,
     ) -> Result<(), DbError> {
         let mut guard = self
             .inner
@@ -1534,8 +1540,8 @@ mod driver {
     use asupersync::combinator::try_commit_section;
     use asupersync::sync::Mutex as AsyncMutex;
     use futures_core::Stream;
-    use oracledb::protocol::thin::{CursorValue, LobValue, ObjectValue};
-    use oracledb::protocol::{
+    use oraclemcp_driver_cx::protocol::thin::{CursorValue, LobValue, ObjectValue};
+    use oraclemcp_driver_cx::protocol::{
         ClientIdentity,
         oson::OsonValue,
         thin::{
@@ -1566,7 +1572,7 @@ mod driver {
 
     /// Driver-local bridge from the server's driver-free token-source contract.
     ///
-    /// This is intentionally the only `oracledb::TokenSource` implementation in
+    /// This is intentionally the only `oraclemcp_driver_cx::TokenSource` implementation in
     /// the workspace. A failed refresh is reduced to the driver's redacted
     /// failure class; it cannot become a password or static-token fallback.
     #[derive(Clone)]
@@ -1578,17 +1584,26 @@ mod driver {
         }
     }
 
-    impl oracledb::TokenSource for DriverIamTokenSource {
-        fn get_token(&self) -> oracledb::BoxFuture<'_, Result<String, oracledb::TokenSourceError>> {
+    impl oraclemcp_driver_cx::TokenSource for DriverIamTokenSource {
+        fn get_token(
+            &self,
+        ) -> oraclemcp_driver_cx::BoxFuture<'_, Result<String, oraclemcp_driver_cx::TokenSourceError>>
+        {
             Box::pin(async move {
                 self.0.get_token().await.map_err(|error| {
                     // This log is operator-only and carries a stable failure
                     // class, never the provider's error text, token, or key.
                     tracing::warn!(reason = error.as_str(), "IAM token refresh failed closed");
                     match error {
-                        IamTokenRefreshError::SourceUnavailable => oracledb::TokenSourceError::Exec,
-                        IamTokenRefreshError::InvalidToken => oracledb::TokenSourceError::Invalid,
-                        IamTokenRefreshError::TimedOut => oracledb::TokenSourceError::Timeout,
+                        IamTokenRefreshError::SourceUnavailable => {
+                            oraclemcp_driver_cx::TokenSourceError::Exec
+                        }
+                        IamTokenRefreshError::InvalidToken => {
+                            oraclemcp_driver_cx::TokenSourceError::Invalid
+                        }
+                        IamTokenRefreshError::TimedOut => {
+                            oraclemcp_driver_cx::TokenSourceError::Timeout
+                        }
                     }
                 })
             })
@@ -1621,7 +1636,7 @@ mod driver {
     struct DriverCqnNotificationReceiver {
         registration_id: u64,
         opts: OracleConnectOptions,
-        connection: oracledb::Connection,
+        connection: oraclemcp_driver_cx::Connection,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -1641,11 +1656,17 @@ mod driver {
                 // Deliberately discard every decoded record field: QUERY CQN
                 // may contain table names, rowids, or query metadata, none of
                 // which may enter the core or client-facing surfaces.
-                oracledb::NotificationOutcome::Record(_) => Ok(CqnNotificationOutcome::Event(
-                    CqnDriverNotification::for_registration(self.registration_id),
-                )),
-                oracledb::NotificationOutcome::TimedOut => Ok(CqnNotificationOutcome::TimedOut),
-                oracledb::NotificationOutcome::Closed => Ok(CqnNotificationOutcome::Closed),
+                oraclemcp_driver_cx::NotificationOutcome::Record(_) => {
+                    Ok(CqnNotificationOutcome::Event(
+                        CqnDriverNotification::for_registration(self.registration_id),
+                    ))
+                }
+                oraclemcp_driver_cx::NotificationOutcome::TimedOut => {
+                    Ok(CqnNotificationOutcome::TimedOut)
+                }
+                oraclemcp_driver_cx::NotificationOutcome::Closed => {
+                    Ok(CqnNotificationOutcome::Closed)
+                }
                 // Future driver outcomes must never fabricate an update.
                 _ => Ok(CqnNotificationOutcome::Closed),
             }
@@ -1656,7 +1677,7 @@ mod driver {
         cx: &Cx,
         opts: OracleConnectOptions,
     ) -> Result<RustOracleConnection, DbError> {
-        let mut inner = oracledb::Connection::connect(cx, to_connect_options(&opts)?)
+        let mut inner = oraclemcp_driver_cx::Connection::connect(cx, to_connect_options(&opts)?)
             .await
             .map_err(|err| connect_error_to_db_error(&err, &opts))?;
         apply_session_identity(cx, &mut inner, opts.session_identity.as_ref(), &opts).await?;
@@ -1723,7 +1744,7 @@ mod driver {
                 )
             })?;
         let options = to_connect_options(&adapter.opts)?.with_server_type_emon(true);
-        let mut connection = oracledb::Connection::connect(cx, options)
+        let mut connection = oraclemcp_driver_cx::Connection::connect(cx, options)
             .await
             .map_err(|err| connect_error_to_db_error(&err, &adapter.opts))?;
         connection
@@ -1819,7 +1840,7 @@ mod driver {
 
     pub(super) fn to_connect_options(
         opts: &OracleConnectOptions,
-    ) -> Result<oracledb::ConnectOptions, DbError> {
+    ) -> Result<oraclemcp_driver_cx::ConnectOptions, DbError> {
         opts.auth_adapter
             .validate()
             .map_err(|err| DbError::UnsupportedAuth(err.to_string()))?;
@@ -1930,7 +1951,7 @@ mod driver {
         let connect_string =
             connect_string_with_expire_time(&connect_string, opts.keepalive_minutes)?;
         let mut connect_options =
-            oracledb::ConnectOptions::new(&connect_string, user, password, identity);
+            oraclemcp_driver_cx::ConnectOptions::new(&connect_string, user, password, identity);
         if let Some(iam_auth) = iam_auth {
             // OCI IAM *database* tokens are proof-of-possession: when the profile
             // resolved the bound private key, wire it through so the driver signs
@@ -2027,7 +2048,7 @@ mod driver {
 
     async fn apply_session_identity(
         cx: &Cx,
-        inner: &mut oracledb::Connection,
+        inner: &mut oraclemcp_driver_cx::Connection,
         identity: Option<&OracleSessionIdentity>,
         opts: &OracleConnectOptions,
     ) -> Result<(), DbError> {
@@ -2103,13 +2124,13 @@ mod driver {
 
     async fn execute_raw(
         cx: &Cx,
-        inner: &mut oracledb::Connection,
+        inner: &mut oraclemcp_driver_cx::Connection,
         sql: &str,
         binds: &[BindValue],
         opts: &OracleConnectOptions,
         context: &'static str,
     ) -> Result<QueryResult, DbError> {
-        // oracledb 0.5.x removed the 0.2.2 `execute_query_with_binds` family;
+        // Driver 0.5.x removed the 0.2.2 `execute_query_with_binds` family;
         // `Connection::execute_raw` is the retained low-level entry that returns the
         // same `QueryResult` and composes with the fetch primitives below. `bind_rows`
         // is positional array DML — one inner row applies our binds in a single round
@@ -2178,7 +2199,7 @@ mod driver {
 
     async fn run_session_hooks(
         cx: &Cx,
-        inner: &mut oracledb::Connection,
+        inner: &mut oraclemcp_driver_cx::Connection,
         opts: &OracleConnectOptions,
         statements: &[String],
         hook_phase: &'static str,
@@ -2198,7 +2219,7 @@ mod driver {
     #[allow(clippy::too_many_arguments)]
     async fn execute_with_timeout(
         cx: &Cx,
-        inner: &mut oracledb::Connection,
+        inner: &mut oraclemcp_driver_cx::Connection,
         sql: &str,
         prefetch_rows: u32,
         binds: &[BindValue],
@@ -2308,7 +2329,7 @@ mod driver {
 
     async fn routine_out_binds(
         cx: &Cx,
-        inner: &mut oracledb::Connection,
+        inner: &mut oraclemcp_driver_cx::Connection,
         result: &QueryResult,
         args: &[OracleRoutineArg],
         opts: &OracleConnectOptions,
@@ -2440,7 +2461,7 @@ mod driver {
 
     async fn collect_all_rows(
         cx: &Cx,
-        inner: &mut oracledb::Connection,
+        inner: &mut oraclemcp_driver_cx::Connection,
         mut result: QueryResult,
         opts: &OracleConnectOptions,
         serialize_opts: &SerializeOptions,
@@ -2570,7 +2591,7 @@ mod driver {
     #[allow(clippy::too_many_arguments)]
     async fn collect_bounded_query_page(
         cx: &Cx,
-        inner: &mut oracledb::Connection,
+        inner: &mut oraclemcp_driver_cx::Connection,
         mut result: QueryResult,
         opts: &OracleConnectOptions,
         serialize_opts: &SerializeOptions,
@@ -2756,7 +2777,7 @@ mod driver {
 
     async fn bounded_recovery_cancel(
         cx: &Cx,
-        inner: &mut oracledb::Connection,
+        inner: &mut oraclemcp_driver_cx::Connection,
         opts: &OracleConnectOptions,
         context: &'static str,
     ) -> Result<(), String> {
@@ -2779,8 +2800,8 @@ mod driver {
 
     async fn resolve_fetch_batch<T>(
         cx: &Cx,
-        inner: &mut oracledb::Connection,
-        result: Result<T, FetchBatchError<oracledb::Error>>,
+        inner: &mut oraclemcp_driver_cx::Connection,
+        result: Result<T, FetchBatchError<oraclemcp_driver_cx::Error>>,
         opts: &OracleConnectOptions,
     ) -> Result<T, DbError> {
         match result {
@@ -2802,8 +2823,8 @@ mod driver {
 
     async fn resolve_execute_round_trip<T>(
         cx: &Cx,
-        inner: &mut oracledb::Connection,
-        result: Result<T, FetchBatchError<oracledb::Error>>,
+        inner: &mut oraclemcp_driver_cx::Connection,
+        result: Result<T, FetchBatchError<oraclemcp_driver_cx::Error>>,
         opts: &OracleConnectOptions,
         context: &'static str,
     ) -> Result<T, DbError> {
@@ -2862,7 +2883,7 @@ mod driver {
     async fn replace_connection_slot(
         inner: &Arc<AsyncMutex<super::RustOracleConnectionSlot>>,
         cx: &Cx,
-        connection: oracledb::Connection,
+        connection: oraclemcp_driver_cx::Connection,
     ) -> Result<(), DbError> {
         let mut guard = inner
             .lock(cx)
@@ -2892,7 +2913,7 @@ mod driver {
     pub(super) struct RustOracleRowStream {
         inner: Arc<AsyncMutex<super::RustOracleConnectionSlot>>,
         opts: OracleConnectOptions,
-        stream: Option<oracledb::OwnedRowStream>,
+        stream: Option<oraclemcp_driver_cx::OwnedRowStream>,
         metadata: Vec<ColumnMetadata>,
         columns: Vec<String>,
         serialize_opts: SerializeOptions,
@@ -3221,7 +3242,7 @@ mod driver {
     #[allow(clippy::too_many_arguments)]
     fn rows_to_oracle_rows<'a>(
         cx: &'a Cx,
-        inner: &'a mut oracledb::Connection,
+        inner: &'a mut oraclemcp_driver_cx::Connection,
         columns: &'a [ColumnMetadata],
         rows: Vec<Vec<Option<QueryValue>>>,
         opts: &'a OracleConnectOptions,
@@ -3254,7 +3275,7 @@ mod driver {
     #[allow(clippy::too_many_arguments)]
     fn row_to_oracle_row<'a>(
         cx: &'a Cx,
-        inner: &'a mut oracledb::Connection,
+        inner: &'a mut oraclemcp_driver_cx::Connection,
         columns: &'a [ColumnMetadata],
         row: &'a [Option<QueryValue>],
         opts: &'a OracleConnectOptions,
@@ -3345,7 +3366,7 @@ mod driver {
     #[allow(clippy::too_many_arguments)]
     fn value_to_cell<'a>(
         cx: &'a Cx,
-        inner: &'a mut oracledb::Connection,
+        inner: &'a mut oraclemcp_driver_cx::Connection,
         meta: &'a ColumnMetadata,
         value: Option<QueryValue>,
         opts: &'a OracleConnectOptions,
@@ -3486,7 +3507,7 @@ mod driver {
                     oracle_type,
                     structured_array_with_caps(&values, serialize_opts.structured_decode_caps),
                 ),
-                // `QueryValue` is `#[non_exhaustive]` as of oracledb 0.5.x. Every wire
+                // `QueryValue` is `#[non_exhaustive]` as of driver 0.5.x. Every wire
                 // value kind that exists today is handled explicitly above; this arm
                 // fails SAFE on any future kind with a clearly-marked, non-silent
                 // placeholder — never a silent wrong value (cf. the NUMBER→string
@@ -4200,7 +4221,7 @@ mod driver {
 
     fn implicit_resultsets_to_row<'a>(
         cx: &'a Cx,
-        inner: &'a mut oracledb::Connection,
+        inner: &'a mut oraclemcp_driver_cx::Connection,
         values: Vec<QueryValue>,
         opts: &'a OracleConnectOptions,
         serialize_opts: &'a SerializeOptions,
@@ -4246,7 +4267,7 @@ mod driver {
     #[allow(clippy::too_many_arguments)]
     fn materialize_cursor_cell<'a>(
         cx: &'a Cx,
-        inner: &'a mut oracledb::Connection,
+        inner: &'a mut oraclemcp_driver_cx::Connection,
         oracle_type: String,
         cursor: &'a CursorValue,
         opts: &'a OracleConnectOptions,
@@ -4444,12 +4465,12 @@ mod driver {
     mod lob_tests {
         use super::*;
         use crate::serialize::serialize_cell;
-        use oracledb::protocol::{
+        use oraclemcp_driver_cx::protocol::{
             oson::OsonValue,
             thin::{CS_FORM_IMPLICIT, ORA_TYPE_NUM_RAW, image_begin, image_finalize},
             vector::{Vector, VectorValues},
         };
-        use oracledb::{CollectionElement, ObjectAttribute, ObjectType, decode_object};
+        use oraclemcp_driver_cx::{CollectionElement, ObjectAttribute, ObjectType, decode_object};
         use serde_json::json;
 
         fn lob(ora_type_num: u8, size: u64) -> LobValue {
@@ -5124,7 +5145,7 @@ mod driver {
                 .expect("current-thread runtime");
             runtime.block_on(async {
                 let cx = asupersync::Cx::current().expect("block_on installs a current Cx");
-                let mut inner = match oracledb::Connection::connect(
+                let mut inner = match oraclemcp_driver_cx::Connection::connect(
                     &cx,
                     to_connect_options(&opts).expect("connect options"),
                 )
@@ -5188,7 +5209,7 @@ mod driver {
                 .expect("current-thread runtime");
             runtime.block_on(async {
                 let cx = asupersync::Cx::current().expect("block_on installs a current Cx");
-                let mut inner = match oracledb::Connection::connect(
+                let mut inner = match oraclemcp_driver_cx::Connection::connect(
                     &cx,
                     to_connect_options(&opts).expect("connect options"),
                 )
@@ -5694,7 +5715,7 @@ mod driver {
     /// set and raw I/O / `ConnectionClosed` failures, which cannot be recovered
     /// from a sanitized display string alone.
     pub(super) fn driver_query_error(
-        err: oracledb::Error,
+        err: oraclemcp_driver_cx::Error,
         opts: &OracleConnectOptions,
         context: Option<&str>,
     ) -> DbError {
@@ -5716,13 +5737,15 @@ mod driver {
         }
     }
 
-    fn is_transient_ttc_129(error: &oracledb::Error) -> bool {
+    fn is_transient_ttc_129(error: &oraclemcp_driver_cx::Error) -> bool {
         matches!(
             error,
-            oracledb::Error::Protocol(oracledb::protocol::ProtocolError::UnknownMessageType {
-                message_type: 129,
-                ..
-            })
+            oraclemcp_driver_cx::Error::Protocol(
+                oraclemcp_driver_cx::protocol::ProtocolError::UnknownMessageType {
+                    message_type: 129,
+                    ..
+                }
+            )
         )
     }
 
@@ -5731,7 +5754,7 @@ mod driver {
     /// `ConnectionLost` so pool/lease cleanup cannot mistake it for ordinary
     /// statement failure.
     pub(super) fn driver_execute_error(
-        err: oracledb::Error,
+        err: oraclemcp_driver_cx::Error,
         opts: &OracleConnectOptions,
         context: &str,
     ) -> DbError {
@@ -5754,38 +5777,42 @@ mod driver {
 
     /// Classify a driver connect/handshake failure into the driver-agnostic
     /// [`ConnectFailureKind`]. This function is the **only** place that reads
-    /// `oracledb::Error` connect variants — everything downstream (envelope
+    /// `oraclemcp_driver_cx::Error` connect variants — everything downstream (envelope
     /// rendering, doctor guidance) works from the structured kind. `None`
     /// means "no handshake-specific classification" and the caller keeps the
     /// plain `DbError::Connect` path (wallet errors deliberately stay there:
     /// their existing diagnostics are already precise).
-    pub(super) fn classify_connect_failure(err: &oracledb::Error) -> Option<ConnectFailureKind> {
+    pub(super) fn classify_connect_failure(
+        err: &oraclemcp_driver_cx::Error,
+    ) -> Option<ConnectFailureKind> {
         match err {
-            oracledb::Error::UnexpectedPacket(packet_type) => {
+            oraclemcp_driver_cx::Error::UnexpectedPacket(packet_type) => {
                 Some(ConnectFailureKind::UnexpectedTnsPacket {
                     packet_type: *packet_type,
                 })
             }
-            oracledb::Error::ConnectResendLoop(rounds) => {
+            oraclemcp_driver_cx::Error::ConnectResendLoop(rounds) => {
                 Some(ConnectFailureKind::ConnectResendLoop { rounds: *rounds })
             }
-            oracledb::Error::FastAuthRequired => Some(ConnectFailureKind::FastAuthNotAdvertised),
-            oracledb::Error::RedirectUnsupported => {
+            oraclemcp_driver_cx::Error::FastAuthRequired => {
+                Some(ConnectFailureKind::FastAuthNotAdvertised)
+            }
+            oraclemcp_driver_cx::Error::RedirectUnsupported => {
                 Some(ConnectFailureKind::ListenerRedirectUnsupported)
             }
-            oracledb::Error::ListenerRefused(payload) => {
+            oraclemcp_driver_cx::Error::ListenerRefused(payload) => {
                 Some(ConnectFailureKind::ListenerRefused {
                     err_code: parse_listener_refuse_code(payload),
                 })
             }
-            oracledb::Error::Protocol(protocol) => match protocol {
-                oracledb::protocol::ProtocolError::UnsupportedVersion {
+            oraclemcp_driver_cx::Error::Protocol(protocol) => match protocol {
+                oraclemcp_driver_cx::protocol::ProtocolError::UnsupportedVersion {
                     version,
                     minimum: _,
                 } => Some(ConnectFailureKind::ServerGenerationUnsupported {
                     tns_version: Some(*version),
                 }),
-                oracledb::protocol::ProtocolError::UnsupportedFeature(feature) => {
+                oraclemcp_driver_cx::protocol::ProtocolError::UnsupportedFeature(feature) => {
                     Some(ConnectFailureKind::UnsupportedWireFeature {
                         feature: (*feature).to_owned(),
                     })
@@ -5795,13 +5822,13 @@ mod driver {
                 // name the phase honestly instead of leaking a bare driver
                 // string (the field bug: "unknown TTC message type 11" was a
                 // network-layer TNS packet misread as application-layer TTC).
-                oracledb::protocol::ProtocolError::TruncatedHeader { .. }
-                | oracledb::protocol::ProtocolError::InvalidPacketLength { .. }
-                | oracledb::protocol::ProtocolError::IncompletePacket { .. }
-                | oracledb::protocol::ProtocolError::PacketTooLarge { .. }
-                | oracledb::protocol::ProtocolError::UnknownMessageType { .. }
-                | oracledb::protocol::ProtocolError::TtcDecode(_)
-                | oracledb::protocol::ProtocolError::InvalidServerResponse => {
+                oraclemcp_driver_cx::protocol::ProtocolError::TruncatedHeader { .. }
+                | oraclemcp_driver_cx::protocol::ProtocolError::InvalidPacketLength { .. }
+                | oraclemcp_driver_cx::protocol::ProtocolError::IncompletePacket { .. }
+                | oraclemcp_driver_cx::protocol::ProtocolError::PacketTooLarge { .. }
+                | oraclemcp_driver_cx::protocol::ProtocolError::UnknownMessageType { .. }
+                | oraclemcp_driver_cx::protocol::ProtocolError::TtcDecode(_)
+                | oraclemcp_driver_cx::protocol::ProtocolError::InvalidServerResponse => {
                     Some(ConnectFailureKind::HandshakeProtocol)
                 }
                 _ => None,
@@ -5815,7 +5842,7 @@ mod driver {
     /// sanitized [`DbError::Connect`] otherwise (both fail closed; the
     /// envelope layer guarantees `next_steps` either way).
     pub(super) fn connect_error_to_db_error(
-        err: &oracledb::Error,
+        err: &oraclemcp_driver_cx::Error,
         opts: &OracleConnectOptions,
     ) -> DbError {
         let message = sanitize_driver_error(err, opts);
@@ -6031,7 +6058,7 @@ mod driver {
             // the account has the privilege) edition/partitioning.
             //
             // Driver-negotiated facts come straight from the thin driver's own
-            // synchronous accessors on the wrapped `oracledb::Connection` — the
+            // synchronous accessors on the wrapped `oraclemcp_driver_cx::Connection` — the
             // ONE seam allowed to name that type. The short lock scope is dropped
             // before the dictionary round-trip below (which re-locks `inner`), so
             // it never deadlocks. If the lock cannot be taken the whole block is
@@ -6200,7 +6227,7 @@ mod driver {
             let limits = self.wire_limits()?;
             let timeout_ms = limits.effective_timeout_ms(cx, "oracle_db.query_row_stream.start")?;
             let connection = self.take_connection(cx).await?;
-            let mut query = oracledb::Query::new(sql)
+            let mut query = oraclemcp_driver_cx::Query::new(sql)
                 .bind(&driver_binds)
                 .arraysize(arraysize)
                 .prefetch(arraysize.get());
@@ -6412,7 +6439,8 @@ mod driver {
             let registered = inner
                 .register_query(
                     cx,
-                    oracledb::Registration::new(sql, registration_id).bind(binds.as_slice()),
+                    oraclemcp_driver_cx::Registration::new(sql, registration_id)
+                        .bind(binds.as_slice()),
                 )
                 .await
                 .map_err(|err| driver_query_error(err, &self.opts, None));
@@ -7218,7 +7246,7 @@ mod tests {
     #[test]
     fn routine_arg_wraps_driver_output_variants() {
         match OracleRoutineArg::output(1, 2, 3).into_driver_bind() {
-            oracledb::protocol::thin::BindValue::Output {
+            oraclemcp_driver_cx::protocol::thin::BindValue::Output {
                 ora_type_num,
                 csfrm,
                 buffer_size,
@@ -7229,7 +7257,7 @@ mod tests {
         }
 
         match OracleRoutineArg::return_output(4, 5, 6).into_driver_bind() {
-            oracledb::protocol::thin::BindValue::Output {
+            oraclemcp_driver_cx::protocol::thin::BindValue::Output {
                 ora_type_num,
                 csfrm,
                 buffer_size,
@@ -7248,7 +7276,7 @@ mod tests {
         )
         .into_driver_bind()
         {
-            oracledb::protocol::thin::BindValue::ObjectOutput {
+            oraclemcp_driver_cx::protocol::thin::BindValue::ObjectOutput {
                 schema,
                 type_name,
                 oid,
@@ -7273,7 +7301,7 @@ mod tests {
         )
         .into_driver_bind()
         {
-            oracledb::protocol::thin::BindValue::ObjectOutput {
+            oraclemcp_driver_cx::protocol::thin::BindValue::ObjectOutput {
                 schema,
                 type_name,
                 oid,
@@ -7292,17 +7320,19 @@ mod tests {
 
     #[test]
     fn routine_out_values_follow_declared_order() {
-        let result = oracledb::protocol::thin::QueryResult {
+        let result = oraclemcp_driver_cx::protocol::thin::QueryResult {
             out_values: vec![
                 (
                     0,
-                    Some(oracledb::protocol::thin::QueryValue::number_from_text(
-                        "42", true,
-                    )),
+                    Some(
+                        oraclemcp_driver_cx::protocol::thin::QueryValue::number_from_text(
+                            "42", true,
+                        ),
+                    ),
                 ),
                 (
                     2,
-                    Some(oracledb::protocol::thin::QueryValue::Text(
+                    Some(oraclemcp_driver_cx::protocol::thin::QueryValue::Text(
                         "first".to_owned(),
                     )),
                 ),
@@ -7320,16 +7350,14 @@ mod tests {
         assert_eq!(
             ordered,
             vec![
-                Some(oracledb::protocol::thin::QueryValue::number_from_text(
-                    "42", true
-                )),
-                Some(oracledb::protocol::thin::QueryValue::Text(
+                Some(oraclemcp_driver_cx::protocol::thin::QueryValue::number_from_text("42", true)),
+                Some(oraclemcp_driver_cx::protocol::thin::QueryValue::Text(
                     "first".to_owned()
                 )),
             ]
         );
 
-        let missing = oracledb::protocol::thin::QueryResult {
+        let missing = oraclemcp_driver_cx::protocol::thin::QueryResult {
             out_values: vec![(0, None)],
             ..Default::default()
         };
@@ -7861,7 +7889,7 @@ mod tests {
                 .await
                 .expect_err("refresh failure must be returned")
         });
-        assert_eq!(error, oracledb::TokenSourceError::Timeout);
+        assert_eq!(error, oraclemcp_driver_cx::TokenSourceError::Timeout);
 
         // Neither the source failure nor any rendered option surface is allowed
         // to act as a credential oracle or reveal the key material.
@@ -7869,8 +7897,11 @@ mod tests {
         assert!(!rendered.contains(TOKEN_SENTINEL), "{rendered}");
         assert!(!rendered.contains(KEY_SENTINEL), "{rendered}");
 
-        let client = driver::connect_error_to_db_error(&oracledb::Error::TokenSource(error), &opts)
-            .into_envelope();
+        let client = driver::connect_error_to_db_error(
+            &oraclemcp_driver_cx::Error::TokenSource(error),
+            &opts,
+        )
+        .into_envelope();
         assert_eq!(
             client.error_class,
             oraclemcp_error::ErrorClass::ConnectionFailed
@@ -8464,9 +8495,11 @@ mod tests {
     fn driver_connection_lost_taxonomy_reaches_the_db_error_boundary() {
         let opts = ezconnect_opts();
         for code in oraclemcp_error::CONNECTION_LOST_ORA_CODES {
-            let err = oracledb::Error::Protocol(oracledb::protocol::ProtocolError::ServerError(
-                format!("ORA-{code:05}: synthetic connection loss"),
-            ));
+            let err = oraclemcp_driver_cx::Error::Protocol(
+                oraclemcp_driver_cx::protocol::ProtocolError::ServerError(format!(
+                    "ORA-{code:05}: synthetic connection loss"
+                )),
+            );
             assert!(
                 err.is_connection_lost(),
                 "pinned driver must classify ORA-{code:05} as connection-lost"
@@ -8478,7 +8511,7 @@ mod tests {
             );
         }
 
-        let io = oracledb::Error::Io(std::io::Error::new(
+        let io = oraclemcp_driver_cx::Error::Io(std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
             "synthetic broken pipe",
         ));
@@ -8488,7 +8521,7 @@ mod tests {
             DbError::ConnectionLost(_)
         ));
 
-        let execute_io = oracledb::Error::Io(std::io::Error::new(
+        let execute_io = oraclemcp_driver_cx::Error::Io(std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
             "synthetic broken pipe",
         ));
@@ -8501,11 +8534,12 @@ mod tests {
     #[test]
     fn ttc_129_is_promoted_to_fresh_connection_retry() {
         let opts = ezconnect_opts();
-        let err =
-            oracledb::Error::Protocol(oracledb::protocol::ProtocolError::UnknownMessageType {
+        let err = oraclemcp_driver_cx::Error::Protocol(
+            oraclemcp_driver_cx::protocol::ProtocolError::UnknownMessageType {
                 message_type: 129,
                 position: 35,
-            });
+            },
+        );
         assert!(
             !err.is_connection_lost(),
             "driver exposes TTC-129 as reusable"
@@ -8522,7 +8556,7 @@ mod tests {
 
     // --- connect/handshake failure classification (bead bhw6.2) -----------
     //
-    // These construct real `oracledb::Error` connect variants and assert the
+    // These construct real `oraclemcp_driver_cx::Error` connect variants and assert the
     // seam maps each to the driver-agnostic `ConnectFailureKind`, so an
     // opaque driver string can never again ship as the whole diagnosis.
 
@@ -8530,7 +8564,8 @@ mod tests {
 
     #[test]
     fn classify_unexpected_packet_maps_to_unexpected_tns_packet() {
-        let kind = driver::classify_connect_failure(&oracledb::Error::UnexpectedPacket(11));
+        let kind =
+            driver::classify_connect_failure(&oraclemcp_driver_cx::Error::UnexpectedPacket(11));
         assert_eq!(
             kind,
             Some(ConnectFailureKind::UnexpectedTnsPacket { packet_type: 11 })
@@ -8539,7 +8574,8 @@ mod tests {
 
     #[test]
     fn classify_connect_resend_loop_carries_rounds() {
-        let kind = driver::classify_connect_failure(&oracledb::Error::ConnectResendLoop(5));
+        let kind =
+            driver::classify_connect_failure(&oraclemcp_driver_cx::Error::ConnectResendLoop(5));
         assert_eq!(
             kind,
             Some(ConnectFailureKind::ConnectResendLoop { rounds: 5 })
@@ -8548,21 +8584,23 @@ mod tests {
 
     #[test]
     fn classify_fast_auth_required_maps_to_token_auth_on_old_server() {
-        let kind = driver::classify_connect_failure(&oracledb::Error::FastAuthRequired);
+        let kind = driver::classify_connect_failure(&oraclemcp_driver_cx::Error::FastAuthRequired);
         assert_eq!(kind, Some(ConnectFailureKind::FastAuthNotAdvertised));
     }
 
     #[test]
     fn classify_redirect_unsupported_maps_to_listener_redirect() {
-        let kind = driver::classify_connect_failure(&oracledb::Error::RedirectUnsupported);
+        let kind =
+            driver::classify_connect_failure(&oraclemcp_driver_cx::Error::RedirectUnsupported);
         assert_eq!(kind, Some(ConnectFailureKind::ListenerRedirectUnsupported));
     }
 
     #[test]
     fn classify_listener_refused_extracts_the_err_code() {
         let payload = "(DESCRIPTION=(TMP=)(VSNNUM=301989888)(ERR=12514)(ERROR_STACK=(ERROR=(CODE=12514)(EMFI=4))))";
-        let kind =
-            driver::classify_connect_failure(&oracledb::Error::ListenerRefused(payload.to_owned()));
+        let kind = driver::classify_connect_failure(&oraclemcp_driver_cx::Error::ListenerRefused(
+            payload.to_owned(),
+        ));
         assert_eq!(
             kind,
             Some(ConnectFailureKind::ListenerRefused {
@@ -8573,7 +8611,7 @@ mod tests {
 
     #[test]
     fn classify_listener_refused_without_code_still_classifies() {
-        let kind = driver::classify_connect_failure(&oracledb::Error::ListenerRefused(
+        let kind = driver::classify_connect_failure(&oraclemcp_driver_cx::Error::ListenerRefused(
             "connection refused".to_owned(),
         ));
         assert_eq!(
@@ -8584,8 +8622,8 @@ mod tests {
 
     #[test]
     fn classify_unsupported_tns_version_maps_to_server_generation() {
-        let kind = driver::classify_connect_failure(&oracledb::Error::Protocol(
-            oracledb::protocol::ProtocolError::UnsupportedVersion {
+        let kind = driver::classify_connect_failure(&oraclemcp_driver_cx::Error::Protocol(
+            oraclemcp_driver_cx::protocol::ProtocolError::UnsupportedVersion {
                 version: 298,
                 minimum: 315,
             },
@@ -8600,8 +8638,8 @@ mod tests {
 
     #[test]
     fn classify_unsupported_feature_names_the_feature() {
-        let kind = driver::classify_connect_failure(&oracledb::Error::Protocol(
-            oracledb::protocol::ProtocolError::UnsupportedFeature(
+        let kind = driver::classify_connect_failure(&oraclemcp_driver_cx::Error::Protocol(
+            oraclemcp_driver_cx::protocol::ProtocolError::UnsupportedFeature(
                 "Native Network Encryption and Data Integrity",
             ),
         ));
@@ -8618,8 +8656,8 @@ mod tests {
         // The field bug: this exact driver error surfaced raw, naming the TTC
         // application layer while the failing byte was a network-layer TNS
         // packet. It must classify as a handshake-phase protocol error.
-        let kind = driver::classify_connect_failure(&oracledb::Error::Protocol(
-            oracledb::protocol::ProtocolError::UnknownMessageType {
+        let kind = driver::classify_connect_failure(&oraclemcp_driver_cx::Error::Protocol(
+            oraclemcp_driver_cx::protocol::ProtocolError::UnknownMessageType {
                 message_type: 11,
                 position: 4,
             },
@@ -8630,8 +8668,9 @@ mod tests {
     #[test]
     fn classify_wallet_error_keeps_the_plain_connect_path() {
         // Wallet diagnostics are already precise; they stay on DbError::Connect.
-        let err =
-            oracledb::Error::Wallet(oracledb::protocol::tls::wallet::WalletError::NoCertificates);
+        let err = oraclemcp_driver_cx::Error::Wallet(
+            oraclemcp_driver_cx::protocol::tls::wallet::WalletError::NoCertificates,
+        );
         assert_eq!(driver::classify_connect_failure(&err), None);
     }
 
@@ -8651,7 +8690,7 @@ mod tests {
             connect_string: "dbhost:1521/private_service".to_owned(),
             ..Default::default()
         };
-        let err = oracledb::Error::ListenerRefused(
+        let err = oraclemcp_driver_cx::Error::ListenerRefused(
             "(ERR=12514) for dbhost:1521/private_service".to_owned(),
         );
         let mapped = driver::connect_error_to_db_error(&err, &opts);
@@ -8674,9 +8713,9 @@ mod tests {
 /// Rust-level guard for the driver-adapter seam (B2; plan §8 release gate).
 ///
 /// Mirrors `scripts/oraclemcp_driver_seam_lint.sh` so `cargo test` catches an
-/// `oracledb::` driver call that leaks outside the adapter even when the shell
+/// `oraclemcp_driver_cx::` driver call that leaks outside the adapter even when the shell
 /// lint is not run. The two enforcers share one allowlist: this file is the
-/// only adapter site. Add a new legitimate `oracledb::` site to BOTH the shell
+/// only adapter site. Add a new legitimate `oraclemcp_driver_cx::` site to BOTH the shell
 /// lint's `ADAPTER_ALLOWLIST` and `ADAPTER_ALLOWLIST` below, with a
 /// justification.
 #[cfg(test)]
@@ -8684,9 +8723,9 @@ mod driver_seam {
     use std::path::{Path, PathBuf};
 
     /// Workspace-relative paths that ARE the adapter — the only sources allowed
-    /// to name an `oracledb::` driver path.
+    /// to name an `oraclemcp_driver_cx::` driver path.
     const ADAPTER_ALLOWLIST: &[&str] = &[
-        // B2 adapter: wraps the whole oracledb driver surface.
+        // B2 adapter: wraps the whole driver-cx surface.
         "crates/oraclemcp-db/src/connection.rs",
     ];
 
@@ -8751,25 +8790,35 @@ mod driver_seam {
     }
 
     #[test]
-    fn pin_is_0_9_1_and_seam_intact() {
+    fn pin_is_0_9_2_and_seam_intact() {
         let root = workspace_root();
         let manifest =
             std::fs::read_to_string(root.join("Cargo.toml")).expect("read workspace Cargo.toml");
         assert!(
-            manifest.contains(r#"oracledb = { version = "=0.9.1", default-features = false }"#),
-            "workspace Cargo.toml must keep the oracledb dependency exactly pinned at =0.9.1"
+            manifest.contains(
+                r#"oraclemcp-driver-cx = { version = "=0.9.2", default-features = false }"#
+            ),
+            "workspace Cargo.toml must keep driver-cx exactly pinned at =0.9.2"
         );
 
         let lock = std::fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");
         assert_eq!(
-            lock_package_versions(&lock, "oracledb"),
-            vec!["0.9.1".to_owned()],
-            "Cargo.lock must resolve exactly one oracledb package at 0.9.1"
+            lock_package_versions(&lock, "oraclemcp-driver-cx"),
+            vec!["0.9.2".to_owned()],
+            "Cargo.lock must resolve exactly one driver-cx package at 0.9.2"
         );
         assert_eq!(
-            lock_package_versions(&lock, "oracledb-protocol"),
-            vec!["0.9.1".to_owned()],
-            "Cargo.lock must resolve the matching oracledb-protocol 0.9.1 package"
+            lock_package_versions(&lock, "oraclemcp-driver-cx-protocol"),
+            vec!["0.9.2".to_owned()],
+            "Cargo.lock must resolve the matching driver-cx protocol package at 0.9.2"
+        );
+        assert!(
+            lock_package_versions(&lock, "oracledb").is_empty(),
+            "Cargo.lock must not retain the legacy oracledb package"
+        );
+        assert!(
+            lock_package_versions(&lock, "oracledb-protocol").is_empty(),
+            "Cargo.lock must not retain the legacy protocol package"
         );
 
         assert_eq!(
@@ -8781,7 +8830,7 @@ mod driver_seam {
 
     #[test]
     fn upstream_expire_time_gap_is_parse_visible() {
-        let descriptor = oracledb::protocol::net::EasyConnect::parse_descriptor(
+        let descriptor = oraclemcp_driver_cx::protocol::net::EasyConnect::parse_descriptor(
             "dbhost:1521/FREEPDB1?expire_time=7&transport_connect_timeout=2.5",
         )
         .expect("extended Easy Connect string should parse");
@@ -8794,22 +8843,22 @@ mod driver_seam {
         assert!((desc.tcp_connect_timeout - 2.5).abs() < 1e-9);
     }
 
-    /// True iff `line` names the DRIVER crate path `oracledb::` (and not the
+    /// True iff `line` names the DRIVER crate path `oraclemcp_driver_cx::` (and not the
     /// workspace crate `oraclemcp_db::`). Requires a non-identifier char (or
-    /// start of line) to the left of `oracledb`, then optional whitespace, then
-    /// `::` — matching the shell lint's `(^|[^A-Za-z0-9_])oracledb[[:space:]]*::`.
+    /// start of line) to the left of `oraclemcp_driver_cx`, then optional
+    /// whitespace, then `::`, matching the shell lint.
     fn names_driver_path(line: &str) -> bool {
         let bytes = line.as_bytes();
         let mut search_from = 0;
-        while let Some(rel) = line[search_from..].find("oracledb") {
+        while let Some(rel) = line[search_from..].find("oraclemcp_driver_cx") {
             let start = search_from + rel;
             let left_ok = start == 0 || {
                 let c = bytes[start - 1];
                 !(c.is_ascii_alphanumeric() || c == b'_')
             };
             if left_ok {
-                // Skip past "oracledb" and any whitespace, expect "::".
-                let mut idx = start + "oracledb".len();
+                // Skip past the crate identifier and any whitespace, expect "::".
+                let mut idx = start + "oraclemcp_driver_cx".len();
                 while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
                     idx += 1;
                 }
@@ -8817,13 +8866,13 @@ mod driver_seam {
                     return true;
                 }
             }
-            search_from = start + "oracledb".len();
+            search_from = start + "oraclemcp_driver_cx".len();
         }
         false
     }
 
     #[test]
-    fn no_oracledb_driver_call_outside_adapter() {
+    fn no_driver_cx_call_outside_adapter() {
         let root = workspace_root();
         let crates_dir = root.join("crates");
         let mut files = Vec::new();
@@ -8851,7 +8900,7 @@ mod driver_seam {
 
         assert!(
             violations.is_empty(),
-            "oracledb:: driver path(s) leaked outside the adapter \
+            "oraclemcp_driver_cx:: driver path(s) leaked outside the adapter \
              ({:?}); move them behind an OracleConnection / adapter method, or \
              add a legitimate new adapter site to ADAPTER_ALLOWLIST here AND in \
              scripts/oraclemcp_driver_seam_lint.sh:\n{}",
@@ -8863,10 +8912,12 @@ mod driver_seam {
     #[test]
     fn pattern_distinguishes_driver_from_workspace_crate() {
         // The DRIVER crate path is a violation.
-        assert!(names_driver_path("use oracledb::Connection;"));
-        assert!(names_driver_path("    inner: Mutex<oracledb::Connection>,"));
+        assert!(names_driver_path("use oraclemcp_driver_cx::Connection;"));
         assert!(names_driver_path(
-            "oracledb :: BlockingConnection::connect(x)"
+            "    inner: Mutex<oraclemcp_driver_cx::Connection>,"
+        ));
+        assert!(names_driver_path(
+            "oraclemcp_driver_cx :: BlockingConnection::connect(x)"
         ));
         // The workspace crate `oraclemcp_db::` is NOT a violation.
         assert!(!names_driver_path("use oraclemcp_db::OracleCell;"));
@@ -8875,10 +8926,10 @@ mod driver_seam {
         ));
         // A bare mention of the word without a `::` path is fine.
         assert!(!names_driver_path(
-            "//! the thin oracledb-backed connection"
+            "//! the thin driver-cx-backed connection"
         ));
         assert!(!names_driver_path(
-            r#""driver": "pure-Rust oracledb thin driver""#
+            r#""driver": "pure-Rust driver-cx thin driver""#
         ));
     }
 

@@ -2,8 +2,8 @@
 //! `docs/tns-discovery-onboarding.md`).
 //!
 //! A thin adapter over the **upstream** sans-I/O tnsnames reader
-//! `oracledb_protocol::net::connectstring::tnsnames::TnsnamesReader`. It parses
-//! a directory's `tnsnames.ora`, following `IFILE` includes, and returns one
+//! `oraclemcp_driver_cx_protocol::net::connectstring::tnsnames::TnsnamesReader`.
+//! It parses a directory's `tnsnames.ora`, following `IFILE` includes, and returns one
 //! entry per net-service — the alias, the raw connect descriptor, and
 //! best-effort connection *hints* (host / port / service / protocol / wallet)
 //! used only for the human discovery report and for choosing env-var names. The
@@ -15,13 +15,14 @@
 //!
 //! The driver-adapter seam (`scripts/oraclemcp_driver_seam_lint.sh`; the
 //! `driver_seam` test in `connection.rs`) forbids the driver-crate `::` path
-//! (the `oracledb` crate followed by `::`) anywhere outside `connection.rs`.
-//! This module deliberately depends on the underlying **`oracledb-protocol`**
-//! crate directly and imports via the `oracledb_protocol::` path, which does NOT
-//! match that seam pattern (the `_` breaks the adjacency the pattern requires).
-//! `oracledb-protocol` is pinned to `=0.9.1`, the exact version `oracledb 0.9.1`
-//! already resolves, and is pure encode/decode (no async runtime), so the driver
-//! seam stays confined to `connection.rs` and the engine-free boundary holds.
+//! (the `oraclemcp_driver_cx` crate followed by `::`) anywhere outside
+//! `connection.rs`.
+//! This module deliberately depends on the underlying **`oraclemcp-driver-cx-protocol`**
+//! crate directly and imports via the `oraclemcp_driver_cx_protocol::` path,
+//! which does not match the main-driver seam pattern. Both packages are pinned to `=0.9.2`;
+//! the protocol crate is pure encode/decode (no async runtime), so
+//! the driver seam stays confined to `connection.rs` and the engine-free
+//! boundary holds.
 //! The `seam_smoke` test below asserts this module names no driver-crate `::`
 //! path.
 //!
@@ -34,7 +35,7 @@
 
 use std::path::{Path, PathBuf};
 
-use oracledb_protocol::net::connectstring::tnsnames::TnsnamesReader;
+use oraclemcp_driver_cx_protocol::net::connectstring::tnsnames::TnsnamesReader;
 
 /// Best-effort connection hints extracted from a net-service descriptor.
 ///
@@ -470,21 +471,23 @@ mod tests {
         );
     }
 
-    /// Seam-lint smoke: this adapter reuses the upstream `oracledb_protocol`
+    /// Seam-lint smoke: this adapter reuses the upstream `oraclemcp_driver_cx_protocol`
     /// crate and names NO driver-crate `::` path (which would leak the seam that
     /// `scripts/oraclemcp_driver_seam_lint.sh` and the `connection.rs`
     /// `driver_seam` test enforce).
     #[test]
     fn seam_smoke_uses_protocol_crate_not_driver_path() {
         let source = include_str!("tns.rs");
-        let driver = "oracledb";
+        let driver = "oraclemcp_driver_cx";
         assert!(
-            source.contains("oracledb_protocol::net::connectstring::tnsnames::TnsnamesReader"),
-            "the adapter must reuse the upstream TnsnamesReader via oracledb_protocol"
+            source.contains(
+                "oraclemcp_driver_cx_protocol::net::connectstring::tnsnames::TnsnamesReader"
+            ),
+            "the adapter must reuse the upstream TnsnamesReader via oraclemcp_driver_cx_protocol"
         );
         // Mirror the seam pattern: the driver crate name followed (after
-        // optional whitespace) by `::`. `oracledb_protocol::` never matches
-        // because the `_` breaks the adjacency.
+        // optional whitespace) by `::`. `oraclemcp_driver_cx_protocol::` does
+        // not match because the `_protocol` suffix breaks the adjacency.
         for (n, line) in source.lines().enumerate() {
             let mut from = 0;
             while let Some(rel) = line[from..].find(driver) {

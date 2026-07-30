@@ -236,9 +236,9 @@ pin is required, for two independent reasons: this checkout resolves
 **asupersync 0.3.9**, whose
 `nightly-outcome-try` feature enables `#![feature(try_trait_v2)]` and
 `try_trait_v2_residual` inside asupersync (it is opt-in, but in asupersync's
-default feature set, and reaches us through the `oracledb` dependency), and on
+default feature set, and reaches us through the `oraclemcp-driver-cx` dependency), and on
 **Windows** `oraclemcp-core` additionally needs `windows_by_handle`. The pinned
-`oracledb` 0.9.1 driver's own source is stable-clean — it is its asupersync
+`oraclemcp-driver-cx` 0.9.2 driver's own source is stable-clean — it is its asupersync
 dependency declaration that pulls the nightly feature in.
 [`docs/toolchain.md`](docs/toolchain.md) has the exact mechanism. The
 repository's `rust-toolchain.toml` selects the pin for local builds. Use the release installer above when you want
@@ -255,7 +255,7 @@ Direct source install:
 cargo +nightly-2026-05-11 install oraclemcp
 ```
 
-Live database access is built in through the pure-Rust thin `oracledb` driver.
+Live database access is built in through the pure-Rust thin `oraclemcp-driver-cx` driver.
 
 **Runtime requirements** for live database access:
 
@@ -1056,7 +1056,7 @@ legacy `signature` value before restarting a protected profile.
 `oraclemcp` builds on a single **pinned Rust nightly** (`nightly-2026-05-11`,
 recorded in `rust-toolchain.toml`). Two independent things need it: asupersync 0.3.9's
 `nightly-outcome-try` feature (`try_trait_v2` + `try_trait_v2_residual`), which
-is opt-in but on by default and reaches us via the `oracledb` 0.9.1 dependency; and,
+is opt-in but on by default and reaches us via the `oraclemcp-driver-cx` 0.9.2 dependency; and,
 on Windows only, `windows_by_handle`. The pin is **build-time only**: the
 shipped binary has no runtime dependency on nightly. See
 [`docs/toolchain.md`](docs/toolchain.md) for the full rationale and the
@@ -1113,7 +1113,7 @@ documented in [`docs/configuration.md`](docs/configuration.md).
 
 | Dimension | Support |
 |---|---|
-| **Database version** | Tested against **Oracle Database 23ai**, including the free **Oracle FREE 23ai** image (`gvenzl/oracle-free:23-slim`, `FREEPDB1`). The pure-Rust thin `oracledb` driver speaks the Oracle Net protocol directly — no Instant Client or ODPI-C. |
+| **Database version** | Tested against **Oracle Database 23ai**, including the free **Oracle FREE 23ai** image (`gvenzl/oracle-free:23-slim`, `FREEPDB1`). The pure-Rust thin `oraclemcp-driver-cx` driver speaks the Oracle Net protocol directly — no Instant Client or ODPI-C. |
 | **EZConnect** | Supported (`host:port/service`, plus EZConnect-Plus `tcps://…?wallet_location=…`) and `tnsnames.ora` aliases. |
 | **TCPS / wallet (TLS, mTLS)** | Supported with `ewallet.pem` (with its wallet password), auto-login `cwallet.sso`, or standalone `ewallet.p12` (with its wallet password), plus `ssl_server_dn_match` / `ssl_server_cert_dn` / `use_sni` controls. All three wallet modes load through the default build's thin driver. |
 | **OCI IAM database token** | Supported for pre-fetched JWT sources over TCPS (`token_env`, `token_file`, `token_exec`, or `ORACLEMCP_IAM_TOKEN`). Non-TCPS is refused before token use. Autonomous OCI SDK/resource-principal minting and real-ADB acceptance remain separate gated work — see the [OCI section](#oci-iam-database-token-auth) and [`docs/configuration.md`](docs/configuration.md). |

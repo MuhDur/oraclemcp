@@ -75,16 +75,16 @@ not available here, so the committed `cwallet.sso` is copied verbatim from the
 `oracledb` driver's proven synthetic fixture
 `crates/oracledb/tests/fixtures/tls/cwallet_orapki.sso` (a real `orapki wallet
 create -auto_login`, synthetic self-signed `CN=oracle-test.invalid`). It parses
-end to end through `oracledb_protocol::tls::sso::parse_cwallet_sso`, which is
+end to end through `oraclemcp_driver_cx_protocol::tls::sso::parse_cwallet_sso`, which is
 exactly the usability condition the driver's wallet loader requires before it
 will fall through to auto-login.
 
-## Driver API exercised (from the pinned `oracledb-protocol` API)
+## Driver API exercised (from the pinned `oraclemcp-driver-cx-protocol` API)
 
-* `oracledb_protocol::tls::wallet::{resolve_wallet_dir, pem_wallet_path,
+* `oraclemcp_driver_cx_protocol::tls::wallet::{resolve_wallet_dir, pem_wallet_path,
   p12_wallet_path, sso_wallet_path, parse_ewallet_pem, parse_ewallet_p12,
   SSO_WALLET_FILE_NAME}`
-* `oracledb_protocol::tls::sso::parse_cwallet_sso`
+* `oraclemcp_driver_cx_protocol::tls::sso::parse_cwallet_sso`
 
 ## `legacy_3des_p12/` — P-U4 (D6 rider)
 

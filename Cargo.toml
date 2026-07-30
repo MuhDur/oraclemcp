@@ -21,11 +21,11 @@ homepage = "https://github.com/MuhDur/oraclemcp"
 # No `rust-version`: the line is pinned to nightly for two independent reasons.
 # (1) asupersync's `nightly-outcome-try` feature enables feature(try_trait_v2) +
 # its residual. It is opt-in but in asupersync's DEFAULT set; we opt out below
-# (default-features = false), and it is re-enabled anyway because oracledb
+# (default-features = false), and it is re-enabled anyway because driver-cx
 # depends on asupersync WITHOUT opting out, and cargo unifies features. Nobody's
 # source uses the nightly syntax — it arrives transitively (bead oraclemcp-yi2z).
 # (2) Windows only: oraclemcp-core's windows_by_handle (see its lib.rs).
-# asupersync does not "require" nightly. The oracledb 0.9.1 driver's own source is stable-clean —
+# asupersync does not "require" nightly. The oraclemcp-driver-cx 0.9.2 driver's own source is stable-clean —
 # it is its dep declaration, not its source, that is the proximate cause. See docs/toolchain.md §1.
 keywords = ["oracle", "mcp", "database", "sql"]
 categories = ["database", "development-tools"]
@@ -45,21 +45,19 @@ asupersync = { version = "0.3.9", default-features = false, features = ["metrics
 # dispatch future across OS threads). MIT/Apache-2.0 — covered by deny.toml's
 # permissive license allow-list.
 async-trait = "0.1"
-# Pinned EXACTLY (B2; plan §8). The whole oracledb surface is isolated behind one
+# Pinned EXACTLY (B2; plan §8). The whole driver-cx surface is isolated behind one
 # adapter (crates/oraclemcp-db/src/connection.rs); the 0.2.2 -> 0.5.x cut-over was
 # the deliberate, single-file change that exact pin guarantees — never an
 # accidental float into a new minor. Keep the `=` pin; bump it deliberately
 # (adapter + contract suite green, full gate battery re-run) for each upgrade.
-oracledb = { version = "=0.9.1", default-features = false }
-# The pure-Rust, sans-I/O TNS/TTC protocol core that `oracledb` itself builds on.
+oraclemcp-driver-cx = { version = "=0.9.2", default-features = false }
+# The pure-Rust, sans-I/O TNS/TTC protocol core that driver-cx itself builds on.
 # The TNS-onboarding parse adapter (crates/oraclemcp-db/src/tns.rs) reuses its
-# `TnsnamesReader` DIRECTLY via the `oracledb_protocol::` path — which does NOT
-# match the driver-seam pattern (`oracledb` + `::`) that
-# scripts/oraclemcp_driver_seam_lint.sh confines to connection.rs, because the
-# `_` breaks the adjacency. Pinned EXACTLY to the version `oracledb 0.9.1`
+# `TnsnamesReader` directly via the `oraclemcp_driver_cx_protocol::` path.
+# Pinned exactly to the version `oraclemcp-driver-cx 0.9.2`
 # already resolves, so this direct edge never floats the graph; pure
 # encode/decode (no async runtime), so the engine-free boundary holds.
-oracledb-protocol = { version = "=0.9.1", default-features = false }
+oraclemcp-driver-cx-protocol = { version = "=0.9.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures-core = "0.3"

@@ -5,7 +5,7 @@
 Accepted (0.4.0). **Decision stands; its stated reason was corrected 2026-07-16
 — see [Correction](#correction-2026-07-16-bead-oraclemcp-yi2z) before relying on
 the Context below.** In short: asupersync does not *require* nightly (the
-feature is opt-in, merely on by default), `oracledb` *is* the proximate cause
+feature is opt-in, merely on by default), driver-cx *is* the proximate cause
 (its dependency declaration does not opt out), and Windows needs nightly for a
 second, unrelated reason. The Context is preserved as written for the record.
 
@@ -55,12 +55,12 @@ decided; corrected here:
    asupersync gates them behind its `nightly-outcome-try` cargo feature
    (`asupersync-0.3.5/src/lib.rs:52-53`). The feature is opt-in — it is merely
    in asupersync's `default` set. A consumer that opts out does not get it.
-2. **"the `oracledb` driver is not the reason for the pin" is inaccurate.** Its
-   *source* is stable-clean, but it declares its asupersync dependency **without
+2. **"the driver is not the reason for the pin" is inaccurate.** The pinned `oraclemcp-driver-cx` 0.9.2 driver's own source is stable-clean,
+   but it declares its asupersync dependency **without
    `default-features = false`**, so cargo feature unification re-enables the
    nightly feature for the whole graph — overriding this workspace's own opt-out.
    `cargo tree -i asupersync -e features` shows `asupersync feature "default"
-   <- oracledb`. It is the proximate cause.
+   <- oraclemcp-driver-cx`. It is the proximate cause.
 3. **Missed at the time:** on **Windows**, `oraclemcp-core` independently needs
    `windows_by_handle` for `MetadataExt::number_of_links` (hard-linked-lock
    refusal). Windows needs nightly even if 1 and 2 are resolved.
@@ -69,7 +69,7 @@ decided; corrected here:
 
 Two levers, not one — and the first needs nobody upstream:
 
-- **Now, and independently of any upstream release:** evaluate having `oracledb`
+- **Now, and independently of any upstream release:** evaluate having `oraclemcp-driver-cx`
   set `default-features = false` on asupersync (keeping `proc-macros`, its other
   default). Neither driver nor server source uses the nightly syntax, so this may
   drop the requirement outright on non-Windows. Tracked by `oraclemcp-yi2z`;

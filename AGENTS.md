@@ -113,7 +113,7 @@ refusal and each acceptance; CI runs it alongside the other lints.
      `feature(try_trait_v2)` + `try_trait_v2_residual` inside asupersync itself
      (`asupersync-0.3.9/src/lib.rs:52-53`). It is **opt-in but on by default**,
      not something asupersync inherently requires. We ask for
-     `default-features = false` (`Cargo.toml`), but `oracledb` depends on
+     `default-features = false` (`Cargo.toml`), but `oraclemcp-driver-cx` depends on
      asupersync *without* opting out, so feature unification turns it back on
      for the whole graph. Neither driver nor server source uses the nightly
      syntax — the feature arrives transitively and unrequested. Whether it can
@@ -124,7 +124,7 @@ refusal and each acceptance; CI runs it alongside the other lints.
      hard-linked service lock (and the audit sink needs for file identity).
      There is no stable `std` equivalent, so Windows needs nightly regardless of
      reason 1.
-  Note the pinned `oracledb` 0.9.1 driver's own source is stable-clean; it is
+  Note the pinned `oraclemcp-driver-cx` 0.9.2 driver's own source is stable-clean; it is
   its asupersync **dependency declaration** that pulls the nightly feature in.
   Do not restate this as "asupersync requires nightly" — that attribution is
   wrong and sent a prior audit looking in the wrong place.
@@ -133,7 +133,7 @@ refusal and each acceptance; CI runs it alongside the other lints.
   --all-targets -- -D warnings`, `cargo test --workspace`, `cargo deny check`
   using the pinned toolchain from `rust-toolchain.toml`.
 - The default build is pure Rust and has no native Oracle client dependency.
-  Live database access uses the thin `oracledb` driver and does not require
+  Live database access uses the thin `oraclemcp-driver-cx` driver and does not require
   Oracle Instant Client, ODPI-C, `libclntsh`, or a C toolchain.
 
 ## Build lease & dedicated build targets

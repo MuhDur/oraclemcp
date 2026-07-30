@@ -125,16 +125,16 @@ for manifest in crates/oraclemcp-*/Cargo.toml; do
 done
 
 workspace_toml="$ROOT/Cargo.toml"
-# The oracledb / oracledb-protocol driver crates version INDEPENDENTLY of the
+# The driver-cx main/protocol crates version independently of the
 # server workspace version (a separate upstream release train — e.g. driver
 # 0.7.4 while the server is 0.8.0). Parse the pinned driver version from the
 # manifest and verify every driver-facing surface agrees on that SAME version
 # (internal consistency), decoupled from the server's own $version.
 driver_version="$(
-  grep -E '^oracledb = \{ version = "=[0-9]' "$workspace_toml" |
+  grep -E '^oraclemcp-driver-cx = \{ version = "=[0-9]' "$workspace_toml" |
     head -1 | sed -E 's/.*version = "=([0-9][0-9.]*)".*/\1/'
 )"
-[ -n "$driver_version" ] || fail "Cargo.toml must pin oracledb at an exact =X.Y.Z version"
+[ -n "$driver_version" ] || fail "Cargo.toml must pin oraclemcp-driver-cx at an exact =X.Y.Z version"
 
 asupersync_version="$(
   grep -E '^asupersync = \{ version = "[0-9]' "$workspace_toml" |
@@ -142,13 +142,13 @@ asupersync_version="$(
 )"
 [ -n "$asupersync_version" ] || fail "Cargo.toml must pin asupersync at X.Y.Z"
 
-grep -Fq "oracledb = { version = \"=$driver_version\", default-features = false }" "$workspace_toml" ||
-  fail "Cargo.toml must pin oracledb exactly at =$driver_version"
-grep -Fq "oracledb-protocol = { version = \"=$driver_version\", default-features = false }" "$workspace_toml" ||
-  fail "Cargo.toml must pin oracledb-protocol exactly at =$driver_version (must match the oracledb pin)"
+grep -Fq "oraclemcp-driver-cx = { version = \"=$driver_version\", default-features = false }" "$workspace_toml" ||
+  fail "Cargo.toml must pin oraclemcp-driver-cx exactly at =$driver_version"
+grep -Fq "oraclemcp-driver-cx-protocol = { version = \"=$driver_version\", default-features = false }" "$workspace_toml" ||
+  fail "Cargo.toml must pin oraclemcp-driver-cx-protocol exactly at =$driver_version"
 
 lock="$ROOT/Cargo.lock"
-for pkg in oracledb oracledb-protocol; do
+for pkg in oraclemcp-driver-cx oraclemcp-driver-cx-protocol; do
   lock_versions="$(
     awk -v pkg="$pkg" '
       $0 ~ /^name = / { cur = $0; sub(/^name = "/, "", cur); sub(/"$/, "", cur) }
@@ -162,10 +162,15 @@ for pkg in oracledb oracledb-protocol; do
   [ "$lock_versions" = "$driver_version" ] ||
     fail "Cargo.lock $pkg version '$lock_versions' != pinned driver '$driver_version'"
 done
+for legacy_pkg in oracledb oracledb-protocol; do
+  if grep -Fq "name = \"$legacy_pkg\"" "$lock"; then
+    fail "Cargo.lock must not retain legacy package $legacy_pkg"
+  fi
+done
 
 connection_rs="$ROOT/crates/oraclemcp-db/src/connection.rs"
-grep -Fq "oracledb = { version = \"=$driver_version\", default-features = false }" "$connection_rs" ||
-  fail "connection.rs pin_is seam test must assert oracledb =$driver_version pin"
+grep -Fq "oraclemcp-driver-cx = { version = \"=$driver_version\", default-features = false }" "$connection_rs" ||
+  fail "connection.rs pin_is seam test must assert driver-cx =$driver_version pin"
 driver_seam_fn="pin_is_$(printf '%s' "$driver_version" | tr '.' '_')_and_seam_intact"
 if ! grep -Fq "fn $driver_seam_fn" "$connection_rs"; then
   fail "connection.rs must define fn $driver_seam_fn driver seam regression test"
@@ -181,20 +186,20 @@ fi
 for provenance_doc in "AGENTS.md" "README.md" "docs/operations.md"; do
   require_contains \
     "$provenance_doc" \
-    "\`oracledb\` $driver_version driver's own source is stable-clean" \
+    "\`oraclemcp-driver-cx\` $driver_version driver's own source is stable-clean" \
     "driver provenance"
 done
 require_contains \
   "docs/operations.md" \
-  "pinned \`oracledb\` $driver_version stack parses" \
+  "pinned \`oraclemcp-driver-cx\` $driver_version stack parses" \
   "EXPIRE_TIME driver provenance"
 require_contains \
   "docs/toolchain.md" \
-  "\`oracledb\` $driver_version driver's own source is stable-clean" \
+  "\`oraclemcp-driver-cx\` $driver_version driver's own source is stable-clean" \
   "toolchain driver provenance"
 require_contains \
   "docs/adr/0001-pinned-nightly-toolchain.md" \
-  "pinned \`oracledb\`"$'\n'"$driver_version driver itself is **stable-clean**" \
+  "pinned \`oraclemcp-driver-cx\` $driver_version driver's own source is stable-clean" \
   "ADR driver provenance"
 require_contains \
   "docs/behavior-inventory.md" \
@@ -202,23 +207,23 @@ require_contains \
   "behavior-inventory driver provenance"
 require_contains \
   "docs/behavior-inventory.md" \
-  "\`oracledb = $driver_version\` and" \
-  "behavior-inventory oracledb pin"
+  "\`oraclemcp-driver-cx = $driver_version\` and" \
+  "behavior-inventory driver-cx pin"
 require_contains \
   "docs/behavior-inventory.md" \
-  "\`oracledb-protocol = $driver_version\` crates from crates.io" \
+  "\`oraclemcp-driver-cx-protocol = $driver_version\` crates from crates.io" \
   "behavior-inventory protocol pin"
 require_contains \
   "Cargo.toml" \
-  "The oracledb $driver_version driver's own source is stable-clean" \
+  "The oraclemcp-driver-cx $driver_version driver's own source is stable-clean" \
   "workspace driver provenance"
 require_contains \
   "Cargo.toml" \
-  "version \`oracledb $driver_version\`" \
+  "version \`oraclemcp-driver-cx $driver_version\`" \
   "workspace protocol provenance"
 require_contains \
   ".github/workflows/ci.yml" \
-  "oracledb $driver_version is stable-clean" \
+  "oraclemcp-driver-cx $driver_version is stable-clean" \
   "CI driver provenance"
 require_contains \
   ".github/workflows/ci.yml" \
@@ -250,11 +255,11 @@ require_contains \
   "capability asupersync provenance"
 require_contains \
   "crates/oraclemcp-db/src/tns.rs" \
-  "\`oracledb-protocol\` is pinned to \`=$driver_version\`, the exact version \`oracledb $driver_version\`" \
+  "Both packages are pinned to \`=$driver_version\`" \
   "TNS adapter driver provenance"
 require_contains \
   "crates/oraclemcp-core/tests/fixtures/wallet/PROVENANCE.md" \
-  "Driver API exercised (from the pinned \`oracledb-protocol\` API)" \
+  "Driver API exercised (from the pinned \`oraclemcp-driver-cx-protocol\` API)" \
   "wallet fixture driver provenance"
 
 server_version="$(jq -r '.version' server.json)"

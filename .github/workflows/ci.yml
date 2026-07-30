@@ -472,7 +472,7 @@ jobs:
       - run: bash scripts/release_acceptance_ci_suite.sh --skip-feature-powerset
 
   # The thin-native line is pinned to nightly. Asupersync depends on specific nightly-only language features,
-  # pulled in transitively by its dependency declaration; oracledb 0.9.1 is stable-clean
+  # pulled in transitively by its dependency declaration; oraclemcp-driver-cx 0.9.2 is stable-clean
   # (see docs/toolchain.md). This is a build-only ratchet separate from the test job
   # so toolchain installation failures stay obvious.
   pinned-nightly:
@@ -565,9 +565,9 @@ jobs:
   # engine crate. Trivially satisfied in this repo (there are no plsql-* crates),
   # but kept as a standing guard against an accidental re-introduction.
   #
-  # The driver-adapter seam (B2): every real `oracledb::` driver call stays
-  # behind the single adapter file so an oracledb driver cut-over (e.g. the
-  # completed 0.2.2 -> 0.5.x bump) touches exactly one file. Mirrored by the
+  # The driver-adapter seam (B2): every real `oraclemcp_driver_cx::` call stays
+  # behind the single adapter file so a driver cut-over touches one boundary.
+  # Mirrored by the
   # `driver_seam` test in crates/oraclemcp-db so `cargo test` catches a leak too.
   boundary:
     name: engine-free boundary + surface + driver-seam + honesty + conformance accounting

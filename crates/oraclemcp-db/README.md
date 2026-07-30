@@ -9,13 +9,13 @@ It owns the correctness-critical Oracle layer used by the server and its
 optional embedded engine:
 
 - the backend-independent [`OracleConnection`] trait + the thin
-  [`oracledb`]-backed `RustOracleConnection`,
+  [`oraclemcp-driver-cx`]-backed `RustOracleConnection`,
 - the bounded pure-Rust session pool (`OraclePool`),
 - the session-lease primitive,
 - the deterministic NUMBER→string / ISO-8601 / NLS-stable serializer,
 - and the dictionary / intelligence operations.
 
-Every real `oracledb` driver call is confined to the adapter seam
+Every real `oraclemcp-driver-cx` call is confined to the adapter seam
 (`src/connection.rs`,
 [ADR-0002](../../docs/adr/0002-driver-adapter-seam.md)). No driver type leaks
 into this crate's public API: callers depend only on the `oraclemcp-db` types.
@@ -64,4 +64,4 @@ CARGO_TARGET_DIR="$PWD/target" cargo semver-checks check-release -p oraclemcp-db
 `rust-toolchain.toml`); run it with that toolchain so the baseline is stable.
 
 [`OracleConnection`]: https://docs.rs/oraclemcp-db
-[`oracledb`]: https://crates.io/crates/oracledb
+[`oraclemcp-driver-cx`]: https://crates.io/crates/oraclemcp-driver-cx

@@ -1422,7 +1422,7 @@ fn fold_cert_expiry(
 /// earliest expiry is read offline through the `oraclemcp-db` seam and folded in
 /// — a near-/already-expired cert escalates an otherwise-usable wallet to WARN.
 fn attach_wallet_posture(ctx: &DoctorContext, base: CheckResult) -> CheckResult {
-    let Some(dir) = oracledb_protocol::tls::wallet::resolve_wallet_dir(
+    let Some(dir) = oraclemcp_driver_cx_protocol::tls::wallet::resolve_wallet_dir(
         ctx.wallet_location.as_deref(),
         ctx.tns_admin.as_deref(),
     ) else {
@@ -1597,12 +1597,14 @@ pub struct DoctorWalletPostureReport {
     pub summary: String,
 }
 
-/// Map a typed driver [`oracledb_protocol::tls::wallet::WalletError`] into the
+/// Map a typed driver [`oraclemcp_driver_cx_protocol::tls::wallet::WalletError`] into the
 /// secret-free [`DoctorWalletErrorKind`]. The driver enum is `#[non_exhaustive]`,
 /// so a wildcard arm is required; every variant the pinned driver can
 /// produce is mapped explicitly.
-fn wallet_error_kind(error: &oracledb_protocol::tls::wallet::WalletError) -> DoctorWalletErrorKind {
-    use oracledb_protocol::tls::wallet::WalletError;
+fn wallet_error_kind(
+    error: &oraclemcp_driver_cx_protocol::tls::wallet::WalletError,
+) -> DoctorWalletErrorKind {
+    use oraclemcp_driver_cx_protocol::tls::wallet::WalletError;
     match error {
         WalletError::FileMissing(_) => DoctorWalletErrorKind::FileMissing,
         WalletError::Io { .. } => DoctorWalletErrorKind::Io,
@@ -1660,8 +1662,8 @@ fn wallet_error_label(kind: DoctorWalletErrorKind) -> &'static str {
 /// DB connection.
 ///
 /// Uses only the driver's public, sans-I/O parsers
-/// (`oracledb_protocol::tls::wallet::{parse_ewallet_pem, parse_ewallet_p12}` and
-/// `oracledb_protocol::tls::sso::parse_cwallet_sso`) plus the public path helpers
+/// (`oraclemcp_driver_cx_protocol::tls::wallet::{parse_ewallet_pem, parse_ewallet_p12}` and
+/// `oraclemcp_driver_cx_protocol::tls::sso::parse_cwallet_sso`) plus the public path helpers
 /// (`pem_wallet_path`/`p12_wallet_path`/`sso_wallet_path`). It mirrors the
 /// driver's documented `load_wallet` precedence and fallthrough contract; it does
 /// NOT call the driver's (private) resolver, so it can only *infer* the verdict,
@@ -1677,8 +1679,8 @@ pub fn probe_wallet_posture(
     dir: &Path,
     wallet_password: Option<&str>,
 ) -> DoctorWalletPostureReport {
-    use oracledb_protocol::tls::sso::parse_cwallet_sso;
-    use oracledb_protocol::tls::wallet::{
+    use oraclemcp_driver_cx_protocol::tls::sso::parse_cwallet_sso;
+    use oraclemcp_driver_cx_protocol::tls::wallet::{
         p12_wallet_path, parse_ewallet_p12, parse_ewallet_pem, pem_wallet_path, sso_wallet_path,
     };
 
@@ -1797,9 +1799,9 @@ pub fn probe_wallet_posture(
 }
 
 /// Auto-login wallet file name, mirrored from
-/// `oracledb_protocol::tls::wallet::SSO_WALLET_FILE_NAME` (= `"cwallet.sso"`); a
+/// `oraclemcp_driver_cx_protocol::tls::wallet::SSO_WALLET_FILE_NAME` (= `"cwallet.sso"`); a
 /// local constant keeps the secret-free summaries free of any borrowed path.
-const SSO_WALLET_FILE: &str = oracledb_protocol::tls::wallet::SSO_WALLET_FILE_NAME;
+const SSO_WALLET_FILE: &str = oraclemcp_driver_cx_protocol::tls::wallet::SSO_WALLET_FILE_NAME;
 
 /// Classify the authentication / transport posture of a connection failure into
 /// a precise [`AuthModeClass`] (A5). Driver-unsupported enterprise auth modes
@@ -4017,7 +4019,7 @@ mod tests {
     /// fails to compile here rather than silently landing on `Pem` again.
     #[test]
     fn wallet_error_kind_maps_every_pinned_driver_variant() {
-        use oracledb_protocol::tls::wallet::WalletError;
+        use oraclemcp_driver_cx_protocol::tls::wallet::WalletError;
 
         fn expected(error: &WalletError) -> DoctorWalletErrorKind {
             match error {

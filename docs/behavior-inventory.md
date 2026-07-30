@@ -13,7 +13,7 @@ query text.
 | Workspace | Cargo workspace with 9 crates plus `oraclemcp` binary, `resolver = "2"`, edition 2024, pinned nightly `nightly-2026-05-11`, and no stable MSRV on the thin-native line. | `Cargo.toml`, `rust-toolchain.toml` |
 | Safety posture | Every crate forbids unsafe code; raw SQL safety is centered on `oraclemcp-guard`. | `Cargo.toml`, crate roots, `AGENTS.md` |
 | Current release line | All `oraclemcp-*` package versions and `server.json` are aligned on the workspace release, while the independently-versioned thin driver/protocol pins are exact at 0.9.1. | `Cargo.toml`, crate `Cargo.toml` files, `server.json`, `Cargo.lock` |
-| Current DB mode | Default build includes live Oracle support through the pure-Rust `oracledb` thin driver. | `README.md`, `crates/oraclemcp-db/Cargo.toml` |
+| Current DB mode | Default build includes live Oracle support through the pure-Rust `oraclemcp-driver-cx` thin driver. | `README.md`, `crates/oraclemcp-db/Cargo.toml` |
 | Current runtime/transport | Native stdio and native Streamable HTTP live in `oraclemcp-core`; dispatch receives explicit Asupersync `Cx` contexts; Tokio, `rmcp`, Axum, Hyper, ODPI-C, and `r2d2` are absent from the current manifests and lockfile. | `crates/oraclemcp-core/src/server.rs`, `crates/oraclemcp-core/src/http/mod.rs`, `Cargo.lock`, `Cargo.toml` |
 | Current bead state | Repo-local `.beads/` contains the migration graph and W-series release hardening work. | `br list --json`, `bv --robot-triage` |
 | Local release artifacts | `docs/performance-footprint.md` records release binary size, startup/RSS, package sizes, Docker image size, Docker smoke, and Unix pipe behavior. | `docs/performance-footprint.md`, `tests/artifacts/perf/20260615T182242Z-7dd4a60/` |
@@ -132,10 +132,11 @@ query text.
 
 ## Thin Driver Release Dependency Decision
 
-Verified on 2026-07-15:
+Verified on 2026-07-30:
 
-- `Cargo.lock` resolves the published `oracledb = 0.9.1` and
-  `oracledb-protocol = 0.9.1` crates from crates.io.
+- `Cargo.lock` resolves the published `oraclemcp-driver-cx = 0.9.2` and
+  `oraclemcp-driver-cx-protocol = 0.9.2` crates from crates.io; the
+  driver/protocol pins are exact at 0.9.2.
 - The published driver exposes the pure-Rust native-async thin connection path
   used by the current `Cx`-first async DB trait boundary.
 - The local `/home/durakovic/projects/rust-oracledb` checkout is a normal
@@ -145,12 +146,12 @@ Verified on 2026-07-15:
 
 Decision:
 
-- `oraclemcp` consumes `oracledb = 0.9.1` from crates.io, declared in the
+- `oraclemcp` consumes `oraclemcp-driver-cx = 0.9.2` from crates.io, declared in the
   workspace dependency table with `default-features = false`.
 - No vendoring is used. No releaseable `oraclemcp` crate may depend on
   `/home/durakovic/projects/rust-oracledb` or any other external local path.
 - The current production graph uses the driver's native-async
-  `oracledb::Connection` behind explicit Asupersync `Cx` checkpoints. This
+  `oraclemcp_driver_cx::Connection` behind explicit Asupersync `Cx` checkpoints. This
   keeps the transport/runtime native while the DB trait remains async.
 - Release package validation uses `cargo package --workspace --locked
   --no-verify` in the tag workflow to prove tarball assembly without hidden
@@ -161,19 +162,19 @@ Decision:
 
 Semver, ownership, and security-fix flow:
 
-- `oracledb` remains independently owned and released from
+- `oraclemcp-driver-cx` remains independently owned and released from
   `https://github.com/MuhDur/rust-oracledb`; `oraclemcp` consumes it like any
   other public crate.
-- Driver fixes flow into `oraclemcp` through normal published `oracledb` version
+- Driver fixes flow into `oraclemcp` through normal published driver-cx version
   bumps and lockfile updates, with release notes in the driver repo for
   downstream users.
-- If `oracledb` lacks a required thin capability, the next step is a
+- If driver-cx lacks a required thin capability, the next step is a
   self-contained `rust-oracledb` issue and a new published driver version, not a
   hidden path dependency.
 
-| oraclemcp need | Legacy/current behavior | `oracledb` / thin migration note |
+| oraclemcp need | Legacy/current behavior | driver-cx / thin migration note |
 | --- | --- | --- |
-| Connect | Thin `oracledb` connect via `RustOracleConnection`; applies username/password, proxy user, wallet location/password, TLS DN/SNI, client identity, edition, app context, SDU, statement-cache size, NLS, and session statements. | Edition, app context, SDU, and statement-cache sizing are sent through thin driver connect options; driver errors are sanitized against credentials, wallet material, identity fields, app context values, and proxy material. |
+| Connect | Thin driver-cx connect via `RustOracleConnection`; applies username/password, proxy user, wallet location/password, TLS DN/SNI, client identity, edition, app context, SDU, statement-cache size, NLS, and session statements. | Edition, app context, SDU, and statement-cache sizing are sent through thin driver connect options; driver errors are sanitized against credentials, wallet material, identity fields, app context values, and proxy material. |
 | Query rows | Positional and named binds; pagination wraps SQL with `OFFSET ... FETCH`; first page fetches max rows plus one. LOB locators, REF CURSOR cells, and implicit result sets are materialized under serialization caps. | `execute_query_with_binds*`, named/positional bind APIs, fetch APIs, locator reads, and cursor fetches are used without local path dependencies. |
 | Execute | Thin adapter reports rows affected, commit/rollback, savepoint rollback preview, and optional bounded DBMS_OUTPUT capture. | Cancellation-aware execute paths roll back dirty dispatcher work; rollback is not skipped by the adapter's own pre-checkpoint, preview DML always attempts rollback-to-savepoint, and commit failure quarantines the session as `commit_in_doubt` instead of attempting a misleading rollback. |
 | Call timeout/cancel | Thin adapter has a default 30s call timeout, profile/per-call request-budget `meet` enforcement, and `&Cx` checkpoints at dispatch, DB, pool, and serialization boundaries. | `DbError::Cancelled` maps to `TIMEOUT`; pooled `*_cx` calls discard the checked-out connection on any cancellation/failure because Oracle may already have crossed a round-trip boundary. Direct write paths quarantine uncertain sessions and audit `RolledBack`, `CommitInDoubt`, or `UnknownDiscarded`; leased paths return the matching structured quarantine error and drop the lease. |
@@ -207,7 +208,7 @@ Remaining upstream thin-driver gaps tracked in `/home/durakovic/projects/rust-or
 | --- | --- | --- |
 | Wallet discovery | Requires `cwallet.sso` and `tnsnames.ora`; parses aliases. | Preserve diagnostics; doctor/log output must not print local wallet paths. |
 | ADB validation | Accepts `tcps://`, TLS descriptor, or bare wallet alias; rejects plaintext `tcp://`. | Preserve fail-closed TLS/ADB validation before connection. |
-| TCPS/SNI/wallet | Thin mode routes TCPS/wallet setup through the published `oracledb` driver where available and otherwise fails explicitly. | Preserve fail-closed diagnostics; unsupported auth/features must not silently fall back to thick mode. |
+| TCPS/SNI/wallet | Thin mode routes TCPS/wallet setup through the published `oraclemcp-driver-cx` driver where available and otherwise fails explicitly. | Preserve fail-closed diagnostics; unsupported auth/features must not silently fall back to thick mode. |
 | IAM refresh | Pre-fetched env/file/exec token sources are wired for profile-level `use_iam_token`; `token_file` is re-read on every connect and `token_exec` runs per connect. Autonomous OCI SDK/resource-principal minting via `iam_config_profile` remains unwired. | Keep token material redacted; do not claim autonomous IAM refresh until the OCI SDK/resource-principal source is implemented and live-tested. |
 | Read-only standby | Standby detection caps write behavior and disables `EXPLAIN PLAN` into `PLAN_TABLE`. | Preserve standby cap and diagnostic clarity. |
 

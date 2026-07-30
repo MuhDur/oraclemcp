@@ -31,7 +31,7 @@ count_lines() {
   #   (a) a product file's inline test module -- test code is not product
   #       complexity, and a single-file seam like connection.rs can neither
   #       split its product nor move its tests behind the driver seam (they use
-  #       `oracledb::`), so its ratchet must measure product lines; and
+  #       `oraclemcp_driver_cx::`), so its ratchet must measure product lines; and
   #   (b) test code already factored behind a `#[cfg(test)]` submodule -- the
   #       desired end state, since the fix for a monolith is to extract it.
   # A file with no `#[cfg(test)]` (all product, or a test-body file whose tests

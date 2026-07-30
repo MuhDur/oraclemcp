@@ -36,18 +36,18 @@ That feature is **opt-in, but in asupersync's `default` set**
 (`default = ["proc-macros", "nightly-outcome-try"]`). asupersync does not
 *require* nightly; a consumer that opts out of its defaults does not get it.
 Our root `Cargo.toml` **does** opt out (`default-features = false`). The feature
-still lands because **`oracledb` declares its asupersync dependency without
+still lands because **`oraclemcp-driver-cx` declares its asupersync dependency without
 `default-features = false`**, and cargo unifies features across the graph — so
 the driver's defaults re-enable it for everyone. Verify with:
 
 ```sh
-cargo tree -i asupersync -e features   # asupersync feature "default" <- oracledb
+cargo tree -i asupersync -e features   # asupersync feature "default" <- driver-cx
 ```
 
 Neither the driver's nor the server's own source uses the nightly syntax: the
 feature arrives transitively and unrequested.
-The pinned `oracledb` 0.9.1 driver's own source is stable-clean — but its
-**dependency declaration** is the proximate cause, so "oracledb is not the
+The pinned `oraclemcp-driver-cx` 0.9.2 driver's own source is stable-clean — but its
+**dependency declaration** is the proximate cause, so "driver-cx is not the
 reason for the pin" is misleading.
 
 **2. `windows_by_handle` (Windows only).** `oraclemcp-core` enables it for
@@ -61,7 +61,7 @@ silently break a build or a release.
 
 **Review trigger (corrected).** ADR-0001 frames this as waiting for asupersync
 to stop needing nightly. That is not the only lever, and probably not the first
-one: reason 1 may be removable *today* by having `oracledb` set
+one: reason 1 may be removable *today* by having `oraclemcp-driver-cx` set
 `default-features = false` on asupersync (keeping `proc-macros`, its other
 default) — no upstream change required. Bead `oraclemcp-yi2z` tracks proving
 that. Reason 2 needs `windows_by_handle` to stabilise
@@ -77,9 +77,9 @@ chase the newest nightly for its own sake. Trigger a bump when:
 - **An asupersync upgrade requires it.** This is the primary driver: asupersync
   is what depends on nightly-only language features, so a new asupersync release
   may need a feature only present in a later nightly. The toolchain bump and the
-  asupersync bump land together. (An `oracledb` upgrade does not by itself force
+  asupersync bump land together. (An `oraclemcp-driver-cx` upgrade does not by itself force
   a re-pin — the driver is stable-clean — but bump the pin if a coordinated
-  `oracledb` upgrade rides along with an asupersync change that needs it.)
+  `oraclemcp-driver-cx` upgrade rides along with an asupersync change that needs it.)
 - **The multi-nightly early-warning job has gone red and you have triaged it.**
   CI runs an advisory `multi-nightly` matrix (pinned date + the floating
   `nightly` channel, `continue-on-error: true`) precisely so an upcoming
@@ -97,7 +97,7 @@ and a flake there is not a toolchain-pin problem.
 ## 3. How to re-pin (the exact change set)
 
 Pick the candidate nightly (usually the minimum date that satisfies the
-Asupersync/`oracledb` upgrade you are landing with). Then update **every** place
+Asupersync/driver-cx upgrade you are landing with). Then update **every** place
 the date is written. There are four:
 
 1. **`rust-toolchain.toml`** — the local-build selector.
@@ -145,7 +145,7 @@ Expected remaining hits after a bump are historical only — for example
 ADR-0001 records `nightly-2026-05-11` as the date the decision was taken. Leave
 those as history; do not rewrite them. If you change the *active* pin, add a
 short note to ADR-0001's Consequences (or a follow-up ADR) recording the new
-date and the Asupersync/`oracledb` versions it was coordinated with, so the pin
+date and the Asupersync/driver-cx versions it was coordinated with, so the pin
 history stays auditable.
 
 ---

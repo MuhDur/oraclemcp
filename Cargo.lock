@@ -2102,50 +2102,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oracledb"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc41705cfd818cb389288d3596d76f3fb9ec895faed4400367558743c174dab3"
-dependencies = [
- "asupersync",
- "base64",
- "futures-core",
- "httpdate",
- "oracledb-protocol",
- "ring",
- "rustls",
- "rustls-native-certs",
- "rustls-pemfile",
- "rustls-pki-types",
- "rustls-webpki",
- "thiserror",
- "tracing",
- "x509-cert",
-]
-
-[[package]]
-name = "oracledb-protocol"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bed2e7030a0ac43ec2e6d25f0d55ce90de8fb76c99e134f6e437828e2a3223c5"
-dependencies = [
- "aes",
- "cbc",
- "der",
- "des",
- "hex",
- "hmac 0.12.1",
- "md-5",
- "pbkdf2",
- "rand 0.8.6",
- "rustls-pemfile",
- "serde",
- "sha1 0.10.6",
- "sha2 0.10.9",
- "thiserror",
-]
-
-[[package]]
 name = "oraclemcp"
 version = "0.10.0"
 dependencies = [
@@ -2256,11 +2212,11 @@ dependencies = [
  "getrandom 0.2.17",
  "libc",
  "loom",
- "oracledb-protocol",
  "oraclemcp-audit",
  "oraclemcp-auth",
  "oraclemcp-config",
  "oraclemcp-db",
+ "oraclemcp-driver-cx-protocol",
  "oraclemcp-error",
  "oraclemcp-guard",
  "oraclemcp-telemetry",
@@ -2288,8 +2244,8 @@ dependencies = [
  "criterion",
  "futures-core",
  "getrandom 0.2.17",
- "oracledb",
- "oracledb-protocol",
+ "oraclemcp-driver-cx",
+ "oraclemcp-driver-cx-protocol",
  "oraclemcp-error",
  "oraclemcp-guard",
  "regex",
@@ -2299,6 +2255,50 @@ dependencies = [
  "thiserror",
  "tracing",
  "trybuild",
+]
+
+[[package]]
+name = "oraclemcp-driver-cx"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8aaaa3ead5f0244103960b5f817fdac23a6b3ebdab8a2ecf50965ef50b86fdc4"
+dependencies = [
+ "asupersync",
+ "base64",
+ "futures-core",
+ "httpdate",
+ "oraclemcp-driver-cx-protocol",
+ "ring",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pemfile",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "thiserror",
+ "tracing",
+ "x509-cert",
+]
+
+[[package]]
+name = "oraclemcp-driver-cx-protocol"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5538d814d0e009aebb614bc04679aa96054022ceed754d959fe015f16c3338ca"
+dependencies = [
+ "aes",
+ "cbc",
+ "der",
+ "des",
+ "hex",
+ "hmac 0.12.1",
+ "md-5",
+ "pbkdf2",
+ "rand 0.8.6",
+ "rustls-pemfile",
+ "serde",
+ "sha1 0.10.6",
+ "sha2 0.10.9",
+ "thiserror",
 ]
 
 [[package]]

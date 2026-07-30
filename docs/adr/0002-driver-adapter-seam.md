@@ -80,7 +80,7 @@ change to that surface must be caught before release. ADR-0006's separate
 `plsql-mcp` convergence story is superseded: the server's supported optional
 engine is embedded through `plsql-intelligence`.
 
-**Decision.** Adopt two API-lock tools (mirroring `oracledb`'s own ADR-0002):
+**Decision.** Adopt two API-lock tools (mirroring driver-cx's own ADR-0002):
 
 - **`cargo public-api`** — renders the exact public API and diffs it against a
   committed baseline at `crates/<crate>/api/<crate>.txt`. This is the hard,
