@@ -954,6 +954,26 @@ fn native_parser_preserves_413_431_and_400_statuses() {
     let response = exchange(addr, malformed);
     assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
 
+    for malformed in [
+        b"POST /mcp HTTP/1.1\r\nhost: 127.0.0.1\r\ntRaNsFeR-EnCoDiNg: chunked\r\ncontent-length: 0\r\n\r\n0\r\n\r\n".as_slice(),
+        b"POST /mcp HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 0\r\nContent-Length: 0\r\n\r\n".as_slice(),
+        b"POST /mcp HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 1\r\nContent-Length: 0\r\n\r\nx".as_slice(),
+        b"POST /mcp HTTP/1.1\r\nhost: 127.0.0.1\r\nContent-Length: 0\r\ncontent-length: 1\r\n\r\nx".as_slice(),
+        b"GET /healthz HTTP/1.1\r\nhost : 127.0.0.1\r\n\r\n".as_slice(),
+        b"GET /healthz HTTP/1.1 trailing\r\nhost: 127.0.0.1\r\n\r\n".as_slice(),
+        b"G(ET /healthz HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n".as_slice(),
+        b"GET /bad\tpath HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n".as_slice(),
+        b"GET /healthz?value=%GG HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n".as_slice(),
+        b"POST /dashboard/pair HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/x-www-form-urlencoded\r\ncontent-length: 8\r\n\r\ncode=%FF".as_slice(),
+    ] {
+        let response = exchange(addr, malformed);
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            "malformed request escaped parser: {response:?}"
+        );
+        assert!(response.contains("connection: close\r\n"));
+    }
+
     let mut exact_header = b"GET /healthz HTTP/1.1\r\nhost: 127.0.0.1\r\nx-fill: ".to_vec();
     exact_header.resize(MAX_HEADER_BYTES - 4, b'x');
     exact_header.extend_from_slice(b"\r\n\r\n");

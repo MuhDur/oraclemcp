@@ -13,7 +13,9 @@
 //! End-to-end zeroize discipline: [`Secret`] wipes on drop and redacts in
 //! `Debug`/logs.
 
-use std::fs;
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -31,6 +33,8 @@ const KEYRING_COMMAND_ENV: &str = "ORACLEMCP_KEYRING_COMMAND";
 const KEYRING_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum bytes accepted independently from keyring stdout and stderr.
 const KEYRING_OUTPUT_CAP: usize = 64 * 1024;
+/// Maximum bytes accepted from a local file-backed secret.
+const FILE_SECRET_BYTES_CAP: usize = 64 * 1024;
 
 /// A secret value that zeroes its memory on drop and never prints its contents.
 #[derive(Clone)]
@@ -83,6 +87,9 @@ pub enum SecretError {
     /// protocol permits.
     #[error("secret backend `{0}` produced too much output")]
     BackendOutputTooLarge(String),
+    /// A file backend target failed its descriptor identity or ownership policy.
+    #[error("secret backend `{0}` refused unsafe file metadata")]
+    UnsafeFile(String),
     /// The scheme needs a backend not compiled into this build.
     #[error("secrets backend not available for scheme `{0}` (feature-gated)")]
     BackendUnavailable(String),
@@ -225,9 +232,92 @@ pub fn resolve_secret(
 }
 
 fn resolve_file_secret(locator: &str) -> Result<Secret, SecretError> {
-    let contents =
-        fs::read_to_string(locator).map_err(|_| SecretError::NotFound("file".to_owned()))?;
+    let mut file = open_secret_file(locator)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| SecretError::NotFound("file".to_owned()))?;
+    validate_secret_file_metadata(&metadata)?;
+    if metadata.len() > FILE_SECRET_BYTES_CAP as u64 {
+        return Err(SecretError::BackendOutputTooLarge("file".to_owned()));
+    }
+
+    let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
+    (&mut file)
+        .take((FILE_SECRET_BYTES_CAP + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| SecretError::BackendFailure("file".to_owned()))?;
+    if bytes.len() > FILE_SECRET_BYTES_CAP {
+        return Err(SecretError::BackendOutputTooLarge("file".to_owned()));
+    }
+    let contents = std::str::from_utf8(&bytes)
+        .map_err(|_| SecretError::InvalidUtf8("file".to_owned()))?
+        .to_owned();
     Ok(Secret::new(strip_one_trailing_line_ending(contents)))
+}
+
+#[cfg(unix)]
+fn open_secret_file(locator: &str) -> Result<File, SecretError> {
+    use rustix::fs::{Mode, OFlags};
+
+    rustix::fs::open(
+        locator,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|_| SecretError::NotFound("file".to_owned()))
+}
+
+#[cfg(windows)]
+fn open_secret_file(locator: &str) -> Result<File, SecretError> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(locator)
+        .map_err(|_| SecretError::NotFound("file".to_owned()))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_secret_file(locator: &str) -> Result<File, SecretError> {
+    OpenOptions::new()
+        .read(true)
+        .open(locator)
+        .map_err(|_| SecretError::NotFound("file".to_owned()))
+}
+
+fn validate_secret_file_metadata(metadata: &fs::Metadata) -> Result<(), SecretError> {
+    if !metadata.file_type().is_file() {
+        return Err(SecretError::UnsafeFile("file".to_owned()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        validate_unix_secret_file_policy(
+            metadata.mode(),
+            metadata.uid(),
+            metadata.nlink(),
+            rustix::process::geteuid().as_raw(),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_unix_secret_file_policy(
+    mode: u32,
+    owner_uid: u32,
+    link_count: u64,
+    effective_uid: u32,
+) -> Result<(), SecretError> {
+    if mode & 0o077 != 0 || owner_uid != effective_uid || link_count != 1 {
+        Err(SecretError::UnsafeFile("file".to_owned()))
+    } else {
+        Ok(())
+    }
 }
 
 fn strip_one_trailing_line_ending(mut value: String) -> String {
@@ -555,6 +645,7 @@ fn platform_keyring_secret(_service: &str, _account: &str) -> Result<Secret, Sec
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
 
     fn env<'a>(
         map: &'a HashMap<&'static str, &'static str>,
@@ -564,6 +655,30 @@ mod tests {
 
     fn empty_env(_: &str) -> Option<String> {
         None
+    }
+
+    fn file_secret_test_root(name: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/file-secret-tests")
+            .join(format!("{name}-{}-{stamp}", std::process::id()))
+    }
+
+    fn write_private_secret(path: &Path, contents: impl AsRef<[u8]>) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create secret fixture directory");
+        }
+        fs::write(path, contents).expect("write secret fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .expect("make secret fixture private");
+        }
     }
 
     #[test]
@@ -597,15 +712,119 @@ mod tests {
 
     #[test]
     fn file_scheme_resolves_from_secret_file_and_strips_one_line_ending() {
-        let path = std::env::temp_dir().join(format!(
-            "oraclemcp-secret-test-{}-file.txt",
-            std::process::id()
-        ));
-        std::fs::write(&path, "file-secret\n").expect("write secret fixture");
+        let path = file_secret_test_root("valid").join("secret.txt");
+        write_private_secret(&path, "file-secret\n");
         let reference = format!("file:{}", path.display());
         let resolver = EnvLookupSecretResolver::new(empty_env);
         let s = resolve_secret_with(&reference, true, &resolver).expect("resolve file");
         assert_eq!(s.expose(), "file-secret");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_secret_refuses_symlink_hardlink_and_public_mode() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let root = file_secret_test_root("unsafe-metadata");
+        fs::create_dir_all(&root).expect("create fixture root");
+        let victim = root.join("victim.txt");
+        write_private_secret(&victim, "victim-secret\n");
+        let victim_before = fs::read(&victim).expect("read victim");
+        let mode_before = fs::metadata(&victim)
+            .expect("victim metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        let link = root.join("secret-link.txt");
+        symlink(&victim, &link).expect("create symlink fixture");
+        assert!(matches!(
+            resolve_file_secret(link.to_str().expect("utf-8 fixture path")),
+            Err(SecretError::NotFound(_)) | Err(SecretError::UnsafeFile(_))
+        ));
+        assert_eq!(fs::read(&victim).expect("victim unchanged"), victim_before);
+        assert_eq!(
+            fs::metadata(&victim)
+                .expect("victim metadata unchanged")
+                .permissions()
+                .mode()
+                & 0o777,
+            mode_before
+        );
+
+        let hardlink = root.join("secret-hardlink.txt");
+        fs::hard_link(&victim, &hardlink).expect("create hardlink fixture");
+        assert!(matches!(
+            resolve_file_secret(victim.to_str().expect("utf-8 fixture path")),
+            Err(SecretError::UnsafeFile(_))
+        ));
+
+        let public = root.join("public.txt");
+        write_private_secret(&public, "public-secret");
+        fs::set_permissions(&public, fs::Permissions::from_mode(0o644))
+            .expect("make public fixture");
+        assert!(matches!(
+            resolve_file_secret(public.to_str().expect("utf-8 fixture path")),
+            Err(SecretError::UnsafeFile(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_secret_refuses_wrong_owner_policy_and_fifo_without_blocking() {
+        assert!(matches!(
+            validate_unix_secret_file_policy(0o100600, 1, 1, 2),
+            Err(SecretError::UnsafeFile(_))
+        ));
+
+        let root = file_secret_test_root("fifo");
+        fs::create_dir_all(&root).expect("create fixture root");
+        let fifo = root.join("secret.fifo");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("run mkfifo")
+                .success()
+        );
+        let started = Instant::now();
+        assert!(matches!(
+            resolve_file_secret(fifo.to_str().expect("utf-8 fixture path")),
+            Err(SecretError::UnsafeFile(_))
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "FIFO refusal blocked for {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn file_secret_enforces_exact_input_ceiling_and_utf8() {
+        let root = file_secret_test_root("bounded");
+        let exact = root.join("exact.txt");
+        write_private_secret(&exact, vec![b'x'; FILE_SECRET_BYTES_CAP]);
+        assert_eq!(
+            resolve_file_secret(exact.to_str().expect("utf-8 fixture path"))
+                .expect("exact byte ceiling is accepted")
+                .expose()
+                .len(),
+            FILE_SECRET_BYTES_CAP
+        );
+
+        let oversized = root.join("oversized.txt");
+        write_private_secret(&oversized, vec![b'x'; FILE_SECRET_BYTES_CAP + 1]);
+        assert!(matches!(
+            resolve_file_secret(oversized.to_str().expect("utf-8 fixture path")),
+            Err(SecretError::BackendOutputTooLarge(ref backend)) if backend == "file"
+        ));
+
+        let invalid = root.join("invalid-utf8.txt");
+        write_private_secret(&invalid, [0xff, 0xfe]);
+        assert!(matches!(
+            resolve_file_secret(invalid.to_str().expect("utf-8 fixture path")),
+            Err(SecretError::InvalidUtf8(ref backend)) if backend == "file"
+        ));
     }
 
     #[test]

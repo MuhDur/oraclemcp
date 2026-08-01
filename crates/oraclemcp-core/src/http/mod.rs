@@ -69,8 +69,8 @@ use crate::client_credentials::{
 use crate::config_ops::{ConfigOpsError, ConfigOpsService};
 use crate::dashboard_auth::{
     DASHBOARD_ACTION_TICKET_HEADER, DASHBOARD_AUDIENCE_HEADER, DASHBOARD_CSRF_HEADER,
-    DASHBOARD_INSTANCE_HEADER, DASHBOARD_PAIR_PATH, DASHBOARD_PAIRING_CODE_FIELD,
-    DASHBOARD_PAIRING_TTL_SECONDS, DASHBOARD_PROBE_CHALLENGE_HEADER,
+    DASHBOARD_INSTANCE_HEADER, DASHBOARD_LOGOUT_PATH, DASHBOARD_PAIR_PATH,
+    DASHBOARD_PAIRING_CODE_FIELD, DASHBOARD_PAIRING_TTL_SECONDS, DASHBOARD_PROBE_CHALLENGE_HEADER,
     DASHBOARD_PROBE_TOKEN_HASH_HEADER, DASHBOARD_PROOF_HEADER, DASHBOARD_SESSION_PATH,
     DashboardAuth,
 };
@@ -261,7 +261,7 @@ mod wire;
 // Façade: the listener lifecycle moved to `serve`, but every existing path
 // (`oraclemcp_core::http::serve_http`, the `lib.rs` re-exports, and this
 // module's own calls into `close_http_principal_sessions`) resolves unchanged.
-use request_target::{parse_form_urlencoded, split_request_target};
+use request_target::{RequestTargetError, split_request_target, try_parse_form_urlencoded};
 // Façade: the transport configuration moved to `config`, but every existing
 // path (`oraclemcp_core::http::HttpTransportConfig`, the `lib.rs` re-exports)
 // resolves unchanged.
@@ -956,6 +956,7 @@ enum HttpRoute {
     Observability,
     DashboardPairing,
     DashboardSession,
+    DashboardLogout,
     Mcp,
     OperatorApi,
     NotFound,
@@ -967,6 +968,7 @@ fn route_for(path: &str) -> HttpRoute {
         HEALTHZ_PATH | READYZ_PATH | METRICS_PATH => HttpRoute::Observability,
         DASHBOARD_PAIR_PATH => HttpRoute::DashboardPairing,
         DASHBOARD_SESSION_PATH => HttpRoute::DashboardSession,
+        DASHBOARD_LOGOUT_PATH => HttpRoute::DashboardLogout,
         MCP_PATH => HttpRoute::Mcp,
         OPERATOR_API_PREFIX => HttpRoute::OperatorApi,
         _ if path
@@ -1098,6 +1100,9 @@ fn handle_http_exchange(
         }
         HttpRoute::DashboardSession => {
             return HttpExchange::Buffered(handle_dashboard_session_route(config, &request));
+        }
+        HttpRoute::DashboardLogout => {
+            return HttpExchange::Buffered(handle_dashboard_logout_route(config, &request));
         }
         HttpRoute::OperatorApi => {
             if let Some(response) = guard_http_request(config, &request) {
@@ -1316,8 +1321,13 @@ fn handle_dashboard_pairing_route(
     if request.body.len() > MAX_PAIRING_BODY_BYTES {
         return with_dashboard_security_headers(empty_response(413));
     }
-    let Some(code) = dashboard_pairing_code_from_body(request) else {
-        return dashboard_pairing_auth_required_response();
+    let code = match dashboard_pairing_code_from_body(request) {
+        Ok(Some(code)) => code,
+        Ok(None) => return dashboard_pairing_auth_required_response(),
+        Err(_) => {
+            return with_dashboard_security_headers(empty_response(400))
+                .with_header("cache-control", "no-store");
+        }
     };
     match auth.exchange_ticket(&code, auth.audience(), cookie_policy.secure()) {
         Ok(login) => with_dashboard_security_headers(
@@ -1332,18 +1342,25 @@ fn handle_dashboard_pairing_route(
 
 /// Read the one-time code from a same-origin form submission. Only an exact
 /// `application/x-www-form-urlencoded` body is read; nothing else is inspected.
-fn dashboard_pairing_code_from_body(request: &HttpRequest) -> Option<String> {
-    let content_type = request.header("content-type")?;
-    let media_type = content_type.split(';').next()?.trim();
+fn dashboard_pairing_code_from_body(
+    request: &HttpRequest,
+) -> Result<Option<String>, RequestTargetError> {
+    let Some(content_type) = request.header("content-type") else {
+        return Ok(None);
+    };
+    let Some(media_type) = content_type.split(';').next() else {
+        return Ok(None);
+    };
+    let media_type = media_type.trim();
     if !media_type.eq_ignore_ascii_case("application/x-www-form-urlencoded") {
-        return None;
+        return Ok(None);
     }
-    let body = std::str::from_utf8(&request.body).ok()?;
-    parse_form_urlencoded(body)
+    let body = std::str::from_utf8(&request.body).map_err(|_| RequestTargetError::InvalidUtf8)?;
+    Ok(try_parse_form_urlencoded(body)?
         .into_iter()
         .find(|(name, _)| name == DASHBOARD_PAIRING_CODE_FIELD)
         .map(|(_, value)| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty()))
 }
 
 /// The bootstrap form. Script-free by design: keeping JS out of the pairing
@@ -1476,6 +1493,50 @@ fn handle_dashboard_session_route(
             &serde_json::to_value(view).unwrap_or(Value::Null),
         ))
         .with_header("cache-control", "no-store"),
+        Err(_) => dashboard_auth_required_response(),
+    }
+}
+
+fn handle_dashboard_logout_route(
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+) -> HttpResponse {
+    if request.method != "POST" {
+        return with_dashboard_security_headers(empty_response(405).with_header("allow", "POST"));
+    }
+    if let Some(response) = guard_dashboard_http_request(config, request) {
+        return response;
+    }
+    if !request.peer_is_loopback {
+        return dashboard_auth_error_response(403, "dashboard_logout_requires_loopback");
+    }
+    if let Some(response) = enforce_dashboard_post_headers(request) {
+        return response;
+    }
+    let Some(auth) = &config.dashboard_auth else {
+        return with_dashboard_security_headers(empty_response(404));
+    };
+    if config
+        .operator_authority
+        .authorize(None, request.peer_is_loopback)
+        .is_none()
+    {
+        return dashboard_auth_error_response(403, "dashboard_operator_authority_required");
+    }
+    let cookie_policy = PrivilegedCookiePolicy::for_request(config, request);
+    if cookie_policy == PrivilegedCookiePolicy::Suppress {
+        return dashboard_auth_error_response(403, "dashboard_logout_requires_secure_transport");
+    }
+    match auth.logout_session(
+        request.header("cookie"),
+        request.header(DASHBOARD_CSRF_HEADER),
+        cookie_policy.secure(),
+    ) {
+        Ok(expired_cookie) => with_dashboard_security_headers(
+            empty_response(204)
+                .with_header("set-cookie", &expired_cookie)
+                .with_header("cache-control", "no-store"),
+        ),
         Err(_) => dashboard_auth_required_response(),
     }
 }

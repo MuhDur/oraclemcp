@@ -4098,13 +4098,21 @@ async fn export_query_to_resource(
         &export_access.principal_key,
         export_access.scopes.as_deref(),
     );
-    let handle = exports.create(
-        &columns,
-        &rows,
-        format,
-        access,
-        oraclemcp_core::export::DEFAULT_EXPORT_TTL,
-    );
+    let handle = exports
+        .create(
+            &columns,
+            &rows,
+            format,
+            access,
+            oraclemcp_core::export::DEFAULT_EXPORT_TTL,
+        )
+        .map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorClass::Internal,
+                "query result could not be materialized within export limits",
+            )
+            .with_next_step("retry with export=false and page the result inline")
+        })?;
 
     tracing::info!(
         export_uri = %handle.uri,

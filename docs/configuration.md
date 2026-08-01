@@ -415,7 +415,7 @@ hatch only and is rejected when `protected = true`. Supported forms:
 | Form | Meaning |
 |---|---|
 | `env:VAR_NAME` | Read from the process environment at use time. |
-| `file:/path/to/secret` | Read a local secret file; one trailing line ending is stripped. |
+| `file:/path/to/secret` | Read at most 64 KiB from a regular file without following links; one trailing line ending is stripped. On Unix the effective service user must own the file, its hard-link count must be one, and group/other permissions must be unset (for example, mode `0600` or `0400`). |
 | `keyring:account` / `keyring:service/account` | Resolve through the OS keyring adapter (`ORACLEMCP_KEYRING_COMMAND`, then platform fallback). |
 | `vault:path` | Future backend seam; fails closed unless a Vault resolver is wired. |
 | `literal:value` | **Dev-only** inline value. **Rejected** when `protected = true`. |

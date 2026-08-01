@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use parking_lot::Mutex;
+use thiserror::Error;
 
 use crate::tamper_token::{sign_token, verify_token};
 
@@ -46,6 +47,18 @@ pub const MAX_EXPORT_BYTES: usize = 10 * 1024 * 1024;
 /// Hard cap on the number of live exports retained in one server process.
 /// Oldest-first eviction keeps memory bounded under a burst of large reads.
 pub const MAX_LIVE_EXPORTS: usize = 64;
+
+/// Failures that prevent an export from being created without partial state.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExportCreateError {
+    /// The requested lifetime cannot be represented by the platform clock.
+    #[error("export TTL exceeds the platform clock range")]
+    InvalidTtl,
+    /// The configured byte ceiling cannot contain the format's mandatory header.
+    #[error("export byte ceiling is too small for the mandatory {0} header")]
+    SizeLimitTooSmall(&'static str),
+}
 
 /// The serialized export format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,7 +205,8 @@ impl ExportRegistry {
     /// Materialize `rows` (already serialized as `Vec<Vec<String>>` cells with
     /// `columns` headers) as an export of `format`, bound to `access`, expiring
     /// after `ttl`. The body is capped at [`MAX_EXPORT_BYTES`] (truncating at a
-    /// row boundary). Returns a handle with the opaque id + metadata.
+    /// row boundary). Returns a handle with the opaque id + metadata, or a
+    /// typed refusal before registry mutation when the TTL/header cannot fit.
     pub fn create(
         &self,
         columns: &[String],
@@ -200,10 +214,12 @@ impl ExportRegistry {
         format: ExportFormat,
         access: ExportAccess,
         ttl: Duration,
-    ) -> ExportHandle {
+    ) -> Result<ExportHandle, ExportCreateError> {
+        let now = Instant::now();
+        let expires_at = now.checked_add(ttl).ok_or(ExportCreateError::InvalidTtl)?;
         let (body, row_count, truncated) = match format {
-            ExportFormat::Csv => render_csv(columns, rows, MAX_EXPORT_BYTES),
-            ExportFormat::Json => render_json(columns, rows, MAX_EXPORT_BYTES),
+            ExportFormat::Csv => render_csv(columns, rows, MAX_EXPORT_BYTES)?,
+            ExportFormat::Json => render_json(columns, rows, MAX_EXPORT_BYTES)?,
         };
         let byte_size = body.len();
 
@@ -225,12 +241,12 @@ impl ExportRegistry {
                 format,
                 body,
                 access: access.clone(),
-                expires_at: Instant::now() + ttl,
+                expires_at,
             },
         );
         inner.evict_to_cap();
 
-        ExportHandle {
+        Ok(ExportHandle {
             id,
             uri,
             format,
@@ -238,7 +254,7 @@ impl ExportRegistry {
             byte_size,
             row_count,
             truncated,
-        }
+        })
     }
 
     /// Read an export by id, enforcing the access binding and expiry. Fails
@@ -335,23 +351,33 @@ fn export_unavailable() -> ErrorEnvelope {
 /// containing a comma, double-quote, CR, or LF is wrapped in double quotes with
 /// internal quotes doubled. Caps the body at `max_bytes`, truncating at a row
 /// boundary; returns `(body, rows_written, truncated)`.
-fn render_csv(columns: &[String], rows: &[Vec<String>], max_bytes: usize) -> (String, usize, bool) {
+fn render_csv(
+    columns: &[String],
+    rows: &[Vec<String>],
+    max_bytes: usize,
+) -> Result<(String, usize, bool), ExportCreateError> {
     let mut out = String::new();
     push_csv_record(&mut out, columns);
-    let header_len = out.len();
+    if out.len() > max_bytes {
+        return Err(ExportCreateError::SizeLimitTooSmall("CSV"));
+    }
     let mut written = 0usize;
     let mut truncated = false;
     for row in rows {
         let mut record = String::new();
         push_csv_record(&mut record, row);
-        if out.len() + record.len() > max_bytes && out.len() > header_len {
+        if out
+            .len()
+            .checked_add(record.len())
+            .is_none_or(|projected| projected > max_bytes)
+        {
             truncated = true;
             break;
         }
         out.push_str(&record);
         written += 1;
     }
-    (out, written, truncated)
+    Ok((out, written, truncated))
 }
 
 /// Append one CSV record (with trailing `\n`) to `out`, escaping each field.
@@ -393,20 +419,31 @@ fn render_json(
     columns: &[String],
     rows: &[Vec<String>],
     max_bytes: usize,
-) -> (String, usize, bool) {
+) -> Result<(String, usize, bool), ExportCreateError> {
     // Build incrementally so we can stop at a row boundary under the cap. Each
     // cell is a JSON string (the caller already serialized cells to text).
     let mut out = String::from("{\"columns\":");
     out.push_str(&serde_json::to_string(columns).unwrap_or_else(|_| "[]".to_owned()));
     out.push_str(",\"rows\":[");
-    let prefix_len = out.len();
+    if out
+        .len()
+        .checked_add(2)
+        .is_none_or(|minimum| minimum > max_bytes)
+    {
+        return Err(ExportCreateError::SizeLimitTooSmall("JSON"));
+    }
     let mut written = 0usize;
     let mut truncated = false;
     for row in rows {
         let cell = serde_json::to_string(row).unwrap_or_else(|_| "[]".to_owned());
         // +2 for a possible leading comma and the closing "]}".
-        let projected = out.len() + cell.len() + if written > 0 { 1 } else { 0 } + 2;
-        if projected > max_bytes && out.len() > prefix_len {
+        let separator = usize::from(written > 0);
+        let projected = out
+            .len()
+            .checked_add(cell.len())
+            .and_then(|size| size.checked_add(separator))
+            .and_then(|size| size.checked_add(2));
+        if projected.is_none_or(|projected| projected > max_bytes) {
             truncated = true;
             break;
         }
@@ -417,7 +454,7 @@ fn render_json(
         written += 1;
     }
     out.push_str("]}");
-    (out, written, truncated)
+    Ok((out, written, truncated))
 }
 
 #[cfg(test)]
@@ -444,13 +481,15 @@ mod tests {
     fn create_then_read_round_trips_csv_under_the_same_access() {
         let reg = ExportRegistry::new();
         let (cols, rows) = sample();
-        let handle = reg.create(
-            &cols,
-            &rows,
-            ExportFormat::Csv,
-            access(),
-            DEFAULT_EXPORT_TTL,
-        );
+        let handle = reg
+            .create(
+                &cols,
+                &rows,
+                ExportFormat::Csv,
+                access(),
+                DEFAULT_EXPORT_TTL,
+            )
+            .expect("export creates");
         assert_eq!(handle.mime_type, "text/csv");
         assert_eq!(handle.row_count, 2);
         let contents = reg.read(&handle.id, &access()).expect("read");
@@ -476,13 +515,15 @@ mod tests {
     fn json_export_is_valid_and_round_trips() {
         let reg = ExportRegistry::new();
         let (cols, rows) = sample();
-        let handle = reg.create(
-            &cols,
-            &rows,
-            ExportFormat::Json,
-            access(),
-            DEFAULT_EXPORT_TTL,
-        );
+        let handle = reg
+            .create(
+                &cols,
+                &rows,
+                ExportFormat::Json,
+                access(),
+                DEFAULT_EXPORT_TTL,
+            )
+            .expect("export creates");
         assert_eq!(handle.mime_type, "application/json");
         let contents = reg.read(&handle.id, &access()).expect("read");
         let doc: serde_json::Value =
@@ -495,13 +536,15 @@ mod tests {
     fn same_principal_can_resume_across_advisory_profile_changes() {
         let reg = ExportRegistry::new();
         let (cols, rows) = sample();
-        let handle = reg.create(
-            &cols,
-            &rows,
-            ExportFormat::Csv,
-            access(),
-            DEFAULT_EXPORT_TTL,
-        );
+        let handle = reg
+            .create(
+                &cols,
+                &rows,
+                ExportFormat::Csv,
+                access(),
+                DEFAULT_EXPORT_TTL,
+            )
+            .expect("export creates");
         // Profile is source metadata, not authority for reading immutable data.
         let same_scope =
             ExportAccess::new(Some("DEV"), PRINCIPAL_A, Some(&["oracle:read".to_owned()]));
@@ -515,13 +558,15 @@ mod tests {
     fn a_read_under_a_different_principal_or_scope_is_refused() {
         let reg = ExportRegistry::new();
         let (cols, rows) = sample();
-        let handle = reg.create(
-            &cols,
-            &rows,
-            ExportFormat::Csv,
-            access(),
-            DEFAULT_EXPORT_TTL,
-        );
+        let handle = reg
+            .create(
+                &cols,
+                &rows,
+                ExportFormat::Csv,
+                access(),
+                DEFAULT_EXPORT_TTL,
+            )
+            .expect("export creates");
         let other_principal = ExportAccess::new(
             Some("PROD"),
             "oauth:principal-b",
@@ -547,13 +592,15 @@ mod tests {
     fn every_unavailable_case_has_one_non_leaking_error_shape() {
         let reg = ExportRegistry::new();
         let (cols, rows) = sample();
-        let handle = reg.create(
-            &cols,
-            &rows,
-            ExportFormat::Csv,
-            access(),
-            DEFAULT_EXPORT_TTL,
-        );
+        let handle = reg
+            .create(
+                &cols,
+                &rows,
+                ExportFormat::Csv,
+                access(),
+                DEFAULT_EXPORT_TTL,
+            )
+            .expect("export creates");
         let wrong_principal = ExportAccess::new(
             Some("PROD"),
             "oauth:principal-b",
@@ -582,13 +629,15 @@ mod tests {
             .read(&valid_missing, &access)
             .expect_err("valid but unknown id");
 
-        let expired = reg.create(
-            &cols,
-            &rows,
-            ExportFormat::Csv,
-            access.clone(),
-            Duration::from_nanos(1),
-        );
+        let expired = reg
+            .create(
+                &cols,
+                &rows,
+                ExportFormat::Csv,
+                access.clone(),
+                Duration::from_nanos(1),
+            )
+            .expect("export creates");
         std::thread::sleep(Duration::from_millis(5));
         let expired_error = reg.read(&expired.id, &access).expect_err("expired id");
 
@@ -616,13 +665,15 @@ mod tests {
             let reg = ExportRegistry::new();
             let (cols, rows) = sample();
             let owner = access();
-            let handle = reg.create(
-                &cols,
-                &rows,
-                ExportFormat::Csv,
-                owner.clone(),
-                DEFAULT_EXPORT_TTL,
-            );
+            let handle = reg
+                .create(
+                    &cols,
+                    &rows,
+                    ExportFormat::Csv,
+                    owner.clone(),
+                    DEFAULT_EXPORT_TTL,
+                )
+                .expect("export creates");
             {
                 let mut inner = reg.inner.lock();
                 let entry = inner.by_id.get_mut(&handle.id).expect("stored export");
@@ -644,13 +695,15 @@ mod tests {
     fn a_forged_id_is_refused() {
         let reg = ExportRegistry::new();
         let (cols, rows) = sample();
-        let handle = reg.create(
-            &cols,
-            &rows,
-            ExportFormat::Csv,
-            access(),
-            DEFAULT_EXPORT_TTL,
-        );
+        let handle = reg
+            .create(
+                &cols,
+                &rows,
+                ExportFormat::Csv,
+                access(),
+                DEFAULT_EXPORT_TTL,
+            )
+            .expect("export creates");
         // Keep the MAC tag, edit the id body to point at a different export.
         let (_body, tag) = handle.id.rsplit_once('.').expect("id has a tag");
         let forged = format!("exp-9999.{tag}");
@@ -662,13 +715,15 @@ mod tests {
     fn an_expired_export_reads_as_not_found() {
         let reg = ExportRegistry::new();
         let (cols, rows) = sample();
-        let handle = reg.create(
-            &cols,
-            &rows,
-            ExportFormat::Csv,
-            access(),
-            Duration::from_nanos(1),
-        );
+        let handle = reg
+            .create(
+                &cols,
+                &rows,
+                ExportFormat::Csv,
+                access(),
+                Duration::from_nanos(1),
+            )
+            .expect("export creates");
         std::thread::sleep(Duration::from_millis(5));
         let err = reg
             .read(&handle.id, &access())
@@ -682,19 +737,73 @@ mod tests {
         let cols = vec!["DATA".to_owned()];
         // Each row is ~1 KiB; force the cap well below the total.
         let rows: Vec<Vec<String>> = (0..100).map(|_| vec!["x".repeat(1024)]).collect();
-        let (body, written, truncated) = render_csv(&cols, &rows, 4096);
+        let (body, written, truncated) = render_csv(&cols, &rows, 4096).expect("header fits");
         assert!(truncated, "body exceeds the cap so it truncates");
         assert!(written < rows.len(), "not all rows fit");
         assert!(body.len() <= 4096 + 1100, "body stays near the cap");
         // The registry path records truncation in the handle.
-        let handle = reg.create(
-            &cols,
-            &rows,
-            ExportFormat::Csv,
-            access(),
-            DEFAULT_EXPORT_TTL,
-        );
+        let handle = reg
+            .create(
+                &cols,
+                &rows,
+                ExportFormat::Csv,
+                access(),
+                DEFAULT_EXPORT_TTL,
+            )
+            .expect("export creates");
         assert!(handle.byte_size <= MAX_EXPORT_BYTES);
+    }
+
+    #[test]
+    fn csv_and_json_never_exceed_max_minus_one_max_or_max_plus_one() {
+        let columns = vec!["H".to_owned()];
+        let rows = vec![vec!["x".to_owned()]];
+
+        let (full_csv, _, _) = render_csv(&columns, &rows, usize::MAX).expect("render CSV");
+        for limit in [full_csv.len() - 1, full_csv.len(), full_csv.len() + 1] {
+            let (body, written, truncated) =
+                render_csv(&columns, &rows, limit).expect("CSV header fits");
+            assert!(body.len() <= limit, "CSV {}/{}", body.len(), limit);
+            assert_eq!(written, usize::from(limit >= full_csv.len()));
+            assert_eq!(truncated, limit < full_csv.len());
+        }
+        assert_eq!(
+            render_csv(&columns, &rows, 1),
+            Err(ExportCreateError::SizeLimitTooSmall("CSV"))
+        );
+
+        let (full_json, _, _) = render_json(&columns, &rows, usize::MAX).expect("render JSON");
+        for limit in [full_json.len() - 1, full_json.len(), full_json.len() + 1] {
+            let (body, written, truncated) =
+                render_json(&columns, &rows, limit).expect("JSON header fits");
+            assert!(body.len() <= limit, "JSON {}/{}", body.len(), limit);
+            serde_json::from_str::<serde_json::Value>(&body).expect("bounded JSON stays valid");
+            assert_eq!(written, usize::from(limit >= full_json.len()));
+            assert_eq!(truncated, limit < full_json.len());
+        }
+        let (empty_json, _, _) = render_json(&columns, &[], usize::MAX).expect("empty JSON");
+        assert_eq!(
+            render_json(&columns, &rows, empty_json.len() - 1),
+            Err(ExportCreateError::SizeLimitTooSmall("JSON"))
+        );
+    }
+
+    #[test]
+    fn unrepresentable_ttl_is_typed_without_panic_or_registry_mutation() {
+        let reg = ExportRegistry::new();
+        let (columns, rows) = sample();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reg.create(&columns, &rows, ExportFormat::Csv, access(), Duration::MAX)
+        }));
+
+        assert_eq!(
+            result.expect("Duration::MAX must not panic"),
+            Err(ExportCreateError::InvalidTtl)
+        );
+        let inner = reg.inner.lock();
+        assert!(inner.by_id.is_empty());
+        assert!(inner.order.is_empty());
+        assert_eq!(inner.seq, 0);
     }
 
     #[test]
@@ -703,13 +812,15 @@ mod tests {
         let (cols, rows) = sample();
         let mut first = None;
         for i in 0..(MAX_LIVE_EXPORTS + 5) {
-            let handle = reg.create(
-                &cols,
-                &rows,
-                ExportFormat::Csv,
-                access(),
-                DEFAULT_EXPORT_TTL,
-            );
+            let handle = reg
+                .create(
+                    &cols,
+                    &rows,
+                    ExportFormat::Csv,
+                    access(),
+                    DEFAULT_EXPORT_TTL,
+                )
+                .expect("export creates");
             if i == 0 {
                 first = Some(handle.id);
             }

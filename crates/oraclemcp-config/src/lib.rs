@@ -976,6 +976,7 @@ pub struct HttpOAuthConfig {
 impl HttpOAuthConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         validate_required_string("http.oauth.resource", self.resource.as_deref())?;
+        validate_http_challenge_value("http.oauth.resource", self.resource.as_deref())?;
         validate_non_empty_list("http.oauth.allowed_issuers", &self.allowed_issuers)?;
         validate_non_empty_list(
             "http.oauth.authorization_servers",
@@ -988,9 +989,27 @@ impl HttpOAuthConfig {
         )?;
         if let Some(metadata_url) = self.metadata_url.as_deref() {
             validate_required_string("http.oauth.metadata_url", Some(metadata_url))?;
+            validate_http_challenge_value("http.oauth.metadata_url", Some(metadata_url))?;
         }
         Ok(())
     }
+}
+
+fn validate_http_challenge_value(
+    field: &'static str,
+    value: Option<&str>,
+) -> Result<(), ConfigError> {
+    if value.is_some_and(|value| {
+        !value
+            .bytes()
+            .all(|byte| matches!(byte, 0x21..=0x7e) && !matches!(byte, b'"' | b'\\'))
+    }) {
+        return Err(ConfigError::InvalidHttp {
+            field,
+            reason: "must use visible ASCII without quotes or backslashes",
+        });
+    }
+    Ok(())
 }
 
 fn normalize_sha256_fingerprint(value: &str) -> Option<String> {
@@ -1908,6 +1927,74 @@ mod tests {
             Some("https://mcp.example.com/mcp")
         );
         assert_eq!(oauth.required_scopes, vec!["oracle:read"]);
+    }
+
+    #[test]
+    fn oauth_challenge_urls_reject_header_unsafe_values() {
+        fn valid_oauth() -> HttpOAuthConfig {
+            HttpOAuthConfig {
+                resource: Some("https://mcp.example.com/mcp".to_owned()),
+                allowed_issuers: vec!["https://idp.example.com".to_owned()],
+                authorization_servers: vec!["https://idp.example.com".to_owned()],
+                required_scopes: vec!["oracle:read".to_owned()],
+                hs256_secret_ref: Some("env:AUTH_KEY".to_owned()),
+                metadata_url: Some(
+                    "https://mcp.example.com/.well-known/oauth-protected-resource".to_owned(),
+                ),
+            }
+        }
+
+        for hostile in [
+            "https://mcp.example/metadata\r\nx-injected: yes",
+            "https://mcp.example/metadata\"",
+            "https://mcp.example/meta\\data",
+            "https://mcp.example/meta data",
+            "https://mcp.example/m\u{e9}tadata",
+        ] {
+            let mut oauth = valid_oauth();
+            oauth.metadata_url = Some(hostile.to_owned());
+            assert!(matches!(
+                oauth.validate(),
+                Err(ConfigError::InvalidHttp {
+                    field: "http.oauth.metadata_url",
+                    ..
+                })
+            ));
+        }
+
+        let mut oauth = valid_oauth();
+        oauth.resource = Some("https://mcp.example/mcp\r\nx-injected: yes".to_owned());
+        assert!(matches!(
+            oauth.validate(),
+            Err(ConfigError::InvalidHttp {
+                field: "http.oauth.resource",
+                ..
+            })
+        ));
+
+        valid_oauth()
+            .validate()
+            .expect("header-safe canonical URLs remain valid");
+
+        let error = OracleMcpConfig::from_toml_str(
+            r#"
+            [http.oauth]
+            resource = "https://mcp.example.com/mcp"
+            allowed_issuers = ["https://idp.example.com"]
+            authorization_servers = ["https://idp.example.com"]
+            required_scopes = ["oracle:read"]
+            hs256_secret_ref = "env:AUTH_KEY"
+            metadata_url = "https://mcp.example/metadata\r\nx-injected: yes"
+            "#,
+        )
+        .expect_err("configuration loading must reject challenge header injection");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidHttp {
+                field: "http.oauth.metadata_url",
+                ..
+            }
+        ));
     }
 
     #[test]

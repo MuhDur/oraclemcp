@@ -2951,12 +2951,17 @@ fn operator_client_credential_error_response(
         ClientCredentialError::AuthenticationFailed => (401, "client_credential_auth_failed"),
         ClientCredentialError::UnknownClient(_) => (404, "unknown_client_credential"),
         ClientCredentialError::Revoked(_) => (409, "client_credential_revoked"),
+        ClientCredentialError::Capacity(_) => (409, "client_credential_capacity_reached"),
+        ClientCredentialError::GenerationOverflow(_) => {
+            (409, "client_credential_generation_exhausted")
+        }
         ClientCredentialError::Store(FileStoreError::Locked) => {
             (409, "client_credential_store_locked")
         }
         ClientCredentialError::Store(_)
         | ClientCredentialError::Serialization(_)
         | ClientCredentialError::PersistenceUncertain
+        | ClientCredentialError::PersistedStateTooLarge(_)
         | ClientCredentialError::Parse(_)
         | ClientCredentialError::Random(_) => (500, "client_credential_store_failed"),
     };

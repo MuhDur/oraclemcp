@@ -28,11 +28,15 @@ use std::fmt;
 
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 
 use oraclemcp_audit::{HmacSha256Key, HmacSha256KeyError};
+
+const MAX_JWT_BYTES: usize = 32 * 1024;
+const MAX_JWT_SEGMENT_BYTES: usize = 24 * 1024;
+const MAX_JWT_DECODED_JSON_BYTES: usize = 16 * 1024;
 
 /// Why resource-server token validation failed.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -204,7 +208,7 @@ impl ResourceServerConfig {
             return Err(TokenError::UntrustedIssuer(iss.to_owned()));
         }
         // RFC 8707 audience binding.
-        if !audiences(claims).iter().any(|a| a == &self.resource) {
+        if !audiences(claims)?.iter().any(|a| a == &self.resource) {
             return Err(TokenError::AudienceMismatch);
         }
         // Expiry / not-before (exp is required per RFC 9068).
@@ -218,11 +222,14 @@ impl ResourceServerConfig {
         if now_unix >= exp {
             return Err(TokenError::Expired { exp });
         }
-        if claims["nbf"].as_i64().is_some_and(|nbf| now_unix < nbf) {
-            return Err(TokenError::NotYetValid);
+        if let Some(value) = claims.get("nbf") {
+            let nbf = value.as_i64().ok_or(TokenError::Malformed)?;
+            if now_unix < nbf {
+                return Err(TokenError::NotYetValid);
+            }
         }
         // Scopes.
-        let scopes = token_scopes(claims);
+        let scopes = token_scopes(claims)?;
         if !self
             .required_scopes
             .iter()
@@ -255,9 +262,12 @@ impl ResourceServerConfig {
     /// The transport records its fixed category in the operator audit trail.
     #[must_use]
     pub fn www_authenticate(&self, metadata_url: &str, error: Option<&str>) -> String {
-        let mut s = format!("Bearer resource_metadata=\"{metadata_url}\"");
+        let mut s = format!(
+            "Bearer resource_metadata=\"{}\"",
+            encode_http_quoted_string(metadata_url)
+        );
         if let Some(e) = error {
-            s.push_str(&format!(", error=\"{e}\""));
+            s.push_str(&format!(", error=\"{}\"", encode_http_quoted_string(e)));
         }
         s
     }
@@ -265,20 +275,48 @@ impl ResourceServerConfig {
 
 /// Extract the bearer token from an `Authorization` header value.
 pub fn extract_bearer(header: Option<&str>) -> Result<&str, TokenError> {
-    let h = header.ok_or(TokenError::Missing)?.trim();
-    let rest = h
-        .strip_prefix("Bearer ")
-        .or_else(|| h.strip_prefix("bearer "));
-    match rest {
-        Some(tok) if !tok.trim().is_empty() => Ok(tok.trim()),
-        _ => Err(TokenError::Missing),
+    let h = header.ok_or(TokenError::Missing)?.trim_matches([' ', '\t']);
+    let Some((scheme, token)) = h.split_once(' ') else {
+        return Err(TokenError::Missing);
+    };
+    if !scheme.eq_ignore_ascii_case("bearer") || !is_bearer_token(token) {
+        return Err(TokenError::Missing);
     }
+    Ok(token)
+}
+
+fn is_bearer_token(token: &str) -> bool {
+    let padding_start = token.find('=').unwrap_or(token.len());
+    padding_start > 0
+        && token[..padding_start].bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/')
+        })
+        && token[padding_start..].bytes().all(|byte| byte == b'=')
+}
+
+fn encode_http_quoted_string(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => encoded.push_str("\\\""),
+            '\\' => encoded.push_str("\\\\"),
+            '\r' => encoded.push_str("%0D"),
+            '\n' => encoded.push_str("%0A"),
+            character if character.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(encoded, "%{:02X}", u32::from(character));
+            }
+            character => encoded.push(character),
+        }
+    }
+    encoded
 }
 
 #[derive(Debug)]
 struct JwtHeader {
     alg: String,
     typ: String,
+    crit: Option<Vec<String>>,
 }
 
 impl<'de> Deserialize<'de> for JwtHeader {
@@ -302,6 +340,7 @@ impl<'de> Deserialize<'de> for JwtHeader {
                 let mut seen = HashSet::new();
                 let mut alg = None;
                 let mut typ = None;
+                let mut crit = None;
 
                 while let Some(key) = map.next_key::<String>()? {
                     if !seen.insert(key.clone()) {
@@ -312,6 +351,20 @@ impl<'de> Deserialize<'de> for JwtHeader {
                     match key.as_str() {
                         "alg" => alg = Some(map.next_value::<String>()?),
                         "typ" => typ = Some(map.next_value::<String>()?),
+                        "crit" => {
+                            let values = map.next_value::<Vec<String>>()?;
+                            let mut names = HashSet::new();
+                            if values.is_empty()
+                                || values
+                                    .iter()
+                                    .any(|value| value.is_empty() || !names.insert(value))
+                            {
+                                return Err(serde::de::Error::custom(
+                                    "invalid critical JWT protected-header parameters",
+                                ));
+                            }
+                            crit = Some(values);
+                        }
                         _ => {
                             let _: IgnoredAny = map.next_value()?;
                         }
@@ -321,11 +374,48 @@ impl<'de> Deserialize<'de> for JwtHeader {
                 Ok(JwtHeader {
                     alg: alg.unwrap_or_default(),
                     typ: typ.unwrap_or_default(),
+                    crit,
                 })
             }
         }
 
         deserializer.deserialize_map(HeaderVisitor)
+    }
+}
+
+#[derive(Debug)]
+struct JwtClaims(Value);
+
+impl<'de> Deserialize<'de> for JwtClaims {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ClaimsVisitor;
+
+        impl<'de> Visitor<'de> for ClaimsVisitor {
+            type Value = JwtClaims;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JWT claims object without duplicate names")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut claims = Map::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if claims.contains_key(&key) {
+                        return Err(serde::de::Error::custom("duplicate JWT claim"));
+                    }
+                    claims.insert(key, map.next_value::<Value>()?);
+                }
+                Ok(JwtClaims(Value::Object(claims)))
+            }
+        }
+
+        deserializer.deserialize_map(ClaimsVisitor)
     }
 }
 
@@ -335,42 +425,86 @@ fn is_access_token_type(value: &str) -> bool {
 
 /// Parse a JWT into (header, claims JSON, signing input bytes, signature bytes).
 fn parse_jwt(token: &str) -> Result<(JwtHeader, Value, Vec<u8>, Vec<u8>), TokenError> {
-    let mut parts = token.trim().split('.');
-    let (h, p, s) = match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some(h), Some(p), Some(s), None) => (h, p, s),
-        _ => return Err(TokenError::Malformed),
-    };
-    let header: JwtHeader = serde_json::from_slice(&b64url_decode(h).ok_or(TokenError::Malformed)?)
-        .map_err(|_| TokenError::Malformed)?;
-    let claims: Value = serde_json::from_slice(&b64url_decode(p).ok_or(TokenError::Malformed)?)
-        .map_err(|_| TokenError::Malformed)?;
+    let (h, p, s) = jwt_segments(token)?;
+    let header_bytes = b64url_decode(h).ok_or(TokenError::Malformed)?;
+    let claims_bytes = b64url_decode(p).ok_or(TokenError::Malformed)?;
+    let header: JwtHeader =
+        serde_json::from_slice(&header_bytes).map_err(|_| TokenError::Malformed)?;
+    if header.crit.is_some() {
+        return Err(TokenError::Malformed);
+    }
+    let claims = serde_json::from_slice::<JwtClaims>(&claims_bytes)
+        .map_err(|_| TokenError::Malformed)?
+        .0;
     let signature = b64url_decode(s).ok_or(TokenError::Malformed)?;
     let signing_input = format!("{h}.{p}").into_bytes();
     Ok((header, claims, signing_input, signature))
 }
 
-fn audiences(claims: &Value) -> Vec<String> {
-    match &claims["aud"] {
-        Value::String(s) => vec![s.clone()],
-        Value::Array(a) => a
+fn jwt_segments(token: &str) -> Result<(&str, &str, &str), TokenError> {
+    if token.len() > MAX_JWT_BYTES || token.trim().len() != token.len() {
+        return Err(TokenError::Malformed);
+    }
+    let mut parts = token.split('.');
+    let (h, p, s) = match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(h), Some(p), Some(s), None) => (h, p, s),
+        _ => return Err(TokenError::Malformed),
+    };
+    if [h, p, s]
+        .iter()
+        .any(|segment| segment.len() > MAX_JWT_SEGMENT_BYTES)
+        || decoded_len(h).is_none_or(|len| len > MAX_JWT_DECODED_JSON_BYTES)
+        || decoded_len(p).is_none_or(|len| len > MAX_JWT_DECODED_JSON_BYTES)
+    {
+        return Err(TokenError::Malformed);
+    }
+    Ok((h, p, s))
+}
+
+fn audiences(claims: &Value) -> Result<Vec<String>, TokenError> {
+    match claims.get("aud") {
+        Some(Value::String(value)) => Ok(vec![value.clone()]),
+        Some(Value::Array(values)) => values
             .iter()
-            .filter_map(|v| v.as_str().map(str::to_owned))
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or(TokenError::Malformed)
+            })
             .collect(),
-        _ => vec![],
+        Some(_) => Err(TokenError::Malformed),
+        None => Ok(Vec::new()),
     }
 }
 
-fn token_scopes(claims: &Value) -> Vec<String> {
-    if let Some(s) = claims["scope"].as_str() {
-        return s.split_whitespace().map(str::to_owned).collect();
+fn token_scopes(claims: &Value) -> Result<Vec<String>, TokenError> {
+    let scope = claims.get("scope");
+    let scp = claims.get("scp");
+    if scope.is_some() && scp.is_some() {
+        return Err(TokenError::Malformed);
     }
-    if let Value::Array(a) = &claims["scp"] {
-        return a
+    if let Some(scope) = scope {
+        return scope
+            .as_str()
+            .map(|value| value.split_whitespace().map(str::to_owned).collect())
+            .ok_or(TokenError::Malformed);
+    }
+    if let Some(scp) = scp {
+        let Value::Array(values) = scp else {
+            return Err(TokenError::Malformed);
+        };
+        return values
             .iter()
-            .filter_map(|v| v.as_str().map(str::to_owned))
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or(TokenError::Malformed)
+            })
             .collect();
     }
-    Vec::new()
+    Ok(Vec::new())
 }
 
 /// HMAC-SHA256 (RFC 2104) over `sha2`.
@@ -412,7 +546,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// base64url decode (no padding required; tolerates `=`).
+/// Decode canonical, unpadded base64url as required by JWS compact serialization.
 fn b64url_decode(input: &str) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u8> {
         match c {
@@ -424,22 +558,56 @@ fn b64url_decode(input: &str) -> Option<Vec<u8>> {
             _ => None,
         }
     }
-    let mut out = Vec::with_capacity(input.len() * 3 / 4);
-    let mut buf = 0u32;
-    let mut bits = 0u32;
-    for &c in input.as_bytes() {
-        if c == b'=' {
-            continue;
-        }
-        let v = u32::from(val(c)?);
-        buf = (buf << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buf >> bits) as u8);
-        }
+    let decoded_len = decoded_len(input)?;
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(decoded_len);
+    let mut index = 0;
+    while index + 4 <= bytes.len() {
+        let a = val(bytes[index])?;
+        let b = val(bytes[index + 1])?;
+        let c = val(bytes[index + 2])?;
+        let d = val(bytes[index + 3])?;
+        out.push((a << 2) | (b >> 4));
+        out.push((b << 4) | (c >> 2));
+        out.push((c << 6) | d);
+        index += 4;
     }
+    match bytes.len() - index {
+        0 => {}
+        2 => {
+            let a = val(bytes[index])?;
+            let b = val(bytes[index + 1])?;
+            if b & 0x0f != 0 {
+                return None;
+            }
+            out.push((a << 2) | (b >> 4));
+        }
+        3 => {
+            let a = val(bytes[index])?;
+            let b = val(bytes[index + 1])?;
+            let c = val(bytes[index + 2])?;
+            if c & 0x03 != 0 {
+                return None;
+            }
+            out.push((a << 2) | (b >> 4));
+            out.push((b << 4) | (c >> 2));
+        }
+        _ => return None,
+    }
+    debug_assert_eq!(out.len(), decoded_len);
     Some(out)
+}
+
+fn decoded_len(input: &str) -> Option<usize> {
+    let complete = input.len() / 4;
+    let remainder = input.len() % 4;
+    let tail = match remainder {
+        0 => 0,
+        2 => 1,
+        3 => 2,
+        _ => return None,
+    };
+    complete.checked_mul(3)?.checked_add(tail)
 }
 
 #[cfg(test)]
@@ -481,11 +649,29 @@ mod tests {
     }
 
     fn mint_with_raw_header(header: &str, claims: Value) -> String {
+        mint_with_raw_parts(header, &serde_json::to_string(&claims).unwrap())
+    }
+
+    fn mint_with_raw_claims(claims: &str) -> String {
+        mint_with_raw_parts(r#"{"alg":"HS256","typ":"at+jwt"}"#, claims)
+    }
+
+    fn mint_with_raw_parts(header: &str, claims: &str) -> String {
         let h = b64url_encode(header.as_bytes());
-        let p = b64url_encode(serde_json::to_string(&claims).unwrap().as_bytes());
+        let p = b64url_encode(claims.as_bytes());
         let signing_input = format!("{h}.{p}");
         let sig = b64url_encode(&hmac_sha256(SECRET, signing_input.as_bytes()));
         format!("{h}.{p}.{sig}")
+    }
+
+    fn raw_claims_with_duplicate(name: &str, first: &Value, second: &Value) -> String {
+        let mut remainder = good_claims();
+        remainder
+            .as_object_mut()
+            .expect("claims object")
+            .remove(name);
+        let remainder = serde_json::to_string(&remainder).expect("serialize claims");
+        format!("{{{name:?}:{first},{name:?}:{second},{}", &remainder[1..])
     }
 
     fn cfg() -> ResourceServerConfig {
@@ -686,6 +872,24 @@ mod tests {
     }
 
     #[test]
+    fn malformed_optional_nbf_is_rejected() {
+        for invalid in [
+            json!("1000000000"),
+            json!(1.5),
+            json!(u64::MAX),
+            json!(null),
+            json!([]),
+        ] {
+            let mut claims = good_claims();
+            claims["nbf"] = invalid;
+            assert_eq!(
+                cfg().validate(&mint(claims), &verifier(), 1_500_000_000),
+                Err(TokenError::Malformed)
+            );
+        }
+    }
+
+    #[test]
     fn wrong_audience_is_rejected_rfc8707() {
         let mut c = good_claims();
         c["aud"] = json!(["https://some-other-resource.example"]);
@@ -694,6 +898,86 @@ mod tests {
             cfg().validate(&token, &verifier(), 1_500_000_000),
             Err(TokenError::AudienceMismatch)
         );
+    }
+
+    #[test]
+    fn malformed_audience_and_scope_collections_fail_closed() {
+        for invalid_audience in [
+            json!(["https://oraclemcp.example/mcp", 7]),
+            json!([null, "https://oraclemcp.example/mcp"]),
+            json!(7),
+        ] {
+            let mut claims = good_claims();
+            claims["aud"] = invalid_audience;
+            assert_eq!(
+                cfg().validate(&mint(claims), &verifier(), 1_500_000_000),
+                Err(TokenError::Malformed)
+            );
+        }
+
+        for invalid_scp in [json!(["oracle:read", 7]), json!("oracle:read"), json!(null)] {
+            let mut claims = good_claims();
+            claims
+                .as_object_mut()
+                .expect("claims object")
+                .remove("scope");
+            claims["scp"] = invalid_scp;
+            assert_eq!(
+                cfg().validate(&mint(claims), &verifier(), 1_500_000_000),
+                Err(TokenError::Malformed)
+            );
+        }
+
+        let mut conflicting = good_claims();
+        conflicting["scp"] = json!(["oracle:read"]);
+        assert_eq!(
+            cfg().validate(&mint(conflicting), &verifier(), 1_500_000_000),
+            Err(TokenError::Malformed)
+        );
+    }
+
+    #[test]
+    fn critical_jose_extensions_are_rejected() {
+        for header in [
+            json!({ "alg": "HS256", "typ": "at+jwt", "crit": ["custom"], "custom": true }),
+            json!({ "alg": "HS256", "typ": "at+jwt", "crit": [] }),
+            json!({ "alg": "HS256", "typ": "at+jwt", "crit": [""] }),
+            json!({ "alg": "HS256", "typ": "at+jwt", "crit": ["custom", "custom"] }),
+            json!({ "alg": "HS256", "typ": "at+jwt", "crit": [7] }),
+            json!({ "alg": "HS256", "typ": "at+jwt", "crit": "custom" }),
+        ] {
+            assert_eq!(
+                cfg().validate(
+                    &mint_with_header(header, good_claims()),
+                    &verifier(),
+                    1_500_000_000,
+                ),
+                Err(TokenError::Malformed)
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_security_claims_are_rejected_in_every_order() {
+        for (name, first, second) in [
+            ("sub", json!("subject-123"), json!("subject-456")),
+            (
+                "aud",
+                json!(["https://oraclemcp.example/mcp"]),
+                json!(["https://other.example/mcp"]),
+            ),
+            ("exp", json!(2_000_000_000i64), json!(1_000_000_000i64)),
+            ("scope", json!("oracle:read"), json!("oracle:admin")),
+        ] {
+            for (left, right) in [(&first, &second), (&second, &first)] {
+                let claims = raw_claims_with_duplicate(name, left, right);
+                assert_eq!(
+                    cfg().validate(&mint_with_raw_claims(&claims), &verifier(), 1_500_000_000,),
+                    Err(TokenError::Malformed),
+                    "duplicate {name} must fail independent of member order"
+                );
+            }
+        }
     }
 
     #[test]
@@ -825,8 +1109,14 @@ mod tests {
                 ),
             ),
             ("tampered signature", {
-                let token = mint(good_claims());
-                let tampered = format!("{}x", &token[..token.len() - 1]);
+                let mut tampered = mint(good_claims());
+                let signature_start = tampered.rfind('.').expect("JWT signature separator") + 1;
+                let replacement = if tampered.as_bytes()[signature_start] == b'A' {
+                    "B"
+                } else {
+                    "A"
+                };
+                tampered.replace_range(signature_start..signature_start + 1, replacement);
                 config.validate(&tampered, &verifier(), now)
             }),
             ("exp in the past", {
@@ -884,14 +1174,38 @@ mod tests {
 
     #[test]
     fn extract_bearer_parses_header() {
-        assert_eq!(
-            extract_bearer(Some("Bearer abc.def.ghi")),
-            Ok("abc.def.ghi")
-        );
-        assert_eq!(extract_bearer(Some("bearer xyz")), Ok("xyz"));
+        for uppercase_mask in 0_u8..64 {
+            let scheme: String = b"bearer"
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| {
+                    if uppercase_mask & (1 << index) == 0 {
+                        char::from(*byte)
+                    } else {
+                        char::from(byte.to_ascii_uppercase())
+                    }
+                })
+                .collect();
+            let header = format!("{scheme} abc.def.ghi");
+            assert_eq!(extract_bearer(Some(&header)), Ok("abc.def.ghi"));
+        }
         assert_eq!(extract_bearer(None), Err(TokenError::Missing));
-        assert_eq!(extract_bearer(Some("Basic Zm9v")), Err(TokenError::Missing));
-        assert_eq!(extract_bearer(Some("Bearer   ")), Err(TokenError::Missing));
+        for malformed in [
+            "Basic Zm9v",
+            "Bearer",
+            "Bearer ",
+            "Bearer  token",
+            "Bearer\ttoken",
+            "Bearer token extra",
+            "Bearer token\tother",
+            "Bearer ===",
+            "Bearer =token",
+            "B\u{212e}arer token",
+            "\u{a0}Bearer token",
+            "Bearer token\u{a0}",
+        ] {
+            assert_eq!(extract_bearer(Some(malformed)), Err(TokenError::Missing));
+        }
     }
 
     #[test]
@@ -910,6 +1224,101 @@ mod tests {
         assert!(chal.starts_with("Bearer resource_metadata="));
         assert!(chal.contains("error=\"invalid_token\""));
         assert!(!chal.contains("error_description="));
+
+        let hostile = c.www_authenticate(
+            "https://mcp.example/metadata\r\nx-injected: yes\"\\",
+            Some("invalid_token\r\nx-other: yes"),
+        );
+        assert!(!hostile.contains(['\r', '\n']));
+        assert!(hostile.contains("%0D%0Ax-injected: yes\\\"\\\\"));
+        assert!(hostile.contains("invalid_token%0D%0Ax-other: yes"));
+    }
+
+    #[test]
+    fn compact_jwt_base64url_is_canonical_and_unpadded() {
+        assert_eq!(b64url_decode(""), Some(Vec::new()));
+        assert_eq!(b64url_decode("Zg"), Some(b"f".to_vec()));
+        assert_eq!(b64url_decode("Zm8"), Some(b"fo".to_vec()));
+        assert_eq!(b64url_decode("Zm9v"), Some(b"foo".to_vec()));
+
+        for malformed in ["A", "Zg=", "Zg==", "Z=g", "Zh", "Zm9", "+w", "/w"] {
+            assert_eq!(b64url_decode(malformed), None, "{malformed:?}");
+        }
+
+        let token = format!("{}=", mint(good_claims()));
+        assert_eq!(
+            cfg().validate(&token, &verifier(), 1_500_000_000),
+            Err(TokenError::Malformed)
+        );
+    }
+
+    #[test]
+    fn oversized_jwt_inputs_fail_before_signature_verification() {
+        struct PanicVerifier;
+
+        impl SignatureVerifier for PanicVerifier {
+            fn verify(&self, _alg: &str, _signing_input: &[u8], _signature: &[u8]) -> bool {
+                panic!("oversized token must fail before verification")
+            }
+        }
+
+        let oversized_token = "x".repeat(MAX_JWT_BYTES + 1);
+        assert_eq!(
+            cfg().validate(&oversized_token, &PanicVerifier, 1_500_000_000),
+            Err(TokenError::Malformed)
+        );
+
+        let oversized_segment = "A".repeat(MAX_JWT_SEGMENT_BYTES + 1);
+        let token = format!("{oversized_segment}.e30.AA");
+        assert_eq!(
+            cfg().validate(&token, &PanicVerifier, 1_500_000_000),
+            Err(TokenError::Malformed)
+        );
+
+        let oversized_json = "A".repeat((MAX_JWT_DECODED_JSON_BYTES + 1).div_ceil(3) * 4);
+        let token = format!("e30.{oversized_json}.AA");
+        assert_eq!(
+            cfg().validate(&token, &PanicVerifier, 1_500_000_000),
+            Err(TokenError::Malformed)
+        );
+
+        cfg()
+            .validate(&mint(good_claims()), &verifier(), 1_500_000_000)
+            .expect("ordinary bounded token remains accepted");
+    }
+
+    #[test]
+    fn jwt_size_boundaries_accept_exact_and_reject_max_plus_one() {
+        let exact_token = format!(
+            "{}.{}.{}",
+            "A".repeat(16_384),
+            "A".repeat(16_380),
+            "A".repeat(2)
+        );
+        assert_eq!(exact_token.len(), MAX_JWT_BYTES);
+        jwt_segments(&exact_token).expect("exact token byte boundary passes size validation");
+        let over_token = format!("{exact_token}A");
+        assert_eq!(over_token.len(), MAX_JWT_BYTES + 1);
+        assert_eq!(jwt_segments(&over_token), Err(TokenError::Malformed));
+
+        let exact_segment = format!("e30.e30.{}", "A".repeat(MAX_JWT_SEGMENT_BYTES));
+        jwt_segments(&exact_segment).expect("exact segment byte boundary passes size validation");
+        let over_segment = format!("{exact_segment}A");
+        assert_eq!(jwt_segments(&over_segment), Err(TokenError::Malformed));
+
+        let exact_decoded_json = format!("{}.e30.AA", "A".repeat(21_846));
+        assert_eq!(
+            decoded_len(&"A".repeat(21_846)),
+            Some(MAX_JWT_DECODED_JSON_BYTES)
+        );
+        jwt_segments(&exact_decoded_json)
+            .expect("exact decoded JSON boundary passes size validation");
+        let over_decoded_json = format!("{}.e30.AA", "A".repeat(21_847));
+        assert_eq!(
+            decoded_len(&"A".repeat(21_847)),
+            Some(MAX_JWT_DECODED_JSON_BYTES + 1)
+        );
+        assert_eq!(jwt_segments(&over_decoded_json), Err(TokenError::Malformed));
     }
 
     #[test]

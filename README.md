@@ -886,6 +886,9 @@ SecretResolver seam as audit and HTTP secrets. Supported forms are `env:VAR`,
 `file:/path/to/secret`, `keyring:account` / `keyring:service/account`, and the
 future `vault:path` seam (fail-closed unless wired). `literal:value` is for
 local development only and is rejected when `protected = true`.
+File-backed secrets are bounded to 64 KiB and must resolve without following a
+link to a regular file. On Unix, the file must be owned by the service user,
+have one hard link, and grant no permissions to group or other users.
 
 The current `oraclemcp` thin adapter fails explicitly for auth/features it
 cannot serve end-to-end safely, such as external wallet auth without

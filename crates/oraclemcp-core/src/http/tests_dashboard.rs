@@ -14,7 +14,9 @@ fn dashboard_pairing_sets_strict_cookie_and_session_view() {
         .expect("ticket mints");
     let token = &ticket.code;
     assert!(
-        !ticket.url.contains(token.as_str()) && !ticket.url.contains('?') && !ticket.url.contains('#'),
+        !ticket.url.contains(token.as_str())
+            && !ticket.url.contains('?')
+            && !ticket.url.contains('#'),
         "the pairing URL carries no bootstrap secret: {}",
         ticket.url
     );
@@ -104,6 +106,158 @@ fn dashboard_pairing_sets_strict_cookie_and_session_view() {
             .expect("action tickets")
             .iter()
             .any(|ticket| ticket["path"] == "/operator/v1/config/apply")
+    );
+}
+
+#[test]
+fn dashboard_pairing_rejects_malformed_form_encoding_before_exchange() {
+    let auth = Arc::new(
+        DashboardAuth::new(dashboard_test_dir("malformed-form"), "http://127.0.0.1")
+            .expect("dashboard auth builds"),
+    );
+    let cfg = HttpTransportConfig {
+        dashboard_auth: Some(auth),
+        ..Default::default()
+    };
+    for body in [
+        format!("{DASHBOARD_PAIRING_CODE_FIELD}=%"),
+        format!("{DASHBOARD_PAIRING_CODE_FIELD}=%A"),
+        format!("{DASHBOARD_PAIRING_CODE_FIELD}=%G0"),
+        format!("{DASHBOARD_PAIRING_CODE_FIELD}=%FF"),
+    ] {
+        let response = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "POST",
+                DASHBOARD_PAIR_PATH,
+                [
+                    ("host", "127.0.0.1"),
+                    ("origin", "http://127.0.0.1"),
+                    ("content-type", "application/x-www-form-urlencoded"),
+                ],
+                body.into_bytes(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(response.status, 400);
+        assert_eq!(response.header("cache-control"), Some("no-store"));
+    }
+}
+
+#[test]
+fn dashboard_logout_requires_same_origin_and_csrf_then_revokes_replay() {
+    let dir = dashboard_test_dir("logout-route");
+    let auth =
+        Arc::new(DashboardAuth::new(dir, "http://127.0.0.1").expect("dashboard auth builds"));
+    let cfg = HttpTransportConfig {
+        dashboard_auth: Some(Arc::clone(&auth)),
+        ..Default::default()
+    };
+    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket_for_test(auth.as_ref())
+        .expect("ticket mints");
+    let pair = handle_http_request(&test_server(), &cfg, pairing_post(&ticket.code));
+    let cookie = pair
+        .header("set-cookie")
+        .expect("pairing cookie")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_owned();
+    let session_request = || {
+        HttpRequest::new(
+            "GET",
+            DASHBOARD_SESSION_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("accept", "application/json"),
+                ("cookie", cookie.as_str()),
+                ("sec-fetch-site", "same-origin"),
+            ],
+            Vec::new(),
+        )
+        .with_peer_loopback(true)
+    };
+    let session = handle_http_request(&test_server(), &cfg, session_request());
+    assert_eq!(session.status, 200);
+    let csrf = response_json(&session)["csrf_token"]
+        .as_str()
+        .expect("csrf token")
+        .to_owned();
+
+    let cross_origin = handle_http_request(
+        &test_server(),
+        &cfg,
+        HttpRequest::new(
+            "POST",
+            DASHBOARD_LOGOUT_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("origin", "https://example.invalid"),
+                ("cookie", cookie.as_str()),
+                (DASHBOARD_CSRF_HEADER, csrf.as_str()),
+            ],
+            Vec::new(),
+        )
+        .with_peer_loopback(true),
+    );
+    assert_eq!(cross_origin.status, 403);
+    assert_eq!(
+        handle_http_request(&test_server(), &cfg, session_request()).status,
+        200,
+        "cross-origin refusal must not revoke the session"
+    );
+
+    let wrong_csrf = handle_http_request(
+        &test_server(),
+        &cfg,
+        HttpRequest::new(
+            "POST",
+            DASHBOARD_LOGOUT_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("origin", "http://127.0.0.1"),
+                ("cookie", cookie.as_str()),
+                (DASHBOARD_CSRF_HEADER, "wrong"),
+            ],
+            Vec::new(),
+        )
+        .with_peer_loopback(true),
+    );
+    assert_eq!(wrong_csrf.status, 401);
+    assert_eq!(
+        handle_http_request(&test_server(), &cfg, session_request()).status,
+        200,
+        "CSRF refusal must not revoke the session"
+    );
+
+    let logout = handle_http_request(
+        &test_server(),
+        &cfg,
+        HttpRequest::new(
+            "POST",
+            DASHBOARD_LOGOUT_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("origin", "http://127.0.0.1"),
+                ("sec-fetch-site", "same-origin"),
+                ("cookie", cookie.as_str()),
+                (DASHBOARD_CSRF_HEADER, csrf.as_str()),
+            ],
+            Vec::new(),
+        )
+        .with_peer_loopback(true),
+    );
+    assert_eq!(logout.status, 204);
+    assert_eq!(logout.header("cache-control"), Some("no-store"));
+    let expired = logout.header("set-cookie").expect("expired cookie");
+    assert!(expired.contains("Max-Age=0"));
+    assert!(expired.contains("HttpOnly"));
+    assert!(expired.contains("SameSite=Strict"));
+    assert_eq!(
+        handle_http_request(&test_server(), &cfg, session_request()).status,
+        401,
+        "replaying the revoked cookie is denied"
     );
 }
 
@@ -358,7 +512,9 @@ fn malicious_page_cannot_trigger_dashboard_gated_action() {
         serde_json::json!("dashboard request was refused")
     );
     assert!(
-        malicious_json["next_steps"].as_array().is_some_and(|steps| !steps.is_empty()),
+        malicious_json["next_steps"]
+            .as_array()
+            .is_some_and(|steps| !steps.is_empty()),
         "dashboard 403 envelope should keep the actionable ErrorEnvelope shape"
     );
     let malicious_body =
@@ -536,7 +692,10 @@ fn served_dashboard_pairing_keeps_the_bootstrap_secret_out_of_the_request_target
     // The bootstrap page is served with no secret in it and none supplied.
     let form = send("GET", DASHBOARD_PAIR_PATH, "accept: text/html\r\n", "");
     assert!(form.starts_with("HTTP/1.1 200 "), "served form: {form}");
-    assert!(!form.contains(&code), "the served form never carries the code");
+    assert!(
+        !form.contains(&code),
+        "the served form never carries the code"
+    );
     assert!(form.contains(&format!("name=\"{DASHBOARD_PAIRING_CODE_FIELD}\"")));
     assert!(form.contains("autocomplete=\"one-time-code\""));
     assert!(form.contains("background: #c7a34a; color: #0c0b09"));
@@ -667,9 +826,7 @@ fn served_dashboard_pairing_refuses_a_secret_in_the_query_without_consuming_it()
     let paired = send(
         "POST",
         DASHBOARD_PAIR_PATH,
-        &format!(
-            "origin: {audience}\r\ncontent-type: application/x-www-form-urlencoded\r\n"
-        ),
+        &format!("origin: {audience}\r\ncontent-type: application/x-www-form-urlencoded\r\n"),
         &format!("{DASHBOARD_PAIRING_CODE_FIELD}={code}"),
     );
     assert!(

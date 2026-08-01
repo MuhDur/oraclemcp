@@ -1833,13 +1833,15 @@ fn an_export_resource_is_served_and_forged_ids_fail_closed() {
     // No-scope access (the stdio default): mint an export under the empty
     // scope, then read it back over resources/read.
     let access = ExportAccess::new(Some("PROD"), oraclemcp_core::STDIO_EXPORT_PRINCIPAL, None);
-    let handle = exports.create(
-        &["ID".to_owned(), "NAME".to_owned()],
-        &[vec!["1".to_owned(), "alice".to_owned()]],
-        ExportFormat::Csv,
-        access,
-        std::time::Duration::from_secs(900),
-    );
+    let handle = exports
+        .create(
+            &["ID".to_owned(), "NAME".to_owned()],
+            &[vec!["1".to_owned(), "alice".to_owned()]],
+            ExportFormat::Csv,
+            access,
+            std::time::Duration::from_secs(900),
+        )
+        .expect("export creates");
 
     let read = server
         .handle_jsonrpc_request(
@@ -1918,13 +1920,15 @@ fn an_export_is_owned_by_principal_and_exact_scope_grant() {
     let principal_b = "oauth:principal-b";
     let minting_access =
         ExportAccess::new(Some("PROD"), principal_a, Some(&["oracle:read".to_owned()]));
-    let handle = exports.create(
-        &["ID".to_owned()],
-        &[vec!["1".to_owned()]],
-        ExportFormat::Csv,
-        minting_access,
-        std::time::Duration::from_secs(900),
-    );
+    let handle = exports
+        .create(
+            &["ID".to_owned()],
+            &[vec!["1".to_owned()]],
+            ExportFormat::Csv,
+            minting_access,
+            std::time::Duration::from_secs(900),
+        )
+        .expect("export creates");
 
     // Read under a DIFFERENT scope grant: refused.
     let wrong_grant = ScopeGrant(vec!["oracle:admin".to_owned()]);

@@ -125,6 +125,17 @@ fn target_tmp_file(name: &str) -> PathBuf {
     path
 }
 
+fn write_private_test_file(path: &std::path::Path, contents: impl AsRef<[u8]>) {
+    fs::write(path, contents).expect("write private test fixture");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .expect("make test fixture private");
+    }
+}
+
 #[test]
 fn runtime_profile_selection_does_not_resolve_secret_refs() {
     let cfg = OracleMcpConfig::from_toml_str(
@@ -784,7 +795,7 @@ fn audit_startup_accepts_32_byte_and_longer_resolved_keys() {
 #[test]
 fn audit_startup_rejects_newline_only_key_file_without_leaking_its_path() {
     let key_path = target_tmp_file("qa2-newline-audit-key");
-    fs::write(&key_path, "\n").expect("write newline-only key fixture");
+    write_private_test_file(&key_path, "\n");
     let audit = AuditConfig {
         key_ref: Some(format!("file:{}", key_path.display())),
         ..AuditConfig::default()
@@ -1312,7 +1323,7 @@ fn http_oauth_resolved_secret_enforces_31_32_byte_boundary_and_redacts() {
 #[test]
 fn http_oauth_rejects_newline_only_key_file_without_leaking_its_path() {
     let key_path = target_tmp_file("qa2-newline-oauth-key");
-    fs::write(&key_path, "\n").expect("write newline-only key fixture");
+    write_private_test_file(&key_path, "\n");
     let error = http_transport_config_from_merged(
         oauth_http_config(format!("file:{}", key_path.display())),
         false,

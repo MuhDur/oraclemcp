@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -44,6 +44,8 @@ pub const DASHBOARD_PAIR_PATH: &str = "/dashboard/pair";
 pub const DASHBOARD_PAIRING_CODE_FIELD: &str = "pairing_code";
 /// Same-origin session-info route used by the SPA to get CSRF/action tickets.
 pub const DASHBOARD_SESSION_PATH: &str = "/dashboard/session";
+/// Same-origin POST route that revokes the current browser session.
+pub const DASHBOARD_LOGOUT_PATH: &str = "/dashboard/logout";
 /// Liveness path probed before minting a dashboard pairing ticket (B3.1 / D1).
 pub const DASHBOARD_HTTP_PROBE_PATH: &str = "/healthz";
 /// Request challenge used to bind pairing to one live listener instance.
@@ -69,6 +71,9 @@ pub const DASHBOARD_ACTION_TICKET_HEADER: &str = "x-oraclemcp-action-ticket";
 pub const DASHBOARD_PAIRING_TTL_SECONDS: u64 = 60;
 const DASHBOARD_SESSION_TTL_SECONDS: u64 = 12 * 60 * 60;
 const TOKEN_BYTES: usize = 32;
+const DASHBOARD_TICKET_FILE_BYTES_CAP: usize = 16 * 1024;
+const MAX_DASHBOARD_SESSIONS: usize = 256;
+const MAX_TICKET_SCAVENGE_ENTRIES: usize = 256;
 
 /// A freshly minted local pairing ticket.
 pub struct DashboardPairingTicket {
@@ -173,6 +178,10 @@ pub enum DashboardAuthError {
     MissingActionTicket,
     #[error("dashboard action ticket is invalid")]
     InvalidActionTicket,
+    #[error("dashboard session capacity reached")]
+    SessionCapacity,
+    #[error("dashboard ticket directory is unsafe")]
+    UnsafeTicketDirectory,
     #[error("{operation} failed: {message}")]
     Io {
         operation: &'static str,
@@ -219,6 +228,7 @@ impl DashboardAuth {
     /// Build dashboard auth against the shared runtime ticket directory.
     pub fn new(ticket_dir: PathBuf, audience: &str) -> Result<Self, DashboardAuthError> {
         let audience = canonical_dashboard_audience(audience)?;
+        prepare_ticket_dir(&ticket_dir)?;
         let mut instance_secret = [0_u8; TOKEN_BYTES];
         getrandom::getrandom(&mut instance_secret).map_err(|error| DashboardAuthError::Io {
             operation: "read OS randomness",
@@ -267,19 +277,25 @@ impl DashboardAuth {
         audience: &str,
         secure_cookie: bool,
     ) -> Result<DashboardLogin, DashboardAuthError> {
+        self.exchange_ticket_at(token, audience, secure_cookie, unix_now(), Instant::now())
+    }
+
+    fn exchange_ticket_at(
+        &self,
+        token: &str,
+        audience: &str,
+        secure_cookie: bool,
+        now_unix: u64,
+        now: Instant,
+    ) -> Result<DashboardLogin, DashboardAuthError> {
         let token = token.trim();
         if token.is_empty() {
             return Err(DashboardAuthError::MissingTicket);
         }
         let token_hash = sha256_hex(token.as_bytes());
         let path = ticket_path(&self.ticket_dir, &token_hash);
-        let raw = fs::read_to_string(&path).map_err(|_| DashboardAuthError::InvalidTicket)?;
-        let ticket: TicketFile =
-            serde_json::from_str(&raw).map_err(|_| DashboardAuthError::InvalidTicket)?;
-        if ticket.schema_version != 2
-            || ticket.purpose != "oraclemcp-dashboard-pairing"
-            || ticket.token_sha256 != token_hash
-        {
+        let ticket = read_ticket_file(&path)?;
+        if !ticket_schema_is_valid(&ticket) || ticket.token_sha256 != token_hash {
             return Err(DashboardAuthError::InvalidTicket);
         }
         let audience = canonical_dashboard_audience(audience)?;
@@ -291,22 +307,28 @@ impl DashboardAuth {
         {
             return Err(DashboardAuthError::ListenerBindingMismatch);
         }
-        if unix_now() > ticket.expires_unix {
+        if ticket_is_expired(ticket.expires_unix, now_unix) {
             let _ = fs::remove_file(&path);
             return Err(DashboardAuthError::ExpiredTicket);
         }
-        fs::remove_file(&path).map_err(|_| DashboardAuthError::InvalidTicket)?;
+        let _ = scavenge_expired_tickets(&self.ticket_dir, now_unix);
 
         let id = random_hex(TOKEN_BYTES)?;
         let csrf_token = format!("csrf-{}", random_hex(TOKEN_BYTES)?);
-        let expires_unix = unix_now().saturating_add(self.session_ttl.as_secs());
+        let expires_unix = now_unix.saturating_add(self.session_ttl.as_secs());
         let session = DashboardSession {
             id: id.clone(),
             csrf_token,
-            expires_at: Instant::now() + self.session_ttl,
+            expires_at: now + self.session_ttl,
             expires_unix,
         };
-        self.sessions.lock().insert(id.clone(), session);
+        let mut sessions = self.sessions.lock();
+        sessions.retain(|_, session| session.expires_at > now);
+        if sessions.len() >= MAX_DASHBOARD_SESSIONS {
+            return Err(DashboardAuthError::SessionCapacity);
+        }
+        fs::remove_file(&path).map_err(|_| DashboardAuthError::InvalidTicket)?;
+        sessions.insert(id.clone(), session);
         Ok(DashboardLogin {
             session_cookie: dashboard_session_cookie_header(
                 &id,
@@ -315,6 +337,33 @@ impl DashboardAuth {
             ),
             expires_unix,
         })
+    }
+
+    /// Revoke the current browser session after cookie and CSRF validation.
+    pub fn logout_session(
+        &self,
+        cookie_header: Option<&str>,
+        csrf_header: Option<&str>,
+        secure_cookie: bool,
+    ) -> Result<String, DashboardAuthError> {
+        let session_id = cookie_header
+            .and_then(|cookie| cookie_value(cookie, DASHBOARD_SESSION_COOKIE))
+            .ok_or(DashboardAuthError::MissingSession)?;
+        let csrf = csrf_header
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(DashboardAuthError::MissingCsrf)?;
+        let now = Instant::now();
+        let mut sessions = self.sessions.lock();
+        sessions.retain(|_, session| session.expires_at > now);
+        let session = sessions
+            .get(session_id)
+            .ok_or(DashboardAuthError::InvalidSession)?;
+        if !constant_time_eq(csrf.as_bytes(), session.csrf_token.as_bytes()) {
+            return Err(DashboardAuthError::InvalidCsrf);
+        }
+        sessions.remove(session_id);
+        Ok(dashboard_expired_session_cookie_header(secure_cookie))
     }
 
     fn proof_for(&self, challenge: &str, token_sha256: &str) -> String {
@@ -416,10 +465,13 @@ pub fn default_dashboard_ticket_dir() -> PathBuf {
     if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
         return PathBuf::from(runtime).join("oraclemcp");
     }
-    let user = std::env::var("USER")
+    #[cfg(unix)]
+    let user_key = format!("uid-{}", rustix::process::geteuid().as_raw());
+    #[cfg(not(unix))]
+    let user_key = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "unknown".to_owned());
-    std::env::temp_dir().join(format!("oraclemcp-dashboard-{user}"))
+    std::env::temp_dir().join(format!("oraclemcp-dashboard-{user_key}"))
 }
 
 /// Prepare a pairing request without releasing its raw bearer to any listener.
@@ -537,6 +589,7 @@ pub fn mint_dashboard_pairing_ticket(
     }
     prepare_ticket_dir(ticket_dir)?;
     let issued_unix = unix_now();
+    let _ = scavenge_expired_tickets(ticket_dir, issued_unix);
     let expires_unix = issued_unix.saturating_add(DASHBOARD_PAIRING_TTL_SECONDS);
     let ticket = TicketFile {
         schema_version: 2,
@@ -604,19 +657,148 @@ pub(crate) fn mint_dashboard_pairing_ticket_for_test(
 }
 
 fn prepare_ticket_dir(ticket_dir: &Path) -> Result<(), DashboardAuthError> {
-    fs::create_dir_all(ticket_dir).map_err(|e| DashboardAuthError::Io {
-        operation: "create dashboard ticket directory",
-        message: e.to_string(),
-    })?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(ticket_dir, fs::Permissions::from_mode(0o700)).map_err(|e| {
-            DashboardAuthError::Io {
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+
+        let parent = ticket_dir
+            .parent()
+            .ok_or(DashboardAuthError::UnsafeTicketDirectory)?;
+        fs::create_dir_all(parent).map_err(|e| DashboardAuthError::Io {
+            operation: "create dashboard ticket directory parent",
+            message: e.to_string(),
+        })?;
+        match fs::create_dir(ticket_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(DashboardAuthError::Io {
+                    operation: "create dashboard ticket directory",
+                    message: error.to_string(),
+                });
+            }
+        }
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(ticket_dir)
+            .map_err(|_| DashboardAuthError::UnsafeTicketDirectory)?;
+        let metadata = directory
+            .metadata()
+            .map_err(|_| DashboardAuthError::UnsafeTicketDirectory)?;
+        if !metadata.file_type().is_dir() || metadata.uid() != rustix::process::geteuid().as_raw() {
+            return Err(DashboardAuthError::UnsafeTicketDirectory);
+        }
+        directory
+            .set_permissions(fs::Permissions::from_mode(0o700))
+            .map_err(|e| DashboardAuthError::Io {
                 operation: "secure dashboard ticket directory",
                 message: e.to_string(),
-            }
+            })?;
+        let secured = directory
+            .metadata()
+            .map_err(|_| DashboardAuthError::UnsafeTicketDirectory)?;
+        if secured.permissions().mode() & 0o777 != 0o700
+            || secured.uid() != rustix::process::geteuid().as_raw()
+        {
+            return Err(DashboardAuthError::UnsafeTicketDirectory);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(ticket_dir).map_err(|e| DashboardAuthError::Io {
+            operation: "create dashboard ticket directory",
+            message: e.to_string(),
         })?;
+        let metadata = fs::symlink_metadata(ticket_dir)
+            .map_err(|_| DashboardAuthError::UnsafeTicketDirectory)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            return Err(DashboardAuthError::UnsafeTicketDirectory);
+        }
+    }
+    Ok(())
+}
+
+fn read_ticket_file(path: &Path) -> Result<TicketFile, DashboardAuthError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let mut file = options
+        .open(path)
+        .map_err(|_| DashboardAuthError::InvalidTicket)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| DashboardAuthError::InvalidTicket)?;
+    if !metadata.file_type().is_file() {
+        return Err(DashboardAuthError::InvalidTicket);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        if metadata.uid() != rustix::process::geteuid().as_raw()
+            || metadata.nlink() != 1
+            || metadata.mode() & 0o077 != 0
+        {
+            return Err(DashboardAuthError::InvalidTicket);
+        }
+    }
+    if metadata.len() > DASHBOARD_TICKET_FILE_BYTES_CAP as u64 {
+        return Err(DashboardAuthError::InvalidTicket);
+    }
+    let mut raw = Vec::with_capacity(metadata.len() as usize);
+    (&mut file)
+        .take((DASHBOARD_TICKET_FILE_BYTES_CAP + 1) as u64)
+        .read_to_end(&mut raw)
+        .map_err(|_| DashboardAuthError::InvalidTicket)?;
+    if raw.len() > DASHBOARD_TICKET_FILE_BYTES_CAP {
+        return Err(DashboardAuthError::InvalidTicket);
+    }
+    serde_json::from_slice(&raw).map_err(|_| DashboardAuthError::InvalidTicket)
+}
+
+fn ticket_schema_is_valid(ticket: &TicketFile) -> bool {
+    ticket.schema_version == 2
+        && ticket.purpose == "oraclemcp-dashboard-pairing"
+        && is_lower_hex_64(&ticket.token_sha256)
+        && is_lower_hex_64(&ticket.challenge)
+        && is_lower_hex_64(&ticket.listener_instance_id)
+        && is_lower_hex_64(&ticket.listener_proof)
+        && ticket.issued_unix <= ticket.expires_unix
+        && canonical_dashboard_audience(&ticket.audience)
+            .is_ok_and(|audience| audience == ticket.audience)
+}
+
+fn ticket_is_expired(expires_unix: u64, now_unix: u64) -> bool {
+    now_unix >= expires_unix
+}
+
+fn scavenge_expired_tickets(ticket_dir: &Path, now_unix: u64) -> Result<(), DashboardAuthError> {
+    let entries = fs::read_dir(ticket_dir).map_err(|e| DashboardAuthError::Io {
+        operation: "scan dashboard ticket directory",
+        message: e.to_string(),
+    })?;
+    for entry in entries.take(MAX_TICKET_SCAVENGE_ENTRIES).flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(token_hash) = name
+            .strip_prefix("dashboard-ticket-")
+            .and_then(|name| name.strip_suffix(".json"))
+            .filter(|hash| is_lower_hex_64(hash))
+        else {
+            continue;
+        };
+        let Ok(ticket) = read_ticket_file(&entry.path()) else {
+            continue;
+        };
+        if ticket_schema_is_valid(&ticket)
+            && ticket.token_sha256 == token_hash
+            && ticket_is_expired(ticket.expires_unix, now_unix)
+        {
+            let _ = fs::remove_file(entry.path());
+        }
     }
     Ok(())
 }
@@ -713,6 +895,16 @@ fn is_dashboard_action_route(method: &str, path: &str) -> bool {
 fn dashboard_session_cookie_header(session_id: &str, max_age_seconds: u64, secure: bool) -> String {
     let mut header = format!(
         "{DASHBOARD_SESSION_COOKIE}={session_id}; Path=/; Max-Age={max_age_seconds}; HttpOnly; SameSite=Strict"
+    );
+    if secure {
+        header.push_str("; Secure");
+    }
+    header
+}
+
+fn dashboard_expired_session_cookie_header(secure: bool) -> String {
+    let mut header = format!(
+        "{DASHBOARD_SESSION_COOKIE}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Strict"
     );
     if secure {
         header.push_str("; Secure");
@@ -821,6 +1013,22 @@ mod tests {
                 .pairing_probe_proof(&request.challenge, &request.token_sha256)
                 .expect("well-formed probe proof"),
         }
+    }
+
+    fn rewrite_ticket_expiry(ticket: &DashboardPairingTicket, expires_unix: u64) {
+        let raw = fs::read_to_string(&ticket.ticket_file).expect("ticket file is readable");
+        let mut stored: serde_json::Value = serde_json::from_str(&raw).expect("ticket json");
+        let issued_unix = stored["issued_unix"]
+            .as_u64()
+            .expect("issued timestamp")
+            .min(expires_unix.saturating_sub(1));
+        stored["issued_unix"] = serde_json::json!(issued_unix);
+        stored["expires_unix"] = serde_json::json!(expires_unix);
+        fs::write(
+            &ticket.ticket_file,
+            serde_json::to_vec(&stored).expect("ticket re-serializes"),
+        )
+        .expect("rewrite ticket");
     }
 
     #[test]
@@ -974,14 +1182,7 @@ mod tests {
         let (auth, ticket) = auth_and_ticket(dir, "http://127.0.0.1:7070");
         // Age the persisted ticket rather than the clock: the TTL is enforced
         // from the ticket's own recorded expiry.
-        let raw = fs::read_to_string(&ticket.ticket_file).expect("ticket file is readable");
-        let mut stored: serde_json::Value = serde_json::from_str(&raw).expect("ticket json");
-        stored["expires_unix"] = serde_json::json!(unix_now().saturating_sub(1));
-        fs::write(
-            &ticket.ticket_file,
-            serde_json::to_vec(&stored).expect("ticket re-serializes"),
-        )
-        .expect("rewrite ticket");
+        rewrite_ticket_expiry(&ticket, unix_now().saturating_sub(1));
 
         assert!(matches!(
             auth.exchange_ticket(&ticket.code, auth.audience(), false),
@@ -990,6 +1191,168 @@ mod tests {
         assert!(
             !ticket.ticket_file.exists(),
             "an expired ticket is swept, not left replayable"
+        );
+    }
+
+    #[test]
+    fn pairing_expiry_is_half_open_at_the_injected_deadline() {
+        let deadline = unix_now().saturating_add(30);
+
+        let (before_auth, before) =
+            auth_and_ticket(test_dir("expiry-before"), "http://127.0.0.1:7070");
+        rewrite_ticket_expiry(&before, deadline);
+        before_auth
+            .exchange_ticket_at(
+                &before.code,
+                before_auth.audience(),
+                false,
+                deadline - 1,
+                Instant::now(),
+            )
+            .expect("ticket is valid immediately before expiry");
+
+        let (equal_auth, equal) =
+            auth_and_ticket(test_dir("expiry-equal"), "http://127.0.0.1:7070");
+        rewrite_ticket_expiry(&equal, deadline);
+        assert!(matches!(
+            equal_auth.exchange_ticket_at(
+                &equal.code,
+                equal_auth.audience(),
+                false,
+                deadline,
+                Instant::now(),
+            ),
+            Err(DashboardAuthError::ExpiredTicket)
+        ));
+
+        let (after_auth, after) =
+            auth_and_ticket(test_dir("expiry-after"), "http://127.0.0.1:7070");
+        rewrite_ticket_expiry(&after, deadline);
+        assert!(matches!(
+            after_auth.exchange_ticket_at(
+                &after.code,
+                after_auth.audience(),
+                false,
+                deadline + 1,
+                Instant::now(),
+            ),
+            Err(DashboardAuthError::ExpiredTicket)
+        ));
+    }
+
+    #[test]
+    fn session_insertion_prunes_then_refuses_at_a_deterministic_cap() {
+        let (auth, ticket) = auth_and_ticket(test_dir("session-capacity"), "http://127.0.0.1:7070");
+        let now = Instant::now();
+        {
+            let mut sessions = auth.sessions.lock();
+            for index in 0..MAX_DASHBOARD_SESSIONS {
+                let id = format!("fixture-{index}");
+                sessions.insert(
+                    id.clone(),
+                    DashboardSession {
+                        id,
+                        csrf_token: format!("csrf-{index}"),
+                        expires_at: now + Duration::from_secs(60),
+                        expires_unix: unix_now().saturating_add(60),
+                    },
+                );
+            }
+        }
+        assert!(matches!(
+            auth.exchange_ticket_at(&ticket.code, auth.audience(), false, unix_now(), now,),
+            Err(DashboardAuthError::SessionCapacity)
+        ));
+        assert!(
+            ticket.ticket_file.exists(),
+            "capacity must not consume ticket"
+        );
+        assert_eq!(auth.sessions.lock().len(), MAX_DASHBOARD_SESSIONS);
+
+        auth.sessions
+            .lock()
+            .get_mut("fixture-0")
+            .expect("fixture session")
+            .expires_at = now;
+        auth.exchange_ticket_at(&ticket.code, auth.audience(), false, unix_now(), now)
+            .expect("expired slot is pruned before insertion");
+        assert_eq!(auth.sessions.lock().len(), MAX_DASHBOARD_SESSIONS);
+    }
+
+    #[test]
+    fn logout_revokes_server_state_and_expires_the_cookie() {
+        let (auth, ticket) = auth_and_ticket(test_dir("logout"), "http://127.0.0.1:7070");
+        let login = auth
+            .exchange_ticket(&ticket.code, auth.audience(), false)
+            .expect("login");
+        let cookie = login.session_cookie.split(';').next().expect("cookie pair");
+        let view = auth.session_view(Some(cookie)).expect("session view");
+        assert!(matches!(
+            auth.logout_session(Some(cookie), Some("wrong-csrf"), false),
+            Err(DashboardAuthError::InvalidCsrf)
+        ));
+        auth.session_view(Some(cookie))
+            .expect("failed logout preserves session");
+
+        let expired_cookie = auth
+            .logout_session(Some(cookie), Some(&view.csrf_token), false)
+            .expect("logout");
+        assert!(expired_cookie.contains("Max-Age=0"));
+        assert!(expired_cookie.contains("HttpOnly"));
+        assert!(expired_cookie.contains("SameSite=Strict"));
+        assert!(matches!(
+            auth.session_view(Some(cookie)),
+            Err(DashboardAuthError::InvalidSession)
+        ));
+    }
+
+    #[test]
+    fn mint_scavenges_only_schema_valid_expired_ticket_files() {
+        let dir = test_dir("ticket-scavenge");
+        let auth = DashboardAuth::new(dir.clone(), "http://127.0.0.1:7070").expect("auth");
+        let expired = mint_dashboard_pairing_ticket_for_test(&auth).expect("expired fixture");
+        rewrite_ticket_expiry(&expired, unix_now().saturating_sub(1));
+        let invalid = dir.join(format!("dashboard-ticket-{}.json", "c".repeat(64)));
+        fs::write(&invalid, b"not a ticket").expect("invalid fixture");
+        let unrelated = dir.join("operator-note.txt");
+        fs::write(&unrelated, b"preserve me").expect("unrelated fixture");
+
+        let live = mint_dashboard_pairing_ticket_for_test(&auth).expect("mint triggers sweep");
+
+        assert!(!expired.ticket_file.exists());
+        assert!(live.ticket_file.exists());
+        assert!(invalid.exists(), "invalid files are not cleanup authority");
+        assert!(unrelated.exists(), "unrelated files are preserved");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planted_ticket_directory_symlink_never_mutates_the_victim() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let root = test_dir("directory-symlink");
+        fs::create_dir_all(&root).expect("fixture root");
+        let victim = root.join("victim");
+        fs::create_dir(&victim).expect("victim directory");
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o755))
+            .expect("victim permissions");
+        let sentinel = victim.join("sentinel.txt");
+        fs::write(&sentinel, b"unchanged").expect("victim sentinel");
+        let planted = root.join("tickets");
+        symlink(&victim, &planted).expect("planted directory symlink");
+
+        assert!(matches!(
+            DashboardAuth::new(planted, "http://127.0.0.1:7070"),
+            Err(DashboardAuthError::UnsafeTicketDirectory)
+        ));
+        assert_eq!(fs::read(&sentinel).expect("sentinel remains"), b"unchanged");
+        assert_eq!(
+            fs::metadata(&victim)
+                .expect("victim metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
         );
     }
 

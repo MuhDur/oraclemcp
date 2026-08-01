@@ -6,7 +6,10 @@
 //! `$XDG_STATE_HOME/oraclemcp/clients.json`.
 
 use std::collections::BTreeSet;
+#[cfg(test)]
 use std::fs;
+use std::fs::File;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,6 +37,10 @@ const DUMMY_CREDENTIAL_HASH: &str =
 const MAX_LABEL_LEN: usize = 128;
 const MAX_SCOPE_LEN: usize = 128;
 const MAX_SCOPES: usize = 32;
+const MAX_CLIENT_CREDENTIAL_FILE_BYTES: usize = 1024 * 1024;
+const MAX_CLIENT_CREDENTIALS: usize = 1024;
+const MAX_REVOKED_CREDENTIALS: usize = 256;
+const CLIENT_CAPACITY_PARSE_MARKER: &str = "client-credential-record-capacity-exceeded";
 
 /// Errors from the per-client credential store.
 #[derive(Debug, Error)]
@@ -68,6 +75,15 @@ pub enum ClientCredentialError {
         "client credential persistence is uncertain; restart and inspect the store before retrying"
     )]
     PersistenceUncertain,
+    /// The store reached its bounded record capacity.
+    #[error("client credential store capacity reached ({0} records)")]
+    Capacity(usize),
+    /// The persisted store exceeds the bounded input protocol.
+    #[error("client credential store exceeds {0} bytes")]
+    PersistedStateTooLarge(usize),
+    /// A credential lifecycle generation cannot advance without wrapping.
+    #[error("client credential generation exhausted for {0}")]
+    GenerationOverflow(String),
 }
 
 /// Durability evidence for a completed credential mutation.
@@ -226,6 +242,7 @@ pub struct ClientCredentialView {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ClientCredentialFile {
     schema_version: u16,
+    #[serde(deserialize_with = "deserialize_bounded_clients")]
     clients: Vec<ClientCredentialRecord>,
 }
 
@@ -255,6 +272,58 @@ struct ClientCredentialRecord {
     rotated_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     revoked_at: Option<String>,
+}
+
+fn deserialize_bounded_clients<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ClientCredentialRecord>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct BoundedClientsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for BoundedClientsVisitor {
+        type Value = Vec<ClientCredentialRecord>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                formatter,
+                "at most {MAX_CLIENT_CREDENTIALS} client credential records"
+            )
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            use serde::de::Error as _;
+
+            if sequence
+                .size_hint()
+                .is_some_and(|size| size > MAX_CLIENT_CREDENTIALS)
+            {
+                return Err(A::Error::custom(CLIENT_CAPACITY_PARSE_MARKER));
+            }
+            let mut clients = Vec::with_capacity(
+                sequence
+                    .size_hint()
+                    .unwrap_or(0)
+                    .min(MAX_CLIENT_CREDENTIALS),
+            );
+            while clients.len() < MAX_CLIENT_CREDENTIALS {
+                let Some(record) = sequence.next_element()? else {
+                    return Ok(clients);
+                };
+                clients.push(record);
+            }
+            if sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(A::Error::custom(CLIENT_CAPACITY_PARSE_MARKER));
+            }
+            Ok(clients)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedClientsVisitor)
 }
 
 impl ClientCredentialRecord {
@@ -366,9 +435,14 @@ impl ClientCredentialStore {
         let scopes = normalize_scopes(request.scopes)?;
         let mut file = self.file.lock();
         self.ensure_persistence_certain()?;
+        let mut next = file.clone();
+        compact_revoked_records(&mut next.clients, MAX_REVOKED_CREDENTIALS);
+        if next.clients.len() >= MAX_CLIENT_CREDENTIALS {
+            return Err(ClientCredentialError::Capacity(MAX_CLIENT_CREDENTIALS));
+        }
         let (client_id, bearer) = loop {
             let client_id = generate_client_id()?;
-            if file.clients.iter().all(|c| c.client_id != client_id) {
+            if next.clients.iter().all(|c| c.client_id != client_id) {
                 let bearer = generate_bearer(&client_id)?;
                 break (client_id, bearer);
             }
@@ -389,7 +463,6 @@ impl ClientCredentialStore {
         };
         let view = record.view();
         let principal_key = principal_key_for_client_id(&client_id);
-        let mut next = file.clone();
         next.clients.push(record);
         sort_clients(&mut next.clients);
         let durability = self.persist_and_install(&mut file, next)?;
@@ -499,7 +572,10 @@ impl ClientCredentialStore {
         let record = &mut next.clients[record_index];
         record.credential_hash = credential_hash(&salt, &bearer);
         record.credential_salt = salt;
-        record.generation = record.generation.saturating_add(1);
+        record.generation = record
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| ClientCredentialError::GenerationOverflow(record.client_id.clone()))?;
         record.rotated_at = Some(unix_timestamp());
         record.last_used_at = None;
         record.last_source_addr = None;
@@ -541,7 +617,9 @@ impl ClientCredentialStore {
             let mut next = file.clone();
             let record = &mut next.clients[record_index];
             record.revoked_at = Some(unix_timestamp());
-            record.generation = record.generation.saturating_add(1);
+            record.generation = record.generation.checked_add(1).ok_or_else(|| {
+                ClientCredentialError::GenerationOverflow(record.client_id.clone())
+            })?;
             record.last_used_at = None;
             record.last_source_addr = None;
             let client_id = record.client_id.clone();
@@ -636,10 +714,32 @@ pub fn looks_like_client_bearer(bearer: &str) -> bool {
 }
 
 fn load_file(path: &Path) -> Result<ClientCredentialFile, ClientCredentialError> {
-    let bytes = fs::read(path)
+    let file = File::open(path)
         .map_err(|e| ClientCredentialError::Store(FileStoreError::Io(e.to_string())))?;
-    let file: ClientCredentialFile =
-        serde_json::from_slice(&bytes).map_err(|e| ClientCredentialError::Parse(e.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| ClientCredentialError::Store(FileStoreError::Io(e.to_string())))?;
+    if metadata.len() > MAX_CLIENT_CREDENTIAL_FILE_BYTES as u64 {
+        return Err(ClientCredentialError::PersistedStateTooLarge(
+            MAX_CLIENT_CREDENTIAL_FILE_BYTES,
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take((MAX_CLIENT_CREDENTIAL_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| ClientCredentialError::Store(FileStoreError::Io(e.to_string())))?;
+    if bytes.len() > MAX_CLIENT_CREDENTIAL_FILE_BYTES {
+        return Err(ClientCredentialError::PersistedStateTooLarge(
+            MAX_CLIENT_CREDENTIAL_FILE_BYTES,
+        ));
+    }
+    let file: ClientCredentialFile = serde_json::from_slice(&bytes).map_err(|error| {
+        if error.to_string().contains(CLIENT_CAPACITY_PARSE_MARKER) {
+            ClientCredentialError::Capacity(MAX_CLIENT_CREDENTIALS)
+        } else {
+            ClientCredentialError::Parse(error.to_string())
+        }
+    })?;
     validate_file(file)
 }
 
@@ -652,6 +752,9 @@ fn validate_file(
             file.schema_version
         )));
     }
+    if file.clients.len() > MAX_CLIENT_CREDENTIALS {
+        return Err(ClientCredentialError::Capacity(MAX_CLIENT_CREDENTIALS));
+    }
     let mut seen = BTreeSet::new();
     for client in &mut file.clients {
         validate_client_id(&client.client_id)?;
@@ -663,9 +766,19 @@ fn validate_file(
                 client.client_id
             )));
         }
-        if !client.credential_hash.starts_with("sha256:") || client.credential_salt.len() != 32 {
+        let canonical_hash = client
+            .credential_hash
+            .strip_prefix("sha256:")
+            .is_some_and(|value| is_lower_hex_exact(value, 64));
+        if !canonical_hash || !is_lower_hex_exact(&client.credential_salt, HASH_SALT_BYTES * 2) {
             return Err(ClientCredentialError::Parse(format!(
                 "invalid credential hash material for {}",
+                client.client_id
+            )));
+        }
+        if client.generation == 0 {
+            return Err(ClientCredentialError::Parse(format!(
+                "invalid zero generation for {}",
                 client.client_id
             )));
         }
@@ -689,6 +802,38 @@ fn persist_file(
 
 fn sort_clients(clients: &mut [ClientCredentialRecord]) {
     clients.sort_by(|a, b| a.client_id.cmp(&b.client_id));
+}
+
+fn compact_revoked_records(clients: &mut Vec<ClientCredentialRecord>, retain: usize) {
+    let mut revoked = clients
+        .iter()
+        .filter_map(|client| {
+            client.revoked_at.as_deref().map(|revoked_at| {
+                (
+                    unix_timestamp_secs(revoked_at).unwrap_or(0),
+                    client.client_id.clone(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if revoked.len() <= retain {
+        return;
+    }
+    revoked.sort_unstable();
+    let remove = revoked.len() - retain;
+    let retired = revoked
+        .into_iter()
+        .take(remove)
+        .map(|(_, client_id)| client_id)
+        .collect::<BTreeSet<_>>();
+    clients.retain(|client| !retired.contains(&client.client_id));
+}
+
+fn is_lower_hex_exact(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn normalize_label(label: &str) -> Result<String, ClientCredentialError> {
@@ -896,6 +1041,22 @@ mod tests {
                 vec!["oracle:read".to_owned(), "oracle:read".to_owned()],
             ))
             .expect("issue client")
+    }
+
+    fn fixture_record(index: usize) -> ClientCredentialRecord {
+        ClientCredentialRecord {
+            client_id: format!("client-{index:032x}"),
+            label: format!("client {index}"),
+            scopes: vec!["oracle:read".to_owned()],
+            credential_hash: format!("sha256:{}", "a".repeat(64)),
+            credential_salt: "b".repeat(HASH_SALT_BYTES * 2),
+            generation: 1,
+            created_at: "unix:1".to_owned(),
+            last_used_at: None,
+            last_source_addr: None,
+            rotated_at: None,
+            revoked_at: None,
+        }
     }
 
     #[test]
@@ -1232,5 +1393,235 @@ mod tests {
                 expected_generation
             );
         }
+    }
+
+    #[test]
+    fn persisted_store_enforces_exact_byte_and_record_boundaries() {
+        let root = test_root("store-bounds");
+        fs::create_dir_all(&root).expect("create fixture root");
+        let path = root.join("clients.json");
+
+        fs::write(&path, vec![b' '; MAX_CLIENT_CREDENTIAL_FILE_BYTES])
+            .expect("write exact byte limit");
+        assert!(
+            matches!(load_file(&path), Err(ClientCredentialError::Parse(_))),
+            "the exact byte limit must reach parsing rather than the size refusal"
+        );
+
+        fs::write(&path, vec![b' '; MAX_CLIENT_CREDENTIAL_FILE_BYTES + 1])
+            .expect("write over byte limit");
+        assert!(matches!(
+            load_file(&path),
+            Err(ClientCredentialError::PersistedStateTooLarge(
+                MAX_CLIENT_CREDENTIAL_FILE_BYTES
+            ))
+        ));
+
+        let exact = ClientCredentialFile {
+            schema_version: CLIENT_CREDENTIAL_SCHEMA_VERSION,
+            clients: (0..MAX_CLIENT_CREDENTIALS).map(fixture_record).collect(),
+        };
+        assert_eq!(
+            validate_file(exact.clone())
+                .expect("exact record limit is valid")
+                .clients
+                .len(),
+            MAX_CLIENT_CREDENTIALS
+        );
+        fs::write(
+            &path,
+            serde_json::to_vec(&exact).expect("serialize exact record limit"),
+        )
+        .expect("write exact record limit");
+        assert_eq!(
+            load_file(&path)
+                .expect("load exact record limit")
+                .clients
+                .len(),
+            MAX_CLIENT_CREDENTIALS
+        );
+        let mut over = exact;
+        over.clients.push(fixture_record(MAX_CLIENT_CREDENTIALS));
+        assert!(matches!(
+            validate_file(over.clone()),
+            Err(ClientCredentialError::Capacity(MAX_CLIENT_CREDENTIALS))
+        ));
+        fs::write(
+            &path,
+            serde_json::to_vec(&over).expect("serialize over record limit"),
+        )
+        .expect("write over record limit");
+        assert!(matches!(
+            load_file(&path),
+            Err(ClientCredentialError::Capacity(MAX_CLIENT_CREDENTIALS))
+        ));
+    }
+
+    #[test]
+    fn issuance_refuses_capacity_without_mutating_memory_or_disk() {
+        let store = ClientCredentialStore::open(test_root("issue-capacity")).expect("store");
+        {
+            let mut live = store.file.lock();
+            let full = ClientCredentialFile {
+                schema_version: CLIENT_CREDENTIAL_SCHEMA_VERSION,
+                clients: (0..MAX_CLIENT_CREDENTIALS).map(fixture_record).collect(),
+            };
+            store
+                .persist_and_install(&mut live, full)
+                .expect("persist full fixture");
+        }
+        let before_disk = fs::read(store.path()).expect("read full fixture");
+        let before_memory = store.list();
+        assert!(matches!(
+            store.issue(ClientCredentialIssueRequest::new(
+                "one too many",
+                vec!["oracle:read".to_owned()],
+            )),
+            Err(ClientCredentialError::Capacity(MAX_CLIENT_CREDENTIALS))
+        ));
+        assert_eq!(store.list(), before_memory);
+        assert_eq!(
+            fs::read(store.path()).expect("read refused store"),
+            before_disk
+        );
+    }
+
+    #[test]
+    fn stored_hash_material_requires_one_canonical_encoding() {
+        let valid = fixture_record(1);
+        let invalid_hashes = [
+            "a".repeat(64),
+            format!("sha256:{}", "A".repeat(64)),
+            format!("sha256:{}", "g".repeat(64)),
+            format!("sha256:{}", "a".repeat(63)),
+            format!("sha256:{}", "a".repeat(65)),
+            format!("SHA256:{}", "a".repeat(64)),
+        ];
+        for hash in invalid_hashes {
+            let mut record = valid.clone();
+            record.credential_hash = hash;
+            assert!(matches!(
+                validate_file(ClientCredentialFile {
+                    schema_version: CLIENT_CREDENTIAL_SCHEMA_VERSION,
+                    clients: vec![record],
+                }),
+                Err(ClientCredentialError::Parse(_))
+            ));
+        }
+
+        for salt in [
+            "B".repeat(HASH_SALT_BYTES * 2),
+            "g".repeat(HASH_SALT_BYTES * 2),
+            "b".repeat(HASH_SALT_BYTES * 2 - 1),
+            "b".repeat(HASH_SALT_BYTES * 2 + 1),
+        ] {
+            let mut record = valid.clone();
+            record.credential_salt = salt;
+            assert!(matches!(
+                validate_file(ClientCredentialFile {
+                    schema_version: CLIENT_CREDENTIAL_SCHEMA_VERSION,
+                    clients: vec![record],
+                }),
+                Err(ClientCredentialError::Parse(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn generation_limits_fail_without_mutating_memory_or_disk() {
+        for operation in ["rotate", "revoke"] {
+            let store = ClientCredentialStore::open(test_root(operation)).expect("store");
+            let issued = issue_read_client(&store);
+            {
+                let mut live = store.file.lock();
+                let mut exhausted = live.clone();
+                exhausted.clients[0].generation = u64::MAX;
+                store
+                    .persist_and_install(&mut live, exhausted)
+                    .expect("persist exhausted generation");
+            }
+            let before_disk = fs::read(store.path()).expect("read exhausted fixture");
+            let before_memory = store.list();
+            let error = match operation {
+                "rotate" => store.rotate(&issued.client_id).expect_err("rotate refuses"),
+                "revoke" => store.revoke(&issued.client_id).expect_err("revoke refuses"),
+                _ => unreachable!(),
+            };
+            assert!(matches!(
+                error,
+                ClientCredentialError::GenerationOverflow(ref id) if id == &issued.client_id
+            ));
+            assert_eq!(store.list(), before_memory);
+            assert_eq!(
+                fs::read(store.path()).expect("read after refusal"),
+                before_disk
+            );
+        }
+
+        let mut zero = fixture_record(0);
+        zero.generation = 0;
+        assert!(matches!(
+            validate_file(ClientCredentialFile {
+                schema_version: CLIENT_CREDENTIAL_SCHEMA_VERSION,
+                clients: vec![zero],
+            }),
+            Err(ClientCredentialError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn compacted_revoked_bearer_remains_invalid_after_reopen() {
+        let root = test_root("revoked-compaction");
+        let store = ClientCredentialStore::open(&root).expect("store");
+        let issued = issue_read_client(&store);
+        let bearer = issued.bearer.expose().to_owned();
+        store.revoke(&issued.client_id).expect("revoke fixture");
+        {
+            let mut live = store.file.lock();
+            let mut compacted = live.clone();
+            compact_revoked_records(&mut compacted.clients, 0);
+            store
+                .persist_and_install(&mut live, compacted)
+                .expect("persist compaction");
+        }
+        assert!(store.list().is_empty());
+        assert!(matches!(
+            store.authenticate_bearer(&bearer, None),
+            Err(ClientCredentialError::AuthenticationFailed)
+        ));
+        drop(store);
+
+        let reopened = ClientCredentialStore::open(root).expect("reopen compacted store");
+        assert!(matches!(
+            reopened.authenticate_bearer(&bearer, None),
+            Err(ClientCredentialError::AuthenticationFailed)
+        ));
+    }
+
+    #[test]
+    fn revoked_compaction_keeps_the_newest_floor_and_all_active_records() {
+        let mut clients = (0..MAX_REVOKED_CREDENTIALS + 2)
+            .map(|index| {
+                let mut record = fixture_record(index);
+                record.revoked_at = Some(format!("unix:{}", index + 1));
+                record
+            })
+            .collect::<Vec<_>>();
+        clients.push(fixture_record(MAX_REVOKED_CREDENTIALS + 2));
+
+        compact_revoked_records(&mut clients, MAX_REVOKED_CREDENTIALS);
+
+        assert_eq!(clients.len(), MAX_REVOKED_CREDENTIALS + 1);
+        assert!(clients.iter().any(|record| record.revoked_at.is_none()));
+        assert!(
+            !clients
+                .iter()
+                .any(|record| record.client_id == fixture_record(0).client_id)
+        );
+        assert!(
+            !clients
+                .iter()
+                .any(|record| record.client_id == fixture_record(1).client_id)
+        );
     }
 }
