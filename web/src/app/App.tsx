@@ -9,6 +9,7 @@ import {
   RouterProvider,
   useBlocker,
   useNavigate,
+  useRouterState,
   useSearch
 } from "@tanstack/react-router";
 import {
@@ -372,6 +373,8 @@ export function bootstrapDashboard(element: HTMLElement): void {
 
 function RootLayout(): React.ReactElement {
   const skin = OMCP_SKIN;
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const priorPathname = React.useRef<string | null>(null);
   const activeLanes = useQuery({
     queryKey: ["active-lanes"],
     queryFn: fetchActiveLanes,
@@ -390,6 +393,19 @@ function RootLayout(): React.ReactElement {
       (stateful || item.to !== "/sessions") &&
       (workbenchNavigationVisible || item.to !== "/workbench")
   );
+  React.useEffect(() => {
+    if (priorPathname.current !== null && priorPathname.current !== pathname) {
+      // Outlet commits the new page after the route state changes. Focus on the
+      // next frame so the announcement targets the incoming heading, not a
+      // heading about to be removed with the outgoing route.
+      const frame = globalThis.requestAnimationFrame(() => {
+        document.getElementById("dashboard-page-title")?.focus();
+      });
+      priorPathname.current = pathname;
+      return () => globalThis.cancelAnimationFrame(frame);
+    }
+    priorPathname.current = pathname;
+  }, [pathname]);
   return (
     <div
       className={skin.layout.appShell}
@@ -3742,10 +3758,10 @@ function OverviewReviewsPanel({
         </div>
         <Link
           to="/reviews"
-          className="inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 text-sm font-semibold text-[var(--om-text-bright)] transition-colors hover:bg-[var(--om-surface-elevated)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--om-focus)]"
+          className="inline-flex min-h-11 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 text-sm font-semibold text-[var(--om-text-bright)] transition-colors hover:bg-[var(--om-surface-elevated)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--om-focus)]"
         >
           <Search className="size-4" aria-hidden="true" />
-          Open
+          View reviews
         </Link>
       </div>
       <div className="divide-y divide-[var(--om-border)]">
@@ -9795,17 +9811,21 @@ function PageFrame({
   description: string;
   children: React.ReactNode;
 }): React.ReactElement {
-  const headingRef = React.useRef<HTMLHeadingElement | null>(null);
   React.useEffect(() => {
     document.title = `${title} · Oracle MCP`;
-    headingRef.current?.focus();
   }, [title]);
   return (
     <div className="space-y-4">
       <header className="border-b border-[var(--om-border)] pb-4">
         <div className="min-w-0">
           <p className="text-xs font-bold uppercase text-[var(--om-gold)]">{eyebrow}</p>
-          <h2 ref={headingRef} tabIndex={-1} className="mt-1 text-3xl font-bold tracking-normal text-[var(--om-text-bright)]">{title}</h2>
+          <h2
+            id="dashboard-page-title"
+            tabIndex={-1}
+            className="mt-1 text-3xl font-bold tracking-normal text-[var(--om-text-bright)] outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[var(--om-focus)]"
+          >
+            {title}
+          </h2>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--om-text-muted)]">{description}</p>
         </div>
       </header>

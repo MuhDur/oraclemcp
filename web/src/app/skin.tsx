@@ -98,7 +98,7 @@ export const OMCP_SKIN: DashboardSkin = {
     appShell: "min-h-screen bg-[var(--om-bg)] text-[var(--om-text)]",
     frame: "mx-auto flex w-full max-w-[1440px] flex-col gap-4 px-4 py-4 md:px-6 lg:flex-row lg:py-6",
     sidebar:
-      "flex shrink-0 flex-col gap-4 border-b border-[var(--om-border)] pb-4 lg:w-64 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-4",
+      "flex shrink-0 flex-col gap-4 border-b border-[var(--om-border)] pb-4 lg:sticky lg:top-6 lg:max-h-[calc(100vh-3rem)] lg:w-64 lg:self-start lg:overflow-y-auto lg:border-b-0 lg:border-r lg:pb-0 lg:pr-4",
     logoMark:
       "flex size-10 items-center justify-center rounded-lg bg-[var(--om-clearance-read-only)] text-[var(--om-bg)]",
     nav: "grid grid-cols-2 gap-2 sm:grid-cols-3 lg:flex lg:flex-col",
