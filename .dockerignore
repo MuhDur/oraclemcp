@@ -25,6 +25,11 @@ crates/*/**
 !crates/*/src/
 crates/*/src/**
 !crates/*/src/**
+!crates/oraclemcp-db/benches/
+crates/oraclemcp-db/benches/**
+!crates/oraclemcp-db/benches/classify_type.rs
+!crates/oraclemcp-db/benches/lob_capping.rs
+!crates/oraclemcp-db/benches/page_serialization.rs
 !crates/oraclemcp/install.sh
 !crates/oraclemcp/install.ps1
 !crates/oraclemcp-core/ci_taxonomy.json

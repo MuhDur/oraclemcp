@@ -221,6 +221,10 @@ ALLOWED = {
     "!crates/*/README.md",
     "!crates/*/src/",
     "!crates/*/src/**",
+    "!crates/oraclemcp-db/benches/",
+    "!crates/oraclemcp-db/benches/classify_type.rs",
+    "!crates/oraclemcp-db/benches/lob_capping.rs",
+    "!crates/oraclemcp-db/benches/page_serialization.rs",
     "!crates/oraclemcp/install.sh",
     "!crates/oraclemcp/install.ps1",
     "!crates/oraclemcp-core/ci_taxonomy.json",
@@ -234,6 +238,7 @@ BARRIERS = {
     "crates/**",
     "crates/*/**",
     "crates/*/src/**",
+    "crates/oraclemcp-db/benches/**",
     "web/**",
     "web/dist/**",
 }
@@ -481,6 +486,9 @@ exact = {
     "crates/oraclemcp/install.sh",
     "crates/oraclemcp/install.ps1",
     "crates/oraclemcp-core/ci_taxonomy.json",
+    "crates/oraclemcp-db/benches/classify_type.rs",
+    "crates/oraclemcp-db/benches/lob_capping.rs",
+    "crates/oraclemcp-db/benches/page_serialization.rs",
 }
 
 
@@ -553,6 +561,9 @@ required = {
     "crates/oraclemcp/install.sh",
     "crates/oraclemcp/install.ps1",
     "crates/oraclemcp-core/ci_taxonomy.json",
+    "crates/oraclemcp-db/benches/classify_type.rs",
+    "crates/oraclemcp-db/benches/lob_capping.rs",
+    "crates/oraclemcp-db/benches/page_serialization.rs",
     "web/dist/index.html",
     "web/dist/oraclemcp-dashboard.cyclonedx.json",
     "web/dist/oraclemcp-dashboard.sha256",
@@ -598,6 +609,9 @@ required = [
     "crates/oraclemcp/install.sh",
     "crates/oraclemcp/install.ps1",
     "crates/oraclemcp-core/ci_taxonomy.json",
+    "crates/oraclemcp-db/benches/classify_type.rs",
+    "crates/oraclemcp-db/benches/lob_capping.rs",
+    "crates/oraclemcp-db/benches/page_serialization.rs",
     "web/dist/index.html",
 ]
 for path in required:
@@ -636,6 +650,7 @@ excluded = [
     "web/dist/private.pem",
     "crates/oraclemcp-audit/fuzz/artifacts/crash-deadbeef",
     "crates/oraclemcp/benches/local.rs",
+    "crates/oraclemcp-db/benches/local.rs",
     "crates/oraclemcp/tests/local.rs",
     "scripts/foreign-helper.sh",
     "web/src/app/local.tsx",
@@ -661,6 +676,9 @@ for path in \
   crates/oraclemcp/install.sh \
   crates/oraclemcp/install.ps1 \
   crates/oraclemcp-core/ci_taxonomy.json \
+  crates/oraclemcp-db/benches/classify_type.rs \
+  crates/oraclemcp-db/benches/lob_capping.rs \
+  crates/oraclemcp-db/benches/page_serialization.rs \
   web/dist/index.html; do
   grep -Fx "context/$path" <<<"$inventory" >/dev/null ||
     fail "required build input was excluded from Docker context: $path"
@@ -699,6 +717,7 @@ for path in \
   web/dist/private.pem \
   crates/oraclemcp-audit/fuzz/artifacts/crash-deadbeef \
   crates/oraclemcp/benches/local.rs \
+  crates/oraclemcp-db/benches/local.rs \
   crates/oraclemcp/tests/local.rs \
   scripts/foreign-helper.sh \
   web/src/app/local.tsx; do
