@@ -1,0 +1,64 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T10:50:11Z",
+  "bead_id": "oraclemcp-ux-repair-2026-08-n56tk",
+  "scope": {
+    "summary": "Aggregates the completed fresh-eyes dashboard repair pass: exact lane identity, visible retry recovery, responsive and keyboard-safe shell and audit surfaces, truthful Explorer state, and coherent visual action semantics.",
+    "in_scope": [
+      ".beads/issues.jsonl",
+      "tests/artifacts/evidence/closes/oraclemcp-ux-repair-2026-08-n56tk.1.json",
+      "tests/artifacts/evidence/closes/oraclemcp-ux-repair-2026-08-n56tk.2.json",
+      "tests/artifacts/evidence/closes/oraclemcp-ux-repair-2026-08-n56tk.3.json",
+      "tests/artifacts/evidence/closes/oraclemcp-ux-repair-2026-08-n56tk.4.json",
+      "tests/artifacts/evidence/closes/oraclemcp-ux-repair-2026-08-n56tk.5.json",
+      "tests/artifacts/evidence/closes/oraclemcp-ux-repair-2026-08-n56tk.6.json",
+      "tests/artifacts/evidence/closes/oraclemcp-ux-repair-2026-08-n56tk.7.json"
+    ],
+    "out_of_scope": [
+      "Live Oracle-backed dashboard verification",
+      "Full release qualification or Required-graph evidence",
+      "Driver work or any Orrery, Three.js, WebGL, or 3D surface"
+    ]
+  },
+  "source": {
+    "sha": "4e9c9df6fa2260c4987f151ddfd7cc75efe1131f",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "closed child evidence",
+        "kind": "tracker",
+        "trace": "`br show oraclemcp-ux-repair-2026-08-n56tk --json` at source 4e9c9df6 lists all seven parent-child beads (.1 through .7) as closed. Each has a committed canonical close-evidence document with a guarded close binding."
+      },
+      {
+        "name": "dashboard type, production build, and regression suite",
+        "kind": "cli",
+        "trace": "The final code source 6591a390 is an ancestor of this tracker-only source and `cd web && npm run check` exited 0 there: TypeScript, Vite production build, SBOM and bundle checks, and 236 dashboard tests passed; 7 existing served-console tests remained intentionally skipped."
+      },
+      {
+        "name": "browser UX regression sweep",
+        "kind": "cli",
+        "trace": "At final code source 6591a390, `cd web && npm exec playwright test e2e/ux-shell.spec.ts e2e/ux-audit-layout.spec.ts e2e/ux-recovery.spec.ts e2e/ux-explorer-selection.spec.ts --config playwright.config.ts` exited 0 with 9 Chromium tests covering keyboard navigation, narrow layouts, recovery, audit layout, and Explorer selection lifecycle."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The evidence is local dashboard and browser coverage with stubbed operator responses; it does not claim a live Oracle-backed run.",
+    "No fuzzing or mutation campaign was run.",
+    "The close records scoped work completion, not release readiness."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
