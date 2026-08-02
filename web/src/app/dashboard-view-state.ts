@@ -47,7 +47,7 @@ export type LaneIdentity = {
   generation: number;
 };
 
-type LaneLike = {
+export type LaneLike = {
   lane_id: string;
   generation: number;
 };
@@ -69,6 +69,29 @@ export function sameLaneIdentity(
     return left === right;
   }
   return left.laneId === right.laneId && left.generation === right.generation;
+}
+
+export type ExactLaneSelection<T extends LaneLike> = {
+  lane: T | null;
+  invalidated: boolean;
+};
+
+/**
+ * A selected operator session is its id and generation. A reused id must not
+ * inherit authority, cached facts, or confirmation state from an older session.
+ */
+export function resolveExactLane<T extends LaneLike>(
+  bound: LaneIdentity | null | undefined,
+  lanes: readonly T[]
+): ExactLaneSelection<T> {
+  if (bound === null || bound === undefined) {
+    return { lane: null, invalidated: false };
+  }
+  const lane = lanes.find(
+    (candidate) =>
+      candidate.lane_id === bound.laneId && candidate.generation === bound.generation
+  );
+  return lane ? { lane, invalidated: false } : { lane: null, invalidated: true };
 }
 
 /**

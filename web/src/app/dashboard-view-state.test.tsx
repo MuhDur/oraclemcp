@@ -16,6 +16,7 @@ import {
   purgeClientRotationMutation,
   reconcileLaneSelection,
   remainingSeconds,
+  resolveExactLane,
   sameLaneIdentity,
   scheduleAbsoluteExpiry,
   scheduleDebouncedValue,
@@ -80,6 +81,18 @@ describe("lane action truth and identity", () => {
     expect(
       reconcileLaneSelection(bound, "lane-a", [{ lane_id: "lane-a", generation: 8 }])
     ).toEqual({ identity: null, invalidated: true });
+  });
+
+  it("resolves only an exact lane identity for stateful operator workflows", () => {
+    const bound = { laneId: "lane-a", generation: 7 };
+    expect(resolveExactLane(bound, [{ lane_id: "lane-a", generation: 8 }])).toEqual({
+      lane: null,
+      invalidated: true
+    });
+    expect(resolveExactLane(bound, [{ lane_id: "lane-a", generation: 7 }])).toEqual({
+      lane: { lane_id: "lane-a", generation: 7 },
+      invalidated: false
+    });
   });
 
   it("binds an initial URL lane to its generation but preserves an explicit clear", () => {

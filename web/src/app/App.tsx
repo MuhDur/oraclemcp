@@ -177,6 +177,7 @@ import {
   nativeConnectionInfo,
   purgeClientRotationMutation,
   reconcileLaneSelection,
+  resolveExactLane,
   sameLaneIdentity,
   sessionLevelSummary,
   sourceAvailability,
@@ -212,6 +213,22 @@ export function authoritativeServerMode(
   response: OperatorResponse<ActiveLanesData> | undefined
 ): boolean | null {
   return authoritativeQueryData(status, response)?.data.stateful ?? null;
+}
+
+function laneOptionValue(lane: ActiveLane): string {
+  return JSON.stringify([lane.lane_id, lane.generation]);
+}
+
+function laneIdentityFromOption(
+  lanes: readonly ActiveLane[],
+  value: string
+): LaneIdentity | null {
+  const lane = lanes.find((candidate) => laneOptionValue(candidate) === value);
+  return lane ? laneIdentity(lane) : null;
+}
+
+function laneOptionLabel(lane: ActiveLane): string {
+  return `${lane.lane_id} | generation ${lane.generation} | ${lane.status} | ${shortHash(lane.subject_id_hash)}`;
 }
 
 type NavItem = {
@@ -301,8 +318,9 @@ const explorerRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/explorer",
   component: ExplorerPage,
-  validateSearch: (search: Record<string, unknown>): { lane?: string } => ({
-    lane: optionalSearchString(search.lane)
+  validateSearch: (search: Record<string, unknown>): { lane?: string; generation?: number } => ({
+    lane: optionalSearchString(search.lane),
+    generation: optionalSearchGeneration(search.generation)
   })
 });
 
@@ -1491,7 +1509,7 @@ function SessionLevelSummaryPanel({
 }
 
 function HealthPage(): React.ReactElement {
-  const [laneId, setLaneId] = React.useState("");
+  const [selectedLaneBinding, setSelectedLaneBinding] = React.useState<LaneIdentity | null>(null);
   const health = useQuery({
     queryKey: ["operator-health"],
     queryFn: fetchOperatorHealth,
@@ -1516,15 +1534,26 @@ function HealthPage(): React.ReactElement {
   });
   const lanes = activeLanes.status === "success" ? activeLanes.data.data.lanes : EMPTY_ACTIVE_LANES;
   const stateful = authoritativeServerMode(activeLanes.status, activeLanes.data) !== false;
-  const selectedLane = stateful ? lanes.find((lane) => lane.lane_id === laneId) : undefined;
+  const laneSelection =
+    stateful && activeLanes.status === "success"
+      ? resolveExactLane(selectedLaneBinding, lanes)
+      : { lane: null, invalidated: false };
+  const selectedLane = laneSelection.lane ?? undefined;
   const connectionLane = selectedLane ? laneIdentity(selectedLane) : undefined;
   const connectionReady =
     activeLanes.status === "success" && (!stateful || Boolean(connectionLane));
   React.useEffect(() => {
-    if (stateful && !laneId && lanes.length === 1) {
-      setLaneId(lanes[0].lane_id);
+    if (!stateful || activeLanes.status !== "success") {
+      return;
     }
-  }, [laneId, lanes, stateful]);
+    if (laneSelection.invalidated) {
+      setSelectedLaneBinding(null);
+      return;
+    }
+    if (!selectedLaneBinding && lanes.length === 1) {
+      setSelectedLaneBinding(laneIdentity(lanes[0]));
+    }
+  }, [activeLanes.status, laneSelection.invalidated, lanes, selectedLaneBinding, stateful]);
   const connection = useQuery({
     queryKey: [
       "health",
@@ -1595,14 +1624,16 @@ function HealthPage(): React.ReactElement {
               <span className={OM_LABEL}>Agent session to inspect</span>
               <select
                 className={cn(OM_INPUT, "font-mono")}
-                value={laneId}
-                onChange={(event) => setLaneId(event.target.value)}
+                value={selectedLane ? laneOptionValue(selectedLane) : ""}
+                onChange={(event) =>
+                  setSelectedLaneBinding(laneIdentityFromOption(lanes, event.target.value))
+                }
                 disabled={activeLanes.isPending || lanes.length === 0}
               >
                 <option value="">Select a session</option>
                 {lanes.map((lane) => (
-                  <option key={`${lane.lane_id}:${lane.generation}`} value={lane.lane_id}>
-                    {lane.lane_id}
+                  <option key={`${lane.lane_id}:${lane.generation}`} value={laneOptionValue(lane)}>
+                    {laneOptionLabel(lane)}
                   </option>
                 ))}
               </select>
@@ -4739,11 +4770,19 @@ function ExplorerPage(): React.ReactElement {
   // The lane is the Explorer's identity — which database you are reading — so
   // it belongs in the URL. Text filters stay local and publish after a short
   // quiet period, while React Query aborts any superseded in-flight request.
-  const { lane: laneId = "" } = useSearch({ from: explorerRoute.id });
+  const { lane: requestedLaneId = "", generation: requestedLaneGeneration } = useSearch({
+    from: explorerRoute.id
+  });
   const explorerNavigate = useNavigate({ from: explorerRoute.id });
-  const setLaneId = React.useCallback(
-    (next: string) => {
-      void explorerNavigate({ search: { lane: next || undefined }, replace: true });
+  const setExplorerLane = React.useCallback(
+    (identity: LaneIdentity | null) => {
+      void explorerNavigate({
+        search: {
+          lane: identity?.laneId,
+          generation: identity?.generation
+        },
+        replace: true
+      });
     },
     [explorerNavigate]
   );
@@ -4792,23 +4831,46 @@ function ExplorerPage(): React.ReactElement {
   });
   const lanes = activeLanes.status === "success" ? activeLanes.data.data.lanes : EMPTY_ACTIVE_LANES;
   const stateful = authoritativeServerMode(activeLanes.status, activeLanes.data) !== false;
-  const selectedLane = stateful ? lanes.find((lane) => lane.lane_id === laneId) : undefined;
+  const requestedLane =
+    requestedLaneId && requestedLaneGeneration !== undefined
+      ? { laneId: requestedLaneId, generation: requestedLaneGeneration }
+      : null;
+  const laneSelection =
+    stateful && activeLanes.status === "success"
+      ? resolveExactLane(requestedLane, lanes)
+      : { lane: null, invalidated: false };
+  const selectedLane = laneSelection.lane ?? undefined;
   const explorerLane = selectedLane ? laneIdentity(selectedLane) : undefined;
   const connectionReady =
     activeLanes.status === "success" && (!stateful || Boolean(explorerLane));
 
   React.useEffect(() => {
-    if (stateful && !laneId && lanes.length === 1) {
-      setLaneId(lanes[0].lane_id);
+    if (!stateful || activeLanes.status !== "success") {
+      return;
     }
-  }, [laneId, lanes, setLaneId, stateful]);
+    if (laneSelection.invalidated) {
+      setExplorerLane(null);
+      return;
+    }
+    if (!requestedLaneId && requestedLaneGeneration === undefined && lanes.length === 1) {
+      setExplorerLane(laneIdentity(lanes[0]));
+    }
+  }, [
+    activeLanes.status,
+    laneSelection.invalidated,
+    lanes,
+    requestedLaneGeneration,
+    requestedLaneId,
+    setExplorerLane,
+    stateful
+  ]);
 
   React.useEffect(() => {
     clearExplorerMetadataCache();
     setCacheVersion((version) => version + 1);
     invalidateExplorerDetail();
     setGlobalSearchRequest(null);
-  }, [explorerLane?.generation, invalidateExplorerDetail, laneId]);
+  }, [explorerLane?.generation, explorerLane?.laneId, invalidateExplorerDetail]);
 
   React.useEffect(() => {
     invalidateExplorerDetail();
@@ -5221,14 +5283,16 @@ function ExplorerPage(): React.ReactElement {
                 <span className={OM_LABEL}>Agent session</span>
                 <select
                   className={cn(OM_INPUT, "font-mono")}
-                  value={laneId}
-                  onChange={(event) => setLaneId(event.target.value)}
+                  value={selectedLane ? laneOptionValue(selectedLane) : ""}
+                  onChange={(event) =>
+                    setExplorerLane(laneIdentityFromOption(lanes, event.target.value))
+                  }
                   disabled={activeLanes.isPending || lanes.length === 0}
                 >
                   <option value="">Select a session</option>
                   {lanes.map((lane) => (
-                    <option key={`${lane.lane_id}:${lane.generation}`} value={lane.lane_id}>
-                      {lane.lane_id}
+                    <option key={`${lane.lane_id}:${lane.generation}`} value={laneOptionValue(lane)}>
+                      {laneOptionLabel(lane)}
                     </option>
                   ))}
                 </select>
@@ -6574,7 +6638,7 @@ function ReviewsPage(): React.ReactElement {
   const [bindsJson, setBindsJson] = React.useState("[]");
   const [draftCommit, setDraftCommit] = React.useState(false);
   const [captureDbmsOutput, setCaptureDbmsOutput] = React.useState(false);
-  const [laneId, setLaneId] = React.useState("");
+  const [selectedLaneBinding, setSelectedLaneBinding] = React.useState<LaneIdentity | null>(null);
   const [confirm, setConfirm] = React.useState("");
   const [applyAcknowledged, setApplyAcknowledged] = React.useState(false);
   const [lastResult, setLastResult] = React.useState<ReviewResult | null>(null);
@@ -6604,7 +6668,11 @@ function ReviewsPage(): React.ReactElement {
   });
   const lanes = activeLanes.status === "success" ? activeLanes.data.data.lanes : EMPTY_ACTIVE_LANES;
   const stateful = authoritativeServerMode(activeLanes.status, activeLanes.data) !== false;
-  const selectedLane = stateful ? lanes.find((lane) => lane.lane_id === laneId) : undefined;
+  const laneSelection =
+    stateful && activeLanes.status === "success"
+      ? resolveExactLane(selectedLaneBinding, lanes)
+      : { lane: null, invalidated: false };
+  const selectedLane = laneSelection.lane ?? undefined;
   const reviewLane = selectedLane ? laneIdentity(selectedLane) : undefined;
   const laneReady = activeLanes.status === "success" && (!stateful || Boolean(reviewLane));
   const sourceHistoryQuery = useQuery({
@@ -6679,12 +6747,18 @@ function ReviewsPage(): React.ReactElement {
     [invalidateReviewGrant, navigateSelectedId]
   );
   const selectReviewLane = React.useCallback(
-    (next: string) => {
+    (next: LaneIdentity | null) => {
       invalidateReviewGrant();
-      setLaneId(next);
+      setSelectedLaneBinding(next);
     },
     [invalidateReviewGrant]
   );
+  React.useEffect(() => {
+    if (laneSelection.invalidated) {
+      invalidateReviewGrant();
+      setSelectedLaneBinding(null);
+    }
+  }, [invalidateReviewGrant, laneSelection.invalidated]);
   const writeStatements = selectedDetail?.statements.filter((statement) => statement.unit !== "read") ?? [];
   const needsConfirm = writeStatements.length > 0;
   const hasDdl = selectedDetail?.statements.some((statement) => statement.unit === "ddl") ?? false;
@@ -7207,14 +7281,16 @@ function ReviewsPage(): React.ReactElement {
                   <span className={OM_LABEL}>Agent session</span>
                   <select
                     className={OM_INPUT}
-                    value={laneId}
-                    onChange={(event) => selectReviewLane(event.target.value)}
+                    value={selectedLane ? laneOptionValue(selectedLane) : ""}
+                    onChange={(event) =>
+                      selectReviewLane(laneIdentityFromOption(lanes, event.target.value))
+                    }
                     disabled={activeLanes.isPending || lanes.length === 0}
                   >
                     <option value="">Select a session</option>
                     {lanes.map((lane) => (
-                      <option key={`${lane.lane_id}:${lane.generation}`} value={lane.lane_id}>
-                        {lane.lane_id}
+                      <option key={`${lane.lane_id}:${lane.generation}`} value={laneOptionValue(lane)}>
+                        {laneOptionLabel(lane)}
                       </option>
                     ))}
                   </select>
@@ -7250,7 +7326,7 @@ function ReviewsPage(): React.ReactElement {
             ) : detailQuery.isError ? (
               <ErrorNotice message="The exact statement detail is unavailable, so this plan cannot be applied." />
             ) : null}
-            {laneId && selectedLaneCapabilities && !profileMatches ? (
+            {reviewLane && selectedLaneCapabilities && !profileMatches ? (
               <ErrorNotice
                 message={`This plan targets ${selectedDetail?.profile ?? "an unknown profile"}, but the selected session uses ${selectedLaneProfile}. Choose a matching session.`}
               />
@@ -8248,7 +8324,7 @@ function WorkbenchRoutePage(): React.ReactElement {
 function WorkbenchPage(): React.ReactElement {
   const [mode, setMode] = React.useState<WorkbenchMode>("read_query");
   const [sql, setSql] = React.useState(WORKBENCH_SQL_SEED);
-  const [laneId, setLaneId] = React.useState("");
+  const [selectedLaneBinding, setSelectedLaneBinding] = React.useState<LaneIdentity | null>(null);
   const [confirm, setConfirm] = React.useState("");
   const [maxRows, setMaxRows] = React.useState(100);
   const [captureDbmsOutput, setCaptureDbmsOutput] = React.useState(false);
@@ -8293,9 +8369,18 @@ function WorkbenchPage(): React.ReactElement {
   });
   const lanes = activeLanes.status === "success" ? activeLanes.data.data.lanes : EMPTY_ACTIVE_LANES;
   const stateful = authoritativeServerMode(activeLanes.status, activeLanes.data) !== false;
-  const selectedLane = stateful ? lanes.find((lane) => lane.lane_id === laneId) : undefined;
+  const laneSelection =
+    stateful && activeLanes.status === "success"
+      ? resolveExactLane(selectedLaneBinding, lanes)
+      : { lane: null, invalidated: false };
+  const selectedLane = laneSelection.lane ?? undefined;
   const workbenchLane = selectedLane ? laneIdentity(selectedLane) : undefined;
   const laneReady = activeLanes.status === "success" && (!stateful || Boolean(workbenchLane));
+  React.useEffect(() => {
+    if (laneSelection.invalidated) {
+      setSelectedLaneBinding(null);
+    }
+  }, [laneSelection.invalidated]);
   const requestIdentity = workbenchActionContextIdentity({
     authority: sessionAuthority,
     source: sql,
@@ -8651,14 +8736,16 @@ function WorkbenchPage(): React.ReactElement {
                   <span className={OM_LABEL}>Agent session</span>
                   <select
                     className={OM_INPUT}
-                    value={laneId}
-                    onChange={(event) => setLaneId(event.target.value)}
+                    value={selectedLane ? laneOptionValue(selectedLane) : ""}
+                    onChange={(event) =>
+                      setSelectedLaneBinding(laneIdentityFromOption(lanes, event.target.value))
+                    }
                     disabled={activeLanes.isPending || lanes.length === 0}
                   >
                     <option value="">Select a session</option>
                     {lanes.map((lane) => (
-                      <option key={`${lane.lane_id}:${lane.generation}`} value={lane.lane_id}>
-                        {lane.lane_id}
+                      <option key={`${lane.lane_id}:${lane.generation}`} value={laneOptionValue(lane)}>
+                        {laneOptionLabel(lane)}
                       </option>
                     ))}
                   </select>
@@ -8761,7 +8848,7 @@ function WorkbenchPage(): React.ReactElement {
                   onChange={(event) => setCommitAcknowledged(event.target.checked)}
                 />
                 I reviewed this DML and intend to commit it durably to{" "}
-                {laneId || "the direct server connection"}
+                {selectedLane?.lane_id ?? (stateful ? "the selected session" : "the direct server connection")}
               </label>
             ) : null}
           </div>
