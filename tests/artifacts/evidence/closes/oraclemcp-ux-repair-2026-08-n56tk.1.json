@@ -1,0 +1,52 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T10:04:26Z",
+  "bead_id": "oraclemcp-ux-repair-2026-08-n56tk.1",
+  "scope": {
+    "summary": "Binds every stateful dashboard workflow to an exact lane id and generation, and makes the selector show the safe context needed to choose it.",
+    "in_scope": [
+      "web/src/app/App.tsx",
+      "web/src/app/dashboard-view-state.ts",
+      "web/src/app/dashboard-view-state.test.tsx"
+    ],
+    "out_of_scope": [
+      "Live Oracle session lifecycle proof",
+      "Unrelated dashboard error-recovery and visual-language repairs"
+    ]
+  },
+  "source": {
+    "sha": "123cd5672b803f61ec9b9bb3ef76e2e83b1c87ab",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "dashboard type, build, and regression suite",
+        "kind": "cli",
+        "trace": "`cd web && npm run check` exited 0 at source 123cd567: TypeScript, Vite production build, bundle check, and 232 dashboard tests passed; 7 existing served-console tests remained intentionally skipped."
+      },
+      {
+        "name": "exact lane generation regression",
+        "kind": "cli",
+        "trace": "`cd web && npm test -- --run src/app/dashboard-view-state.test.tsx` exited 0 with 22 tests. The new exact-lane test proves generation 7 cannot resolve to a reused lane id at generation 8, while the exact generation resolves."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is a local dashboard proof and does not claim a live Oracle session lifecycle run.",
+    "No fuzzing or mutation campaign was run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "scoped-test"
+  }
+}
