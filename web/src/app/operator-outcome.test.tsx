@@ -481,7 +481,7 @@ describe("dashboard retained-data projections", () => {
     expect(combinedQueryStatus("success", "pending")).toBe("pending");
   });
 
-  it("drops retained Explorer connection and metadata after background failures", () => {
+  it("drops retained Explorer facts after background failures but permits a fresh search", () => {
     const connection = forwarded({
       jsonrpc: "2.0",
       id: "operator-v1",
@@ -495,19 +495,16 @@ describe("dashboard retained-data projections", () => {
     expect(
       explorerSearchAuthorityReady({
         includeObjects: true,
-        objectStatus: "error",
-        includeSource: false,
-        sourceStatus: "success"
+        includeSource: false
       })
-    ).toBe(false);
+    ).toBe(true);
     expect(
       explorerSearchAuthorityReady({
         includeObjects: false,
-        objectStatus: "error",
-        includeSource: true,
-        sourceStatus: "success"
+        includeSource: true
       })
     ).toBe(true);
+    expect(explorerSearchAuthorityReady({ includeObjects: false, includeSource: false })).toBe(false);
   });
 
   it("drops retained Edition topology after a background failure", () => {

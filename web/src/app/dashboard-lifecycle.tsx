@@ -2,6 +2,7 @@ import * as React from "react";
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import { RefreshCcw } from "lucide-react";
 
+import { Button } from "../components/ui/primitives";
 import {
   clearOperatorSessionState,
   fetchDashboardSession,
@@ -234,6 +235,16 @@ export function DashboardSessionBanner({
         <p className="mt-1 text-sm leading-6 text-[var(--om-text-muted)]">
           Run <code className="font-mono text-[var(--om-gold)]">oraclemcp dashboard</code> on the server, open the new pairing page, and enter its one-time code.
         </p>
+        <Button
+          type="button"
+          variant="secondary"
+          className="mt-3"
+          disabled={session.isFetching}
+          onClick={() => void session.refetch()}
+        >
+          <RefreshCcw className={session.isFetching ? "size-4 animate-spin" : "size-4"} aria-hidden="true" />
+          {session.isFetching ? "Retrying dashboard session" : "Retry dashboard session"}
+        </Button>
       </div>
     );
   }

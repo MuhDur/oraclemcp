@@ -384,8 +384,11 @@ function RootLayout(): React.ReactElement {
     staleTime: 30_000
   });
   const workbenchEnabled = operatorConfig.data?.data.status.dashboard_workbench === true;
+  const workbenchNavigationVisible = operatorConfig.status !== "success" || workbenchEnabled;
   const visibleNavItems = navItems.filter(
-    (item) => (stateful || item.to !== "/sessions") && (workbenchEnabled || item.to !== "/workbench")
+    (item) =>
+      (stateful || item.to !== "/sessions") &&
+      (workbenchNavigationVisible || item.to !== "/workbench")
   );
   return (
     <div
@@ -479,6 +482,11 @@ function OverviewPage(): React.ReactElement {
   const activity = queryActivity(health, metrics, activeLanes);
   const pending = activity.blocking;
   const dataError = firstQueryError(health.error, metrics.error, activeLanes.error);
+  const retryDashboardData = React.useCallback(() => {
+    void health.refetch();
+    void metrics.refetch();
+    void activeLanes.refetch();
+  }, [activeLanes, health, metrics]);
 
   return (
     <PageFrame
@@ -498,7 +506,14 @@ function OverviewPage(): React.ReactElement {
           error={dataError}
           checkedAt={Math.max(health.dataUpdatedAt, metrics.dataUpdatedAt, activeLanes.dataUpdatedAt)}
         />
-        {dataError ? <QueryErrorNotice title="Dashboard data is unavailable" error={dataError} /> : null}
+        {dataError ? (
+          <QueryErrorNotice
+            title="Dashboard data is unavailable"
+            error={dataError}
+            retryLabel="Retry dashboard data"
+            onRetry={retryDashboardData}
+          />
+        ) : null}
         <OverviewMetricTiles
           snapshot={snapshot}
           lanes={lanes}
@@ -1896,6 +1911,10 @@ function CapacityPage(): React.ReactElement {
   const pending = activity.blocking;
   const model = capacity ? capacityModel(capacity, snapshot, lanes) : null;
   const error = firstQueryError(metrics.error, activeLanes.error);
+  const retryCapacityData = React.useCallback(() => {
+    void metrics.refetch();
+    void activeLanes.refetch();
+  }, [activeLanes, metrics]);
 
   return (
     <PageFrame
@@ -1906,7 +1925,14 @@ function CapacityPage(): React.ReactElement {
       {model ? (
         <div className="space-y-4">
           <BackgroundRefreshStatus refreshing={activity.refreshing} />
-          {error ? <QueryErrorNotice title="Some resource-limit data is unavailable" error={error} /> : null}
+          {error ? (
+            <QueryErrorNotice
+              title="Some resource-limit data is unavailable"
+              error={error}
+              retryLabel="Retry resource-limit data"
+              onRetry={retryCapacityData}
+            />
+          ) : null}
           <CapacityMetricTiles model={model} pending={pending} />
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
             <ReadPoolCapacityPanel model={model} />
@@ -1920,7 +1946,12 @@ function CapacityPage(): React.ReactElement {
       ) : (
         <ConsolePanel className="p-4" aria-busy={pending}>
           {error ? (
-            <QueryErrorNotice title="Resource limits are unavailable" error={error} />
+            <QueryErrorNotice
+              title="Resource limits are unavailable"
+              error={error}
+              retryLabel="Retry resource-limit data"
+              onRetry={retryCapacityData}
+            />
           ) : (
             <p className="text-sm text-[var(--om-text-muted)]" role="status">
               Loading resource limits…
@@ -4756,14 +4787,9 @@ export function authoritativeExplorerConnection(
 
 export function explorerSearchAuthorityReady(input: {
   includeObjects: boolean;
-  objectStatus: DashboardQueryStatus;
   includeSource: boolean;
-  sourceStatus: DashboardQueryStatus;
 }): boolean {
-  return (
-    (!input.includeObjects || input.objectStatus !== "error") &&
-    (!input.includeSource || input.sourceStatus !== "error")
-  );
+  return input.includeObjects || input.includeSource;
 }
 
 function ExplorerPage(): React.ReactElement {
@@ -5242,6 +5268,12 @@ function ExplorerPage(): React.ReactElement {
       owner: owner.trim(),
       maxRows
     }));
+    if (globalIncludeObjects && globalObjectsQuery.isError) {
+      void globalObjectsQuery.refetch();
+    }
+    if (globalIncludeSource && globalSourceQuery.isError) {
+      void globalSourceQuery.refetch();
+    }
   };
   const requestObjectDetail = (kind: "ddl" | "source", ref: ExplorerObjectRef): void => {
     if (!baseCacheKey || !selectedReferenceIsAuthoritative) {
@@ -5428,9 +5460,7 @@ function ExplorerPage(): React.ReactElement {
             connected &&
             explorerSearchAuthorityReady({
               includeObjects: globalIncludeObjects,
-              objectStatus: globalObjectsQuery.status,
-              includeSource: globalIncludeSource,
-              sourceStatus: globalSourceQuery.status
+              includeSource: globalIncludeSource
             }) &&
             globalSearchText.trim().length > 0 &&
             (globalIncludeObjects || globalIncludeSource)
@@ -8296,16 +8326,31 @@ function WorkbenchRoutePage(): React.ReactElement {
             {config.isError ? "setting unavailable" : config.isPending ? "checking setting" : "disabled"}
           </Badge>
           <h3 className="text-lg font-semibold text-[var(--om-text-bright)]">
-            {config.isPending
-              ? "Checking whether browser SQL is enabled…"
-              : "Browser SQL is disabled on this server"}
+            {config.isError
+              ? "Browser SQL setting is unavailable"
+              : config.isPending
+                ? "Checking whether browser SQL is enabled…"
+                : "Browser SQL is disabled on this server"}
           </h3>
           <p className="max-w-3xl text-sm leading-6 text-[var(--om-text)]">
             {config.isError
               ? "The dashboard could not verify the Workbench setting, so it is failing closed. Database Explorer remains available for governed metadata reads."
               : "Set [http].dashboard_workbench = true in Profiles & settings and restart the HTTP service to expose read, preview, and guarded DML controls. DDL and ADMIN actions remain blocked in the browser."}
           </p>
-          {!config.isPending ? (
+          {config.isError && config.error instanceof Error ? (
+            <p className="text-sm text-[var(--om-text-muted)]">{config.error.message}</p>
+          ) : null}
+          {config.isError ? (
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={config.isFetching}
+              onClick={() => void config.refetch()}
+            >
+              <RefreshCcw className={config.isFetching ? "size-4 animate-spin" : "size-4"} aria-hidden="true" />
+              {config.isFetching ? "Retrying setting" : "Retry setting"}
+            </Button>
+          ) : !config.isPending ? (
             <Link
               to="/config"
               className="inline-flex min-h-11 items-center rounded-md border border-[var(--om-control-border)] px-4 py-2 text-sm font-semibold text-[var(--om-text-bright)] hover:bg-[var(--om-surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--om-focus)]"
