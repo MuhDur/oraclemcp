@@ -4834,6 +4834,7 @@ function ExplorerPage(): React.ReactElement {
   const [maxRows, setMaxRows] = React.useState(100);
   const [maxChars, setMaxChars] = React.useState(40_000);
   const [selectedRef, setSelectedRef] = React.useState<ExplorerObjectRef | null>(null);
+  const [selectedGlobalHitKey, setSelectedGlobalHitKey] = React.useState<string | null>(null);
   const [detailResult, setDetailResult] = React.useState<ExplorerDetailResult | null>(null);
   const [globalSearchText, setGlobalSearchText] = React.useState("");
   const [globalIncludeObjects, setGlobalIncludeObjects] = React.useState(true);
@@ -4855,6 +4856,7 @@ function ExplorerPage(): React.ReactElement {
   const invalidateExplorerDetail = React.useCallback(() => {
     clearExplorerDetailResult();
     setSelectedRef(null);
+    setSelectedGlobalHitKey(null);
   }, [clearExplorerDetailResult]);
 
   const session = useQuery({
@@ -5259,6 +5261,13 @@ function ExplorerPage(): React.ReactElement {
     const ref = rowRef(row);
     clearExplorerDetailResult();
     setSelectedRef(ref);
+    setSelectedGlobalHitKey(null);
+  };
+  const selectGlobalObjectHit = (row: ExplorerObjectRow): void => {
+    const ref = rowRef(row);
+    clearExplorerDetailResult();
+    setSelectedRef(ref);
+    setSelectedGlobalHitKey(globalObjectSearchHitKey(row));
   };
   const selectSourceHit = (row: ExplorerSourceHitRow): void => {
     clearExplorerDetailResult();
@@ -5267,6 +5276,7 @@ function ExplorerPage(): React.ReactElement {
       name: row.name,
       objectType: row.objectType
     });
+    setSelectedGlobalHitKey(globalSourceSearchHitKey(row));
   };
   const runGlobalSearch = (): void => {
     const needle = globalSearchText.trim();
@@ -5468,6 +5478,8 @@ function ExplorerPage(): React.ReactElement {
           sourceLimit={globalSourceLimit}
           invalidObjectRows={globalObjectDecode.invalidCount}
           invalidSourceRows={globalSourceDecode.invalidCount}
+          selectedRef={selectedRef}
+          selectedHitKey={selectedGlobalHitKey}
           canSearch={
             session.status === "success" &&
             connection.status === "success" &&
@@ -5485,7 +5497,7 @@ function ExplorerPage(): React.ReactElement {
           onAllSchemasChange={setGlobalAllSchemas}
           onSourceTypeChange={setGlobalSourceType}
           onSearch={runGlobalSearch}
-          onSelectObject={selectRow}
+          onSelectObject={selectGlobalObjectHit}
           onSelectSource={selectSourceHit}
         />
 
@@ -5528,7 +5540,7 @@ function ExplorerPage(): React.ReactElement {
   );
 }
 
-function ExplorerGlobalSearchPanel({
+export function ExplorerGlobalSearchPanel({
   searchText,
   includeObjects,
   includeSource,
@@ -5545,6 +5557,8 @@ function ExplorerGlobalSearchPanel({
   sourceLimit,
   invalidObjectRows,
   invalidSourceRows,
+  selectedRef,
+  selectedHitKey,
   canSearch,
   onSearchTextChange,
   onIncludeObjectsChange,
@@ -5571,6 +5585,8 @@ function ExplorerGlobalSearchPanel({
   sourceLimit: number | null;
   invalidObjectRows: number;
   invalidSourceRows: number;
+  selectedRef: ExplorerObjectRef | null;
+  selectedHitKey: string | null;
   canSearch: boolean;
   onSearchTextChange: (value: string) => void;
   onIncludeObjectsChange: (value: boolean) => void;
@@ -5589,6 +5605,13 @@ function ExplorerGlobalSearchPanel({
   const sourceHitsRef = React.useRef<HTMLDivElement>(null);
   const objectHits = useWindowedRows(objectRows, objectHitsRef, ESTIMATED_HIT_PX);
   const sourceHits = useWindowedRows(sourceRows, sourceHitsRef, ESTIMATED_HIT_PX);
+  const selectedGlobalRef =
+    selectedRef !== null &&
+    selectedHitKey !== null &&
+    (objectRows.some((row) => globalObjectSearchHitKey(row) === selectedHitKey) ||
+      sourceRows.some((row) => globalSourceSearchHitKey(row) === selectedHitKey))
+      ? selectedRef
+      : null;
 
   return (
     <ConsolePanel>
@@ -5709,6 +5732,15 @@ function ExplorerGlobalSearchPanel({
             . Narrow the search or raise Maximum results before treating this list as complete.
           </p>
         ) : null}
+        {selectedGlobalRef ? (
+          <p
+            className="rounded-md border border-[color-mix(in_srgb,var(--om-gold)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)] p-3 text-sm font-semibold text-[var(--om-text-bright)]"
+            data-testid="explorer-global-selection"
+            role="status"
+          >
+            Selected {objectRefLabel(selectedGlobalRef)}. Details are available below.
+          </p>
+        ) : null}
         <div className="grid gap-4 xl:grid-cols-2">
           <div className="overflow-hidden rounded-md border border-[var(--om-border)]">
             <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 py-2">
@@ -5742,26 +5774,38 @@ function ExplorerGlobalSearchPanel({
                   {objectHits.padTop > 0 ? (
                     <div aria-hidden="true" style={{ height: objectHits.padTop }} />
                   ) : null}
-                  {objectHits.visible.map(({ row, index }) => (
-                    <button
-                      key={objectRefKey(rowRef(row))}
-                      ref={objectHits.measure}
-                      data-index={index}
-                      type="button"
-                      className="block min-h-11 w-full border-b border-[var(--om-border)] px-3 py-3 text-left hover:bg-[var(--om-surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--om-focus)]"
-                      onClick={() => onSelectObject(row)}
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="min-w-0 truncate font-mono text-sm font-semibold text-[var(--om-text-bright)]">
-                          {row.objectName}
-                        </span>
-                        <Badge tone="neutral">{row.objectType}</Badge>
-                      </div>
-                      <p className="mt-1 font-mono text-xs text-[var(--om-text-muted)]">
-                        {row.owner}
-                      </p>
-                    </button>
-                  ))}
+                  {objectHits.visible.map(({ row, index }) => {
+                    const hitKey = globalObjectSearchHitKey(row);
+                    const selected = hitKey === selectedHitKey;
+                    return (
+                      <button
+                        key={hitKey}
+                        ref={objectHits.measure}
+                        data-index={index}
+                        data-selected={selected ? "true" : undefined}
+                        type="button"
+                        className={cn(
+                          "block min-h-11 w-full border-b border-[var(--om-border)] px-3 py-3 text-left hover:bg-[var(--om-surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--om-focus)]",
+                          selected
+                            ? "bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)] ring-1 ring-inset ring-[var(--om-gold)]"
+                            : "bg-transparent"
+                        )}
+                        aria-label={`Select ${objectRefLabel(rowRef(row))} for details`}
+                        aria-pressed={selected}
+                        onClick={() => onSelectObject(row)}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="min-w-0 truncate font-mono text-sm font-semibold text-[var(--om-text-bright)]">
+                            {row.objectName}
+                          </span>
+                          <Badge tone="neutral">{row.objectType}</Badge>
+                        </div>
+                        <p className="mt-1 font-mono text-xs text-[var(--om-text-muted)]">
+                          {row.owner}
+                        </p>
+                      </button>
+                    );
+                  })}
                   {objectHits.padBottom > 0 ? (
                     <div aria-hidden="true" style={{ height: objectHits.padBottom }} />
                   ) : null}
@@ -5801,29 +5845,41 @@ function ExplorerGlobalSearchPanel({
                   {sourceHits.padTop > 0 ? (
                     <div aria-hidden="true" style={{ height: sourceHits.padTop }} />
                   ) : null}
-                  {sourceHits.visible.map(({ row, index }) => (
-                    <button
-                      key={JSON.stringify([row.owner, row.name, row.objectType, row.line])}
-                      ref={sourceHits.measure}
-                      data-index={index}
-                      type="button"
-                      className="block min-h-11 w-full border-b border-[var(--om-border)] px-3 py-3 text-left hover:bg-[var(--om-surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--om-focus)]"
-                      onClick={() => onSelectSource(row)}
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="min-w-0 truncate font-mono text-sm font-semibold text-[var(--om-text-bright)]">
-                          {row.name}
-                        </span>
-                        <span className="font-mono text-xs font-semibold text-[var(--om-text-muted)]">
-                          {row.objectType}:{row.line}
-                        </span>
-                      </div>
-                      <p className="mt-1 font-mono text-xs text-[var(--om-text-muted)]">
-                        {row.owner}
-                      </p>
-                      <p className="mt-2 line-clamp-2 text-sm text-[var(--om-text)]">{row.text}</p>
-                    </button>
-                  ))}
+                  {sourceHits.visible.map(({ row, index }) => {
+                    const hitKey = globalSourceSearchHitKey(row);
+                    const selected = hitKey === selectedHitKey;
+                    return (
+                      <button
+                        key={hitKey}
+                        ref={sourceHits.measure}
+                        data-index={index}
+                        data-selected={selected ? "true" : undefined}
+                        type="button"
+                        className={cn(
+                          "block min-h-11 w-full border-b border-[var(--om-border)] px-3 py-3 text-left hover:bg-[var(--om-surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--om-focus)]",
+                          selected
+                            ? "bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)] ring-1 ring-inset ring-[var(--om-gold)]"
+                            : "bg-transparent"
+                        )}
+                        aria-label={`Select ${row.owner}.${row.name} (${row.objectType}, line ${row.line}) for details`}
+                        aria-pressed={selected}
+                        onClick={() => onSelectSource(row)}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="min-w-0 truncate font-mono text-sm font-semibold text-[var(--om-text-bright)]">
+                            {row.name}
+                          </span>
+                          <span className="font-mono text-xs font-semibold text-[var(--om-text-muted)]">
+                            {row.objectType}:{row.line}
+                          </span>
+                        </div>
+                        <p className="mt-1 font-mono text-xs text-[var(--om-text-muted)]">
+                          {row.owner}
+                        </p>
+                        <p className="mt-2 line-clamp-2 text-sm text-[var(--om-text)]">{row.text}</p>
+                      </button>
+                    );
+                  })}
                   {sourceHits.padBottom > 0 ? (
                     <div aria-hidden="true" style={{ height: sourceHits.padBottom }} />
                   ) : null}
@@ -6373,6 +6429,14 @@ function rowRef(row: ExplorerObjectRow): ExplorerObjectRef {
     name: row.objectName,
     objectType: row.objectType
   };
+}
+
+function globalObjectSearchHitKey(row: ExplorerObjectRow): string {
+  return `object:${objectRefKey(rowRef(row))}`;
+}
+
+function globalSourceSearchHitKey(row: ExplorerSourceHitRow): string {
+  return `source:${JSON.stringify([row.owner, row.name, row.objectType, row.line])}`;
 }
 
 export function objectRefKey(ref: ExplorerObjectRef): string {
