@@ -1,0 +1,53 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T10:14:50Z",
+  "bead_id": "oraclemcp-ux-repair-2026-08-n56tk.3",
+  "scope": {
+    "summary": "Keeps initial keyboard focus normal, announces in-app route changes from the incoming page heading, and makes the operator shell usable at narrow and long desktop viewports.",
+    "in_scope": [
+      "web/src/app/App.tsx",
+      "web/src/app/skin.tsx",
+      "web/src/styles.css",
+      "web/e2e/ux-shell.spec.ts"
+    ],
+    "out_of_scope": [
+      "Live assistive-technology validation",
+      "Unrelated audit control layout and visual semantic token repairs"
+    ]
+  },
+  "source": {
+    "sha": "668947c755bea5dd396b3a97a6884593f76c7466",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "dashboard type, production build, and regression suite",
+        "kind": "cli",
+        "trace": "`cd web && npm run check` exited 0 at source 668947c7: TypeScript, Vite production build, bundle check, and 232 dashboard tests passed; 7 existing served-console tests remained intentionally skipped."
+      },
+      {
+        "name": "browser shell behavior",
+        "kind": "cli",
+        "trace": "`cd web && npm exec playwright test e2e/ux-shell.spec.ts --config playwright.config.ts` exited 0 with 2 Chromium tests. It proves initial load leaves the heading unfocused, a client-side route change focuses the incoming heading, the 280px document has no horizontal overflow and a 44px review action, and the desktop sidebar remains onscreen after scrolling Reviews."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is local browser coverage and does not claim screen-reader testing with a live assistive technology stack.",
+    "No fuzzing or mutation campaign was run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
